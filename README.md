@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, and Phase 7 structured trade ideas.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, and Phase 8 dry-run-first alert formatting.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -23,6 +23,7 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 |-- alembic/
 |-- app/
 |   |-- agents/
+|   |-- alerts/
 |   |-- api/
 |   |-- core/
 |   |-- data/
@@ -94,7 +95,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, and structured trade idea generation. Tests do not call live exchange APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, and mocked alert delivery behavior. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -255,6 +256,56 @@ Example output:
 }
 ```
 
+## Phase 8 Alert Agent
+
+Phase 8 adds `AlertAgent` under `app/agents` and alert helpers under `app/alerts` for turning structured trade ideas into readable alert messages:
+
+- Alerts are dry-run by default. If `dry_run` is omitted or `True`, no Telegram request is made and the formatted message is returned with status `dry_run`.
+- Live Telegram delivery happens only when `dry_run=False`, `channel="telegram"`, `telegram_bot_token` is provided, and `telegram_chat_id` is provided.
+- Telegram delivery uses async `httpx`, sends plain text without fragile Markdown formatting, splits long messages safely, and handles timeouts, non-200 responses, rate limits, and malformed responses.
+- Tests use `httpx.MockTransport` and do not call the live Telegram API.
+- Deduplication keys can be passed through and marked in the result, but persistent deduplication is intentionally not implemented yet.
+- The alert agent does not call exchanges, use private exchange APIs, place orders, route orders, or execute trades.
+- Missing data remains `N/A`, unreliable data remains `Unverified`, and every formatted alert includes a risk warning.
+
+Example dry-run usage:
+
+```python
+from app.agents.alert_agent import AlertAgent
+
+result = await AlertAgent().send({"trade_idea": trade_idea})
+assert result.status == "dry_run"
+print(result.formatted_message)
+```
+
+Example alert message:
+
+```text
+🟢 Trade Setup Alert — BTCUSDT
+
+Direction: long
+Exchange: Binance
+Market type: perpetual
+Timeframe: 1h
+Setup type: liquidity_sweep_reclaim
+Status: conditional
+Entry zone: 100.00000000 - 102.00000000
+Stop loss: 95.00000000
+Invalidation: Price closes below the reclaimed range low.
+Take profits: TP1: 112.00000000; TP2: 120.00000000
+Best R:R: 3.50000000
+Confidence score: 88.00000000
+Grade: A
+Reason for trade: Technical context: Bullish sweep and reclaim at support. Derivatives context: Open interest confirms participation without crowding.
+Confirmed facts: Range low reclaimed
+Missing data: N/A
+Unverified data: funding: Unverified
+Cancel condition: Cancel if price accepts below the entry zone before trigger.
+Risk warning: This is not financial advice. Position size must be based on stop-loss risk, not desired profit.
+
+Candle Craft | Signal. Structure. Execution.
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -263,3 +314,4 @@ Example output:
 - Market data must be stored as observed. Missing data is `N/A`; unreliable data is `Unverified`.
 - Opportunity scoring is scoring only. It does not create exchange orders or use private exchange access.
 - Trade idea generation structures scored candidates only. It does not send alerts, place trades, or use private exchange access.
+- Alert delivery is notification-only. It does not place orders, use private exchange access, or add trading execution.
