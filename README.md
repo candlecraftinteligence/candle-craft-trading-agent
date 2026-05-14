@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, and Phase 8 dry-run-first alert formatting.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, and Phase 9 in-memory journal tracking.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -95,7 +95,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, and mocked alert delivery behavior. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, and in-memory journal tracking. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -306,6 +306,70 @@ Risk warning: This is not financial advice. Position size must be based on stop-
 Candle Craft | Signal. Structure. Execution.
 ```
 
+## Phase 9 Journal Agent
+
+Phase 9 adds `JournalAgent` under `app/agents` for tracking generated trade ideas and alerts after they are created:
+
+- Journal entries are structured in memory only. Database persistence, deduplication storage, and reporting dashboards are intentionally deferred to a later phase.
+- The agent records setup context, risk context, optional chart/notes context, current journal status, and later performance outcome as `result_r`.
+- It does not call exchanges, use private API access, place orders, route orders, or execute trades.
+- Missing optional list data is marked as `N/A`; supplied unreliable data is preserved as `Unverified`.
+- Updates can change only status, `result_r`, notes, emotional notes, and screenshot URL. Original setup fields such as symbol, direction, entry, stop loss, targets, invalidation, reason, and risk warning are preserved.
+- Performance summaries calculate totals, selected status counts, win/loss counts, win rate, average R, best R, worst R, and best/worst setup type from supplied in-memory entries.
+
+Supported statuses:
+
+- `watching`
+- `triggered`
+- `invalidated`
+- `tp1_hit`
+- `tp2_hit`
+- `tp3_hit`
+- `stopped`
+- `closed`
+- `cancelled`
+
+Win/loss logic:
+
+- `result_r > 0` is a win.
+- `result_r < 0` is a loss.
+- `result_r == 0` or missing is neutral/unresolved and is excluded from win-rate calculation.
+
+Example journal entry:
+
+```python
+from decimal import Decimal
+
+from app.agents.journal_agent import create_journal_entry
+
+entry = create_journal_entry(
+    {
+        "trade_idea_id": "idea-1",
+        "alert_id": "alert-1",
+        "symbol": "BTCUSDT",
+        "exchange": "Binance",
+        "direction": "long",
+        "timeframe": "1h",
+        "setup_type": "liquidity_sweep_reclaim",
+        "status": "watching",
+        "entry_low": Decimal("100"),
+        "entry_high": Decimal("102"),
+        "stop_loss": Decimal("95"),
+        "take_profit_targets": (Decimal("112"), Decimal("120")),
+        "invalidation": "Price closes below the reclaimed range low.",
+        "best_rr": Decimal("3.5"),
+        "confidence_score": Decimal("88"),
+        "grade": "A",
+        "reason_for_trade": "Technical context confirmed with derivatives participation.",
+        "confirmed_facts": ("Range low reclaimed",),
+        "missing_data": ("funding: N/A",),
+        "unverified_data": ("open_interest: Unverified",),
+        "risk_warning": "This is not financial advice. Size from stop-loss risk only.",
+        "notes": "Watch the reclaim retest.",
+    }
+)
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -315,3 +379,4 @@ Candle Craft | Signal. Structure. Execution.
 - Opportunity scoring is scoring only. It does not create exchange orders or use private exchange access.
 - Trade idea generation structures scored candidates only. It does not send alerts, place trades, or use private exchange access.
 - Alert delivery is notification-only. It does not place orders, use private exchange access, or add trading execution.
+- Journal tracking is in-memory outcome tracking only. It does not place orders, use private exchange access, or persist records yet.
