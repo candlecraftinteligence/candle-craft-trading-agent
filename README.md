@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, and Phase 5 risk-management validation.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, and Phase 6 opportunity scoring.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -29,7 +29,8 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 |   |   |-- exchange_clients/
 |   |   `-- normalizers/
 |   |-- db/
-|   `-- models/
+|   |-- models/
+|   `-- scoring/
 |-- scripts/
 |-- tests/
 |-- docker-compose.yml
@@ -93,7 +94,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, and mocked public market-data client responses. Tests do not call live exchange APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, and opportunity scoring. Tests do not call live exchange APIs.
 
 ## Phase 2 Market Data
 
@@ -149,9 +150,57 @@ Phase 5 adds `RiskManagerAgent` under `app/agents` for deterministic risk valida
 - Leverage is never encouraged. If leverage is missing it is marked `N/A`; if leverage is supplied the result includes a risk warning, with higher tiers marked as high, extreme, or dangerous risk.
 - Exact liquidation distance is currently `N/A` because exact liquidation price requires exchange-specific margin model and position settings.
 
+## Phase 6 Opportunity Scoring Engine
+
+Phase 6 adds `OpportunityScoringEngine` under `app/scoring` for deterministic scoring of candidate setups:
+
+- It combines technical structure score, derivatives/orderflow score, risk-manager approval, best risk/reward, liquidity placeholder score, catalyst placeholder score, and data quality score.
+- It scores candidate setups only. It does not create trade ideas, place trades, route orders, call private exchange APIs, or perform live execution.
+- Missing liquidity defaults to 50 and is marked `N/A`; missing catalyst defaults to 0 and is marked `N/A`; missing data quality defaults to 50 and is marked `N/A`.
+- Unverified input data is preserved in the output as `Unverified`; low supplied data quality below 60 is also treated as `Unverified`.
+- Setup location defaults to `unknown` when not supplied.
+
+Scoring weights total 100 points:
+
+- Technical structure: 30 points
+- Derivatives/orderflow: 20 points
+- Liquidity: 15 points
+- Catalyst: 15 points
+- Risk/reward: 15 points
+- Data quality: 5 points
+
+Each component score is expected from 0 to 100 and is converted to its weighted contribution. Risk/reward is derived from `best_rr`: below 2.0 is rejected, 2.0 to 2.99 is moderate, 3.0 to 4.99 is strong, and 5.0 or higher is excellent.
+
+Hard filters reject weak setups when any of these are true:
+
+- Risk manager approval is false.
+- Invalidation is missing.
+- Best risk/reward is below 2.0.
+- Data quality score is below 60.
+- Setup location is `middle`.
+- Technical score is below 50.
+- Derivatives/orderflow score is below 40.
+- Any risk-manager rejection reason is present.
+
+Grades:
+
+- `A+`: 90 to 100
+- `A`: 80 to 89
+- `B`: 70 to 79
+- `C`: 60 to 69
+- `Reject`: below 60 or any hard filter failure
+
+Decisions:
+
+- `high_quality_candidate`: score 90 or higher with no hard rejects
+- `alert_candidate`: score 80 or higher with no hard rejects
+- `watchlist_only`: score 70 or higher with no hard rejects
+- `reject`: any hard reject, or any score below 70
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
 - Trade ideas must include invalidation and a risk warning.
 - The `trades` table is for manual or paper records, not live order execution.
 - Market data must be stored as observed. Missing data is `N/A`; unreliable data is `Unverified`.
+- Opportunity scoring is scoring only. It does not create exchange orders or use private exchange access.
