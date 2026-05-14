@@ -28,6 +28,18 @@ from app.agents.technical_structure import (
     VolumeAnomalySignal,
     calculate_ema,
 )
+from app.agents.trade_idea import (
+    TakeProfitLevel,
+    TradeIdeaAgent,
+    TradeIdeaContext,
+    TradeIdeaInput,
+    TradeIdeaLevel,
+    TradeIdeaQualityGate,
+    TradeIdeaQualityGateViolation,
+    TradeIdeaResult,
+    TradeIdeaStatus,
+    create_trade_idea,
+)
 
 __all__ = [
     "BosSignal",
@@ -49,9 +61,19 @@ __all__ = [
     "RiskRuleViolation",
     "SweepSignal",
     "SwingPoint",
+    "TakeProfitLevel",
     "TechnicalStructureAgent",
     "TechnicalStructureResult",
+    "TradeIdeaAgent",
+    "TradeIdeaContext",
+    "TradeIdeaInput",
+    "TradeIdeaLevel",
+    "TradeIdeaQualityGate",
+    "TradeIdeaQualityGateViolation",
+    "TradeIdeaResult",
+    "TradeIdeaStatus",
     "VolumeConfirmationSignal",
     "VolumeAnomalySignal",
     "calculate_ema",
+    "create_trade_idea",
 ]

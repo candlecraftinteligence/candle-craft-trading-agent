@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, and Phase 6 opportunity scoring.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, and Phase 7 structured trade ideas.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -94,7 +94,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, and opportunity scoring. Tests do not call live exchange APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, and structured trade idea generation. Tests do not call live exchange APIs.
 
 ## Phase 2 Market Data
 
@@ -197,6 +197,64 @@ Decisions:
 - `watchlist_only`: score 70 or higher with no hard rejects
 - `reject`: any hard reject, or any score below 70
 
+## Phase 7 Trade Idea Agent
+
+Phase 7 adds `TradeIdeaAgent` under `app/agents` for turning an already-scored candidate setup into a structured, human-readable trade idea object:
+
+- It only structures scored candidates. It does not score raw market data, send alerts, place trades, route orders, call private exchange APIs, or perform live execution.
+- It creates a trade idea only when hard quality gates pass: opportunity decision is not `reject`, opportunity score is at least 80, risk is approved, invalidation is present, stop loss is present, entry zone is present, at least one take profit target exists, and best risk/reward is at least 2.0.
+- Passing ideas are `conditional` by default. They become `active` only when the input explicitly sets `entry_triggered=True`.
+- Rejected candidates return `status: rejected` with structured quality-gate violations.
+- Missing technical or derivatives summaries are marked as `N/A` in the deterministic reason text and missing-data list.
+- Unverified data supplied by earlier phases is preserved.
+- Every result includes a risk warning. If leverage is supplied, additional liquidation-risk language is included, with high, extreme, and dangerous leverage warnings when thresholds are exceeded.
+
+Example output:
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "exchange": "Binance",
+  "market_type": "perpetual",
+  "direction": "long",
+  "timeframe": "1h",
+  "setup_type": "liquidity_sweep_reclaim",
+  "status": "conditional",
+  "entry_zone": {
+    "label": "entry_zone",
+    "price": "N/A",
+    "low": "100.00000000",
+    "high": "102.00000000"
+  },
+  "stop_loss": {
+    "label": "stop_loss",
+    "price": "95.00000000",
+    "low": "N/A",
+    "high": "N/A"
+  },
+  "invalidation": "Price closes below the reclaimed range low.",
+  "take_profits": [
+    {
+      "target_number": 1,
+      "price": "112.00000000"
+    }
+  ],
+  "best_rr": "3.50000000",
+  "confidence_score": "88.00000000",
+  "grade": "A",
+  "reason_for_trade": "Technical context: Bullish sweep and reclaim at support. Derivatives context: Open interest confirms participation without crowding.",
+  "confirmed_facts": ["Range low reclaimed"],
+  "missing_data": [],
+  "unverified_data": [],
+  "cancel_condition": "Cancel if price accepts below the entry zone before trigger.",
+  "risk_warning": "This is not financial advice. Position size must be based on stop-loss risk, not desired profit.",
+  "quality_gate_result": {
+    "passed": true,
+    "violations": []
+  }
+}
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -204,3 +262,4 @@ Decisions:
 - The `trades` table is for manual or paper records, not live order execution.
 - Market data must be stored as observed. Missing data is `N/A`; unreliable data is `Unverified`.
 - Opportunity scoring is scoring only. It does not create exchange orders or use private exchange access.
+- Trade idea generation structures scored candidates only. It does not send alerts, place trades, or use private exchange access.
