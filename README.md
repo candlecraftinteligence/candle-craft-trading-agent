@@ -22,6 +22,7 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 .
 |-- alembic/
 |-- app/
+|   |-- agents/
 |   |-- api/
 |   |-- core/
 |   |-- data/
@@ -113,6 +114,17 @@ Manual live check:
 ```
 
 The manual script fetches `BTCUSDT` candles, ticker, funding, and open interest from Binance and Bybit, then prints normalized DTOs. It is optional and not used by automated tests.
+
+## Phase 3 Technical Structure Agent
+
+Phase 3 adds the first deterministic analysis agent under `app/agents`:
+
+- `TechnicalStructureAgent` analyzes already-collected OHLCV candles only.
+- It does not call live APIs, use private exchange access, place orders, or produce trading recommendations.
+- It returns structured DTOs such as `TechnicalStructureResult`, `SwingPoint`, `SweepSignal`, `BosSignal`, `ChochSignal`, and `VolumeAnomalySignal`.
+- It calculates ATR, EMA 50, EMA 200, volume z-score, trend context, recent range high/low, nearest support, and nearest resistance.
+- It detects confirmed swing highs/lows, bullish and bearish liquidity sweeps, simple BOS, and simple CHoCH using deterministic rules.
+- Missing volume marks volume anomaly fields as `N/A`; malformed or insufficient OHLC data returns an invalid result with clear errors.
 
 ## Safety Boundaries
 
