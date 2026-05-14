@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, and Phase 4 derivatives/orderflow context analysis.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, and Phase 5 risk-management validation.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -136,6 +136,18 @@ Phase 4 adds `DerivativesOrderflowAgent` under `app/agents` for deterministic de
 - Missing funding, open interest, or volume is marked as `N/A` and surfaced through explicit risk flags.
 - CVD and liquidation heatmaps are currently not implemented and are always marked `N/A`; the agent does not invent either data source.
 - The agent does not call live APIs, use private exchange access, produce trading recommendations, place orders, or expose trading execution.
+
+## Phase 5 Risk Manager Agent
+
+Phase 5 adds `RiskManagerAgent` under `app/agents` for deterministic risk validation of a proposed setup:
+
+- It validates already-supplied setup data only: account equity, risk per trade, entry, stop loss, take profit targets, direction, optional leverage, optional daily risk limits, optional data quality score, and invalidation reason.
+- It does not place trades, route orders, call exchanges, use private API access, or perform live execution.
+- It calculates risk amount, stop-loss-based position size, notional value, and risk/reward for each take profit target.
+- It rejects setups with missing invalidation, wrong-side stops, risk per trade above 2%, best risk/reward below 2.0, poor data quality, or exceeded daily risk limits.
+- Missing optional values are marked as `N/A`; unreliable low data quality is marked `Unverified`.
+- Leverage is never encouraged. If leverage is missing it is marked `N/A`; if leverage is supplied the result includes a risk warning, with higher tiers marked as high, extreme, or dangerous risk.
+- Exact liquidation distance is currently `N/A` because exact liquidation price requires exchange-specific margin model and position settings.
 
 ## Safety Boundaries
 
