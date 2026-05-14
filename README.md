@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -13,25 +13,30 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 - Alembic
 - Pydantic settings
 - pytest
+- async httpx
 - Docker Compose
 
 ## Project Structure
 
 ```text
 .
-├── alembic/
-├── app/
-│   ├── api/
-│   ├── core/
-│   ├── db/
-│   └── models/
-├── tests/
-├── docker-compose.yml
-├── requirements.txt
-├── pytest.ini
-├── .env.example
-├── AGENTS.md
-└── README.md
+|-- alembic/
+|-- app/
+|   |-- api/
+|   |-- core/
+|   |-- data/
+|   |   |-- exchange_clients/
+|   |   `-- normalizers/
+|   |-- db/
+|   `-- models/
+|-- scripts/
+|-- tests/
+|-- docker-compose.yml
+|-- requirements.txt
+|-- pytest.ini
+|-- .env.example
+|-- AGENTS.md
+`-- README.md
 ```
 
 ## Setup
@@ -84,10 +89,30 @@ alembic upgrade head
 ## Tests
 
 ```powershell
-pytest
+.\.venv\Scripts\python.exe -m pytest
 ```
 
-The baseline tests cover settings loading, the FastAPI health endpoint, and model metadata imports.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, and mocked public market-data client responses. Tests do not call live exchange APIs.
+
+## Phase 2 Market Data
+
+Phase 2 adds read-only public market-data clients under `app/data`:
+
+- `BinanceFuturesClient` for Binance USD-M Futures public market data.
+- `BybitLinearClient` for Bybit Linear Perpetual public market data.
+- Shared DTOs: `CandleDTO`, `TickerDTO`, `FundingDTO`, and `OpenInterestDTO`.
+
+The clients use public GET endpoints only. They do not use API keys, account endpoints, private data, order placement, withdrawals, transfers, or trading functionality.
+
+Normalized DTOs expose a consistent internal shape across Binance and Bybit. Missing optional fields are marked as `N/A`; malformed or incomplete required data raises a clear exchange client error.
+
+Manual live check:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\test_market_data_clients.py
+```
+
+The manual script fetches `BTCUSDT` candles, ticker, funding, and open interest from Binance and Bybit, then prints normalized DTOs. It is optional and not used by automated tests.
 
 ## Safety Boundaries
 
