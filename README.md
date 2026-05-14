@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, and Phase 4 derivatives/orderflow context analysis.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -125,6 +125,17 @@ Phase 3 adds the first deterministic analysis agent under `app/agents`:
 - It calculates ATR, EMA 50, EMA 200, volume z-score, trend context, recent range high/low, nearest support, and nearest resistance.
 - It detects confirmed swing highs/lows, bullish and bearish liquidity sweeps, simple BOS, and simple CHoCH using deterministic rules.
 - Missing volume marks volume anomaly fields as `N/A`; malformed or insufficient OHLC data returns an invalid result with clear errors.
+
+## Phase 4 Derivatives / Orderflow Agent
+
+Phase 4 adds `DerivativesOrderflowAgent` under `app/agents` for deterministic derivatives context analysis:
+
+- It analyzes normalized in-memory data only: price change, current and previous open interest, funding rate, optional historical funding rates, and optional volume z-score.
+- It returns structured models including `DerivativesOrderflowResult`, `FundingSignal`, `OpenInterestSignal`, `PriceOiRelationship`, `CrowdingRiskSignal`, and `DerivativesDataQuality`.
+- It classifies funding direction and severity, calculates funding z-score when historical funding is supplied, calculates OI percentage change, classifies price/OI relationships, detects crowded long or crowded short risk, and scores derivatives context from 0 to 100.
+- Missing funding, open interest, or volume is marked as `N/A` and surfaced through explicit risk flags.
+- CVD and liquidation heatmaps are currently not implemented and are always marked `N/A`; the agent does not invent either data source.
+- The agent does not call live APIs, use private exchange access, produce trading recommendations, place orders, or expose trading execution.
 
 ## Safety Boundaries
 
