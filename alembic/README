@@ -1,0 +1,6 @@
+Alembic migration environment for Candle Craft Trading Agent.
+
+Use:
+
+alembic revision --autogenerate -m "describe change"
+alembic upgrade head
