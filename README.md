@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, and Phase 9 in-memory journal tracking.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, and Phase 10 scanner-runner orchestration.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -31,6 +31,7 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 |   |   `-- normalizers/
 |   |-- db/
 |   |-- models/
+|   |-- pipeline/
 |   `-- scoring/
 |-- scripts/
 |-- tests/
@@ -95,7 +96,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, and in-memory journal tracking. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, and the Phase 10 scanner runner. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -370,6 +371,26 @@ entry = create_journal_entry(
 )
 ```
 
+## Phase 10 Scanner Runner
+
+Phase 10 adds the first scanner pipeline under `app/pipeline`:
+
+- `ScannerRunner` connects the existing read-only modules into one safe flow: public market data, technical structure, derivatives/orderflow, risk validation, opportunity scoring, trade idea creation, dry-run alert formatting, and journal entry creation.
+- It does not place trades, route orders, use private exchange API access, withdraw funds, transfer funds, or require exchange API keys.
+- Alerts are dry-run by default. The runner formats the alert through the alert agent but does not send live Telegram messages unless a caller explicitly disables dry-run behavior and supplies live alert settings.
+- Trade ideas are created only after technical context, derivatives checks, risk-manager gates, opportunity-scoring gates, and the configured minimum scanner score pass.
+- Missing data is preserved as `N/A`; unreliable data is preserved as `Unverified`.
+- If a symbol fails, the failure is recorded on that symbol and the scanner continues with the next symbol.
+- Weak setups are rejected. If there is no sweep, BOS, or CHoCH context, the symbol returns `scanned_no_setup`.
+
+Manual dry-run scan:
+
+```powershell
+python scripts/run_scan.py
+```
+
+The script scans `BTCUSDT`, `ETHUSDT`, and `SOLUSDT` on Binance Futures by default using public endpoints only. It prints a scanner summary and keeps alerts dry-run.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -380,3 +401,4 @@ entry = create_journal_entry(
 - Trade idea generation structures scored candidates only. It does not send alerts, place trades, or use private exchange access.
 - Alert delivery is notification-only. It does not place orders, use private exchange access, or add trading execution.
 - Journal tracking is in-memory outcome tracking only. It does not place orders, use private exchange access, or persist records yet.
+- The scanner runner is orchestration only. It does not place orders, use private exchange access, or create a trade idea unless all configured quality gates pass.
