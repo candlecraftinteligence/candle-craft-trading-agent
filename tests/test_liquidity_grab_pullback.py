@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from app.analytics.derivatives_enrichment import enrich_derivatives
 from app.data.dtos import NA
 from app.strategies.liquidity_grab_pullback import (
     LiquidityGrabEngine,
@@ -535,6 +536,104 @@ def test_poc_alone_does_not_create_trade_idea() -> None:
     assert result.swing.is_valid is False
     assert result.swing.first_failed_gate == "no_execution_candles"
     assert result.swing.gates_passed == ()
+
+
+def test_derivatives_used_as_confluence_only_on_valid_setup() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
+            "candles_2d": _trend_candles(),
+            "derivatives_enrichment": enrich_derivatives(
+                {
+                    "symbol": "BTCUSDT",
+                    "exchange": "binance",
+                    "latest_price": Decimal("112"),
+                    "current_funding_rate": Decimal("0.0001"),
+                    "current_open_interest": Decimal("105"),
+                    "previous_open_interest": Decimal("100"),
+                    "candles_15m": _full_bullish_setup_candles(),
+                    "long_short_ratio": Decimal("1.10"),
+                }
+            ),
+        }
+    )
+
+    assert result.swing.is_valid is True
+    assert result.swing.derivatives_supports_trade is True
+    assert result.swing.derivatives_conflict_reason == NA
+
+
+def test_severe_derivatives_conflict_can_reject_after_technical_gates_pass() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
+            "candles_2d": _trend_candles(),
+            "derivatives_enrichment": enrich_derivatives(
+                {
+                    "symbol": "BTCUSDT",
+                    "exchange": "binance",
+                    "latest_price": Decimal("112"),
+                    "current_funding_rate": Decimal("0.0015"),
+                    "current_open_interest": Decimal("120"),
+                    "previous_open_interest": Decimal("100"),
+                    "candles_15m": _full_bullish_setup_candles(),
+                    "long_short_ratio": Decimal("2.00"),
+                }
+            ),
+        }
+    )
+
+    assert result.swing.is_valid is False
+    assert "sweep" in result.swing.gates_passed
+    assert "bos_choch" in result.swing.gates_passed
+    assert "derivatives_conflict" in result.swing.gates_failed
+    assert result.swing.derivatives_supports_trade is False
+    assert "Severe derivatives conflict against long" in result.swing.derivatives_conflict_reason
+
+
+def test_missing_derivatives_does_not_reject_by_itself() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
+            "candles_2d": _trend_candles(),
+        }
+    )
+
+    assert result.swing.is_valid is True
+    assert "derivatives_conflict" not in result.swing.gates_failed
+    assert result.swing.derivatives_supports_trade == NA
+
+
+def test_derivatives_alone_cannot_create_setup() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "derivatives_enrichment": enrich_derivatives(
+                {
+                    "symbol": "BTCUSDT",
+                    "exchange": "binance",
+                    "latest_price": Decimal("112"),
+                    "current_funding_rate": Decimal("0.0001"),
+                    "current_open_interest": Decimal("105"),
+                    "previous_open_interest": Decimal("100"),
+                    "long_short_ratio": Decimal("1.10"),
+                }
+            ),
+        }
+    )
+
+    assert result.swing.is_valid is False
+    assert result.swing.first_failed_gate == "no_execution_candles"
 
 
 def test_rejected_setup_remains_rejected_with_poc_context() -> None:

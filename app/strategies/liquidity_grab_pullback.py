@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.pullback_zones import (
     FibAlignmentResult,
     PullbackZone,
@@ -225,6 +226,12 @@ class LiquidityGrabSetup(BaseModel):
     momentum_diagnostics: str = NA
     rr_diagnostics: str = NA
     trust_meter_diagnostics: str = NA
+    derivatives_supports_trade: bool | Literal["N/A"] = NA
+    derivatives_conflict_reason: str = NA
+    funding_context: Any = NA
+    oi_context: Any = NA
+    crowding_risk: str = NA
+    squeeze_risk: str = NA
 
     model_config = ConfigDict(frozen=True)
 
@@ -305,6 +312,7 @@ class LiquidityGrabInput(BaseModel):
     orderflow_summary: Any | None = None
     funding: Any | None = None
     open_interest: Any | None = None
+    derivatives_enrichment: DerivativesEnrichmentResult | None = None
     cvd: Any | None = None
     liquidation_data: Any | None = None
     btc_context: Any | None = None
@@ -658,6 +666,7 @@ class LiquidityGrabEngine:
             data=data,
             rr_to_tp2=rr_to_tp2,
         )
+        derivatives_fields = _derivatives_strategy_fields(data, direction)
         gate_result = _gate_result(
             data=data,
             mode=mode,
@@ -724,6 +733,7 @@ class LiquidityGrabEngine:
             missing_data=missing_data,
             unverified_data=unverified_data,
             rotation=rotation,
+            **derivatives_fields,
             **context_fields,
         )
 
@@ -1519,9 +1529,92 @@ def _risk_guard_violations(data: LiquidityGrabInput, direction: Direction) -> tu
             violations.append(_violation("btc_d_guard", "BTC.D breaking down intraday rejects alt shorts."))
     if _event_active(data.event_risk_context):
         violations.append(_violation("event_guard", "Major scheduled event window is active within +/- 30 minutes."))
+    derivatives_conflict = _derivatives_conflict_against_trade(data, direction)
+    if derivatives_conflict != NA:
+        violations.append(_violation("derivatives_conflict", derivatives_conflict))
     if _funding_oi_against_trade(data, direction):
         violations.append(_violation("funding_oi_guard", "Extreme funding plus rising OI is directly against the trade without absorption."))
     return tuple(violations)
+
+
+def _derivatives_strategy_fields(data: LiquidityGrabInput, direction: Direction) -> dict[str, Any]:
+    result = _derivatives_enrichment_result(data)
+    if result is None or direction not in ("bullish", "bearish"):
+        return {
+            "derivatives_supports_trade": NA,
+            "derivatives_conflict_reason": NA,
+            "funding_context": NA,
+            "oi_context": NA,
+            "crowding_risk": NA,
+            "squeeze_risk": NA,
+        }
+
+    supports = result.supports_long if direction == "bullish" else result.supports_short
+    conflict_reason = _derivatives_conflict_against_trade(data, direction)
+    return {
+        "derivatives_supports_trade": supports,
+        "derivatives_conflict_reason": conflict_reason,
+        "funding_context": result.funding_context.model_dump(),
+        "oi_context": result.oi_context.model_dump(),
+        "crowding_risk": result.crowding_risk,
+        "squeeze_risk": result.squeeze_risk,
+    }
+
+
+def _derivatives_conflict_against_trade(data: LiquidityGrabInput, direction: Direction) -> str:
+    result = _derivatives_enrichment_result(data)
+    if result is None or direction not in ("bullish", "bearish") or _has_clear_absorption(data):
+        return NA
+
+    if direction == "bullish":
+        severe = (
+            result.funding_status == "extreme_positive"
+            and result.oi_direction == "rising"
+        ) or (
+            result.crowding_risk == "high"
+            and result.crowding_context.risk_direction == "long"
+        ) or result.squeeze_risk == "long_squeeze_risk"
+        if severe:
+            return (
+                "Severe derivatives conflict against long: extreme positive funding or crowded longs "
+                "with rising OI and no clear absorption."
+            )
+
+    if direction == "bearish":
+        severe = (
+            result.funding_status == "extreme_negative"
+            and result.oi_direction == "rising"
+        ) or (
+            result.crowding_risk == "high"
+            and result.crowding_context.risk_direction == "short"
+        ) or result.squeeze_risk == "short_squeeze_risk"
+        if severe:
+            return (
+                "Severe derivatives conflict against short: extreme negative funding or crowded shorts "
+                "with rising OI and no clear absorption."
+            )
+
+    return NA
+
+
+def _derivatives_enrichment_result(data: LiquidityGrabInput) -> DerivativesEnrichmentResult | None:
+    value = data.derivatives_enrichment
+    if value is None:
+        return None
+    if isinstance(value, DerivativesEnrichmentResult):
+        return value
+    try:
+        return DerivativesEnrichmentResult.model_validate(value)
+    except ValueError:
+        return None
+
+
+def _has_clear_absorption(data: LiquidityGrabInput) -> bool:
+    return _context_has(data.orderflow_summary, "absorption", "absorbed") or _context_has(
+        data.liquidation_data,
+        "absorption",
+        "absorbed",
+    )
 
 
 def _entry_status(
@@ -1680,6 +1773,12 @@ def _setup_diagnostic_fields(setup: LiquidityGrabSetup) -> dict[str, Any]:
         "momentum_diagnostics": _momentum_diagnostics(setup),
         "rr_diagnostics": _rr_diagnostics(setup),
         "trust_meter_diagnostics": _trust_meter_diagnostics(setup),
+        "derivatives_supports_trade": setup.derivatives_supports_trade,
+        "derivatives_conflict_reason": setup.derivatives_conflict_reason,
+        "funding_context": setup.funding_context,
+        "oi_context": setup.oi_context,
+        "crowding_risk": setup.crowding_risk,
+        "squeeze_risk": setup.squeeze_risk,
         "poc_diagnostics": setup.poc_diagnostics
         if setup.poc_diagnostics != NA
         else _setup_poc_diagnostics(setup),
@@ -1871,6 +1970,10 @@ def _format_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> str:
             f"Momentum: {_diagnostic_detail(setup.momentum_diagnostics)}",
             f"RR: {_diagnostic_detail(setup.rr_diagnostics)}",
             f"Trust Meter: {_diagnostic_detail(setup.trust_meter_diagnostics)}",
+            f"Derivatives support: {_display(setup.derivatives_supports_trade)}",
+            f"Derivatives conflict: {_display(setup.derivatives_conflict_reason)}",
+            f"Crowding risk: {_display(setup.crowding_risk)}",
+            f"Squeeze risk: {_display(setup.squeeze_risk)}",
             f"First failed gate: {setup.first_failed_gate}",
             f"Final decision: {'Valid setup.' if setup.is_valid else 'No valid setup.'}",
         )

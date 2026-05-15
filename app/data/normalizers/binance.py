@@ -101,6 +101,33 @@ def normalize_binance_funding(symbol: str, payload: Any) -> FundingDTO:
     )
 
 
+def normalize_binance_funding_history(symbol: str, payload: Any) -> list[FundingDTO]:
+    rows = require_list(payload, "binance.funding")
+    funding: list[FundingDTO] = []
+
+    for index, raw in enumerate(rows):
+        row_path = f"binance.funding[{index}]"
+        data = require_mapping(raw, row_path)
+        funding.append(
+            FundingDTO(
+                exchange=BINANCE_FUTURES_EXCHANGE,
+                symbol=str(require_field(data, "symbol", row_path)),
+                timestamp=int_from(
+                    require_field(data, "fundingTime", row_path),
+                    f"{row_path}.fundingTime",
+                ),
+                funding_rate=decimal_from(
+                    require_field(data, "fundingRate", row_path),
+                    f"{row_path}.fundingRate",
+                ),
+                mark_price=optional_decimal(data.get("markPrice"), f"{row_path}.markPrice"),
+                raw_source=data,
+            )
+        )
+
+    return sorted(funding, key=lambda item: item.timestamp)
+
+
 def normalize_binance_open_interest(symbol: str, payload: Any) -> OpenInterestDTO:
     data = require_mapping(payload, "binance.open_interest")
 
@@ -116,4 +143,40 @@ def normalize_binance_open_interest(symbol: str, payload: Any) -> OpenInterestDT
             "binance.open_interest.openInterest",
         ),
         raw_source=data,
+    )
+
+
+def normalize_binance_open_interest_history(symbol: str, payload: Any) -> list[OpenInterestDTO]:
+    rows = require_list(payload, "binance.open_interest_history")
+    history: list[OpenInterestDTO] = []
+
+    for index, raw in enumerate(rows):
+        row_path = f"binance.open_interest_history[{index}]"
+        data = require_mapping(raw, row_path)
+        history.append(
+            OpenInterestDTO(
+                exchange=BINANCE_FUTURES_EXCHANGE,
+                symbol=symbol,
+                timestamp=int_from(
+                    require_field(data, "timestamp", row_path),
+                    f"{row_path}.timestamp",
+                ),
+                open_interest=decimal_from(
+                    require_field(data, "sumOpenInterest", row_path),
+                    f"{row_path}.sumOpenInterest",
+                ),
+                notional_value=optional_decimal(data.get("sumOpenInterestValue"), f"{row_path}.sumOpenInterestValue"),
+                raw_source=data,
+            )
+        )
+
+    return sorted(history, key=lambda item: item.timestamp if isinstance(item.timestamp, int) else 0)
+
+
+def normalize_binance_long_short_ratio(symbol: str, payload: Any) -> Decimal:
+    rows = require_list(payload, "binance.long_short_ratio")
+    data = require_mapping(last_item(rows, "binance.long_short_ratio"), "binance.long_short_ratio[-1]")
+    return decimal_from(
+        require_field(data, "longShortRatio", "binance.long_short_ratio[-1]"),
+        "binance.long_short_ratio[-1].longShortRatio",
     )

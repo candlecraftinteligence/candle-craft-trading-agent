@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, and Phase 14 refined OB/FVG plus fib pullback-zone validation.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, and Phase 15 public derivatives enrichment.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -98,7 +98,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, and the Phase 14 pullback-zone engine. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, and the Phase 15 derivatives enrichment layer. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -621,6 +621,45 @@ Run Phase 14 scanner output:
 python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
 ```
 
+## Phase 15 Derivatives Enrichment Layer
+
+Phase 15 adds `app/analytics/derivatives_enrichment.py` and threads `DerivativesEnrichmentResult` into scanner results, CLI diagnostics, JSON output, and the Liquidity-Grab Pullback strategy context.
+
+- The layer uses public futures market data only. Binance Futures and Bybit Linear clients can collect current funding, funding history, open interest, open interest history, and public long/short ratio where the exchange endpoint is available.
+- It does not use API keys, private exchange access, account endpoints, order endpoints, withdrawals, transfers, or live execution.
+- Funding is classified as `normal`, `elevated_positive`, `extreme_positive`, `elevated_negative`, `extreme_negative`, or `N/A`.
+- Open interest change is calculated from current and previous OI when both are available. Missing current or previous OI keeps `open_interest_change_pct = N/A`.
+- Price/OI relationship is deterministic: price up + OI up, price up + OI down, price down + OI up, and price down + OI down each map to a fixed classification.
+- Crowding risk combines funding, public long/short ratio, and OI expansion when available.
+- Squeeze risk estimates long-squeeze, short-squeeze, balanced, or `N/A` context from funding extremes, OI expansion, price direction, and long/short imbalance.
+- `derivatives_score` measures how useful and complete the derivatives context is. It is not a profitability score.
+- Missing derivatives fields are marked `N/A`; malformed or endpoint-inconsistent fields are preserved as `Unverified` with warnings.
+- Public endpoint failures do not fail the scan. The scanner keeps going and records missing/warning diagnostics.
+
+Derivatives are confluence/filter only. They never create a trade setup by themselves and never override hard technical gates:
+
+- No sweep means no trade.
+- No 5m BOS/CHoCH means no trade.
+- No OB/FVG/fib alignment means no trade.
+- RR below the strategy threshold means no trade.
+- Trust Meter requirements still apply.
+
+The Liquidity-Grab Pullback strategy can reject only severe derivatives conflict after technical gates have passed, such as extreme funding directly against the trade, aggressive OI expansion against the trade, high crowding risk against the trade, and no clear absorption. Missing derivatives data does not reject a setup by itself.
+
+Scanner summary output includes compact derivatives context when available:
+
+```text
+BTCUSDT | No Setup | 2D: bearish | 12H: bearish | POC: 79704 | Funding: negative/normal | OI: rising | 15m sweep: passed | 5m BOS/CHoCH: passed | Pullback: failed | Reject: pullback_too_deep
+```
+
+Normal CLI output includes a `Derivatives` block with funding, OI, price/OI, crowding risk, squeeze risk, and derivatives score. Full diagnostics and JSON output include the nested `derivatives_enrichment` object.
+
+Run Phase 15 scanner output:
+
+```powershell
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -636,3 +675,4 @@ python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance 
 - The Phase 12 scanner strategy path is still dry-run analysis only. It can format a dry-run alert after all gates pass, but rejected setups remain diagnostics only.
 - The Phase 13 volume profile is candle-estimated confluence only. It does not create signals by itself, place orders, or use private exchange API access.
 - The Phase 14 pullback-zone engine is deterministic validation only. It does not place orders, use private exchange API access, or loosen any sweep, confirmation, pullback, fib, RR, or Trust Meter gates.
+- The Phase 15 derivatives enrichment layer is public-data confluence only. It does not create setups, place orders, use private exchange API access, or loosen any technical strategy gate.

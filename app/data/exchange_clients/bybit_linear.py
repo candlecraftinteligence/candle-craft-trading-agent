@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -10,8 +11,11 @@ from app.data.exceptions import ExchangeRateLimitError, ExchangeResponseError
 from app.data.exchange_clients.base import PublicHTTPExchangeClient
 from app.data.normalizers.bybit import (
     normalize_bybit_funding,
+    normalize_bybit_funding_history,
     normalize_bybit_klines,
+    normalize_bybit_long_short_ratio,
     normalize_bybit_open_interest,
+    normalize_bybit_open_interest_history,
     normalize_bybit_ticker,
 )
 
@@ -68,6 +72,9 @@ class BybitLinearClient(PublicHTTPExchangeClient):
 
     async def get_funding_rate(self, symbol: str) -> FundingDTO:
         normalized_symbol = symbol.upper()
+        history = await self.get_funding_rate_history(normalized_symbol, limit=1)
+        if history:
+            return history[-1]
         payload = await self._get_json(
             "/v5/market/funding/history",
             params={"category": self.CATEGORY, "symbol": normalized_symbol, "limit": 1},
@@ -75,8 +82,21 @@ class BybitLinearClient(PublicHTTPExchangeClient):
         )
         return normalize_bybit_funding(normalized_symbol, payload)
 
+    async def get_funding_rate_history(self, symbol: str, limit: int = 100) -> list[FundingDTO]:
+        _validate_limit(limit, maximum=200)
+        normalized_symbol = symbol.upper()
+        payload = await self._get_json(
+            "/v5/market/funding/history",
+            params={"category": self.CATEGORY, "symbol": normalized_symbol, "limit": limit},
+            validate=self._ensure_success,
+        )
+        return normalize_bybit_funding_history(normalized_symbol, payload)
+
     async def get_open_interest(self, symbol: str) -> OpenInterestDTO:
         normalized_symbol = symbol.upper()
+        history = await self.get_open_interest_history(normalized_symbol, limit=1)
+        if history:
+            return history[-1]
         payload = await self._get_json(
             "/v5/market/open-interest",
             params={
@@ -88,6 +108,36 @@ class BybitLinearClient(PublicHTTPExchangeClient):
             validate=self._ensure_success,
         )
         return normalize_bybit_open_interest(normalized_symbol, payload)
+
+    async def get_open_interest_history(self, symbol: str, limit: int = 30) -> list[OpenInterestDTO]:
+        _validate_limit(limit, maximum=200)
+        normalized_symbol = symbol.upper()
+        payload = await self._get_json(
+            "/v5/market/open-interest",
+            params={
+                "category": self.CATEGORY,
+                "symbol": normalized_symbol,
+                "intervalTime": self.open_interest_interval,
+                "limit": limit,
+            },
+            validate=self._ensure_success,
+        )
+        return normalize_bybit_open_interest_history(normalized_symbol, payload)
+
+    async def get_long_short_ratio(self, symbol: str, limit: int = 1, period: str = "5min") -> Decimal:
+        _validate_limit(limit, maximum=500)
+        normalized_symbol = symbol.upper()
+        payload = await self._get_json(
+            "/v5/market/account-ratio",
+            params={
+                "category": self.CATEGORY,
+                "symbol": normalized_symbol,
+                "period": period,
+                "limit": limit,
+            },
+            validate=self._ensure_success,
+        )
+        return normalize_bybit_long_short_ratio(normalized_symbol, payload)
 
     @staticmethod
     def _ensure_success(payload: Any) -> None:

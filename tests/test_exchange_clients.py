@@ -153,6 +153,47 @@ def test_binance_open_interest_mocked_response() -> None:
     run(scenario())
 
 
+def test_binance_public_derivatives_history_and_ratio_mocked_response() -> None:
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/fapi/v1/fundingRate":
+                assert request.url.params["limit"] == "2"
+                return httpx.Response(
+                    200,
+                    json=[
+                        {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingTime": 1710000000000},
+                        {"symbol": "BTCUSDT", "fundingRate": "0.0002", "fundingTime": 1710003600000},
+                    ],
+                )
+            if request.url.path == "/futures/data/openInterestHist":
+                assert request.url.params["period"] == "5m"
+                return httpx.Response(
+                    200,
+                    json=[
+                        {"sumOpenInterest": "100", "sumOpenInterestValue": "1000000", "timestamp": 1710000000000},
+                        {"sumOpenInterest": "110", "sumOpenInterestValue": "1100000", "timestamp": 1710000300000},
+                    ],
+                )
+            if request.url.path == "/futures/data/globalLongShortAccountRatio":
+                return httpx.Response(
+                    200,
+                    json=[{"symbol": "BTCUSDT", "longShortRatio": "1.25", "timestamp": "1710000300000"}],
+                )
+            raise AssertionError(f"unexpected path {request.url.path}")
+
+        client = await _binance_client(httpx.MockTransport(handler))
+        funding = await client.get_funding_rate_history("BTCUSDT", limit=2)
+        open_interest = await client.get_open_interest_history("BTCUSDT", limit=2)
+        ratio = await client.get_long_short_ratio("BTCUSDT")
+        await client._http_client.aclose()
+
+        assert [item.funding_rate for item in funding] == [Decimal("0.0001"), Decimal("0.0002")]
+        assert [item.open_interest for item in open_interest] == [Decimal("100"), Decimal("110")]
+        assert ratio == Decimal("1.25")
+
+    run(scenario())
+
+
 def test_bybit_klines_mocked_response() -> None:
     async def scenario() -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -292,6 +333,65 @@ def test_bybit_open_interest_mocked_response() -> None:
 
         assert open_interest.exchange == "bybit_linear"
         assert open_interest.open_interest == Decimal("12345.67")
+
+    run(scenario())
+
+
+def test_bybit_public_derivatives_history_and_ratio_mocked_response() -> None:
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/v5/market/funding/history":
+                assert request.url.params["category"] == "linear"
+                return httpx.Response(
+                    200,
+                    json={
+                        "retCode": 0,
+                        "retMsg": "OK",
+                        "result": {
+                            "category": "linear",
+                            "list": [
+                                {"symbol": "BTCUSDT", "fundingRate": "0.0001", "fundingRateTimestamp": "1710000000000"},
+                                {"symbol": "BTCUSDT", "fundingRate": "0.0002", "fundingRateTimestamp": "1710003600000"},
+                            ],
+                        },
+                    },
+                )
+            if request.url.path == "/v5/market/open-interest":
+                return httpx.Response(
+                    200,
+                    json={
+                        "retCode": 0,
+                        "retMsg": "OK",
+                        "result": {
+                            "symbol": "BTCUSDT",
+                            "category": "linear",
+                            "list": [
+                                {"openInterest": "100", "timestamp": "1710000000000"},
+                                {"openInterest": "110", "timestamp": "1710000300000"},
+                            ],
+                        },
+                    },
+                )
+            if request.url.path == "/v5/market/account-ratio":
+                return httpx.Response(
+                    200,
+                    json={
+                        "retCode": 0,
+                        "retMsg": "OK",
+                        "result": {"list": [{"symbol": "BTCUSDT", "buyRatio": "0.55", "sellRatio": "0.45"}]},
+                    },
+                )
+            raise AssertionError(f"unexpected path {request.url.path}")
+
+        client = await _bybit_client(httpx.MockTransport(handler))
+        funding = await client.get_funding_rate_history("BTCUSDT", limit=2)
+        open_interest = await client.get_open_interest_history("BTCUSDT", limit=2)
+        ratio = await client.get_long_short_ratio("BTCUSDT")
+        await client._http_client.aclose()
+
+        assert [item.funding_rate for item in funding] == [Decimal("0.0001"), Decimal("0.0002")]
+        assert [item.open_interest for item in open_interest] == [Decimal("100"), Decimal("110")]
+        assert ratio == Decimal("1.222222222222222222222222222")
 
     run(scenario())
 

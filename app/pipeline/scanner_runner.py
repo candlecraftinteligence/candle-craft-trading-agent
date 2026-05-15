@@ -15,6 +15,11 @@ from app.agents.journal_agent import JournalAgent, JournalEntryResult, JournalSt
 from app.agents.risk_manager import RiskDecision, RiskManagerAgent, RiskManagerInput
 from app.agents.technical_structure import TechnicalStructureAgent, TechnicalStructureResult
 from app.agents.trade_idea import TradeIdeaAgent, TradeIdeaResult
+from app.analytics.derivatives_enrichment import (
+    DerivativesEnrichmentInput,
+    DerivativesEnrichmentResult,
+    enrich_derivatives,
+)
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
@@ -232,8 +237,18 @@ class ScannerSymbolResult(BaseModel):
     choch_detected: bool = False
     funding_direction: str = NA
     funding_severity: str = NA
+    funding_status: str = NA
+    funding_extreme: bool | Literal["N/A"] = NA
     oi_direction: str = NA
+    open_interest_change_pct: MaybeDecimal = NA
     price_oi_relationship: str = NA
+    price_direction: str = NA
+    long_short_ratio: MaybeDecimal = NA
+    crowding_risk: str = NA
+    squeeze_risk: str = NA
+    derivatives_missing_data: tuple[str, ...] = ()
+    derivatives_unverified_data: tuple[str, ...] = ()
+    derivatives_warnings: tuple[str, ...] = ()
     rejection_stage: str = NA
     rejection_reasons: tuple[str, ...] = ()
     missing_data: tuple[str, ...] = ()
@@ -257,6 +272,7 @@ class ScannerSymbolResult(BaseModel):
     volume_profile_warnings: tuple[str, ...] = ()
     technical_result: TechnicalStructureResult | None = None
     derivatives_result: DerivativesOrderflowResult | None = None
+    derivatives_enrichment: DerivativesEnrichmentResult | None = None
     risk_decision: RiskDecision | None = None
     score_result: OpportunityScoreResult | None = None
     trade_idea: TradeIdeaResult | None = None
@@ -310,8 +326,13 @@ class _CandidateBuildResult(BaseModel):
 class _OptionalMarketData(BaseModel):
     ticker: TickerDTO | Any | None = None
     funding: FundingDTO | Any | None = None
+    funding_history: Sequence[FundingDTO | Any] | None = None
     open_interest: OpenInterestDTO | Any | None = None
+    open_interest_history: Sequence[OpenInterestDTO | Any] | None = None
     previous_open_interest: MaybeDecimal = NA
+    long_short_ratio: MaybeDecimal = NA
+    liquidation_data: Any | None = None
+    warnings: tuple[str, ...] = ()
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
 
@@ -430,6 +451,18 @@ class ScannerRunner:
         technical = self.technical_agent.analyze(technical_candles)
         base_missing = list(optional_data.missing_data)
         base_unverified = list(optional_data.unverified_data)
+        derivatives_enrichment = enrich_derivatives(
+            _derivatives_enrichment_input(
+                symbol=symbol,
+                exchange=config.exchange,
+                candles=candles,
+                current_price=current_price,
+                optional_data=optional_data,
+                interval=config.interval,
+            )
+        )
+        base_missing.extend(derivatives_enrichment.missing_data)
+        base_unverified.extend(derivatives_enrichment.unverified_data)
         strategy_execution = await self._run_strategy(
             client=client,
             symbol=symbol,
@@ -438,6 +471,7 @@ class ScannerRunner:
             current_price=current_price,
             optional_data=optional_data,
             technical=technical,
+            derivatives_enrichment=derivatives_enrichment,
         )
         base_missing.extend(strategy_execution.strategy_missing_data)
         base_unverified.extend(strategy_execution.strategy_unverified_data)
@@ -455,6 +489,7 @@ class ScannerRunner:
                 unverified_data=base_unverified,
                 rejection_reason=reason,
                 technical_result=technical,
+                derivatives_enrichment=derivatives_enrichment,
                 strategy_execution=strategy_execution,
             )
 
@@ -485,6 +520,7 @@ class ScannerRunner:
                     rejection_reason=NO_VALID_STRATEGY_SETUP_REASON,
                     technical_result=technical,
                     derivatives_result=derivatives,
+                    derivatives_enrichment=derivatives_enrichment,
                     strategy_execution=strategy_execution,
                     rejection_stage_override="strategy",
                 )
@@ -516,11 +552,12 @@ class ScannerRunner:
                     rejection_reason=candidate_result.reason,
                     technical_result=technical,
                     derivatives_result=derivatives,
+                    derivatives_enrichment=derivatives_enrichment,
                     strategy_execution=strategy_execution,
                 )
             candidate = candidate_result.candidate
 
-        derivative_rejection = _derivatives_rejection(candidate.direction, derivatives)
+        derivative_rejection = _derivatives_rejection(candidate.direction, derivatives_enrichment)
         if derivative_rejection is not None:
             return self._symbol_result(
                 symbol=symbol,
@@ -534,6 +571,7 @@ class ScannerRunner:
                 rejection_reason=derivative_rejection,
                 technical_result=technical,
                 derivatives_result=derivatives,
+                derivatives_enrichment=derivatives_enrichment,
                 strategy_execution=strategy_execution,
             )
 
@@ -566,6 +604,7 @@ class ScannerRunner:
                 rejection_reason=_risk_rejection_reason(risk_decision),
                 technical_result=technical,
                 derivatives_result=derivatives,
+                derivatives_enrichment=derivatives_enrichment,
                 risk_decision=risk_decision,
                 strategy_execution=strategy_execution,
             )
@@ -574,7 +613,7 @@ class ScannerRunner:
         score_result = self.scoring_engine.score(
             {
                 "technical_score": Decimal(technical.structure_score),
-                "derivatives_score": Decimal(derivatives.derivatives_score),
+                "derivatives_score": _scoring_derivatives_score(derivatives_enrichment),
                 "risk_approved": risk_decision.approved,
                 "best_rr": _best_rr_for_scoring(risk_decision),
                 "liquidity_score": _liquidity_score(candles, optional_data.ticker),
@@ -604,6 +643,7 @@ class ScannerRunner:
                 rejection_reason=_scoring_rejection_reason(score_result, config.min_score_for_idea),
                 technical_result=technical,
                 derivatives_result=derivatives,
+                derivatives_enrichment=derivatives_enrichment,
                 risk_decision=risk_decision,
                 score_result=score_result,
                 strategy_execution=strategy_execution,
@@ -628,7 +668,7 @@ class ScannerRunner:
                 "risk_approved": risk_decision.approved,
                 "best_rr": _best_rr_for_scoring(risk_decision),
                 "technical_summary": candidate.technical_summary,
-                "derivatives_summary": _derivatives_summary(derivatives),
+                "derivatives_summary": _derivatives_enrichment_summary(derivatives_enrichment),
                 "confirmed_facts": candidate.confirmed_facts,
                 "missing_data": _unique_strings(base_missing),
                 "unverified_data": _unique_strings(base_unverified),
@@ -649,6 +689,7 @@ class ScannerRunner:
                 rejection_reason=_trade_idea_rejection_reason(trade_idea),
                 technical_result=technical,
                 derivatives_result=derivatives,
+                derivatives_enrichment=derivatives_enrichment,
                 risk_decision=risk_decision,
                 score_result=score_result,
                 strategy_execution=strategy_execution,
@@ -702,6 +743,7 @@ class ScannerRunner:
             unverified_data=base_unverified,
             technical_result=technical,
             derivatives_result=derivatives,
+            derivatives_enrichment=derivatives_enrichment,
             risk_decision=risk_decision,
             score_result=score_result,
             trade_idea=trade_idea,
@@ -732,6 +774,7 @@ class ScannerRunner:
         current_price: MaybeDecimal,
         optional_data: _OptionalMarketData,
         technical: TechnicalStructureResult,
+        derivatives_enrichment: DerivativesEnrichmentResult | None = None,
     ) -> _StrategyExecution:
         if not config.enable_strategy_output or config.strategy_name is None:
             execution_timeframe = config.execution_timeframe.strip().lower()
@@ -776,6 +819,7 @@ class ScannerRunner:
             confirmation_timeframe=config.confirmation_timeframe,
             timeframe_context=timeframe_context,
             volume_profile=execution_volume_profile,
+            derivatives_enrichment=derivatives_enrichment,
         )
 
         strategy_results: dict[str, LiquidityGrabResult] = {}
@@ -894,14 +938,45 @@ class ScannerRunner:
     async def _fetch_optional_market_data(self, client: BaseExchangeClient, symbol: str) -> _OptionalMarketData:
         missing_data: list[str] = []
         unverified_data: list[str] = []
-        ticker = await self._optional_call(client, "get_ticker", symbol, missing_data, "ticker")
-        funding = await self._optional_call(client, "get_funding_rate", symbol, missing_data, "funding_rate")
-        open_interest = await self._optional_call(client, "get_open_interest", symbol, missing_data, "open_interest")
+        warnings: list[str] = []
+        ticker = await self._optional_call(client, "get_ticker", symbol, missing_data, warnings, "ticker")
+        funding = await self._optional_call(client, "get_funding_rate", symbol, missing_data, warnings, "funding_rate")
+        funding_history = await self._optional_call(
+            client,
+            "get_funding_rate_history",
+            symbol,
+            missing_data,
+            warnings,
+            "funding_history",
+        )
+        open_interest = await self._optional_call(
+            client,
+            "get_open_interest",
+            symbol,
+            missing_data,
+            warnings,
+            "open_interest",
+        )
+        open_interest_history = await self._optional_call(
+            client,
+            "get_open_interest_history",
+            symbol,
+            missing_data,
+            warnings,
+            "open_interest_history",
+        )
+        long_short_ratio = await self._optional_call(
+            client,
+            "get_long_short_ratio",
+            symbol,
+            missing_data,
+            warnings,
+            "long_short_ratio",
+        )
         previous_open_interest = _previous_open_interest_from(open_interest)
 
         if previous_open_interest == NA:
-            history_value = await self._optional_previous_open_interest(client, symbol, missing_data)
-            previous_open_interest = history_value
+            previous_open_interest = _previous_open_interest_from_history(open_interest_history)
 
         if previous_open_interest == NA:
             missing_data.append("previous_open_interest: N/A")
@@ -909,33 +984,15 @@ class ScannerRunner:
         return _OptionalMarketData(
             ticker=ticker,
             funding=funding,
+            funding_history=funding_history if _is_sequence_data(funding_history) else None,
             open_interest=open_interest,
+            open_interest_history=open_interest_history if _is_sequence_data(open_interest_history) else None,
             previous_open_interest=previous_open_interest,
+            long_short_ratio=_normalize_optional_decimal(long_short_ratio),
+            warnings=_unique_strings(warnings),
             missing_data=_unique_strings(missing_data),
             unverified_data=_unique_strings(unverified_data),
         )
-
-    async def _optional_previous_open_interest(
-        self,
-        client: BaseExchangeClient,
-        symbol: str,
-        missing_data: list[str],
-    ) -> MaybeDecimal:
-        method = getattr(client, "get_open_interest_history", None)
-        if not callable(method):
-            return NA
-        try:
-            history = await _maybe_await(method(symbol=symbol, limit=2))
-        except TypeError:
-            history = await _maybe_await(method(symbol, 2))
-        except Exception as exc:
-            self.logger.warning("Optional previous OI fetch failed for symbol=%s: %s", symbol, exc)
-            return NA
-
-        if isinstance(history, Sequence) and not isinstance(history, (str, bytes)) and len(history) >= 2:
-            previous = history[-2]
-            return _decimal_field(previous, ("open_interest", "current_open_interest", "oi"))
-        return NA
 
     async def _optional_call(
         self,
@@ -943,6 +1000,7 @@ class ScannerRunner:
         method_name: str,
         symbol: str,
         missing_data: list[str],
+        warnings: list[str],
         label: str,
     ) -> Any | None:
         method = getattr(client, method_name, None)
@@ -954,6 +1012,7 @@ class ScannerRunner:
         except Exception as exc:
             self.logger.warning("Optional %s fetch failed for symbol=%s: %s", label, symbol, exc)
             missing_data.append(f"{label}: N/A")
+            warnings.append(f"{label} unavailable from public endpoint: {exc}")
             return None
 
     def _symbol_result(
@@ -970,6 +1029,7 @@ class ScannerRunner:
         rejection_reason: str | None = None,
         technical_result: TechnicalStructureResult | None = None,
         derivatives_result: DerivativesOrderflowResult | None = None,
+        derivatives_enrichment: DerivativesEnrichmentResult | None = None,
         risk_decision: RiskDecision | None = None,
         score_result: OpportunityScoreResult | None = None,
         trade_idea: TradeIdeaResult | None = None,
@@ -988,12 +1048,20 @@ class ScannerRunner:
             rejection_reason=rejection_reason,
             candle_count=len(candles),
             current_price=current_price,
-            funding_rate=_decimal_field(optional_data.funding, ("funding_rate", "current_funding_rate")),
-            open_interest=_decimal_field(optional_data.open_interest, ("open_interest", "current_open_interest", "oi")),
+            funding_rate=derivatives_enrichment.funding_rate
+            if derivatives_enrichment is not None
+            else _decimal_field(optional_data.funding, ("funding_rate", "current_funding_rate")),
+            open_interest=derivatives_enrichment.open_interest
+            if derivatives_enrichment is not None
+            else _decimal_field(optional_data.open_interest, ("open_interest", "current_open_interest", "oi")),
             candles_fetched=len(candles),
             latest_close=_current_price_from_candles(candles),
             technical_score=technical_result.structure_score if technical_result is not None else NA,
-            derivatives_score=derivatives_result.derivatives_score if derivatives_result is not None else NA,
+            derivatives_score=derivatives_enrichment.derivatives_score
+            if derivatives_enrichment is not None
+            else derivatives_result.derivatives_score
+            if derivatives_result is not None
+            else NA,
             trend_context=technical_result.trend_context if technical_result is not None else NA,
             recent_range_high=technical_result.recent_range_high if technical_result is not None else NA,
             recent_range_low=technical_result.recent_range_low if technical_result is not None else NA,
@@ -1006,10 +1074,32 @@ class ScannerRunner:
             choch_detected=technical_result.choch.is_present if technical_result is not None else False,
             funding_direction=derivatives_result.funding.direction if derivatives_result is not None else NA,
             funding_severity=derivatives_result.funding.severity if derivatives_result is not None else NA,
-            oi_direction=derivatives_result.open_interest.direction if derivatives_result is not None else NA,
-            price_oi_relationship=derivatives_result.price_oi_relationship.classification
+            funding_status=derivatives_enrichment.funding_status if derivatives_enrichment is not None else NA,
+            funding_extreme=derivatives_enrichment.funding_extreme if derivatives_enrichment is not None else NA,
+            oi_direction=derivatives_enrichment.oi_direction
+            if derivatives_enrichment is not None
+            else derivatives_result.open_interest.direction
             if derivatives_result is not None
             else NA,
+            open_interest_change_pct=derivatives_enrichment.open_interest_change_pct
+            if derivatives_enrichment is not None
+            else derivatives_result.open_interest.oi_change_percentage
+            if derivatives_result is not None
+            else NA,
+            price_oi_relationship=derivatives_enrichment.price_oi_relationship
+            if derivatives_enrichment is not None
+            else derivatives_result.price_oi_relationship.classification
+            if derivatives_result is not None
+            else NA,
+            price_direction=derivatives_enrichment.price_direction if derivatives_enrichment is not None else NA,
+            long_short_ratio=derivatives_enrichment.long_short_ratio if derivatives_enrichment is not None else NA,
+            crowding_risk=derivatives_enrichment.crowding_risk if derivatives_enrichment is not None else NA,
+            squeeze_risk=derivatives_enrichment.squeeze_risk if derivatives_enrichment is not None else NA,
+            derivatives_missing_data=derivatives_enrichment.missing_data if derivatives_enrichment is not None else (),
+            derivatives_unverified_data=derivatives_enrichment.unverified_data
+            if derivatives_enrichment is not None
+            else (),
+            derivatives_warnings=derivatives_enrichment.warnings if derivatives_enrichment is not None else (),
             rejection_stage=rejection_stage_override or _rejection_stage_for(status),
             rejection_reasons=_rejection_reasons_for(status, rejection_reason),
             missing_data=cleaned_missing,
@@ -1045,6 +1135,7 @@ class ScannerRunner:
             else (),
             technical_result=technical_result,
             derivatives_result=derivatives_result,
+            derivatives_enrichment=derivatives_enrichment,
             risk_decision=risk_decision,
             score_result=score_result,
             trade_idea=trade_idea,
@@ -1114,6 +1205,7 @@ def _liquidity_grab_input(
     execution_timeframe: str,
     confirmation_timeframe: str,
     volume_profile: VolumeProfileResult,
+    derivatives_enrichment: DerivativesEnrichmentResult | None = None,
     timeframe_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     support_levels = _strategy_levels(technical.nearest_support, technical.recent_range_low)
@@ -1141,6 +1233,7 @@ def _liquidity_grab_input(
         "volume_profile_warnings": volume_profile.warnings,
         "funding": optional_data.funding,
         "open_interest": optional_data.open_interest,
+        "derivatives_enrichment": derivatives_enrichment,
         "cvd": None,
         "liquidation_data": None,
         "aggressive_toggle": aggressive_toggle,
@@ -1260,6 +1353,12 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "fib_diagnostics": setup.fib_diagnostics,
         "rr_diagnostics": setup.rr_diagnostics,
         "trust_meter_diagnostics": setup.trust_meter_diagnostics,
+        "derivatives_supports_trade": setup.derivatives_supports_trade,
+        "derivatives_conflict_reason": setup.derivatives_conflict_reason,
+        "funding_context": setup.funding_context,
+        "oi_context": setup.oi_context,
+        "crowding_risk": setup.crowding_risk,
+        "squeeze_risk": setup.squeeze_risk,
         "strategy_diagnostics": setup.strategy_diagnostics,
         "missing_data": setup.missing_data,
         "unverified_data": setup.unverified_data,
@@ -1546,18 +1645,56 @@ def _previous_open_interest_from(open_interest: Any | None) -> MaybeDecimal:
     return _decimal_field(open_interest, ("previous_open_interest", "previous_oi", "open_interest_previous"))
 
 
-def _derivatives_rejection(direction: Literal["long", "short"], result: DerivativesOrderflowResult) -> str | None:
-    if result.data_quality.status == "invalid":
-        return result.data_quality.reason
-    if Decimal(result.derivatives_score) < MIN_DERIVATIVES_SCORE:
-        return f"Derivatives score {result.derivatives_score} is below 40."
-    if direction == "long" and result.risk_flags.crowded_long_risk:
-        return "Crowded long derivatives risk is active."
-    if direction == "short" and result.risk_flags.crowded_short_risk:
-        return "Crowded short derivatives risk is active."
-    if result.risk_flags.conflicting_context:
-        return "Derivatives context conflicts with price direction."
+def _previous_open_interest_from_history(history: Any | None) -> MaybeDecimal:
+    if _is_sequence_data(history) and len(history) >= 2:
+        return _decimal_field(history[-2], ("open_interest", "current_open_interest", "oi"))
+    return NA
+
+
+def _derivatives_enrichment_input(
+    *,
+    symbol: str,
+    exchange: str,
+    candles: Sequence[Any],
+    current_price: MaybeDecimal,
+    optional_data: _OptionalMarketData,
+    interval: str,
+) -> DerivativesEnrichmentInput:
+    return DerivativesEnrichmentInput(
+        symbol=symbol,
+        exchange=exchange,
+        latest_price=current_price,
+        current_funding_rate=_decimal_field(optional_data.funding, ("funding_rate", "current_funding_rate")),
+        current_open_interest=_decimal_field(optional_data.open_interest, ("open_interest", "current_open_interest", "oi")),
+        previous_open_interest=optional_data.previous_open_interest,
+        candles_15m=candles if interval.strip().lower() == "15m" else (),
+        funding_history=optional_data.funding_history,
+        open_interest_history=optional_data.open_interest_history,
+        long_short_ratio=optional_data.long_short_ratio,
+        liquidation_data=optional_data.liquidation_data,
+        warnings=optional_data.warnings,
+    )
+
+
+def _derivatives_rejection(direction: Literal["long", "short"], result: DerivativesEnrichmentResult) -> str | None:
+    if direction == "long":
+        if result.supports_long is False and result.crowding_risk == "high":
+            return _derivatives_conflict_reason("long", result)
+        if result.funding_status == "extreme_positive" and result.oi_direction == "rising":
+            return _derivatives_conflict_reason("long", result)
+    if direction == "short":
+        if result.supports_short is False and result.crowding_risk == "high":
+            return _derivatives_conflict_reason("short", result)
+        if result.funding_status == "extreme_negative" and result.oi_direction == "rising":
+            return _derivatives_conflict_reason("short", result)
     return None
+
+
+def _derivatives_conflict_reason(direction: Literal["long", "short"], result: DerivativesEnrichmentResult) -> str:
+    return (
+        f"Severe derivatives conflict against {direction}: funding {result.funding_status}, "
+        f"OI {result.oi_direction}, crowding {result.crowding_risk}, squeeze {result.squeeze_risk}."
+    )
 
 
 def _data_quality_score(
@@ -1636,6 +1773,25 @@ def _derivatives_summary(result: DerivativesOrderflowResult) -> str:
     return f"{relationship}; derivatives score {result.derivatives_score}; {flags}."
 
 
+def _derivatives_enrichment_summary(result: DerivativesEnrichmentResult) -> str:
+    return (
+        f"Funding {result.funding_status} ({_display_decimal(result.funding_rate)}); "
+        f"OI {result.oi_direction} ({_display_decimal(result.open_interest_change_pct)}%); "
+        f"Price/OI {result.price_oi_relationship}; "
+        f"crowding {result.crowding_risk}; squeeze {result.squeeze_risk}; "
+        f"derivatives score {result.derivatives_score}."
+    )
+
+
+def _scoring_derivatives_score(result: DerivativesEnrichmentResult) -> Decimal:
+    if result.derivatives_score == NA:
+        return MIN_DERIVATIVES_SCORE
+    score = Decimal(result.derivatives_score)
+    if score < MIN_DERIVATIVES_SCORE and result.missing_data:
+        return MIN_DERIVATIVES_SCORE
+    return score
+
+
 def _missing_data_from_derivatives(result: DerivativesOrderflowResult) -> tuple[str, ...]:
     return tuple(f"{field}: N/A" for field in result.data_quality.missing_fields)
 
@@ -1692,6 +1848,34 @@ def _field(source: Any | None, name: str) -> Any:
     if isinstance(source, Mapping):
         return source.get(name)
     return getattr(source, name, None)
+
+
+def _is_sequence_data(value: Any | None) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
+def _normalize_optional_decimal(value: Any | None) -> MaybeDecimal:
+    if value is None or value == "" or value == NA:
+        return NA
+    if isinstance(value, Mapping):
+        for name in ("long_short_ratio", "longShortRatio", "ratio"):
+            candidate = value.get(name)
+            if candidate not in (None, "", NA):
+                value = candidate
+                break
+    try:
+        return _quantize(_decimal_from(value, "optional_decimal"))
+    except ValueError:
+        return NA
+
+
+def _display_decimal(value: object) -> str:
+    if value == NA or value is None:
+        return NA
+    if isinstance(value, Decimal):
+        text = format(value, "f")
+        return text.rstrip("0").rstrip(".") if "." in text else text
+    return str(value)
 
 
 def _decimal_from(value: Any, path: str) -> Decimal:

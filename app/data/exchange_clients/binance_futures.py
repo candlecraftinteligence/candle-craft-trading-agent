@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import httpx
 
 from app.data.dtos import CandleDTO, FundingDTO, OpenInterestDTO, TickerDTO
 from app.data.exchange_clients.base import PublicHTTPExchangeClient
 from app.data.normalizers.binance import (
     normalize_binance_funding,
+    normalize_binance_funding_history,
     normalize_binance_klines,
+    normalize_binance_long_short_ratio,
     normalize_binance_open_interest,
+    normalize_binance_open_interest_history,
     normalize_binance_ticker,
 )
 
@@ -54,11 +59,23 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
 
     async def get_funding_rate(self, symbol: str) -> FundingDTO:
         normalized_symbol = symbol.upper()
+        history = await self.get_funding_rate_history(normalized_symbol, limit=1)
+        if not history:
+            payload = await self._get_json(
+                "/fapi/v1/fundingRate",
+                params={"symbol": normalized_symbol, "limit": 1},
+            )
+            return normalize_binance_funding(normalized_symbol, payload)
+        return history[-1]
+
+    async def get_funding_rate_history(self, symbol: str, limit: int = 100) -> list[FundingDTO]:
+        _validate_limit(limit, maximum=1000)
+        normalized_symbol = symbol.upper()
         payload = await self._get_json(
             "/fapi/v1/fundingRate",
-            params={"symbol": normalized_symbol, "limit": 1},
+            params={"symbol": normalized_symbol, "limit": limit},
         )
-        return normalize_binance_funding(normalized_symbol, payload)
+        return normalize_binance_funding_history(normalized_symbol, payload)
 
     async def get_open_interest(self, symbol: str) -> OpenInterestDTO:
         normalized_symbol = symbol.upper()
@@ -67,6 +84,29 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
             params={"symbol": normalized_symbol},
         )
         return normalize_binance_open_interest(normalized_symbol, payload)
+
+    async def get_open_interest_history(
+        self,
+        symbol: str,
+        limit: int = 30,
+        period: str = "5m",
+    ) -> list[OpenInterestDTO]:
+        _validate_limit(limit, maximum=500)
+        normalized_symbol = symbol.upper()
+        payload = await self._get_json(
+            "/futures/data/openInterestHist",
+            params={"symbol": normalized_symbol, "period": period, "limit": limit},
+        )
+        return normalize_binance_open_interest_history(normalized_symbol, payload)
+
+    async def get_long_short_ratio(self, symbol: str, limit: int = 1, period: str = "5m") -> Decimal:
+        _validate_limit(limit, maximum=500)
+        normalized_symbol = symbol.upper()
+        payload = await self._get_json(
+            "/futures/data/globalLongShortAccountRatio",
+            params={"symbol": normalized_symbol, "period": period, "limit": limit},
+        )
+        return normalize_binance_long_short_ratio(normalized_symbol, payload)
 
 
 def _validate_limit(limit: int, *, maximum: int) -> None:

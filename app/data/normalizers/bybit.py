@@ -104,6 +104,33 @@ def normalize_bybit_funding(symbol: str, payload: Any) -> FundingDTO:
     )
 
 
+def normalize_bybit_funding_history(symbol: str, payload: Any) -> list[FundingDTO]:
+    result = _result(payload, "bybit.funding")
+    rows = require_list(require_field(result, "list", "bybit.funding.result"), "bybit.funding.result.list")
+    funding: list[FundingDTO] = []
+
+    for index, raw in enumerate(rows):
+        row_path = f"bybit.funding.result.list[{index}]"
+        data = require_mapping(raw, row_path)
+        funding.append(
+            FundingDTO(
+                exchange=BYBIT_LINEAR_EXCHANGE,
+                symbol=str(require_field(data, "symbol", row_path)),
+                timestamp=int_from(
+                    require_field(data, "fundingRateTimestamp", row_path),
+                    f"{row_path}.fundingRateTimestamp",
+                ),
+                funding_rate=decimal_from(
+                    require_field(data, "fundingRate", row_path),
+                    f"{row_path}.fundingRate",
+                ),
+                raw_source=data,
+            )
+        )
+
+    return sorted(funding, key=lambda item: item.timestamp)
+
+
 def normalize_bybit_open_interest(symbol: str, payload: Any) -> OpenInterestDTO:
     result = _result(payload, "bybit.open_interest")
     rows = require_list(
@@ -125,3 +152,49 @@ def normalize_bybit_open_interest(symbol: str, payload: Any) -> OpenInterestDTO:
         ),
         raw_source=data,
     )
+
+
+def normalize_bybit_open_interest_history(symbol: str, payload: Any) -> list[OpenInterestDTO]:
+    result = _result(payload, "bybit.open_interest")
+    rows = require_list(
+        require_field(result, "list", "bybit.open_interest.result"),
+        "bybit.open_interest.result.list",
+    )
+    history: list[OpenInterestDTO] = []
+
+    for index, raw in enumerate(rows):
+        row_path = f"bybit.open_interest.result.list[{index}]"
+        data = require_mapping(raw, row_path)
+        history.append(
+            OpenInterestDTO(
+                exchange=BYBIT_LINEAR_EXCHANGE,
+                symbol=symbol,
+                timestamp=int_from(
+                    require_field(data, "timestamp", row_path),
+                    f"{row_path}.timestamp",
+                ),
+                open_interest=decimal_from(
+                    require_field(data, "openInterest", row_path),
+                    f"{row_path}.openInterest",
+                ),
+                raw_source=data,
+            )
+        )
+
+    return sorted(history, key=lambda item: item.timestamp if isinstance(item.timestamp, int) else 0)
+
+
+def normalize_bybit_long_short_ratio(symbol: str, payload: Any) -> Decimal:
+    result = _result(payload, "bybit.long_short_ratio")
+    rows = require_list(require_field(result, "list", "bybit.long_short_ratio.result"), "bybit.long_short_ratio.result.list")
+    data = require_mapping(first_item(rows, "bybit.long_short_ratio.result.list"), "bybit.long_short_ratio.result.list[0]")
+
+    if "longShortRatio" in data:
+        return decimal_from(data["longShortRatio"], "bybit.long_short_ratio.result.list[0].longShortRatio")
+
+    buy_ratio = optional_decimal(data.get("buyRatio"), "bybit.long_short_ratio.result.list[0].buyRatio")
+    sell_ratio = optional_decimal(data.get("sellRatio"), "bybit.long_short_ratio.result.list[0].sellRatio")
+    if isinstance(buy_ratio, Decimal) and isinstance(sell_ratio, Decimal) and sell_ratio != 0:
+        return buy_ratio / sell_ratio
+
+    raise ExchangeResponseError("Bybit long/short ratio response is missing ratio fields")

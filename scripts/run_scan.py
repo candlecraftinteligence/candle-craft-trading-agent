@@ -126,6 +126,9 @@ def _format_symbol_summary(symbol_result: ScannerSymbolResult) -> str:
     ]
     if symbol_result.poc != NA:
         parts.append(f"POC: {_display(symbol_result.poc)}")
+    derivatives_context = _compact_derivatives_context(symbol_result)
+    if derivatives_context != NA:
+        parts.append(derivatives_context)
     parts.extend(
         (
             f"{execution_tf} sweep: {_status_text(diagnostics.get('execution_sweep_status'))}",
@@ -152,6 +155,7 @@ def _format_symbol_normal_block(symbol_result: ScannerSymbolResult) -> str:
             f"2D HTF: {_display(diagnostics.get('htf_2d_trend'))} | source: {_display(diagnostics.get('htf_2d_context_source'))}",
             f"12H Bias: {_display(diagnostics.get('mtf_12h_trend'))}",
             _volume_profile_normal_text(symbol_result),
+            _format_derivatives_normal_block(symbol_result),
             f"15m Execution: {_execution_text(diagnostics)}",
             f"5m Confirmation: {_confirmation_text(diagnostics)}",
             _pullback_normal_text(diagnostics),
@@ -180,8 +184,20 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
             f"BOS detected: {_bool_text(symbol_result.bos_detected)}",
             f"CHoCH detected: {_bool_text(symbol_result.choch_detected)}",
             f"Funding: {_display(symbol_result.funding_direction)} / {_display(symbol_result.funding_severity)}",
+            f"Funding status: {_display(symbol_result.funding_status)}",
+            f"Funding extreme: {_display(symbol_result.funding_extreme)}",
+            f"Open interest: {_display(symbol_result.open_interest)}",
+            f"Open interest change %: {_display(symbol_result.open_interest_change_pct)}",
             f"OI direction: {_display(symbol_result.oi_direction)}",
+            f"Long/short ratio: {_display(symbol_result.long_short_ratio)}",
             f"Price/OI: {_display(symbol_result.price_oi_relationship)}",
+            f"Crowding risk: {_display(symbol_result.crowding_risk)}",
+            f"Squeeze risk: {_display(symbol_result.squeeze_risk)}",
+            f"Derivatives missing data: {_sequence_text(symbol_result.derivatives_missing_data)}",
+            f"Derivatives unverified data: {_sequence_text(symbol_result.derivatives_unverified_data)}",
+            f"Derivatives warnings: {_sequence_text(symbol_result.derivatives_warnings)}",
+            "Derivatives enrichment:",
+            _format_derivatives_diagnostics(symbol_result),
             f"Volume profile source: {_display(symbol_result.volume_profile_source)}",
             f"POC: {_display(symbol_result.poc)}",
             f"Value area high: {_display(symbol_result.value_area_high)}",
@@ -283,6 +299,67 @@ def _volume_profile_normal_text(symbol_result: ScannerSymbolResult) -> str:
         f"VAL [{_display(symbol_result.value_area_low)}], "
         f"source {_display(symbol_result.volume_profile_source)}"
     )
+
+
+def _compact_derivatives_context(symbol_result: ScannerSymbolResult) -> str:
+    funding = _funding_summary(symbol_result)
+    oi = _display(symbol_result.oi_direction)
+    parts = []
+    if funding != NA:
+        parts.append(f"Funding: {funding}")
+    if oi != NA:
+        parts.append(f"OI: {oi}")
+    return " | ".join(parts) if parts else NA
+
+
+def _funding_summary(symbol_result: ScannerSymbolResult) -> str:
+    status = _display(symbol_result.funding_status)
+    rate = symbol_result.funding_rate
+    if status == NA and rate == NA:
+        return NA
+    if isinstance(rate, Decimal):
+        if rate > 0:
+            direction = "positive"
+        elif rate < 0:
+            direction = "negative"
+        else:
+            direction = "neutral"
+    else:
+        direction = _display(symbol_result.funding_direction)
+        if direction == NA:
+            direction = NA
+
+    severity = status
+    if status in ("elevated_positive", "elevated_negative"):
+        severity = "elevated"
+    elif status in ("extreme_positive", "extreme_negative"):
+        severity = "extreme"
+    if direction == NA:
+        return severity
+    if severity == NA:
+        return direction
+    return f"{direction}/{severity}"
+
+
+def _format_derivatives_normal_block(symbol_result: ScannerSymbolResult) -> str:
+    return "\n".join(
+        (
+            "Derivatives:",
+            f"Funding: [{_display(symbol_result.funding_rate)}] | status [{_display(symbol_result.funding_status)}]",
+            f"OI: [{_display(symbol_result.open_interest)}] | change [{_display(symbol_result.open_interest_change_pct)}] | direction [{_display(symbol_result.oi_direction)}]",
+            f"Price/OI: [{_display(symbol_result.price_oi_relationship)}]",
+            f"Crowding risk: [{_display(symbol_result.crowding_risk)}]",
+            f"Squeeze risk: [{_display(symbol_result.squeeze_risk)}]",
+            f"Derivatives score: [{_display(symbol_result.derivatives_score)}]",
+        )
+    )
+
+
+def _format_derivatives_diagnostics(symbol_result: ScannerSymbolResult) -> str:
+    enrichment = symbol_result.derivatives_enrichment
+    if enrichment is None:
+        return NA
+    return str(enrichment.model_dump())
 
 
 def _format_volume_profile_diagnostics(symbol_result: ScannerSymbolResult) -> str:
@@ -400,6 +477,12 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
                 f"{mode} fib: {_display(diagnostics.get('fib_diagnostics'))}",
                 f"{mode} RR: {_display(diagnostics.get('rr_diagnostics'))}",
                 f"{mode} Trust Meter: {_display(diagnostics.get('trust_meter_diagnostics'))}",
+                f"{mode} derivatives support: {_display(diagnostics.get('derivatives_supports_trade'))}",
+                f"{mode} derivatives conflict: {_display(diagnostics.get('derivatives_conflict_reason'))}",
+                f"{mode} funding context: {_display(diagnostics.get('funding_context'))}",
+                f"{mode} OI context: {_display(diagnostics.get('oi_context'))}",
+                f"{mode} crowding risk: {_display(diagnostics.get('crowding_risk'))}",
+                f"{mode} squeeze risk: {_display(diagnostics.get('squeeze_risk'))}",
             )
         )
     return "\n".join(lines)

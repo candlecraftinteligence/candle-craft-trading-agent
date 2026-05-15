@@ -4,6 +4,7 @@ import asyncio
 import json
 from decimal import Decimal
 
+from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 from scripts import run_scan
@@ -31,8 +32,10 @@ class FakeScannerRunner:
             rejection_reason="No sweep, BOS, or CHoCH context was detected.",
             candles_fetched=250,
             latest_close=Decimal("104250.5"),
+            funding_rate=Decimal("-0.0001"),
+            open_interest=Decimal("105"),
             technical_score=62,
-            derivatives_score=55,
+            derivatives_score=90,
             trend_context="bullish",
             recent_range_high=Decimal("105000"),
             recent_range_low=Decimal("103200"),
@@ -40,6 +43,33 @@ class FakeScannerRunner:
             latest_swing_low=Decimal("103700"),
             rejection_stage="technical",
             rejection_reasons=("No sweep, BOS, or CHoCH context was detected.",),
+            funding_status="normal",
+            funding_extreme=False,
+            open_interest_change_pct=Decimal("5"),
+            oi_direction="rising",
+            price_direction="up",
+            price_oi_relationship="long_building_or_breakout_participation",
+            long_short_ratio=Decimal("1.10"),
+            crowding_risk="low",
+            squeeze_risk="balanced",
+            derivatives_enrichment=DerivativesEnrichmentResult(
+                symbol="BTCUSDT",
+                exchange="binance",
+                funding_rate=Decimal("-0.0001"),
+                funding_status="normal",
+                funding_extreme=False,
+                open_interest=Decimal("105"),
+                open_interest_change_pct=Decimal("5"),
+                oi_direction="rising",
+                price_direction="up",
+                price_oi_relationship="long_building_or_breakout_participation",
+                long_short_ratio=Decimal("1.10"),
+                crowding_risk="low",
+                squeeze_risk="balanced",
+                derivatives_score=90,
+                supports_long=True,
+                supports_short=True,
+            ),
             strategy_name="liquidity_grab_pullback",
             volume_profile=volume_profile,
             volume_profile_source=VOLUME_PROFILE_SOURCE,
@@ -93,6 +123,12 @@ class FakeScannerRunner:
                     "hard_rejection_reasons": ("No 5m BOS/CHoCH close beyond the required LTF swing.",),
                     "sweep_diagnostics": "passed: bullish sweep at candle 30; magnitude 5 (0.5 ATR).",
                     "bos_choch_diagnostics": "failed: No 5m BOS/CHoCH close beyond the required LTF swing.",
+                    "derivatives_supports_trade": True,
+                    "derivatives_conflict_reason": "N/A",
+                    "funding_context": {"funding_status": "normal"},
+                    "oi_context": {"oi_direction": "rising"},
+                    "crowding_risk": "low",
+                    "squeeze_risk": "balanced",
                 }
             },
             rejected_strategy_modes=("challenge", "swing", "scalp"),
@@ -179,6 +215,9 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["volume_profile"]["source"] == VOLUME_PROFILE_SOURCE
     assert payload["results"][0]["volume_profile"]["poc"] == "80750"
     assert payload["results"][0]["volume_profile_source"] == VOLUME_PROFILE_SOURCE
+    assert payload["results"][0]["derivatives_enrichment"]["funding_status"] == "normal"
+    assert payload["results"][0]["derivatives_enrichment"]["price_oi_relationship"] == "long_building_or_breakout_participation"
+    assert payload["results"][0]["derivatives_enrichment"]["derivatives_score"] == 90
     assert "api_key" not in output_path.read_text(encoding="utf-8").lower()
     assert payload["results"][0]["formatted_strategy_output"].startswith("Challenge Setup")
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["gates_failed"] == [
@@ -226,7 +265,7 @@ def test_diagnostics_level_summary_prints_compact_symbol_result(monkeypatch, cap
 
     captured = capsys.readouterr()
     assert (
-        "BTCUSDT | No Setup | 2D: bearish | 12H: neutral | POC: 80750 | 15m sweep: passed | "
+        "BTCUSDT | No Setup | 2D: bearish | 12H: neutral | POC: 80750 | Funding: negative/normal | OI: rising | 15m sweep: passed | "
         "5m BOS/CHoCH: failed | Pullback: N/A | Reject: missing_confirmation_structure_shift"
     ) in captured.out
     assert "2D HTF:" not in captured.out
@@ -242,6 +281,10 @@ def test_diagnostics_level_normal_prints_readable_block(monkeypatch, capsys) -> 
     assert "2D HTF: bearish | source: synthetic_from_1d" in captured.out
     assert "12H Bias: neutral" in captured.out
     assert "Volume Profile: POC [80750], VAH [81200], VAL [80100], source estimated_from_candles" in captured.out
+    assert "Derivatives:" in captured.out
+    assert "Funding: [-0.0001] | status [normal]" in captured.out
+    assert "OI: [105] | change [5] | direction [rising]" in captured.out
+    assert "Price/OI: [long_building_or_breakout_participation]" in captured.out
     assert "15m Execution: bullish sweep detected" in captured.out
     assert "5m Confirmation: BOS/CHoCH failed" in captured.out
     assert "Pullback Zone: N/A | OB/FVG: [N/A] | Fib: [N/A] | RR: [N/A]" in captured.out
@@ -262,6 +305,7 @@ def test_diagnostics_level_full_preserves_detailed_diagnostics(monkeypatch, caps
     assert "challenge 15m execution sweep: passed" in captured.out
     assert "challenge 5m confirmation BOS/CHoCH: failed" in captured.out
     assert "challenge Pullback Zone: N/A | OB/FVG: N/A | Fib: N/A | RR: N/A" in captured.out
+    assert "Derivatives enrichment:" in captured.out
 
 
 def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:

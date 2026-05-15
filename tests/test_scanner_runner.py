@@ -128,6 +128,7 @@ class FakeExchangeClient:
         funding: Decimal | str = Decimal("0.0001"),
         open_interest: Decimal | str = Decimal("105"),
         previous_open_interest: Decimal | str = Decimal("100"),
+        long_short_ratio: Decimal | str = Decimal("1.10"),
         failing_symbols: set[str] | None = None,
         failing_timeframes: set[str] | None = None,
     ) -> None:
@@ -135,6 +136,7 @@ class FakeExchangeClient:
         self.funding = funding
         self.open_interest = open_interest
         self.previous_open_interest = previous_open_interest
+        self.long_short_ratio = long_short_ratio
         self.failing_symbols = failing_symbols or set()
         self.failing_timeframes = failing_timeframes or set()
         self.requested_symbols: list[str] = []
@@ -163,6 +165,14 @@ class FakeExchangeClient:
             raise RuntimeError("funding unavailable")
         return {"symbol": symbol, "funding_rate": self.funding, "timestamp": 1}
 
+    async def get_funding_rate_history(self, symbol: str) -> list[dict[str, Decimal | str | int]]:
+        if self.funding == NA:
+            raise RuntimeError("funding history unavailable")
+        return [
+            {"symbol": symbol, "funding_rate": Decimal("0.00005"), "timestamp": 0},
+            {"symbol": symbol, "funding_rate": self.funding, "timestamp": 1},
+        ]
+
     async def get_open_interest(self, symbol: str) -> dict[str, Decimal | str | int]:
         if self.open_interest == NA:
             raise RuntimeError("open interest unavailable")
@@ -171,6 +181,19 @@ class FakeExchangeClient:
             "open_interest": self.open_interest,
             "previous_open_interest": self.previous_open_interest,
         }
+
+    async def get_open_interest_history(self, symbol: str) -> list[dict[str, Decimal | str | int]]:
+        if self.open_interest == NA:
+            raise RuntimeError("open interest history unavailable")
+        return [
+            {"symbol": symbol, "open_interest": self.previous_open_interest, "timestamp": 0},
+            {"symbol": symbol, "open_interest": self.open_interest, "timestamp": 1},
+        ]
+
+    async def get_long_short_ratio(self, symbol: str) -> Decimal | str:
+        if self.long_short_ratio == NA:
+            raise RuntimeError("long/short ratio unavailable")
+        return self.long_short_ratio
 
 
 class SpyAlertAgent(AlertAgent):
@@ -260,6 +283,29 @@ def test_scanner_diagnostics_exist_for_no_setup_result() -> None:
         symbol_result.strategy_diagnostics["challenge"]["poc_diagnostics"]
         == "POC available from estimated candle volume profile."
     )
+    assert symbol_result.derivatives_enrichment is not None
+    assert symbol_result.funding_status == "normal"
+    assert symbol_result.open_interest_change_pct == Decimal("5.00000000")
+    assert symbol_result.long_short_ratio == Decimal("1.10000000")
+    assert symbol_result.crowding_risk in ("low", "medium")
+    assert "funding_rate" in symbol_result.derivatives_enrichment.model_dump()
+
+
+def test_scanner_derivatives_missing_data_does_not_reject_by_itself() -> None:
+    client = FakeExchangeClient(
+        {"BTCUSDT": _strategy_pullback_candles()},
+        funding=NA,
+        open_interest=NA,
+        long_short_ratio=NA,
+        failing_timeframes={"2d"},
+    )
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    symbol_result = result.results[0]
+    assert symbol_result.status != ScannerPipelineStatus.REJECTED_BY_DERIVATIVES
+    assert symbol_result.derivatives_enrichment is not None
+    assert symbol_result.derivatives_enrichment.funding_status == NA
+    assert "funding_rate: N/A" in symbol_result.derivatives_missing_data
 
 
 def test_scanner_continues_if_one_symbol_fails() -> None:
