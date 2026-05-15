@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, and Phase 12.1 multi-timeframe scanner context.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, and Phase 13 candle-estimated Volume Profile / POC context.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -23,6 +23,7 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 |-- alembic/
 |-- app/
 |   |-- agents/
+|   |-- analytics/
 |   |-- alerts/
 |   |-- api/
 |   |-- core/
@@ -97,7 +98,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, and the Phase 12.1 synthetic 2D timeframe model. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, and the Phase 13 candle-estimated volume profile. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -571,6 +572,28 @@ Run Phase 12.2 scanner output:
 python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
 ```
 
+## Phase 13 Volume Profile / POC Engine
+
+Phase 13 adds a deterministic candle-based Volume Profile / POC engine under `app/analytics/volume_profile.py` and threads its output into scanner diagnostics and Liquidity-Grab Pullback context.
+
+- The source is always marked as `volume_profile_source = "estimated_from_candles"`.
+- This is an OHLCV candle approximation, not tick-level true volume profile.
+- Candle volume is allocated across price buckets using each candle's high/low range.
+- Missing volume keeps POC, VAH, VAL, HVN, and LVN context as `N/A`; the scanner does not invent profile levels.
+- POC, VAH, VAL, high-volume nodes, and low-volume nodes are diagnostics and confluence only.
+- POC alone never creates a setup, never loosens strategy gates, and never bypasses sweep, 5m BOS/CHoCH, OB/FVG, fib, RR, or Trust Meter requirements.
+- Rejected setups stay rejected even when POC is available.
+- Scanner JSON includes the volume profile result and source without secrets or API keys.
+- Alert behavior remains dry-run by default.
+
+Scanner summary mode shows `POC` only when available. Normal mode shows `POC`, `VAH`, `VAL`, and the source. Full mode includes volume profile diagnostics, HVN/LVN context, warnings, and the optional 12H profile when enough 12H candles are available.
+
+Run Phase 13 scanner output:
+
+```powershell
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -584,3 +607,4 @@ python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance 
 - The scanner runner is orchestration only. It does not place orders, use private exchange access, or create a trade idea unless all configured quality gates pass.
 - The liquidity-grab pullback engine is strategy analysis and formatting only. It does not place orders, use private exchange access, or convert a setup into live execution.
 - The Phase 12 scanner strategy path is still dry-run analysis only. It can format a dry-run alert after all gates pass, but rejected setups remain diagnostics only.
+- The Phase 13 volume profile is candle-estimated confluence only. It does not create signals by itself, place orders, or use private exchange API access.

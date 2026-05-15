@@ -465,6 +465,63 @@ def test_missing_optional_context_marked_na() -> None:
     assert "weekend_filter: N/A" in result.missing_data
 
 
+def test_liquidity_grab_output_uses_poc_when_available() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
+            "candles_2d": _trend_candles(),
+            "poc": Decimal("102.5"),
+            "volume_profile_source": "estimated_from_candles",
+        }
+    )
+
+    assert result.swing.poc == Decimal("102.5")
+    assert "POC available from estimated candle volume profile." in result.swing.strategy_diagnostics
+    assert "POC: [102.5]" in result.formatted_output.swing_setup
+
+
+def test_liquidity_grab_keeps_poc_na_when_unavailable() -> None:
+    result = LiquidityGrabEngine().analyze({"symbol": "BTCUSDT", "mode": "swing"})
+
+    assert result.swing.poc == NA
+    assert "POC N/A because volume data missing/insufficient." in result.swing.strategy_diagnostics
+
+
+def test_poc_alone_does_not_create_trade_idea() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "poc": Decimal("102.5"),
+            "volume_profile_source": "estimated_from_candles",
+        }
+    )
+
+    assert result.swing.is_valid is False
+    assert result.swing.first_failed_gate == "no_execution_candles"
+    assert result.swing.gates_passed == ()
+
+
+def test_rejected_setup_remains_rejected_with_poc_context() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "candles_15m": _base_candles(),
+            "candles_5m": _base_candles(),
+            "poc": Decimal("102.5"),
+            "volume_profile_source": "estimated_from_candles",
+        }
+    )
+
+    assert result.swing.is_valid is False
+    assert result.swing.first_failed_gate == "missing_confirmed_sweep"
+    assert "Confirmed liquidity sweep is required." in result.swing.hard_rejection_reasons
+
+
 def test_output_includes_all_sections_and_closing_line() -> None:
     result = LiquidityGrabEngine().analyze({"symbol": "BTCUSDT"})
     output = result.formatted_output.full_text

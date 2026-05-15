@@ -4,12 +4,26 @@ import asyncio
 import json
 from decimal import Decimal
 
+from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 from scripts import run_scan
 
 
 class FakeScannerRunner:
     async def run(self, config):
+        volume_profile = VolumeProfileResult(
+            symbol="BTCUSDT",
+            timeframe="15m",
+            poc=Decimal("80750"),
+            value_area_high=Decimal("81200"),
+            value_area_low=Decimal("80100"),
+            nearest_high_volume_node=Decimal("80750"),
+            nearest_low_volume_node=Decimal("80400"),
+            price_range_high=Decimal("82000"),
+            price_range_low=Decimal("79000"),
+            total_volume=Decimal("100000"),
+            candles_used=250,
+        )
         symbol_result = ScannerSymbolResult(
             symbol="BTCUSDT",
             status=ScannerPipelineStatus.SCANNED_NO_SETUP,
@@ -27,6 +41,13 @@ class FakeScannerRunner:
             rejection_stage="technical",
             rejection_reasons=("No sweep, BOS, or CHoCH context was detected.",),
             strategy_name="liquidity_grab_pullback",
+            volume_profile=volume_profile,
+            volume_profile_source=VOLUME_PROFILE_SOURCE,
+            poc=Decimal("80750"),
+            value_area_high=Decimal("81200"),
+            value_area_low=Decimal("80100"),
+            nearest_high_volume_node=Decimal("80750"),
+            nearest_low_volume_node=Decimal("80400"),
             formatted_strategy_output="Challenge Setup\nNo valid challenge setup.\n\nSwing Setup\nNo valid swing setup.\n\nScalp Setup\nNo valid scalp setup.",
             strategy_diagnostics={
                 "challenge": {
@@ -48,6 +69,9 @@ class FakeScannerRunner:
                     "confirmation_structure_shift_status": "failed",
                     "confirmation_bos_choch_reason": "No 5m BOS/CHoCH close beyond the required LTF swing.",
                     "first_failed_gate": "missing_confirmation_structure_shift",
+                    "volume_profile_source": VOLUME_PROFILE_SOURCE,
+                    "poc": Decimal("80750"),
+                    "poc_diagnostics": "POC available from estimated candle volume profile.",
                     "gates_failed": ("missing_confirmation_structure_shift",),
                     "hard_rejection_reasons": ("No 5m BOS/CHoCH close beyond the required LTF swing.",),
                     "sweep_diagnostics": "passed: bullish sweep at candle 30; magnitude 5 (0.5 ATR).",
@@ -135,6 +159,10 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["candles_fetched"] == 250
     assert payload["results"][0]["rejection_reasons"] == ["No sweep, BOS, or CHoCH context was detected."]
     assert payload["results"][0]["strategy_name"] == "liquidity_grab_pullback"
+    assert payload["results"][0]["volume_profile"]["source"] == VOLUME_PROFILE_SOURCE
+    assert payload["results"][0]["volume_profile"]["poc"] == "80750"
+    assert payload["results"][0]["volume_profile_source"] == VOLUME_PROFILE_SOURCE
+    assert "api_key" not in output_path.read_text(encoding="utf-8").lower()
     assert payload["results"][0]["formatted_strategy_output"].startswith("Challenge Setup")
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["gates_failed"] == [
         "missing_confirmation_structure_shift"
@@ -158,7 +186,6 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
         == "missing_confirmation_structure_shift"
     )
     assert "candles_2d: N/A" in payload["results"][0]["strategy_missing_data"]
-    assert "api_key" not in output_path.read_text(encoding="utf-8").lower()
 
 
 def test_show_strategy_output_prints_formatted_output(monkeypatch, capsys) -> None:
@@ -180,7 +207,7 @@ def test_diagnostics_level_summary_prints_compact_symbol_result(monkeypatch, cap
 
     captured = capsys.readouterr()
     assert (
-        "BTCUSDT | No Setup | 2D: bearish | 12H: neutral | 15m sweep: passed | "
+        "BTCUSDT | No Setup | 2D: bearish | 12H: neutral | POC: 80750 | 15m sweep: passed | "
         "5m BOS/CHoCH: failed | Reject: missing_confirmation_structure_shift"
     ) in captured.out
     assert "2D HTF:" not in captured.out
@@ -195,6 +222,7 @@ def test_diagnostics_level_normal_prints_readable_block(monkeypatch, capsys) -> 
     assert "BTCUSDT - No Setup" in captured.out
     assert "2D HTF: bearish | source: synthetic_from_1d" in captured.out
     assert "12H Bias: neutral" in captured.out
+    assert "Volume Profile: POC [80750], VAH [81200], VAL [80100], source estimated_from_candles" in captured.out
     assert "15m Execution: bullish sweep detected" in captured.out
     assert "5m Confirmation: BOS/CHoCH failed" in captured.out
     assert "Failed gate: missing_confirmation_structure_shift" in captured.out
@@ -210,6 +238,7 @@ def test_diagnostics_level_full_preserves_detailed_diagnostics(monkeypatch, caps
     assert "Strategy diagnostics:" in captured.out
     assert "challenge 2D context: synthetic from 1D" in captured.out
     assert "challenge 12H bias: direct" in captured.out
+    assert "challenge POC: 80750" in captured.out
     assert "challenge 15m execution sweep: passed" in captured.out
     assert "challenge 5m confirmation BOS/CHoCH: failed" in captured.out
 

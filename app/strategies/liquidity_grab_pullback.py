@@ -176,6 +176,9 @@ class LiquidityGrabSetup(BaseModel):
     confirmation_bos_choch_reason: str = NA
     first_failed_gate: str = NA
     current_price: MaybeDecimal = NA
+    poc: MaybeDecimal = NA
+    volume_profile_source: str = NA
+    poc_diagnostics: str = NA
     sweep: LiquiditySweepSignal = LiquiditySweepSignal()
     structure_shift: StructureShiftSignal = StructureShiftSignal()
     order_block: OrderBlockZone = OrderBlockZone()
@@ -279,6 +282,8 @@ class LiquidityGrabInput(BaseModel):
     user_support_levels: Sequence[Any] | Any | None = None
     user_resistance_levels: Sequence[Any] | Any | None = None
     poc: Any | None = None
+    volume_profile_source: str = NA
+    volume_profile_warnings: Sequence[Any] | Any | None = None
     liquidity_below: Sequence[Any] | Any | None = None
     liquidity_above: Sequence[Any] | Any | None = None
     orderflow_summary: Any | None = None
@@ -1663,6 +1668,9 @@ def _setup_diagnostic_fields(setup: LiquidityGrabSetup) -> dict[str, Any]:
         "momentum_diagnostics": _momentum_diagnostics(setup),
         "rr_diagnostics": _rr_diagnostics(setup),
         "trust_meter_diagnostics": _trust_meter_diagnostics(setup),
+        "poc_diagnostics": setup.poc_diagnostics
+        if setup.poc_diagnostics != NA
+        else _setup_poc_diagnostics(setup),
     }
 
 
@@ -1800,6 +1808,12 @@ def _trust_meter_diagnostics(setup: LiquidityGrabSetup) -> str:
     return f"passed: Trust Meter {setup.trust_meter.percentage}% ({setup.trust_meter.grade})."
 
 
+def _setup_poc_diagnostics(setup: LiquidityGrabSetup) -> str:
+    if setup.poc != NA:
+        return "POC available from estimated candle volume profile."
+    return "POC N/A because volume data missing/insufficient."
+
+
 def _format_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> str:
     sweep_status, sweep_reason = _split_diagnostic(setup.sweep_diagnostics)
     lines = [
@@ -1807,6 +1821,7 @@ def _format_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> str:
         f"Mode: {setup.mode.value}",
         f"{setup.htf_timeframe.upper()} HTF context: {_context_source_text(setup.htf_2d_context_source)}; candles={setup.candles_2d_count}; trend={setup.htf_2d_trend}",
         f"{setup.bias_timeframe.upper()} bias: {'direct' if setup.candles_12h_count > 0 else NA}; candles={setup.candles_12h_count}; trend={setup.mtf_12h_trend}",
+        f"POC: {_display(setup.poc)}; source={_display(setup.volume_profile_source)}; {setup.poc_diagnostics}",
         f"{setup.execution_timeframe} execution sweep: {setup.execution_sweep_status}",
         f"{setup.confirmation_timeframe} confirmation BOS/CHoCH: {setup.confirmation_structure_shift_status}",
         f"Sweep: {sweep_status}",
@@ -2109,6 +2124,9 @@ def _timeframe_context_fields(
         "execution_timeframe": execution.timeframe if execution is not None else NA,
         "confirmation_timeframe": confirmation_timeframe,
         "htf_2d_context_source": source,
+        "poc": data.poc if not _is_missing(data.poc) else NA,
+        "volume_profile_source": _context_text(data.volume_profile_source),
+        "poc_diagnostics": _poc_context_diagnostics(data),
         "candles_2d_count": len(candles_2d),
         "candles_12h_count": len(candles_12h),
         "candles_15m_count": len(candles_15m),
@@ -2205,6 +2223,15 @@ def _key_play(data: LiquidityGrabInput) -> str:
     if not _is_missing(data.sector_rotation):
         return _context_text(data.sector_rotation)
     return NA
+
+
+def _poc_context_diagnostics(data: LiquidityGrabInput) -> str:
+    if not _is_missing(data.poc):
+        return "POC available from estimated candle volume profile."
+    warning_text = _context_text(data.volume_profile_warnings)
+    if warning_text != NA:
+        return f"POC N/A because volume data missing/insufficient: {warning_text}"
+    return "POC N/A because volume data missing/insufficient."
 
 
 def _sweep_wick_price(sweep: LiquiditySweepSignal) -> Decimal:

@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.agents.alert_agent import AlertAgent
+from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunner
 
@@ -248,6 +249,17 @@ def test_scanner_diagnostics_exist_for_no_setup_result() -> None:
     assert symbol_result.rejection_stage == "strategy"
     assert symbol_result.rejection_reasons == ("No valid Liquidity-Grab Pullback setup.",)
     assert "swing" in symbol_result.strategy_diagnostics
+    assert symbol_result.volume_profile is not None
+    assert symbol_result.volume_profile_source == VOLUME_PROFILE_SOURCE
+    assert symbol_result.poc != NA
+    assert symbol_result.value_area_high != NA
+    assert symbol_result.value_area_low != NA
+    assert symbol_result.strategy_diagnostics["challenge"]["volume_profile_source"] == VOLUME_PROFILE_SOURCE
+    assert symbol_result.strategy_diagnostics["challenge"]["poc"] == symbol_result.poc
+    assert (
+        symbol_result.strategy_diagnostics["challenge"]["poc_diagnostics"]
+        == "POC available from estimated candle volume profile."
+    )
 
 
 def test_scanner_continues_if_one_symbol_fails() -> None:
@@ -356,6 +368,21 @@ def test_tests_use_mocked_exchange_client_without_live_api_calls() -> None:
 
     assert client.requested_klines
     assert all(symbol == "BTCUSDT" for symbol, _interval in client.requested_klines)
+
+
+def test_scanner_marks_volume_profile_na_when_execution_volume_missing() -> None:
+    candles = _flat_candles()
+    for candle in candles:
+        candle.pop("volume")
+    client = FakeExchangeClient({"BTCUSDT": candles})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    symbol_result = result.results[0]
+    assert symbol_result.volume_profile is not None
+    assert symbol_result.volume_profile.source == VOLUME_PROFILE_SOURCE
+    assert symbol_result.poc == NA
+    assert "volume: N/A" in symbol_result.missing_data
+    assert symbol_result.volume_profile_warnings
 
 
 def test_scanner_returns_strategy_results_output_and_diagnostics() -> None:

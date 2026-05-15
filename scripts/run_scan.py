@@ -118,14 +118,22 @@ def _format_symbol_summary(symbol_result: ScannerSymbolResult) -> str:
         execution_tf = "15m"
     if confirmation_tf == NA:
         confirmation_tf = "5m"
-    return (
-        f"{symbol_result.symbol} | {_symbol_status_label(symbol_result)} | "
-        f"2D: {_display(diagnostics.get('htf_2d_trend'))} | "
-        f"12H: {_display(diagnostics.get('mtf_12h_trend'))} | "
-        f"{execution_tf} sweep: {_status_text(diagnostics.get('execution_sweep_status'))} | "
-        f"{confirmation_tf} BOS/CHoCH: {_status_text(diagnostics.get('confirmation_structure_shift_status'))} | "
-        f"Reject: {reject_text}"
+    parts = [
+        symbol_result.symbol,
+        _symbol_status_label(symbol_result),
+        f"2D: {_display(diagnostics.get('htf_2d_trend'))}",
+        f"12H: {_display(diagnostics.get('mtf_12h_trend'))}",
+    ]
+    if symbol_result.poc != NA:
+        parts.append(f"POC: {_display(symbol_result.poc)}")
+    parts.extend(
+        (
+            f"{execution_tf} sweep: {_status_text(diagnostics.get('execution_sweep_status'))}",
+            f"{confirmation_tf} BOS/CHoCH: {_status_text(diagnostics.get('confirmation_structure_shift_status'))}",
+            f"Reject: {reject_text}",
+        )
     )
+    return " | ".join(parts)
 
 
 def _format_symbol_normal_block(symbol_result: ScannerSymbolResult) -> str:
@@ -142,6 +150,7 @@ def _format_symbol_normal_block(symbol_result: ScannerSymbolResult) -> str:
             f"{symbol_result.symbol} - {_symbol_status_label(symbol_result)}",
             f"2D HTF: {_display(diagnostics.get('htf_2d_trend'))} | source: {_display(diagnostics.get('htf_2d_context_source'))}",
             f"12H Bias: {_display(diagnostics.get('mtf_12h_trend'))}",
+            _volume_profile_normal_text(symbol_result),
             f"15m Execution: {_execution_text(diagnostics)}",
             f"5m Confirmation: {_confirmation_text(diagnostics)}",
             f"Failed gate: {failed_gate}",
@@ -171,6 +180,15 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
             f"Funding: {_display(symbol_result.funding_direction)} / {_display(symbol_result.funding_severity)}",
             f"OI direction: {_display(symbol_result.oi_direction)}",
             f"Price/OI: {_display(symbol_result.price_oi_relationship)}",
+            f"Volume profile source: {_display(symbol_result.volume_profile_source)}",
+            f"POC: {_display(symbol_result.poc)}",
+            f"Value area high: {_display(symbol_result.value_area_high)}",
+            f"Value area low: {_display(symbol_result.value_area_low)}",
+            f"Nearest high-volume node: {_display(symbol_result.nearest_high_volume_node)}",
+            f"Nearest low-volume node: {_display(symbol_result.nearest_low_volume_node)}",
+            f"Volume profile warnings: {_sequence_text(symbol_result.volume_profile_warnings)}",
+            "Volume profile diagnostics:",
+            _format_volume_profile_diagnostics(symbol_result),
             f"Rejection stage: {_display(symbol_result.rejection_stage)}",
             f"Reason: {reason}",
             f"Missing data: {_sequence_text(symbol_result.missing_data)}",
@@ -245,6 +263,46 @@ def _normal_reason(symbol_result: ScannerSymbolResult, diagnostics: dict[str, ob
     return _diagnostic_reason(symbol_result)
 
 
+def _volume_profile_normal_text(symbol_result: ScannerSymbolResult) -> str:
+    return (
+        f"Volume Profile: POC [{_display(symbol_result.poc)}], "
+        f"VAH [{_display(symbol_result.value_area_high)}], "
+        f"VAL [{_display(symbol_result.value_area_low)}], "
+        f"source {_display(symbol_result.volume_profile_source)}"
+    )
+
+
+def _format_volume_profile_diagnostics(symbol_result: ScannerSymbolResult) -> str:
+    profile = symbol_result.volume_profile
+    if profile is None:
+        return NA
+    lines = [
+        f"{profile.timeframe}: source={profile.source}",
+        f"{profile.timeframe}: POC={_display(profile.poc)}, VAH={_display(profile.value_area_high)}, VAL={_display(profile.value_area_low)}",
+        f"{profile.timeframe}: range={_display(profile.price_range_low)} - {_display(profile.price_range_high)}, total_volume={_display(profile.total_volume)}, candles_used={profile.candles_used}",
+        f"{profile.timeframe}: nearest HVN={_display(profile.nearest_high_volume_node)}, nearest LVN={_display(profile.nearest_low_volume_node)}",
+        f"{profile.timeframe}: HVNs={_volume_profile_nodes_text(profile.high_volume_nodes)}",
+        f"{profile.timeframe}: LVNs={_volume_profile_nodes_text(profile.low_volume_nodes)}",
+        f"{profile.timeframe}: warnings={_sequence_text(profile.warnings)}",
+    ]
+    if symbol_result.volume_profile_12h is not None:
+        profile_12h = symbol_result.volume_profile_12h
+        lines.append(
+            f"12h: POC={_display(profile_12h.poc)}, VAH={_display(profile_12h.value_area_high)}, "
+            f"VAL={_display(profile_12h.value_area_low)}, source={profile_12h.source}"
+        )
+    return "\n".join(lines)
+
+
+def _volume_profile_nodes_text(nodes: Sequence[object]) -> str:
+    values: list[str] = []
+    for node in nodes:
+        price = getattr(node, "price", NA)
+        volume = getattr(node, "volume", NA)
+        values.append(f"{_display(price)} vol {_display(volume)}")
+    return ", ".join(values) if values else NA
+
+
 def _format_strategy_output_for_cli(symbol_result: ScannerSymbolResult) -> str:
     if not symbol_result.valid_strategy_modes:
         return "\n".join(
@@ -308,6 +366,9 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
                 f"{mode} {execution_timeframe} execution sweep: {_status_text(diagnostics.get('execution_sweep_status'))}",
                 f"{mode} {confirmation_timeframe} confirmation BOS/CHoCH: "
                 f"{_status_text(diagnostics.get('confirmation_structure_shift_status'))}",
+                f"{mode} volume profile source: {_display(diagnostics.get('volume_profile_source'))}",
+                f"{mode} POC: {_display(diagnostics.get('poc'))}",
+                f"{mode} POC diagnostics: {_display(diagnostics.get('poc_diagnostics'))}",
                 f"{mode} confirmation reason: {_display(diagnostics.get('confirmation_bos_choch_reason'))}",
                 f"{mode} first failed gate: {_display(diagnostics.get('first_failed_gate'))}",
                 f"{mode} final decision: {'valid setup' if diagnostics.get('is_valid') else 'no setup'}",
@@ -331,6 +392,9 @@ def _bool_text(value: bool) -> str:
 def _display(value: object) -> str:
     if value is None or value == "":
         return NA
+    if isinstance(value, Decimal):
+        text = format(value, "f")
+        return text.rstrip("0").rstrip(".") if "." in text else text
     return str(value)
 
 

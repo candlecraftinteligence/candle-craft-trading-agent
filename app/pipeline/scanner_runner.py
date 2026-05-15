@@ -15,6 +15,7 @@ from app.agents.journal_agent import JournalAgent, JournalEntryResult, JournalSt
 from app.agents.risk_manager import RiskDecision, RiskManagerAgent, RiskManagerInput
 from app.agents.technical_structure import TechnicalStructureAgent, TechnicalStructureResult
 from app.agents.trade_idea import TradeIdeaAgent, TradeIdeaResult
+from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
 from app.data.timeframes import resample_ohlcv_candles
@@ -40,6 +41,7 @@ DEFAULT_STRATEGY_MODES = (
 DIRECT_STRATEGY_TIMEFRAMES = ("12h", "4h", "1h", "15m", "5m")
 SYNTHETIC_2D_SOURCE_TIMEFRAME = "1d"
 NO_VALID_STRATEGY_SETUP_REASON = "No valid Liquidity-Grab Pullback setup."
+MIN_12H_VOLUME_PROFILE_CANDLES = 20
 
 
 class ScannerPipelineStatus(str, Enum):
@@ -244,6 +246,15 @@ class ScannerSymbolResult(BaseModel):
     rejected_strategy_modes: tuple[str, ...] = ()
     strategy_missing_data: tuple[str, ...] = ()
     strategy_unverified_data: tuple[str, ...] = ()
+    volume_profile: VolumeProfileResult | None = None
+    volume_profile_12h: VolumeProfileResult | None = None
+    volume_profile_source: str = NA
+    poc: MaybeDecimal = NA
+    value_area_high: MaybeDecimal = NA
+    value_area_low: MaybeDecimal = NA
+    nearest_high_volume_node: MaybeDecimal = NA
+    nearest_low_volume_node: MaybeDecimal = NA
+    volume_profile_warnings: tuple[str, ...] = ()
     technical_result: TechnicalStructureResult | None = None
     derivatives_result: DerivativesOrderflowResult | None = None
     risk_decision: RiskDecision | None = None
@@ -316,6 +327,8 @@ class _StrategyExecution(BaseModel):
     rejected_strategy_modes: tuple[str, ...] = ()
     strategy_missing_data: tuple[str, ...] = ()
     strategy_unverified_data: tuple[str, ...] = ()
+    volume_profile: VolumeProfileResult | None = None
+    volume_profile_12h: VolumeProfileResult | None = None
     selected_setup: LiquidityGrabSetup | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -721,13 +734,34 @@ class ScannerRunner:
         technical: TechnicalStructureResult,
     ) -> _StrategyExecution:
         if not config.enable_strategy_output or config.strategy_name is None:
-            return _StrategyExecution()
+            execution_timeframe = config.execution_timeframe.strip().lower()
+            primary_timeframe = config.interval.strip().lower()
+            profile_candles = primary_candles if primary_timeframe == execution_timeframe else ()
+            volume_profile = _volume_profile_for_timeframe(
+                symbol=symbol,
+                timeframe=execution_timeframe,
+                candles=profile_candles,
+            )
+            return _StrategyExecution(
+                strategy_missing_data=volume_profile.missing_data,
+                volume_profile=volume_profile,
+            )
 
         candles_by_timeframe, timeframe_missing, timeframe_context = await self._fetch_strategy_timeframe_candles(
             client=client,
             symbol=symbol,
             config=config,
             primary_candles=primary_candles,
+        )
+        execution_timeframe = config.execution_timeframe.strip().lower()
+        execution_volume_profile = _volume_profile_for_timeframe(
+            symbol=symbol,
+            timeframe=execution_timeframe,
+            candles=candles_by_timeframe.get(execution_timeframe, ()),
+        )
+        higher_timeframe_volume_profile = _optional_12h_volume_profile(
+            symbol=symbol,
+            candles=candles_by_timeframe.get("12h", ()),
         )
         base_input = _liquidity_grab_input(
             symbol=symbol,
@@ -741,6 +775,7 @@ class ScannerRunner:
             execution_timeframe=config.execution_timeframe,
             confirmation_timeframe=config.confirmation_timeframe,
             timeframe_context=timeframe_context,
+            volume_profile=execution_volume_profile,
         )
 
         strategy_results: dict[str, LiquidityGrabResult] = {}
@@ -748,6 +783,7 @@ class ScannerRunner:
         valid_modes: list[str] = []
         rejected_modes: list[str] = []
         missing_data = list(timeframe_missing)
+        missing_data.extend(execution_volume_profile.missing_data)
         unverified_data: list[str] = []
         formatted_output = NA
         selected_setup: LiquidityGrabSetup | None = None
@@ -788,6 +824,8 @@ class ScannerRunner:
             rejected_strategy_modes=_unique_strings(rejected_modes),
             strategy_missing_data=_unique_strings(missing_data),
             strategy_unverified_data=_unique_strings(unverified_data),
+            volume_profile=execution_volume_profile,
+            volume_profile_12h=higher_timeframe_volume_profile,
             selected_setup=selected_setup,
         )
 
@@ -984,6 +1022,27 @@ class ScannerRunner:
             rejected_strategy_modes=strategy_execution.rejected_strategy_modes,
             strategy_missing_data=strategy_execution.strategy_missing_data,
             strategy_unverified_data=strategy_execution.strategy_unverified_data,
+            volume_profile=strategy_execution.volume_profile,
+            volume_profile_12h=strategy_execution.volume_profile_12h,
+            volume_profile_source=strategy_execution.volume_profile.source
+            if strategy_execution.volume_profile is not None
+            else NA,
+            poc=strategy_execution.volume_profile.poc if strategy_execution.volume_profile is not None else NA,
+            value_area_high=strategy_execution.volume_profile.value_area_high
+            if strategy_execution.volume_profile is not None
+            else NA,
+            value_area_low=strategy_execution.volume_profile.value_area_low
+            if strategy_execution.volume_profile is not None
+            else NA,
+            nearest_high_volume_node=strategy_execution.volume_profile.nearest_high_volume_node
+            if strategy_execution.volume_profile is not None
+            else NA,
+            nearest_low_volume_node=strategy_execution.volume_profile.nearest_low_volume_node
+            if strategy_execution.volume_profile is not None
+            else NA,
+            volume_profile_warnings=strategy_execution.volume_profile.warnings
+            if strategy_execution.volume_profile is not None
+            else (),
             technical_result=technical_result,
             derivatives_result=derivatives_result,
             risk_decision=risk_decision,
@@ -1054,6 +1113,7 @@ def _liquidity_grab_input(
     bias_timeframe: str,
     execution_timeframe: str,
     confirmation_timeframe: str,
+    volume_profile: VolumeProfileResult,
     timeframe_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     support_levels = _strategy_levels(technical.nearest_support, technical.recent_range_low)
@@ -1074,6 +1134,9 @@ def _liquidity_grab_input(
         "current_price": None if current_price == NA else current_price,
         "user_support_levels": support_levels or None,
         "user_resistance_levels": resistance_levels or None,
+        "poc": volume_profile.poc if volume_profile.poc != NA else NA,
+        "volume_profile_source": volume_profile.source,
+        "volume_profile_warnings": volume_profile.warnings,
         "funding": optional_data.funding,
         "open_interest": optional_data.open_interest,
         "cvd": None,
@@ -1081,6 +1144,31 @@ def _liquidity_grab_input(
         "aggressive_toggle": aggressive_toggle,
         "htf_2d_context_source": timeframe_context.get("htf_2d_context_source", NA),
     }
+
+
+def _volume_profile_for_timeframe(
+    *,
+    symbol: str,
+    timeframe: str,
+    candles: Sequence[Any],
+) -> VolumeProfileResult:
+    return calculate_volume_profile(
+        VolumeProfileInput(
+            symbol=symbol,
+            timeframe=timeframe,
+            candles=candles,
+        )
+    )
+
+
+def _optional_12h_volume_profile(
+    *,
+    symbol: str,
+    candles: Sequence[Any],
+) -> VolumeProfileResult | None:
+    if len(candles) < MIN_12H_VOLUME_PROFILE_CANDLES:
+        return None
+    return _volume_profile_for_timeframe(symbol=symbol, timeframe="12h", candles=candles)
 
 
 def _strategy_levels(*values: MaybeDecimal) -> tuple[Decimal, ...]:
@@ -1138,6 +1226,9 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "confirmation_structure_shift_status": setup.confirmation_structure_shift_status,
         "confirmation_bos_choch_reason": setup.confirmation_bos_choch_reason,
         "first_failed_gate": setup.first_failed_gate,
+        "volume_profile_source": setup.volume_profile_source,
+        "poc": setup.poc,
+        "poc_diagnostics": setup.poc_diagnostics,
         "trust_grade": setup.trust_meter.grade,
         "trust_percentage": setup.trust_meter.percentage,
         "gates_passed": setup.gates_passed,
