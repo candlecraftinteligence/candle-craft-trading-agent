@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from app.data.dtos import NA
+from app.formatters.scanner_display import build_symbol_display
 from app.pipeline.scanner_runner import ScannerSymbolResult
 from app.strategies.liquidity_grab_pullback import LiquidityGrabMode, LiquidityGrabResult, LiquidityGrabSetup
 
@@ -14,6 +15,11 @@ BULLET = "\u2022"
 DASH = "\u2014"
 GREEN_CIRCLE = "\U0001F7E2"
 POINT_RIGHT = "\U0001F449"
+PIN = "\U0001F4CD"
+BRAIN = "\U0001F9E0"
+TARGET = "\U0001F3AF"
+CHECK = "\u2705"
+CROSS = "\u274c"
 SWORDS = "\u2694\ufe0f"
 FOOTER = f"{SWORDS} Candle Craft | Signal. Structure. Execution."
 RISK_WARNING_FALLBACK = (
@@ -71,50 +77,48 @@ def format_valid_setup_message(
     status = _display(_setup_field(setup, diagnostics, "status"))
     if status == NA:
         status = "Pending"
+    display = build_symbol_display(symbol_result)
 
     if compact:
         return "\n".join(
             (
                 (
-                    f"{GREEN_CIRCLE} {symbol} {mode_title} {grade} {trust_percentage}% | "
+                    f"{symbol} {DASH} Valid Setup | {mode_title} {grade} {trust_percentage}% | "
                     f"Bias: {_trade_bias(setup, diagnostics)} | Entry: {_entry_text(setup, diagnostics)} | "
                     f"Stop: {_display(_setup_field(setup, diagnostics, 'stop'))} | "
-                    f"TPs: {_tp_text(setup, diagnostics)} | RR: {_display(_setup_field(setup, diagnostics, 'rr_to_tp2'))} | "
-                    f"Status: {status}"
+                    f"RR: {_display(_setup_field(setup, diagnostics, 'rr_to_tp2'))} | Trade idea created."
                 ),
                 FOOTER,
             )
         )
 
     lines = [
-        f"{GREEN_CIRCLE} {mode_title} Setup {DASH} {symbol}",
+        f"{symbol} {DASH} Valid Setup",
         "",
-        "1) HTF Structure",
+        f"{PIN} Bias",
         f"{BULLET} 2D HTF: {_display(_setup_field(setup, diagnostics, 'htf_2d_trend'))}",
         f"{BULLET} 12H Bias: {_display(_setup_field(setup, diagnostics, 'mtf_12h_trend'))}",
-        f"{BULLET} Current price: {_current_price_text(symbol_result, setup, diagnostics)}",
-        f"{BULLET} Key context: {_key_context_text(symbol_result, setup, diagnostics)}",
         "",
-        "2) Orderflow + Derivatives",
+        f"{CHECK} Passed",
+        *_telegram_passed_lines(display),
+        "",
+        "Orderflow",
         f"{BULLET} POC: {_display(_first_available(_setup_field(setup, diagnostics, 'poc'), symbol_result.poc))}",
         f"{BULLET} VAH/VAL: {_vah_val_text(symbol_result)}",
         f"{BULLET} Funding: {_funding_text(symbol_result)}",
         f"{BULLET} OI: {_oi_text(symbol_result)}",
-        f"{BULLET} Price/OI: {_display(symbol_result.price_oi_relationship)}",
-        f"{BULLET} Context score: {_display(symbol_result.derivatives_score)}",
         "",
-        "3) Trade Map",
+        f"{TARGET} Trade Idea",
         f"{BULLET} Bias: {_trade_bias(setup, diagnostics)}",
-        f"{BULLET} Sweep Zone: {_sweep_zone_text(setup, diagnostics)}",
         f"{BULLET} Entry: {_entry_text(setup, diagnostics)}",
         f"{BULLET} Stop: {_display(_setup_field(setup, diagnostics, 'stop'))}",
-        f"{BULLET} TPs: {_tp_text(setup, diagnostics)}",
         f"{BULLET} RR: {_display(_setup_field(setup, diagnostics, 'rr_to_tp2'))}",
         f"{BULLET} Trust Meter: {grade} + {trust_percentage}%",
         f"{BULLET} Invalidation: {_display(_setup_field(setup, diagnostics, 'invalidation'))}",
         f"{BULLET} Risk warning: {_risk_warning(setup, diagnostics)}",
         "",
-        f"{POINT_RIGHT} {symbol} = {mode_title} {grade}. Status: {status}.",
+        f"{BRAIN} Final Result",
+        f"Trade idea created. Status: {status}.",
     ]
 
     if diagnostics_level == "full":
@@ -145,31 +149,40 @@ def format_rejection_summary(
 ) -> str:
     diagnostics = _representative_diagnostics(symbol_result)
     symbol = symbol_result.symbol
+    display = build_symbol_display(symbol_result)
     failed_gate = _failed_gate(symbol_result, diagnostics)
-    reason = _clean_rejection_reason(symbol_result, diagnostics)
+    reason = display.short_reason
 
     if compact:
         return "\n".join(
             (
                 (
-                    f"{symbol} {DASH} No Valid Setup | Failed gate: {failed_gate} | "
-                    f"Reason: {reason} | Action: No trade idea, no alert, no journal entry."
+                    f"{symbol} {DASH} {_telegram_no_setup_title(display.display_status)} | "
+                    f"Failed: {_telegram_failed_summary(display, failed_gate)} | "
+                    f"Why: {reason} | No valid setup. No trade. Watching only."
                 ),
                 FOOTER,
             )
         )
 
     lines = [
-        f"{symbol} {DASH} No Valid Setup",
+        f"{symbol} {DASH} {_telegram_no_setup_title(display.display_status)}",
         "",
+        f"{PIN} Bias",
         f"{BULLET} 2D HTF: {_display(diagnostics.get('htf_2d_trend'))}",
         f"{BULLET} 12H Bias: {_display(diagnostics.get('mtf_12h_trend'))}",
-        f"{BULLET} 15m Execution: {_status_text(diagnostics.get('execution_sweep_status'))}",
-        f"{BULLET} 5m Confirmation: {_status_text(diagnostics.get('confirmation_structure_shift_status'))}",
-        f"{BULLET} Pullback: {_status_text(diagnostics.get('pullback_zone_status'))}",
-        f"{BULLET} Failed gate: {failed_gate}",
-        f"{BULLET} Reason: {reason}",
-        f"{BULLET} Action: No trade idea, no alert, no journal entry.",
+        "",
+        f"{CHECK} Passed",
+        *_telegram_passed_lines(display),
+        "",
+        f"{CROSS} Failed",
+        *_telegram_failed_lines(display, failed_gate),
+        "",
+        f"{BRAIN} Why",
+        reason,
+        "",
+        f"{TARGET} Action",
+        "No valid setup. No trade. Watching only.",
     ]
 
     if diagnostics_level == "full":
@@ -177,6 +190,38 @@ def format_rejection_summary(
 
     lines.extend(("", FOOTER))
     return "\n".join(lines)
+
+
+def _telegram_no_setup_title(display_status: str) -> str:
+    if display_status == "near_miss":
+        return "Near Miss (No Valid Setup)"
+    if display_status == "data_incomplete":
+        return "Data Incomplete (No Valid Setup)"
+    return "No Valid Setup"
+
+
+def _telegram_passed_lines(display: Any) -> list[str]:
+    values = [item.label for item in display.progress_items if item.passed]
+    if not values:
+        return [f"{BULLET} None yet."]
+    return [f"{BULLET} {value}" for value in values]
+
+
+def _telegram_failed_lines(display: Any, failed_gate: str) -> list[str]:
+    values = [item.label for item in display.progress_items if not item.passed and item.evaluated]
+    lines = [f"{BULLET} {value}" for value in values]
+    if failed_gate != NA:
+        lines.append(f"{BULLET} Gate: {failed_gate}")
+    if not lines:
+        return [f"{BULLET} None."]
+    return lines
+
+
+def _telegram_failed_summary(display: Any, failed_gate: str) -> str:
+    failed = [item.label for item in display.progress_items if not item.passed and item.evaluated]
+    if failed_gate != NA:
+        failed.append(f"Gate: {failed_gate}")
+    return ", ".join(failed) if failed else NA
 
 
 def _valid_modes(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:

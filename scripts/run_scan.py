@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from collections.abc import Sequence
 from decimal import Decimal
@@ -12,8 +13,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.data.dtos import NA  # noqa: E402
+from app.formatters.scanner_display import (  # noqa: E402
+    display_fields,
+    format_scan_dashboard,
+    format_symbol_card,
+    format_symbol_compact_line,
+    representative_strategy_diagnostics,
+)
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
-from app.pipeline.scanner_runner import ScannerRunConfig, ScannerRunner, ScannerSymbolResult  # noqa: E402
+from app.pipeline.scanner_runner import ScannerRunConfig, ScannerRunResult, ScannerRunner, ScannerSymbolResult  # noqa: E402
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -21,6 +29,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     diagnostics_level_explicit = any(
         token == "--diagnostics-level" or token.startswith("--diagnostics-level=") for token in tokens
     )
+    display_explicit = any(token == "--display" or token.startswith("--display=") for token in tokens)
     parser = argparse.ArgumentParser(description="Run the Candle Craft dry-run scanner pipeline.")
     parser.add_argument("--symbols", nargs="*", default=["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     parser.add_argument("--exchange", choices=["binance", "bybit"], default="binance")
@@ -39,10 +48,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--show-strategy-output", action="store_true")
     parser.add_argument("--telegram-format", action="store_true")
     parser.add_argument("--diagnostics-level", choices=["summary", "normal", "full"], default="normal")
+    parser.add_argument("--display", choices=["compact", "normal", "full"], default="normal")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args(argv)
     args.diagnostics_level_explicit = diagnostics_level_explicit
+    args.display_explicit = display_explicit
     return args
 
 
@@ -51,6 +62,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
     diagnostics_level = args.diagnostics_level
     if args.verbose and not args.diagnostics_level_explicit:
         diagnostics_level = "full"
+    display_mode = args.display
+    if (args.verbose or diagnostics_level == "full") and not args.display_explicit:
+        display_mode = "full"
 
     config = ScannerRunConfig(
         symbols=args.symbols,
@@ -76,34 +90,19 @@ async def main(argv: Sequence[str] | None = None) -> None:
     result = await ScannerRunner().run(config)
 
     if args.output_json is not None:
-        args.output_json.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        args.output_json.write_text(json.dumps(_json_payload(result), indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print("Candle Craft Scanner Runner")
-    print(f"Exchange: {config.exchange}")
-    print(f"Interval: {config.interval}")
-    print(f"Strategy: {_display(config.strategy_name)}")
-    print(f"Strategy modes: {', '.join(mode.value for mode in config.strategy_modes)}")
-    print(
-        "Strategy timeframes: "
-        f"HTF={config.htf_timeframe}, bias={config.bias_timeframe}, "
-        f"execution={config.execution_timeframe}, confirmation={config.confirmation_timeframe}"
-    )
-    print(f"Symbols scanned: {result.scanned_symbols}")
-    print(f"Trade ideas created: {result.trade_ideas_created}")
-    print(f"Dry-run alerts created: {result.dry_run_alerts_created}")
-    print(f"Journal entries created: {result.journal_entries_created}")
+    print(format_scan_dashboard(result))
     print("")
 
     for symbol_result in result.results:
-        if diagnostics_level == "summary":
-            print(_format_symbol_summary(symbol_result))
-        elif diagnostics_level == "normal":
-            print(_format_symbol_normal_block(symbol_result))
+        if display_mode == "compact":
+            print(format_symbol_compact_line(symbol_result))
         else:
-            detail = symbol_result.rejection_reason or symbol_result.error_message or "N/A"
-            print(f"{symbol_result.symbol}: {symbol_result.status.value} | {detail}")
-            print("")
-            print(_format_symbol_diagnostics(symbol_result))
+            print(format_symbol_card(symbol_result))
+            if display_mode == "full":
+                print("")
+                print(_format_symbol_diagnostics(symbol_result))
         if args.show_strategy_output:
             print("")
             print(f"{symbol_result.symbol} Candle Craft strategy output:")
@@ -113,62 +112,19 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 print(_format_strategy_output_for_cli(symbol_result))
 
 
+def _json_payload(result: ScannerRunResult) -> dict[str, object]:
+    payload = result.model_dump(mode="json")
+    for index, symbol_result in enumerate(result.results):
+        payload["results"][index].update(display_fields(symbol_result))
+    return payload
+
+
 def _format_symbol_summary(symbol_result: ScannerSymbolResult) -> str:
-    diagnostics = _representative_strategy_diagnostics(symbol_result)
-    failed_gate = _display(diagnostics.get("first_failed_gate"))
-    reject_text = failed_gate if failed_gate != NA else _diagnostic_reason(symbol_result)
-    execution_tf = _display(diagnostics.get("execution_timeframe"))
-    confirmation_tf = _display(diagnostics.get("confirmation_timeframe"))
-    if execution_tf == NA:
-        execution_tf = "15m"
-    if confirmation_tf == NA:
-        confirmation_tf = "5m"
-    parts = [
-        symbol_result.symbol,
-        _symbol_status_label(symbol_result),
-        f"2D: {_display(diagnostics.get('htf_2d_trend'))}",
-        f"12H: {_display(diagnostics.get('mtf_12h_trend'))}",
-    ]
-    if symbol_result.poc != NA:
-        parts.append(f"POC: {_display(symbol_result.poc)}")
-    derivatives_context = _compact_derivatives_context(symbol_result)
-    if derivatives_context != NA:
-        parts.append(derivatives_context)
-    parts.extend(
-        (
-            f"{execution_tf} sweep: {_status_text(diagnostics.get('execution_sweep_status'))}",
-            f"{confirmation_tf} BOS/CHoCH: {_status_text(diagnostics.get('confirmation_structure_shift_status'))}",
-            f"Pullback: {_status_text(diagnostics.get('pullback_zone_status'))}",
-            f"Reject: {reject_text}",
-        )
-    )
-    return " | ".join(parts)
+    return format_symbol_compact_line(symbol_result)
 
 
 def _format_symbol_normal_block(symbol_result: ScannerSymbolResult) -> str:
-    diagnostics = _representative_strategy_diagnostics(symbol_result)
-    failed_gate = _display(diagnostics.get("first_failed_gate"))
-    reason = _normal_reason(symbol_result, diagnostics)
-    action = (
-        "No trade idea, no alert, no journal entry."
-        if _symbol_status_label(symbol_result) == "No Setup"
-        else "Continue through scanner gates."
-    )
-    return "\n".join(
-        (
-            f"{symbol_result.symbol} - {_symbol_status_label(symbol_result)}",
-            f"2D HTF: {_display(diagnostics.get('htf_2d_trend'))} | source: {_display(diagnostics.get('htf_2d_context_source'))}",
-            f"12H Bias: {_display(diagnostics.get('mtf_12h_trend'))}",
-            _volume_profile_normal_text(symbol_result),
-            _format_derivatives_normal_block(symbol_result),
-            f"15m Execution: {_execution_text(diagnostics)}",
-            f"5m Confirmation: {_confirmation_text(diagnostics)}",
-            _pullback_normal_text(diagnostics),
-            f"Failed gate: {failed_gate}",
-            f"Reason: {reason}",
-            f"Action: {action}",
-        )
-    )
+    return format_symbol_card(symbol_result)
 
 
 def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
@@ -228,14 +184,7 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
 
 
 def _representative_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> dict[str, object]:
-    for mode in symbol_result.valid_strategy_modes:
-        diagnostics = symbol_result.strategy_diagnostics.get(mode)
-        if isinstance(diagnostics, dict):
-            return diagnostics
-    for diagnostics in symbol_result.strategy_diagnostics.values():
-        if isinstance(diagnostics, dict):
-            return diagnostics
-    return {}
+    return dict(representative_strategy_diagnostics(symbol_result))
 
 
 def _symbol_status_label(symbol_result: ScannerSymbolResult) -> str:

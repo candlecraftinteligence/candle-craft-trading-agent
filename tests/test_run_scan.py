@@ -7,6 +7,7 @@ from decimal import Decimal
 from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
 from app.data.dtos import NA
+from app.formatters.scanner_display import build_symbol_display
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 from scripts import run_scan
 
@@ -161,6 +162,109 @@ def test_diagnostics_level_cli_flag_accepted() -> None:
     assert args.diagnostics_level_explicit is True
 
 
+def test_display_cli_flag_defaults_to_normal_and_accepts_modes() -> None:
+    default_args = run_scan.parse_args(["--symbols", "BTCUSDT"])
+    compact_args = run_scan.parse_args(["--symbols", "BTCUSDT", "--display", "compact"])
+
+    assert default_args.display == "normal"
+    assert default_args.display_explicit is False
+    assert compact_args.display == "compact"
+    assert compact_args.display_explicit is True
+
+
+def test_valid_setup_display_label() -> None:
+    symbol_result = ScannerSymbolResult(
+        symbol="BTCUSDT",
+        status=ScannerPipelineStatus.IDEA_CREATED,
+        status_history=(ScannerPipelineStatus.IDEA_CREATED,),
+        strategy_diagnostics={
+            "challenge": {
+                "is_valid": True,
+                "gates_passed": ("sweep", "bos_choch", "pullback_zone", "rr"),
+                "rr_to_tp2": Decimal("3.1"),
+            }
+        },
+        valid_strategy_modes=("challenge",),
+    )
+
+    display = build_symbol_display(symbol_result)
+
+    assert display.display_status == "valid_setup"
+    assert display.display_status_label == "🟢 VALID SETUP"
+    assert display.setup_progress_passed == 4
+
+
+def test_near_miss_classification_requires_sweep_and_confirmation_then_later_failure() -> None:
+    symbol_result = ScannerSymbolResult(
+        symbol="BTCUSDT",
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        strategy_diagnostics={
+            "swing": {
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "failed",
+                "rr_to_tp2": NA,
+                "first_failed_gate": "no_ob_or_fvg_zone",
+                "pullback_failure_reason": "No valid OB or FVG was found inside the 5m displacement impulse.",
+            }
+        },
+        rejected_strategy_modes=("swing",),
+    )
+
+    display = build_symbol_display(symbol_result)
+
+    assert display.display_status == "near_miss"
+    assert display.display_status_label == "🟡 NEAR MISS"
+    assert display.setup_progress_passed == 2
+    assert display.failed_checks == ("Pullback zone", "RR")
+
+
+def test_no_setup_classification_for_early_core_gate_failure() -> None:
+    symbol_result = ScannerSymbolResult(
+        symbol="BTCUSDT",
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        strategy_diagnostics={
+            "challenge": {
+                "execution_sweep_status": "failed",
+                "confirmation_structure_shift_status": "not_evaluated",
+                "first_failed_gate": "missing_confirmed_sweep",
+            }
+        },
+        rejected_strategy_modes=("challenge",),
+    )
+
+    display = build_symbol_display(symbol_result)
+
+    assert display.display_status == "no_setup"
+    assert display.display_status_label == "🔴 NO SETUP"
+    assert display.failed_checks == ("15m sweep",)
+
+
+def test_data_incomplete_classification_for_missing_required_market_data() -> None:
+    symbol_result = ScannerSymbolResult(
+        symbol="BTCUSDT",
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        strategy_diagnostics={
+            "challenge": {
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": NA,
+                "first_failed_gate": "missing_confirmation_candles",
+                "confirmation_bos_choch_reason": "5m confirmation candles missing.",
+            }
+        },
+        rejected_strategy_modes=("challenge",),
+    )
+
+    display = build_symbol_display(symbol_result)
+
+    assert display.display_status == "data_incomplete"
+    assert display.display_status_label == "⚪ DATA INCOMPLETE"
+    assert display.short_reason == "5m confirmation candles missing."
+
+
 def test_strategy_cli_flags_accepted() -> None:
     args = run_scan.parse_args(
         [
@@ -250,6 +354,14 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
         == "missing_confirmation_structure_shift"
     )
     assert "candles_2d: N/A" in payload["results"][0]["strategy_missing_data"]
+    assert payload["results"][0]["display_status"] == "no_setup"
+    assert payload["results"][0]["display_status_label"] == "\U0001F534 NO SETUP"
+    assert payload["results"][0]["setup_progress_total"] == 4
+    assert payload["results"][0]["setup_progress_passed"] == 1
+    assert payload["results"][0]["passed_checks"] == ["15m sweep"]
+    assert payload["results"][0]["failed_checks"] == ["5m BOS/CHoCH"]
+    assert payload["results"][0]["short_reason"] == "No 5m BOS/CHoCH close beyond the required LTF swing."
+    assert payload["results"][0]["action_label"] == "No trade idea, no alert, no journal entry."
 
 
 def test_show_strategy_output_prints_formatted_output(monkeypatch, capsys) -> None:
@@ -283,57 +395,61 @@ def test_show_strategy_output_with_telegram_format_prints_clean_message(monkeypa
     captured = capsys.readouterr()
     assert "BTCUSDT Candle Craft strategy output:" in captured.out
     assert "BTCUSDT — No Valid Setup" in captured.out
-    assert "• Failed gate: missing_confirmation_structure_shift" in captured.out
-    assert "• Reason: No 5m BOS/CHoCH close beyond the required LTF swing." in captured.out
-    assert "• Action: No trade idea, no alert, no journal entry." in captured.out
+    assert "❌ Failed" in captured.out
+    assert "• Gate: missing_confirmation_structure_shift" in captured.out
+    assert "🧠 Why" in captured.out
+    assert "No 5m BOS/CHoCH close beyond the required LTF swing." in captured.out
+    assert "No valid setup. No trade. Watching only." in captured.out
     assert "⚔️ Candle Craft | Signal. Structure. Execution." in captured.out
     assert "Challenge: No valid challenge setup." not in captured.out
 
 
-def test_diagnostics_level_summary_prints_compact_symbol_result(monkeypatch, capsys) -> None:
+def test_display_compact_prints_dashboard_and_one_line_result(monkeypatch, capsys) -> None:
     monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
 
-    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--diagnostics-level", "summary"]))
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--display", "compact"]))
 
     captured = capsys.readouterr()
-    assert (
-        "BTCUSDT | No Setup | 2D: bearish | 12H: neutral | POC: 80750 | Funding: negative/normal | OI: rising | 15m sweep: passed | "
-        "5m BOS/CHoCH: failed | Pullback: N/A | Reject: missing_confirmation_structure_shift"
-    ) in captured.out
+    assert "Candle Craft Scanner" in captured.out
+    assert "🔴 BTCUSDT — NO SETUP | Progress 1/4" in captured.out
+    assert "Gate: missing_confirmation_structure_shift" in captured.out
     assert "2D HTF:" not in captured.out
 
 
-def test_diagnostics_level_normal_prints_readable_block(monkeypatch, capsys) -> None:
+def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
     monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
 
-    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--diagnostics-level", "normal"]))
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--display", "normal"]))
 
     captured = capsys.readouterr()
-    assert "Candle Craft Scanner Runner" in captured.out
+    assert "Candle Craft Scanner" in captured.out
+    assert "Strategy: Liquidity Grab Pullback" in captured.out
+    assert "Timeframes: 2D → 12H → 15m → 5m" in captured.out
+    assert "🟢 Valid setups: 0" in captured.out
+    assert "🔴 No setups: 1" in captured.out
     assert "Phase 12 Scanner Runner" not in captured.out
-    assert "BTCUSDT - No Setup" in captured.out
-    assert "2D HTF: bearish | source: synthetic_from_1d" in captured.out
-    assert "12H Bias: neutral" in captured.out
-    assert "Volume Profile: POC [80750], VAH [81200], VAL [80100], source estimated_from_candles" in captured.out
-    assert "Derivatives:" in captured.out
-    assert "Funding: [-0.0001] | status [normal]" in captured.out
-    assert "OI: [105] | change [5%] | direction [rising]" in captured.out
-    assert "Price/OI: [long_building_or_breakout_participation]" in captured.out
-    assert "Crowding: [low]" in captured.out
-    assert "Squeeze: [balanced]" in captured.out
-    assert "Context score: [90]" in captured.out
+    assert "🔴 BTCUSDT — NO SETUP" in captured.out
+    assert "📍 Context" in captured.out
+    assert "• 2D HTF: Bearish" in captured.out
+    assert "• 12H Bias: Neutral" in captured.out
+    assert "• Volume Profile: POC 80,750 | VAH 81,200 | VAL 80,100" in captured.out
+    assert "• Derivatives: Funding normal | OI rising | Crowding low" in captured.out
+    assert "✅ Passed" in captured.out
+    assert "• 15m sweep detected" in captured.out
+    assert "• Context score: 90" in captured.out
     assert "Derivatives score:" not in captured.out
-    assert "15m Execution: bullish sweep detected" in captured.out
-    assert "5m Confirmation: BOS/CHoCH failed" in captured.out
-    assert "Pullback:\nStatus: N/A\nOB/FVG: N/A\nFib: N/A\nRR: N/A" in captured.out
-    assert "Failed gate: missing_confirmation_structure_shift" in captured.out
-    assert "Action: No trade idea, no alert, no journal entry." in captured.out
+    assert "❌ Failed" in captured.out
+    assert "• 5m BOS/CHoCH: failed" in captured.out
+    assert "📊 Setup Progress: 1/4" in captured.out
+    assert "🧠 Reason" in captured.out
+    assert "🎯 Action" in captured.out
+    assert "No trade idea, no alert, no journal entry." in captured.out
 
 
-def test_diagnostics_level_full_preserves_detailed_diagnostics(monkeypatch, capsys) -> None:
+def test_display_full_preserves_detailed_diagnostics(monkeypatch, capsys) -> None:
     monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
 
-    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--diagnostics-level", "full"]))
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--display", "full"]))
 
     captured = capsys.readouterr()
     assert "Strategy diagnostics:" in captured.out
@@ -395,10 +511,11 @@ def test_normal_block_prints_single_failed_gate_reason_for_pullback() -> None:
 
     text = run_scan._format_symbol_normal_block(symbol_result)
 
-    assert text.count("Failed gate:") == 1
-    assert text.count("Reason:") == 1
+    assert text.count("Gate: no_ob_or_fvg_zone") == 1
+    assert text.count("Reason") == 1
     assert "Reject: no_ob_or_fvg_zone" not in text
-    assert "Source: 5m" in text
+    assert "No valid OB or FVG was found inside the 5m displacement impulse." in text
+    assert "🟡 BTCUSDT — NEAR MISS" in text
 
 
 def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:
@@ -414,8 +531,10 @@ def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:
 def test_diagnostics_level_overrides_verbose(monkeypatch, capsys) -> None:
     monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
 
-    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--verbose", "--diagnostics-level", "summary"]))
+    asyncio.run(
+        run_scan.main(["--symbols", "BTCUSDT", "--verbose", "--diagnostics-level", "summary", "--display", "compact"])
+    )
 
     captured = capsys.readouterr()
-    assert "BTCUSDT | No Setup" in captured.out
+    assert "🔴 BTCUSDT — NO SETUP" in captured.out
     assert "Strategy diagnostics:" not in captured.out

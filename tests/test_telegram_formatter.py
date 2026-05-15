@@ -128,16 +128,19 @@ def _rejected_symbol_result() -> ScannerSymbolResult:
 def test_valid_setup_formatting_is_telegram_ready() -> None:
     text = format_telegram_strategy_output(_valid_symbol_result())
 
-    assert "\U0001F7E2 Challenge Setup \u2014 BTCUSDT" in text
-    assert "1) HTF Structure" in text
+    assert "BTCUSDT \u2014 Valid Setup" in text
+    assert "\U0001F4CD Bias" in text
     assert "• 2D HTF: bullish" in text
+    assert "✅ Passed" in text
+    assert "• 15m sweep" in text
+    assert "• 5m BOS/CHoCH" in text
     assert "• Funding: 0.0001 / normal" in text
     assert "• OI: 1500000 / 4.5% / rising" in text
     assert "• Entry: 103100 - 103300" in text
     assert "• Trust Meter: A + 88%" in text
     assert "• Invalidation: Invalid if price accepts below 102400." in text
     assert "• Risk warning:" in text
-    assert "\U0001F449 BTCUSDT = Challenge A. Status: Pending." in text
+    assert "Trade idea created. Status: Pending." in text
     assert text.endswith("\u2694\ufe0f Candle Craft | Signal. Structure. Execution.")
 
 
@@ -145,11 +148,13 @@ def test_no_setup_formatting_is_readable() -> None:
     text = format_no_setup_message(_rejected_symbol_result())
 
     assert "BTCUSDT \u2014 No Valid Setup" in text
+    assert "\U0001F4CD Bias" in text
     assert "• 2D HTF: bearish" in text
-    assert "• 15m Execution: passed" in text
-    assert "• 5m Confirmation: failed" in text
-    assert "• Pullback: N/A" in text
-    assert "• Action: No trade idea, no alert, no journal entry." in text
+    assert "✅ Passed" in text
+    assert "• 15m sweep" in text
+    assert "❌ Failed" in text
+    assert "• 5m BOS/CHoCH" in text
+    assert "No valid setup. No trade. Watching only." in text
 
 
 def test_na_values_are_preserved_in_valid_setup_formatting() -> None:
@@ -175,25 +180,24 @@ def test_na_values_are_preserved_in_valid_setup_formatting() -> None:
     assert "• VAH/VAL: N/A" in text
     assert "• Funding: N/A" in text
     assert "• OI: N/A" in text
-    assert "• Price/OI: N/A" in text
-    assert "• Context score: N/A" in text
-    assert "• TPs: TP1 104800, TP2 106000, TP3 N/A" in text
+    assert "• RR: 3.2" in text
 
 
 def test_failed_gate_formatting_uses_clean_reason() -> None:
     text = format_no_setup_message(_rejected_symbol_result())
 
-    assert "• Failed gate: missing_confirmation_structure_shift" in text
-    assert "• Reason: No 5m BOS/CHoCH close beyond the required LTF swing." in text
-    assert "missing_confirmation_structure_shift\n• Reason" in text
+    assert "• Gate: missing_confirmation_structure_shift" in text
+    assert "🧠 Why" in text
+    assert "No 5m BOS/CHoCH close beyond the required LTF swing." in text
+    assert "missing_confirmation_structure_shift\n\n🧠 Why" in text
 
 
 def test_compact_mode_and_full_diagnostics_are_supported() -> None:
     compact = format_telegram_strategy_output(_valid_symbol_result(), compact=True)
     full = format_no_setup_message(_rejected_symbol_result(), diagnostics_level="full")
 
-    assert "1) HTF Structure" not in compact
-    assert "BTCUSDT Challenge A 88%" in compact
+    assert "\U0001F4CD Bias" not in compact
+    assert "BTCUSDT — Valid Setup | Challenge A 88%" in compact
     assert "Diagnostics" in full
     assert "• Failed gates: missing_confirmation_structure_shift" in full
 
