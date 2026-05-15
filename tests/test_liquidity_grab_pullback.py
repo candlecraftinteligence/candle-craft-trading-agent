@@ -65,6 +65,36 @@ def _full_bullish_setup_candles(*, with_fvg: bool = True, sweep_volume: Decimal 
     return candles
 
 
+def _mtf_execution_sweep_candles() -> list[dict[str, Decimal | int]]:
+    candles = _full_bullish_setup_candles()
+    for index, candle in enumerate(candles):
+        candle["timestamp"] = index * 15
+    return candles
+
+
+def _mtf_confirmation_bos_candles() -> list[dict[str, Decimal | int]]:
+    candles = _base_candles(100)
+    for index, candle in enumerate(candles):
+        candle["timestamp"] = index * 5
+
+    candles[60]["low"] = Decimal("90")
+    candles[84]["high"] = Decimal("110")
+    candles[90]["open"] = Decimal("89")
+    candles[90]["high"] = Decimal("100")
+    candles[90]["low"] = Decimal("85")
+    candles[90]["close"] = Decimal("91")
+    candles[91]["open"] = Decimal("99")
+    candles[91]["high"] = Decimal("100")
+    candles[91]["low"] = Decimal("95")
+    candles[91]["close"] = Decimal("97")
+    candles[92]["open"] = Decimal("104")
+    candles[92]["high"] = Decimal("114")
+    candles[92]["low"] = Decimal("101")
+    candles[92]["close"] = Decimal("112")
+    candles[92]["volume"] = Decimal("300")
+    return candles
+
+
 def _missing_ob_fvg_candles() -> list[dict[str, Decimal | int]]:
     candles = _base_candles(45)
     candles[20]["low"] = Decimal("90")
@@ -326,7 +356,7 @@ def test_reject_if_rr_to_tp2_below_25() -> None:
     )
 
     assert result.swing.is_valid is False
-    assert result.swing.first_failed_gate == "rr_too_low"
+    assert result.swing.first_failed_gate == "rr_below_minimum"
 
 
 def test_liquidity_diagnostics_explain_failed_sweep() -> None:
@@ -357,10 +387,10 @@ def test_liquidity_diagnostics_explain_failed_bos_choch() -> None:
 
 def test_liquidity_diagnostics_explain_missing_ob_fvg() -> None:
     result = analyze_liquidity_grab_pullback(
-        {"symbol": "BTCUSDT", "candles_15m": _missing_ob_fvg_candles(), "candles_5m": _full_bullish_setup_candles()}
+        {"symbol": "BTCUSDT", "candles_15m": _full_bullish_setup_candles(), "candles_5m": _missing_ob_fvg_candles()}
     )
 
-    assert result.swing.gates_failed[0] == "missing_pullback_zone"
+    assert result.swing.gates_failed[0] == "no_ob_or_fvg_zone"
     assert result.swing.ob_fvg_diagnostics == "failed: OB missing; FVG missing."
     assert "OB/FVG: failed" in result.swing.strategy_diagnostics
     assert result.swing.fib_diagnostics == "N/A because OB/FVG failed."
@@ -368,7 +398,7 @@ def test_liquidity_diagnostics_explain_missing_ob_fvg() -> None:
 
 def test_liquidity_diagnostics_explain_failed_fib_alignment() -> None:
     result = analyze_liquidity_grab_pullback(
-        {"symbol": "BTCUSDT", "candles_15m": _fib_failure_candles(), "candles_5m": _full_bullish_setup_candles()}
+        {"symbol": "BTCUSDT", "candles_15m": _full_bullish_setup_candles(), "candles_5m": _fib_failure_candles()}
     )
 
     assert result.swing.gates_failed[0] == "pullback_too_deep"
@@ -388,7 +418,7 @@ def test_liquidity_diagnostics_explain_failed_rr() -> None:
         }
     )
 
-    assert result.swing.gates_failed[0] == "rr_too_low"
+    assert result.swing.gates_failed[0] == "rr_below_minimum"
     assert "RR: failed" in result.swing.strategy_diagnostics
     assert "is below 2.5" in result.swing.rr_diagnostics
 
@@ -421,8 +451,8 @@ def test_challenge_rejects_if_rr_below_30() -> None:
     )
 
     assert result.challenge.is_valid is False
-    assert result.challenge.first_failed_gate == "rr_too_low"
-    assert any(violation.code == "rr_too_low" for violation in result.challenge.gate_result.violations)
+    assert result.challenge.first_failed_gate == "rr_below_minimum"
+    assert any(violation.code == "rr_below_minimum" for violation in result.challenge.gate_result.violations)
 
 
 def test_challenge_failure_output_exact_message() -> None:
@@ -465,7 +495,7 @@ def test_missing_5m_candles_rejects_with_na_confirmation_timeframe() -> None:
     )
 
     assert result.swing.is_valid is False
-    assert result.swing.first_failed_gate == "missing_confirmation_structure_shift"
+    assert result.swing.first_failed_gate == "missing_confirmation_candles"
     assert result.swing.confirmation_timeframe == NA
     assert result.swing.ltf_confirmation_timeframe == NA
     assert result.swing.confirmation_bos_choch_reason == "5m confirmation candles missing."
@@ -477,14 +507,74 @@ def test_valid_5m_confirmation_allows_ob_fvg_checks_to_run() -> None:
         {
             "symbol": "BTCUSDT",
             "mode": "swing",
-            "candles_15m": _missing_ob_fvg_candles(),
-            "candles_5m": _full_bullish_setup_candles(),
+            "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _missing_ob_fvg_candles(),
         }
     )
 
-    assert result.swing.first_failed_gate == "missing_pullback_zone"
+    assert result.swing.first_failed_gate == "no_ob_or_fvg_zone"
     assert result.swing.confirmation_structure_shift_status == "passed"
     assert result.swing.ob_fvg_diagnostics == "failed: OB missing; FVG missing."
+
+
+def test_5m_bos_passed_uses_confirmation_indices_for_pullback() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "candles_15m": _mtf_execution_sweep_candles(),
+            "candles_5m": _mtf_confirmation_bos_candles(),
+            "candles_2d": _trend_candles(),
+        }
+    )
+
+    assert result.swing.confirmation_structure_shift_status == "passed"
+    assert result.swing.pullback_zone.calculation_timeframe == "5m"
+    assert result.swing.pullback_zone.sweep_candle_index == 90
+    assert result.swing.pullback_zone.bos_choch_candle_index == 92
+    assert result.swing.pullback_zone.displacement_start_index == 90
+    assert result.swing.pullback_zone.displacement_end_index == 92
+    assert result.swing.first_failed_gate != "missing_displacement_impulse"
+    assert result.swing.pullback_failure_reason != "Displacement impulse is N/A because sweep and BOS/CHoCH indices are not usable."
+
+
+def test_5m_bos_passed_with_candles_gets_specific_pullback_rejection() -> None:
+    confirmation = _mtf_confirmation_bos_candles()
+    confirmation[91]["open"] = Decimal("98")
+    confirmation[91]["close"] = Decimal("98")
+    confirmation[91]["high"] = Decimal("100")
+    confirmation[91]["low"] = Decimal("96")
+    confirmation[92]["low"] = Decimal("99")
+
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "candles_15m": _mtf_execution_sweep_candles(),
+            "candles_5m": confirmation,
+            "candles_2d": _trend_candles(),
+        }
+    )
+
+    assert result.swing.confirmation_structure_shift_status == "passed"
+    assert result.swing.first_failed_gate == "no_ob_or_fvg_zone"
+    assert result.swing.first_failed_gate != "missing_displacement_impulse"
+
+
+def test_eth_style_failed_bos_choch_still_rejects_before_pullback() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "ETHUSDT",
+            "mode": "swing",
+            "candles_15m": _mtf_execution_sweep_candles(),
+            "candles_5m": _base_candles(100),
+        }
+    )
+
+    assert result.swing.confirmation_structure_shift_status == "failed"
+    assert result.swing.first_failed_gate == "missing_confirmation_structure_shift"
+    assert result.swing.pullback_zone_status == "N/A"
+    assert result.swing.pullback_calculation_timeframe == NA
 
 
 def test_missing_optional_context_marked_na() -> None:

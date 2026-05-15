@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, and Phase 15 public derivatives enrichment.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, and Phase 15.2 multi-timeframe confirmation-to-pullback integration.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -98,7 +98,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, and the Phase 15 derivatives enrichment layer. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, and the Phase 15.2 confirmation-to-pullback integration. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -673,6 +673,15 @@ Phase 15.1 keeps scanner behavior and JSON field names backward compatible while
 - Runtime scanner output uses the phase-neutral `Candle Craft Scanner Runner` label.
 - The derivatives score is displayed as context/data clarity, not trade profitability. Internal JSON keeps the existing `derivatives_score` field name.
 
+## Phase 15.2 Confirmation Pullback Integration
+
+Phase 15.2 fixes the multi-timeframe confirmation-to-pullback handoff:
+
+- The Liquidity-Grab Pullback strategy keeps the 15m execution sweep context while using the 5m confirmation BOS/CHoCH displacement for pullback-zone calculation.
+- Pullback diagnostics now expose the calculation timeframe, sweep index, BOS/CHoCH index, and displacement start/end indices.
+- Rejection reasons are more specific, including `missing_confirmation_candles`, `no_displacement_candle`, `no_ob_or_fvg_zone`, `pullback_too_deep`, and `rr_below_minimum`.
+- Normal CLI output prints one failed gate, one reason, and one action instead of duplicating pullback rejection lines.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -689,3 +698,4 @@ Phase 15.1 keeps scanner behavior and JSON field names backward compatible while
 - The Phase 13 volume profile is candle-estimated confluence only. It does not create signals by itself, place orders, or use private exchange API access.
 - The Phase 14 pullback-zone engine is deterministic validation only. It does not place orders, use private exchange API access, or loosen any sweep, confirmation, pullback, fib, RR, or Trust Meter gates.
 - The Phase 15 derivatives enrichment layer is public-data confluence only. It does not create setups, place orders, use private exchange API access, or loosen any technical strategy gate.
+- The Phase 15.2 confirmation-to-pullback fix is index propagation only. It does not add order execution, private exchange API access, withdrawals, transfers, or account endpoints.

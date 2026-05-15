@@ -273,27 +273,32 @@ def _confirmation_text(diagnostics: dict[str, object]) -> str:
 
 def _pullback_normal_text(diagnostics: dict[str, object]) -> str:
     status = _status_text(diagnostics.get("pullback_zone_status"))
+    source = _display(diagnostics.get("pullback_calculation_timeframe"))
     selected = _display(diagnostics.get("selected_zone_type"))
     fib = _display(diagnostics.get("fib_alignment_status"))
     rr = _display(diagnostics.get("rr_to_tp2"))
-    reject = _display(diagnostics.get("first_failed_gate")) if status == "failed" else NA
-    reason = _display(diagnostics.get("pullback_failure_reason")) if status == "failed" else NA
-    return "\n".join(
+    lines = [
+        "Pullback:",
+        f"Status: {status}",
+    ]
+    if source != NA:
+        lines.append(f"Source: {source}")
+    lines.extend(
         (
-            "Pullback:",
-            f"Status: {status}",
             f"OB/FVG: {selected}",
             f"Fib: {fib}",
             f"RR: {rr}",
-            f"Reject: {reject}",
-            f"Reason: {reason}",
         )
     )
+    return "\n".join(lines)
 
 
 def _normal_reason(symbol_result: ScannerSymbolResult, diagnostics: dict[str, object]) -> str:
     confirmation_reason = _display(diagnostics.get("confirmation_bos_choch_reason"))
-    if confirmation_reason != NA and diagnostics.get("first_failed_gate") == "missing_confirmation_structure_shift":
+    if confirmation_reason != NA and diagnostics.get("first_failed_gate") in (
+        "missing_confirmation_structure_shift",
+        "missing_confirmation_candles",
+    ):
         return confirmation_reason
     pullback_reason = _display(diagnostics.get("pullback_failure_reason"))
     if pullback_reason != NA and _display(diagnostics.get("pullback_zone_status")) == "failed":
@@ -492,6 +497,9 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
                 f"OB/FVG: {_display(diagnostics.get('selected_zone_type'))} | "
                 f"Fib: {_display(diagnostics.get('fib_alignment_status'))} | "
                 f"RR: {_display(diagnostics.get('rr_to_tp2'))}",
+                f"{mode} pullback source: {_display(diagnostics.get('pullback_calculation_timeframe'))} | "
+                f"sweep index {_display(diagnostics.get('pullback_sweep_candle_index'))} | "
+                f"BOS/CHoCH index {_display(diagnostics.get('pullback_bos_choch_candle_index'))}",
                 f"{mode} pullback failure reason: {_display(diagnostics.get('pullback_failure_reason'))}",
                 f"{mode} OB zone: {_display(diagnostics.get('ob_zone'))}",
                 f"{mode} FVG zone: {_display(diagnostics.get('fvg_zone'))}",

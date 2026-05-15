@@ -297,7 +297,7 @@ def test_diagnostics_level_normal_prints_readable_block(monkeypatch, capsys) -> 
     assert "Derivatives score:" not in captured.out
     assert "15m Execution: bullish sweep detected" in captured.out
     assert "5m Confirmation: BOS/CHoCH failed" in captured.out
-    assert "Pullback:\nStatus: N/A\nOB/FVG: N/A\nFib: N/A\nRR: N/A\nReject: N/A\nReason: N/A" in captured.out
+    assert "Pullback:\nStatus: N/A\nOB/FVG: N/A\nFib: N/A\nRR: N/A" in captured.out
     assert "Failed gate: missing_confirmation_structure_shift" in captured.out
     assert "Action: No trade idea, no alert, no journal entry." in captured.out
 
@@ -336,10 +336,41 @@ def test_pullback_rejection_normal_formatting_is_readable() -> None:
         "Status: failed\n"
         "OB/FVG: N/A\n"
         "Fib: pullback_too_deep\n"
-        "RR: N/A\n"
-        "Reject: pullback_too_deep\n"
-        "Reason: Pullback tagged beyond 0.786 before entry."
+        "RR: N/A"
     )
+
+
+def test_normal_block_prints_single_failed_gate_reason_for_pullback() -> None:
+    symbol_result = ScannerSymbolResult(
+        symbol="BTCUSDT",
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        strategy_diagnostics={
+            "swing": {
+                "htf_2d_trend": "bullish",
+                "htf_2d_context_source": "synthetic_from_1d",
+                "mtf_12h_trend": "bullish",
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "failed",
+                "pullback_calculation_timeframe": "5m",
+                "selected_zone_type": "N/A",
+                "fib_alignment_status": "N/A",
+                "rr_to_tp2": "N/A",
+                "first_failed_gate": "no_ob_or_fvg_zone",
+                "pullback_failure_reason": "No valid OB or FVG was found inside the 5m displacement impulse.",
+                "sweep_diagnostics": "passed: bullish sweep at candle 30; magnitude 5 (0.5 ATR).",
+            }
+        },
+        rejected_strategy_modes=("swing",),
+    )
+
+    text = run_scan._format_symbol_normal_block(symbol_result)
+
+    assert text.count("Failed gate:") == 1
+    assert text.count("Reason:") == 1
+    assert "Reject: no_ob_or_fvg_zone" not in text
+    assert "Source: 5m" in text
 
 
 def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:

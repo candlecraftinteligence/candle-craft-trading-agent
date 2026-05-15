@@ -75,6 +75,7 @@ class PullbackZoneInput(BaseModel):
     direction: TradeDirection
     execution_timeframe: str
     confirmation_timeframe: str
+    calculation_timeframe: str = NA
     candles_15m: Sequence[Any]
     candles_5m: Sequence[Any]
     sweep_candle_index: MaybeInt
@@ -122,6 +123,11 @@ class PullbackZoneResult(BaseModel):
     pullback_zone_status: Literal["valid", "failed", "N/A"] = "N/A"
     first_failed_gate: str = NA
     pullback_failure_reason: str = NA
+    calculation_timeframe: str = NA
+    sweep_candle_index: MaybeInt = NA
+    bos_choch_candle_index: MaybeInt = NA
+    displacement_start_index: MaybeInt = NA
+    displacement_end_index: MaybeInt = NA
     selected_zone_type: ZoneType = NA
     selected_zone: PullbackZone = PullbackZone()
     ob_zone: PullbackZone = PullbackZone(zone_type="OB")
@@ -166,31 +172,51 @@ class _Candle:
 
 def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> PullbackZoneResult:
     data = input_data if isinstance(input_data, PullbackZoneInput) else PullbackZoneInput.model_validate(input_data)
-    candles, errors = _normalize_candles(data.candles_15m, "candles_15m")
+    calculation_timeframe, candle_values, candle_label = _calculation_candle_source(data)
+    candles, errors = _normalize_candles(candle_values, candle_label)
     if errors:
         raise ValueError(errors[0])
 
     sweep_index = _index_or_none(data.sweep_candle_index)
     bos_index = _index_or_none(data.bos_choch_candle_index)
+    index_update = {
+        "calculation_timeframe": calculation_timeframe,
+        "sweep_candle_index": sweep_index if sweep_index is not None else NA,
+        "bos_choch_candle_index": bos_index if bos_index is not None else NA,
+    }
+    if not candles:
+        return _failed_result(
+            data,
+            "missing_confirmation_candles",
+            f"Pullback calculation candles are missing for {calculation_timeframe}.",
+            **index_update,
+        )
+    if sweep_index is None or bos_index is None:
+        return _failed_result(
+            data,
+            "missing_displacement_impulse",
+            "Displacement impulse is N/A because sweep or BOS/CHoCH index is unavailable.",
+            **index_update,
+        )
     if (
-        sweep_index is None
-        or bos_index is None
-        or sweep_index < 0
+        sweep_index < 0
         or bos_index <= sweep_index
         or bos_index >= len(candles)
     ):
         return _failed_result(
             data,
-            "missing_displacement_impulse",
-            "Displacement impulse is N/A because sweep and BOS/CHoCH indices are not usable.",
+            "no_displacement_candle",
+            f"No displacement candle could be evaluated between sweep and BOS/CHoCH on {calculation_timeframe}.",
+            **index_update,
         )
 
     impulse = _displacement_impulse(candles, data.direction, sweep_index, bos_index)
     if impulse is None:
         return _failed_result(
             data,
-            "missing_displacement_impulse",
-            "Displacement impulse could not be identified from the sweep wick to BOS/CHoCH.",
+            "no_displacement_candle",
+            f"No displacement candle was found from the sweep wick to BOS/CHoCH on {calculation_timeframe}.",
+            **index_update,
         )
 
     impulse_start, impulse_end, impulse_low, impulse_high = impulse
@@ -202,6 +228,9 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
 
     base_update = {
         "direction": data.direction,
+        **index_update,
+        "displacement_start_index": sweep_index,
+        "displacement_end_index": bos_index,
         "ob_zone": ob_zone,
         "fvg_zone": fvg_zone,
         "impulse_start": _quantize(impulse_start),
@@ -236,8 +265,8 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
     if not ob_zone.is_present and not fvg_zone.is_present:
         return _failed_result(
             data,
-            "missing_pullback_zone",
-            "No valid OB or FVG was found inside the displacement impulse.",
+            "no_ob_or_fvg_zone",
+            f"No valid OB or FVG was found inside the {calculation_timeframe} displacement impulse.",
             **base_update,
             fib_alignment=fib_alignment,
         )
@@ -246,8 +275,8 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
     if selected is None:
         return _failed_result(
             data,
-            "missing_pullback_zone",
-            "OB/FVG zones did not overlap the 0.382 to 0.618 fib pullback zone.",
+            "no_ob_or_fvg_zone",
+            "No OB/FVG zone overlapped the 0.382 to 0.618 fib pullback zone.",
             **base_update,
             fib_alignment=fib_alignment.model_copy(
                 update={
@@ -262,7 +291,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
     if not fib_alignment.is_aligned:
         return _failed_result(
             data,
-            "missing_pullback_zone",
+            "no_ob_or_fvg_zone",
             fib_alignment.reason,
             **base_update,
             selected_zone=selected,
@@ -312,7 +341,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
     if _decimal_from(rr_to_tp2, "rr_to_tp2") < data.minimum_rr:
         return _failed_result(
             data,
-            "rr_too_low",
+            "rr_below_minimum",
             f"RR to TP2 {_display(rr_to_tp2)} is below {data.minimum_rr}.",
             **base_update,
             selected_zone=selected,
@@ -340,6 +369,11 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         valid=True,
         direction=data.direction,
         pullback_zone_status="valid",
+        calculation_timeframe=calculation_timeframe,
+        sweep_candle_index=sweep_index,
+        bos_choch_candle_index=bos_index,
+        displacement_start_index=sweep_index,
+        displacement_end_index=bos_index,
         selected_zone_type=selected.zone_type,
         selected_zone=selected,
         ob_zone=ob_zone,
@@ -407,6 +441,20 @@ def calculate_fib_alignment(
         )
 
     return _fib_alignment_for_levels(normalized_direction, sweep, bos, entry, aggressive_toggle, original_direction=direction)
+
+
+def _calculation_candle_source(data: PullbackZoneInput) -> tuple[str, Sequence[Any], str]:
+    timeframe = data.calculation_timeframe.strip().lower() if data.calculation_timeframe != NA else ""
+    if not timeframe:
+        timeframe = data.execution_timeframe
+
+    if timeframe == data.confirmation_timeframe:
+        return timeframe, data.candles_5m, "candles_5m"
+    if timeframe == data.execution_timeframe:
+        return timeframe, data.candles_15m, "candles_15m"
+    if timeframe == "5m":
+        return timeframe, data.candles_5m, "candles_5m"
+    return timeframe, data.candles_15m, "candles_15m"
 
 
 def _failed_result(data: PullbackZoneInput, gate: str, reason: str, **updates: Any) -> PullbackZoneResult:

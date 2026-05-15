@@ -524,7 +524,7 @@ def test_missing_5m_context_does_not_crash_if_15m_exists() -> None:
     assert symbol_result.strategy_diagnostics["challenge"]["candles_15m_count"] == 220
     assert symbol_result.strategy_diagnostics["challenge"]["candles_5m_count"] == 0
     assert symbol_result.strategy_diagnostics["challenge"]["confirmation_timeframe"] == NA
-    assert symbol_result.strategy_diagnostics["challenge"]["first_failed_gate"] == "missing_confirmation_structure_shift"
+    assert symbol_result.strategy_diagnostics["challenge"]["first_failed_gate"] == "missing_confirmation_candles"
     assert (
         symbol_result.strategy_diagnostics["challenge"]["confirmation_bos_choch_reason"]
         == "5m confirmation candles missing."

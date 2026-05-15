@@ -158,7 +158,7 @@ def test_ob_fvg_overlap_inside_fib_zone_becomes_valid_pullback_zone() -> None:
     assert result.fib_alignment.is_aligned is True
 
 
-def test_no_ob_fvg_returns_missing_pullback_zone() -> None:
+def test_no_ob_fvg_returns_no_ob_or_fvg_zone() -> None:
     candles = _base_candles()
     candles[5]["low"] = Decimal("100")
     candles[9]["high"] = Decimal("145")
@@ -167,7 +167,7 @@ def test_no_ob_fvg_returns_missing_pullback_zone() -> None:
     result = analyze_pullback_zone(_input(candles))
 
     assert result.valid is False
-    assert result.first_failed_gate == "missing_pullback_zone"
+    assert result.first_failed_gate == "no_ob_or_fvg_zone"
     assert result.ob_zone.is_present is False
     assert result.fvg_zone.is_present is False
 
@@ -179,6 +179,36 @@ def test_missing_displacement_impulse_returns_missing_displacement_impulse() -> 
 
     assert result.valid is False
     assert result.first_failed_gate == "missing_displacement_impulse"
+
+
+def test_unusable_indices_with_candles_return_no_displacement_candle() -> None:
+    result = analyze_pullback_zone(
+        _input(_bullish_valid_candles()).model_copy(update={"bos_choch_candle_index": 5})
+    )
+
+    assert result.valid is False
+    assert result.first_failed_gate == "no_displacement_candle"
+
+
+def test_confirmation_timeframe_indices_drive_pullback_calculation() -> None:
+    result = analyze_pullback_zone(
+        _input(_bullish_valid_candles(), minimum_rr=Decimal("3.0")).model_copy(
+            update={
+                "calculation_timeframe": "5m",
+                "candles_15m": _base_candles(),
+                "candles_5m": _bullish_valid_candles(),
+                "sweep_candle_index": 5,
+                "bos_choch_candle_index": 9,
+            }
+        )
+    )
+
+    assert result.valid is True
+    assert result.calculation_timeframe == "5m"
+    assert result.sweep_candle_index == 5
+    assert result.bos_choch_candle_index == 9
+    assert result.displacement_start_index == 5
+    assert result.displacement_end_index == 9
 
 
 def test_pullback_deeper_than_0786_rejects() -> None:
@@ -204,14 +234,14 @@ def test_rr_below_25_rejects() -> None:
     result = analyze_pullback_zone(_input(_bullish_valid_candles(), atr_15m=Decimal("90")))
 
     assert result.valid is False
-    assert result.first_failed_gate == "rr_too_low"
+    assert result.first_failed_gate == "rr_below_minimum"
 
 
 def test_challenge_rr_below_30_rejects() -> None:
     result = analyze_pullback_zone(_input(_bullish_valid_candles(), minimum_rr=Decimal("3.0"), atr_15m=Decimal("20")))
 
     assert result.valid is False
-    assert result.first_failed_gate == "rr_too_low"
+    assert result.first_failed_gate == "rr_below_minimum"
 
 
 def test_valid_zone_produces_entry_stop_targets_and_rr() -> None:
@@ -241,4 +271,4 @@ def test_poc_alone_does_not_create_setup() -> None:
     result = analyze_pullback_zone(_input(candles, poc=Decimal("117.2")))
 
     assert result.valid is False
-    assert result.first_failed_gate == "missing_pullback_zone"
+    assert result.first_failed_gate == "no_ob_or_fvg_zone"

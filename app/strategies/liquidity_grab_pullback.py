@@ -188,6 +188,11 @@ class LiquidityGrabSetup(BaseModel):
     fib_alignment: FibAlignmentResult = FibAlignmentResult()
     pullback_zone: PullbackZoneResult = PullbackZoneResult()
     pullback_zone_status: str = NA
+    pullback_calculation_timeframe: str = NA
+    pullback_sweep_candle_index: MaybeInt = NA
+    pullback_bos_choch_candle_index: MaybeInt = NA
+    displacement_start_index: MaybeInt = NA
+    displacement_end_index: MaybeInt = NA
     selected_zone_type: str = NA
     ob_zone: PullbackZone = PullbackZone(zone_type="OB")
     fvg_zone: PullbackZone = PullbackZone(zone_type="FVG")
@@ -483,7 +488,7 @@ class LiquidityGrabEngine:
         if confirmation is None:
             return _rejected_setup(
                 mode,
-                "missing_confirmation_structure_shift",
+                "missing_confirmation_candles",
                 "5m confirmation candles missing.",
                 missing_data,
                 unverified_data,
@@ -577,11 +582,6 @@ class LiquidityGrabEngine:
             confirmation,
             structure_shift=structure_shift,
         )
-        execution_structure_shift = _execution_shift_from_confirmation(
-            structure_shift,
-            execution_candles=candles,
-            confirmation_candles=confirmation_candles,
-        )
 
         direction: Direction = structure_shift.direction
         bias: TradeBias = "long" if direction == "bullish" else "short"
@@ -592,11 +592,12 @@ class LiquidityGrabEngine:
                 direction=trade_direction,
                 execution_timeframe=execution.timeframe,
                 confirmation_timeframe=confirmation.timeframe,
+                calculation_timeframe=confirmation.timeframe,
                 candles_15m=candles,
                 candles_5m=confirmation_candles,
-                sweep_candle_index=sweep.candle_index,
-                bos_choch_candle_index=execution_structure_shift.candle_index,
-                latest_price=_current_price(data, candles),
+                sweep_candle_index=confirmation_sweep.candle_index,
+                bos_choch_candle_index=structure_shift.candle_index,
+                latest_price=_current_price(data, confirmation_candles),
                 atr_15m=atr,
                 tick_size=TICK_SIZE,
                 aggressive_toggle=data.aggressive_toggle,
@@ -617,7 +618,7 @@ class LiquidityGrabEngine:
         if not pullback_zone.valid:
             return _rejected_setup(
                 mode,
-                pullback_zone.first_failed_gate if pullback_zone.first_failed_gate != NA else "missing_pullback_zone",
+                pullback_zone.first_failed_gate if pullback_zone.first_failed_gate != NA else "no_ob_or_fvg_zone",
                 pullback_zone.pullback_failure_reason
                 if pullback_zone.pullback_failure_reason != NA
                 else "Required OB/FVG pullback zone with fib alignment is missing.",
@@ -674,9 +675,9 @@ class LiquidityGrabEngine:
             rr_to_tp2=rr_to_tp2,
             trust_meter=trust_meter,
             entry_source=entry_source,
-            selected=execution,
-            candles=candles,
-            structure_shift=execution_structure_shift,
+            selected=confirmation,
+            candles=confirmation_candles,
+            structure_shift=structure_shift,
             entry_low=entry_low,
             entry_high=entry_high,
             fib_alignment=fib_alignment,
@@ -684,10 +685,10 @@ class LiquidityGrabEngine:
         status: SetupStatus = "Rejected"
         if gate_result.passed:
             status = _entry_status(
-                execution.timeframe,
+                confirmation.timeframe,
                 mode,
-                candles,
-                int(execution_structure_shift.candle_index),
+                confirmation_candles,
+                int(structure_shift.candle_index),
                 direction,
                 entry_low,
                 entry_high,
@@ -708,6 +709,11 @@ class LiquidityGrabEngine:
             fib_alignment=fib_alignment,
             pullback_zone=pullback_zone,
             pullback_zone_status=pullback_zone.pullback_zone_status,
+            pullback_calculation_timeframe=pullback_zone.calculation_timeframe,
+            pullback_sweep_candle_index=pullback_zone.sweep_candle_index,
+            pullback_bos_choch_candle_index=pullback_zone.bos_choch_candle_index,
+            displacement_start_index=pullback_zone.displacement_start_index,
+            displacement_end_index=pullback_zone.displacement_end_index,
             selected_zone_type=pullback_zone.selected_zone_type,
             ob_zone=pullback_zone.ob_zone,
             fvg_zone=pullback_zone.fvg_zone,
@@ -1699,6 +1705,11 @@ def _rejected_setup(
         fib_alignment=fib_alignment or FibAlignmentResult(),
         pullback_zone=pullback_zone,
         pullback_zone_status=pullback_zone.pullback_zone_status,
+        pullback_calculation_timeframe=pullback_zone.calculation_timeframe,
+        pullback_sweep_candle_index=pullback_zone.sweep_candle_index,
+        pullback_bos_choch_candle_index=pullback_zone.bos_choch_candle_index,
+        displacement_start_index=pullback_zone.displacement_start_index,
+        displacement_end_index=pullback_zone.displacement_end_index,
         selected_zone_type=pullback_zone.selected_zone_type,
         ob_zone=pullback_zone.ob_zone,
         fvg_zone=pullback_zone.fvg_zone,
@@ -1756,6 +1767,11 @@ def _setup_diagnostic_fields(setup: LiquidityGrabSetup) -> dict[str, Any]:
         "confirmation_structure_shift_status": _confirmation_structure_shift_status(setup),
         "confirmation_bos_choch_reason": _confirmation_bos_choch_reason(setup),
         "pullback_zone_status": setup.pullback_zone.pullback_zone_status,
+        "pullback_calculation_timeframe": setup.pullback_zone.calculation_timeframe,
+        "pullback_sweep_candle_index": setup.pullback_zone.sweep_candle_index,
+        "pullback_bos_choch_candle_index": setup.pullback_zone.bos_choch_candle_index,
+        "displacement_start_index": setup.pullback_zone.displacement_start_index,
+        "displacement_end_index": setup.pullback_zone.displacement_end_index,
         "selected_zone_type": setup.pullback_zone.selected_zone_type,
         "ob_zone": setup.pullback_zone.ob_zone,
         "fvg_zone": setup.pullback_zone.fvg_zone,
@@ -1802,7 +1818,7 @@ def _confirmation_structure_shift_status(setup: LiquidityGrabSetup) -> str:
 def _confirmation_bos_choch_reason(setup: LiquidityGrabSetup) -> str:
     if setup.confirmation_timeframe == NA:
         for violation in setup.gate_result.violations:
-            if violation.code == "missing_confirmation_structure_shift":
+            if violation.code in ("missing_confirmation_structure_shift", "missing_confirmation_candles"):
                 return violation.message
         return "5m confirmation candles missing."
     if not setup.sweep.is_present:
@@ -1878,12 +1894,14 @@ def _pullback_zone_diagnostics(setup: LiquidityGrabSetup) -> str:
     if not setup.structure_shift.is_present:
         return "N/A because BOS/CHoCH failed."
     status = setup.pullback_zone.pullback_zone_status
+    source = setup.pullback_zone.calculation_timeframe
+    source_text = f" on {source}" if source != NA else ""
     if status == "valid":
-        return f"valid: {setup.pullback_zone.selected_zone_type} overlaps fib; RR {_display(setup.pullback_zone.rr_to_tp2)}."
+        return f"valid{source_text}: {setup.pullback_zone.selected_zone_type} overlaps fib; RR {_display(setup.pullback_zone.rr_to_tp2)}."
     reason = setup.pullback_zone.pullback_failure_reason
     if reason == NA:
         reason = "Required OB/FVG pullback zone with fib alignment is missing."
-    return f"failed: {reason}"
+    return f"failed{source_text}: {reason}"
 
 
 def _fib_diagnostics(setup: LiquidityGrabSetup) -> str:
@@ -1961,6 +1979,7 @@ def _format_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> str:
         (
             f"{setup.confirmation_timeframe} BOS/CHoCH: {_diagnostic_detail(setup.structure_shift_diagnostics)}",
             f"Pullback Zone: {_diagnostic_detail(setup.pullback_zone_diagnostics)}",
+            f"Pullback source: {_display(setup.pullback_calculation_timeframe)}; sweep index {_display(setup.pullback_sweep_candle_index)}; BOS/CHoCH index {_display(setup.pullback_bos_choch_candle_index)}",
             f"OB: {_pullback_zone_text(setup.ob_zone)}",
             f"FVG: {_pullback_zone_text(setup.fvg_zone)}",
             f"Fib: {_display(setup.fib_alignment.status)}",
@@ -2165,26 +2184,6 @@ def _sweep_for_confirmation_candles(
         target_candles=confirmation_candles,
     )
     return sweep.model_copy(update={"candle_index": mapped_index})
-
-
-def _execution_shift_from_confirmation(
-    structure_shift: StructureShiftSignal,
-    *,
-    execution_candles: Sequence[_Candle],
-    confirmation_candles: Sequence[_Candle],
-) -> StructureShiftSignal:
-    mapped_index = _map_candle_index(
-        int(structure_shift.candle_index),
-        source_candles=confirmation_candles,
-        target_candles=execution_candles,
-    )
-    close = execution_candles[mapped_index].close if execution_candles else structure_shift.close
-    return structure_shift.model_copy(
-        update={
-            "candle_index": mapped_index,
-            "close": _quantize(close) if close != NA else close,
-        }
-    )
 
 
 def _map_candle_index(
