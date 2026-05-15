@@ -76,7 +76,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
     if args.output_json is not None:
         args.output_json.write_text(result.model_dump_json(indent=2), encoding="utf-8")
 
-    print("Phase 12 Scanner Runner")
+    print("Candle Craft Scanner Runner")
     print(f"Exchange: {config.exchange}")
     print(f"Interval: {config.interval}")
     print(f"Strategy: {_display(config.strategy_name)}")
@@ -175,7 +175,7 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
             f"Latest close: {_display(symbol_result.latest_close)}",
             f"Trend: {_display(symbol_result.trend_context)}",
             f"Technical score: {_display(symbol_result.technical_score)}",
-            f"Derivatives score: {_display(symbol_result.derivatives_score)}",
+            f"Derivatives context score: {_display(symbol_result.derivatives_score)}",
             f"Range high: {_display(symbol_result.recent_range_high)}",
             f"Range low: {_display(symbol_result.recent_range_low)}",
             f"Latest swing high: {_display(symbol_result.latest_swing_high)}",
@@ -276,7 +276,19 @@ def _pullback_normal_text(diagnostics: dict[str, object]) -> str:
     selected = _display(diagnostics.get("selected_zone_type"))
     fib = _display(diagnostics.get("fib_alignment_status"))
     rr = _display(diagnostics.get("rr_to_tp2"))
-    return f"Pullback Zone: {status} | OB/FVG: [{selected}] | Fib: [{fib}] | RR: [{rr}]"
+    reject = _display(diagnostics.get("first_failed_gate")) if status == "failed" else NA
+    reason = _display(diagnostics.get("pullback_failure_reason")) if status == "failed" else NA
+    return "\n".join(
+        (
+            "Pullback:",
+            f"Status: {status}",
+            f"OB/FVG: {selected}",
+            f"Fib: {fib}",
+            f"RR: {rr}",
+            f"Reject: {reject}",
+            f"Reason: {reason}",
+        )
+    )
 
 
 def _normal_reason(symbol_result: ScannerSymbolResult, diagnostics: dict[str, object]) -> str:
@@ -345,14 +357,30 @@ def _format_derivatives_normal_block(symbol_result: ScannerSymbolResult) -> str:
     return "\n".join(
         (
             "Derivatives:",
-            f"Funding: [{_display(symbol_result.funding_rate)}] | status [{_display(symbol_result.funding_status)}]",
-            f"OI: [{_display(symbol_result.open_interest)}] | change [{_display(symbol_result.open_interest_change_pct)}] | direction [{_display(symbol_result.oi_direction)}]",
+            f"Funding: [{_display(symbol_result.funding_rate)}] | status [{_funding_status_display(symbol_result.funding_status)}]",
+            f"OI: [{_display(symbol_result.open_interest)}] | change [{_percentage_display(symbol_result.open_interest_change_pct)}] | direction [{_display(symbol_result.oi_direction)}]",
             f"Price/OI: [{_display(symbol_result.price_oi_relationship)}]",
-            f"Crowding risk: [{_display(symbol_result.crowding_risk)}]",
-            f"Squeeze risk: [{_display(symbol_result.squeeze_risk)}]",
-            f"Derivatives score: [{_display(symbol_result.derivatives_score)}]",
+            f"Crowding: [{_display(symbol_result.crowding_risk)}]",
+            f"Squeeze: [{_display(symbol_result.squeeze_risk)}]",
+            f"Context score: [{_display(symbol_result.derivatives_score)}]",
         )
     )
+
+
+def _funding_status_display(value: object) -> str:
+    status = _display(value)
+    if status in ("elevated_positive", "elevated_negative"):
+        return "elevated"
+    if status in ("extreme_positive", "extreme_negative"):
+        return "extreme"
+    return status
+
+
+def _percentage_display(value: object) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    return f"{text}%"
 
 
 def _format_derivatives_diagnostics(symbol_result: ScannerSymbolResult) -> str:

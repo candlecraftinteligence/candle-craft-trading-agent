@@ -24,6 +24,7 @@ PriceOiRelationship = Literal[
     "short_covering_or_weak_participation",
     "short_building_or_long_trap_risk",
     "long_unwind_or_deleveraging",
+    "neutral_or_no_clear_positioning",
     "N/A",
 ]
 CrowdingRisk = Literal["low", "medium", "high", "N/A"]
@@ -402,12 +403,7 @@ class DerivativesEnrichmentEngine:
         elif price_direction == "down" and oi_direction == "falling":
             relationship = "long_unwind_or_deleveraging"
         else:
-            return PriceOiContext(
-                price_change_pct=price_change_pct,
-                price_direction=price_direction,
-                oi_direction=oi_direction,
-                reason="Price/OI relationship is N/A because price or OI is flat.",
-            )
+            relationship = "neutral_or_no_clear_positioning"
         return PriceOiContext(
             price_change_pct=price_change_pct,
             price_direction=price_direction,

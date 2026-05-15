@@ -612,7 +612,13 @@ No setup is created unless the pullback zone and RR are valid. Missing or uncert
 Scanner JSON and full diagnostics include pullback fields such as `pullback_zone_status`, `selected_zone_type`, `ob_zone`, `fvg_zone`, `fib_alignment_status`, `fib_382`, `fib_618`, `fib_65`, `fib_786`, `entry_low`, `entry_high`, `stop`, `tp1`, `tp2`, `tp3`, `rr_to_tp2`, and `pullback_failure_reason`. Normal CLI output includes:
 
 ```text
-Pullback Zone: valid/failed | OB/FVG: [selected zone] | Fib: [status] | RR: [value or N/A]
+Pullback:
+Status: valid/failed
+OB/FVG: selected zone or N/A
+Fib: status or N/A
+RR: value or N/A
+Reject: failed gate or N/A
+Reason: rejection reason or N/A
 ```
 
 Run Phase 14 scanner output:
@@ -629,7 +635,7 @@ Phase 15 adds `app/analytics/derivatives_enrichment.py` and threads `Derivatives
 - It does not use API keys, private exchange access, account endpoints, order endpoints, withdrawals, transfers, or live execution.
 - Funding is classified as `normal`, `elevated_positive`, `extreme_positive`, `elevated_negative`, `extreme_negative`, or `N/A`.
 - Open interest change is calculated from current and previous OI when both are available. Missing current or previous OI keeps `open_interest_change_pct = N/A`.
-- Price/OI relationship is deterministic: price up + OI up, price up + OI down, price down + OI up, and price down + OI down each map to a fixed classification.
+- Price/OI relationship is deterministic: price up + OI up, price up + OI down, price down + OI up, price down + OI down, and neutral/flat context each map to a fixed classification.
 - Crowding risk combines funding, public long/short ratio, and OI expansion when available.
 - Squeeze risk estimates long-squeeze, short-squeeze, balanced, or `N/A` context from funding extremes, OI expansion, price direction, and long/short imbalance.
 - `derivatives_score` measures how useful and complete the derivatives context is. It is not a profitability score.
@@ -652,13 +658,20 @@ Scanner summary output includes compact derivatives context when available:
 BTCUSDT | No Setup | 2D: bearish | 12H: bearish | POC: 79704 | Funding: negative/normal | OI: rising | 15m sweep: passed | 5m BOS/CHoCH: passed | Pullback: failed | Reject: pullback_too_deep
 ```
 
-Normal CLI output includes a `Derivatives` block with funding, OI, price/OI, crowding risk, squeeze risk, and derivatives score. Full diagnostics and JSON output include the nested `derivatives_enrichment` object.
+Normal CLI output includes a `Derivatives` block with funding, OI, price/OI, crowding, squeeze, and context score. Full diagnostics and JSON output include the nested `derivatives_enrichment` object.
 
 Run Phase 15 scanner output:
 
 ```powershell
 python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
 ```
+
+## Phase 15.1 Scanner Output Cleanup
+
+Phase 15.1 keeps scanner behavior and JSON field names backward compatible while cleaning up CLI wording:
+
+- Runtime scanner output uses the phase-neutral `Candle Craft Scanner Runner` label.
+- The derivatives score is displayed as context/data clarity, not trade profitability. Internal JSON keeps the existing `derivatives_score` field name.
 
 ## Safety Boundaries
 

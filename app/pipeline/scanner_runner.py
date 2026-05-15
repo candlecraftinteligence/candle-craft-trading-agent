@@ -1770,7 +1770,7 @@ def _derivatives_summary(result: DerivativesOrderflowResult) -> str:
     if relationship == NA:
         relationship = "price/OI relationship N/A"
     flags = ", ".join(result.active_risk_flags) if result.active_risk_flags else "no active derivatives risk flags"
-    return f"{relationship}; derivatives score {result.derivatives_score}; {flags}."
+    return f"{relationship}; derivatives context score {result.derivatives_score}; {flags}."
 
 
 def _derivatives_enrichment_summary(result: DerivativesEnrichmentResult) -> str:
@@ -1779,7 +1779,7 @@ def _derivatives_enrichment_summary(result: DerivativesEnrichmentResult) -> str:
         f"OI {result.oi_direction} ({_display_decimal(result.open_interest_change_pct)}%); "
         f"Price/OI {result.price_oi_relationship}; "
         f"crowding {result.crowding_risk}; squeeze {result.squeeze_risk}; "
-        f"derivatives score {result.derivatives_score}."
+        f"derivatives context score {result.derivatives_score}."
     )
 
 

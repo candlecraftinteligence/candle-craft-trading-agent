@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
+from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 from scripts import run_scan
 
@@ -208,6 +209,7 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     )
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))
+    serialized = output_path.read_text(encoding="utf-8")
     assert payload["results"][0]["symbol"] == "BTCUSDT"
     assert payload["results"][0]["candles_fetched"] == 250
     assert payload["results"][0]["rejection_reasons"] == ["No sweep, BOS, or CHoCH context was detected."]
@@ -218,7 +220,9 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["derivatives_enrichment"]["funding_status"] == "normal"
     assert payload["results"][0]["derivatives_enrichment"]["price_oi_relationship"] == "long_building_or_breakout_participation"
     assert payload["results"][0]["derivatives_enrichment"]["derivatives_score"] == 90
-    assert "api_key" not in output_path.read_text(encoding="utf-8").lower()
+    assert "derivatives_context_score" not in payload["results"][0]
+    assert "derivatives_context_score" not in payload["results"][0]["derivatives_enrichment"]
+    assert "api_key" not in serialized.lower()
     assert payload["results"][0]["formatted_strategy_output"].startswith("Challenge Setup")
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["gates_failed"] == [
         "missing_confirmation_structure_shift"
@@ -277,17 +281,23 @@ def test_diagnostics_level_normal_prints_readable_block(monkeypatch, capsys) -> 
     asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--diagnostics-level", "normal"]))
 
     captured = capsys.readouterr()
+    assert "Candle Craft Scanner Runner" in captured.out
+    assert "Phase 12 Scanner Runner" not in captured.out
     assert "BTCUSDT - No Setup" in captured.out
     assert "2D HTF: bearish | source: synthetic_from_1d" in captured.out
     assert "12H Bias: neutral" in captured.out
     assert "Volume Profile: POC [80750], VAH [81200], VAL [80100], source estimated_from_candles" in captured.out
     assert "Derivatives:" in captured.out
     assert "Funding: [-0.0001] | status [normal]" in captured.out
-    assert "OI: [105] | change [5] | direction [rising]" in captured.out
+    assert "OI: [105] | change [5%] | direction [rising]" in captured.out
     assert "Price/OI: [long_building_or_breakout_participation]" in captured.out
+    assert "Crowding: [low]" in captured.out
+    assert "Squeeze: [balanced]" in captured.out
+    assert "Context score: [90]" in captured.out
+    assert "Derivatives score:" not in captured.out
     assert "15m Execution: bullish sweep detected" in captured.out
     assert "5m Confirmation: BOS/CHoCH failed" in captured.out
-    assert "Pullback Zone: N/A | OB/FVG: [N/A] | Fib: [N/A] | RR: [N/A]" in captured.out
+    assert "Pullback:\nStatus: N/A\nOB/FVG: N/A\nFib: N/A\nRR: N/A\nReject: N/A\nReason: N/A" in captured.out
     assert "Failed gate: missing_confirmation_structure_shift" in captured.out
     assert "Action: No trade idea, no alert, no journal entry." in captured.out
 
@@ -306,6 +316,30 @@ def test_diagnostics_level_full_preserves_detailed_diagnostics(monkeypatch, caps
     assert "challenge 5m confirmation BOS/CHoCH: failed" in captured.out
     assert "challenge Pullback Zone: N/A | OB/FVG: N/A | Fib: N/A | RR: N/A" in captured.out
     assert "Derivatives enrichment:" in captured.out
+    assert "Derivatives context score: 90" in captured.out
+
+
+def test_pullback_rejection_normal_formatting_is_readable() -> None:
+    text = run_scan._pullback_normal_text(
+        {
+            "pullback_zone_status": "failed",
+            "selected_zone_type": NA,
+            "fib_alignment_status": "pullback_too_deep",
+            "rr_to_tp2": NA,
+            "first_failed_gate": "pullback_too_deep",
+            "pullback_failure_reason": "Pullback tagged beyond 0.786 before entry.",
+        }
+    )
+
+    assert text == (
+        "Pullback:\n"
+        "Status: failed\n"
+        "OB/FVG: N/A\n"
+        "Fib: pullback_too_deep\n"
+        "RR: N/A\n"
+        "Reject: pullback_too_deep\n"
+        "Reason: Pullback tagged beyond 0.786 before entry."
+    )
 
 
 def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:

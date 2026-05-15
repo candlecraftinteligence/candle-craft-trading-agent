@@ -96,6 +96,22 @@ def test_price_down_oi_down_relationship() -> None:
     assert result.price_oi_relationship == "long_unwind_or_deleveraging"
 
 
+def test_price_flat_oi_flat_relationship_is_neutral_not_na() -> None:
+    result = enrich_derivatives(
+        _base_input(
+            current_open_interest=Decimal("100"),
+            previous_open_interest=Decimal("100"),
+            candles_15m=_candles(Decimal("100"), Decimal("100")),
+            latest_price=Decimal("100"),
+        )
+    )
+
+    assert result.price_direction == "flat"
+    assert result.oi_direction == "flat"
+    assert result.price_oi_relationship == "neutral_or_no_clear_positioning"
+    assert "price_oi_relationship: N/A" not in result.missing_data
+
+
 def test_missing_oi_returns_na() -> None:
     result = enrich_derivatives(
         _base_input(current_open_interest=NA, previous_open_interest=NA, open_interest_history=None)
