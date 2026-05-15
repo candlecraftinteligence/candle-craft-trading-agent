@@ -31,18 +31,27 @@ class FakeScannerRunner:
             strategy_diagnostics={
                 "challenge": {
                     "is_valid": False,
+                    "htf_timeframe": "2d",
+                    "bias_timeframe": "12h",
+                    "execution_timeframe": "15m",
+                    "confirmation_timeframe": "5m",
                     "htf_2d_context_source": "synthetic_from_1d",
                     "candles_2d_count": 125,
                     "candles_12h_count": 250,
                     "candles_15m_count": 250,
                     "candles_5m_count": 250,
-                    "htf_2d_trend": "bullish",
-                    "mtf_12h_trend": "bullish",
-                    "ltf_confirmation_timeframe": "15m",
+                    "htf_2d_trend": "bearish",
+                    "mtf_12h_trend": "neutral",
+                    "ltf_confirmation_timeframe": "5m",
                     "ltf_confirmation_status": "missing",
-                    "first_failed_gate": "missing_confirmed_sweep",
-                    "gates_failed": ("missing_confirmed_sweep",),
-                    "hard_rejection_reasons": ("Confirmed liquidity sweep is required.",),
+                    "execution_sweep_status": "passed",
+                    "confirmation_structure_shift_status": "failed",
+                    "confirmation_bos_choch_reason": "No 5m BOS/CHoCH close beyond the required LTF swing.",
+                    "first_failed_gate": "missing_confirmation_structure_shift",
+                    "gates_failed": ("missing_confirmation_structure_shift",),
+                    "hard_rejection_reasons": ("No 5m BOS/CHoCH close beyond the required LTF swing.",),
+                    "sweep_diagnostics": "passed: bullish sweep at candle 30; magnitude 5 (0.5 ATR).",
+                    "bos_choch_diagnostics": "failed: No 5m BOS/CHoCH close beyond the required LTF swing.",
                 }
             },
             rejected_strategy_modes=("challenge", "swing", "scalp"),
@@ -63,6 +72,15 @@ def test_verbose_cli_flag_accepted() -> None:
     args = run_scan.parse_args(["--symbols", "BTCUSDT", "--verbose"])
 
     assert args.verbose is True
+    assert args.diagnostics_level == "normal"
+    assert args.diagnostics_level_explicit is False
+
+
+def test_diagnostics_level_cli_flag_accepted() -> None:
+    args = run_scan.parse_args(["--symbols", "BTCUSDT", "--diagnostics-level", "summary"])
+
+    assert args.diagnostics_level == "summary"
+    assert args.diagnostics_level_explicit is True
 
 
 def test_strategy_cli_flags_accepted() -> None:
@@ -118,11 +136,27 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["rejection_reasons"] == ["No sweep, BOS, or CHoCH context was detected."]
     assert payload["results"][0]["strategy_name"] == "liquidity_grab_pullback"
     assert payload["results"][0]["formatted_strategy_output"].startswith("Challenge Setup")
-    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["gates_failed"] == ["missing_confirmed_sweep"]
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["gates_failed"] == [
+        "missing_confirmation_structure_shift"
+    ]
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["htf_timeframe"] == "2d"
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["bias_timeframe"] == "12h"
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["execution_timeframe"] == "15m"
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["confirmation_timeframe"] == "5m"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["htf_2d_context_source"] == "synthetic_from_1d"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["candles_12h_count"] == 250
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["candles_15m_count"] == 250
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["candles_5m_count"] == 250
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["execution_sweep_status"] == "passed"
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["confirmation_structure_shift_status"] == "failed"
+    assert (
+        payload["results"][0]["strategy_diagnostics"]["challenge"]["confirmation_bos_choch_reason"]
+        == "No 5m BOS/CHoCH close beyond the required LTF swing."
+    )
+    assert (
+        payload["results"][0]["strategy_diagnostics"]["challenge"]["first_failed_gate"]
+        == "missing_confirmation_structure_shift"
+    )
     assert "candles_2d: N/A" in payload["results"][0]["strategy_missing_data"]
     assert "api_key" not in output_path.read_text(encoding="utf-8").lower()
 
@@ -134,15 +168,67 @@ def test_show_strategy_output_prints_formatted_output(monkeypatch, capsys) -> No
 
     captured = capsys.readouterr()
     assert "BTCUSDT Candle Craft strategy output:" in captured.out
-    assert "No valid challenge setup." in captured.out
+    assert "Challenge: No valid challenge setup." in captured.out
+    assert "Swing: No valid swing setup." in captured.out
+    assert "Scalp: No valid scalp setup." in captured.out
 
 
-def test_verbose_output_shows_phase_121_timeframe_context(monkeypatch, capsys) -> None:
+def test_diagnostics_level_summary_prints_compact_symbol_result(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--diagnostics-level", "summary"]))
+
+    captured = capsys.readouterr()
+    assert (
+        "BTCUSDT | No Setup | 2D: bearish | 12H: neutral | 15m sweep: passed | "
+        "5m BOS/CHoCH: failed | Reject: missing_confirmation_structure_shift"
+    ) in captured.out
+    assert "2D HTF:" not in captured.out
+
+
+def test_diagnostics_level_normal_prints_readable_block(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--diagnostics-level", "normal"]))
+
+    captured = capsys.readouterr()
+    assert "BTCUSDT - No Setup" in captured.out
+    assert "2D HTF: bearish | source: synthetic_from_1d" in captured.out
+    assert "12H Bias: neutral" in captured.out
+    assert "15m Execution: bullish sweep detected" in captured.out
+    assert "5m Confirmation: BOS/CHoCH failed" in captured.out
+    assert "Failed gate: missing_confirmation_structure_shift" in captured.out
+    assert "Action: No trade idea, no alert, no journal entry." in captured.out
+
+
+def test_diagnostics_level_full_preserves_detailed_diagnostics(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--diagnostics-level", "full"]))
+
+    captured = capsys.readouterr()
+    assert "Strategy diagnostics:" in captured.out
+    assert "challenge 2D context: synthetic from 1D" in captured.out
+    assert "challenge 12H bias: direct" in captured.out
+    assert "challenge 15m execution sweep: passed" in captured.out
+    assert "challenge 5m confirmation BOS/CHoCH: failed" in captured.out
+
+
+def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:
     monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
 
     asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--verbose"]))
 
     captured = capsys.readouterr()
-    assert "challenge 2D context: synthetic from 1D" in captured.out
-    assert "challenge 12H context: direct" in captured.out
-    assert "challenge LTF confirmation: 15m / 5m" in captured.out
+    assert "Strategy diagnostics:" in captured.out
+    assert "challenge 5m confirmation BOS/CHoCH: failed" in captured.out
+
+
+def test_diagnostics_level_overrides_verbose(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--verbose", "--diagnostics-level", "summary"]))
+
+    captured = capsys.readouterr()
+    assert "BTCUSDT | No Setup" in captured.out
+    assert "Strategy diagnostics:" not in captured.out

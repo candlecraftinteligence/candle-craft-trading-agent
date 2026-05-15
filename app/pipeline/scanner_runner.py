@@ -736,6 +736,10 @@ class ScannerRunner:
             optional_data=optional_data,
             technical=technical,
             aggressive_toggle=config.aggressive_toggle,
+            htf_timeframe=config.htf_timeframe,
+            bias_timeframe=config.bias_timeframe,
+            execution_timeframe=config.execution_timeframe,
+            confirmation_timeframe=config.confirmation_timeframe,
             timeframe_context=timeframe_context,
         )
 
@@ -1046,6 +1050,10 @@ def _liquidity_grab_input(
     optional_data: _OptionalMarketData,
     technical: TechnicalStructureResult,
     aggressive_toggle: bool,
+    htf_timeframe: str,
+    bias_timeframe: str,
+    execution_timeframe: str,
+    confirmation_timeframe: str,
     timeframe_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     support_levels = _strategy_levels(technical.nearest_support, technical.recent_range_low)
@@ -1053,6 +1061,10 @@ def _liquidity_grab_input(
     timeframe_context = timeframe_context or {}
     return {
         "symbol": symbol,
+        "htf_timeframe": htf_timeframe,
+        "bias_timeframe": bias_timeframe,
+        "execution_timeframe": execution_timeframe,
+        "confirmation_timeframe": confirmation_timeframe,
         "candles_2d": candles_by_timeframe.get("2d"),
         "candles_12h": candles_by_timeframe.get("12h"),
         "candles_4h": candles_by_timeframe.get("4h"),
@@ -1109,6 +1121,10 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "status": setup.status,
         "bias": setup.bias,
         "timeframe": setup.timeframe,
+        "htf_timeframe": setup.htf_timeframe,
+        "bias_timeframe": setup.bias_timeframe,
+        "execution_timeframe": setup.execution_timeframe,
+        "confirmation_timeframe": setup.confirmation_timeframe,
         "htf_2d_context_source": setup.htf_2d_context_source,
         "candles_2d_count": setup.candles_2d_count,
         "candles_12h_count": setup.candles_12h_count,
@@ -1118,6 +1134,9 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "mtf_12h_trend": setup.mtf_12h_trend,
         "ltf_confirmation_timeframe": setup.ltf_confirmation_timeframe,
         "ltf_confirmation_status": setup.ltf_confirmation_status,
+        "execution_sweep_status": setup.execution_sweep_status,
+        "confirmation_structure_shift_status": setup.confirmation_structure_shift_status,
+        "confirmation_bos_choch_reason": setup.confirmation_bos_choch_reason,
         "first_failed_gate": setup.first_failed_gate,
         "trust_grade": setup.trust_meter.grade,
         "trust_percentage": setup.trust_meter.percentage,

@@ -286,6 +286,7 @@ def test_reject_if_rr_to_tp2_below_25() -> None:
             "symbol": "SOLUSDT",
             "mode": "swing",
             "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
             "candles_2d": _trend_candles(),
             "user_resistance_levels": (Decimal("112"), Decimal("120")),
         }
@@ -296,7 +297,9 @@ def test_reject_if_rr_to_tp2_below_25() -> None:
 
 
 def test_liquidity_diagnostics_explain_failed_sweep() -> None:
-    result = analyze_liquidity_grab_pullback({"symbol": "BTCUSDT", "candles_15m": _base_candles()})
+    result = analyze_liquidity_grab_pullback(
+        {"symbol": "BTCUSDT", "candles_15m": _base_candles(), "candles_5m": _base_candles()}
+    )
 
     assert result.swing.gates_failed[0] == "missing_confirmed_sweep"
     assert "Sweep: failed" in result.swing.strategy_diagnostics
@@ -306,17 +309,23 @@ def test_liquidity_diagnostics_explain_failed_sweep() -> None:
 
 def test_liquidity_diagnostics_explain_failed_bos_choch() -> None:
     result = analyze_liquidity_grab_pullback(
-        {"symbol": "BTCUSDT", "candles_15m": _bullish_sweep_candles(sweep_low=Decimal("86.5"), sweep_close=Decimal("91"))}
+        {
+            "symbol": "BTCUSDT",
+            "candles_15m": _bullish_sweep_candles(sweep_low=Decimal("86.5"), sweep_close=Decimal("91")),
+            "candles_5m": _base_candles(),
+        }
     )
 
-    assert result.swing.gates_failed[0] == "missing_structure_shift"
+    assert result.swing.gates_failed[0] == "missing_confirmation_structure_shift"
     assert "Sweep: passed" in result.swing.strategy_diagnostics
-    assert "BOS/CHoCH: failed" in result.swing.strategy_diagnostics
-    assert "No BOS/CHoCH close beyond the required LTF swing." in result.swing.structure_shift_diagnostics
+    assert "5m BOS/CHoCH: failed" in result.swing.strategy_diagnostics
+    assert "No 5m BOS/CHoCH close beyond the required LTF swing." in result.swing.structure_shift_diagnostics
 
 
 def test_liquidity_diagnostics_explain_missing_ob_fvg() -> None:
-    result = analyze_liquidity_grab_pullback({"symbol": "BTCUSDT", "candles_15m": _missing_ob_fvg_candles()})
+    result = analyze_liquidity_grab_pullback(
+        {"symbol": "BTCUSDT", "candles_15m": _missing_ob_fvg_candles(), "candles_5m": _full_bullish_setup_candles()}
+    )
 
     assert result.swing.gates_failed[0] == "missing_pullback_zone"
     assert result.swing.ob_fvg_diagnostics == "failed: OB missing; FVG missing."
@@ -325,7 +334,9 @@ def test_liquidity_diagnostics_explain_missing_ob_fvg() -> None:
 
 
 def test_liquidity_diagnostics_explain_failed_fib_alignment() -> None:
-    result = analyze_liquidity_grab_pullback({"symbol": "BTCUSDT", "candles_15m": _fib_failure_candles()})
+    result = analyze_liquidity_grab_pullback(
+        {"symbol": "BTCUSDT", "candles_15m": _fib_failure_candles(), "candles_5m": _full_bullish_setup_candles()}
+    )
 
     assert result.swing.gates_failed[0] == "fib_alignment_failed"
     assert "Fib alignment: failed" in result.swing.strategy_diagnostics
@@ -338,6 +349,7 @@ def test_liquidity_diagnostics_explain_failed_rr() -> None:
             "symbol": "SOLUSDT",
             "mode": "swing",
             "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
             "candles_2d": _trend_candles(),
             "user_resistance_levels": (Decimal("112"), Decimal("120")),
         }
@@ -354,6 +366,7 @@ def test_challenge_rejects_if_trust_meter_below_85() -> None:
             "symbol": "SOLUSDT",
             "mode": LiquidityGrabMode.challenge,
             "candles_15m": _full_bullish_setup_candles(with_fvg=False, sweep_volume=Decimal("100")),
+            "candles_5m": _full_bullish_setup_candles(),
             "cvd": "positive delta",
         }
     )
@@ -369,6 +382,7 @@ def test_challenge_rejects_if_rr_below_30() -> None:
             "symbol": "SOLUSDT",
             "mode": LiquidityGrabMode.challenge,
             "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
             "candles_2d": _trend_candles(),
             "user_resistance_levels": (Decimal("112"), Decimal("120")),
         }
@@ -406,6 +420,38 @@ def test_rejects_setup_when_ltf_confirmation_is_missing() -> None:
     assert result.challenge.first_failed_gate == "no_execution_candles"
     assert result.challenge.ltf_confirmation_status == NA
     assert result.challenge.htf_2d_context_source == "synthetic_from_1d"
+
+
+def test_missing_5m_candles_rejects_with_na_confirmation_timeframe() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "candles_15m": _full_bullish_setup_candles(),
+        }
+    )
+
+    assert result.swing.is_valid is False
+    assert result.swing.first_failed_gate == "missing_confirmation_structure_shift"
+    assert result.swing.confirmation_timeframe == NA
+    assert result.swing.ltf_confirmation_timeframe == NA
+    assert result.swing.confirmation_bos_choch_reason == "5m confirmation candles missing."
+    assert "5m confirmation candles missing." in result.swing.hard_rejection_reasons
+
+
+def test_valid_5m_confirmation_allows_ob_fvg_checks_to_run() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "swing",
+            "candles_15m": _missing_ob_fvg_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
+        }
+    )
+
+    assert result.swing.first_failed_gate == "missing_pullback_zone"
+    assert result.swing.confirmation_structure_shift_status == "passed"
+    assert result.swing.ob_fvg_diagnostics == "failed: OB missing; FVG missing."
 
 
 def test_missing_optional_context_marked_na() -> None:

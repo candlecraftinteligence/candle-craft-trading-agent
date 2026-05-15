@@ -489,8 +489,10 @@ python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance 
 
 CLI behavior:
 
-- Normal mode prints the scan summary and per-symbol status.
-- `--verbose` prints scanner diagnostics and strategy diagnostics.
+- `--diagnostics-level summary` prints one compact line per scanned symbol.
+- `--diagnostics-level normal` is the default and prints a readable per-symbol block.
+- `--diagnostics-level full` prints the detailed scanner diagnostics and strategy diagnostics.
+- `--verbose` maps to `--diagnostics-level full` unless `--diagnostics-level` is explicitly provided.
 - `--show-strategy-output` prints the formatted Challenge, Swing, and Scalp Candle Craft sections for each symbol.
 - `--htf-timeframe`, `--bias-timeframe`, `--execution-timeframe`, and `--confirmation-timeframe` default to `2d`, `12h`, `15m`, and `5m`.
 - `--output-json scan_output.json` writes the full scanner result, including strategy results, formatted output, diagnostics, `missing_data`, and `unverified_data`, without secrets or API keys.
@@ -498,7 +500,8 @@ CLI behavior:
 Missing data policy:
 
 - Missing data is always marked `N/A`; unreliable supplied data is preserved as `Unverified`.
-- Missing synthetic 2D, direct 12H, or direct 5m context is marked `N/A`. Missing 5m confirmation does not crash the scan if 15m execution candles are available.
+- Missing synthetic 2D or direct 12H context is marked `N/A`.
+- Missing 5m confirmation candles are marked `N/A`, reject the setup, and do not crash the scan if 15m execution candles are available.
 - Missing CVD and liquidation context remain `N/A` unless supplied by a caller.
 - Malformed required candles reject the affected symbol with a clear failure reason, and the scanner continues to the next symbol.
 
@@ -508,23 +511,65 @@ Phase 12.1 updates the scanner and Liquidity-Grab Pullback integration to match 
 
 - `2D` is high-timeframe structure: trend, major support/resistance, and macro sweep zones.
 - `12H` is active directional bias and liquidity context.
-- `15m` is primary execution: sweep, BOS/CHoCH, OB/FVG pullback, fib alignment, RR, volume/delta when available, and Trust Meter gates.
-- `5m` is lower-timeframe confirmation and can confirm BOS/CHoCH after the sweep.
+- `15m` is primary execution: sweep, OB/FVG pullback, fib alignment, RR, volume/delta when available, and Trust Meter gates.
+- `5m` is mandatory lower-timeframe BOS/CHoCH confirmation after the sweep.
 - `4H` and `1H` remain extra context only where the scanner already supports them.
 
 Binance Futures does not support `2d` on `/klines`, so the scanner does not request Binance interval `2d`. It fetches `1d` candles, merges every two complete daily candles into one synthetic 2D candle, and marks `htf_2d_context_source = synthetic_from_1d`. If a complete synthetic 2D series cannot be created, `candles_2d: N/A` is preserved.
 
-The strategy never creates a setup from 2D or 12H alone. Higher timeframes provide context only; execution confirmation still requires the strict setup gates: confirmed sweep, BOS/CHoCH, OB/FVG pullback, fib alignment, volume/delta confirmation when available, RR gate, and Trust Meter gate. Weak setups remain rejected.
+The strategy never creates a setup from 2D or 12H alone. Higher timeframes provide context only; execution confirmation still requires the strict setup gates: confirmed 15m sweep, mandatory 5m BOS/CHoCH, 15m OB/FVG pullback, fib alignment, volume/delta confirmation when available, RR gate, and Trust Meter gate. Weak setups remain rejected.
 
 Verbose and JSON diagnostics include:
 
+- `htf_timeframe`, `bias_timeframe`, `execution_timeframe`, `confirmation_timeframe`
 - `htf_2d_context_source`
 - `candles_2d_count`, `candles_12h_count`, `candles_15m_count`, `candles_5m_count`
 - `htf_2d_trend`, `mtf_12h_trend`
 - `ltf_confirmation_timeframe`, `ltf_confirmation_status`
+- `execution_sweep_status`, `confirmation_structure_shift_status`, `confirmation_bos_choch_reason`
 - `first_failed_gate`
 
 This remains dry-run analysis only. The scanner and strategy do not place orders, do not use private exchange API access, and do not add withdrawal or transfer functionality.
+
+## Phase 12.2 Confirmation Timeframe Fix
+
+Phase 12.2 tightens the multi-timeframe confirmation path and makes scanner output easier to read:
+
+- `2D` is HTF structure and major sweep-zone context.
+- `12H` is active directional bias.
+- `15m` is execution: sweep, OB/FVG, fib, entry, stop, RR, and execution-side trade mapping.
+- `5m` is mandatory BOS/CHoCH confirmation after the 15m sweep.
+- No setup is created from 2D or 12H context alone.
+- If 5m BOS/CHoCH confirmation fails, the setup is rejected with `first_failed_gate = missing_confirmation_structure_shift`.
+- If 5m candles are missing, confirmation timeframe is marked `N/A`, the setup is rejected, and the reason is `5m confirmation candles missing.`
+
+Scanner JSON diagnostics now include the configured and resolved timeframe context:
+
+- `htf_timeframe`, `bias_timeframe`, `execution_timeframe`, `confirmation_timeframe`
+- `htf_2d_context_source`
+- `candles_2d_count`, `candles_12h_count`, `candles_15m_count`, `candles_5m_count`
+- `execution_sweep_status`
+- `confirmation_structure_shift_status`
+- `confirmation_bos_choch_reason`
+- `first_failed_gate`
+
+Diagnostics levels:
+
+- `summary`: one compact line per symbol.
+- `normal`: default readable block per symbol.
+- `full`: all detailed diagnostics retained for debugging.
+
+Rejected formatted strategy output stays concise:
+
+- `Challenge: No valid challenge setup.`
+- `Swing: No valid swing setup.`
+- `Scalp: No valid scalp setup.`
+
+Run Phase 12.2 scanner output:
+
+```powershell
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
+```
 
 ## Safety Boundaries
 

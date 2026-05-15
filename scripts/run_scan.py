@@ -16,6 +16,10 @@ from app.pipeline.scanner_runner import ScannerRunConfig, ScannerRunner, Scanner
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    diagnostics_level_explicit = any(
+        token == "--diagnostics-level" or token.startswith("--diagnostics-level=") for token in tokens
+    )
     parser = argparse.ArgumentParser(description="Run the Candle Craft dry-run scanner pipeline.")
     parser.add_argument("--symbols", nargs="*", default=["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     parser.add_argument("--exchange", choices=["binance", "bybit"], default="binance")
@@ -32,13 +36,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--confirmation-timeframe", default="5m")
     parser.add_argument("--aggressive-toggle", action="store_true")
     parser.add_argument("--show-strategy-output", action="store_true")
+    parser.add_argument("--diagnostics-level", choices=["summary", "normal", "full"], default="normal")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-json", type=Path)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.diagnostics_level_explicit = diagnostics_level_explicit
+    return args
 
 
 async def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    diagnostics_level = args.diagnostics_level
+    if args.verbose and not args.diagnostics_level_explicit:
+        diagnostics_level = "full"
+
     config = ScannerRunConfig(
         symbols=args.symbols,
         exchange=args.exchange,
@@ -48,7 +59,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         account_equity=Decimal(args.account_equity),
         risk_per_trade_pct=Decimal(args.risk_per_trade_pct),
         min_score_for_idea=Decimal(args.min_score_for_idea),
-        verbose=args.verbose,
+        verbose=diagnostics_level == "full",
         strategy_name=args.strategy,
         strategy_modes=args.modes,
         enable_strategy_output=True,
@@ -81,11 +92,12 @@ async def main(argv: Sequence[str] | None = None) -> None:
     print(f"Journal entries created: {result.journal_entries_created}")
     print("")
 
-    if not config.verbose and not args.show_strategy_output:
-        return
-
     for symbol_result in result.results:
-        if config.verbose:
+        if diagnostics_level == "summary":
+            print(_format_symbol_summary(symbol_result))
+        elif diagnostics_level == "normal":
+            print(_format_symbol_normal_block(symbol_result))
+        else:
             detail = symbol_result.rejection_reason or symbol_result.error_message or "N/A"
             print(f"{symbol_result.symbol}: {symbol_result.status.value} | {detail}")
             print("")
@@ -93,7 +105,50 @@ async def main(argv: Sequence[str] | None = None) -> None:
         if args.show_strategy_output:
             print("")
             print(f"{symbol_result.symbol} Candle Craft strategy output:")
-            print(_display(symbol_result.formatted_strategy_output))
+            print(_format_strategy_output_for_cli(symbol_result))
+
+
+def _format_symbol_summary(symbol_result: ScannerSymbolResult) -> str:
+    diagnostics = _representative_strategy_diagnostics(symbol_result)
+    failed_gate = _display(diagnostics.get("first_failed_gate"))
+    reject_text = failed_gate if failed_gate != NA else _diagnostic_reason(symbol_result)
+    execution_tf = _display(diagnostics.get("execution_timeframe"))
+    confirmation_tf = _display(diagnostics.get("confirmation_timeframe"))
+    if execution_tf == NA:
+        execution_tf = "15m"
+    if confirmation_tf == NA:
+        confirmation_tf = "5m"
+    return (
+        f"{symbol_result.symbol} | {_symbol_status_label(symbol_result)} | "
+        f"2D: {_display(diagnostics.get('htf_2d_trend'))} | "
+        f"12H: {_display(diagnostics.get('mtf_12h_trend'))} | "
+        f"{execution_tf} sweep: {_status_text(diagnostics.get('execution_sweep_status'))} | "
+        f"{confirmation_tf} BOS/CHoCH: {_status_text(diagnostics.get('confirmation_structure_shift_status'))} | "
+        f"Reject: {reject_text}"
+    )
+
+
+def _format_symbol_normal_block(symbol_result: ScannerSymbolResult) -> str:
+    diagnostics = _representative_strategy_diagnostics(symbol_result)
+    failed_gate = _display(diagnostics.get("first_failed_gate"))
+    reason = _normal_reason(symbol_result, diagnostics)
+    action = (
+        "No trade idea, no alert, no journal entry."
+        if _symbol_status_label(symbol_result) == "No Setup"
+        else "Continue through scanner gates."
+    )
+    return "\n".join(
+        (
+            f"{symbol_result.symbol} - {_symbol_status_label(symbol_result)}",
+            f"2D HTF: {_display(diagnostics.get('htf_2d_trend'))} | source: {_display(diagnostics.get('htf_2d_context_source'))}",
+            f"12H Bias: {_display(diagnostics.get('mtf_12h_trend'))}",
+            f"15m Execution: {_execution_text(diagnostics)}",
+            f"5m Confirmation: {_confirmation_text(diagnostics)}",
+            f"Failed gate: {failed_gate}",
+            f"Reason: {reason}",
+            f"Action: {action}",
+        )
+    )
 
 
 def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
@@ -131,6 +186,77 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
     )
 
 
+def _representative_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> dict[str, object]:
+    for mode in symbol_result.valid_strategy_modes:
+        diagnostics = symbol_result.strategy_diagnostics.get(mode)
+        if isinstance(diagnostics, dict):
+            return diagnostics
+    for diagnostics in symbol_result.strategy_diagnostics.values():
+        if isinstance(diagnostics, dict):
+            return diagnostics
+    return {}
+
+
+def _symbol_status_label(symbol_result: ScannerSymbolResult) -> str:
+    if symbol_result.error_message:
+        return "Failed"
+    if symbol_result.trade_idea is not None or symbol_result.valid_strategy_modes:
+        return "Setup"
+    return "No Setup"
+
+
+def _status_text(value: object) -> str:
+    text = _display(value)
+    if text == "not_evaluated":
+        return "not evaluated"
+    return text
+
+
+def _execution_text(diagnostics: dict[str, object]) -> str:
+    status = _status_text(diagnostics.get("execution_sweep_status"))
+    sweep_text = _display(diagnostics.get("sweep_diagnostics")).lower()
+    if status == "passed":
+        if "bearish" in sweep_text:
+            return "bearish sweep detected"
+        if "bullish" in sweep_text:
+            return "bullish sweep detected"
+        return "sweep detected"
+    if status == "failed":
+        return "sweep failed"
+    return status
+
+
+def _confirmation_text(diagnostics: dict[str, object]) -> str:
+    status = _status_text(diagnostics.get("confirmation_structure_shift_status"))
+    if status == "passed":
+        return "BOS/CHoCH passed"
+    if status == "failed":
+        return "BOS/CHoCH failed"
+    return status
+
+
+def _normal_reason(symbol_result: ScannerSymbolResult, diagnostics: dict[str, object]) -> str:
+    confirmation_reason = _display(diagnostics.get("confirmation_bos_choch_reason"))
+    if confirmation_reason != NA and diagnostics.get("first_failed_gate") == "missing_confirmation_structure_shift":
+        return confirmation_reason
+    hard_rejections = diagnostics.get("hard_rejection_reasons")
+    if isinstance(hard_rejections, Sequence) and not isinstance(hard_rejections, (str, bytes)) and hard_rejections:
+        return str(hard_rejections[0])
+    return _diagnostic_reason(symbol_result)
+
+
+def _format_strategy_output_for_cli(symbol_result: ScannerSymbolResult) -> str:
+    if not symbol_result.valid_strategy_modes:
+        return "\n".join(
+            (
+                "Challenge: No valid challenge setup.",
+                "Swing: No valid swing setup.",
+                "Scalp: No valid scalp setup.",
+            )
+        )
+    return _display(symbol_result.formatted_strategy_output)
+
+
 def _diagnostic_reason(symbol_result: ScannerSymbolResult) -> str:
     if symbol_result.rejection_reasons:
         return "; ".join(symbol_result.rejection_reasons)
@@ -162,22 +288,27 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
         failed_gates = _sequence_text(tuple(str(value) for value in diagnostics.get("gates_failed", ())))
         hard_rejections = _sequence_text(tuple(str(value) for value in diagnostics.get("hard_rejection_reasons", ())))
         candles_12h_count = int(diagnostics.get("candles_12h_count") or 0)
-        ltf_timeframe = _display(diagnostics.get("ltf_confirmation_timeframe"))
-        ltf_status = _display(diagnostics.get("ltf_confirmation_status"))
+        htf_timeframe = _display(diagnostics.get("htf_timeframe"))
+        bias_timeframe = _display(diagnostics.get("bias_timeframe"))
+        execution_timeframe = _display(diagnostics.get("execution_timeframe"))
+        confirmation_timeframe = _display(diagnostics.get("confirmation_timeframe"))
         lines.extend(
             (
                 f"{mode}: valid={_bool_text(bool(diagnostics.get('is_valid')))} "
                 f"trust={_display(diagnostics.get('trust_grade'))} "
                 f"{_display(diagnostics.get('trust_percentage'))}%",
-                f"{mode} 2D context: {_context_source_text(_display(diagnostics.get('htf_2d_context_source')))}",
-                f"{mode} 12H context: {'direct' if candles_12h_count > 0 else NA}",
+                f"{mode} {htf_timeframe.upper()} context: {_context_source_text(_display(diagnostics.get('htf_2d_context_source')))}",
+                f"{mode} {bias_timeframe.upper()} bias: {'direct' if candles_12h_count > 0 else NA}",
                 f"{mode} candles: 2D={_display(diagnostics.get('candles_2d_count'))}, "
                 f"12H={_display(diagnostics.get('candles_12h_count'))}, "
                 f"15m={_display(diagnostics.get('candles_15m_count'))}, "
                 f"5m={_display(diagnostics.get('candles_5m_count'))}",
                 f"{mode} HTF/MTF trend: 2D={_display(diagnostics.get('htf_2d_trend'))}, "
                 f"12H={_display(diagnostics.get('mtf_12h_trend'))}",
-                f"{mode} LTF confirmation: 15m / 5m; selected={ltf_timeframe}; status={ltf_status}",
+                f"{mode} {execution_timeframe} execution sweep: {_status_text(diagnostics.get('execution_sweep_status'))}",
+                f"{mode} {confirmation_timeframe} confirmation BOS/CHoCH: "
+                f"{_status_text(diagnostics.get('confirmation_structure_shift_status'))}",
+                f"{mode} confirmation reason: {_display(diagnostics.get('confirmation_bos_choch_reason'))}",
                 f"{mode} first failed gate: {_display(diagnostics.get('first_failed_gate'))}",
                 f"{mode} final decision: {'valid setup' if diagnostics.get('is_valid') else 'no setup'}",
                 f"{mode} failed gates: {failed_gates}",
