@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, and Phase 10 scanner-runner orchestration.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, and Phase 11 liquidity-grab pullback strategy analysis.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -32,7 +32,8 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 |   |-- db/
 |   |-- models/
 |   |-- pipeline/
-|   `-- scoring/
+|   |-- scoring/
+|   `-- strategies/
 |-- scripts/
 |-- tests/
 |-- docker-compose.yml
@@ -96,7 +97,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, and the Phase 10 scanner runner. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, and the Phase 11 liquidity-grab pullback engine. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -391,6 +392,58 @@ python scripts/run_scan.py
 
 The script scans `BTCUSDT`, `ETHUSDT`, and `SOLUSDT` on Binance Futures by default using public endpoints only. It prints a scanner summary and keeps alerts dry-run.
 
+## Phase 11 Liquidity-Grab Pullback Engine
+
+Phase 11 adds `LiquidityGrabEngine` under `app/strategies` for deterministic setup detection and formatting:
+
+- It analyzes supplied candles and context only. It does not call live APIs, use private exchange access, place orders, route orders, calculate exchange liquidation, withdraw funds, or transfer funds.
+- The required model is strict: confirmed liquidity sweep, BOS/CHoCH by candle close, limit pullback into a refined OB/FVG, fib alignment, RR validation, and Trust Meter gating.
+- Hard requirements reject the setup. The engine prefers no setup over weak setup and does not loosen gates to create more alerts.
+- Missing optional derivatives/orderflow/context data is marked `N/A`; supplied unreliable context containing `Unverified` is preserved as `Unverified`.
+
+Supported modes:
+
+- `challenge`: strictest mode. Requires Trust Meter >= 85, RR >= 3.0, fixed 5% risk text, limit pullback entries only, no meme/illiquid token classification, and no active BTC/event guard when provided. Invalid Challenge output exposes the exact message `No valid challenge setup.`
+- `swing`: uses 1h or 4h execution candles where available, with 15m fallback, and applies the base RR >= 2.5 gate.
+- `scalp`: uses 15m execution candles where available, with 5m fallback, and requires the pullback entry to remain valid within the short LTF window.
+
+Trust Meter scoring totals 12 points:
+
+- Sweep magnitude: 0 to 2
+- Clean BOS/CHoCH: 0 to 2
+- OB/FVG quality: 0 to 2
+- Fib alignment: 0 to 1
+- Volume/Delta confirmation: 0 to 2
+- HTF bias alignment: 0 to 2
+- BTC/BTC.D context supportive: 0 to 1
+
+Trust Meter percent is `min(100, 10 * score + 20)`. Grades are `A` at 85% or higher, `B` from 75% to 84%, and `No trade` below 75%.
+
+Shortened formatted example:
+
+```text
+🟢 Challenge Setup
+No valid challenge setup.
+
+🔵 Swing Setup
+1) HTF Structure (2D)
+• Current price: [112].
+• Trend: [bullish].
+• Key levels: Support [N/A], Resistance [120].
+
+3) Trade Map
+• Bias: [long].
+• Sweep Zone: [85 -> 90].
+• Entry: [97 - 99].
+• Stop: [83.275].
+• TPs: [TP1 112], [TP2 142.175], [TP3 opt N/A].
+• RR: [3].
+• Trust Meter: [A + 100%].
+👉 SOLUSDT = Swing A.
+
+⚔️ Candle Craft | Signal. Structure. Execution.
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -402,3 +455,4 @@ The script scans `BTCUSDT`, `ETHUSDT`, and `SOLUSDT` on Binance Futures by defau
 - Alert delivery is notification-only. It does not place orders, use private exchange access, or add trading execution.
 - Journal tracking is in-memory outcome tracking only. It does not place orders, use private exchange access, or persist records yet.
 - The scanner runner is orchestration only. It does not place orders, use private exchange access, or create a trade idea unless all configured quality gates pass.
+- The liquidity-grab pullback engine is strategy analysis and formatting only. It does not place orders, use private exchange access, or convert a setup into live execution.
