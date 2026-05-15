@@ -52,6 +52,50 @@ def _flat_candles() -> list[dict[str, Decimal | int]]:
     ]
 
 
+def _strategy_pullback_candles() -> list[dict[str, Decimal | int]]:
+    candles: list[dict[str, Decimal | int]] = []
+    for index in range(184):
+        candles.append(
+            {
+                "timestamp": index,
+                "open": Decimal("100"),
+                "high": Decimal("105"),
+                "low": Decimal("95"),
+                "close": Decimal("100"),
+                "volume": Decimal("100"),
+            }
+        )
+
+    pattern: list[dict[str, Decimal | int]] = []
+    for index in range(36):
+        pattern.append(
+            {
+                "timestamp": 184 + index,
+                "open": Decimal("100"),
+                "high": Decimal("105"),
+                "low": Decimal("95"),
+                "close": Decimal("100"),
+                "volume": Decimal("100"),
+            }
+        )
+
+    pattern[20]["low"] = Decimal("90")
+    pattern[24]["high"] = Decimal("110")
+    pattern[30]["low"] = Decimal("85")
+    pattern[30]["close"] = Decimal("91")
+    pattern[30]["volume"] = Decimal("200")
+    pattern[33]["open"] = Decimal("99")
+    pattern[33]["close"] = Decimal("97")
+    pattern[33]["low"] = Decimal("95")
+    pattern[33]["high"] = Decimal("100")
+    pattern[35]["open"] = Decimal("104")
+    pattern[35]["high"] = Decimal("114")
+    pattern[35]["low"] = Decimal("101")
+    pattern[35]["close"] = Decimal("112")
+    pattern[35]["volume"] = Decimal("300")
+    return candles + pattern
+
+
 def _bos_without_stop_candles() -> list[dict[str, Decimal | int]]:
     candles: list[dict[str, Decimal | int]] = []
     for index in range(220):
@@ -84,18 +128,24 @@ class FakeExchangeClient:
         open_interest: Decimal | str = Decimal("105"),
         previous_open_interest: Decimal | str = Decimal("100"),
         failing_symbols: set[str] | None = None,
+        failing_timeframes: set[str] | None = None,
     ) -> None:
         self.candles_by_symbol = candles_by_symbol
         self.funding = funding
         self.open_interest = open_interest
         self.previous_open_interest = previous_open_interest
         self.failing_symbols = failing_symbols or set()
+        self.failing_timeframes = failing_timeframes or set()
         self.requested_symbols: list[str] = []
+        self.requested_klines: list[tuple[str, str]] = []
 
     async def get_klines(self, symbol: str, interval: str, limit: int) -> list[dict[str, Decimal | int]]:
         self.requested_symbols.append(symbol)
+        self.requested_klines.append((symbol, interval))
         if symbol in self.failing_symbols:
             raise RuntimeError(f"mocked kline failure for {symbol}")
+        if interval in self.failing_timeframes:
+            raise RuntimeError(f"mocked kline failure for {symbol} {interval}")
         return self.candles_by_symbol[symbol][-limit:]
 
     async def get_ticker(self, symbol: str) -> dict[str, Decimal | str | int]:
@@ -152,7 +202,7 @@ def _config(symbols: list[str], **overrides: object) -> ScannerRunConfig:
 
 
 def test_scanner_handles_one_valid_mocked_symbol() -> None:
-    client = FakeExchangeClient({"BTCUSDT": _trend_candles_with_valid_setup()})
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
     result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
 
     symbol_result = result.results[0]
@@ -160,7 +210,10 @@ def test_scanner_handles_one_valid_mocked_symbol() -> None:
     assert ScannerPipelineStatus.IDEA_CREATED in symbol_result.status_history
     assert ScannerPipelineStatus.ALERT_DRY_RUN_CREATED in symbol_result.status_history
     assert symbol_result.trade_idea is not None
+    assert symbol_result.trade_idea.setup_type == "liquidity_grab_pullback_challenge"
     assert symbol_result.trade_idea.quality_gate_result.passed is True
+    assert symbol_result.strategy_name == "liquidity_grab_pullback"
+    assert symbol_result.valid_strategy_modes == ("challenge", "swing", "scalp")
     assert result.trade_ideas_created == 1
 
 
@@ -171,7 +224,8 @@ def test_scanner_handles_no_setup() -> None:
     symbol_result = result.results[0]
     assert symbol_result.status == ScannerPipelineStatus.SCANNED_NO_SETUP
     assert symbol_result.trade_idea is None
-    assert "No sweep, BOS, or CHoCH" in str(symbol_result.rejection_reason)
+    assert symbol_result.rejection_reason == "No valid Liquidity-Grab Pullback setup."
+    assert symbol_result.rejection_stage == "strategy"
 
 
 def test_verbose_config_defaults_to_false() -> None:
@@ -191,17 +245,19 @@ def test_scanner_diagnostics_exist_for_no_setup_result() -> None:
     assert symbol_result.sweep_detected is False
     assert symbol_result.bos_detected is False
     assert symbol_result.choch_detected is False
-    assert symbol_result.rejection_stage == "technical"
-    assert symbol_result.rejection_reasons == ("No sweep, BOS, or CHoCH context was detected.",)
+    assert symbol_result.rejection_stage == "strategy"
+    assert symbol_result.rejection_reasons == ("No valid Liquidity-Grab Pullback setup.",)
+    assert "swing" in symbol_result.strategy_diagnostics
 
 
 def test_scanner_continues_if_one_symbol_fails() -> None:
     client = FakeExchangeClient(
         {
             "FAILUSDT": _flat_candles(),
-            "BTCUSDT": _trend_candles_with_valid_setup(),
+            "BTCUSDT": _strategy_pullback_candles(),
         },
         failing_symbols={"FAILUSDT"},
+        failing_timeframes={"2d"},
     )
 
     result = run(ScannerRunner(exchange_client=client).run(_config(["FAILUSDT", "BTCUSDT"])))
@@ -214,7 +270,7 @@ def test_scanner_continues_if_one_symbol_fails() -> None:
 
 def test_scanner_rejects_candidate_without_invalidation() -> None:
     client = FakeExchangeClient({"BTCUSDT": _bos_without_stop_candles()})
-    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"], enable_strategy_output=False)))
 
     symbol_result = result.results[0]
     assert symbol_result.status == ScannerPipelineStatus.REJECTED_BY_TECHNICAL
@@ -226,9 +282,10 @@ def test_scanner_creates_dry_run_alert_only_when_idea_passes_gates() -> None:
     alert_agent = SpyAlertAgent()
     client = FakeExchangeClient(
         {
-            "BTCUSDT": _trend_candles_with_valid_setup(),
+            "BTCUSDT": _strategy_pullback_candles(),
             "ETHUSDT": _flat_candles(),
-        }
+        },
+        failing_timeframes={"2d"},
     )
 
     result = run(ScannerRunner(exchange_client=client, alert_agent=alert_agent).run(_config(["BTCUSDT", "ETHUSDT"])))
@@ -243,9 +300,10 @@ def test_scanner_creates_dry_run_alert_only_when_idea_passes_gates() -> None:
 def test_scanner_creates_journal_entry_only_when_idea_exists() -> None:
     client = FakeExchangeClient(
         {
-            "BTCUSDT": _trend_candles_with_valid_setup(),
+            "BTCUSDT": _strategy_pullback_candles(),
             "ETHUSDT": _flat_candles(),
-        }
+        },
+        failing_timeframes={"2d"},
     )
 
     result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT", "ETHUSDT"])))
@@ -257,7 +315,7 @@ def test_scanner_creates_journal_entry_only_when_idea_exists() -> None:
 
 def test_dry_run_alert_does_not_call_telegram_live() -> None:
     alert_agent = SpyAlertAgent()
-    client = FakeExchangeClient({"BTCUSDT": _trend_candles_with_valid_setup()})
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
 
     result = run(ScannerRunner(exchange_client=client, alert_agent=alert_agent).run(_config(["BTCUSDT"])))
 
@@ -296,4 +354,60 @@ def test_tests_use_mocked_exchange_client_without_live_api_calls() -> None:
     client = FakeExchangeClient({"BTCUSDT": _flat_candles()})
     run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
 
-    assert client.requested_symbols == ["BTCUSDT"]
+    assert client.requested_klines
+    assert all(symbol == "BTCUSDT" for symbol, _interval in client.requested_klines)
+
+
+def test_scanner_returns_strategy_results_output_and_diagnostics() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    symbol_result = result.results[0]
+    assert "challenge" in symbol_result.strategy_results
+    assert "Challenge Setup" in symbol_result.formatted_strategy_output
+    assert "sweep_diagnostics" in symbol_result.strategy_diagnostics["challenge"]
+    assert "candles_2d: N/A" in symbol_result.strategy_missing_data
+
+
+def test_challenge_invalid_output_remains_exact_message() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _flat_candles()})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    challenge_result = result.results[0].strategy_results["challenge"]
+    assert challenge_result.formatted_output.challenge_setup == "No valid challenge setup."
+
+
+def test_rejected_strategy_does_not_create_trade_idea_alert_or_journal() -> None:
+    alert_agent = SpyAlertAgent()
+    client = FakeExchangeClient({"BTCUSDT": _flat_candles()})
+    result = run(ScannerRunner(exchange_client=client, alert_agent=alert_agent).run(_config(["BTCUSDT"])))
+
+    symbol_result = result.results[0]
+    assert symbol_result.status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert symbol_result.trade_idea is None
+    assert symbol_result.alert_result is None
+    assert symbol_result.journal_entry is None
+    assert alert_agent.calls == []
+
+
+def test_missing_strategy_context_is_marked_na() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    symbol_result = result.results[0]
+    assert "candles_2d: N/A" in symbol_result.strategy_missing_data
+    assert "cvd: N/A" in symbol_result.strategy_missing_data
+    assert "liquidation_data: N/A" in symbol_result.strategy_missing_data
+    assert "candles_2d: N/A" in symbol_result.missing_data
+
+
+def test_one_noncritical_timeframe_failure_does_not_crash_symbol_scan() -> None:
+    client = FakeExchangeClient(
+        {"BTCUSDT": _strategy_pullback_candles()},
+        failing_timeframes={"2d", "4h"},
+    )
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    symbol_result = result.results[0]
+    assert symbol_result.status != ScannerPipelineStatus.FAILED
+    assert "candles_4h: N/A" in symbol_result.strategy_missing_data

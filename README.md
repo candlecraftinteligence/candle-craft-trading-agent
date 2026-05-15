@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, and Phase 11 liquidity-grab pullback strategy analysis.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, and Phase 12 scanner strategy integration.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -97,7 +97,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, and the Phase 11 liquidity-grab pullback engine. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, and the Phase 12 scanner strategy integration. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -467,6 +467,40 @@ Save scanner JSON output:
 python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --output-json scan_output.json
 ```
 
+## Phase 12 Scanner Strategy Integration
+
+Phase 12 connects the Phase 11 Liquidity-Grab Pullback Engine into the Phase 10 Scanner Runner:
+
+- `ScannerRunConfig` now supports `strategy_name`, `strategy_modes`, `enable_strategy_output`, `include_formatted_strategy_output`, and `aggressive_toggle`.
+- The default strategy is `liquidity_grab_pullback` with `challenge`, `swing`, and `scalp` modes.
+- For each symbol, the scanner attempts to fetch 2d, 12h, 4h, 1h, 15m, and 5m candles for strategy context. If 2d is not available from the exchange client, `candles_2d: N/A` is preserved and the engine uses the nearest available higher-timeframe context without guessing.
+- Strategy results, formatted Candle Craft output, diagnostics, valid/rejected modes, missing data, and unverified data are included in the scanner result and JSON export.
+- A trade idea is created only when the strategy returns at least one valid A/B setup and the existing technical, derivatives, risk, scoring, and trade-idea gates also pass.
+- If no valid Liquidity-Grab Pullback setup exists, the symbol returns `scanned_no_setup`, `rejection_stage = strategy`, and `No valid Liquidity-Grab Pullback setup.`
+- Rejected strategy setups are diagnostics only. They are not signals, do not create trade ideas, do not create alerts, and do not create journal entries.
+- Telegram remains dry-run by default. The scanner does not live-send Telegram alerts unless `dry_run_alerts=False` is explicitly provided by a caller.
+- No trades are placed, no orders are routed, no private exchange API access is used, and no withdrawals or transfers exist.
+
+Run the scanner with strategy output:
+
+```powershell
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --interval 15m --candle-limit 250 --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --verbose --show-strategy-output
+```
+
+CLI behavior:
+
+- Normal mode prints the scan summary and per-symbol status.
+- `--verbose` prints scanner diagnostics and strategy diagnostics.
+- `--show-strategy-output` prints the formatted Challenge, Swing, and Scalp Candle Craft sections for each symbol.
+- `--output-json scan_output.json` writes the full scanner result, including strategy results, formatted output, diagnostics, `missing_data`, and `unverified_data`, without secrets or API keys.
+
+Missing data policy:
+
+- Missing data is always marked `N/A`; unreliable supplied data is preserved as `Unverified`.
+- Missing optional timeframes such as 2d or a failed non-critical timeframe fetch do not crash the scan if enough execution candles remain.
+- Missing CVD and liquidation context remain `N/A` unless supplied by a caller.
+- Malformed required candles reject the affected symbol with a clear failure reason, and the scanner continues to the next symbol.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -479,3 +513,4 @@ python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --output-json scan_
 - Journal tracking is in-memory outcome tracking only. It does not place orders, use private exchange access, or persist records yet.
 - The scanner runner is orchestration only. It does not place orders, use private exchange access, or create a trade idea unless all configured quality gates pass.
 - The liquidity-grab pullback engine is strategy analysis and formatting only. It does not place orders, use private exchange access, or convert a setup into live execution.
+- The Phase 12 scanner strategy path is still dry-run analysis only. It can format a dry-run alert after all gates pass, but rejected setups remain diagnostics only.

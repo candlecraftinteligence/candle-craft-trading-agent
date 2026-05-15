@@ -18,11 +18,26 @@ from app.agents.trade_idea import TradeIdeaAgent, TradeIdeaResult
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
+from app.strategies.liquidity_grab_pullback import (
+    LiquidityGrabEngine,
+    LiquidityGrabInput,
+    LiquidityGrabMode,
+    LiquidityGrabResult,
+    LiquidityGrabSetup,
+)
 
 logger = logging.getLogger(__name__)
 
 OUTPUT_QUANT = Decimal("0.00000001")
 MIN_DERIVATIVES_SCORE = Decimal("40")
+LIQUIDITY_GRAB_STRATEGY_NAME = "liquidity_grab_pullback"
+DEFAULT_STRATEGY_MODES = (
+    LiquidityGrabMode.challenge,
+    LiquidityGrabMode.swing,
+    LiquidityGrabMode.scalp,
+)
+STRATEGY_TIMEFRAMES = ("2d", "12h", "4h", "1h", "15m", "5m")
+NO_VALID_STRATEGY_SETUP_REASON = "No valid Liquidity-Grab Pullback setup."
 
 
 class ScannerPipelineStatus(str, Enum):
@@ -88,6 +103,11 @@ class ScannerRunConfig(BaseModel):
     leverage: Decimal | None = None
     min_score_for_idea: Decimal = Decimal("80")
     verbose: bool = False
+    strategy_name: str | None = LIQUIDITY_GRAB_STRATEGY_NAME
+    strategy_modes: tuple[LiquidityGrabMode, ...] = DEFAULT_STRATEGY_MODES
+    enable_strategy_output: bool = True
+    include_formatted_strategy_output: bool = True
+    aggressive_toggle: bool = False
 
     model_config = ConfigDict(frozen=True)
 
@@ -115,6 +135,29 @@ class ScannerRunConfig(BaseModel):
             return None
         return _decimal_from(value, "scanner_run_config")
 
+    @field_validator("strategy_name")
+    @classmethod
+    def _normalize_strategy_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if normalized != LIQUIDITY_GRAB_STRATEGY_NAME:
+            raise ValueError(f"unsupported strategy_name: {value!r}")
+        return normalized
+
+    @field_validator("strategy_modes", mode="before")
+    @classmethod
+    def _normalize_strategy_modes(cls, value: Any) -> Any:
+        if value is None:
+            return DEFAULT_STRATEGY_MODES
+        if isinstance(value, str):
+            return (value,)
+        if isinstance(value, Sequence):
+            return tuple(value)
+        return value
+
     @field_validator("interval")
     @classmethod
     def _interval_not_blank(cls, value: str) -> str:
@@ -140,6 +183,8 @@ class ScannerRunConfig(BaseModel):
             raise ValueError("risk_per_trade_pct must be greater than zero")
         if self.min_score_for_idea < 0 or self.min_score_for_idea > 100:
             raise ValueError("min_score_for_idea must be between 0 and 100")
+        if self.enable_strategy_output and self.strategy_name is not None and not self.strategy_modes:
+            raise ValueError("strategy_modes must include at least one mode when strategy output is enabled")
         return self
 
     @property
@@ -185,6 +230,14 @@ class ScannerSymbolResult(BaseModel):
     rejection_reasons: tuple[str, ...] = ()
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
+    strategy_name: str = NA
+    strategy_results: dict[str, LiquidityGrabResult] = Field(default_factory=dict)
+    formatted_strategy_output: str = NA
+    strategy_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    valid_strategy_modes: tuple[str, ...] = ()
+    rejected_strategy_modes: tuple[str, ...] = ()
+    strategy_missing_data: tuple[str, ...] = ()
+    strategy_unverified_data: tuple[str, ...] = ()
     technical_result: TechnicalStructureResult | None = None
     derivatives_result: DerivativesOrderflowResult | None = None
     risk_decision: RiskDecision | None = None
@@ -248,6 +301,20 @@ class _OptionalMarketData(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
 
+class _StrategyExecution(BaseModel):
+    strategy_name: str = NA
+    strategy_results: dict[str, LiquidityGrabResult] = Field(default_factory=dict)
+    formatted_strategy_output: str = NA
+    strategy_diagnostics: dict[str, Any] = Field(default_factory=dict)
+    valid_strategy_modes: tuple[str, ...] = ()
+    rejected_strategy_modes: tuple[str, ...] = ()
+    strategy_missing_data: tuple[str, ...] = ()
+    strategy_unverified_data: tuple[str, ...] = ()
+    selected_setup: LiquidityGrabSetup | None = None
+
+    model_config = ConfigDict(frozen=True)
+
+
 class ScannerRunner:
     """Connect existing read-only analysis modules into one dry-run scanner flow.
 
@@ -264,6 +331,7 @@ class ScannerRunner:
         derivatives_agent: DerivativesOrderflowAgent | None = None,
         risk_manager: RiskManagerAgent | None = None,
         scoring_engine: OpportunityScoringEngine | None = None,
+        strategy_engine: LiquidityGrabEngine | None = None,
         trade_idea_agent: TradeIdeaAgent | None = None,
         alert_agent: AlertAgent | None = None,
         journal_agent: JournalAgent | None = None,
@@ -274,6 +342,7 @@ class ScannerRunner:
         self.derivatives_agent = derivatives_agent or DerivativesOrderflowAgent()
         self.risk_manager = risk_manager or RiskManagerAgent()
         self.scoring_engine = scoring_engine or OpportunityScoringEngine()
+        self.strategy_engine = strategy_engine or LiquidityGrabEngine()
         self.trade_idea_agent = trade_idea_agent or TradeIdeaAgent()
         self.alert_agent = alert_agent or AlertAgent()
         self.journal_agent = journal_agent or JournalAgent()
@@ -342,6 +411,17 @@ class ScannerRunner:
         technical = self.technical_agent.analyze(technical_candles)
         base_missing = list(optional_data.missing_data)
         base_unverified = list(optional_data.unverified_data)
+        strategy_execution = await self._run_strategy(
+            client=client,
+            symbol=symbol,
+            config=config,
+            primary_candles=candles,
+            current_price=current_price,
+            optional_data=optional_data,
+            technical=technical,
+        )
+        base_missing.extend(strategy_execution.strategy_missing_data)
+        base_unverified.extend(strategy_execution.strategy_unverified_data)
 
         if not technical.is_valid:
             reason = "; ".join(technical.errors) if technical.errors else "Technical structure is invalid."
@@ -356,6 +436,7 @@ class ScannerRunner:
                 unverified_data=base_unverified,
                 rejection_reason=reason,
                 technical_result=technical,
+                strategy_execution=strategy_execution,
             )
 
         derivatives_input = _derivatives_input(
@@ -370,30 +451,56 @@ class ScannerRunner:
         base_missing.extend(_missing_data_from_derivatives(derivatives))
         base_unverified.extend(_unverified_data_from_derivatives(derivatives))
 
-        candidate_result = _build_candidate(
-            symbol=symbol,
-            exchange=config.exchange,
-            interval=config.interval,
-            candles=candles,
-            current_price=current_price,
-            technical=technical,
-        )
-        if candidate_result.candidate is None:
-            return self._symbol_result(
+        candidate: _CandidateSetup
+        if config.enable_strategy_output and config.strategy_name == LIQUIDITY_GRAB_STRATEGY_NAME:
+            if strategy_execution.selected_setup is None:
+                return self._symbol_result(
+                    symbol=symbol,
+                    status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+                    status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+                    candles=candles,
+                    current_price=current_price,
+                    optional_data=optional_data,
+                    missing_data=base_missing,
+                    unverified_data=base_unverified,
+                    rejection_reason=NO_VALID_STRATEGY_SETUP_REASON,
+                    technical_result=technical,
+                    derivatives_result=derivatives,
+                    strategy_execution=strategy_execution,
+                    rejection_stage_override="strategy",
+                )
+            candidate = _candidate_from_strategy_setup(
+                setup=strategy_execution.selected_setup,
                 symbol=symbol,
-                status=candidate_result.status,
-                status_history=(candidate_result.status,),
+                exchange=config.exchange,
+                fallback_interval=config.interval,
+            )
+        else:
+            candidate_result = _build_candidate(
+                symbol=symbol,
+                exchange=config.exchange,
+                interval=config.interval,
                 candles=candles,
                 current_price=current_price,
-                optional_data=optional_data,
-                missing_data=[*base_missing, *candidate_result.missing_data],
-                unverified_data=base_unverified,
-                rejection_reason=candidate_result.reason,
-                technical_result=technical,
-                derivatives_result=derivatives,
+                technical=technical,
             )
+            if candidate_result.candidate is None:
+                return self._symbol_result(
+                    symbol=symbol,
+                    status=candidate_result.status,
+                    status_history=(candidate_result.status,),
+                    candles=candles,
+                    current_price=current_price,
+                    optional_data=optional_data,
+                    missing_data=[*base_missing, *candidate_result.missing_data],
+                    unverified_data=base_unverified,
+                    rejection_reason=candidate_result.reason,
+                    technical_result=technical,
+                    derivatives_result=derivatives,
+                    strategy_execution=strategy_execution,
+                )
+            candidate = candidate_result.candidate
 
-        candidate = candidate_result.candidate
         derivative_rejection = _derivatives_rejection(candidate.direction, derivatives)
         if derivative_rejection is not None:
             return self._symbol_result(
@@ -408,6 +515,7 @@ class ScannerRunner:
                 rejection_reason=derivative_rejection,
                 technical_result=technical,
                 derivatives_result=derivatives,
+                strategy_execution=strategy_execution,
             )
 
         data_quality_score = _data_quality_score(technical, derivatives, base_missing)
@@ -440,8 +548,10 @@ class ScannerRunner:
                 technical_result=technical,
                 derivatives_result=derivatives,
                 risk_decision=risk_decision,
+                strategy_execution=strategy_execution,
             )
 
+        strategy_catalyst_score = _strategy_catalyst_score(strategy_execution.selected_setup)
         score_result = self.scoring_engine.score(
             {
                 "technical_score": Decimal(technical.structure_score),
@@ -449,6 +559,7 @@ class ScannerRunner:
                 "risk_approved": risk_decision.approved,
                 "best_rr": _best_rr_for_scoring(risk_decision),
                 "liquidity_score": _liquidity_score(candles, optional_data.ticker),
+                "catalyst_score": strategy_catalyst_score,
                 "data_quality_score": data_quality_score,
                 "invalidation_present": risk_decision.invalidation_reason != NA,
                 "setup_location": candidate.setup_location,
@@ -476,6 +587,7 @@ class ScannerRunner:
                 derivatives_result=derivatives,
                 risk_decision=risk_decision,
                 score_result=score_result,
+                strategy_execution=strategy_execution,
             )
 
         trade_idea = self.trade_idea_agent.create(
@@ -520,6 +632,7 @@ class ScannerRunner:
                 derivatives_result=derivatives,
                 risk_decision=risk_decision,
                 score_result=score_result,
+                strategy_execution=strategy_execution,
             )
 
         status_history = [ScannerPipelineStatus.IDEA_CREATED]
@@ -575,7 +688,116 @@ class ScannerRunner:
             trade_idea=trade_idea,
             alert_result=alert_result,
             journal_entry=journal_entry,
+            strategy_execution=strategy_execution,
         )
+
+    async def _run_strategy(
+        self,
+        *,
+        client: BaseExchangeClient,
+        symbol: str,
+        config: ScannerRunConfig,
+        primary_candles: Sequence[Any],
+        current_price: MaybeDecimal,
+        optional_data: _OptionalMarketData,
+        technical: TechnicalStructureResult,
+    ) -> _StrategyExecution:
+        if not config.enable_strategy_output or config.strategy_name is None:
+            return _StrategyExecution()
+
+        candles_by_timeframe, timeframe_missing = await self._fetch_strategy_timeframe_candles(
+            client=client,
+            symbol=symbol,
+            config=config,
+            primary_candles=primary_candles,
+        )
+        base_input = _liquidity_grab_input(
+            symbol=symbol,
+            candles_by_timeframe=candles_by_timeframe,
+            current_price=current_price,
+            optional_data=optional_data,
+            technical=technical,
+            aggressive_toggle=config.aggressive_toggle,
+        )
+
+        strategy_results: dict[str, LiquidityGrabResult] = {}
+        diagnostics: dict[str, Any] = {}
+        valid_modes: list[str] = []
+        rejected_modes: list[str] = []
+        missing_data = list(timeframe_missing)
+        unverified_data: list[str] = []
+        formatted_output = NA
+        selected_setup: LiquidityGrabSetup | None = None
+
+        for mode in config.strategy_modes:
+            mode_name = mode.value
+            strategy_input = LiquidityGrabInput.model_validate({**base_input, "mode": mode})
+            try:
+                result = self.strategy_engine.analyze(strategy_input)
+            except Exception as exc:
+                self.logger.warning("Strategy %s failed for symbol=%s mode=%s: %s", config.strategy_name, symbol, mode_name, exc)
+                diagnostics[mode_name] = {"error": str(exc)}
+                rejected_modes.append(mode_name)
+                continue
+
+            strategy_results[mode_name] = result
+            setup = _strategy_setup_for_mode(result, mode)
+            diagnostics[mode_name] = _strategy_diagnostics_for_setup(setup)
+            missing_data.extend(result.missing_data)
+            unverified_data.extend(result.unverified_data)
+
+            if formatted_output == NA and config.include_formatted_strategy_output:
+                formatted_output = result.formatted_output.full_text
+
+            if _is_valid_strategy_setup(setup):
+                valid_modes.append(mode_name)
+                if selected_setup is None:
+                    selected_setup = setup
+            else:
+                rejected_modes.append(mode_name)
+
+        return _StrategyExecution(
+            strategy_name=config.strategy_name,
+            strategy_results=strategy_results,
+            formatted_strategy_output=formatted_output,
+            strategy_diagnostics=diagnostics,
+            valid_strategy_modes=_unique_strings(valid_modes),
+            rejected_strategy_modes=_unique_strings(rejected_modes),
+            strategy_missing_data=_unique_strings(missing_data),
+            strategy_unverified_data=_unique_strings(unverified_data),
+            selected_setup=selected_setup,
+        )
+
+    async def _fetch_strategy_timeframe_candles(
+        self,
+        *,
+        client: BaseExchangeClient,
+        symbol: str,
+        config: ScannerRunConfig,
+        primary_candles: Sequence[Any],
+    ) -> tuple[dict[str, Sequence[Any]], tuple[str, ...]]:
+        candles_by_timeframe: dict[str, Sequence[Any]] = {}
+        missing_data: list[str] = []
+        primary_timeframe = config.interval.strip().lower()
+
+        for timeframe in STRATEGY_TIMEFRAMES:
+            if timeframe == primary_timeframe:
+                candles_by_timeframe[timeframe] = primary_candles
+                continue
+
+            try:
+                candles = await client.get_klines(symbol, timeframe, config.candle_limit)
+            except Exception as exc:
+                self.logger.warning("Optional strategy candles fetch failed for symbol=%s timeframe=%s: %s", symbol, timeframe, exc)
+                missing_data.append(f"candles_{timeframe}: N/A")
+                continue
+
+            if candles:
+                candles_by_timeframe[timeframe] = candles
+            else:
+                missing_data.append(f"candles_{timeframe}: N/A")
+
+        return candles_by_timeframe, _unique_strings(missing_data)
 
     async def _fetch_optional_market_data(self, client: BaseExchangeClient, symbol: str) -> _OptionalMarketData:
         missing_data: list[str] = []
@@ -661,9 +883,12 @@ class ScannerRunner:
         trade_idea: TradeIdeaResult | None = None,
         alert_result: AlertResult | None = None,
         journal_entry: JournalEntryResult | None = None,
+        strategy_execution: _StrategyExecution | None = None,
+        rejection_stage_override: str | None = None,
     ) -> ScannerSymbolResult:
         cleaned_missing = _unique_strings(missing_data)
         cleaned_unverified = _unique_strings(unverified_data)
+        strategy_execution = strategy_execution or _StrategyExecution()
         return ScannerSymbolResult(
             symbol=symbol,
             status=status,
@@ -693,10 +918,18 @@ class ScannerRunner:
             price_oi_relationship=derivatives_result.price_oi_relationship.classification
             if derivatives_result is not None
             else NA,
-            rejection_stage=_rejection_stage_for(status),
+            rejection_stage=rejection_stage_override or _rejection_stage_for(status),
             rejection_reasons=_rejection_reasons_for(status, rejection_reason),
             missing_data=cleaned_missing,
             unverified_data=cleaned_unverified,
+            strategy_name=strategy_execution.strategy_name,
+            strategy_results=strategy_execution.strategy_results,
+            formatted_strategy_output=strategy_execution.formatted_strategy_output,
+            strategy_diagnostics=strategy_execution.strategy_diagnostics,
+            valid_strategy_modes=strategy_execution.valid_strategy_modes,
+            rejected_strategy_modes=strategy_execution.rejected_strategy_modes,
+            strategy_missing_data=strategy_execution.strategy_missing_data,
+            strategy_unverified_data=strategy_execution.strategy_unverified_data,
             technical_result=technical_result,
             derivatives_result=derivatives_result,
             risk_decision=risk_decision,
@@ -753,6 +986,140 @@ def _technical_candles(candles: Sequence[Any]) -> tuple[dict[str, Any], ...]:
             }
         )
     return tuple(output)
+
+
+def _liquidity_grab_input(
+    *,
+    symbol: str,
+    candles_by_timeframe: Mapping[str, Sequence[Any]],
+    current_price: MaybeDecimal,
+    optional_data: _OptionalMarketData,
+    technical: TechnicalStructureResult,
+    aggressive_toggle: bool,
+) -> dict[str, Any]:
+    support_levels = _strategy_levels(technical.nearest_support, technical.recent_range_low)
+    resistance_levels = _strategy_levels(technical.nearest_resistance, technical.recent_range_high)
+    return {
+        "symbol": symbol,
+        "candles_2d": candles_by_timeframe.get("2d"),
+        "candles_12h": candles_by_timeframe.get("12h"),
+        "candles_4h": candles_by_timeframe.get("4h"),
+        "candles_1h": candles_by_timeframe.get("1h"),
+        "candles_15m": candles_by_timeframe.get("15m"),
+        "candles_5m": candles_by_timeframe.get("5m"),
+        "current_price": None if current_price == NA else current_price,
+        "user_support_levels": support_levels or None,
+        "user_resistance_levels": resistance_levels or None,
+        "funding": optional_data.funding,
+        "open_interest": optional_data.open_interest,
+        "cvd": None,
+        "liquidation_data": None,
+        "aggressive_toggle": aggressive_toggle,
+    }
+
+
+def _strategy_levels(*values: MaybeDecimal) -> tuple[Decimal, ...]:
+    levels: list[Decimal] = []
+    for value in values:
+        if value != NA:
+            levels.append(_quantize(value))
+    return tuple(levels)
+
+
+def _strategy_setup_for_mode(result: LiquidityGrabResult, mode: LiquidityGrabMode | str) -> LiquidityGrabSetup:
+    selected = LiquidityGrabMode(mode)
+    if selected == LiquidityGrabMode.challenge:
+        return result.challenge
+    if selected == LiquidityGrabMode.scalp:
+        return result.scalp
+    return result.swing
+
+
+def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]:
+    return {
+        "is_valid": setup.is_valid,
+        "status": setup.status,
+        "bias": setup.bias,
+        "timeframe": setup.timeframe,
+        "trust_grade": setup.trust_meter.grade,
+        "trust_percentage": setup.trust_meter.percentage,
+        "gates_passed": setup.gates_passed,
+        "gates_failed": setup.gates_failed,
+        "hard_rejection_reasons": setup.hard_rejection_reasons,
+        "sweep_diagnostics": setup.sweep_diagnostics,
+        "bos_choch_diagnostics": setup.structure_shift_diagnostics,
+        "ob_fvg_diagnostics": setup.ob_fvg_diagnostics,
+        "fib_diagnostics": setup.fib_diagnostics,
+        "rr_diagnostics": setup.rr_diagnostics,
+        "trust_meter_diagnostics": setup.trust_meter_diagnostics,
+        "strategy_diagnostics": setup.strategy_diagnostics,
+        "missing_data": setup.missing_data,
+        "unverified_data": setup.unverified_data,
+    }
+
+
+def _is_valid_strategy_setup(setup: LiquidityGrabSetup) -> bool:
+    return setup.is_valid and setup.trust_meter.grade in ("A", "B")
+
+
+def _candidate_from_strategy_setup(
+    *,
+    setup: LiquidityGrabSetup,
+    symbol: str,
+    exchange: str,
+    fallback_interval: str,
+) -> _CandidateSetup:
+    if setup.bias not in ("long", "short"):
+        raise ValueError("Valid strategy setup is missing trade bias.")
+    required_levels = (setup.entry_low, setup.entry_high, setup.entry, setup.stop, setup.tp1, setup.tp2)
+    if any(value == NA for value in required_levels):
+        raise ValueError("Valid strategy setup is missing required trade levels.")
+
+    take_profit_targets = tuple(
+        _quantize(value)
+        for value in (setup.tp1, setup.tp2, setup.tp3)
+        if value != NA
+    )
+    technical_summary = (
+        f"Liquidity-Grab Pullback {setup.mode.value} setup: {setup.structure_shift.kind} "
+        f"{setup.structure_shift.direction}; OB/FVG source {setup.entry_source}; "
+        f"RR to TP2 {setup.rr_to_tp2}; Trust Meter {setup.trust_meter.grade} "
+        f"{setup.trust_meter.percentage}%."
+    )
+    confirmed_facts = _unique_strings(
+        (
+            setup.sweep_diagnostics,
+            setup.structure_shift_diagnostics,
+            setup.ob_fvg_diagnostics,
+            setup.fib_diagnostics,
+            setup.rr_diagnostics,
+            setup.trust_meter_diagnostics,
+        )
+    )
+
+    return _CandidateSetup(
+        symbol=symbol,
+        exchange=exchange,
+        direction=setup.bias,
+        timeframe=setup.timeframe if setup.timeframe != NA else fallback_interval,
+        setup_type=f"liquidity_grab_pullback_{setup.mode.value}",
+        entry_price=_quantize(setup.entry),
+        entry_low=_quantize(setup.entry_low),
+        entry_high=_quantize(setup.entry_high),
+        stop_loss=_quantize(setup.stop),
+        take_profit_targets=take_profit_targets,
+        invalidation=setup.invalidation,
+        cancel_condition="Cancel if price reaches invalidation before entry or strategy gates are no longer valid.",
+        setup_location="edge" if setup.sweep.is_present else "breakout_retest",
+        technical_summary=technical_summary,
+        confirmed_facts=confirmed_facts,
+    )
+
+
+def _strategy_catalyst_score(setup: LiquidityGrabSetup | None) -> Decimal | None:
+    if setup is None or not _is_valid_strategy_setup(setup):
+        return None
+    return Decimal(setup.trust_meter.percentage)
 
 
 def _build_candidate(
