@@ -180,6 +180,7 @@ def test_strategy_cli_flags_accepted() -> None:
             "15m",
             "--confirmation-timeframe",
             "5m",
+            "--telegram-format",
         ]
     )
 
@@ -191,6 +192,7 @@ def test_strategy_cli_flags_accepted() -> None:
     assert args.bias_timeframe == "12h"
     assert args.execution_timeframe == "15m"
     assert args.confirmation_timeframe == "5m"
+    assert args.telegram_format is True
 
 
 def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None:
@@ -260,6 +262,32 @@ def test_show_strategy_output_prints_formatted_output(monkeypatch, capsys) -> No
     assert "Challenge: No valid challenge setup." in captured.out
     assert "Swing: No valid swing setup." in captured.out
     assert "Scalp: No valid scalp setup." in captured.out
+
+
+def test_show_strategy_output_with_telegram_format_prints_clean_message(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    asyncio.run(
+        run_scan.main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "--diagnostics-level",
+                "summary",
+                "--show-strategy-output",
+                "--telegram-format",
+            ]
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "BTCUSDT Candle Craft strategy output:" in captured.out
+    assert "BTCUSDT — No Valid Setup" in captured.out
+    assert "• Failed gate: missing_confirmation_structure_shift" in captured.out
+    assert "• Reason: No 5m BOS/CHoCH close beyond the required LTF swing." in captured.out
+    assert "• Action: No trade idea, no alert, no journal entry." in captured.out
+    assert "⚔️ Candle Craft | Signal. Structure. Execution." in captured.out
+    assert "Challenge: No valid challenge setup." not in captured.out
 
 
 def test_diagnostics_level_summary_prints_compact_symbol_result(monkeypatch, capsys) -> None:

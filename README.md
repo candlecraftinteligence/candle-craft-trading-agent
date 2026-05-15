@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, and Phase 15.2 multi-timeframe confirmation-to-pullback integration.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, and Phase 16 Telegram-ready scanner formatting.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -31,6 +31,7 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 |   |   |-- exchange_clients/
 |   |   `-- normalizers/
 |   |-- db/
+|   |-- formatters/
 |   |-- models/
 |   |-- pipeline/
 |   |-- scoring/
@@ -98,7 +99,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, and the Phase 15.2 confirmation-to-pullback integration. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, and the Phase 16 Telegram-ready formatter. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -495,6 +496,7 @@ CLI behavior:
 - `--diagnostics-level full` prints the detailed scanner diagnostics and strategy diagnostics.
 - `--verbose` maps to `--diagnostics-level full` unless `--diagnostics-level` is explicitly provided.
 - `--show-strategy-output` prints the formatted Challenge, Swing, and Scalp Candle Craft sections for each symbol.
+- `--telegram-format` changes `--show-strategy-output` to print Telegram-ready Candle Craft messages. It formats text only and does not send Telegram messages.
 - `--htf-timeframe`, `--bias-timeframe`, `--execution-timeframe`, and `--confirmation-timeframe` default to `2d`, `12h`, `15m`, and `5m`.
 - `--output-json scan_output.json` writes the full scanner result, including strategy results, formatted output, diagnostics, `missing_data`, and `unverified_data`, without secrets or API keys.
 
@@ -682,6 +684,22 @@ Phase 15.2 fixes the multi-timeframe confirmation-to-pullback handoff:
 - Rejection reasons are more specific, including `missing_confirmation_candles`, `no_displacement_candle`, `no_ob_or_fvg_zone`, `pullback_too_deep`, and `rr_below_minimum`.
 - Normal CLI output prints one failed gate, one reason, and one action instead of duplicating pullback rejection lines.
 
+## Phase 16 Telegram Formatter
+
+Phase 16 adds `app/formatters/telegram_formatter.py` for Telegram-ready Liquidity-Grab Pullback scanner output:
+
+- Valid setups are formatted as concise Candle Craft trade-map messages with HTF structure, orderflow/derivatives context, entry, stop, targets, RR, Trust Meter, invalidation, and risk warning.
+- Rejected setups are formatted as no-valid-setup messages with 2D/12H context, 15m sweep status, 5m BOS/CHoCH status, pullback status, failed gate, clean reason, and no-trade action.
+- Missing values remain `N/A`; unreliable values remain `Unverified` when present in scanner output.
+- Compact and full diagnostic formatter modes are available. `--diagnostics-level full` keeps diagnostic detail available when printing Telegram-ready strategy output.
+- The formatter is output-only. It does not call Telegram, create alerts, place orders, use private exchange endpoints, withdrawals, transfers, or change strategy gates.
+
+Run Phase 16 Telegram-ready scanner output:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level summary --show-strategy-output --telegram-format
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -699,3 +717,4 @@ Phase 15.2 fixes the multi-timeframe confirmation-to-pullback handoff:
 - The Phase 14 pullback-zone engine is deterministic validation only. It does not place orders, use private exchange API access, or loosen any sweep, confirmation, pullback, fib, RR, or Trust Meter gates.
 - The Phase 15 derivatives enrichment layer is public-data confluence only. It does not create setups, place orders, use private exchange API access, or loosen any technical strategy gate.
 - The Phase 15.2 confirmation-to-pullback fix is index propagation only. It does not add order execution, private exchange API access, withdrawals, transfers, or account endpoints.
+- The Phase 16 Telegram formatter is text output only. It does not send live Telegram messages, create alerts, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or loosen any strategy gate.

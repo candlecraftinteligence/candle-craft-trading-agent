@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.data.dtos import NA  # noqa: E402
+from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
 from app.pipeline.scanner_runner import ScannerRunConfig, ScannerRunner, ScannerSymbolResult  # noqa: E402
 
 
@@ -36,6 +37,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--confirmation-timeframe", default="5m")
     parser.add_argument("--aggressive-toggle", action="store_true")
     parser.add_argument("--show-strategy-output", action="store_true")
+    parser.add_argument("--telegram-format", action="store_true")
     parser.add_argument("--diagnostics-level", choices=["summary", "normal", "full"], default="normal")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-json", type=Path)
@@ -105,7 +107,10 @@ async def main(argv: Sequence[str] | None = None) -> None:
         if args.show_strategy_output:
             print("")
             print(f"{symbol_result.symbol} Candle Craft strategy output:")
-            print(_format_strategy_output_for_cli(symbol_result))
+            if args.telegram_format:
+                print(format_telegram_strategy_output(symbol_result, diagnostics_level=diagnostics_level))
+            else:
+                print(_format_strategy_output_for_cli(symbol_result))
 
 
 def _format_symbol_summary(symbol_result: ScannerSymbolResult) -> str:
