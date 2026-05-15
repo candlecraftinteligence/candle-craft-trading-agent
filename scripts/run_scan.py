@@ -26,6 +26,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-score-for-idea", default="80")
     parser.add_argument("--strategy", choices=["liquidity_grab_pullback"], default="liquidity_grab_pullback")
     parser.add_argument("--modes", nargs="+", choices=["challenge", "swing", "scalp"], default=["challenge", "swing", "scalp"])
+    parser.add_argument("--htf-timeframe", default="2d")
+    parser.add_argument("--bias-timeframe", default="12h")
+    parser.add_argument("--execution-timeframe", default="15m")
+    parser.add_argument("--confirmation-timeframe", default="5m")
     parser.add_argument("--aggressive-toggle", action="store_true")
     parser.add_argument("--show-strategy-output", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -50,6 +54,10 @@ async def main(argv: Sequence[str] | None = None) -> None:
         enable_strategy_output=True,
         include_formatted_strategy_output=True,
         aggressive_toggle=args.aggressive_toggle,
+        htf_timeframe=args.htf_timeframe,
+        bias_timeframe=args.bias_timeframe,
+        execution_timeframe=args.execution_timeframe,
+        confirmation_timeframe=args.confirmation_timeframe,
     )
 
     result = await ScannerRunner().run(config)
@@ -62,6 +70,11 @@ async def main(argv: Sequence[str] | None = None) -> None:
     print(f"Interval: {config.interval}")
     print(f"Strategy: {_display(config.strategy_name)}")
     print(f"Strategy modes: {', '.join(mode.value for mode in config.strategy_modes)}")
+    print(
+        "Strategy timeframes: "
+        f"HTF={config.htf_timeframe}, bias={config.bias_timeframe}, "
+        f"execution={config.execution_timeframe}, confirmation={config.confirmation_timeframe}"
+    )
     print(f"Symbols scanned: {result.scanned_symbols}")
     print(f"Trade ideas created: {result.trade_ideas_created}")
     print(f"Dry-run alerts created: {result.dry_run_alerts_created}")
@@ -148,11 +161,25 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
 
         failed_gates = _sequence_text(tuple(str(value) for value in diagnostics.get("gates_failed", ())))
         hard_rejections = _sequence_text(tuple(str(value) for value in diagnostics.get("hard_rejection_reasons", ())))
+        candles_12h_count = int(diagnostics.get("candles_12h_count") or 0)
+        ltf_timeframe = _display(diagnostics.get("ltf_confirmation_timeframe"))
+        ltf_status = _display(diagnostics.get("ltf_confirmation_status"))
         lines.extend(
             (
                 f"{mode}: valid={_bool_text(bool(diagnostics.get('is_valid')))} "
                 f"trust={_display(diagnostics.get('trust_grade'))} "
                 f"{_display(diagnostics.get('trust_percentage'))}%",
+                f"{mode} 2D context: {_context_source_text(_display(diagnostics.get('htf_2d_context_source')))}",
+                f"{mode} 12H context: {'direct' if candles_12h_count > 0 else NA}",
+                f"{mode} candles: 2D={_display(diagnostics.get('candles_2d_count'))}, "
+                f"12H={_display(diagnostics.get('candles_12h_count'))}, "
+                f"15m={_display(diagnostics.get('candles_15m_count'))}, "
+                f"5m={_display(diagnostics.get('candles_5m_count'))}",
+                f"{mode} HTF/MTF trend: 2D={_display(diagnostics.get('htf_2d_trend'))}, "
+                f"12H={_display(diagnostics.get('mtf_12h_trend'))}",
+                f"{mode} LTF confirmation: 15m / 5m; selected={ltf_timeframe}; status={ltf_status}",
+                f"{mode} first failed gate: {_display(diagnostics.get('first_failed_gate'))}",
+                f"{mode} final decision: {'valid setup' if diagnostics.get('is_valid') else 'no setup'}",
                 f"{mode} failed gates: {failed_gates}",
                 f"{mode} hard rejections: {hard_rejections}",
                 f"{mode} sweep: {_display(diagnostics.get('sweep_diagnostics'))}",
@@ -174,6 +201,12 @@ def _display(value: object) -> str:
     if value is None or value == "":
         return NA
     return str(value)
+
+
+def _context_source_text(value: str) -> str:
+    if value == "synthetic_from_1d":
+        return "synthetic from 1D"
+    return value if value else NA
 
 
 if __name__ == "__main__":

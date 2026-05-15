@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, and Phase 12 scanner strategy integration.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, and Phase 12.1 multi-timeframe scanner context.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -97,7 +97,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, and the Phase 12 scanner strategy integration. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, and the Phase 12.1 synthetic 2D timeframe model. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -403,9 +403,9 @@ Phase 11 adds `LiquidityGrabEngine` under `app/strategies` for deterministic set
 
 Supported modes:
 
-- `challenge`: strictest mode. Requires Trust Meter >= 85, RR >= 3.0, fixed 5% risk text, limit pullback entries only, no meme/illiquid token classification, and no active BTC/event guard when provided. Invalid Challenge output exposes the exact message `No valid challenge setup.`
-- `swing`: uses 1h or 4h execution candles where available, with 15m fallback, and applies the base RR >= 2.5 gate.
-- `scalp`: uses 15m execution candles where available, with 5m fallback, and requires the pullback entry to remain valid within the short LTF window.
+- `challenge`: strictest mode. Uses 2D HTF structure, 12H/4H bias, and 15m/5m execution. Requires Trust Meter >= 85, RR >= 3.0, fixed 5% risk text, limit pullback entries only, no meme/illiquid token classification, and no active BTC/event guard when provided. Invalid Challenge output exposes the exact message `No valid challenge setup.`
+- `swing`: uses 2D/12H structure with 4H or 1H execution where available, with 15m/5m fallback, and applies the base RR >= 2.5 gate. Invalid Swing output exposes the exact message `No valid swing setup.`
+- `scalp`: uses 12H/4H bias with 15m/5m execution and requires the pullback entry to remain valid within the short LTF window. Invalid Scalp output exposes the exact message `No valid scalp setup.`
 
 Trust Meter scoring totals 12 points:
 
@@ -471,9 +471,9 @@ python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --output-json scan_
 
 Phase 12 connects the Phase 11 Liquidity-Grab Pullback Engine into the Phase 10 Scanner Runner:
 
-- `ScannerRunConfig` now supports `strategy_name`, `strategy_modes`, `enable_strategy_output`, `include_formatted_strategy_output`, and `aggressive_toggle`.
+- `ScannerRunConfig` now supports `strategy_name`, `strategy_modes`, `enable_strategy_output`, `include_formatted_strategy_output`, `aggressive_toggle`, `htf_timeframe`, `bias_timeframe`, `execution_timeframe`, and `confirmation_timeframe`.
 - The default strategy is `liquidity_grab_pullback` with `challenge`, `swing`, and `scalp` modes.
-- For each symbol, the scanner attempts to fetch 2d, 12h, 4h, 1h, 15m, and 5m candles for strategy context. If 2d is not available from the exchange client, `candles_2d: N/A` is preserved and the engine uses the nearest available higher-timeframe context without guessing.
+- For each symbol, the scanner collects Phase 12.1 multi-timeframe context: synthetic 2D from 1D candles, direct 12H bias candles, direct 15m execution candles, and direct 5m confirmation candles. Existing 4H and 1H context remains optional when available.
 - Strategy results, formatted Candle Craft output, diagnostics, valid/rejected modes, missing data, and unverified data are included in the scanner result and JSON export.
 - A trade idea is created only when the strategy returns at least one valid A/B setup and the existing technical, derivatives, risk, scoring, and trade-idea gates also pass.
 - If no valid Liquidity-Grab Pullback setup exists, the symbol returns `scanned_no_setup`, `rejection_stage = strategy`, and `No valid Liquidity-Grab Pullback setup.`
@@ -484,7 +484,7 @@ Phase 12 connects the Phase 11 Liquidity-Grab Pullback Engine into the Phase 10 
 Run the scanner with strategy output:
 
 ```powershell
-python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --interval 15m --candle-limit 250 --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --verbose --show-strategy-output
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --interval 15m --candle-limit 250 --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --verbose --show-strategy-output
 ```
 
 CLI behavior:
@@ -492,14 +492,39 @@ CLI behavior:
 - Normal mode prints the scan summary and per-symbol status.
 - `--verbose` prints scanner diagnostics and strategy diagnostics.
 - `--show-strategy-output` prints the formatted Challenge, Swing, and Scalp Candle Craft sections for each symbol.
+- `--htf-timeframe`, `--bias-timeframe`, `--execution-timeframe`, and `--confirmation-timeframe` default to `2d`, `12h`, `15m`, and `5m`.
 - `--output-json scan_output.json` writes the full scanner result, including strategy results, formatted output, diagnostics, `missing_data`, and `unverified_data`, without secrets or API keys.
 
 Missing data policy:
 
 - Missing data is always marked `N/A`; unreliable supplied data is preserved as `Unverified`.
-- Missing optional timeframes such as 2d or a failed non-critical timeframe fetch do not crash the scan if enough execution candles remain.
+- Missing synthetic 2D, direct 12H, or direct 5m context is marked `N/A`. Missing 5m confirmation does not crash the scan if 15m execution candles are available.
 - Missing CVD and liquidation context remain `N/A` unless supplied by a caller.
 - Malformed required candles reject the affected symbol with a clear failure reason, and the scanner continues to the next symbol.
+
+## Phase 12.1 MTF Timeframe Model
+
+Phase 12.1 updates the scanner and Liquidity-Grab Pullback integration to match Candle Craft multi-timeframe logic:
+
+- `2D` is high-timeframe structure: trend, major support/resistance, and macro sweep zones.
+- `12H` is active directional bias and liquidity context.
+- `15m` is primary execution: sweep, BOS/CHoCH, OB/FVG pullback, fib alignment, RR, volume/delta when available, and Trust Meter gates.
+- `5m` is lower-timeframe confirmation and can confirm BOS/CHoCH after the sweep.
+- `4H` and `1H` remain extra context only where the scanner already supports them.
+
+Binance Futures does not support `2d` on `/klines`, so the scanner does not request Binance interval `2d`. It fetches `1d` candles, merges every two complete daily candles into one synthetic 2D candle, and marks `htf_2d_context_source = synthetic_from_1d`. If a complete synthetic 2D series cannot be created, `candles_2d: N/A` is preserved.
+
+The strategy never creates a setup from 2D or 12H alone. Higher timeframes provide context only; execution confirmation still requires the strict setup gates: confirmed sweep, BOS/CHoCH, OB/FVG pullback, fib alignment, volume/delta confirmation when available, RR gate, and Trust Meter gate. Weak setups remain rejected.
+
+Verbose and JSON diagnostics include:
+
+- `htf_2d_context_source`
+- `candles_2d_count`, `candles_12h_count`, `candles_15m_count`, `candles_5m_count`
+- `htf_2d_trend`, `mtf_12h_trend`
+- `ltf_confirmation_timeframe`, `ltf_confirmation_status`
+- `first_failed_gate`
+
+This remains dry-run analysis only. The scanner and strategy do not place orders, do not use private exchange API access, and do not add withdrawal or transfer functionality.
 
 ## Safety Boundaries
 

@@ -17,6 +17,7 @@ from app.agents.technical_structure import TechnicalStructureAgent, TechnicalStr
 from app.agents.trade_idea import TradeIdeaAgent, TradeIdeaResult
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
+from app.data.timeframes import resample_ohlcv_candles
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
 from app.strategies.liquidity_grab_pullback import (
     LiquidityGrabEngine,
@@ -36,7 +37,8 @@ DEFAULT_STRATEGY_MODES = (
     LiquidityGrabMode.swing,
     LiquidityGrabMode.scalp,
 )
-STRATEGY_TIMEFRAMES = ("2d", "12h", "4h", "1h", "15m", "5m")
+DIRECT_STRATEGY_TIMEFRAMES = ("12h", "4h", "1h", "15m", "5m")
+SYNTHETIC_2D_SOURCE_TIMEFRAME = "1d"
 NO_VALID_STRATEGY_SETUP_REASON = "No valid Liquidity-Grab Pullback setup."
 
 
@@ -108,6 +110,10 @@ class ScannerRunConfig(BaseModel):
     enable_strategy_output: bool = True
     include_formatted_strategy_output: bool = True
     aggressive_toggle: bool = False
+    htf_timeframe: str = "2d"
+    bias_timeframe: str = "12h"
+    execution_timeframe: str = "15m"
+    confirmation_timeframe: str = "5m"
 
     model_config = ConfigDict(frozen=True)
 
@@ -158,7 +164,7 @@ class ScannerRunConfig(BaseModel):
             return tuple(value)
         return value
 
-    @field_validator("interval")
+    @field_validator("interval", "htf_timeframe", "bias_timeframe", "execution_timeframe", "confirmation_timeframe")
     @classmethod
     def _interval_not_blank(cls, value: str) -> str:
         normalized = value.strip()
@@ -399,7 +405,7 @@ class ScannerRunner:
         client: BaseExchangeClient,
     ) -> ScannerSymbolResult:
         symbol = symbol_config.symbol
-        candles = await client.get_klines(symbol, config.interval, config.candle_limit)
+        candles = await self._fetch_primary_candles(client, symbol, config)
         technical_candles = _technical_candles(candles)
         current_price = _current_price_from_candles(candles)
         optional_data = await self._fetch_optional_market_data(client, symbol)
@@ -691,6 +697,18 @@ class ScannerRunner:
             strategy_execution=strategy_execution,
         )
 
+    async def _fetch_primary_candles(
+        self,
+        client: BaseExchangeClient,
+        symbol: str,
+        config: ScannerRunConfig,
+    ) -> Sequence[Any]:
+        primary_timeframe = config.interval.strip().lower()
+        if config.exchange == "binance" and primary_timeframe == "2d":
+            source_candles = await client.get_klines(symbol, SYNTHETIC_2D_SOURCE_TIMEFRAME, config.candle_limit * 2)
+            return resample_ohlcv_candles(source_candles, target_interval="2d")
+        return await client.get_klines(symbol, config.interval, config.candle_limit)
+
     async def _run_strategy(
         self,
         *,
@@ -705,7 +723,7 @@ class ScannerRunner:
         if not config.enable_strategy_output or config.strategy_name is None:
             return _StrategyExecution()
 
-        candles_by_timeframe, timeframe_missing = await self._fetch_strategy_timeframe_candles(
+        candles_by_timeframe, timeframe_missing, timeframe_context = await self._fetch_strategy_timeframe_candles(
             client=client,
             symbol=symbol,
             config=config,
@@ -718,6 +736,7 @@ class ScannerRunner:
             optional_data=optional_data,
             technical=technical,
             aggressive_toggle=config.aggressive_toggle,
+            timeframe_context=timeframe_context,
         )
 
         strategy_results: dict[str, LiquidityGrabResult] = {}
@@ -775,12 +794,39 @@ class ScannerRunner:
         symbol: str,
         config: ScannerRunConfig,
         primary_candles: Sequence[Any],
-    ) -> tuple[dict[str, Sequence[Any]], tuple[str, ...]]:
+    ) -> tuple[dict[str, Sequence[Any]], tuple[str, ...], dict[str, Any]]:
         candles_by_timeframe: dict[str, Sequence[Any]] = {}
         missing_data: list[str] = []
         primary_timeframe = config.interval.strip().lower()
+        htf_source: str = NA
 
-        for timeframe in STRATEGY_TIMEFRAMES:
+        if config.htf_timeframe.strip().lower() == "2d":
+            source_candles: Sequence[Any] = ()
+            try:
+                if primary_timeframe == SYNTHETIC_2D_SOURCE_TIMEFRAME:
+                    source_candles = primary_candles
+                else:
+                    source_candles = await client.get_klines(
+                        symbol,
+                        SYNTHETIC_2D_SOURCE_TIMEFRAME,
+                        config.candle_limit * 2,
+                    )
+                synthetic_2d = resample_ohlcv_candles(source_candles, target_interval="2d")
+            except Exception as exc:
+                self.logger.warning(
+                    "Synthetic 2D candle creation failed for symbol=%s from 1d source: %s",
+                    symbol,
+                    exc,
+                )
+                synthetic_2d = []
+
+            if synthetic_2d:
+                candles_by_timeframe["2d"] = synthetic_2d
+                htf_source = "synthetic_from_1d"
+            else:
+                missing_data.append("candles_2d: N/A")
+
+        for timeframe in _direct_strategy_timeframes(config):
             if timeframe == primary_timeframe:
                 candles_by_timeframe[timeframe] = primary_candles
                 continue
@@ -797,7 +843,11 @@ class ScannerRunner:
             else:
                 missing_data.append(f"candles_{timeframe}: N/A")
 
-        return candles_by_timeframe, _unique_strings(missing_data)
+        return (
+            candles_by_timeframe,
+            _unique_strings(missing_data),
+            {"htf_2d_context_source": htf_source},
+        )
 
     async def _fetch_optional_market_data(self, client: BaseExchangeClient, symbol: str) -> _OptionalMarketData:
         missing_data: list[str] = []
@@ -996,9 +1046,11 @@ def _liquidity_grab_input(
     optional_data: _OptionalMarketData,
     technical: TechnicalStructureResult,
     aggressive_toggle: bool,
+    timeframe_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     support_levels = _strategy_levels(technical.nearest_support, technical.recent_range_low)
     resistance_levels = _strategy_levels(technical.nearest_resistance, technical.recent_range_high)
+    timeframe_context = timeframe_context or {}
     return {
         "symbol": symbol,
         "candles_2d": candles_by_timeframe.get("2d"),
@@ -1015,6 +1067,7 @@ def _liquidity_grab_input(
         "cvd": None,
         "liquidation_data": None,
         "aggressive_toggle": aggressive_toggle,
+        "htf_2d_context_source": timeframe_context.get("htf_2d_context_source", NA),
     }
 
 
@@ -1024,6 +1077,21 @@ def _strategy_levels(*values: MaybeDecimal) -> tuple[Decimal, ...]:
         if value != NA:
             levels.append(_quantize(value))
     return tuple(levels)
+
+
+def _direct_strategy_timeframes(config: ScannerRunConfig) -> tuple[str, ...]:
+    timeframes = (
+        config.bias_timeframe,
+        *DIRECT_STRATEGY_TIMEFRAMES,
+        config.execution_timeframe,
+        config.confirmation_timeframe,
+    )
+    normalized: list[str] = []
+    for timeframe in timeframes:
+        value = timeframe.strip().lower()
+        if value and value not in ("2d", SYNTHETIC_2D_SOURCE_TIMEFRAME) and value not in normalized:
+            normalized.append(value)
+    return tuple(normalized)
 
 
 def _strategy_setup_for_mode(result: LiquidityGrabResult, mode: LiquidityGrabMode | str) -> LiquidityGrabSetup:
@@ -1041,6 +1109,16 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "status": setup.status,
         "bias": setup.bias,
         "timeframe": setup.timeframe,
+        "htf_2d_context_source": setup.htf_2d_context_source,
+        "candles_2d_count": setup.candles_2d_count,
+        "candles_12h_count": setup.candles_12h_count,
+        "candles_15m_count": setup.candles_15m_count,
+        "candles_5m_count": setup.candles_5m_count,
+        "htf_2d_trend": setup.htf_2d_trend,
+        "mtf_12h_trend": setup.mtf_12h_trend,
+        "ltf_confirmation_timeframe": setup.ltf_confirmation_timeframe,
+        "ltf_confirmation_status": setup.ltf_confirmation_status,
+        "first_failed_gate": setup.first_failed_gate,
         "trust_grade": setup.trust_meter.grade,
         "trust_percentage": setup.trust_meter.percentage,
         "gates_passed": setup.gates_passed,

@@ -384,6 +384,30 @@ def test_challenge_failure_output_exact_message() -> None:
     assert result.formatted_output.challenge_setup == "No valid challenge setup."
 
 
+def test_invalid_swing_and_scalp_outputs_remain_exact_messages() -> None:
+    result = LiquidityGrabEngine().analyze({"symbol": "BTCUSDT"})
+
+    assert result.formatted_output.swing_setup == "No valid swing setup."
+    assert result.formatted_output.scalp_setup == "No valid scalp setup."
+
+
+def test_rejects_setup_when_ltf_confirmation_is_missing() -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": "challenge",
+            "candles_2d": _trend_candles(),
+            "candles_12h": _trend_candles(),
+            "htf_2d_context_source": "synthetic_from_1d",
+        }
+    )
+
+    assert result.challenge.is_valid is False
+    assert result.challenge.first_failed_gate == "no_execution_candles"
+    assert result.challenge.ltf_confirmation_status == NA
+    assert result.challenge.htf_2d_context_source == "synthetic_from_1d"
+
+
 def test_missing_optional_context_marked_na() -> None:
     result = LiquidityGrabEngine().analyze({"symbol": "BTCUSDT"})
 

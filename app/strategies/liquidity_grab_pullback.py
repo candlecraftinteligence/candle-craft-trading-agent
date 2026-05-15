@@ -158,6 +158,16 @@ class LiquidityGrabSetup(BaseModel):
     bias: TradeBias = NA
     timeframe: str = NA
     trend: TrendLabel = NA
+    htf_2d_context_source: str = NA
+    candles_2d_count: int = 0
+    candles_12h_count: int = 0
+    candles_15m_count: int = 0
+    candles_5m_count: int = 0
+    htf_2d_trend: TrendLabel = NA
+    mtf_12h_trend: TrendLabel = NA
+    ltf_confirmation_timeframe: str = NA
+    ltf_confirmation_status: str = NA
+    first_failed_gate: str = NA
     current_price: MaybeDecimal = NA
     sweep: LiquiditySweepSignal = LiquiditySweepSignal()
     structure_shift: StructureShiftSignal = StructureShiftSignal()
@@ -273,6 +283,7 @@ class LiquidityGrabInput(BaseModel):
     narrative: Any | None = None
     aggressive_toggle: bool = False
     token_classification: Any | None = None
+    htf_2d_context_source: str = NA
 
     model_config = ConfigDict(frozen=True)
 
@@ -406,6 +417,7 @@ class LiquidityGrabEngine:
         rotation: RotationContext,
     ) -> LiquidityGrabSetup:
         selected = _select_candles(normalized, mode)
+        context_fields = _timeframe_context_fields(data, normalized, selected)
         if selected is None:
             return _rejected_setup(
                 mode,
@@ -414,6 +426,7 @@ class LiquidityGrabEngine:
                 missing_data,
                 unverified_data,
                 rotation,
+                context_fields=context_fields,
             )
 
         candles = selected.candles
@@ -427,6 +440,7 @@ class LiquidityGrabEngine:
                 rotation,
                 timeframe=selected.timeframe,
                 current_price=_current_price(data, candles),
+                context_fields=context_fields,
             )
 
         atr = _calculate_atr_from_normalized(candles, self.atr_period)
@@ -440,6 +454,7 @@ class LiquidityGrabEngine:
                 rotation,
                 timeframe=selected.timeframe,
                 current_price=_current_price(data, candles),
+                context_fields=context_fields,
             )
 
         sweep = detect_liquidity_sweep(
@@ -460,6 +475,7 @@ class LiquidityGrabEngine:
                 timeframe=selected.timeframe,
                 current_price=_current_price(data, candles),
                 sweep=sweep,
+                context_fields=context_fields,
             )
 
         structure_shift = detect_structure_shift(
@@ -468,6 +484,7 @@ class LiquidityGrabEngine:
             lookback=self.swing_lookback,
         )
         if not structure_shift.is_present:
+            context_fields = _timeframe_context_fields(data, normalized, selected, structure_shift=structure_shift)
             return _rejected_setup(
                 mode,
                 "missing_structure_shift",
@@ -479,7 +496,9 @@ class LiquidityGrabEngine:
                 current_price=_current_price(data, candles),
                 sweep=sweep,
                 structure_shift=structure_shift,
+                context_fields=context_fields,
             )
+        context_fields = _timeframe_context_fields(data, normalized, selected, structure_shift=structure_shift)
 
         direction: Direction = structure_shift.direction
         bias: TradeBias = "long" if direction == "bullish" else "short"
@@ -518,6 +537,7 @@ class LiquidityGrabEngine:
                 structure_shift=structure_shift,
                 order_block=order_block,
                 fair_value_gap=fair_value_gap,
+                context_fields=context_fields,
             )
 
         entry_low, entry_high, entry, entry_source, fib_alignment = entry_zone
@@ -555,6 +575,7 @@ class LiquidityGrabEngine:
                 entry_high=entry_high,
                 entry=entry,
                 entry_source=entry_source,
+                context_fields=context_fields,
             )
 
         stop = _stop_price(direction, sweep, order_block, atr, entry)
@@ -577,6 +598,7 @@ class LiquidityGrabEngine:
                 entry_high=entry_high,
                 entry=entry,
                 entry_source=entry_source,
+                context_fields=context_fields,
             )
 
         tp1, tp2, tp3 = _targets(data, direction, entry, stop, normalized)
@@ -650,6 +672,7 @@ class LiquidityGrabEngine:
             missing_data=missing_data,
             unverified_data=unverified_data,
             rotation=rotation,
+            **context_fields,
         )
 
 
@@ -1526,7 +1549,9 @@ def _rejected_setup(
     entry_high: MaybeDecimal = NA,
     entry: MaybeDecimal = NA,
     entry_source: str = NA,
+    context_fields: Mapping[str, Any] | None = None,
 ) -> LiquidityGrabSetup:
+    context_fields = context_fields or {}
     return LiquidityGrabSetup(
         mode=mode,
         timeframe=timeframe,
@@ -1544,6 +1569,7 @@ def _rejected_setup(
         missing_data=missing_data,
         unverified_data=unverified_data,
         rotation=rotation,
+        **context_fields,
     )
 
 
@@ -1570,6 +1596,7 @@ def _setup_diagnostic_fields(setup: LiquidityGrabSetup) -> dict[str, Any]:
     gates_failed = tuple(violation.code for violation in setup.gate_result.violations)
     hard_rejection_reasons = tuple(violation.message for violation in setup.gate_result.violations)
     return {
+        "first_failed_gate": gates_failed[0] if gates_failed else NA,
         "gates_passed": _gates_passed(setup, gates_failed),
         "gates_failed": gates_failed,
         "hard_rejection_reasons": hard_rejection_reasons,
@@ -1697,6 +1724,9 @@ def _format_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> str:
     lines = [
         f"Liquidity-Grab Diagnostics - {symbol}",
         f"Mode: {setup.mode.value}",
+        f"2D context: {_context_source_text(setup.htf_2d_context_source)}; candles={setup.candles_2d_count}; trend={setup.htf_2d_trend}",
+        f"12H context: {'direct' if setup.candles_12h_count > 0 else NA}; candles={setup.candles_12h_count}; trend={setup.mtf_12h_trend}",
+        f"LTF confirmation: {setup.ltf_confirmation_timeframe}; status={setup.ltf_confirmation_status}",
         f"Sweep: {sweep_status}",
     ]
     if sweep_reason:
@@ -1709,7 +1739,7 @@ def _format_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> str:
             f"Momentum: {_diagnostic_detail(setup.momentum_diagnostics)}",
             f"RR: {_diagnostic_detail(setup.rr_diagnostics)}",
             f"Trust Meter: {_diagnostic_detail(setup.trust_meter_diagnostics)}",
-            f"First failed gate: {setup.gates_failed[0] if setup.gates_failed else NA}",
+            f"First failed gate: {setup.first_failed_gate}",
             f"Final decision: {'Valid setup.' if setup.is_valid else 'No valid setup.'}",
         )
     )
@@ -1782,7 +1812,7 @@ def _format_challenge(symbol: str, data: LiquidityGrabInput, setup: LiquidityGra
 
 def _format_swing(symbol: str, data: LiquidityGrabInput, setup: LiquidityGrabSetup) -> str:
     if not setup.is_valid:
-        return "\n".join(("No valid swing setup.", *_rotation_lines(setup.rotation)))
+        return "No valid swing setup."
     common = _common_structure(data, setup, challenge=False)
     return "\n".join(
         (
@@ -1805,7 +1835,7 @@ def _format_swing(symbol: str, data: LiquidityGrabInput, setup: LiquidityGrabSet
 
 def _format_scalp(symbol: str, data: LiquidityGrabInput, setup: LiquidityGrabSetup) -> str:
     if not setup.is_valid:
-        return "\n".join(("No valid scalp setup.", *_rotation_lines(setup.rotation)))
+        return "No valid scalp setup."
     return "\n".join(
         (
             "1) HTF/MTF Bias (12H/4H)",
@@ -1871,11 +1901,11 @@ def _select_candles(
     mode: LiquidityGrabMode,
 ) -> _SelectedCandles | None:
     if mode == LiquidityGrabMode.challenge:
-        order = ("15m", "5m", "1h")
+        order = ("15m", "5m")
     elif mode == LiquidityGrabMode.scalp:
         order = ("15m", "5m")
     else:
-        order = ("1h", "4h", "15m", "6h")
+        order = ("4h", "1h", "15m", "5m")
     for timeframe in order:
         candles = normalized.get(timeframe)
         if candles:
@@ -1889,10 +1919,45 @@ def _trend_for_mode(normalized: Mapping[str, tuple[_Candle, ...]], mode: Liquidi
             if normalized.get(timeframe):
                 return _simple_trend(normalized[timeframe])
     else:
-        for timeframe in ("2d", "4h", "12h", "6h", "1h"):
+        for timeframe in ("2d", "12h", "4h", "6h", "1h"):
             if normalized.get(timeframe):
                 return _simple_trend(normalized[timeframe])
     return NA
+
+
+def _timeframe_context_fields(
+    data: LiquidityGrabInput,
+    normalized: Mapping[str, tuple[_Candle, ...]],
+    selected: _SelectedCandles | None,
+    *,
+    structure_shift: StructureShiftSignal | None = None,
+) -> dict[str, Any]:
+    candles_2d = normalized.get("2d", ())
+    candles_12h = normalized.get("12h", ())
+    candles_15m = normalized.get("15m", ())
+    candles_5m = normalized.get("5m", ())
+    source = data.htf_2d_context_source if candles_2d and data.htf_2d_context_source != NA else NA
+    ltf_timeframe = selected.timeframe if selected is not None and selected.timeframe in ("15m", "5m") else NA
+    if selected is None:
+        ltf_status = NA
+    elif ltf_timeframe == NA:
+        ltf_status = "not_applicable"
+    elif structure_shift is not None and structure_shift.is_present:
+        ltf_status = "confirmed"
+    else:
+        ltf_status = "missing"
+
+    return {
+        "htf_2d_context_source": source,
+        "candles_2d_count": len(candles_2d),
+        "candles_12h_count": len(candles_12h),
+        "candles_15m_count": len(candles_15m),
+        "candles_5m_count": len(candles_5m),
+        "htf_2d_trend": _simple_trend(candles_2d) if candles_2d else NA,
+        "mtf_12h_trend": _simple_trend(candles_12h) if candles_12h else NA,
+        "ltf_confirmation_timeframe": ltf_timeframe,
+        "ltf_confirmation_status": ltf_status,
+    }
 
 
 def _trend_for_targets(normalized: Mapping[str, tuple[_Candle, ...]], direction: Direction) -> bool:
@@ -1945,6 +2010,9 @@ def _missing_context(data: LiquidityGrabInput, normalized: Mapping[str, tuple[_C
     ):
         if _is_missing(getattr(data, field)):
             missing.append(f"{field}: N/A")
+    for timeframe in ("2d", "12h", "15m", "5m"):
+        if not normalized.get(timeframe):
+            missing.append(f"candles_{timeframe}: N/A")
     if not normalized:
         missing.append("candles: N/A")
     return tuple(missing)
@@ -2062,6 +2130,12 @@ def _display(value: Any) -> str:
         text = format(value.quantize(OUTPUT_QUANT), "f")
         return text.rstrip("0").rstrip(".") if "." in text else text
     return str(value)
+
+
+def _context_source_text(value: str) -> str:
+    if value == "synthetic_from_1d":
+        return "synthetic from 1D"
+    return value if value else NA
 
 
 def _context_text(value: Any | None) -> str:

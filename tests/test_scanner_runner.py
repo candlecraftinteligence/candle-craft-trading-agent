@@ -366,7 +366,11 @@ def test_scanner_returns_strategy_results_output_and_diagnostics() -> None:
     assert "challenge" in symbol_result.strategy_results
     assert "Challenge Setup" in symbol_result.formatted_strategy_output
     assert "sweep_diagnostics" in symbol_result.strategy_diagnostics["challenge"]
-    assert "candles_2d: N/A" in symbol_result.strategy_missing_data
+    assert symbol_result.strategy_diagnostics["challenge"]["htf_2d_context_source"] == "synthetic_from_1d"
+    assert symbol_result.strategy_diagnostics["challenge"]["candles_2d_count"] > 0
+    assert symbol_result.strategy_diagnostics["challenge"]["candles_12h_count"] == 220
+    assert symbol_result.strategy_diagnostics["challenge"]["candles_15m_count"] == 220
+    assert symbol_result.strategy_diagnostics["challenge"]["candles_5m_count"] == 220
 
 
 def test_challenge_invalid_output_remains_exact_message() -> None:
@@ -391,14 +395,54 @@ def test_rejected_strategy_does_not_create_trade_idea_alert_or_journal() -> None
 
 
 def test_missing_strategy_context_is_marked_na() -> None:
-    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"1d", "12h"})
     result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
 
     symbol_result = result.results[0]
     assert "candles_2d: N/A" in symbol_result.strategy_missing_data
+    assert "candles_12h: N/A" in symbol_result.strategy_missing_data
     assert "cvd: N/A" in symbol_result.strategy_missing_data
     assert "liquidation_data: N/A" in symbol_result.strategy_missing_data
     assert "candles_2d: N/A" in symbol_result.missing_data
+
+
+def test_scanner_does_not_request_binance_2d_and_uses_synthetic_2d() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    requested_intervals = [interval for _symbol, interval in client.requested_klines]
+    diagnostics = result.results[0].strategy_diagnostics["challenge"]
+
+    assert "2d" not in requested_intervals
+    assert "1d" in requested_intervals
+    assert diagnostics["htf_2d_context_source"] == "synthetic_from_1d"
+    assert diagnostics["candles_2d_count"] == 110
+
+
+def test_scanner_fetches_12h_15m_and_5m_for_strategy_context() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    requested_intervals = [interval for _symbol, interval in client.requested_klines]
+    diagnostics = result.results[0].strategy_diagnostics["challenge"]
+
+    assert "12h" in requested_intervals
+    assert "15m" in requested_intervals
+    assert "5m" in requested_intervals
+    assert diagnostics["candles_12h_count"] == 220
+    assert diagnostics["candles_15m_count"] == 220
+    assert diagnostics["candles_5m_count"] == 220
+
+
+def test_missing_5m_context_does_not_crash_if_15m_exists() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"5m"})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    symbol_result = result.results[0]
+    assert symbol_result.status != ScannerPipelineStatus.FAILED
+    assert "candles_5m: N/A" in symbol_result.strategy_missing_data
+    assert symbol_result.strategy_diagnostics["challenge"]["candles_15m_count"] == 220
+    assert symbol_result.strategy_diagnostics["challenge"]["candles_5m_count"] == 0
 
 
 def test_one_noncritical_timeframe_failure_does_not_crash_symbol_scan() -> None:
