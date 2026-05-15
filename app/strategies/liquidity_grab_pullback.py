@@ -181,8 +181,22 @@ class LiquidityGrabSetup(BaseModel):
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
     rotation: RotationContext = RotationContext()
+    strategy_diagnostics: str = NA
+    gates_passed: tuple[str, ...] = ()
+    gates_failed: tuple[str, ...] = ()
+    hard_rejection_reasons: tuple[str, ...] = ()
+    sweep_diagnostics: str = NA
+    structure_shift_diagnostics: str = NA
+    ob_fvg_diagnostics: str = NA
+    fib_diagnostics: str = NA
+    momentum_diagnostics: str = NA
+    rr_diagnostics: str = NA
+    trust_meter_diagnostics: str = NA
 
     model_config = ConfigDict(frozen=True)
+
+    def diagnostics_summary(self, symbol: str) -> str:
+        return _format_setup_diagnostics(symbol, self)
 
 
 class StrategyFormattedOutput(BaseModel):
@@ -203,9 +217,31 @@ class LiquidityGrabResult(BaseModel):
     formatted_output: StrategyFormattedOutput
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
+    strategy_diagnostics: str = NA
+    gates_passed: tuple[str, ...] = ()
+    gates_failed: tuple[str, ...] = ()
+    hard_rejection_reasons: tuple[str, ...] = ()
+    sweep_diagnostics: str = NA
+    structure_shift_diagnostics: str = NA
+    ob_fvg_diagnostics: str = NA
+    fib_diagnostics: str = NA
+    momentum_diagnostics: str = NA
+    rr_diagnostics: str = NA
+    trust_meter_diagnostics: str = NA
+    challenge_diagnostics: str = NA
+    swing_diagnostics: str = NA
+    scalp_diagnostics: str = NA
     safety_note: str = "Dry-run strategy analysis only. No exchange order or private API access is used."
 
     model_config = ConfigDict(frozen=True)
+
+    def formatted_diagnostics(self, mode: LiquidityGrabMode | str | None = None) -> str:
+        selected = self.requested_mode if mode is None else LiquidityGrabMode(mode)
+        if selected == LiquidityGrabMode.challenge:
+            return self.challenge_diagnostics
+        if selected == LiquidityGrabMode.scalp:
+            return self.scalp_diagnostics
+        return self.swing_diagnostics
 
 
 class LiquidityGrabInput(BaseModel):
@@ -330,6 +366,10 @@ class LiquidityGrabEngine:
             unverified_data,
             rotation,
         )
+        challenge = _with_setup_diagnostics(data.symbol, challenge)
+        swing = _with_setup_diagnostics(data.symbol, swing)
+        scalp = _with_setup_diagnostics(data.symbol, scalp)
+        requested_setup = _setup_for_mode(data.mode, challenge, swing, scalp)
         formatted = _format_result(data.symbol, data, challenge, swing, scalp)
         return LiquidityGrabResult(
             symbol=data.symbol,
@@ -340,6 +380,20 @@ class LiquidityGrabEngine:
             formatted_output=formatted,
             missing_data=missing_data,
             unverified_data=unverified_data,
+            strategy_diagnostics=requested_setup.strategy_diagnostics,
+            gates_passed=requested_setup.gates_passed,
+            gates_failed=requested_setup.gates_failed,
+            hard_rejection_reasons=requested_setup.hard_rejection_reasons,
+            sweep_diagnostics=requested_setup.sweep_diagnostics,
+            structure_shift_diagnostics=requested_setup.structure_shift_diagnostics,
+            ob_fvg_diagnostics=requested_setup.ob_fvg_diagnostics,
+            fib_diagnostics=requested_setup.fib_diagnostics,
+            momentum_diagnostics=requested_setup.momentum_diagnostics,
+            rr_diagnostics=requested_setup.rr_diagnostics,
+            trust_meter_diagnostics=requested_setup.trust_meter_diagnostics,
+            challenge_diagnostics=challenge.strategy_diagnostics,
+            swing_diagnostics=swing.strategy_diagnostics,
+            scalp_diagnostics=scalp.strategy_diagnostics,
         )
 
     def _analyze_mode(
@@ -1491,6 +1545,189 @@ def _rejected_setup(
         unverified_data=unverified_data,
         rotation=rotation,
     )
+
+
+def _setup_for_mode(
+    mode: LiquidityGrabMode,
+    challenge: LiquidityGrabSetup,
+    swing: LiquidityGrabSetup,
+    scalp: LiquidityGrabSetup,
+) -> LiquidityGrabSetup:
+    if mode == LiquidityGrabMode.challenge:
+        return challenge
+    if mode == LiquidityGrabMode.scalp:
+        return scalp
+    return swing
+
+
+def _with_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> LiquidityGrabSetup:
+    fields = _setup_diagnostic_fields(setup)
+    diagnosed = setup.model_copy(update=fields)
+    return diagnosed.model_copy(update={"strategy_diagnostics": _format_setup_diagnostics(symbol, diagnosed)})
+
+
+def _setup_diagnostic_fields(setup: LiquidityGrabSetup) -> dict[str, Any]:
+    gates_failed = tuple(violation.code for violation in setup.gate_result.violations)
+    hard_rejection_reasons = tuple(violation.message for violation in setup.gate_result.violations)
+    return {
+        "gates_passed": _gates_passed(setup, gates_failed),
+        "gates_failed": gates_failed,
+        "hard_rejection_reasons": hard_rejection_reasons,
+        "sweep_diagnostics": _sweep_diagnostics(setup.sweep),
+        "structure_shift_diagnostics": _structure_shift_diagnostics(setup.sweep, setup.structure_shift),
+        "ob_fvg_diagnostics": _ob_fvg_diagnostics(setup.structure_shift, setup.order_block, setup.fair_value_gap),
+        "fib_diagnostics": _fib_diagnostics(setup),
+        "momentum_diagnostics": _momentum_diagnostics(setup),
+        "rr_diagnostics": _rr_diagnostics(setup),
+        "trust_meter_diagnostics": _trust_meter_diagnostics(setup),
+    }
+
+
+def _gates_passed(setup: LiquidityGrabSetup, gates_failed: tuple[str, ...]) -> tuple[str, ...]:
+    passed: list[str] = []
+    if setup.sweep.is_present:
+        passed.append("sweep")
+    if setup.structure_shift.is_present:
+        passed.append("bos_choch")
+    if setup.order_block.is_present or setup.fair_value_gap.is_present:
+        passed.append("ob_fvg")
+    if setup.fib_alignment.is_aligned and not setup.fib_alignment.rejected_deeper_than_786:
+        passed.append("fib_alignment")
+    if setup.momentum.is_confirmed:
+        passed.append("volume_confirmation")
+    if setup.rr_to_tp2 != NA and not any(code in gates_failed for code in ("missing_rr", "rr_below_minimum", "challenge_rr_below_3")):
+        passed.append("rr")
+    if setup.trust_meter.grade != "No trade" and not any(
+        code in gates_failed for code in ("trust_meter_below_minimum", "challenge_trust_below_85")
+    ):
+        passed.append("trust_meter")
+    if setup.gate_result.passed:
+        passed.append("final_strategy_gates")
+    return tuple(passed)
+
+
+def _sweep_diagnostics(sweep: LiquiditySweepSignal) -> str:
+    if not sweep.is_present:
+        reason = sweep.reason
+        if reason == LiquiditySweepSignal().reason:
+            reason = "No candle swept prior swing by at least 0.35 ATR and closed back inside."
+        return f"failed: {reason}"
+    return (
+        f"passed: {sweep.direction} sweep at candle {_display(sweep.candle_index)}; "
+        f"magnitude {_display(sweep.magnitude)} ({_display(sweep.magnitude_atr)} ATR)."
+    )
+
+
+def _structure_shift_diagnostics(sweep: LiquiditySweepSignal, structure_shift: StructureShiftSignal) -> str:
+    if not sweep.is_present:
+        return "N/A because sweep failed."
+    if not structure_shift.is_present:
+        return f"failed: {structure_shift.reason}"
+    return (
+        f"passed: {structure_shift.kind} {structure_shift.direction} at {_display(structure_shift.level)} "
+        f"from candle close {_display(structure_shift.close)}."
+    )
+
+
+def _ob_fvg_diagnostics(
+    structure_shift: StructureShiftSignal,
+    order_block: OrderBlockZone,
+    fair_value_gap: FairValueGapZone,
+) -> str:
+    if not structure_shift.is_present:
+        return "N/A because BOS/CHoCH failed."
+    ob_status = "found" if order_block.is_present else "missing"
+    fvg_status = "found" if fair_value_gap.is_present else "missing"
+    if not order_block.is_present and not fair_value_gap.is_present:
+        return "failed: OB missing; FVG missing."
+    return f"passed: OB {ob_status}; FVG {fvg_status}."
+
+
+def _fib_diagnostics(setup: LiquidityGrabSetup) -> str:
+    if not setup.structure_shift.is_present:
+        return "N/A."
+    if not setup.order_block.is_present and not setup.fair_value_gap.is_present:
+        return "N/A because OB/FVG failed."
+    if setup.fib_alignment.is_aligned and not setup.fib_alignment.rejected_deeper_than_786:
+        return f"passed: {setup.fib_alignment.reason}"
+    return f"failed: {setup.fib_alignment.reason}"
+
+
+def _momentum_diagnostics(setup: LiquidityGrabSetup) -> str:
+    if not setup.sweep.is_present or not setup.structure_shift.is_present:
+        return "N/A."
+    if setup.momentum.is_confirmed:
+        return f"passed: {setup.momentum.reason}"
+    if setup.momentum.volume_status == "not_confirmed":
+        return f"failed: {setup.momentum.reason}"
+    return f"N/A: {setup.momentum.reason}"
+
+
+def _rr_diagnostics(setup: LiquidityGrabSetup) -> str:
+    rr_messages = [
+        violation.message
+        for violation in setup.gate_result.violations
+        if violation.code in ("missing_rr", "rr_below_minimum", "challenge_rr_below_3")
+    ]
+    if setup.rr_to_tp2 == NA:
+        if rr_messages:
+            return f"failed: {'; '.join(rr_messages)}"
+        return "N/A."
+    if rr_messages:
+        return f"failed: RR to TP2 {_display(setup.rr_to_tp2)}. {'; '.join(rr_messages)}"
+    return f"passed: RR to TP2 {_display(setup.rr_to_tp2)}."
+
+
+def _trust_meter_diagnostics(setup: LiquidityGrabSetup) -> str:
+    trust_messages = [
+        violation.message
+        for violation in setup.gate_result.violations
+        if violation.code in ("trust_meter_below_minimum", "challenge_trust_below_85")
+    ]
+    if setup.trust_meter.grade == "No trade":
+        if setup.trust_meter.percentage == 0 and not trust_messages:
+            return "N/A."
+        message = "; ".join(trust_messages) if trust_messages else setup.trust_meter.reason
+        return f"failed: Trust Meter {setup.trust_meter.percentage}% ({setup.trust_meter.grade}). {message}"
+    return f"passed: Trust Meter {setup.trust_meter.percentage}% ({setup.trust_meter.grade})."
+
+
+def _format_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> str:
+    sweep_status, sweep_reason = _split_diagnostic(setup.sweep_diagnostics)
+    lines = [
+        f"Liquidity-Grab Diagnostics - {symbol}",
+        f"Mode: {setup.mode.value}",
+        f"Sweep: {sweep_status}",
+    ]
+    if sweep_reason:
+        lines.append(f"Reason: {sweep_reason}")
+    lines.extend(
+        (
+            f"BOS/CHoCH: {_diagnostic_detail(setup.structure_shift_diagnostics)}",
+            f"OB/FVG: {_diagnostic_detail(setup.ob_fvg_diagnostics)}",
+            f"Fib alignment: {_diagnostic_detail(setup.fib_diagnostics)}",
+            f"Momentum: {_diagnostic_detail(setup.momentum_diagnostics)}",
+            f"RR: {_diagnostic_detail(setup.rr_diagnostics)}",
+            f"Trust Meter: {_diagnostic_detail(setup.trust_meter_diagnostics)}",
+            f"First failed gate: {setup.gates_failed[0] if setup.gates_failed else NA}",
+            f"Final decision: {'Valid setup.' if setup.is_valid else 'No valid setup.'}",
+        )
+    )
+    return "\n".join(lines)
+
+
+def _split_diagnostic(value: str) -> tuple[str, str]:
+    if ": " not in value:
+        return value, ""
+    status, reason = value.split(": ", 1)
+    return status, reason
+
+
+def _diagnostic_detail(value: str) -> str:
+    status, reason = _split_diagnostic(value)
+    if reason:
+        return f"{status} - {reason}"
+    return status
 
 
 def _format_result(

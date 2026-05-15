@@ -15,7 +15,7 @@ from app.agents.journal_agent import JournalAgent, JournalEntryResult, JournalSt
 from app.agents.risk_manager import RiskDecision, RiskManagerAgent, RiskManagerInput
 from app.agents.technical_structure import TechnicalStructureAgent, TechnicalStructureResult
 from app.agents.trade_idea import TradeIdeaAgent, TradeIdeaResult
-from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, OpenInterestDTO, TickerDTO
+from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
 
@@ -87,6 +87,7 @@ class ScannerRunConfig(BaseModel):
     current_daily_loss_pct: Decimal | None = None
     leverage: Decimal | None = None
     min_score_for_idea: Decimal = Decimal("80")
+    verbose: bool = False
 
     model_config = ConfigDict(frozen=True)
 
@@ -162,6 +163,26 @@ class ScannerSymbolResult(BaseModel):
     current_price: MaybeDecimal = NA
     funding_rate: MaybeDecimal = NA
     open_interest: MaybeDecimal = NA
+    candles_fetched: int = 0
+    latest_close: MaybeDecimal = NA
+    technical_score: MaybeInt = NA
+    derivatives_score: MaybeInt = NA
+    trend_context: str = NA
+    recent_range_high: MaybeDecimal = NA
+    recent_range_low: MaybeDecimal = NA
+    nearest_support: MaybeDecimal = NA
+    nearest_resistance: MaybeDecimal = NA
+    latest_swing_high: MaybeDecimal = NA
+    latest_swing_low: MaybeDecimal = NA
+    sweep_detected: bool = False
+    bos_detected: bool = False
+    choch_detected: bool = False
+    funding_direction: str = NA
+    funding_severity: str = NA
+    oi_direction: str = NA
+    price_oi_relationship: str = NA
+    rejection_stage: str = NA
+    rejection_reasons: tuple[str, ...] = ()
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
     technical_result: TechnicalStructureResult | None = None
@@ -275,6 +296,8 @@ class ScannerRunner:
                             status=ScannerPipelineStatus.FAILED,
                             status_history=(ScannerPipelineStatus.FAILED,),
                             error_message=str(exc),
+                            rejection_stage="scanner",
+                            rejection_reasons=(str(exc),),
                         )
                     )
         finally:
@@ -639,6 +662,8 @@ class ScannerRunner:
         alert_result: AlertResult | None = None,
         journal_entry: JournalEntryResult | None = None,
     ) -> ScannerSymbolResult:
+        cleaned_missing = _unique_strings(missing_data)
+        cleaned_unverified = _unique_strings(unverified_data)
         return ScannerSymbolResult(
             symbol=symbol,
             status=status,
@@ -648,8 +673,30 @@ class ScannerRunner:
             current_price=current_price,
             funding_rate=_decimal_field(optional_data.funding, ("funding_rate", "current_funding_rate")),
             open_interest=_decimal_field(optional_data.open_interest, ("open_interest", "current_open_interest", "oi")),
-            missing_data=_unique_strings(missing_data),
-            unverified_data=_unique_strings(unverified_data),
+            candles_fetched=len(candles),
+            latest_close=_current_price_from_candles(candles),
+            technical_score=technical_result.structure_score if technical_result is not None else NA,
+            derivatives_score=derivatives_result.derivatives_score if derivatives_result is not None else NA,
+            trend_context=technical_result.trend_context if technical_result is not None else NA,
+            recent_range_high=technical_result.recent_range_high if technical_result is not None else NA,
+            recent_range_low=technical_result.recent_range_low if technical_result is not None else NA,
+            nearest_support=technical_result.nearest_support if technical_result is not None else NA,
+            nearest_resistance=technical_result.nearest_resistance if technical_result is not None else NA,
+            latest_swing_high=_latest_swing_price(technical_result.swing_highs if technical_result is not None else ()),
+            latest_swing_low=_latest_swing_price(technical_result.swing_lows if technical_result is not None else ()),
+            sweep_detected=technical_result.sweep.is_present if technical_result is not None else False,
+            bos_detected=technical_result.bos.is_present if technical_result is not None else False,
+            choch_detected=technical_result.choch.is_present if technical_result is not None else False,
+            funding_direction=derivatives_result.funding.direction if derivatives_result is not None else NA,
+            funding_severity=derivatives_result.funding.severity if derivatives_result is not None else NA,
+            oi_direction=derivatives_result.open_interest.direction if derivatives_result is not None else NA,
+            price_oi_relationship=derivatives_result.price_oi_relationship.classification
+            if derivatives_result is not None
+            else NA,
+            rejection_stage=_rejection_stage_for(status),
+            rejection_reasons=_rejection_reasons_for(status, rejection_reason),
+            missing_data=cleaned_missing,
+            unverified_data=cleaned_unverified,
             technical_result=technical_result,
             derivatives_result=derivatives_result,
             risk_decision=risk_decision,
@@ -658,6 +705,38 @@ class ScannerRunner:
             alert_result=alert_result,
             journal_entry=journal_entry,
         )
+
+
+def _latest_swing_price(points: Sequence[Any]) -> MaybeDecimal:
+    if not points:
+        return NA
+    return _quantize(points[-1].price)
+
+
+def _rejection_stage_for(status: ScannerPipelineStatus) -> str:
+    stages = {
+        ScannerPipelineStatus.SCANNED_NO_SETUP: "technical",
+        ScannerPipelineStatus.REJECTED_BY_TECHNICAL: "technical",
+        ScannerPipelineStatus.REJECTED_BY_DERIVATIVES: "derivatives",
+        ScannerPipelineStatus.REJECTED_BY_RISK: "risk",
+        ScannerPipelineStatus.REJECTED_BY_SCORING: "scoring",
+        ScannerPipelineStatus.FAILED: "scanner",
+    }
+    return stages.get(status, NA)
+
+
+def _rejection_reasons_for(status: ScannerPipelineStatus, rejection_reason: str | None) -> tuple[str, ...]:
+    if rejection_reason:
+        return (rejection_reason,)
+    if status in (
+        ScannerPipelineStatus.IDEA_CREATED,
+        ScannerPipelineStatus.ALERT_DRY_RUN_CREATED,
+        ScannerPipelineStatus.JOURNAL_ENTRY_CREATED,
+    ):
+        return ()
+    if status == ScannerPipelineStatus.SCANNED_NO_SETUP:
+        return ("No deterministic setup context was detected.",)
+    return ()
 
 
 def _technical_candles(candles: Sequence[Any]) -> tuple[dict[str, Any], ...]:

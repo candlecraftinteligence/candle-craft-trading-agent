@@ -64,6 +64,35 @@ def _full_bullish_setup_candles(*, with_fvg: bool = True, sweep_volume: Decimal 
     return candles
 
 
+def _missing_ob_fvg_candles() -> list[dict[str, Decimal | int]]:
+    candles = _base_candles(45)
+    candles[20]["low"] = Decimal("90")
+    candles[24]["high"] = Decimal("110")
+    candles[30]["open"] = Decimal("89")
+    candles[30]["low"] = Decimal("85")
+    candles[30]["close"] = Decimal("91")
+    candles[35]["open"] = Decimal("104")
+    candles[35]["high"] = Decimal("114")
+    candles[35]["low"] = Decimal("100")
+    candles[35]["close"] = Decimal("112")
+    return candles
+
+
+def _fib_failure_candles() -> list[dict[str, Decimal | int]]:
+    candles = _full_bullish_setup_candles()
+    candles.append(
+        {
+            "timestamp": 36,
+            "open": Decimal("112"),
+            "high": Decimal("113"),
+            "low": Decimal("87"),
+            "close": Decimal("100"),
+            "volume": Decimal("100"),
+        }
+    )
+    return candles
+
+
 def _trend_candles(count: int = 30) -> list[dict[str, Decimal | int]]:
     candles: list[dict[str, Decimal | int]] = []
     for index in range(count):
@@ -264,6 +293,59 @@ def test_reject_if_rr_to_tp2_below_25() -> None:
 
     assert result.swing.is_valid is False
     assert any(violation.code == "rr_below_minimum" for violation in result.swing.gate_result.violations)
+
+
+def test_liquidity_diagnostics_explain_failed_sweep() -> None:
+    result = analyze_liquidity_grab_pullback({"symbol": "BTCUSDT", "candles_15m": _base_candles()})
+
+    assert result.swing.gates_failed[0] == "missing_confirmed_sweep"
+    assert "Sweep: failed" in result.swing.strategy_diagnostics
+    assert "No candle swept prior swing by at least 0.35 ATR and closed back inside." in result.swing.strategy_diagnostics
+    assert result.swing.structure_shift_diagnostics == "N/A because sweep failed."
+
+
+def test_liquidity_diagnostics_explain_failed_bos_choch() -> None:
+    result = analyze_liquidity_grab_pullback(
+        {"symbol": "BTCUSDT", "candles_15m": _bullish_sweep_candles(sweep_low=Decimal("86.5"), sweep_close=Decimal("91"))}
+    )
+
+    assert result.swing.gates_failed[0] == "missing_structure_shift"
+    assert "Sweep: passed" in result.swing.strategy_diagnostics
+    assert "BOS/CHoCH: failed" in result.swing.strategy_diagnostics
+    assert "No BOS/CHoCH close beyond the required LTF swing." in result.swing.structure_shift_diagnostics
+
+
+def test_liquidity_diagnostics_explain_missing_ob_fvg() -> None:
+    result = analyze_liquidity_grab_pullback({"symbol": "BTCUSDT", "candles_15m": _missing_ob_fvg_candles()})
+
+    assert result.swing.gates_failed[0] == "missing_pullback_zone"
+    assert result.swing.ob_fvg_diagnostics == "failed: OB missing; FVG missing."
+    assert "OB/FVG: failed" in result.swing.strategy_diagnostics
+    assert result.swing.fib_diagnostics == "N/A because OB/FVG failed."
+
+
+def test_liquidity_diagnostics_explain_failed_fib_alignment() -> None:
+    result = analyze_liquidity_grab_pullback({"symbol": "BTCUSDT", "candles_15m": _fib_failure_candles()})
+
+    assert result.swing.gates_failed[0] == "fib_alignment_failed"
+    assert "Fib alignment: failed" in result.swing.strategy_diagnostics
+    assert "Pullback tagged beyond 0.786 before entry." in result.swing.fib_diagnostics
+
+
+def test_liquidity_diagnostics_explain_failed_rr() -> None:
+    result = analyze_liquidity_grab_pullback(
+        {
+            "symbol": "SOLUSDT",
+            "mode": "swing",
+            "candles_15m": _full_bullish_setup_candles(),
+            "candles_2d": _trend_candles(),
+            "user_resistance_levels": (Decimal("112"), Decimal("120")),
+        }
+    )
+
+    assert result.swing.gates_failed[0] == "rr_below_minimum"
+    assert "RR: failed" in result.swing.strategy_diagnostics
+    assert "RR to TP2 is below 2.5." in result.swing.rr_diagnostics
 
 
 def test_challenge_rejects_if_trust_meter_below_85() -> None:

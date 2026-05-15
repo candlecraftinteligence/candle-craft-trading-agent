@@ -174,6 +174,27 @@ def test_scanner_handles_no_setup() -> None:
     assert "No sweep, BOS, or CHoCH" in str(symbol_result.rejection_reason)
 
 
+def test_verbose_config_defaults_to_false() -> None:
+    assert _config(["BTCUSDT"]).verbose is False
+
+
+def test_scanner_diagnostics_exist_for_no_setup_result() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _flat_candles()})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    symbol_result = result.results[0]
+    assert symbol_result.candles_fetched == 220
+    assert symbol_result.latest_close == Decimal("100")
+    assert symbol_result.technical_score != NA
+    assert symbol_result.derivatives_score != NA
+    assert symbol_result.trend_context in ("bullish", "bearish", "neutral", NA)
+    assert symbol_result.sweep_detected is False
+    assert symbol_result.bos_detected is False
+    assert symbol_result.choch_detected is False
+    assert symbol_result.rejection_stage == "technical"
+    assert symbol_result.rejection_reasons == ("No sweep, BOS, or CHoCH context was detected.",)
+
+
 def test_scanner_continues_if_one_symbol_fails() -> None:
     client = FakeExchangeClient(
         {
@@ -251,6 +272,8 @@ def test_missing_funding_marked_na() -> None:
 
     symbol_result = result.results[0]
     assert symbol_result.funding_rate == NA
+    assert symbol_result.funding_direction == NA
+    assert symbol_result.funding_severity == NA
     assert "funding_rate: N/A" in symbol_result.missing_data
     assert symbol_result.derivatives_result is not None
     assert symbol_result.derivatives_result.funding.raw_funding_rate == NA
@@ -262,6 +285,8 @@ def test_missing_oi_marked_na() -> None:
 
     symbol_result = result.results[0]
     assert symbol_result.open_interest == NA
+    assert symbol_result.oi_direction == NA
+    assert symbol_result.price_oi_relationship == NA
     assert "open_interest: N/A" in symbol_result.missing_data
     assert symbol_result.derivatives_result is not None
     assert symbol_result.derivatives_result.open_interest.current_open_interest == NA

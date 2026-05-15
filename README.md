@@ -444,6 +444,29 @@ No valid challenge setup.
 ⚔️ Candle Craft | Signal. Structure. Execution.
 ```
 
+## Phase 11.1 Scanner + Strategy Diagnostics
+
+Phase 11.1 adds readable diagnostics to the Scanner Runner and the Liquidity-Grab Pullback Engine:
+
+- Scanner symbol results now include per-symbol diagnostics such as candles fetched, latest close, technical and derivatives scores, trend/range context, swing levels, sweep/BOS/CHoCH flags, funding/OI context, rejection stage, rejection reasons, missing data, and unverified data.
+- `scripts/run_scan.py --verbose` prints a readable diagnostic block for each scanned symbol so rejected or no-setup symbols are explainable.
+- `scripts/run_scan.py --output-json scan_output.json` writes the full `ScannerRunResult`, including diagnostics, without API keys or secrets.
+- Liquidity-grab setup results now explain sweep, BOS/CHoCH, OB/FVG, fib alignment, momentum, RR, Trust Meter, the first failed gate, and the final decision.
+- Diagnostics help understand rejected setups. They do not loosen quality gates, bypass hard rejections, force trade ideas, place orders, or use private exchange API access.
+- Missing data remains `N/A`; unreliable supplied context remains `Unverified`.
+
+Verbose scanner run:
+
+```powershell
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --interval 15m --candle-limit 250 --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --verbose
+```
+
+Save scanner JSON output:
+
+```powershell
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --output-json scan_output.json
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
