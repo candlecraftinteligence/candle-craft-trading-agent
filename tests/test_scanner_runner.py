@@ -211,10 +211,10 @@ def test_scanner_handles_one_valid_mocked_symbol() -> None:
     assert ScannerPipelineStatus.IDEA_CREATED in symbol_result.status_history
     assert ScannerPipelineStatus.ALERT_DRY_RUN_CREATED in symbol_result.status_history
     assert symbol_result.trade_idea is not None
-    assert symbol_result.trade_idea.setup_type == "liquidity_grab_pullback_challenge"
+    assert symbol_result.trade_idea.setup_type == "liquidity_grab_pullback_swing"
     assert symbol_result.trade_idea.quality_gate_result.passed is True
     assert symbol_result.strategy_name == "liquidity_grab_pullback"
-    assert symbol_result.valid_strategy_modes == ("challenge", "swing", "scalp")
+    assert symbol_result.valid_strategy_modes == ("swing", "scalp")
     assert result.trade_ideas_created == 1
 
 

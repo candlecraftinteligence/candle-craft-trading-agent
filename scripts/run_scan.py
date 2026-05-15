@@ -130,6 +130,7 @@ def _format_symbol_summary(symbol_result: ScannerSymbolResult) -> str:
         (
             f"{execution_tf} sweep: {_status_text(diagnostics.get('execution_sweep_status'))}",
             f"{confirmation_tf} BOS/CHoCH: {_status_text(diagnostics.get('confirmation_structure_shift_status'))}",
+            f"Pullback: {_status_text(diagnostics.get('pullback_zone_status'))}",
             f"Reject: {reject_text}",
         )
     )
@@ -153,6 +154,7 @@ def _format_symbol_normal_block(symbol_result: ScannerSymbolResult) -> str:
             _volume_profile_normal_text(symbol_result),
             f"15m Execution: {_execution_text(diagnostics)}",
             f"5m Confirmation: {_confirmation_text(diagnostics)}",
+            _pullback_normal_text(diagnostics),
             f"Failed gate: {failed_gate}",
             f"Reason: {reason}",
             f"Action: {action}",
@@ -253,10 +255,21 @@ def _confirmation_text(diagnostics: dict[str, object]) -> str:
     return status
 
 
+def _pullback_normal_text(diagnostics: dict[str, object]) -> str:
+    status = _status_text(diagnostics.get("pullback_zone_status"))
+    selected = _display(diagnostics.get("selected_zone_type"))
+    fib = _display(diagnostics.get("fib_alignment_status"))
+    rr = _display(diagnostics.get("rr_to_tp2"))
+    return f"Pullback Zone: {status} | OB/FVG: [{selected}] | Fib: [{fib}] | RR: [{rr}]"
+
+
 def _normal_reason(symbol_result: ScannerSymbolResult, diagnostics: dict[str, object]) -> str:
     confirmation_reason = _display(diagnostics.get("confirmation_bos_choch_reason"))
     if confirmation_reason != NA and diagnostics.get("first_failed_gate") == "missing_confirmation_structure_shift":
         return confirmation_reason
+    pullback_reason = _display(diagnostics.get("pullback_failure_reason"))
+    if pullback_reason != NA and _display(diagnostics.get("pullback_zone_status")) == "failed":
+        return pullback_reason
     hard_rejections = diagnostics.get("hard_rejection_reasons")
     if isinstance(hard_rejections, Sequence) and not isinstance(hard_rejections, (str, bytes)) and hard_rejections:
         return str(hard_rejections[0])
@@ -370,6 +383,13 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
                 f"{mode} POC: {_display(diagnostics.get('poc'))}",
                 f"{mode} POC diagnostics: {_display(diagnostics.get('poc_diagnostics'))}",
                 f"{mode} confirmation reason: {_display(diagnostics.get('confirmation_bos_choch_reason'))}",
+                f"{mode} Pullback Zone: {_display(diagnostics.get('pullback_zone_status'))} | "
+                f"OB/FVG: {_display(diagnostics.get('selected_zone_type'))} | "
+                f"Fib: {_display(diagnostics.get('fib_alignment_status'))} | "
+                f"RR: {_display(diagnostics.get('rr_to_tp2'))}",
+                f"{mode} pullback failure reason: {_display(diagnostics.get('pullback_failure_reason'))}",
+                f"{mode} OB zone: {_display(diagnostics.get('ob_zone'))}",
+                f"{mode} FVG zone: {_display(diagnostics.get('fvg_zone'))}",
                 f"{mode} first failed gate: {_display(diagnostics.get('first_failed_gate'))}",
                 f"{mode} final decision: {'valid setup' if diagnostics.get('is_valid') else 'no setup'}",
                 f"{mode} failed gates: {failed_gates}",

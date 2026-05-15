@@ -8,6 +8,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.analytics.pullback_zones import (
+    FibAlignmentResult,
+    PullbackZone,
+    PullbackZoneInput,
+    PullbackZoneResult,
+    analyze_pullback_zone,
+    calculate_fib_alignment,
+)
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
 
 DecimalLike = Decimal | int | str
@@ -72,6 +80,11 @@ class OrderBlockZone(BaseModel):
     low: MaybeDecimal = NA
     high: MaybeDecimal = NA
     midpoint: MaybeDecimal = NA
+    body_low: MaybeDecimal = NA
+    body_high: MaybeDecimal = NA
+    wick_low: MaybeDecimal = NA
+    wick_high: MaybeDecimal = NA
+    freshness_status: str = NA
     reason: str = "Order block is N/A because no qualifying candle was found."
 
     model_config = ConfigDict(frozen=True)
@@ -86,20 +99,8 @@ class FairValueGapZone(BaseModel):
     midpoint: MaybeDecimal = NA
     fill_low: MaybeDecimal = NA
     fill_high: MaybeDecimal = NA
+    freshness_status: str = NA
     reason: str = "FVG is N/A because no valid imbalance was found."
-
-    model_config = ConfigDict(frozen=True)
-
-
-class FibAlignmentResult(BaseModel):
-    is_aligned: bool = False
-    direction: Direction = NA
-    retracement: MaybeDecimal = NA
-    preferred_low: MaybeDecimal = NA
-    preferred_high: MaybeDecimal = NA
-    aggressive_drift_used: bool = False
-    rejected_deeper_than_786: bool = False
-    reason: str = "Fib alignment is N/A because impulse or entry data is missing."
 
     model_config = ConfigDict(frozen=True)
 
@@ -184,6 +185,17 @@ class LiquidityGrabSetup(BaseModel):
     order_block: OrderBlockZone = OrderBlockZone()
     fair_value_gap: FairValueGapZone = FairValueGapZone()
     fib_alignment: FibAlignmentResult = FibAlignmentResult()
+    pullback_zone: PullbackZoneResult = PullbackZoneResult()
+    pullback_zone_status: str = NA
+    selected_zone_type: str = NA
+    ob_zone: PullbackZone = PullbackZone(zone_type="OB")
+    fvg_zone: PullbackZone = PullbackZone(zone_type="FVG")
+    fib_382: MaybeDecimal = NA
+    fib_618: MaybeDecimal = NA
+    fib_65: MaybeDecimal = NA
+    fib_786: MaybeDecimal = NA
+    pullback_failure_reason: str = NA
+    atr_stop_buffer: MaybeDecimal = NA
     momentum: MomentumConfirmation = MomentumConfirmation()
     trust_meter: TrustMeterResult = TrustMeterResult()
     gate_result: StrategyGateResult = StrategyGateResult()
@@ -208,6 +220,7 @@ class LiquidityGrabSetup(BaseModel):
     sweep_diagnostics: str = NA
     structure_shift_diagnostics: str = NA
     ob_fvg_diagnostics: str = NA
+    pullback_zone_diagnostics: str = NA
     fib_diagnostics: str = NA
     momentum_diagnostics: str = NA
     rr_diagnostics: str = NA
@@ -244,6 +257,7 @@ class LiquidityGrabResult(BaseModel):
     sweep_diagnostics: str = NA
     structure_shift_diagnostics: str = NA
     ob_fvg_diagnostics: str = NA
+    pullback_zone_diagnostics: str = NA
     fib_diagnostics: str = NA
     momentum_diagnostics: str = NA
     rr_diagnostics: str = NA
@@ -282,6 +296,8 @@ class LiquidityGrabInput(BaseModel):
     user_support_levels: Sequence[Any] | Any | None = None
     user_resistance_levels: Sequence[Any] | Any | None = None
     poc: Any | None = None
+    value_area_high: Any | None = None
+    value_area_low: Any | None = None
     volume_profile_source: str = NA
     volume_profile_warnings: Sequence[Any] | Any | None = None
     liquidity_below: Sequence[Any] | Any | None = None
@@ -422,6 +438,7 @@ class LiquidityGrabEngine:
             sweep_diagnostics=requested_setup.sweep_diagnostics,
             structure_shift_diagnostics=requested_setup.structure_shift_diagnostics,
             ob_fvg_diagnostics=requested_setup.ob_fvg_diagnostics,
+            pullback_zone_diagnostics=requested_setup.pullback_zone_diagnostics,
             fib_diagnostics=requested_setup.fib_diagnostics,
             momentum_diagnostics=requested_setup.momentum_diagnostics,
             rr_diagnostics=requested_setup.rr_diagnostics,
@@ -560,65 +577,42 @@ class LiquidityGrabEngine:
 
         direction: Direction = structure_shift.direction
         bias: TradeBias = "long" if direction == "bullish" else "short"
-        order_block = detect_order_block(
-            candles,
-            direction,
-            bos_index=int(execution_structure_shift.candle_index),
-            sweep_index=int(sweep.candle_index),
-        )
-        fair_value_gap = detect_fair_value_gap(
-            candles,
-            direction,
-            start_index=max(2, int(sweep.candle_index) + 1),
-            end_index=int(execution_structure_shift.candle_index),
-        )
-
-        entry_zone = _entry_zone(
-            direction=direction,
-            sweep=sweep,
-            structure_shift=execution_structure_shift,
-            order_block=order_block,
-            fair_value_gap=fair_value_gap,
-            aggressive_toggle=data.aggressive_toggle,
-        )
-        if entry_zone is None:
-            return _rejected_setup(
-                mode,
-                "missing_pullback_zone",
-                "Required OB/FVG pullback zone with fib alignment is missing.",
-                missing_data,
-                unverified_data,
-                rotation,
-                timeframe=execution.timeframe,
-                current_price=_current_price(data, candles),
-                sweep=sweep,
-                structure_shift=structure_shift,
-                order_block=order_block,
-                fair_value_gap=fair_value_gap,
-                context_fields=context_fields,
+        trade_direction: TradeBias = "long" if direction == "bullish" else "short"
+        pullback_zone = analyze_pullback_zone(
+            PullbackZoneInput(
+                symbol=data.symbol,
+                direction=trade_direction,
+                execution_timeframe=execution.timeframe,
+                confirmation_timeframe=confirmation.timeframe,
+                candles_15m=candles,
+                candles_5m=confirmation_candles,
+                sweep_candle_index=sweep.candle_index,
+                bos_choch_candle_index=execution_structure_shift.candle_index,
+                latest_price=_current_price(data, candles),
+                atr_15m=atr,
+                tick_size=TICK_SIZE,
+                aggressive_toggle=data.aggressive_toggle,
+                minimum_rr=CHALLENGE_MIN_RR if mode == LiquidityGrabMode.challenge else BASE_MIN_RR,
+                poc=data.poc if not _is_missing(data.poc) else NA,
+                value_area_high=data.value_area_high if not _is_missing(data.value_area_high) else NA,
+                value_area_low=data.value_area_low if not _is_missing(data.value_area_low) else NA,
+                liquidity_below=data.liquidity_below,
+                liquidity_above=data.liquidity_above,
+                user_support_levels=data.user_support_levels,
+                user_resistance_levels=data.user_resistance_levels,
             )
-
-        entry_low, entry_high, entry, entry_source, fib_alignment = entry_zone
-        deepest_pullback = _deepest_pullback_after_bos(
-            candles,
-            direction,
-            int(execution_structure_shift.candle_index),
-            int(sweep.candle_index),
-            execution_structure_shift,
         )
-        fib_alignment = calculate_fib_alignment(
-            direction=direction,
-            sweep_price=_sweep_wick_price(sweep),
-            bos_price=_bos_impulse_price(candles[int(execution_structure_shift.candle_index)], direction),
-            entry_price=entry,
-            aggressive_toggle=data.aggressive_toggle,
-            deepest_pullback=deepest_pullback,
-        )
-        if not fib_alignment.is_aligned or fib_alignment.rejected_deeper_than_786:
+        order_block = _order_block_from_pullback_zone(pullback_zone.ob_zone, direction)
+        fair_value_gap = _fair_value_gap_from_pullback_zone(pullback_zone.fvg_zone, direction)
+        fib_alignment = pullback_zone.fib_alignment
+        entry_source = pullback_zone.selected_zone_type
+        if not pullback_zone.valid:
             return _rejected_setup(
                 mode,
-                "fib_alignment_failed",
-                fib_alignment.reason,
+                pullback_zone.first_failed_gate if pullback_zone.first_failed_gate != NA else "missing_pullback_zone",
+                pullback_zone.pullback_failure_reason
+                if pullback_zone.pullback_failure_reason != NA
+                else "Required OB/FVG pullback zone with fib alignment is missing.",
                 missing_data,
                 unverified_data,
                 rotation,
@@ -629,38 +623,27 @@ class LiquidityGrabEngine:
                 order_block=order_block,
                 fair_value_gap=fair_value_gap,
                 fib_alignment=fib_alignment,
-                entry_low=entry_low,
-                entry_high=entry_high,
-                entry=entry,
+                pullback_zone=pullback_zone,
+                entry_low=pullback_zone.entry_low,
+                entry_high=pullback_zone.entry_high,
+                entry=pullback_zone.entry,
                 entry_source=entry_source,
+                stop=pullback_zone.stop,
+                tp1=pullback_zone.tp1,
+                tp2=pullback_zone.tp2,
+                tp3=pullback_zone.tp3,
+                rr_to_tp2=pullback_zone.rr_to_tp2,
                 context_fields=context_fields,
             )
 
-        stop = _stop_price(direction, sweep, order_block, atr, entry)
-        if stop == NA:
-            return _rejected_setup(
-                mode,
-                "missing_stop",
-                "A deterministic stop could not be calculated.",
-                missing_data,
-                unverified_data,
-                rotation,
-                timeframe=execution.timeframe,
-                current_price=_current_price(data, candles),
-                sweep=sweep,
-                structure_shift=structure_shift,
-                order_block=order_block,
-                fair_value_gap=fair_value_gap,
-                fib_alignment=fib_alignment,
-                entry_low=entry_low,
-                entry_high=entry_high,
-                entry=entry,
-                entry_source=entry_source,
-                context_fields=context_fields,
-            )
-
-        tp1, tp2, tp3 = _targets(data, direction, entry, stop, normalized)
-        rr_to_tp2 = _risk_reward(direction, entry, stop, tp2)
+        entry_low = _decimal_from(pullback_zone.entry_low, "pullback_zone.entry_low")
+        entry_high = _decimal_from(pullback_zone.entry_high, "pullback_zone.entry_high")
+        entry = _decimal_from(pullback_zone.entry, "pullback_zone.entry")
+        stop = _decimal_from(pullback_zone.stop, "pullback_zone.stop")
+        tp1 = _decimal_from(pullback_zone.tp1, "pullback_zone.tp1")
+        tp2 = _decimal_from(pullback_zone.tp2, "pullback_zone.tp2")
+        tp3: MaybeDecimal = pullback_zone.tp3
+        rr_to_tp2 = pullback_zone.rr_to_tp2
         momentum = confirm_momentum(candles, int(sweep.candle_index), cvd=data.cvd)
         trend = _trend_for_mode(normalized, mode)
         trust_meter = _trust_meter(
@@ -714,6 +697,17 @@ class LiquidityGrabEngine:
             order_block=order_block,
             fair_value_gap=fair_value_gap,
             fib_alignment=fib_alignment,
+            pullback_zone=pullback_zone,
+            pullback_zone_status=pullback_zone.pullback_zone_status,
+            selected_zone_type=pullback_zone.selected_zone_type,
+            ob_zone=pullback_zone.ob_zone,
+            fvg_zone=pullback_zone.fvg_zone,
+            fib_382=pullback_zone.fib_382,
+            fib_618=pullback_zone.fib_618,
+            fib_65=pullback_zone.fib_65,
+            fib_786=pullback_zone.fib_786,
+            pullback_failure_reason=pullback_zone.pullback_failure_reason,
+            atr_stop_buffer=pullback_zone.atr_stop_buffer,
             momentum=momentum,
             trust_meter=trust_meter,
             gate_result=gate_result,
@@ -952,65 +946,6 @@ def detect_order_block(
     return OrderBlockZone()
 
 
-def calculate_fib_alignment(
-    *,
-    direction: Direction,
-    sweep_price: DecimalLike,
-    bos_price: DecimalLike,
-    entry_price: DecimalLike,
-    aggressive_toggle: bool = False,
-    deepest_pullback: DecimalLike | None = None,
-) -> FibAlignmentResult:
-    if direction not in ("bullish", "bearish"):
-        return FibAlignmentResult(reason="Fib alignment is N/A because direction is N/A.")
-    sweep = _decimal_from(sweep_price, "sweep_price")
-    bos = _decimal_from(bos_price, "bos_price")
-    entry = _decimal_from(entry_price, "entry_price")
-    impulse = abs(bos - sweep)
-    if impulse <= 0:
-        return FibAlignmentResult(direction=direction, reason="Fib alignment failed because impulse range is zero.")
-
-    if direction == "bullish":
-        retracement = (bos - entry) / impulse
-    else:
-        retracement = (entry - bos) / impulse
-
-    deepest_ratio = _pullback_ratio(direction, sweep, bos, deepest_pullback)
-    if deepest_ratio is not None and deepest_ratio > Decimal("0.786"):
-        return FibAlignmentResult(
-            direction=direction,
-            retracement=_quantize(retracement),
-            rejected_deeper_than_786=True,
-            reason="Pullback tagged beyond 0.786 before entry.",
-        )
-
-    max_retrace = Decimal("0.65") if aggressive_toggle else Decimal("0.618")
-    min_retrace = Decimal("0.382")
-    aggressive_drift_used = retracement > Decimal("0.618") and retracement <= Decimal("0.65")
-    if min_retrace <= retracement <= max_retrace:
-        preferred_low, preferred_high = _fib_price_zone(direction, sweep, bos, aggressive_toggle)
-        return FibAlignmentResult(
-            is_aligned=True,
-            direction=direction,
-            retracement=_quantize(retracement),
-            preferred_low=_quantize(preferred_low),
-            preferred_high=_quantize(preferred_high),
-            aggressive_drift_used=aggressive_drift_used,
-            reason="Entry is aligned with the preferred 0.382 to 0.618 fib zone."
-            if not aggressive_drift_used
-            else "Entry used aggressive drift to 0.65 with aggressive mode enabled.",
-        )
-
-    preferred_low, preferred_high = _fib_price_zone(direction, sweep, bos, aggressive_toggle)
-    return FibAlignmentResult(
-        direction=direction,
-        retracement=_quantize(retracement),
-        preferred_low=_quantize(preferred_low),
-        preferred_high=_quantize(preferred_high),
-        reason="Entry is outside the preferred fib retracement zone.",
-    )
-
-
 def confirm_momentum(
     candles: Sequence[Any],
     sweep_index: int,
@@ -1223,7 +1158,50 @@ def _order_block_from_candle(candle: _Candle, direction: Direction) -> OrderBloc
         low=_quantize(low),
         high=_quantize(high),
         midpoint=_quantize(midpoint),
+        body_low=_quantize(low),
+        body_high=_quantize(high),
+        wick_low=_quantize(candle.low),
+        wick_high=_quantize(candle.high),
+        freshness_status=NA,
         reason="Order block is the last opposite-color candle body before displacement/BOS.",
+    )
+
+
+def _order_block_from_pullback_zone(zone: PullbackZone, direction: Direction) -> OrderBlockZone:
+    if not zone.is_present:
+        return OrderBlockZone(reason=zone.reason if zone.reason != NA else OrderBlockZone().reason)
+    low = zone.body_low if zone.body_low != NA else zone.low
+    high = zone.body_high if zone.body_high != NA else zone.high
+    return OrderBlockZone(
+        is_present=True,
+        direction=direction,
+        candle_index=zone.creation_index,
+        low=low,
+        high=high,
+        midpoint=zone.midpoint,
+        body_low=zone.body_low,
+        body_high=zone.body_high,
+        wick_low=zone.wick_low,
+        wick_high=zone.wick_high,
+        freshness_status=zone.freshness_status,
+        reason=zone.reason,
+    )
+
+
+def _fair_value_gap_from_pullback_zone(zone: PullbackZone, direction: Direction) -> FairValueGapZone:
+    if not zone.is_present:
+        return FairValueGapZone(reason=zone.reason if zone.reason != NA else FairValueGapZone().reason)
+    return FairValueGapZone(
+        is_present=True,
+        direction=direction,
+        candle_index=zone.creation_index,
+        low=zone.low,
+        high=zone.high,
+        midpoint=zone.midpoint,
+        fill_low=zone.fill_low,
+        fill_high=zone.fill_high,
+        freshness_status=zone.freshness_status,
+        reason=zone.reason,
     )
 
 
@@ -1603,13 +1581,20 @@ def _rejected_setup(
     order_block: OrderBlockZone | None = None,
     fair_value_gap: FairValueGapZone | None = None,
     fib_alignment: FibAlignmentResult | None = None,
+    pullback_zone: PullbackZoneResult | None = None,
     entry_low: MaybeDecimal = NA,
     entry_high: MaybeDecimal = NA,
     entry: MaybeDecimal = NA,
     entry_source: str = NA,
+    stop: MaybeDecimal = NA,
+    tp1: MaybeDecimal = NA,
+    tp2: MaybeDecimal = NA,
+    tp3: MaybeDecimal = NA,
+    rr_to_tp2: MaybeDecimal = NA,
     context_fields: Mapping[str, Any] | None = None,
 ) -> LiquidityGrabSetup:
     context_fields = context_fields or {}
+    pullback_zone = pullback_zone or PullbackZoneResult()
     return LiquidityGrabSetup(
         mode=mode,
         timeframe=timeframe,
@@ -1619,10 +1604,26 @@ def _rejected_setup(
         order_block=order_block or OrderBlockZone(),
         fair_value_gap=fair_value_gap or FairValueGapZone(),
         fib_alignment=fib_alignment or FibAlignmentResult(),
+        pullback_zone=pullback_zone,
+        pullback_zone_status=pullback_zone.pullback_zone_status,
+        selected_zone_type=pullback_zone.selected_zone_type,
+        ob_zone=pullback_zone.ob_zone,
+        fvg_zone=pullback_zone.fvg_zone,
+        fib_382=pullback_zone.fib_382,
+        fib_618=pullback_zone.fib_618,
+        fib_65=pullback_zone.fib_65,
+        fib_786=pullback_zone.fib_786,
+        pullback_failure_reason=pullback_zone.pullback_failure_reason,
+        atr_stop_buffer=pullback_zone.atr_stop_buffer,
         entry_low=entry_low,
         entry_high=entry_high,
         entry=entry,
         entry_source=entry_source,
+        stop=stop,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        rr_to_tp2=rr_to_tp2,
         gate_result=StrategyGateResult(passed=False, violations=(_violation(code, message),)),
         missing_data=missing_data,
         unverified_data=unverified_data,
@@ -1661,9 +1662,20 @@ def _setup_diagnostic_fields(setup: LiquidityGrabSetup) -> dict[str, Any]:
         "execution_sweep_status": _execution_sweep_status(setup),
         "confirmation_structure_shift_status": _confirmation_structure_shift_status(setup),
         "confirmation_bos_choch_reason": _confirmation_bos_choch_reason(setup),
+        "pullback_zone_status": setup.pullback_zone.pullback_zone_status,
+        "selected_zone_type": setup.pullback_zone.selected_zone_type,
+        "ob_zone": setup.pullback_zone.ob_zone,
+        "fvg_zone": setup.pullback_zone.fvg_zone,
+        "fib_382": setup.pullback_zone.fib_382,
+        "fib_618": setup.pullback_zone.fib_618,
+        "fib_65": setup.pullback_zone.fib_65,
+        "fib_786": setup.pullback_zone.fib_786,
+        "pullback_failure_reason": setup.pullback_zone.pullback_failure_reason,
+        "atr_stop_buffer": setup.pullback_zone.atr_stop_buffer,
         "sweep_diagnostics": _sweep_diagnostics(setup.sweep),
         "structure_shift_diagnostics": _structure_shift_diagnostics(setup.sweep, setup.structure_shift),
         "ob_fvg_diagnostics": _ob_fvg_diagnostics(setup.structure_shift, setup.order_block, setup.fair_value_gap),
+        "pullback_zone_diagnostics": _pullback_zone_diagnostics(setup),
         "fib_diagnostics": _fib_diagnostics(setup),
         "momentum_diagnostics": _momentum_diagnostics(setup),
         "rr_diagnostics": _rr_diagnostics(setup),
@@ -1707,6 +1719,8 @@ def _gates_passed(setup: LiquidityGrabSetup, gates_failed: tuple[str, ...]) -> t
         passed.append("bos_choch")
     if setup.order_block.is_present or setup.fair_value_gap.is_present:
         passed.append("ob_fvg")
+    if setup.pullback_zone.valid:
+        passed.append("pullback_zone")
     if setup.fib_alignment.is_aligned and not setup.fib_alignment.rejected_deeper_than_786:
         passed.append("fib_alignment")
     if setup.momentum.is_confirmed:
@@ -1759,9 +1773,25 @@ def _ob_fvg_diagnostics(
     return f"passed: OB {ob_status}; FVG {fvg_status}."
 
 
+def _pullback_zone_diagnostics(setup: LiquidityGrabSetup) -> str:
+    if not setup.sweep.is_present:
+        return "N/A because sweep failed."
+    if not setup.structure_shift.is_present:
+        return "N/A because BOS/CHoCH failed."
+    status = setup.pullback_zone.pullback_zone_status
+    if status == "valid":
+        return f"valid: {setup.pullback_zone.selected_zone_type} overlaps fib; RR {_display(setup.pullback_zone.rr_to_tp2)}."
+    reason = setup.pullback_zone.pullback_failure_reason
+    if reason == NA:
+        reason = "Required OB/FVG pullback zone with fib alignment is missing."
+    return f"failed: {reason}"
+
+
 def _fib_diagnostics(setup: LiquidityGrabSetup) -> str:
     if not setup.structure_shift.is_present:
         return "N/A."
+    if setup.pullback_zone.first_failed_gate == "pullback_too_deep":
+        return f"failed: {setup.pullback_zone.pullback_failure_reason}"
     if not setup.order_block.is_present and not setup.fair_value_gap.is_present:
         return "N/A because OB/FVG failed."
     if setup.fib_alignment.is_aligned and not setup.fib_alignment.rejected_deeper_than_786:
@@ -1783,7 +1813,7 @@ def _rr_diagnostics(setup: LiquidityGrabSetup) -> str:
     rr_messages = [
         violation.message
         for violation in setup.gate_result.violations
-        if violation.code in ("missing_rr", "rr_below_minimum", "challenge_rr_below_3")
+        if violation.code in ("missing_rr", "rr_below_minimum", "challenge_rr_below_3", "rr_too_low")
     ]
     if setup.rr_to_tp2 == NA:
         if rr_messages:
@@ -1831,6 +1861,11 @@ def _format_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> str:
     lines.extend(
         (
             f"{setup.confirmation_timeframe} BOS/CHoCH: {_diagnostic_detail(setup.structure_shift_diagnostics)}",
+            f"Pullback Zone: {_diagnostic_detail(setup.pullback_zone_diagnostics)}",
+            f"OB: {_pullback_zone_text(setup.ob_zone)}",
+            f"FVG: {_pullback_zone_text(setup.fvg_zone)}",
+            f"Fib: {_display(setup.fib_alignment.status)}",
+            f"RR: {_display(setup.rr_to_tp2)}",
             f"OB/FVG: {_diagnostic_detail(setup.ob_fvg_diagnostics)}",
             f"Fib alignment: {_diagnostic_detail(setup.fib_diagnostics)}",
             f"Momentum: {_diagnostic_detail(setup.momentum_diagnostics)}",
@@ -1955,6 +1990,7 @@ def _format_scalp(symbol: str, data: LiquidityGrabInput, setup: LiquidityGrabSet
             "4) Trade Map",
             f"• Bias: [{setup.bias}].",
             f"• Sweep Zone: [{_display(setup.sweep.wick_price)} -> {_display(setup.sweep.swing_level)}].",
+            f"• Pullback Zone: [{setup.pullback_zone_status} | OB/FVG: {setup.selected_zone_type} | Fib: {_display(setup.fib_alignment.status)} | RR: {_display(setup.rr_to_tp2)}].",
             f"• Entry: [{_zone_text(setup.entry_low, setup.entry_high)}].",
             f"• Stop: [{_display(setup.stop)}].",
             f"• TPs: [TP1 {_display(setup.tp1)}], [TP2 {_display(setup.tp2)}], [TP3 opt {_display(setup.tp3)}].",
@@ -2308,6 +2344,12 @@ def _zone_text(low: MaybeDecimal, high: MaybeDecimal) -> str:
     if low == NA or high == NA:
         return NA
     return f"{_display(low)} - {_display(high)}"
+
+
+def _pullback_zone_text(zone: PullbackZone) -> str:
+    if not zone.is_present or zone.low == NA or zone.high == NA:
+        return NA
+    return f"{zone.zone_type} {_display(zone.low)} - {_display(zone.high)} ({zone.freshness_status})"
 
 
 def _display(value: Any) -> str:

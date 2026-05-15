@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, and Phase 13 candle-estimated Volume Profile / POC context.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, and Phase 14 refined OB/FVG plus fib pullback-zone validation.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -98,7 +98,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, and the Phase 13 candle-estimated volume profile. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, and the Phase 14 pullback-zone engine. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -594,6 +594,33 @@ Run Phase 13 scanner output:
 python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
 ```
 
+## Phase 14 Pullback Zone Engine
+
+Phase 14 adds `app/analytics/pullback_zones.py` for the Liquidity-Grab Pullback strategy. The engine runs only after the 15m sweep and 5m BOS/CHoCH confirmation have passed.
+
+- The engine identifies the displacement impulse from the sweep wick to the BOS/CHoCH impulse extreme.
+- Bullish and bearish FVGs are detected from the displacement candles and marked with high, low, midpoint, creation index, and freshness.
+- Bullish and bearish order blocks are detected as the last opposite-color candle before displacement/BOS and include body, wick, midpoint, creation index, and freshness.
+- A selected pullback zone must overlap the 0.382 to 0.618 fib retracement range. Aggressive mode can allow drift to 0.65.
+- Pullbacks that tag deeper than 0.786 before entry are rejected with `pullback_too_deep`.
+- Stops use the sweep wick plus a 0.10 ATR(15m) buffer, or the farther OB structure edge when that is more conservative. If ATR is unavailable, the structure edge is used and the ATR buffer remains `N/A`.
+- TP1 uses the nearest opposing liquidity/range level when available, otherwise fib 1.272. TP2 uses fib 1.618 and TP3 uses fib 2.0.
+- RR to TP2 must be at least 2.5 for swing/scalp and at least 3.0 for challenge mode. Failed RR rejects with `rr_too_low`.
+
+No setup is created unless the pullback zone and RR are valid. Missing or uncertain OB/FVG/fib fields remain `N/A`, and rejected setups stay rejected. POC, VAL, and VAH remain confluence only; they can annotate a selected zone but never create a setup by themselves.
+
+Scanner JSON and full diagnostics include pullback fields such as `pullback_zone_status`, `selected_zone_type`, `ob_zone`, `fvg_zone`, `fib_alignment_status`, `fib_382`, `fib_618`, `fib_65`, `fib_786`, `entry_low`, `entry_high`, `stop`, `tp1`, `tp2`, `tp3`, `rr_to_tp2`, and `pullback_failure_reason`. Normal CLI output includes:
+
+```text
+Pullback Zone: valid/failed | OB/FVG: [selected zone] | Fib: [status] | RR: [value or N/A]
+```
+
+Run Phase 14 scanner output:
+
+```powershell
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -608,3 +635,4 @@ python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance 
 - The liquidity-grab pullback engine is strategy analysis and formatting only. It does not place orders, use private exchange access, or convert a setup into live execution.
 - The Phase 12 scanner strategy path is still dry-run analysis only. It can format a dry-run alert after all gates pass, but rejected setups remain diagnostics only.
 - The Phase 13 volume profile is candle-estimated confluence only. It does not create signals by itself, place orders, or use private exchange API access.
+- The Phase 14 pullback-zone engine is deterministic validation only. It does not place orders, use private exchange API access, or loosen any sweep, confirmation, pullback, fib, RR, or Trust Meter gates.

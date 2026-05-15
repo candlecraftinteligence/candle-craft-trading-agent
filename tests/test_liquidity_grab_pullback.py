@@ -93,6 +93,38 @@ def _fib_failure_candles() -> list[dict[str, Decimal | int]]:
     return candles
 
 
+def _rr_failure_candles() -> list[dict[str, Decimal | int]]:
+    candles = _full_bullish_setup_candles()
+    candles.append(
+        {
+            "timestamp": 36,
+            "open": Decimal("112"),
+            "high": Decimal("400"),
+            "low": Decimal("112"),
+            "close": Decimal("120"),
+            "volume": Decimal("100"),
+        }
+    )
+    return candles
+
+
+def _challenge_low_trust_candles() -> list[dict[str, Decimal | int]]:
+    candles = _base_candles(36)
+    candles[20]["low"] = Decimal("90")
+    candles[24]["high"] = Decimal("110")
+    candles[30]["low"] = Decimal("85")
+    candles[30]["close"] = Decimal("91")
+    candles[33]["open"] = Decimal("108")
+    candles[33]["close"] = Decimal("106")
+    candles[33]["low"] = Decimal("105")
+    candles[33]["high"] = Decimal("108")
+    candles[35]["open"] = Decimal("112")
+    candles[35]["high"] = Decimal("145")
+    candles[35]["low"] = Decimal("109")
+    candles[35]["close"] = Decimal("143")
+    return candles
+
+
 def _trend_candles(count: int = 30) -> list[dict[str, Decimal | int]]:
     candles: list[dict[str, Decimal | int]] = []
     for index in range(count):
@@ -285,7 +317,7 @@ def test_reject_if_rr_to_tp2_below_25() -> None:
         {
             "symbol": "SOLUSDT",
             "mode": "swing",
-            "candles_15m": _full_bullish_setup_candles(),
+            "candles_15m": _rr_failure_candles(),
             "candles_5m": _full_bullish_setup_candles(),
             "candles_2d": _trend_candles(),
             "user_resistance_levels": (Decimal("112"), Decimal("120")),
@@ -293,7 +325,7 @@ def test_reject_if_rr_to_tp2_below_25() -> None:
     )
 
     assert result.swing.is_valid is False
-    assert any(violation.code == "rr_below_minimum" for violation in result.swing.gate_result.violations)
+    assert result.swing.first_failed_gate == "rr_too_low"
 
 
 def test_liquidity_diagnostics_explain_failed_sweep() -> None:
@@ -338,8 +370,8 @@ def test_liquidity_diagnostics_explain_failed_fib_alignment() -> None:
         {"symbol": "BTCUSDT", "candles_15m": _fib_failure_candles(), "candles_5m": _full_bullish_setup_candles()}
     )
 
-    assert result.swing.gates_failed[0] == "fib_alignment_failed"
-    assert "Fib alignment: failed" in result.swing.strategy_diagnostics
+    assert result.swing.gates_failed[0] == "pullback_too_deep"
+    assert "Pullback Zone: failed" in result.swing.strategy_diagnostics
     assert "Pullback tagged beyond 0.786 before entry." in result.swing.fib_diagnostics
 
 
@@ -348,16 +380,16 @@ def test_liquidity_diagnostics_explain_failed_rr() -> None:
         {
             "symbol": "SOLUSDT",
             "mode": "swing",
-            "candles_15m": _full_bullish_setup_candles(),
+            "candles_15m": _rr_failure_candles(),
             "candles_5m": _full_bullish_setup_candles(),
             "candles_2d": _trend_candles(),
             "user_resistance_levels": (Decimal("112"), Decimal("120")),
         }
     )
 
-    assert result.swing.gates_failed[0] == "rr_below_minimum"
+    assert result.swing.gates_failed[0] == "rr_too_low"
     assert "RR: failed" in result.swing.strategy_diagnostics
-    assert "RR to TP2 is below 2.5." in result.swing.rr_diagnostics
+    assert "is below 2.5" in result.swing.rr_diagnostics
 
 
 def test_challenge_rejects_if_trust_meter_below_85() -> None:
@@ -365,9 +397,8 @@ def test_challenge_rejects_if_trust_meter_below_85() -> None:
         {
             "symbol": "SOLUSDT",
             "mode": LiquidityGrabMode.challenge,
-            "candles_15m": _full_bullish_setup_candles(with_fvg=False, sweep_volume=Decimal("100")),
-            "candles_5m": _full_bullish_setup_candles(),
-            "cvd": "positive delta",
+            "candles_15m": _challenge_low_trust_candles(),
+            "candles_5m": _challenge_low_trust_candles(),
         }
     )
 
@@ -389,7 +420,8 @@ def test_challenge_rejects_if_rr_below_30() -> None:
     )
 
     assert result.challenge.is_valid is False
-    assert any(violation.code == "rr_below_minimum" for violation in result.challenge.gate_result.violations)
+    assert result.challenge.first_failed_gate == "rr_too_low"
+    assert any(violation.code == "rr_too_low" for violation in result.challenge.gate_result.violations)
 
 
 def test_challenge_failure_output_exact_message() -> None:

@@ -67,6 +67,23 @@ class FakeScannerRunner:
                     "ltf_confirmation_status": "missing",
                     "execution_sweep_status": "passed",
                     "confirmation_structure_shift_status": "failed",
+                    "pullback_zone_status": "N/A",
+                    "selected_zone_type": "N/A",
+                    "ob_zone": {"is_present": False, "zone_type": "OB"},
+                    "fvg_zone": {"is_present": False, "zone_type": "FVG"},
+                    "fib_alignment_status": "N/A",
+                    "fib_382": "N/A",
+                    "fib_618": "N/A",
+                    "fib_65": "N/A",
+                    "fib_786": "N/A",
+                    "entry_low": "N/A",
+                    "entry_high": "N/A",
+                    "stop": "N/A",
+                    "tp1": "N/A",
+                    "tp2": "N/A",
+                    "tp3": "N/A",
+                    "rr_to_tp2": "N/A",
+                    "pullback_failure_reason": "N/A",
                     "confirmation_bos_choch_reason": "No 5m BOS/CHoCH close beyond the required LTF swing.",
                     "first_failed_gate": "missing_confirmation_structure_shift",
                     "volume_profile_source": VOLUME_PROFILE_SOURCE,
@@ -177,6 +194,8 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["candles_5m_count"] == 250
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["execution_sweep_status"] == "passed"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["confirmation_structure_shift_status"] == "failed"
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["pullback_zone_status"] == "N/A"
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["rr_to_tp2"] == "N/A"
     assert (
         payload["results"][0]["strategy_diagnostics"]["challenge"]["confirmation_bos_choch_reason"]
         == "No 5m BOS/CHoCH close beyond the required LTF swing."
@@ -208,7 +227,7 @@ def test_diagnostics_level_summary_prints_compact_symbol_result(monkeypatch, cap
     captured = capsys.readouterr()
     assert (
         "BTCUSDT | No Setup | 2D: bearish | 12H: neutral | POC: 80750 | 15m sweep: passed | "
-        "5m BOS/CHoCH: failed | Reject: missing_confirmation_structure_shift"
+        "5m BOS/CHoCH: failed | Pullback: N/A | Reject: missing_confirmation_structure_shift"
     ) in captured.out
     assert "2D HTF:" not in captured.out
 
@@ -225,6 +244,7 @@ def test_diagnostics_level_normal_prints_readable_block(monkeypatch, capsys) -> 
     assert "Volume Profile: POC [80750], VAH [81200], VAL [80100], source estimated_from_candles" in captured.out
     assert "15m Execution: bullish sweep detected" in captured.out
     assert "5m Confirmation: BOS/CHoCH failed" in captured.out
+    assert "Pullback Zone: N/A | OB/FVG: [N/A] | Fib: [N/A] | RR: [N/A]" in captured.out
     assert "Failed gate: missing_confirmation_structure_shift" in captured.out
     assert "Action: No trade idea, no alert, no journal entry." in captured.out
 
@@ -241,6 +261,7 @@ def test_diagnostics_level_full_preserves_detailed_diagnostics(monkeypatch, caps
     assert "challenge POC: 80750" in captured.out
     assert "challenge 15m execution sweep: passed" in captured.out
     assert "challenge 5m confirmation BOS/CHoCH: failed" in captured.out
+    assert "challenge Pullback Zone: N/A | OB/FVG: N/A | Fib: N/A | RR: N/A" in captured.out
 
 
 def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:
