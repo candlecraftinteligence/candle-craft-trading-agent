@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
@@ -26,16 +27,40 @@ from app.formatters.scanner_display import (  # noqa: E402
 )
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
 from app.pipeline.scanner_runner import ScannerRunConfig, ScannerRunResult, ScannerRunner, ScannerSymbolResult  # noqa: E402
+from app.watchlists.presets import (  # noqa: E402
+    WatchlistPresetError,
+    dedupe_symbols,
+    load_custom_preset,
+    preset_symbols,
+    presets_with_counts,
+    validate_symbols,
+)
+
+
+DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+
+
+@dataclass(frozen=True)
+class WatchlistResolution:
+    symbols: tuple[str, ...]
+    source_label: str
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     tokens = list(sys.argv[1:] if argv is None else argv)
+    symbols_explicit = any(token == "--symbols" or token.startswith("--symbols=") for token in tokens)
     diagnostics_level_explicit = any(
         token == "--diagnostics-level" or token.startswith("--diagnostics-level=") for token in tokens
     )
     display_explicit = any(token == "--display" or token.startswith("--display=") for token in tokens)
     parser = argparse.ArgumentParser(description="Run the Candle Craft dry-run scanner pipeline.")
-    parser.add_argument("--symbols", nargs="*", default=["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    parser.add_argument("--symbols", nargs="*", default=list(DEFAULT_SYMBOLS))
+    parser.add_argument("--preset")
+    parser.add_argument("--list-presets", action="store_true")
+    parser.add_argument("--max-symbols", type=int)
+    parser.add_argument("--include-symbols", nargs="*", default=[])
+    parser.add_argument("--exclude-symbols", nargs="*", default=[])
+    parser.add_argument("--preset-file", type=Path)
     parser.add_argument("--exchange", choices=["binance", "bybit"], default="binance")
     parser.add_argument("--interval", default="15m")
     parser.add_argument("--candle-limit", type=int, default=250)
@@ -61,6 +86,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args(argv)
+    args.symbols_explicit = symbols_explicit
     args.diagnostics_level_explicit = diagnostics_level_explicit
     args.display_explicit = display_explicit
     return args
@@ -68,6 +94,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 async def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.list_presets:
+        print(_format_available_presets())
+        return
+
+    watchlist = _resolve_watchlist(args)
     diagnostics_level = args.diagnostics_level
     if args.verbose and not args.diagnostics_level_explicit:
         diagnostics_level = "full"
@@ -76,7 +107,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         display_mode = "full"
 
     config = ScannerRunConfig(
-        symbols=args.symbols,
+        symbols=watchlist.symbols,
         exchange=args.exchange,
         interval=args.interval,
         candle_limit=args.candle_limit,
@@ -95,6 +126,10 @@ async def main(argv: Sequence[str] | None = None) -> None:
         execution_timeframe=args.execution_timeframe,
         confirmation_timeframe=args.confirmation_timeframe,
     )
+
+    print(f"Watchlist: {watchlist.source_label}")
+    print(f"Symbols queued: {len(watchlist.symbols)}")
+    print("")
 
     result = await ScannerRunner().run(config)
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
@@ -131,6 +166,61 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 print(format_telegram_strategy_output(symbol_result, diagnostics_level=diagnostics_level))
             else:
                 print(_format_strategy_output_for_cli(symbol_result))
+
+
+def _format_available_presets() -> str:
+    lines = ["Available watchlist presets:"]
+    for name, count in presets_with_counts():
+        lines.append(f"- {name} ({count} symbols)")
+    return "\n".join(lines)
+
+
+def _resolve_watchlist(args: argparse.Namespace) -> WatchlistResolution:
+    source_count = sum(
+        (
+            bool(args.symbols_explicit),
+            bool(args.preset),
+            args.preset_file is not None,
+        )
+    )
+    if source_count > 1:
+        raise SystemExit("Use only one watchlist source: --symbols, --preset, or --preset-file.")
+
+    try:
+        if args.symbols_explicit:
+            symbols = validate_symbols(args.symbols, context="--symbols")
+            source_label = "symbols"
+        elif args.preset_file is not None:
+            custom_preset = load_custom_preset(args.preset_file)
+            symbols = custom_preset.symbols
+            source_label = f"custom file {custom_preset.name}"
+        elif args.preset:
+            symbols = preset_symbols(args.preset)
+            source_label = f"preset {args.preset.strip().lower()}"
+        else:
+            symbols = validate_symbols(args.symbols, context="default symbols")
+            source_label = "symbols"
+
+        include_symbols = validate_symbols(args.include_symbols, context="--include-symbols")
+        exclude_symbols = set(validate_symbols(args.exclude_symbols, context="--exclude-symbols"))
+    except WatchlistPresetError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    resolved_symbols = dedupe_symbols((*symbols, *include_symbols))
+    if exclude_symbols:
+        resolved_symbols = tuple(symbol for symbol in resolved_symbols if symbol not in exclude_symbols)
+
+    if args.max_symbols is not None:
+        if args.max_symbols < 1:
+            raise SystemExit("--max-symbols must be at least 1.")
+        resolved_symbols = resolved_symbols[: args.max_symbols]
+
+    if not resolved_symbols:
+        raise SystemExit(
+            "Resolved watchlist is empty after include/exclude/max-symbols processing. Provide at least one symbol."
+        )
+
+    return WatchlistResolution(symbols=resolved_symbols, source_label=source_label)
 
 
 def _parse_bucket_filter(values: Sequence[str] | None) -> set[DisplayBucket] | None:
@@ -555,5 +645,12 @@ def _context_source_text(value: str) -> str:
     return value if value else NA
 
 
+def _configure_cli_encoding() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 if __name__ == "__main__":
+    _configure_cli_encoding()
     asyncio.run(main())

@@ -4,6 +4,8 @@ import asyncio
 import json
 from decimal import Decimal
 
+import pytest
+
 from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
 from app.data.dtos import NA
@@ -147,6 +149,22 @@ class FakeScannerRunner:
         )
 
 
+class CapturingScannerRunner:
+    configs = []
+
+    async def run(self, config):
+        self.__class__.configs.append(config)
+        return ScannerRunResult(
+            config=config,
+            results=(),
+            scanned_symbols=0,
+            failed_symbols=0,
+            trade_ideas_created=0,
+            dry_run_alerts_created=0,
+            journal_entries_created=0,
+        )
+
+
 def _valid_rank_result(symbol: str = "VALIDUSDT") -> ScannerSymbolResult:
     return ScannerSymbolResult(
         symbol=symbol,
@@ -245,6 +263,125 @@ def test_phase_18_cli_flags_default_to_ranked_hidden_no_setups() -> None:
     assert args.show_no_setups is False
     assert args.max_display_results == 20
     assert args.bucket_filter is None
+
+
+def test_list_presets_prints_available_presets(capsys) -> None:
+    asyncio.run(run_scan.main(["--list-presets"]))
+
+    captured = capsys.readouterr()
+    assert "Available watchlist presets:" in captured.out
+    assert "- majors (5 symbols)" in captured.out
+    assert "- large_caps (13 symbols)" in captured.out
+    assert "- meme_high_liquidity (6 symbols)" in captured.out
+
+
+def test_manual_symbols_behavior_is_preserved() -> None:
+    args = run_scan.parse_args(["--symbols", "btcusdt", "ETHUSDT"])
+    resolution = run_scan._resolve_watchlist(args)
+
+    assert resolution.source_label == "symbols"
+    assert resolution.symbols == ("BTCUSDT", "ETHUSDT")
+
+
+def test_preset_resolution_uses_static_symbols() -> None:
+    args = run_scan.parse_args(["--preset", "majors"])
+    resolution = run_scan._resolve_watchlist(args)
+
+    assert resolution.source_label == "preset majors"
+    assert resolution.symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT")
+
+
+def test_include_exclude_behavior_runs_after_preset_resolution() -> None:
+    args = run_scan.parse_args(
+        [
+            "--preset",
+            "majors",
+            "--include-symbols",
+            "ethusdt",
+            "jupusdt",
+            "--exclude-symbols",
+            "btcusdt",
+        ]
+    )
+
+    resolution = run_scan._resolve_watchlist(args)
+
+    assert resolution.symbols == ("ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "JUPUSDT")
+
+
+def test_max_symbols_trims_after_include_exclude_processing() -> None:
+    args = run_scan.parse_args(
+        [
+            "--preset",
+            "large_caps",
+            "--include-symbols",
+            "JUPUSDT",
+            "--exclude-symbols",
+            "BTCUSDT",
+            "--max-symbols",
+            "3",
+        ]
+    )
+
+    resolution = run_scan._resolve_watchlist(args)
+
+    assert resolution.symbols == ("ETHUSDT", "SOLUSDT", "BNBUSDT")
+
+
+def test_duplicate_removal_preserves_first_occurrence() -> None:
+    args = run_scan.parse_args(
+        [
+            "--symbols",
+            "btcusdt",
+            "ETHUSDT",
+            "BTCUSDT",
+            "--include-symbols",
+            "ethusdt",
+            "solusdt",
+        ]
+    )
+
+    resolution = run_scan._resolve_watchlist(args)
+
+    assert resolution.symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+
+
+def test_custom_preset_file_source(tmp_path) -> None:
+    preset_path = tmp_path / "watchlist.json"
+    preset_path.write_text(json.dumps({"name": "custom_name", "symbols": ["btcusdt", "ethusdt"]}), encoding="utf-8")
+    args = run_scan.parse_args(["--preset-file", str(preset_path)])
+
+    resolution = run_scan._resolve_watchlist(args)
+
+    assert resolution.source_label == "custom file custom_name"
+    assert resolution.symbols == ("BTCUSDT", "ETHUSDT")
+
+
+def test_unknown_preset_raises_clear_error() -> None:
+    args = run_scan.parse_args(["--preset", "unknown"])
+
+    with pytest.raises(SystemExit, match="Unknown watchlist preset 'unknown'"):
+        run_scan._resolve_watchlist(args)
+
+
+def test_empty_final_symbol_list_raises_clear_error() -> None:
+    args = run_scan.parse_args(["--symbols", "BTCUSDT", "--exclude-symbols", "BTCUSDT"])
+
+    with pytest.raises(SystemExit, match="Resolved watchlist is empty"):
+        run_scan._resolve_watchlist(args)
+
+
+def test_cli_integration_passes_resolved_watchlist_to_scanner(monkeypatch, capsys) -> None:
+    CapturingScannerRunner.configs = []
+    monkeypatch.setattr(run_scan, "ScannerRunner", CapturingScannerRunner)
+
+    asyncio.run(run_scan.main(["--preset", "large_caps", "--max-symbols", "2", "--display", "compact"]))
+
+    captured = capsys.readouterr()
+    config = CapturingScannerRunner.configs[0]
+    assert [symbol.symbol for symbol in config.symbols] == ["BTCUSDT", "ETHUSDT"]
+    assert "Watchlist: preset large_caps" in captured.out
+    assert "Symbols queued: 2" in captured.out
 
 
 def test_valid_setup_ranks_above_near_miss() -> None:
