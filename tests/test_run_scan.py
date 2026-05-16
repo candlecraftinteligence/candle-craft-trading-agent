@@ -634,7 +634,7 @@ def test_valid_setup_display_label() -> None:
     assert display.setup_progress_passed == 4
 
 
-def test_near_miss_requires_valid_pullback_or_calculated_rr_failure() -> None:
+def test_no_ob_or_fvg_after_sweep_and_confirmation_is_near_miss() -> None:
     symbol_result = ScannerSymbolResult(
         symbol="BTCUSDT",
         status=ScannerPipelineStatus.SCANNED_NO_SETUP,
@@ -654,8 +654,8 @@ def test_near_miss_requires_valid_pullback_or_calculated_rr_failure() -> None:
 
     display = build_symbol_display(symbol_result)
 
-    assert display.display_status == "no_setup"
-    assert display.display_status_label == "⚪ REJECTED"
+    assert display.display_status == "near_miss"
+    assert display.display_status_label == "🟡 NEAR MISS"
     assert display.setup_progress_passed == 2
     assert display.failed_checks == ("Pullback zone", "RR")
 
@@ -870,7 +870,11 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["passed_checks"] == ["15m sweep"]
     assert payload["results"][0]["failed_checks"] == ["5m BOS/CHoCH"]
     assert payload["results"][0]["short_reason"] == "No 5m BOS/CHoCH close beyond the required LTF swing."
-    assert payload["results"][0]["action_label"] == "Rejected"
+    assert payload["results"][0]["action_label"] == "Wait for confirmation"
+    assert payload["results"][0]["near_miss_intelligence"]["primary_failed_gate"] == (
+        "missing_confirmation_structure_shift"
+    )
+    assert payload["results"][0]["near_miss_intelligence"]["action_label"] == "Wait for confirmation"
 
 
 def test_show_strategy_output_prints_formatted_output(monkeypatch, capsys) -> None:
@@ -909,7 +913,7 @@ def test_show_strategy_output_with_telegram_format_prints_clean_message(monkeypa
     assert "• Gate: missing_confirmation_structure_shift" in captured.out
     assert "🧠 Why" in captured.out
     assert "No 5m BOS/CHoCH close beyond the required LTF swing." in captured.out
-    assert "No valid setup. No trade. Watching only." in captured.out
+    assert "No valid setup. No trade. Wait for confirmation." in captured.out
     assert "⚔️ Candle Craft | Signal. Structure. Execution." in captured.out
     assert "Challenge: No valid challenge setup." not in captured.out
 
@@ -1054,7 +1058,7 @@ def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
     assert "📊 Setup Progress: 1/4" in captured.out
     assert "🧠 Reason" in captured.out
     assert "🎯 Action" in captured.out
-    assert "Rejected" in captured.out
+    assert "Wait for confirmation" in captured.out
 
 
 def test_display_full_preserves_detailed_diagnostics(monkeypatch, capsys) -> None:
@@ -1122,11 +1126,13 @@ def test_normal_block_prints_single_failed_gate_reason_for_pullback() -> None:
 
     text = run_scan._format_symbol_normal_block(symbol_result)
 
-    assert text.count("Gate: no_ob_or_fvg_zone") == 1
+    assert text.count("Failed gate: no_ob_or_fvg_zone") == 1
     assert text.count("Reason") == 1
     assert "Reject: no_ob_or_fvg_zone" not in text
     assert "No valid OB or FVG was found inside the 5m displacement impulse." in text
-    assert "⚪ BTCUSDT — REJECTED" in text
+    assert "🟡 BTCUSDT — NEAR MISS" in text
+    assert "Needs next:" in text
+    assert "Action: Watchlist only" in text
 
 
 def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:

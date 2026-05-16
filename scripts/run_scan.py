@@ -121,6 +121,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--show-no-setups", action="store_true")
     parser.add_argument("--max-display-results", type=int, default=DEFAULT_MAX_DISPLAY_RESULTS)
     parser.add_argument("--bucket-filter", nargs="+")
+    parser.add_argument(
+        "--show-near-miss-plan",
+        action="store_true",
+        help="Print the near-miss plan block even when compact display is selected.",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--cache", dest="cache_enabled", action="store_true", default=True)
@@ -276,8 +281,17 @@ async def main(argv: Sequence[str] | None = None) -> None:
         symbol_result = ranked.symbol_result
         if display_mode == "compact":
             print(format_symbol_compact_line(symbol_result, rank=ranked.display_rank))
+            if args.show_near_miss_plan and ranked.display.display_bucket == "near_miss":
+                print("")
+                print(format_symbol_card(symbol_result, rank=ranked.display_rank))
         else:
-            print(format_symbol_card(symbol_result, rank=ranked.display_rank))
+            print(
+                format_symbol_card(
+                    symbol_result,
+                    include_diagnostics=display_mode == "full" and ranked.display.display_bucket == "near_miss",
+                    rank=ranked.display_rank,
+                )
+            )
             if display_mode == "full":
                 print("")
                 print(_format_symbol_diagnostics(symbol_result))
@@ -704,6 +718,8 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
             f"Rejected strategy modes: {_sequence_text(symbol_result.rejected_strategy_modes)}",
             f"Strategy missing data: {_sequence_text(symbol_result.strategy_missing_data)}",
             f"Strategy unverified data: {_sequence_text(symbol_result.strategy_unverified_data)}",
+            "Near-miss intelligence:",
+            _format_near_miss_intelligence(symbol_result),
             "Strategy diagnostics:",
             _format_strategy_diagnostics(symbol_result),
         )
@@ -929,6 +945,24 @@ def _format_volume_profile_diagnostics(symbol_result: ScannerSymbolResult) -> st
             f"VAL={_display(profile_12h.value_area_low)}, source={profile_12h.source}"
         )
     return "\n".join(lines)
+
+
+def _format_near_miss_intelligence(symbol_result: ScannerSymbolResult) -> str:
+    intelligence = build_symbol_display(symbol_result).near_miss_intelligence
+    if intelligence is None:
+        return NA
+    return "\n".join(
+        (
+            f"Primary failed gate: {intelligence.primary_failed_gate}",
+            f"Status: {intelligence.watchlist_status}",
+            f"Short reason: {intelligence.short_reason}",
+            f"Needs next: {_sequence_text(intelligence.next_required_conditions)}",
+            f"Activation hint: {intelligence.activation_hint}",
+            f"Invalidation hint: {intelligence.invalidation_hint}",
+            f"Quality note: {intelligence.quality_note}",
+            f"Action: {intelligence.action_label}",
+        )
+    )
 
 
 def _volume_profile_nodes_text(nodes: Sequence[object]) -> str:

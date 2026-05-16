@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
+from app.analytics.near_miss_intelligence import NearMissIntelligence, build_near_miss_intelligence
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 
@@ -122,6 +123,7 @@ class SymbolDisplay:
     action_label: str
     progress_items: tuple[ProgressItem, ...]
     failed_gate: str
+    near_miss_intelligence: NearMissIntelligence | None
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,7 @@ def build_symbol_display(symbol_result: ScannerSymbolResult) -> SymbolDisplay:
     display_bucket = _display_bucket(display_status)
     setup_progress_passed = sum(1 for item in progress_items if item.passed)
     short_reason = _short_reason(symbol_result, diagnostics, display_status)
+    near_miss_intelligence = _near_miss_intelligence(symbol_result, diagnostics, failed_gate, short_reason)
     return SymbolDisplay(
         display_status=display_status,
         display_status_label=_display_status_label(display_status),
@@ -160,9 +163,10 @@ def build_symbol_display(symbol_result: ScannerSymbolResult) -> SymbolDisplay:
         passed_checks=passed_checks,
         failed_checks=failed_checks,
         short_reason=short_reason,
-        action_label=_action_label(display_bucket),
+        action_label=_action_label(display_bucket, near_miss_intelligence),
         progress_items=progress_items,
         failed_gate=failed_gate,
+        near_miss_intelligence=near_miss_intelligence,
     )
 
 
@@ -183,6 +187,9 @@ def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | No
         "failed_checks": list(display.failed_checks),
         "short_reason": display.short_reason,
         "action_label": display.action_label,
+        "near_miss_intelligence": display.near_miss_intelligence.model_dump(mode="json")
+        if display.near_miss_intelligence is not None
+        else None,
     }
 
 
@@ -323,9 +330,18 @@ def format_symbol_card(
     *,
     include_diagnostics: bool = False,
     rank: int | None = None,
+    show_near_miss_plan: bool = True,
 ) -> str:
     diagnostics = representative_strategy_diagnostics(symbol_result)
     display = build_symbol_display(symbol_result)
+    if display.display_bucket == "near_miss" and show_near_miss_plan:
+        return _format_near_miss_card(
+            symbol_result,
+            display=display,
+            include_diagnostics=include_diagnostics,
+            rank=rank,
+        )
+
     icon, status_text = display.display_status_label.split(" ", 1)
     rank_text = f"#{rank} " if rank is not None else ""
     lines = [
@@ -365,6 +381,68 @@ def format_symbol_card(
 
     lines.extend(("", FOOTER))
     return "\n".join(lines)
+
+
+def _format_near_miss_card(
+    symbol_result: ScannerSymbolResult,
+    *,
+    display: SymbolDisplay,
+    include_diagnostics: bool,
+    rank: int | None,
+) -> str:
+    diagnostics = representative_strategy_diagnostics(symbol_result)
+    icon, status_text = display.display_status_label.split(" ", 1)
+    rank_text = f"#{rank} " if rank is not None else ""
+    intelligence = display.near_miss_intelligence
+    status = intelligence.watchlist_status if intelligence is not None else display.action_label
+    failed_gate = intelligence.primary_failed_gate if intelligence is not None else display.failed_gate
+    reason = intelligence.short_reason if intelligence is not None else display.short_reason
+    activation_hint = intelligence.activation_hint if intelligence is not None else NA
+    invalidation_hint = intelligence.invalidation_hint if intelligence is not None else NA
+    action = intelligence.action_label if intelligence is not None else display.action_label
+    conditions = intelligence.next_required_conditions if intelligence is not None else (NA,)
+
+    lines = [
+        CARD_RULE,
+        f"{rank_text}{icon} {symbol_result.symbol} {DASH} {status_text}",
+        CARD_RULE,
+        "",
+        f"Status: {status}",
+        f"Failed gate: {failed_gate}",
+        f"Reason: {reason}",
+        "",
+        "Needs next:",
+        *_numbered_condition_lines(conditions),
+        "",
+        f"Activation hint: {activation_hint}",
+        f"Invalidation hint: {invalidation_hint}",
+        f"Action: {action}",
+    ]
+
+    if include_diagnostics:
+        lines.extend(
+            (
+                "",
+                "Near-miss diagnostics",
+                f"{BULLET} Quality note: {intelligence.quality_note if intelligence is not None else NA}",
+                f"{BULLET} Progress: {display.setup_progress_passed}/{display.setup_progress_total}",
+                f"{BULLET} Passed checks: {_sequence_text(display.passed_checks)}",
+                f"{BULLET} Failed checks: {_sequence_text(display.failed_checks)}",
+                "",
+                "Diagnostics",
+                *_diagnostic_lines(symbol_result, diagnostics),
+            )
+        )
+
+    lines.extend(("", FOOTER))
+    return "\n".join(lines)
+
+
+def _numbered_condition_lines(conditions: Sequence[str]) -> list[str]:
+    values = [condition for condition in conditions if _display(condition) != NA]
+    if not values:
+        values = [NA]
+    return [f"{index}. {condition}" for index, condition in enumerate(values, start=1)]
 
 
 def representative_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> Mapping[str, Any]:
@@ -415,6 +493,8 @@ def _near_miss_eligible(
     gates_failed = set(_sequence_values(diagnostics.get("gates_failed")))
     if failed_gate not in LATE_FAILURE_GATES and not bool(gates_failed & LATE_FAILURE_GATES):
         return False
+    if failed_gate == "no_ob_or_fvg_zone" or "no_ob_or_fvg_zone" in gates_failed:
+        return True
     return _has_valid_pullback_or_calculated_rr_failure(diagnostics, failed_gate, gates_failed)
 
 
@@ -573,7 +653,26 @@ def _short_reason(
     return "No valid setup."
 
 
-def _action_label(display_bucket: DisplayBucket) -> str:
+def _near_miss_intelligence(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    failed_gate: str,
+    short_reason: str,
+) -> NearMissIntelligence | None:
+    if symbol_result.near_miss_intelligence is not None:
+        return symbol_result.near_miss_intelligence
+    if failed_gate == NA:
+        return None
+    return build_near_miss_intelligence(
+        failed_gate=failed_gate,
+        short_reason=short_reason,
+        diagnostics=diagnostics,
+    )
+
+
+def _action_label(display_bucket: DisplayBucket, intelligence: NearMissIntelligence | None = None) -> str:
+    if intelligence is not None and intelligence.action_label != NA:
+        return intelligence.action_label
     if display_bucket == "valid":
         return "Trade idea created"
     if display_bucket == "near_miss":

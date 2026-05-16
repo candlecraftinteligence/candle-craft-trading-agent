@@ -154,7 +154,8 @@ def test_no_setup_formatting_is_readable() -> None:
     assert "• 15m sweep" in text
     assert "❌ Failed" in text
     assert "• 5m BOS/CHoCH" in text
-    assert "No valid setup. No trade. Watching only." in text
+    assert "No valid setup. No trade. Wait for confirmation." in text
+    assert "Needs next" in text
 
 
 def test_na_values_are_preserved_in_valid_setup_formatting() -> None:

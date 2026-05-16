@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, and Phase 21 public symbol universes.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, and Phase 22 near-miss intelligence.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -101,7 +101,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, and the Phase 20 cache/resume reliability layer. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, and the Phase 22 near-miss intelligence layer. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -710,7 +710,7 @@ Phase 17 adds `app/formatters/scanner_display.py` for clean Candle Craft scanner
 - `--display compact|normal|full` controls output shape. `compact` prints the dashboard plus one result line per symbol, `normal` prints dashboard plus premium cards, and `full` adds detailed diagnostics after each card.
 - Near misses are diagnostics only: they require the 15m sweep and 5m BOS/CHoCH confirmation to pass while a later pullback/RR/quality gate fails. They do not create signals, alerts, journal entries, or trade ideas.
 - `--telegram-format` now prints shorter Telegram-ready diagnosis blocks with bias, passed checks, failed checks, reason, action, and the Candle Craft footer.
-- `--output-json` preserves existing scanner fields and adds `display_status`, `display_status_label`, `setup_progress_total`, `setup_progress_passed`, `passed_checks`, `failed_checks`, `short_reason`, and `action_label`.
+- `--output-json` preserves existing scanner fields and adds `display_status`, `display_status_label`, `setup_progress_total`, `setup_progress_passed`, `passed_checks`, `failed_checks`, `short_reason`, `action_label`, and Phase 22 `near_miss_intelligence` when applicable.
 - This phase is formatting/output UX only. It does not change strategy gates, sweep/BOS/CHoCH/OB/FVG/RR rules, exchange access, alert sending, order execution, withdrawals, or transfers.
 
 Run Phase 17 premium scanner output:
@@ -869,6 +869,52 @@ Example C - top 50 Binance USDT perpetuals by public market cap:
 
 Safety note: Phase 21 resolves scanner inputs from public market data only. It does not create trades, weaken strategy gates, use private exchange API keys, call private/account/order endpoints, place orders, send live Telegram messages, withdraw funds, or transfer funds.
 
+## Phase 22 Near-Miss Intelligence
+
+Phase 22 adds `app/analytics/near_miss_intelligence.py`, an output-only explanation layer for symbols that are close but not valid. It reads existing scanner diagnostics and failed gates, then adds a `near_miss_intelligence` object to scanner results and JSON output when a watchlist/no-trade plan is useful.
+
+Each near-miss intelligence object includes:
+
+- `primary_failed_gate`
+- `short_reason`
+- `watchlist_status`
+- `next_required_conditions`
+- `activation_hint`
+- `invalidation_hint`
+- `quality_note`
+- `action_label`
+
+Behavior examples:
+
+- `rr_below_minimum`: status is `Watchlist only`; the plan explains that RR must improve through a better pullback entry, wider TP2 distance, or cleaner opposing liquidity target before the setup can become valid.
+- `pullback_too_deep`: status is `Rejected`; the plan explains that the pullback tagged beyond 0.786 and a completely new sweep plus BOS/CHoCH is required.
+- `no_ob_or_fvg_zone`: status is `Watchlist only` only when the sweep and BOS/CHoCH passed; otherwise it stays `Rejected`.
+- `missing_confirmation_structure_shift`: status is `Wait for confirmation`; the plan waits for a 5m BOS/CHoCH close before any pullback, RR, risk, or trade-idea logic can matter.
+
+Normal near-miss cards now include a short action plan:
+
+```text
+BTCUSDT — NEAR MISS
+Status: Watchlist only
+Failed gate: rr_below_minimum
+Reason: RR to TP2 is below the required minimum.
+
+Needs next:
+1. Better pullback entry must improve entry-to-stop distance.
+2. TP2 distance must widen without inventing a target.
+3. A cleaner opposing liquidity target must be visible before activation.
+
+Activation hint: RR must improve to the required minimum before this setup can become valid.
+Invalidation hint: Invalidated if the sweep/BOS/CHoCH context fails, expires, or price invalidates the strategy structure.
+Action: Watchlist only
+```
+
+`--display full` includes the near-miss diagnostics alongside the existing scanner diagnostics. `--show-near-miss-plan` can print the same plan block when compact display is selected.
+
+Telegram formatting remains text-only and no-trade-first. For watchlist or confirmation-only cases it prints clean wording such as `No valid setup. No trade. Watchlist only.` or `No valid setup. No trade. Wait for confirmation.` It does not send Telegram messages by itself.
+
+Safety note: Phase 22 is intelligence and display wording only. It does not weaken sweep, BOS/CHoCH, OB/FVG, fib, RR, Trust Meter, risk, scoring, or trade-idea gates; it does not create trade ideas from near-misses, send live Telegram alerts, place orders, use private exchange API access, withdraw funds, or transfer funds.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -892,3 +938,4 @@ Safety note: Phase 21 resolves scanner inputs from public market data only. It d
 - The Phase 19 watchlist preset layer resolves symbol inputs only. It does not create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, live Telegram sending, or modify scan artifacts by itself.
 - The Phase 20 cache/resume layer is public-data reliability only. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
 - The Phase 21 symbol universe layer resolves public scanner inputs only, including optional public market-cap rankings for the market-cap universe. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
+- The Phase 22 near-miss intelligence layer is output-only. It does not create trade ideas from near-misses, send Telegram alerts, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, or account endpoints.

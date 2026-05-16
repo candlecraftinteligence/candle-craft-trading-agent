@@ -21,6 +21,7 @@ from app.analytics.derivatives_enrichment import (
     DerivativesEnrichmentResult,
     enrich_derivatives,
 )
+from app.analytics.near_miss_intelligence import NearMissIntelligence, build_near_miss_intelligence
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
@@ -291,6 +292,7 @@ class ScannerSymbolResult(BaseModel):
     trade_idea: TradeIdeaResult | None = None
     alert_result: AlertResult | None = None
     journal_entry: JournalEntryResult | None = None
+    near_miss_intelligence: NearMissIntelligence | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -1087,6 +1089,14 @@ class ScannerRunner:
         cleaned_missing = _unique_strings(missing_data)
         cleaned_unverified = _unique_strings(unverified_data)
         strategy_execution = strategy_execution or _StrategyExecution()
+        near_miss_intelligence = _near_miss_intelligence_for_result(
+            status=status,
+            rejection_reason=rejection_reason,
+            strategy_execution=strategy_execution,
+            trade_idea=trade_idea,
+            alert_result=alert_result,
+            journal_entry=journal_entry,
+        )
         return ScannerSymbolResult(
             symbol=symbol,
             status=status,
@@ -1187,6 +1197,7 @@ class ScannerRunner:
             trade_idea=trade_idea,
             alert_result=alert_result,
             journal_entry=journal_entry,
+            near_miss_intelligence=near_miss_intelligence,
         )
 
 
@@ -1194,6 +1205,107 @@ def _latest_swing_price(points: Sequence[Any]) -> MaybeDecimal:
     if not points:
         return NA
     return _quantize(points[-1].price)
+
+
+def _near_miss_intelligence_for_result(
+    *,
+    status: ScannerPipelineStatus,
+    rejection_reason: str | None,
+    strategy_execution: _StrategyExecution,
+    trade_idea: TradeIdeaResult | None,
+    alert_result: AlertResult | None,
+    journal_entry: JournalEntryResult | None,
+) -> NearMissIntelligence | None:
+    if (
+        status
+        in (
+            ScannerPipelineStatus.IDEA_CREATED,
+            ScannerPipelineStatus.ALERT_DRY_RUN_CREATED,
+            ScannerPipelineStatus.JOURNAL_ENTRY_CREATED,
+        )
+        or trade_idea is not None
+        or alert_result is not None
+        or journal_entry is not None
+    ):
+        return None
+
+    diagnostics = _representative_strategy_diagnostics(strategy_execution)
+    if not diagnostics:
+        return None
+    failed_gate = _strategy_failed_gate(diagnostics)
+    if failed_gate == NA:
+        return None
+    return build_near_miss_intelligence(
+        failed_gate=failed_gate,
+        short_reason=_strategy_short_reason(diagnostics, rejection_reason),
+        diagnostics=diagnostics,
+    )
+
+
+def _representative_strategy_diagnostics(strategy_execution: _StrategyExecution) -> Mapping[str, Any]:
+    for mode in strategy_execution.valid_strategy_modes:
+        diagnostics = strategy_execution.strategy_diagnostics.get(mode)
+        if isinstance(diagnostics, Mapping):
+            return diagnostics
+    for mode in strategy_execution.rejected_strategy_modes:
+        diagnostics = strategy_execution.strategy_diagnostics.get(mode)
+        if isinstance(diagnostics, Mapping):
+            return diagnostics
+    for mode in ("challenge", "swing", "scalp"):
+        diagnostics = strategy_execution.strategy_diagnostics.get(mode)
+        if isinstance(diagnostics, Mapping):
+            return diagnostics
+    for diagnostics in strategy_execution.strategy_diagnostics.values():
+        if isinstance(diagnostics, Mapping):
+            return diagnostics
+    return {}
+
+
+def _strategy_failed_gate(diagnostics: Mapping[str, Any]) -> str:
+    failed_gate = _display_decimal_or_text(diagnostics.get("first_failed_gate"))
+    if failed_gate != NA:
+        return failed_gate
+    gates_failed = diagnostics.get("gates_failed")
+    if _is_sequence_data(gates_failed) and gates_failed:
+        return _display_decimal_or_text(gates_failed[0])
+    return NA
+
+
+def _strategy_short_reason(diagnostics: Mapping[str, Any], rejection_reason: str | None) -> str:
+    failed_gate = _strategy_failed_gate(diagnostics)
+    if failed_gate in ("missing_confirmation_structure_shift", "missing_confirmation_candles"):
+        reason = _display_decimal_or_text(diagnostics.get("confirmation_bos_choch_reason"))
+        if reason != NA:
+            return reason
+
+    for key in (
+        "pullback_failure_reason",
+        "derivatives_conflict_reason",
+        "confirmation_bos_choch_reason",
+        "rr_diagnostics",
+        "trust_meter_diagnostics",
+    ):
+        reason = _display_decimal_or_text(diagnostics.get(key))
+        if reason != NA:
+            return reason
+
+    hard_rejections = diagnostics.get("hard_rejection_reasons")
+    if _is_sequence_data(hard_rejections) and hard_rejections:
+        return _display_decimal_or_text(hard_rejections[0])
+    if rejection_reason:
+        return rejection_reason
+    return NA
+
+
+def _display_decimal_or_text(value: object) -> str:
+    if value is None or value == "":
+        return NA
+    if value == NA:
+        return NA
+    if isinstance(value, Decimal):
+        text = format(value, "f")
+        return text.rstrip("0").rstrip(".") if "." in text else text
+    return str(value)
 
 
 def _rejection_stage_for(status: ScannerPipelineStatus) -> str:

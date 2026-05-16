@@ -154,17 +154,19 @@ def format_rejection_summary(
     reason = display.short_reason
 
     if compact:
+        action = _telegram_action_text(display)
         return "\n".join(
             (
                 (
                     f"{symbol} {DASH} {_telegram_no_setup_title(display.display_status)} | "
                     f"Failed: {_telegram_failed_summary(display, failed_gate)} | "
-                    f"Why: {reason} | No valid setup. No trade. Watching only."
+                    f"Why: {reason} | {action}"
                 ),
                 FOOTER,
             )
         )
 
+    action = _telegram_action_text(display)
     lines = [
         f"{symbol} {DASH} {_telegram_no_setup_title(display.display_status)}",
         "",
@@ -182,8 +184,18 @@ def format_rejection_summary(
         reason,
         "",
         f"{TARGET} Action",
-        "No valid setup. No trade. Watching only.",
+        action,
     ]
+
+    if _show_watchlist_plan(display):
+        lines.extend(("", "Needs next", *_telegram_plan_lines(display), ""))
+        intelligence = display.near_miss_intelligence
+        lines.extend(
+            (
+                f"Activation hint: {intelligence.activation_hint if intelligence is not None else NA}",
+                f"Invalidation hint: {intelligence.invalidation_hint if intelligence is not None else NA}",
+            )
+        )
 
     if diagnostics_level == "full":
         lines.extend(("", "Diagnostics", *_diagnostic_lines(symbol_result, diagnostics)))
@@ -195,9 +207,33 @@ def format_rejection_summary(
 def _telegram_no_setup_title(display_status: str) -> str:
     if display_status == "near_miss":
         return "Near Miss (No Valid Setup)"
-    if display_status == "data_incomplete":
+    if display_status in ("data_incomplete", "data_issue", "scan_error"):
         return "Data Incomplete (No Valid Setup)"
     return "No Valid Setup"
+
+
+def _telegram_action_text(display: Any) -> str:
+    intelligence = getattr(display, "near_miss_intelligence", None)
+    if intelligence is not None and intelligence.action_label != NA:
+        return f"No valid setup. No trade. {intelligence.action_label}."
+    return "No valid setup. No trade. Watching only."
+
+
+def _show_watchlist_plan(display: Any) -> bool:
+    intelligence = getattr(display, "near_miss_intelligence", None)
+    if intelligence is None:
+        return False
+    return intelligence.action_label in {"Watchlist only", "Wait for confirmation"}
+
+
+def _telegram_plan_lines(display: Any) -> list[str]:
+    intelligence = getattr(display, "near_miss_intelligence", None)
+    if intelligence is None:
+        return [f"{BULLET} {NA}"]
+    conditions = [condition for condition in intelligence.next_required_conditions if _display(condition) != NA]
+    if not conditions:
+        return [f"{BULLET} {NA}"]
+    return [f"{BULLET} {condition}" for condition in conditions]
 
 
 def _telegram_passed_lines(display: Any) -> list[str]:
