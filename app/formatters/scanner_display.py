@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from app.analytics.near_miss_intelligence import NearMissIntelligence, build_near_miss_intelligence
+from app.analytics.setup_quality import SetupQualityResult, SetupQualityState
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 
@@ -96,6 +97,13 @@ STAGE_ORDER = {
     "final": 6,
     "valid": 7,
 }
+QUALITY_STATE_ORDER = {
+    SetupQualityState.HIGH_QUALITY_TRADE: 0,
+    SetupQualityState.VALID_BUT_LOWER_QUALITY: 1,
+    SetupQualityState.WATCHLIST_NEAR_MISS: 2,
+    SetupQualityState.REJECTED_NO_EDGE: 3,
+    SetupQualityState.DATA_ISSUE: 4,
+}
 
 
 @dataclass(frozen=True)
@@ -163,7 +171,7 @@ def build_symbol_display(symbol_result: ScannerSymbolResult) -> SymbolDisplay:
         passed_checks=passed_checks,
         failed_checks=failed_checks,
         short_reason=short_reason,
-        action_label=_action_label(display_bucket, near_miss_intelligence),
+        action_label=_action_label(symbol_result, display_bucket, near_miss_intelligence),
         progress_items=progress_items,
         failed_gate=failed_gate,
         near_miss_intelligence=near_miss_intelligence,
@@ -210,8 +218,7 @@ def rank_scan_results(
     if rank_results:
         ranked_input.sort(
             key=lambda item: (
-                BUCKET_ORDER[item.display.display_bucket],
-                -item.display.display_priority_score,
+                *_ranking_priority(item),
                 item.original_index,
             )
         )
@@ -310,8 +317,14 @@ def format_scan_dashboard(
 def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int | None = None) -> str:
     diagnostics = representative_strategy_diagnostics(symbol_result)
     display = build_symbol_display(symbol_result)
+    quality = symbol_result.setup_quality
     status_text = display.display_status_label.split(" ", 1)[1]
     rank_text = f"#{rank} " if rank is not None else ""
+    if _quality_evaluated(quality):
+        return (
+            f"{rank_text}{symbol_result.symbol} {DASH} {quality.quality_state.value} {DASH} "
+            f"{quality.quality_grade.value} {DASH} {quality.quality_score} {DASH} {quality.action_label}"
+        )
     parts = [
         f"{rank_text}{display.display_status_label.split(' ', 1)[0]} {symbol_result.symbol} {DASH} {status_text}",
         f"Modes {_mode_summary(symbol_result)}",
@@ -353,6 +366,7 @@ def format_symbol_card(
         f"{BULLET} Mode(s): {_mode_summary(symbol_result)}",
         f"{BULLET} HTF/Bias/Execution: {_execution_summary(diagnostics)}",
         *(_card_failed_gate_lines(display)),
+        *_quality_summary_lines(symbol_result.setup_quality),
         "",
         f"{PIN} Context",
         f"{BULLET} 2D HTF: {_title_value(diagnostics.get('htf_2d_trend'))}",
@@ -410,6 +424,7 @@ def _format_near_miss_card(
         f"Status: {status}",
         f"Failed gate: {failed_gate}",
         f"Reason: {reason}",
+        *_quality_summary_lines(symbol_result.setup_quality),
         "",
         "Needs next:",
         *_numbered_condition_lines(conditions),
@@ -670,7 +685,14 @@ def _near_miss_intelligence(
     )
 
 
-def _action_label(display_bucket: DisplayBucket, intelligence: NearMissIntelligence | None = None) -> str:
+def _action_label(
+    symbol_result: ScannerSymbolResult,
+    display_bucket: DisplayBucket,
+    intelligence: NearMissIntelligence | None = None,
+) -> str:
+    quality = symbol_result.setup_quality
+    if _quality_evaluated(quality):
+        return quality.action_label
     if intelligence is not None and intelligence.action_label != NA:
         return intelligence.action_label
     if display_bucket == "valid":
@@ -680,6 +702,41 @@ def _action_label(display_bucket: DisplayBucket, intelligence: NearMissIntellige
     if display_bucket == "data_issue":
         return "Data insufficient"
     return "Rejected"
+
+
+def _ranking_priority(item: RankedSymbolDisplay) -> tuple[int, int, int, int]:
+    quality = item.symbol_result.setup_quality
+    if _quality_evaluated(quality):
+        return (
+            QUALITY_STATE_ORDER[quality.quality_state],
+            -quality.quality_score,
+            BUCKET_ORDER[item.display.display_bucket],
+            -item.display.display_priority_score,
+        )
+    return (
+        BUCKET_ORDER[item.display.display_bucket],
+        -item.display.display_priority_score,
+        0,
+        0,
+    )
+
+
+def _quality_summary_lines(quality: SetupQualityResult) -> tuple[str, ...]:
+    if not _quality_evaluated(quality):
+        return ()
+    return (
+        f"{BULLET} Quality: {quality.quality_state.value} | Grade: {quality.quality_grade.value} | Score: {quality.quality_score}",
+        f"{BULLET} Edge: {quality.profitability_edge_score}",
+        f"{BULLET} Risk: {quality.execution_risk_score} (lower is better)",
+        f"{BULLET} Action: {quality.action_label}",
+        f"{BULLET} Strongest: {_sequence_text(quality.strongest_factors)}",
+        f"{BULLET} Weakest: {_sequence_text(quality.weakest_factors)}",
+        f"{BULLET} Reason: {quality.decision_reason}",
+    )
+
+
+def _quality_evaluated(quality: SetupQualityResult) -> bool:
+    return bool(getattr(quality, "is_evaluated", False))
 
 
 def _passed_lines(

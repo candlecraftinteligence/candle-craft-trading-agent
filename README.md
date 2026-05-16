@@ -732,12 +732,12 @@ Buckets:
 
 Default display behavior:
 
-- Results are ranked by bucket first: valid setup, near miss, no setup, then data issue.
+- Results are ranked by bucket first: valid setup, near miss, no setup, then data issue. Phase 23 overrides this with setup-quality priority when `setup_quality` is evaluated.
 - Within a bucket, ranking prioritizes created trade ideas, higher Trust Meter or setup score, better RR, stronger context score, derivatives support, fewer failed gates, and later-stage failures.
 - Normal CLI output shows valid setups first, near misses second, and data issues after that. Weak rejected/no-setup symbols are counted in the dashboard but hidden unless `--show-no-setups` or `--bucket-filter no_setup` is used.
 - Normal display shows at most 10 result cards by default. Use `--max-display-results N` to change the display limit.
 - `--display full` keeps detailed diagnostics while sorting by the Phase 18 rank first.
-- JSON output keeps all scanner results and adds `display_rank`, `display_bucket`, `display_priority_score`, `display_reason`, `hidden_by_default`, `failed_stage`, and `action_label`.
+- JSON output keeps all scanner results and adds `display_rank`, `display_bucket`, `display_priority_score`, `display_reason`, `hidden_by_default`, `failed_stage`, and `action_label`. Phase 23 also includes the nested `setup_quality` object on each scanner result.
 
 Run ranked scanner output:
 
@@ -915,6 +915,53 @@ Telegram formatting remains text-only and no-trade-first. For watchlist or confi
 
 Safety note: Phase 22 is intelligence and display wording only. It does not weaken sweep, BOS/CHoCH, OB/FVG, fib, RR, Trust Meter, risk, scoring, or trade-idea gates; it does not create trade ideas from near-misses, send live Telegram alerts, place orders, use private exchange API access, withdraw funds, or transfer funds.
 
+## Phase 23 Setup Quality / Profitability Validation
+
+Phase 23 adds `app/analytics/setup_quality.py`, a deterministic post-strategy quality layer that decides whether a technically valid setup has enough money-making edge to be worth acting on. It runs after the existing strategy result is produced and is attached to each `ScannerSymbolResult` as `setup_quality`.
+
+Quality states:
+
+- `HIGH_QUALITY_TRADE`: valid scanner setup with clean sweep, clean 5m BOS/CHoCH, valid pullback, RR at or above the required threshold, strong context, non-conflicting derivatives, and acceptable execution risk.
+- `VALID_BUT_LOWER_QUALITY`: valid scanner setup with one or more weaknesses such as marginal RR, weak context, mixed derivatives, late pullback, wide stop, weak volume/POC alignment, or trend conflict.
+- `WATCHLIST_NEAR_MISS`: sweep and 5m BOS/CHoCH passed, but a later pullback, RR, or quality gate still needs improvement.
+- `REJECTED_NO_EDGE`: setup quality does not provide enough deterministic edge.
+- `DATA_ISSUE`: required market data is missing, unavailable, or unreliable enough to prevent validation.
+
+The result includes `quality_grade`, `quality_score`, `tradeability_score`, `profitability_edge_score`, `execution_risk_score`, `strongest_factors`, `weakest_factors`, `decision_reason`, and `action_label`. `execution_risk_score` is 0-100 where lower is better; the weighted quality score uses `100 - execution_risk_score` for the execution-risk contribution.
+
+Scoring model:
+
+- Structure quality: 25 points from sweep, 5m BOS/CHoCH, and direction alignment.
+- Pullback quality: 20 points from valid OB/FVG, fib alignment, and non-late pullback behavior.
+- RR / profit potential: 20 points from RR versus the mode-specific minimum and target reach.
+- Context quality: 15 points from 2D/12H alignment, Trust Meter/context score, and POC/VAH/VAL availability.
+- Derivatives quality: 10 points from funding, OI, price/OI, crowding, and directional support. Missing optional derivatives reduce confidence but do not auto-reject.
+- Execution risk: 10 points from risk approval, data completeness, leverage risk, stop width, and warnings.
+
+Ranking behavior:
+
+- Ranked output now prioritizes `HIGH_QUALITY_TRADE`, then `VALID_BUT_LOWER_QUALITY`, `WATCHLIST_NEAR_MISS`, `REJECTED_NO_EDGE`, and `DATA_ISSUE`.
+- Inside each quality bucket, symbols sort by `quality_score` descending.
+- If there are no valid trades, near-misses remain visible and ordered by how close they are to becoming actionable.
+
+Display behavior:
+
+- Compact display prints only `SYMBOL — STATE — grade — score — action`.
+- Normal and full cards include Quality, Edge, Risk, Action, Strongest, Weakest, and Reason.
+- Telegram formatting includes quality grade/score for valid setups. Rejected/no-trade output stays concise with `Action` and `Reason`.
+
+Safety boundaries:
+
+- Phase 23 does not weaken sweep, BOS/CHoCH, OB/FVG, fib, RR, risk, scoring, pullback, or Trust Meter gates.
+- It does not add order execution, private exchange API access, account endpoints, withdrawals, transfers, or live Telegram sending.
+- It does not invent CVD, liquidation heatmap, footprint, BTC.D, event calendar, or sector data. Missing unavailable inputs remain `N/A` and unreliable inputs remain `Unverified`.
+
+Example command:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --display normal --rank-results
+```
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -939,3 +986,4 @@ Safety note: Phase 22 is intelligence and display wording only. It does not weak
 - The Phase 20 cache/resume layer is public-data reliability only. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
 - The Phase 21 symbol universe layer resolves public scanner inputs only, including optional public market-cap rankings for the market-cap universe. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
 - The Phase 22 near-miss intelligence layer is output-only. It does not create trade ideas from near-misses, send Telegram alerts, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, or account endpoints.
+- The Phase 23 setup quality layer is post-strategy validation only. It does not weaken strategy gates, create trades from invalid setups, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.

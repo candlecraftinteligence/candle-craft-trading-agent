@@ -59,6 +59,7 @@ class PublicHTTPExchangeClient(BaseExchangeClient):
         self._retry_base_delay = retry_base_delay
         self._retry_max_delay = retry_max_delay
         self._logger = logging.getLogger(f"{__name__}.{exchange_name}")
+        self._retry_events: list[dict[str, Any]] = []
 
     async def __aenter__(self) -> PublicHTTPExchangeClient:
         return self
@@ -91,7 +92,11 @@ class PublicHTTPExchangeClient(BaseExchangeClient):
             max_delay=self._retry_max_delay,
             logger=self._logger,
             operation_name=f"{self.exchange_name} GET {path}",
+            on_retry_event=self._record_retry_event,
         )
+
+    def retry_events(self) -> tuple[dict[str, Any], ...]:
+        return tuple(self._retry_events)
 
     async def _send_once(
         self,
@@ -129,6 +134,9 @@ class PublicHTTPExchangeClient(BaseExchangeClient):
             raise ExchangeMalformedJSONError(
                 f"{self.exchange_name} returned malformed JSON for {path}"
             ) from exc
+
+    def _record_retry_event(self, event: dict[str, Any]) -> None:
+        self._retry_events.append(dict(event))
 
     @staticmethod
     def _parse_retry_after(response: httpx.Response) -> float | None:

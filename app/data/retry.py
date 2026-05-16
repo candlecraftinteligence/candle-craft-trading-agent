@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from app.data.exceptions import (
     ExchangeClientError,
@@ -30,6 +30,7 @@ async def retry_async(
     max_delay: float,
     logger: logging.Logger,
     operation_name: str,
+    on_retry_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> T:
     if attempts < 1:
         raise ValueError("attempts must be at least 1")
@@ -39,13 +40,37 @@ async def retry_async(
             return await operation()
         except ExchangeClientError as exc:
             if not is_retryable_exchange_error(exc) or attempt == attempts:
-                logger.error("%s failed after attempt %s: %s", operation_name, attempt, exc)
+                logger.debug("%s failed after attempt %s: %s", operation_name, attempt, exc)
+                if on_retry_event is not None:
+                    on_retry_event(
+                        {
+                            "operation": operation_name,
+                            "attempt": attempt,
+                            "attempts": attempts,
+                            "will_retry": False,
+                            "delay_seconds": 0,
+                            "error": str(exc),
+                            "error_type": exc.__class__.__name__,
+                        }
+                    )
                 raise
 
             retry_after = getattr(exc, "retry_after", None)
             exponential_delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
             delay = max(exponential_delay, retry_after or 0)
-            logger.warning(
+            if on_retry_event is not None:
+                on_retry_event(
+                    {
+                        "operation": operation_name,
+                        "attempt": attempt,
+                        "attempts": attempts,
+                        "will_retry": True,
+                        "delay_seconds": delay,
+                        "error": str(exc),
+                        "error_type": exc.__class__.__name__,
+                    }
+                )
+            logger.debug(
                 "%s failed on attempt %s/%s: %s; retrying in %.2fs",
                 operation_name,
                 attempt,

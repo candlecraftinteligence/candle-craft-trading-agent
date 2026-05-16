@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
+from app.analytics.setup_quality import SetupQualityState, validate_setup_quality
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, filter_ranked_results, rank_scan_results
@@ -137,6 +138,29 @@ class FakeScannerRunner:
             },
             rejected_strategy_modes=("challenge", "swing", "scalp"),
             strategy_missing_data=("candles_2d: N/A", "cvd: N/A", "liquidation_data: N/A"),
+            setup_quality=validate_setup_quality(
+                {
+                    "symbol": "BTCUSDT",
+                    "setup_valid": False,
+                    "mode": "challenge",
+                    "bias": "long",
+                    "sweep_passed": True,
+                    "confirmation_passed": False,
+                    "pullback_valid": False,
+                    "rr_to_tp2": NA,
+                    "best_rr": NA,
+                    "htf_2d_trend": "bearish",
+                    "mtf_12h_trend": "neutral",
+                    "derivatives_supports_trade": True,
+                    "derivatives_score": 90,
+                    "funding_status": "normal",
+                    "crowding_risk": "low",
+                    "first_failed_gate": "missing_confirmation_structure_shift",
+                    "gates_passed": ("sweep",),
+                    "gates_failed": ("missing_confirmation_structure_shift",),
+                    "rejection_reason": "No 5m BOS/CHoCH close beyond the required LTF swing.",
+                }
+            ),
         )
         return ScannerRunResult(
             config=config,
@@ -605,6 +629,89 @@ def test_near_miss_ranks_above_no_setup() -> None:
     assert ranked[1].display.display_bucket == "no_setup"
 
 
+def test_ranking_uses_setup_quality_priority_and_score() -> None:
+    def quality_symbol(symbol: str, setup_quality) -> ScannerSymbolResult:
+        return ScannerSymbolResult(
+            symbol=symbol,
+            status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+            status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+            setup_quality=setup_quality,
+        )
+
+    high = validate_setup_quality(
+        {
+            "setup_valid": True,
+            "bias": "long",
+            "rr_to_tp2": Decimal("3.5"),
+            "sweep_passed": True,
+            "confirmation_passed": True,
+            "pullback_valid": True,
+            "ob_or_fvg_valid": True,
+            "fib_valid": True,
+            "htf_2d_trend": "bullish",
+            "mtf_12h_trend": "bullish",
+            "trust_percentage": 90,
+            "poc_available": True,
+            "value_area_available": True,
+            "derivatives_supports_trade": True,
+            "derivatives_score": 90,
+            "funding_status": "normal",
+            "crowding_risk": "low",
+            "risk_approved": True,
+            "data_quality_score": Decimal("90"),
+        }
+    )
+    lower = validate_setup_quality(
+        {
+            "setup_valid": True,
+            "bias": "long",
+            "rr_to_tp2": Decimal("2.1"),
+            "sweep_passed": True,
+            "confirmation_passed": True,
+            "pullback_valid": True,
+            "ob_or_fvg_valid": True,
+            "fib_valid": True,
+            "htf_2d_trend": "bullish",
+            "mtf_12h_trend": "neutral",
+            "trust_percentage": 76,
+            "derivatives_supports_trade": "N/A",
+            "risk_approved": True,
+        }
+    )
+    watch = validate_setup_quality(
+        {
+            "setup_valid": False,
+            "sweep_passed": True,
+            "confirmation_passed": True,
+            "pullback_valid": False,
+            "rr_to_tp2": Decimal("3.0"),
+            "first_failed_gate": "no_ob_or_fvg_zone",
+            "gates_failed": ("no_ob_or_fvg_zone",),
+        }
+    )
+    rejected = validate_setup_quality({"setup_valid": False, "first_failed_gate": "missing_confirmed_sweep"})
+    data_issue = validate_setup_quality({"setup_valid": False, "first_failed_gate": "no_execution_candles"})
+
+    ranked = rank_scan_results(
+        (
+            quality_symbol("DATAUSDT", data_issue),
+            quality_symbol("WATCHUSDT", watch),
+            quality_symbol("LOWERUSDT", lower),
+            quality_symbol("REJECTUSDT", rejected),
+            quality_symbol("HIGHUSDT", high),
+        )
+    )
+
+    assert [item.symbol_result.symbol for item in ranked] == [
+        "HIGHUSDT",
+        "LOWERUSDT",
+        "WATCHUSDT",
+        "REJECTUSDT",
+        "DATAUSDT",
+    ]
+    assert ranked[0].symbol_result.setup_quality.quality_state == SetupQualityState.HIGH_QUALITY_TRADE
+
+
 def test_default_max_display_results_limits_to_ten() -> None:
     ranked = rank_scan_results(tuple(_valid_rank_result(f"VALID{index}USDT") for index in range(12)))
     visible = filter_ranked_results(ranked)
@@ -875,6 +982,12 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
         "missing_confirmation_structure_shift"
     )
     assert payload["results"][0]["near_miss_intelligence"]["action_label"] == "Wait for confirmation"
+    assert payload["results"][0]["setup_quality"]["quality_state"] == "REJECTED_NO_EDGE"
+    assert payload["results"][0]["setup_quality"]["quality_grade"] == "Reject"
+    assert payload["results"][0]["setup_quality"]["action_label"] == "Wait for confirmation"
+    assert payload["results"][0]["setup_quality"]["decision_reason"] == (
+        "Sweep passed but 5m BOS/CHoCH confirmation is missing."
+    )
 
 
 def test_show_strategy_output_prints_formatted_output(monkeypatch, capsys) -> None:
@@ -908,12 +1021,9 @@ def test_show_strategy_output_with_telegram_format_prints_clean_message(monkeypa
 
     captured = capsys.readouterr()
     assert "BTCUSDT Candle Craft strategy output:" in captured.out
-    assert "BTCUSDT — No Valid Setup" in captured.out
-    assert "❌ Failed" in captured.out
-    assert "• Gate: missing_confirmation_structure_shift" in captured.out
-    assert "🧠 Why" in captured.out
-    assert "No 5m BOS/CHoCH close beyond the required LTF swing." in captured.out
-    assert "No valid setup. No trade. Wait for confirmation." in captured.out
+    assert "BTCUSDT — No valid trade" in captured.out
+    assert "Action: Wait for confirmation" in captured.out
+    assert "Reason: Sweep passed but 5m BOS/CHoCH confirmation is missing." in captured.out
     assert "⚔️ Candle Craft | Signal. Structure. Execution." in captured.out
     assert "Challenge: No valid challenge setup." not in captured.out
 
@@ -925,9 +1035,11 @@ def test_display_compact_prints_dashboard_and_one_line_result(monkeypatch, capsy
 
     captured = capsys.readouterr()
     assert "Candle Craft Scanner" in captured.out
-    assert "#1 ⚪ BTCUSDT — REJECTED" in captured.out
-    assert "Progress 1/4" in captured.out
-    assert "Gate: missing_confirmation_structure_shift" in captured.out
+    assert "#1 BTCUSDT — REJECTED_NO_EDGE" in captured.out
+    assert "Reject" in captured.out
+    assert "Wait for confirmation" in captured.out
+    assert "Progress 1/4" not in captured.out
+    assert "Gate: missing_confirmation_structure_shift" not in captured.out
     assert "2D HTF:" not in captured.out
 
 
@@ -1025,7 +1137,7 @@ def test_bucket_filter_reveals_selected_no_setup_bucket(monkeypatch, capsys) -> 
     asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--display", "compact", "--bucket-filter", "no_setup"]))
 
     captured = capsys.readouterr()
-    assert "#1 ⚪ BTCUSDT — REJECTED" in captured.out
+    assert "#1 BTCUSDT — REJECTED_NO_EDGE" in captured.out
 
 
 def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
@@ -1044,6 +1156,11 @@ def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
     assert "• Bucket: ⚪ REJECTED" in captured.out
     assert "• Mode(s): rejected challenge, swing, scalp" in captured.out
     assert "• HTF/Bias/Execution:" in captured.out
+    assert "• Quality: REJECTED_NO_EDGE | Grade: Reject | Score:" in captured.out
+    assert "• Edge:" in captured.out
+    assert "• Risk:" in captured.out
+    assert "• Action: Wait for confirmation" in captured.out
+    assert "• Reason: Sweep passed but 5m BOS/CHoCH confirmation is missing." in captured.out
     assert "📍 Context" in captured.out
     assert "• 2D HTF: Bearish" in captured.out
     assert "• 12H Bias: Neutral" in captured.out
@@ -1076,6 +1193,8 @@ def test_display_full_preserves_detailed_diagnostics(monkeypatch, capsys) -> Non
     assert "challenge Pullback Zone: N/A | OB/FVG: N/A | Fib: N/A | RR: N/A" in captured.out
     assert "Derivatives enrichment:" in captured.out
     assert "Derivatives context score: 90" in captured.out
+    assert "Setup quality:" in captured.out
+    assert "State: REJECTED_NO_EDGE" in captured.out
 
 
 def test_pullback_rejection_normal_formatting_is_readable() -> None:
@@ -1164,5 +1283,5 @@ def test_diagnostics_level_overrides_verbose(monkeypatch, capsys) -> None:
     )
 
     captured = capsys.readouterr()
-    assert "⚪ BTCUSDT — REJECTED" in captured.out
+    assert "BTCUSDT — REJECTED_NO_EDGE" in captured.out
     assert "Strategy diagnostics:" not in captured.out

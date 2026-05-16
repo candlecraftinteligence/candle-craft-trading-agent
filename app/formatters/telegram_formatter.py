@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display
+from app.analytics.setup_quality import SetupQualityResult, SetupQualityState
 from app.pipeline.scanner_runner import ScannerSymbolResult
 from app.strategies.liquidity_grab_pullback import LiquidityGrabMode, LiquidityGrabResult, LiquidityGrabSetup
 
@@ -78,12 +79,15 @@ def format_valid_setup_message(
     if status == NA:
         status = "Pending"
     display = build_symbol_display(symbol_result)
+    quality = symbol_result.setup_quality
 
     if compact:
+        quality_text = _quality_valid_text(quality)
         return "\n".join(
             (
                 (
                     f"{symbol} {DASH} Valid Setup | {mode_title} {grade} {trust_percentage}% | "
+                    f"{quality_text} | "
                     f"Bias: {_trade_bias(setup, diagnostics)} | Entry: {_entry_text(setup, diagnostics)} | "
                     f"Stop: {_display(_setup_field(setup, diagnostics, 'stop'))} | "
                     f"RR: {_display(_setup_field(setup, diagnostics, 'rr_to_tp2'))} | Trade idea created."
@@ -101,6 +105,7 @@ def format_valid_setup_message(
         "",
         f"{CHECK} Passed",
         *_telegram_passed_lines(display),
+        *_telegram_quality_lines(quality),
         "",
         "Orderflow",
         f"{BULLET} POC: {_display(_first_available(_setup_field(setup, diagnostics, 'poc'), symbol_result.poc))}",
@@ -150,8 +155,20 @@ def format_rejection_summary(
     diagnostics = _representative_diagnostics(symbol_result)
     symbol = symbol_result.symbol
     display = build_symbol_display(symbol_result)
+    quality = symbol_result.setup_quality
     failed_gate = _failed_gate(symbol_result, diagnostics)
     reason = display.short_reason
+
+    if _quality_evaluated(quality):
+        lines = [
+            f"{symbol} {DASH} No valid trade",
+            f"Action: {quality.action_label}",
+            f"Reason: {quality.decision_reason}",
+        ]
+        if diagnostics_level == "full":
+            lines.extend(("", "Diagnostics", *_diagnostic_lines(symbol_result, diagnostics)))
+        lines.extend(("", FOOTER))
+        return "\n".join(lines)
 
     if compact:
         action = _telegram_action_text(display)
@@ -261,6 +278,9 @@ def _telegram_failed_summary(display: Any, failed_gate: str) -> str:
 
 
 def _valid_modes(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    if _quality_evaluated(symbol_result.setup_quality) and not _quality_allows_signal(symbol_result.setup_quality):
+        return ()
+
     candidates: list[str] = []
     candidates.extend(symbol_result.valid_strategy_modes)
 
@@ -276,6 +296,34 @@ def _valid_modes(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
     ordered = [mode for mode in MODE_ORDER if mode in candidates]
     ordered.extend(mode for mode in candidates if mode not in ordered)
     return tuple(ordered)
+
+
+def _telegram_quality_lines(quality: SetupQualityResult) -> list[str]:
+    if not _quality_evaluated(quality):
+        return []
+    return [
+        f"{BULLET} Quality: {quality.quality_state.value}",
+        f"{BULLET} Grade/Score: {quality.quality_grade.value} / {quality.quality_score}",
+        f"{BULLET} Edge: {quality.profitability_edge_score}",
+        f"{BULLET} Execution risk: {quality.execution_risk_score} (lower is better)",
+    ]
+
+
+def _quality_valid_text(quality: SetupQualityResult) -> str:
+    if not _quality_evaluated(quality):
+        return "Quality: N/A"
+    return f"Quality: {quality.quality_grade.value} {quality.quality_score}"
+
+
+def _quality_evaluated(quality: SetupQualityResult) -> bool:
+    return bool(getattr(quality, "is_evaluated", False))
+
+
+def _quality_allows_signal(quality: SetupQualityResult) -> bool:
+    return quality.quality_state in {
+        SetupQualityState.HIGH_QUALITY_TRADE,
+        SetupQualityState.VALID_BUT_LOWER_QUALITY,
+    }
 
 
 def _setup_from_symbol_result(symbol_result: ScannerSymbolResult, mode: str) -> LiquidityGrabSetup | None:

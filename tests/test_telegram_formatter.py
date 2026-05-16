@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from app.data.dtos import NA
+from app.analytics.setup_quality import validate_setup_quality
 from app.formatters.telegram_formatter import (
     format_no_setup_message,
     format_telegram_strategy_output,
@@ -238,3 +239,60 @@ def test_formatter_does_not_change_strategy_gate_results() -> None:
     assert result.swing.is_valid is False
     assert result.swing.first_failed_gate == "no_execution_candles"
     assert result.swing.model_dump() == before
+
+
+def test_valid_setup_includes_quality_grade_and_score_when_evaluated() -> None:
+    symbol_result = _valid_symbol_result().model_copy(
+        update={
+            "setup_quality": validate_setup_quality(
+                {
+                    "setup_valid": True,
+                    "bias": "long",
+                    "rr_to_tp2": Decimal("3.2"),
+                    "sweep_passed": True,
+                    "confirmation_passed": True,
+                    "pullback_valid": True,
+                    "ob_or_fvg_valid": True,
+                    "fib_valid": True,
+                    "htf_2d_trend": "bullish",
+                    "mtf_12h_trend": "bullish",
+                    "trust_percentage": 90,
+                    "poc_available": True,
+                    "value_area_available": True,
+                    "derivatives_supports_trade": True,
+                    "derivatives_score": 86,
+                    "funding_status": "normal",
+                    "crowding_risk": "low",
+                    "risk_approved": True,
+                    "data_quality_score": Decimal("90"),
+                }
+            )
+        }
+    )
+
+    text = format_telegram_strategy_output(symbol_result)
+
+    assert "Quality: HIGH_QUALITY_TRADE" in text
+    assert "Grade/Score:" in text
+
+
+def test_quality_rejected_setup_does_not_format_as_telegram_signal() -> None:
+    symbol_result = _valid_symbol_result().model_copy(
+        update={
+            "setup_quality": validate_setup_quality(
+                {
+                    "setup_valid": False,
+                    "sweep_passed": True,
+                    "confirmation_passed": False,
+                    "first_failed_gate": "missing_confirmation_structure_shift",
+                    "gates_passed": ("sweep",),
+                }
+            )
+        }
+    )
+
+    text = format_telegram_strategy_output(symbol_result)
+
+    assert "Valid Setup" not in text
+    assert "BTCUSDT — No valid trade" in text
+    assert "Action: Wait for confirmation" in text

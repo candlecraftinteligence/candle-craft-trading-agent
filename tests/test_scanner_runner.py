@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from app.agents.alert_agent import AlertAgent
+from app.analytics.setup_quality import SetupQualityState
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunner
@@ -238,6 +239,9 @@ def test_scanner_handles_one_valid_mocked_symbol() -> None:
     assert symbol_result.trade_idea.quality_gate_result.passed is True
     assert symbol_result.strategy_name == "liquidity_grab_pullback"
     assert symbol_result.valid_strategy_modes == ("swing", "scalp")
+    assert symbol_result.setup_quality.quality_state == SetupQualityState.HIGH_QUALITY_TRADE
+    assert symbol_result.setup_quality.quality_score >= 85
+    assert symbol_result.setup_quality.action_label == "Trade candidate"
     assert result.trade_ideas_created == 1
 
 
@@ -306,6 +310,8 @@ def test_scanner_derivatives_missing_data_does_not_reject_by_itself() -> None:
     assert symbol_result.derivatives_enrichment is not None
     assert symbol_result.derivatives_enrichment.funding_status == NA
     assert "funding_rate: N/A" in symbol_result.derivatives_missing_data
+    assert symbol_result.setup_quality.quality_state != SetupQualityState.HIGH_QUALITY_TRADE
+    assert "mixed derivatives" in symbol_result.setup_quality.weakest_factors
 
 
 def test_scanner_continues_if_one_symbol_fails() -> None:

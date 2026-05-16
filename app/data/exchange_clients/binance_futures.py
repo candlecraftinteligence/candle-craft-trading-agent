@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
+from typing import Any
 
 import httpx
 
 from app.data.dtos import CandleDTO, FundingDTO, OpenInterestDTO, TickerDTO
+from app.data.exceptions import ExchangeResponseError
 from app.data.exchange_clients.base import PublicHTTPExchangeClient
 from app.data.normalizers.binance import (
     normalize_binance_funding,
@@ -56,6 +59,12 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
             params={"symbol": normalized_symbol},
         )
         return normalize_binance_ticker(normalized_symbol, payload)
+
+    async def get_24h_tickers(self) -> list[Mapping[str, Any]]:
+        payload = await self._get_json("/fapi/v1/ticker/24hr")
+        if not isinstance(payload, list):
+            raise ExchangeResponseError("Expected list response at binance.tickers_24h")
+        return payload
 
     async def get_funding_rate(self, symbol: str) -> FundingDTO:
         normalized_symbol = symbol.upper()

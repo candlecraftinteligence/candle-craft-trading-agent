@@ -22,6 +22,12 @@ from app.analytics.derivatives_enrichment import (
     enrich_derivatives,
 )
 from app.analytics.near_miss_intelligence import NearMissIntelligence, build_near_miss_intelligence
+from app.analytics.setup_quality import (
+    SetupQualityInput,
+    SetupQualityResult,
+    default_setup_quality_result,
+    validate_setup_quality,
+)
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
@@ -293,6 +299,7 @@ class ScannerSymbolResult(BaseModel):
     alert_result: AlertResult | None = None
     journal_entry: JournalEntryResult | None = None
     near_miss_intelligence: NearMissIntelligence | None = None
+    setup_quality: SetupQualityResult = Field(default_factory=default_setup_quality_result)
 
     model_config = ConfigDict(frozen=True)
 
@@ -435,6 +442,14 @@ class ScannerRunner:
                         rejection_reason=reason,
                         rejection_stage="scanner",
                         rejection_reasons=(reason,),
+                        setup_quality=validate_setup_quality(
+                            SetupQualityInput(
+                                symbol=symbol_config.symbol,
+                                first_failed_gate="scanner_error",
+                                missing_data=("scanner: N/A",),
+                                rejection_reason=reason,
+                            )
+                        ),
                     )
                 results.append(symbol_result)
                 if after_symbol is not None:
@@ -1097,6 +1112,20 @@ class ScannerRunner:
             alert_result=alert_result,
             journal_entry=journal_entry,
         )
+        setup_quality = _setup_quality_for_result(
+            symbol=symbol,
+            status=status,
+            rejection_reason=rejection_reason,
+            strategy_execution=strategy_execution,
+            derivatives_enrichment=derivatives_enrichment,
+            risk_decision=risk_decision,
+            score_result=score_result,
+            trade_idea=trade_idea,
+            alert_result=alert_result,
+            journal_entry=journal_entry,
+            missing_data=cleaned_missing,
+            unverified_data=cleaned_unverified,
+        )
         return ScannerSymbolResult(
             symbol=symbol,
             status=status,
@@ -1198,7 +1227,221 @@ class ScannerRunner:
             alert_result=alert_result,
             journal_entry=journal_entry,
             near_miss_intelligence=near_miss_intelligence,
+            setup_quality=setup_quality,
         )
+
+
+def _setup_quality_for_result(
+    *,
+    symbol: str,
+    status: ScannerPipelineStatus,
+    rejection_reason: str | None,
+    strategy_execution: _StrategyExecution,
+    derivatives_enrichment: DerivativesEnrichmentResult | None,
+    risk_decision: RiskDecision | None,
+    score_result: OpportunityScoreResult | None,
+    trade_idea: TradeIdeaResult | None,
+    alert_result: AlertResult | None,
+    journal_entry: JournalEntryResult | None,
+    missing_data: Sequence[str],
+    unverified_data: Sequence[str],
+) -> SetupQualityResult:
+    diagnostics = _representative_strategy_diagnostics(strategy_execution)
+    setup = strategy_execution.selected_setup
+    mode = setup.mode.value if setup is not None else _strategy_mode_from_execution(strategy_execution)
+    failed_gate = _strategy_failed_gate(diagnostics) if diagnostics else NA
+    if failed_gate == NA:
+        if status == ScannerPipelineStatus.REJECTED_BY_DERIVATIVES:
+            failed_gate = "derivatives_conflict"
+        elif status == ScannerPipelineStatus.REJECTED_BY_RISK:
+            failed_gate = "risk"
+        elif status == ScannerPipelineStatus.REJECTED_BY_SCORING:
+            failed_gate = "quality_filter"
+        elif status == ScannerPipelineStatus.SCAN_ERROR:
+            failed_gate = "scanner_error"
+
+    gates_passed = _sequence_from_diagnostics(diagnostics.get("gates_passed")) if diagnostics else ()
+    gates_failed = _sequence_from_diagnostics(diagnostics.get("gates_failed")) if diagnostics else ()
+    bias = _first_non_na(
+        getattr(setup, "bias", NA) if setup is not None else NA,
+        diagnostics.get("bias") if diagnostics else NA,
+        getattr(trade_idea, "direction", NA) if trade_idea is not None else NA,
+    )
+    rr_to_tp2 = _first_decimal(
+        getattr(setup, "rr_to_tp2", NA) if setup is not None else NA,
+        diagnostics.get("rr_to_tp2") if diagnostics else NA,
+        getattr(risk_decision, "best_risk_reward_ratio", NA) if risk_decision is not None else NA,
+    )
+    best_rr = _first_decimal(
+        getattr(risk_decision, "best_risk_reward_ratio", NA) if risk_decision is not None else NA,
+        getattr(getattr(score_result, "score_breakdown", None), "best_rr", NA) if score_result is not None else NA,
+        rr_to_tp2,
+    )
+    final_setup_valid = (
+        status
+        in (
+            ScannerPipelineStatus.IDEA_CREATED,
+            ScannerPipelineStatus.ALERT_DRY_RUN_CREATED,
+            ScannerPipelineStatus.JOURNAL_ENTRY_CREATED,
+        )
+        or trade_idea is not None
+        or alert_result is not None
+        or journal_entry is not None
+    )
+    if setup is not None:
+        final_setup_valid = final_setup_valid and _is_valid_strategy_setup(setup)
+
+    derivatives_support = _derivatives_support_for_quality(
+        bias=bias,
+        diagnostics=diagnostics,
+        derivatives_enrichment=derivatives_enrichment,
+    )
+    stop_distance_pct = _stop_distance_pct(setup)
+    required_rr = Decimal("3.0") if mode == "challenge" else Decimal("2.5")
+
+    return validate_setup_quality(
+        SetupQualityInput(
+            symbol=symbol,
+            setup_valid=final_setup_valid,
+            mode=mode,
+            bias=bias,
+            rr_to_tp2=rr_to_tp2,
+            required_rr=required_rr,
+            sweep_passed=_diagnostic_passed(diagnostics, "execution_sweep_status", "sweep"),
+            confirmation_passed=_diagnostic_passed(diagnostics, "confirmation_structure_shift_status", "bos_choch"),
+            pullback_valid=_pullback_valid_for_quality(diagnostics),
+            ob_or_fvg_valid="ob_fvg" in gates_passed or _display_decimal_or_text(diagnostics.get("selected_zone_type")) != NA,
+            fib_valid="fib_alignment" in gates_passed
+            or _display_decimal_or_text(diagnostics.get("fib_alignment_status")) in ("aligned", "valid", "passed"),
+            volume_confirmed="volume_confirmation" in gates_passed,
+            late_pullback=failed_gate == "entry_window_expired",
+            htf_2d_trend=_display_decimal_or_text(diagnostics.get("htf_2d_trend")) if diagnostics else NA,
+            mtf_12h_trend=_display_decimal_or_text(diagnostics.get("mtf_12h_trend")) if diagnostics else NA,
+            trend=_display_decimal_or_text(diagnostics.get("trend")) if diagnostics else NA,
+            trust_percentage=_integer_or_na(diagnostics.get("trust_percentage")) if diagnostics else NA,
+            poc_available=_first_non_na(
+                getattr(setup, "poc", NA) if setup is not None else NA,
+                diagnostics.get("poc") if diagnostics else NA,
+            )
+            != NA,
+            value_area_available=_value_area_available(strategy_execution),
+            derivatives_supports_trade=derivatives_support,
+            derivatives_score=derivatives_enrichment.derivatives_score
+            if derivatives_enrichment is not None
+            else NA,
+            funding_status=derivatives_enrichment.funding_status if derivatives_enrichment is not None else NA,
+            oi_direction=derivatives_enrichment.oi_direction if derivatives_enrichment is not None else NA,
+            price_oi_relationship=derivatives_enrichment.price_oi_relationship if derivatives_enrichment is not None else NA,
+            crowding_risk=derivatives_enrichment.crowding_risk if derivatives_enrichment is not None else NA,
+            squeeze_risk=derivatives_enrichment.squeeze_risk if derivatives_enrichment is not None else NA,
+            risk_approved=risk_decision.approved if risk_decision is not None else NA,
+            best_rr=best_rr,
+            leverage_risk_level=risk_decision.leverage_risk.risk_level if risk_decision is not None else NA,
+            data_quality_score=risk_decision.data_quality_score if risk_decision is not None else NA,
+            stop_distance_pct=stop_distance_pct,
+            first_failed_gate=failed_gate,
+            gates_passed=gates_passed,
+            gates_failed=gates_failed,
+            hard_rejection_reasons=_sequence_from_diagnostics(diagnostics.get("hard_rejection_reasons"))
+            if diagnostics
+            else (),
+            missing_data=missing_data,
+            unverified_data=unverified_data,
+            derivatives_missing_data=derivatives_enrichment.missing_data if derivatives_enrichment is not None else (),
+            derivatives_unverified_data=derivatives_enrichment.unverified_data
+            if derivatives_enrichment is not None
+            else (),
+            derivatives_warnings=derivatives_enrichment.warnings if derivatives_enrichment is not None else (),
+            rejection_reason=rejection_reason or NA,
+        )
+    )
+
+
+def _strategy_mode_from_execution(strategy_execution: _StrategyExecution) -> str:
+    for values in (strategy_execution.valid_strategy_modes, strategy_execution.rejected_strategy_modes):
+        if values:
+            return values[0]
+    return NA
+
+
+def _diagnostic_passed(diagnostics: Mapping[str, Any], status_key: str, gate_name: str) -> bool:
+    status = _display_decimal_or_text(diagnostics.get(status_key))
+    gates_passed = _sequence_from_diagnostics(diagnostics.get("gates_passed"))
+    return status == "passed" or gate_name in gates_passed
+
+
+def _pullback_valid_for_quality(diagnostics: Mapping[str, Any]) -> bool:
+    status = _display_decimal_or_text(diagnostics.get("pullback_zone_status"))
+    return status in ("valid", "passed") or "pullback_zone" in _sequence_from_diagnostics(diagnostics.get("gates_passed"))
+
+
+def _derivatives_support_for_quality(
+    *,
+    bias: str,
+    diagnostics: Mapping[str, Any],
+    derivatives_enrichment: DerivativesEnrichmentResult | None,
+) -> bool | Literal["N/A"]:
+    diagnostic_value = diagnostics.get("derivatives_supports_trade")
+    if isinstance(diagnostic_value, bool):
+        return diagnostic_value
+    if _display_decimal_or_text(diagnostic_value) in ("True", "true"):
+        return True
+    if _display_decimal_or_text(diagnostic_value) in ("False", "false"):
+        return False
+    if derivatives_enrichment is None:
+        return NA
+    if bias == "long":
+        return derivatives_enrichment.supports_long
+    if bias == "short":
+        return derivatives_enrichment.supports_short
+    return NA
+
+
+def _value_area_available(strategy_execution: _StrategyExecution) -> bool:
+    profile = strategy_execution.volume_profile
+    if profile is None:
+        return False
+    return profile.value_area_high != NA and profile.value_area_low != NA
+
+
+def _stop_distance_pct(setup: LiquidityGrabSetup | None) -> MaybeDecimal:
+    if setup is None or setup.entry == NA or setup.stop == NA or setup.entry == 0:
+        return NA
+    distance = abs(setup.entry - setup.stop) / abs(setup.entry) * Decimal("100")
+    return _quantize(distance)
+
+
+def _sequence_from_diagnostics(value: Any) -> tuple[str, ...]:
+    if not _is_sequence_data(value):
+        return ()
+    return tuple(_display_decimal_or_text(item) for item in value if _display_decimal_or_text(item) != NA)
+
+
+def _first_non_na(*values: Any) -> Any:
+    for value in values:
+        if _display_decimal_or_text(value) != NA:
+            return value
+    return NA
+
+
+def _first_decimal(*values: Any) -> MaybeDecimal:
+    for value in values:
+        if _display_decimal_or_text(value) == NA:
+            continue
+        try:
+            return _quantize(_decimal_from(value, "setup_quality"))
+        except ValueError:
+            continue
+    return NA
+
+
+def _integer_or_na(value: Any) -> MaybeInt:
+    if _display_decimal_or_text(value) == NA:
+        return NA
+    try:
+        return int(Decimal(str(value)))
+    except (InvalidOperation, ValueError):
+        return NA
 
 
 def _latest_swing_price(points: Sequence[Any]) -> MaybeDecimal:

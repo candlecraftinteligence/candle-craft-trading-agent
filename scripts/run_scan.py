@@ -720,6 +720,8 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
             f"Strategy unverified data: {_sequence_text(symbol_result.strategy_unverified_data)}",
             "Near-miss intelligence:",
             _format_near_miss_intelligence(symbol_result),
+            "Setup quality:",
+            _format_setup_quality_diagnostics(symbol_result),
             "Strategy diagnostics:",
             _format_strategy_diagnostics(symbol_result),
         )
@@ -961,6 +963,26 @@ def _format_near_miss_intelligence(symbol_result: ScannerSymbolResult) -> str:
             f"Invalidation hint: {intelligence.invalidation_hint}",
             f"Quality note: {intelligence.quality_note}",
             f"Action: {intelligence.action_label}",
+        )
+    )
+
+
+def _format_setup_quality_diagnostics(symbol_result: ScannerSymbolResult) -> str:
+    quality = symbol_result.setup_quality
+    if not quality.is_evaluated:
+        return "N/A"
+    return "\n".join(
+        (
+            f"State: {quality.quality_state.value}",
+            f"Grade: {quality.quality_grade.value}",
+            f"Quality score: {quality.quality_score}",
+            f"Tradeability score: {quality.tradeability_score}",
+            f"Profitability edge score: {quality.profitability_edge_score}",
+            f"Execution risk score: {quality.execution_risk_score} (lower is better)",
+            f"Strongest: {_sequence_text(quality.strongest_factors)}",
+            f"Weakest: {_sequence_text(quality.weakest_factors)}",
+            f"Action: {quality.action_label}",
+            f"Reason: {quality.decision_reason}",
         )
     )
 
