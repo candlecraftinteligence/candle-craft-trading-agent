@@ -9,7 +9,8 @@ from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 
 DisplayMode = Literal["compact", "normal", "full"]
-DisplayStatus = Literal["valid_setup", "near_miss", "no_setup", "data_incomplete"]
+DisplayBucket = Literal["valid", "near_miss", "no_setup", "data_issue"]
+DisplayStatus = Literal["valid_setup", "near_miss", "no_setup", "data_issue"]
 
 BULLET = "\u2022"
 CHECK = "\u2705"
@@ -30,6 +31,13 @@ FOOTER = f"{SWORDS} Candle Craft | Signal. Structure. Execution."
 
 MODE_ORDER = ("challenge", "swing", "scalp")
 SETUP_PROGRESS_TOTAL = 4
+DEFAULT_MAX_DISPLAY_RESULTS = 20
+BUCKET_ORDER: dict[DisplayBucket, int] = {
+    "valid": 0,
+    "near_miss": 1,
+    "no_setup": 2,
+    "data_issue": 3,
+}
 EARLY_CORE_GATES = {
     "missing_confirmed_sweep",
     "missing_confirmation_structure_shift",
@@ -53,9 +61,39 @@ PULLBACK_FAIL_GATES = {
 }
 RR_FAIL_GATES = {
     "missing_rr",
+    "missing_target",
     "rr_below_minimum",
     "challenge_rr_below_3",
     "rr_too_low",
+}
+FINAL_CONFLUENCE_FAIL_GATES = {
+    "trust_meter_below_minimum",
+    "challenge_trust_below_85",
+    "entry_window_expired",
+    "challenge_illiquid_token",
+    "challenge_btc_abnormal",
+    "challenge_event_window",
+    "btc_volatility_guard",
+    "btc_d_guard",
+    "event_guard",
+    "derivatives_conflict",
+    "funding_oi_guard",
+}
+LATE_FAILURE_GATES = (
+    PULLBACK_FAIL_GATES
+    | RR_FAIL_GATES
+    | FINAL_CONFLUENCE_FAIL_GATES
+    | {"missing_displacement_impulse", "missing_stop"}
+)
+STAGE_ORDER = {
+    "data": 0,
+    "sweep": 1,
+    "structure": 2,
+    "pullback": 3,
+    "ob_fvg": 4,
+    "rr": 5,
+    "final": 6,
+    "valid": 7,
 }
 
 
@@ -70,6 +108,12 @@ class ProgressItem:
 class SymbolDisplay:
     display_status: DisplayStatus
     display_status_label: str
+    display_bucket: DisplayBucket
+    display_bucket_label: str
+    display_priority_score: int
+    display_reason: str
+    hidden_by_default: bool
+    failed_stage: str
     setup_progress_total: int
     setup_progress_passed: int
     passed_checks: tuple[str, ...]
@@ -78,6 +122,14 @@ class SymbolDisplay:
     action_label: str
     progress_items: tuple[ProgressItem, ...]
     failed_gate: str
+
+
+@dataclass(frozen=True)
+class RankedSymbolDisplay:
+    symbol_result: ScannerSymbolResult
+    display: SymbolDisplay
+    display_rank: int
+    original_index: int
 
 
 def build_symbol_display(symbol_result: ScannerSymbolResult) -> SymbolDisplay:
@@ -91,24 +143,38 @@ def build_symbol_display(symbol_result: ScannerSymbolResult) -> SymbolDisplay:
         if not item.passed and (item.evaluated or _core_checks_passed(progress_items))
     )
     display_status = _display_status(symbol_result, diagnostics, failed_gate, progress_items)
+    display_bucket = _display_bucket(display_status)
     setup_progress_passed = sum(1 for item in progress_items if item.passed)
+    short_reason = _short_reason(symbol_result, diagnostics, display_status)
     return SymbolDisplay(
         display_status=display_status,
         display_status_label=_display_status_label(display_status),
+        display_bucket=display_bucket,
+        display_bucket_label=_display_status_label(display_status),
+        display_priority_score=_display_priority_score(symbol_result, diagnostics, display_status, failed_gate),
+        display_reason=short_reason,
+        hidden_by_default=display_bucket == "no_setup",
+        failed_stage=_failed_stage(symbol_result, failed_gate, display_status),
         setup_progress_total=SETUP_PROGRESS_TOTAL,
         setup_progress_passed=setup_progress_passed,
         passed_checks=passed_checks,
         failed_checks=failed_checks,
-        short_reason=_short_reason(symbol_result, diagnostics, display_status),
-        action_label=_action_label(display_status),
+        short_reason=short_reason,
+        action_label=_action_label(display_bucket),
         progress_items=progress_items,
         failed_gate=failed_gate,
     )
 
 
-def display_fields(symbol_result: ScannerSymbolResult) -> dict[str, Any]:
+def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | None = None) -> dict[str, Any]:
     display = build_symbol_display(symbol_result)
     return {
+        "display_rank": display_rank,
+        "display_bucket": display.display_bucket,
+        "display_priority_score": display.display_priority_score,
+        "display_reason": display.display_reason,
+        "hidden_by_default": display.hidden_by_default,
+        "failed_stage": display.failed_stage,
         "display_status": display.display_status,
         "display_status_label": display.display_status_label,
         "setup_progress_total": display.setup_progress_total,
@@ -120,17 +186,87 @@ def display_fields(symbol_result: ScannerSymbolResult) -> dict[str, Any]:
     }
 
 
-def format_scan_dashboard(result: ScannerRunResult) -> str:
+def rank_scan_results(
+    results: Sequence[ScannerSymbolResult],
+    *,
+    rank_results: bool = True,
+) -> tuple[RankedSymbolDisplay, ...]:
+    ranked_input = [
+        RankedSymbolDisplay(
+            symbol_result=symbol_result,
+            display=build_symbol_display(symbol_result),
+            display_rank=0,
+            original_index=index,
+        )
+        for index, symbol_result in enumerate(results)
+    ]
+    if rank_results:
+        ranked_input.sort(
+            key=lambda item: (
+                BUCKET_ORDER[item.display.display_bucket],
+                -item.display.display_priority_score,
+                item.original_index,
+            )
+        )
+    return tuple(
+        RankedSymbolDisplay(
+            symbol_result=item.symbol_result,
+            display=item.display,
+            display_rank=index + 1,
+            original_index=item.original_index,
+        )
+        for index, item in enumerate(ranked_input)
+    )
+
+
+def filter_ranked_results(
+    ranked_results: Sequence[RankedSymbolDisplay],
+    *,
+    show_no_setups: bool = False,
+    bucket_filter: set[DisplayBucket] | None = None,
+    max_display_results: int | None = DEFAULT_MAX_DISPLAY_RESULTS,
+) -> tuple[RankedSymbolDisplay, ...]:
+    filtered = []
+    for item in ranked_results:
+        bucket = item.display.display_bucket
+        if bucket_filter is not None and bucket not in bucket_filter:
+            continue
+        if bucket_filter is None and bucket == "no_setup" and not show_no_setups:
+            continue
+        filtered.append(item)
+
+    if max_display_results is None:
+        return tuple(filtered)
+    return tuple(filtered[: max(0, max_display_results)])
+
+
+def format_scan_dashboard(
+    result: ScannerRunResult,
+    *,
+    ranked_results: Sequence[RankedSymbolDisplay] | None = None,
+    visible_results: Sequence[RankedSymbolDisplay] | None = None,
+) -> str:
+    ranked = tuple(ranked_results) if ranked_results is not None else rank_scan_results(result.results)
+    visible = tuple(visible_results) if visible_results is not None else filter_ranked_results(ranked)
     counts = {
-        "valid_setup": 0,
+        "valid": 0,
         "near_miss": 0,
         "no_setup": 0,
-        "data_incomplete": 0,
+        "data_issue": 0,
     }
-    for symbol_result in result.results:
-        counts[build_symbol_display(symbol_result).display_status] += 1
+    visible_counts = {
+        "valid": 0,
+        "near_miss": 0,
+        "no_setup": 0,
+        "data_issue": 0,
+    }
+    for item in ranked:
+        counts[item.display.display_bucket] += 1
+    for item in visible:
+        visible_counts[item.display.display_bucket] += 1
 
     config = result.config
+    hidden_no_setups = max(0, counts["no_setup"] - visible_counts["no_setup"])
     return "\n".join(
         (
             "Candle Craft Scanner",
@@ -144,37 +280,51 @@ def format_scan_dashboard(result: ScannerRunResult) -> str:
             ),
             f"Symbols scanned: {result.scanned_symbols}",
             "",
-            f"{GREEN_CIRCLE} Valid setups: {counts['valid_setup']}",
+            f"{GREEN_CIRCLE} Valid setups: {counts['valid']}",
             f"{YELLOW_CIRCLE} Near misses: {counts['near_miss']}",
-            f"{RED_CIRCLE} No setups: {counts['no_setup']}",
-            f"{WHITE_CIRCLE} Data incomplete: {counts['data_incomplete']}",
+            f"{WHITE_CIRCLE} No setups hidden: {hidden_no_setups}",
+            f"{RED_CIRCLE} Data issues: {counts['data_issue']}",
         )
     )
 
 
-def format_symbol_compact_line(symbol_result: ScannerSymbolResult) -> str:
+def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int | None = None) -> str:
+    diagnostics = representative_strategy_diagnostics(symbol_result)
     display = build_symbol_display(symbol_result)
     status_text = display.display_status_label.split(" ", 1)[1]
+    rank_text = f"#{rank} " if rank is not None else ""
     parts = [
-        f"{display.display_status_label.split(' ', 1)[0]} {symbol_result.symbol} {DASH} {status_text}",
+        f"{rank_text}{display.display_status_label.split(' ', 1)[0]} {symbol_result.symbol} {DASH} {status_text}",
+        f"Modes {_mode_summary(symbol_result)}",
+        _execution_summary(diagnostics),
         f"Progress {display.setup_progress_passed}/{display.setup_progress_total}",
     ]
-    if display.failed_checks:
-        parts.append(f"Failed: {', '.join(display.failed_checks)}")
-    if display.failed_gate != NA:
+    if display.display_bucket != "valid" and display.failed_gate != NA:
         parts.append(f"Gate: {display.failed_gate}")
-    parts.append(_compact_result_text(display.display_status))
+    parts.append(display.display_reason)
+    parts.append(display.action_label)
     return " | ".join(parts)
 
 
-def format_symbol_card(symbol_result: ScannerSymbolResult, *, include_diagnostics: bool = False) -> str:
+def format_symbol_card(
+    symbol_result: ScannerSymbolResult,
+    *,
+    include_diagnostics: bool = False,
+    rank: int | None = None,
+) -> str:
     diagnostics = representative_strategy_diagnostics(symbol_result)
     display = build_symbol_display(symbol_result)
     icon, status_text = display.display_status_label.split(" ", 1)
+    rank_text = f"#{rank} " if rank is not None else ""
     lines = [
         CARD_RULE,
-        f"{icon} {symbol_result.symbol} {DASH} {status_text}",
+        f"{rank_text}{icon} {symbol_result.symbol} {DASH} {status_text}",
         CARD_RULE,
+        "",
+        f"{BULLET} Bucket: {display.display_bucket_label}",
+        f"{BULLET} Mode(s): {_mode_summary(symbol_result)}",
+        f"{BULLET} HTF/Bias/Execution: {_execution_summary(diagnostics)}",
+        *(_card_failed_gate_lines(display)),
         "",
         f"{PIN} Context",
         f"{BULLET} 2D HTF: {_title_value(diagnostics.get('htf_2d_trend'))}",
@@ -233,10 +383,31 @@ def _display_status(
     if _trade_idea_created(symbol_result):
         return "valid_setup"
     if _data_incomplete(symbol_result, diagnostics, failed_gate):
-        return "data_incomplete"
-    if _core_checks_passed(progress_items) and failed_gate not in (NA, *EARLY_CORE_GATES):
+        return "data_issue"
+    if _near_miss_eligible(diagnostics, failed_gate, progress_items):
         return "near_miss"
     return "no_setup"
+
+
+def _near_miss_eligible(
+    diagnostics: Mapping[str, Any],
+    failed_gate: str,
+    progress_items: tuple[ProgressItem, ...],
+) -> bool:
+    if not _core_checks_passed(progress_items):
+        return False
+    if failed_gate == NA or failed_gate in EARLY_CORE_GATES:
+        return False
+    gates_failed = set(_sequence_values(diagnostics.get("gates_failed")))
+    return failed_gate in LATE_FAILURE_GATES or bool(gates_failed & LATE_FAILURE_GATES)
+
+
+def _display_bucket(display_status: DisplayStatus) -> DisplayBucket:
+    if display_status == "valid_setup":
+        return "valid"
+    if display_status == "data_issue":
+        return "data_issue"
+    return display_status
 
 
 def _trade_idea_created(symbol_result: ScannerSymbolResult) -> bool:
@@ -318,8 +489,8 @@ def _display_status_label(display_status: DisplayStatus) -> str:
     labels = {
         "valid_setup": f"{GREEN_CIRCLE} VALID SETUP",
         "near_miss": f"{YELLOW_CIRCLE} NEAR MISS",
-        "no_setup": f"{RED_CIRCLE} NO SETUP",
-        "data_incomplete": f"{WHITE_CIRCLE} DATA INCOMPLETE",
+        "no_setup": f"{WHITE_CIRCLE} NO SETUP",
+        "data_issue": f"{RED_CIRCLE} DATA ISSUE",
     }
     return labels[display_status]
 
@@ -361,17 +532,19 @@ def _short_reason(
         return symbol_result.rejection_reason
     if symbol_result.error_message:
         return symbol_result.error_message
-    if display_status == "data_incomplete":
+    if display_status == "data_issue":
         return "Required market data is missing or unavailable."
     return "No valid setup."
 
 
-def _action_label(display_status: DisplayStatus) -> str:
-    if display_status == "valid_setup":
-        return "Trade idea created. Review invalidation and risk warning."
-    if display_status == "data_incomplete":
-        return "No trade idea. Required data is incomplete."
-    return "No trade idea, no alert, no journal entry."
+def _action_label(display_bucket: DisplayBucket) -> str:
+    if display_bucket == "valid":
+        return "Trade idea created"
+    if display_bucket == "near_miss":
+        return "Watchlist only"
+    if display_bucket == "data_issue":
+        return "Data insufficient"
+    return "Rejected"
 
 
 def _passed_lines(
@@ -426,6 +599,163 @@ def _diagnostic_lines(symbol_result: ScannerSymbolResult, diagnostics: Mapping[s
         f"{BULLET} Missing data: {_sequence_text(symbol_result.strategy_missing_data or symbol_result.missing_data)}",
         f"{BULLET} Unverified data: {_sequence_text(symbol_result.strategy_unverified_data or symbol_result.unverified_data)}",
     ]
+
+
+def _card_failed_gate_lines(display: SymbolDisplay) -> tuple[str, ...]:
+    if display.display_bucket == "valid" or display.failed_gate == NA:
+        return ()
+    return (f"{BULLET} Failed gate: {display.failed_gate}",)
+
+
+def _mode_summary(symbol_result: ScannerSymbolResult) -> str:
+    valid_modes = _ordered_modes(symbol_result.valid_strategy_modes)
+    rejected_modes = _ordered_modes(symbol_result.rejected_strategy_modes)
+    if valid_modes and rejected_modes:
+        return f"valid {', '.join(valid_modes)}; rejected {', '.join(rejected_modes)}"
+    if valid_modes:
+        return f"valid {', '.join(valid_modes)}"
+    if rejected_modes:
+        return f"rejected {', '.join(rejected_modes)}"
+    if symbol_result.strategy_results:
+        return ", ".join(_ordered_modes(symbol_result.strategy_results.keys()))
+    return NA
+
+
+def _ordered_modes(values: Sequence[str] | Any) -> tuple[str, ...]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        values = tuple(values) if hasattr(values, "__iter__") else ()
+    cleaned = tuple(str(value) for value in values if str(value))
+    return tuple(sorted(cleaned, key=lambda value: (MODE_ORDER.index(value) if value in MODE_ORDER else 99, value)))
+
+
+def _execution_summary(diagnostics: Mapping[str, Any]) -> str:
+    execution_tf = _display(diagnostics.get("execution_timeframe"))
+    confirmation_tf = _display(diagnostics.get("confirmation_timeframe"))
+    if execution_tf == NA:
+        execution_tf = "15m"
+    if confirmation_tf == NA:
+        confirmation_tf = "5m"
+    return " | ".join(
+        (
+            f"2D HTF {_title_value(diagnostics.get('htf_2d_trend'))}",
+            f"12H Bias {_title_value(diagnostics.get('mtf_12h_trend'))}",
+            f"{execution_tf} sweep {_summary_status(diagnostics.get('execution_sweep_status'))}",
+            f"{confirmation_tf} BOS/CHoCH {_summary_status(diagnostics.get('confirmation_structure_shift_status'))}",
+        )
+    )
+
+
+def _summary_status(value: object) -> str:
+    text = _display(value)
+    if text == "not_evaluated":
+        return "not evaluated"
+    return text
+
+
+def _display_priority_score(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    display_status: DisplayStatus,
+    failed_gate: str,
+) -> int:
+    display_bucket = _display_bucket(display_status)
+    score = (len(BUCKET_ORDER) - 1 - BUCKET_ORDER[display_bucket]) * 100_000
+    if _trade_idea_created(symbol_result):
+        score += 20_000
+    score += int(_best_setup_score(symbol_result, diagnostics) * Decimal("100"))
+    score += min(int(_best_rr(symbol_result, diagnostics) * Decimal("100")), 2_000)
+    score += int(_numeric(symbol_result.technical_score) * Decimal("20"))
+    score += int(_numeric(symbol_result.derivatives_score) * Decimal("10"))
+    score += _derivatives_support_score(diagnostics)
+    score += max(0, 20 - _failed_gate_count(diagnostics, failed_gate)) * 50
+    score += _stage_rank(failed_gate, display_status) * 500
+    return score
+
+
+def _best_setup_score(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Decimal:
+    score_result = symbol_result.score_result
+    return max(
+        _numeric(diagnostics.get("trust_percentage")),
+        _numeric(diagnostics.get("trust_score")),
+        _numeric(getattr(score_result, "total_score", NA) if score_result is not None else NA),
+        _numeric(symbol_result.technical_score),
+    )
+
+
+def _best_rr(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Decimal:
+    risk_decision = symbol_result.risk_decision
+    return max(
+        _numeric(diagnostics.get("rr_to_tp2")),
+        _numeric(getattr(risk_decision, "best_risk_reward_ratio", NA) if risk_decision is not None else NA),
+    )
+
+
+def _derivatives_support_score(diagnostics: Mapping[str, Any]) -> int:
+    support = _display(diagnostics.get("derivatives_supports_trade"))
+    conflict = _display(diagnostics.get("derivatives_conflict_reason"))
+    score = 0
+    if support == "True":
+        score += 500
+    elif support == "False":
+        score -= 750
+    if conflict != NA:
+        score -= 750
+    return score
+
+
+def _failed_gate_count(diagnostics: Mapping[str, Any], failed_gate: str) -> int:
+    gates_failed = _sequence_values(diagnostics.get("gates_failed"))
+    if gates_failed:
+        return len(gates_failed)
+    return 1 if failed_gate != NA else 0
+
+
+def _failed_stage(
+    symbol_result: ScannerSymbolResult,
+    failed_gate: str,
+    display_status: DisplayStatus,
+) -> str:
+    if display_status == "valid_setup":
+        return NA
+    if failed_gate != NA:
+        return _stage_name(failed_gate, display_status)
+    if symbol_result.rejection_stage != NA:
+        return _display(symbol_result.rejection_stage)
+    return NA
+
+
+def _stage_rank(failed_gate: str, display_status: DisplayStatus) -> int:
+    return STAGE_ORDER.get(_stage_name(failed_gate, display_status), 0)
+
+
+def _stage_name(failed_gate: str, display_status: DisplayStatus) -> str:
+    if display_status == "valid_setup":
+        return "valid"
+    if display_status == "data_issue" or failed_gate in DATA_INCOMPLETE_GATES:
+        return "data"
+    if failed_gate in ("missing_confirmed_sweep",):
+        return "sweep"
+    if failed_gate in ("missing_confirmation_structure_shift",):
+        return "structure"
+    if failed_gate in ("no_ob_or_fvg_zone",):
+        return "ob_fvg"
+    if failed_gate in PULLBACK_FAIL_GATES or failed_gate in ("missing_displacement_impulse", "missing_stop"):
+        return "pullback"
+    if failed_gate in RR_FAIL_GATES:
+        return "rr"
+    if failed_gate in FINAL_CONFLUENCE_FAIL_GATES:
+        return "final"
+    return "data" if failed_gate == NA else "pullback"
+
+
+def _numeric(value: object) -> Decimal:
+    text = _display(value)
+    if text == NA:
+        return Decimal("0")
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
 
 
 def _volume_profile_text(symbol_result: ScannerSymbolResult) -> str:
@@ -485,7 +815,7 @@ def _failed_gate(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, A
 def _compact_result_text(display_status: DisplayStatus) -> str:
     if display_status == "valid_setup":
         return "Trade idea created."
-    if display_status == "data_incomplete":
+    if display_status == "data_issue":
         return "No valid setup. Data incomplete."
     return "No valid setup."
 
@@ -563,14 +893,19 @@ def _display(value: object) -> str:
 
 
 __all__ = [
+    "DEFAULT_MAX_DISPLAY_RESULTS",
+    "DisplayBucket",
     "DisplayMode",
     "DisplayStatus",
     "FOOTER",
+    "RankedSymbolDisplay",
     "SymbolDisplay",
     "build_symbol_display",
     "display_fields",
+    "filter_ranked_results",
     "format_scan_dashboard",
     "format_symbol_card",
     "format_symbol_compact_line",
+    "rank_scan_results",
     "representative_strategy_diagnostics",
 ]

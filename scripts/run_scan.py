@@ -14,10 +14,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.data.dtos import NA  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
+    DEFAULT_MAX_DISPLAY_RESULTS,
+    DisplayBucket,
     display_fields,
+    filter_ranked_results,
     format_scan_dashboard,
     format_symbol_card,
     format_symbol_compact_line,
+    rank_scan_results,
     representative_strategy_diagnostics,
 )
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
@@ -49,6 +53,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--telegram-format", action="store_true")
     parser.add_argument("--diagnostics-level", choices=["summary", "normal", "full"], default="normal")
     parser.add_argument("--display", choices=["compact", "normal", "full"], default="normal")
+    parser.add_argument("--rank-results", dest="rank_results", action="store_true", default=True)
+    parser.add_argument("--no-rank-results", dest="rank_results", action="store_false")
+    parser.add_argument("--show-no-setups", action="store_true")
+    parser.add_argument("--max-display-results", type=int, default=DEFAULT_MAX_DISPLAY_RESULTS)
+    parser.add_argument("--bucket-filter", nargs="+")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args(argv)
@@ -88,18 +97,30 @@ async def main(argv: Sequence[str] | None = None) -> None:
     )
 
     result = await ScannerRunner().run(config)
+    bucket_filter = _parse_bucket_filter(args.bucket_filter)
+    ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
+    visible_results = filter_ranked_results(
+        ranked_results,
+        show_no_setups=args.show_no_setups,
+        bucket_filter=bucket_filter,
+        max_display_results=args.max_display_results,
+    )
 
     if args.output_json is not None:
-        args.output_json.write_text(json.dumps(_json_payload(result), indent=2, ensure_ascii=False), encoding="utf-8")
+        args.output_json.write_text(
+            json.dumps(_json_payload(result, ranked_results), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
-    print(format_scan_dashboard(result))
+    print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
     print("")
 
-    for symbol_result in result.results:
+    for ranked in visible_results:
+        symbol_result = ranked.symbol_result
         if display_mode == "compact":
-            print(format_symbol_compact_line(symbol_result))
+            print(format_symbol_compact_line(symbol_result, rank=ranked.display_rank))
         else:
-            print(format_symbol_card(symbol_result))
+            print(format_symbol_card(symbol_result, rank=ranked.display_rank))
             if display_mode == "full":
                 print("")
                 print(_format_symbol_diagnostics(symbol_result))
@@ -112,10 +133,47 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 print(_format_strategy_output_for_cli(symbol_result))
 
 
-def _json_payload(result: ScannerRunResult) -> dict[str, object]:
+def _parse_bucket_filter(values: Sequence[str] | None) -> set[DisplayBucket] | None:
+    if values is None:
+        return None
+    aliases: dict[str, DisplayBucket] = {
+        "valid": "valid",
+        "valid_setup": "valid",
+        "near_miss": "near_miss",
+        "near-miss": "near_miss",
+        "no_setup": "no_setup",
+        "no-setup": "no_setup",
+        "data_issue": "data_issue",
+        "data-issue": "data_issue",
+        "data_incomplete": "data_issue",
+    }
+    buckets: set[DisplayBucket] = set()
+    invalid: list[str] = []
+    for raw_value in values:
+        for item in raw_value.split(","):
+            normalized = item.strip().lower()
+            if not normalized:
+                continue
+            bucket = aliases.get(normalized)
+            if bucket is None:
+                invalid.append(item)
+                continue
+            buckets.add(bucket)
+    if invalid:
+        allowed = "valid,near_miss,no_setup,data_issue"
+        raise SystemExit(f"--bucket-filter accepts {allowed}; invalid value(s): {', '.join(invalid)}")
+    return buckets
+
+
+def _json_payload(result: ScannerRunResult, ranked_results=None) -> dict[str, object]:
     payload = result.model_dump(mode="json")
+    ranks_by_index = {}
+    if ranked_results is None:
+        ranked_results = rank_scan_results(result.results)
+    for ranked in ranked_results:
+        ranks_by_index[ranked.original_index] = ranked.display_rank
     for index, symbol_result in enumerate(result.results):
-        payload["results"][index].update(display_fields(symbol_result))
+        payload["results"][index].update(display_fields(symbol_result, display_rank=ranks_by_index.get(index)))
     return payload
 
 
