@@ -31,7 +31,7 @@ FOOTER = f"{SWORDS} Candle Craft | Signal. Structure. Execution."
 
 MODE_ORDER = ("challenge", "swing", "scalp")
 SETUP_PROGRESS_TOTAL = 4
-DEFAULT_MAX_DISPLAY_RESULTS = 20
+DEFAULT_MAX_DISPLAY_RESULTS = 10
 BUCKET_ORDER: dict[DisplayBucket, int] = {
     "valid": 0,
     "near_miss": 1,
@@ -270,6 +270,7 @@ def format_scan_dashboard(
     scan_errors = sum(1 for item in ranked if item.display.display_status == "scan_error")
     completed = max(0, result.scanned_symbols - scan_errors)
     cache_stats = result.cache_stats or {}
+    data_warning_count = _optional_data_warning_count(result)
     return "\n".join(
         (
             "Candle Craft Scanner",
@@ -287,12 +288,13 @@ def format_scan_dashboard(
             f"Near miss: {counts['near_miss']}",
             f"Trade ideas: {counts['valid']}",
             f"Scan errors: {scan_errors}",
+            f"Data warnings: {data_warning_count} optional endpoint warnings.",
             f"Cache hits: {int(cache_stats.get('hits', 0) or 0)}",
             f"Cache misses: {int(cache_stats.get('misses', 0) or 0)}",
             "",
             f"{GREEN_CIRCLE} Valid setups: {counts['valid']}",
             f"{YELLOW_CIRCLE} Near misses: {counts['near_miss']}",
-            f"{WHITE_CIRCLE} No setups hidden: {hidden_no_setups}",
+            f"{WHITE_CIRCLE} Hidden rejected/no-setup symbols: {hidden_no_setups}",
             f"{RED_CIRCLE} Data issues: {counts['data_issue']}",
         )
     )
@@ -411,7 +413,24 @@ def _near_miss_eligible(
     if failed_gate == NA or failed_gate in EARLY_CORE_GATES:
         return False
     gates_failed = set(_sequence_values(diagnostics.get("gates_failed")))
-    return failed_gate in LATE_FAILURE_GATES or bool(gates_failed & LATE_FAILURE_GATES)
+    if failed_gate not in LATE_FAILURE_GATES and not bool(gates_failed & LATE_FAILURE_GATES):
+        return False
+    return _has_valid_pullback_or_calculated_rr_failure(diagnostics, failed_gate, gates_failed)
+
+
+def _has_valid_pullback_or_calculated_rr_failure(
+    diagnostics: Mapping[str, Any],
+    failed_gate: str,
+    gates_failed: set[str],
+) -> bool:
+    gates_passed = set(_sequence_values(diagnostics.get("gates_passed")))
+    pullback_status = _display(diagnostics.get("pullback_zone_status"))
+    if pullback_status in ("valid", "passed") or "pullback_zone" in gates_passed:
+        return True
+
+    rr_value = _display(diagnostics.get("rr_to_tp2"))
+    rr_failed = failed_gate in RR_FAIL_GATES or bool(gates_failed & RR_FAIL_GATES)
+    return rr_failed and rr_value != NA
 
 
 def _display_bucket(display_status: DisplayStatus) -> DisplayBucket:
@@ -501,9 +520,9 @@ def _display_status_label(display_status: DisplayStatus) -> str:
     labels = {
         "valid_setup": f"{GREEN_CIRCLE} VALID SETUP",
         "near_miss": f"{YELLOW_CIRCLE} NEAR MISS",
-        "no_setup": f"{WHITE_CIRCLE} NO SETUP",
+        "no_setup": f"{WHITE_CIRCLE} REJECTED",
         "data_issue": f"{RED_CIRCLE} DATA ISSUE",
-        "scan_error": f"{RED_CIRCLE} SCAN ERROR",
+        "scan_error": f"{RED_CIRCLE} DATA ISSUE",
     }
     return labels[display_status]
 
@@ -815,6 +834,10 @@ def _funding_status_display(status: str) -> str:
     if status in ("extreme_positive", "extreme_negative"):
         return "extreme"
     return status
+
+
+def _optional_data_warning_count(result: ScannerRunResult) -> int:
+    return sum(len(symbol_result.derivatives_warnings) for symbol_result in result.results)
 
 
 def _failed_gate(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:

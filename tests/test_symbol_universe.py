@@ -6,9 +6,14 @@ from decimal import Decimal
 from app.pipeline.scanner_runner import ScannerRunConfig, ScannerRunResult
 from app.universe.symbol_universe import (
     BINANCE_USDM_24H_TICKER_SOURCE,
+    BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
     BINANCE_USDT_PERP_TOP_TRADABLE_MODE,
     BINANCE_USDT_PERP_TOP_VOLUME_MODE,
+    COINPAPRIKA_MARKET_CAP_SOURCE,
+    UniverseResolutionError,
+    build_symbol_universe_from_market_caps,
     build_symbol_universe_from_tickers,
+    resolve_symbol_universe,
 )
 from scripts import run_scan
 
@@ -99,6 +104,57 @@ def test_universe_size_limits_resolved_symbols_after_sorting() -> None:
 
     assert universe.requested_size == 2
     assert universe.resolved_symbols == ("BTCUSDT", "ETHUSDT")
+
+
+def test_market_cap_universe_intersects_public_rankings_with_binance_usdt_perps() -> None:
+    universe = build_symbol_universe_from_market_caps(
+        [
+            {"symbol": "BTCUSDT", "quoteVolume": "300"},
+            {"symbol": "ETHUSDT", "quoteVolume": "200"},
+            {"symbol": "SOLUSDT", "quoteVolume": "100"},
+            {"symbol": "USDCUSDT", "quoteVolume": "90"},
+            {"symbol": "XRPUSDC", "quoteVolume": "80"},
+        ],
+        [
+            {"symbol": "ETH", "rank": 2, "quotes": {"USD": {"market_cap": "2000"}}},
+            {"symbol": "BTC", "rank": 1, "quotes": {"USD": {"market_cap": "3000"}}},
+            {"symbol": "XRP", "rank": 3, "quotes": {"USD": {"market_cap": "1000"}}},
+            {"symbol": "SOL", "rank": 5, "quotes": {"USD": {"market_cap": "500"}}},
+            {"symbol": "USDC", "rank": 4, "quotes": {"USD": {"market_cap": "700"}}},
+        ],
+        universe_size=3,
+        generated_at=GENERATED_AT,
+    )
+
+    assert universe.mode == BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE
+    assert universe.source == COINPAPRIKA_MARKET_CAP_SOURCE
+    assert universe.resolved_symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+    assert universe.market_cap_rank_by_symbol == {"BTCUSDT": 1, "ETHUSDT": 2, "SOLUSDT": 5}
+    assert "USDCUSDT" in universe.excluded_symbols
+
+
+def test_market_cap_universe_source_failure_returns_clean_universe_error() -> None:
+    async def scenario() -> None:
+        def ticker_fetcher():
+            return [{"symbol": "BTCUSDT", "quoteVolume": "100"}]
+
+        def market_cap_fetcher():
+            raise RuntimeError("source unavailable")
+
+        try:
+            await resolve_symbol_universe(
+                BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
+                universe_size=1,
+                ticker_fetcher=ticker_fetcher,
+                market_cap_fetcher=market_cap_fetcher,
+                generated_at=GENERATED_AT,
+            )
+        except UniverseResolutionError as exc:
+            assert str(exc) == "universe_error: market-cap source failed: source unavailable"
+        else:
+            raise AssertionError("expected UniverseResolutionError")
+
+    asyncio.run(scenario())
 
 
 def test_manual_symbols_stay_on_existing_watchlist_path() -> None:
@@ -195,10 +251,13 @@ def test_json_payload_includes_universe_block() -> None:
 
     assert payload["universe"] == {
         "mode": BINANCE_USDT_PERP_TOP_VOLUME_MODE,
+        "label": "Top Binance USDT perpetuals by quote volume",
         "requested_size": 50,
         "resolved_symbols": ["BTCUSDT"],
         "excluded_symbols": [],
         "source": BINANCE_USDM_24H_TICKER_SOURCE,
         "generated_at": GENERATED_AT,
         "min_quote_volume": "10",
+        "market_cap_rank_by_symbol": {},
+        "market_cap_usd_by_symbol": {},
     }

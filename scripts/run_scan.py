@@ -40,6 +40,7 @@ from app.universe.symbol_universe import (  # noqa: E402
     MANUAL_UNIVERSE_MODE,
     UNIVERSE_MODES,
     SymbolUniverse,
+    UniverseResolutionError,
     manual_symbol_universe,
     resolve_symbol_universe,
 )
@@ -266,7 +267,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         _write_run_json(args.output_json, result, ranked_results=ranked_results)
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
-    if display_mode == "full":
+    if diagnostics_level == "full" or display_mode == "full":
         print("")
         print(_format_run_diagnostics(result))
     print("")
@@ -297,18 +298,29 @@ def _format_available_presets() -> str:
 
 
 def _format_universe_header(universe: SymbolUniverse) -> str:
-    top_symbols = universe.top_by_quote_volume(limit=5)
-    if top_symbols:
-        top_text = ", ".join(f"{item.symbol} ({_display(item.quote_volume)})" for item in top_symbols)
+    top_market_cap_symbols = universe.top_by_market_cap_rank(limit=5)
+    top_quote_volume_symbols = universe.top_by_quote_volume(limit=5)
+    if top_market_cap_symbols:
+        top_text = ", ".join(
+            f"{item.symbol} (rank {item.rank}, market cap {_display(item.market_cap)})"
+            for item in top_market_cap_symbols
+        )
+        top_label = "Top 5 by public market-cap rank"
+    elif top_quote_volume_symbols:
+        top_text = ", ".join(f"{item.symbol} ({_display(item.quote_volume)})" for item in top_quote_volume_symbols)
+        top_label = "Top 5 by quote volume"
     else:
         top_text = "N/A"
+        top_label = "Top 5"
     return "\n".join(
         (
             f"Universe mode: {universe.mode}",
+            f"Universe label: {universe.label}",
+            f"Universe source: {universe.source}",
             f"Universe size requested: {universe.requested_size}",
             f"Symbols resolved: {len(universe.resolved_symbols)}",
             f"Excluded count: {len(universe.excluded_symbols)}",
-            f"Top 5 by quote volume: {top_text}",
+            f"{top_label}: {top_text}",
         )
     )
 
@@ -390,6 +402,8 @@ async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistReso
         include_symbols = validate_symbols(args.include_symbols, context="--include-symbols")
         exclude_symbols = set(validate_symbols(args.exclude_symbols, context="--exclude-symbols"))
     except WatchlistPresetError as exc:
+        raise SystemExit(str(exc)) from exc
+    except UniverseResolutionError as exc:
         raise SystemExit(str(exc)) from exc
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

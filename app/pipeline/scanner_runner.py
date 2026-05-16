@@ -1056,7 +1056,7 @@ class ScannerRunner:
         try:
             return await _maybe_await(method(symbol))
         except Exception as exc:
-            self.logger.warning("Optional %s fetch failed for symbol=%s: %s", label, symbol, exc)
+            self.logger.debug("Optional %s fetch failed for symbol=%s: %s", label, symbol, exc)
             missing_data.append(f"{label}: N/A")
             warnings.append(f"{label} unavailable from public endpoint: {exc}")
             return None

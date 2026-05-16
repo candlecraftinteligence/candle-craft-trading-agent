@@ -727,14 +727,15 @@ Buckets:
 
 - `valid` / `🟢 VALID SETUP`: a trade idea was created after scanner gates passed.
 - `near_miss` / `🟡 NEAR MISS`: the 15m sweep and 5m BOS/CHoCH confirmation passed, then a later pullback, OB/FVG, fib, RR, or final confluence gate failed.
-- `no_setup` / `⚪ NO SETUP`: the setup failed before sweep or 5m structure confirmation, or otherwise never became near-actionable.
+- `no_setup` / `⚪ REJECTED`: the setup failed before sweep or 5m structure confirmation, or otherwise never became near-actionable.
 - `data_issue` / `🔴 DATA ISSUE`: required scanner data was missing, unavailable, malformed, or otherwise insufficient.
 
 Default display behavior:
 
 - Results are ranked by bucket first: valid setup, near miss, no setup, then data issue.
 - Within a bucket, ranking prioritizes created trade ideas, higher Trust Meter or setup score, better RR, stronger context score, derivatives support, fewer failed gates, and later-stage failures.
-- Normal CLI output shows valid setups, near misses, and data issues by default. Weak no-setups are counted in the dashboard but hidden unless `--show-no-setups` or `--bucket-filter no_setup` is used.
+- Normal CLI output shows valid setups first, near misses second, and data issues after that. Weak rejected/no-setup symbols are counted in the dashboard but hidden unless `--show-no-setups` or `--bucket-filter no_setup` is used.
+- Normal display shows at most 10 result cards by default. Use `--max-display-results N` to change the display limit.
 - `--display full` keeps detailed diagnostics while sorting by the Phase 18 rank first.
 - JSON output keeps all scanner results and adds `display_rank`, `display_bucket`, `display_priority_score`, `display_reason`, `hidden_by_default`, `failed_stage`, and `action_label`.
 
@@ -839,10 +840,14 @@ Phase 21 adds public-data-only scanner universes so larger Binance USD-M futures
 
 - `--universe manual` preserves existing `--symbols`, `--preset`, and `--preset-file` behavior.
 - `--universe binance_usdt_perp_top_volume` resolves the top Binance USD-M USDT symbols by public 24h ticker `quoteVolume`.
-- `--universe binance_usdt_perp_top_tradable` uses the same public ticker data, then filters obvious bad scan targets such as stablecoin/stable pairs, leveraged tokens, missing quote volume, non-USDT symbols, and symbols below `--min-quote-volume`.
-- `--universe-size N` controls how many symbols are requested from public ticker sorting.
+- `--universe binance_usdt_perp_top_tradable` is labeled as "Top Binance USDT perpetuals by quote volume/tradability". It uses public Binance USD-M 24h ticker quote volume, then filters obvious bad scan targets such as stablecoin/stable pairs, leveraged tokens, missing quote volume, non-USDT symbols, and symbols below `--min-quote-volume`. This is not a market-cap ranking.
+- `--universe binance_usdt_perp_top_market_cap` resolves a true public market-cap ranking from a no-key public source, then intersects ranked base assets with tradable Binance USDT perpetual symbols. If the market-cap source is unavailable, the CLI returns a clean `universe_error` message and does not invent rankings.
+- `--universe-size N` controls how many symbols are requested after each universe's public ranking/filtering step.
 - `--min-quote-volume N` is optional and defaults to `0`.
-- Scanner headers and saved JSON include the selected universe mode, requested size, resolved symbols, excluded symbols, source, generated time, minimum quote volume, and top resolved symbols by quote volume where available.
+- Scanner headers and saved JSON include the selected universe mode, clear display label, public source, requested size, resolved symbols, excluded symbols, generated time, minimum quote volume, and top resolved symbols by quote volume or market-cap rank where available.
+- The dashboard aggregates optional public endpoint failures as `Data warnings: X optional endpoint warnings.` Retry/backoff details stay out of normal output and remain available in `--diagnostics-level full` and JSON diagnostics.
+- `--display compact|normal|full` controls line, card, and detailed-card output. Normal display shows the dashboard plus visible cards, sorted as valid setups first and near misses second, with a default limit of 10 cards unless `--max-display-results` is set.
+- `--diagnostics-level summary|normal|full` controls how much diagnostic detail is shown by supporting formatters. Full diagnostics include retry attempts; summary and normal keep retry noise hidden.
 
 Example A - manual scan:
 
@@ -850,19 +855,19 @@ Example A - manual scan:
 .\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --strategy liquidity_grab_pullback
 ```
 
-Example B - top 50 Binance USDT perp volume scan:
+Example B - top 50 Binance USDT perpetuals by quote volume/tradability:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_volume --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level summary --display normal --rank-results --max-display-results 50 --show-no-setups --save-run
+.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_tradable --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --display normal --rank-results --max-display-results 10 --save-run
 ```
 
-Example C - top 50 tradable filtered scan:
+Example C - top 50 Binance USDT perpetuals by public market cap:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_tradable --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level summary --display normal --rank-results --max-display-results 50 --show-no-setups --save-run
+.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_market_cap --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --display normal --rank-results --max-display-results 10 --save-run
 ```
 
-Safety note: Phase 21 resolves scanner inputs from public Binance USD-M ticker data only. It does not create trades, weaken strategy gates, use private exchange API keys, call private/account/order endpoints, place orders, send live Telegram messages, withdraw funds, or transfer funds.
+Safety note: Phase 21 resolves scanner inputs from public market data only. It does not create trades, weaken strategy gates, use private exchange API keys, call private/account/order endpoints, place orders, send live Telegram messages, withdraw funds, or transfer funds.
 
 ## Safety Boundaries
 
@@ -886,4 +891,4 @@ Safety note: Phase 21 resolves scanner inputs from public Binance USD-M ticker d
 - The Phase 18 scanner result ranking layer is output-only. It does not create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or modify scan artifacts by itself.
 - The Phase 19 watchlist preset layer resolves symbol inputs only. It does not create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, live Telegram sending, or modify scan artifacts by itself.
 - The Phase 20 cache/resume layer is public-data reliability only. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
-- The Phase 21 symbol universe layer resolves public scanner inputs only. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
+- The Phase 21 symbol universe layer resolves public scanner inputs only, including optional public market-cap rankings for the market-cap universe. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.

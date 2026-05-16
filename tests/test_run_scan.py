@@ -9,7 +9,7 @@ import pytest
 from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
 from app.data.dtos import NA
-from app.formatters.scanner_display import build_symbol_display, rank_scan_results
+from app.formatters.scanner_display import build_symbol_display, filter_ranked_results, rank_scan_results
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
 from scripts import run_scan
 
@@ -188,7 +188,8 @@ def _valid_rank_result(symbol: str = "VALIDUSDT") -> ScannerSymbolResult:
     )
 
 
-def _near_miss_rank_result(symbol: str = "NEARUSDT", failed_gate: str = "no_ob_or_fvg_zone") -> ScannerSymbolResult:
+def _near_miss_rank_result(symbol: str = "NEARUSDT", failed_gate: str = "trust_meter_below_minimum") -> ScannerSymbolResult:
+    rr_value = Decimal("1.8") if failed_gate in {"rr_below_minimum", "rr_too_low"} else Decimal("2.6")
     return ScannerSymbolResult(
         symbol=symbol,
         status=ScannerPipelineStatus.SCANNED_NO_SETUP,
@@ -199,10 +200,11 @@ def _near_miss_rank_result(symbol: str = "NEARUSDT", failed_gate: str = "no_ob_o
             "swing": {
                 "execution_sweep_status": "passed",
                 "confirmation_structure_shift_status": "passed",
-                "pullback_zone_status": "failed",
-                "rr_to_tp2": NA,
+                "pullback_zone_status": "valid",
+                "rr_to_tp2": rr_value,
                 "first_failed_gate": failed_gate,
                 "gates_failed": (failed_gate,),
+                "gates_passed": ("sweep", "bos_choch", "pullback_zone"),
                 "trust_percentage": 62,
                 "pullback_failure_reason": "Later setup gate failed after sweep and confirmation.",
                 "derivatives_supports_trade": True,
@@ -269,6 +271,49 @@ class Phase20ScannerRunner:
         )
 
 
+class RetryDiagnosticsScannerRunner:
+    async def run(self, config, after_symbol=None, resume_metadata=None):
+        symbol_result = ScannerSymbolResult(
+            symbol="WARNUSDT",
+            status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+            status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+            rejection_reason="No valid setup.",
+            rejection_stage="strategy",
+            rejection_reasons=("No valid setup.",),
+            derivatives_warnings=("funding_rate unavailable from public endpoint: mocked retry failure",),
+            strategy_diagnostics={
+                "swing": {
+                    "execution_sweep_status": "failed",
+                    "confirmation_structure_shift_status": "not_evaluated",
+                    "first_failed_gate": "missing_confirmed_sweep",
+                    "gates_failed": ("missing_confirmed_sweep",),
+                }
+            },
+            rejected_strategy_modes=("swing",),
+        )
+        return ScannerRunResult(
+            config=config,
+            results=(symbol_result,),
+            scanned_symbols=1,
+            failed_symbols=0,
+            trade_ideas_created=0,
+            dry_run_alerts_created=0,
+            journal_entries_created=0,
+            retry_diagnostics=(
+                {
+                    "operation": "binance_futures GET /fapi/v1/fundingRate",
+                    "attempt": 1,
+                    "attempts": 3,
+                    "will_retry": True,
+                    "delay_seconds": 0,
+                    "error": "mocked retry",
+                    "error_type": "ExchangeRateLimitError",
+                },
+            ),
+            resume_metadata=dict(resume_metadata or {}),
+        )
+
+
 def test_verbose_cli_flag_accepted() -> None:
     args = run_scan.parse_args(["--symbols", "BTCUSDT", "--verbose"])
 
@@ -299,7 +344,7 @@ def test_phase_18_cli_flags_default_to_ranked_hidden_no_setups() -> None:
 
     assert args.rank_results is True
     assert args.show_no_setups is False
-    assert args.max_display_results == 20
+    assert args.max_display_results == 10
     assert args.bucket_filter is None
 
 
@@ -560,6 +605,13 @@ def test_near_miss_ranks_above_no_setup() -> None:
     assert ranked[1].display.display_bucket == "no_setup"
 
 
+def test_default_max_display_results_limits_to_ten() -> None:
+    ranked = rank_scan_results(tuple(_valid_rank_result(f"VALID{index}USDT") for index in range(12)))
+    visible = filter_ranked_results(ranked)
+
+    assert len(visible) == 10
+
+
 def test_valid_setup_display_label() -> None:
     symbol_result = ScannerSymbolResult(
         symbol="BTCUSDT",
@@ -582,7 +634,7 @@ def test_valid_setup_display_label() -> None:
     assert display.setup_progress_passed == 4
 
 
-def test_near_miss_classification_requires_sweep_and_confirmation_then_later_failure() -> None:
+def test_near_miss_requires_valid_pullback_or_calculated_rr_failure() -> None:
     symbol_result = ScannerSymbolResult(
         symbol="BTCUSDT",
         status=ScannerPipelineStatus.SCANNED_NO_SETUP,
@@ -602,10 +654,35 @@ def test_near_miss_classification_requires_sweep_and_confirmation_then_later_fai
 
     display = build_symbol_display(symbol_result)
 
-    assert display.display_status == "near_miss"
-    assert display.display_status_label == "🟡 NEAR MISS"
+    assert display.display_status == "no_setup"
+    assert display.display_status_label == "⚪ REJECTED"
     assert display.setup_progress_passed == 2
     assert display.failed_checks == ("Pullback zone", "RR")
+
+
+def test_final_gate_failure_after_valid_pullback_is_near_miss() -> None:
+    symbol_result = ScannerSymbolResult(
+        symbol="BTCUSDT",
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        strategy_diagnostics={
+            "swing": {
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "valid",
+                "rr_to_tp2": Decimal("2.8"),
+                "first_failed_gate": "trust_meter_below_minimum",
+                "gates_passed": ("sweep", "bos_choch", "pullback_zone", "rr"),
+                "gates_failed": ("trust_meter_below_minimum",),
+            }
+        },
+        rejected_strategy_modes=("swing",),
+    )
+
+    display = build_symbol_display(symbol_result)
+
+    assert display.display_status == "near_miss"
+    assert display.display_status_label == "🟡 NEAR MISS"
 
 
 def test_rr_failure_after_sweep_and_confirmation_is_near_miss() -> None:
@@ -634,7 +711,7 @@ def test_no_setup_classification_for_early_core_gate_failure() -> None:
     display = build_symbol_display(symbol_result)
 
     assert display.display_status == "no_setup"
-    assert display.display_status_label == "\u26aa NO SETUP"
+    assert display.display_status_label == "\u26aa REJECTED"
     assert display.display_bucket == "no_setup"
     assert display.failed_checks == ("15m sweep",)
 
@@ -787,7 +864,7 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["hidden_by_default"] is True
     assert payload["results"][0]["failed_stage"] == "structure"
     assert payload["results"][0]["display_status"] == "no_setup"
-    assert payload["results"][0]["display_status_label"] == "\u26aa NO SETUP"
+    assert payload["results"][0]["display_status_label"] == "\u26aa REJECTED"
     assert payload["results"][0]["setup_progress_total"] == 4
     assert payload["results"][0]["setup_progress_passed"] == 1
     assert payload["results"][0]["passed_checks"] == ["15m sweep"]
@@ -844,7 +921,7 @@ def test_display_compact_prints_dashboard_and_one_line_result(monkeypatch, capsy
 
     captured = capsys.readouterr()
     assert "Candle Craft Scanner" in captured.out
-    assert "#1 ⚪ BTCUSDT — NO SETUP" in captured.out
+    assert "#1 ⚪ BTCUSDT — REJECTED" in captured.out
     assert "Progress 1/4" in captured.out
     assert "Gate: missing_confirmation_structure_shift" in captured.out
     assert "2D HTF:" not in captured.out
@@ -856,8 +933,8 @@ def test_default_display_hides_no_setups(monkeypatch, capsys) -> None:
     asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--display", "compact"]))
 
     captured = capsys.readouterr()
-    assert "⚪ No setups hidden: 1" in captured.out
-    assert "BTCUSDT — NO SETUP" not in captured.out
+    assert "⚪ Hidden rejected/no-setup symbols: 1" in captured.out
+    assert "BTCUSDT — REJECTED" not in captured.out
 
 
 def test_dashboard_includes_phase_20_cache_and_error_counts() -> None:
@@ -901,13 +978,50 @@ def test_dashboard_includes_phase_20_cache_and_error_counts() -> None:
     assert "Cache misses: 5" in text
 
 
+def test_retry_warnings_hidden_in_normal_mode(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", RetryDiagnosticsScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "WARNUSDT", "--display", "compact"]))
+
+    captured = capsys.readouterr()
+    assert "Data warnings: 1 optional endpoint warnings." in captured.out
+    assert "Retry diagnostics:" not in captured.out
+    assert "binance_futures GET /fapi/v1/fundingRate" not in captured.out
+    assert "mocked retry failure" not in captured.out
+
+
+def test_retry_details_visible_in_full_diagnostics(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", RetryDiagnosticsScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "WARNUSDT", "--diagnostics-level", "full"]))
+
+    captured = capsys.readouterr()
+    assert "Retry diagnostics:" in captured.out
+    assert "binance_futures GET /fapi/v1/fundingRate" in captured.out
+    assert "attempt 1/3" in captured.out
+
+
+def test_json_preserves_retry_and_optional_warning_diagnostics(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "scan_output.json"
+    monkeypatch.setattr(run_scan, "ScannerRunner", RetryDiagnosticsScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "WARNUSDT", "--output-json", str(output_path)]))
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["retry_diagnostics"][0]["operation"] == "binance_futures GET /fapi/v1/fundingRate"
+    assert payload["retry_diagnostics"][0]["error_type"] == "ExchangeRateLimitError"
+    assert payload["results"][0]["derivatives_warnings"] == [
+        "funding_rate unavailable from public endpoint: mocked retry failure"
+    ]
+
+
 def test_bucket_filter_reveals_selected_no_setup_bucket(monkeypatch, capsys) -> None:
     monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
 
     asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--display", "compact", "--bucket-filter", "no_setup"]))
 
     captured = capsys.readouterr()
-    assert "#1 ⚪ BTCUSDT — NO SETUP" in captured.out
+    assert "#1 ⚪ BTCUSDT — REJECTED" in captured.out
 
 
 def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
@@ -920,10 +1034,10 @@ def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
     assert "Strategy: Liquidity Grab Pullback" in captured.out
     assert "Timeframes: 2D → 12H → 15m → 5m" in captured.out
     assert "🟢 Valid setups: 0" in captured.out
-    assert "⚪ No setups hidden: 0" in captured.out
+    assert "⚪ Hidden rejected/no-setup symbols: 0" in captured.out
     assert "Phase 12 Scanner Runner" not in captured.out
-    assert "#1 ⚪ BTCUSDT — NO SETUP" in captured.out
-    assert "• Bucket: ⚪ NO SETUP" in captured.out
+    assert "#1 ⚪ BTCUSDT — REJECTED" in captured.out
+    assert "• Bucket: ⚪ REJECTED" in captured.out
     assert "• Mode(s): rejected challenge, swing, scalp" in captured.out
     assert "• HTF/Bias/Execution:" in captured.out
     assert "📍 Context" in captured.out
@@ -1012,7 +1126,7 @@ def test_normal_block_prints_single_failed_gate_reason_for_pullback() -> None:
     assert text.count("Reason") == 1
     assert "Reject: no_ob_or_fvg_zone" not in text
     assert "No valid OB or FVG was found inside the 5m displacement impulse." in text
-    assert "🟡 BTCUSDT — NEAR MISS" in text
+    assert "⚪ BTCUSDT — REJECTED" in text
 
 
 def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:
@@ -1044,5 +1158,5 @@ def test_diagnostics_level_overrides_verbose(monkeypatch, capsys) -> None:
     )
 
     captured = capsys.readouterr()
-    assert "⚪ BTCUSDT — NO SETUP" in captured.out
+    assert "⚪ BTCUSDT — REJECTED" in captured.out
     assert "Strategy diagnostics:" not in captured.out
