@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, and Phase 22 near-miss intelligence.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, and Phase 24 historical replay validation.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -26,6 +26,7 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 |   |-- analytics/
 |   |-- alerts/
 |   |-- api/
+|   |-- backtesting/
 |   |-- cache/
 |   |-- core/
 |   |-- data/
@@ -101,7 +102,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, and the Phase 22 near-miss intelligence layer. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, and the Phase 24 historical replay layer. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -962,6 +963,58 @@ Example command:
 .\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --display normal --rank-results
 ```
 
+## Phase 24 Historical Replay / Backtest Validation
+
+Phase 24 adds `app/backtesting/strategy_replay.py`, a deterministic diagnostic replay layer for the Liquidity-Grab Pullback strategy. It walks recent historical candles in chronological order, calls the existing strategy engine on candle prefixes, records valid historical setups only after the existing gates pass, and then simulates the existing limit pullback entry, stop, and TP levels using later candle high/low data.
+
+Replay behavior:
+
+- Uses the existing Liquidity-Grab Pullback strategy result for setup creation where possible.
+- Does not weaken sweep, BOS/CHoCH, OB/FVG, fib, RR, pullback, risk, Trust Meter, or quality validation rules.
+- Simulates a limit fill from the strategy result's entry price only after the pullback zone exists.
+- Records `tp1_hit`, `tp2_hit`, `tp3_hit`, `stopped`, `expired`, `invalidated`, and `not_filled` outcomes.
+- Calculates total setups, filled trades, win rate, TP1/TP2 rates, average R, median R, expectancy R, profit factor, max win/loss streaks, average time in trade, rejected setup count, and near-miss count.
+- If both TP and stop are touched in one candle, `--same-candle-policy conservative` assumes the stop resolves first. `optimistic` can be selected explicitly.
+- Missing derivatives, CVD, and liquidation heatmap context remain `N/A`. Candle-only replay never invents unavailable data.
+
+Sample-size labels:
+
+- `low_sample_size`: fewer than 10 filled trades.
+- `medium_sample_size`: 10 to 29 filled trades.
+- `usable_sample_size`: 30 or more filled trades.
+
+Replay edge classification:
+
+- `strong`: expectancy above `0.35R`, win rate above `45%`, and at least medium sample size.
+- `mixed`: positive but not strong expectancy, or low sample size.
+- `weak`: expectancy at or below `0R` with medium or usable sample size.
+- `N/A`: no filled trades or no usable replay sample.
+
+Example replay command:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py `
+  --symbols BTCUSDT ETHUSDT SOLUSDT `
+  --exchange binance `
+  --strategy liquidity_grab_pullback `
+  --replay `
+  --replay-candles 1000 `
+  --execution-timeframe 15m `
+  --confirmation-timeframe 5m `
+  --htf-timeframe 2d `
+  --bias-timeframe 12h `
+  --display normal
+```
+
+When `--replay` is used with `--output-json`, the output includes a top-level `replay_result` object. Replay edge is displayed as diagnostic context only; it does not replace live setup ranking.
+
+Safety boundaries:
+
+- Replay is diagnostic only and never places orders.
+- It uses public candle data only and does not use private exchange, account, transfer, withdrawal, or order endpoints.
+- Telegram remains dry-run/output-only by default.
+- Existing scan artifacts are not changed unless the user explicitly uses existing output flags such as `--output-json` or `--save-run`.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -987,3 +1040,4 @@ Example command:
 - The Phase 21 symbol universe layer resolves public scanner inputs only, including optional public market-cap rankings for the market-cap universe. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
 - The Phase 22 near-miss intelligence layer is output-only. It does not create trade ideas from near-misses, send Telegram alerts, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, or account endpoints.
 - The Phase 23 setup quality layer is post-strategy validation only. It does not weaken strategy gates, create trades from invalid setups, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
+- The Phase 24 historical replay layer is diagnostic candle replay only. It does not weaken live strategy gates, replace live ranking, place orders, call private exchange APIs, send live Telegram messages, withdraw funds, or transfer funds.

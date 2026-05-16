@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -14,6 +15,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.backtesting import (  # noqa: E402
+    ReplayConfig,
+    ReplaySummary,
+    StrategyReplayEngine,
+    format_replay_summary,
+)
 from app.data.dtos import NA  # noqa: E402
 from app.cache.market_data_cache import MarketDataCache  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
@@ -112,6 +119,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--execution-timeframe", default="15m")
     parser.add_argument("--confirmation-timeframe", default="5m")
     parser.add_argument("--aggressive-toggle", action="store_true")
+    parser.add_argument("--replay", action="store_true")
+    parser.add_argument("--replay-candles", type=int, default=1000)
+    parser.add_argument("--same-candle-policy", choices=["conservative", "optimistic"], default="conservative")
+    parser.add_argument("--replay-max-hold-candles", type=int)
+    parser.add_argument("--replay-max-fill-candles", type=int)
     parser.add_argument("--show-strategy-output", action="store_true")
     parser.add_argument("--telegram-format", action="store_true")
     parser.add_argument("--diagnostics-level", choices=["summary", "normal", "full"], default="normal")
@@ -141,6 +153,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--universe-size must be at least 1.")
     if args.cache_ttl_seconds is not None and args.cache_ttl_seconds < 0:
         parser.error("--cache-ttl-seconds must be zero or greater.")
+    if args.replay_candles < 1:
+        parser.error("--replay-candles must be at least 1.")
+    if args.replay_max_hold_candles is not None and args.replay_max_hold_candles < 1:
+        parser.error("--replay-max-hold-candles must be at least 1.")
+    if args.replay_max_fill_candles is not None and args.replay_max_fill_candles < 1:
+        parser.error("--replay-max-fill-candles must be at least 1.")
     args.symbols_explicit = symbols_explicit
     args.diagnostics_level_explicit = diagnostics_level_explicit
     args.display_explicit = display_explicit
@@ -259,6 +277,10 @@ async def main(argv: Sequence[str] | None = None) -> None:
     if args.save_run is not None:
         _write_run_json(args.save_run, result)
 
+    replay_summary: ReplaySummary | None = None
+    if args.replay:
+        replay_summary = await _run_replay(args, watchlist, config, cache)
+
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     visible_results = filter_ranked_results(
@@ -269,9 +291,12 @@ async def main(argv: Sequence[str] | None = None) -> None:
     )
 
     if args.output_json is not None:
-        _write_run_json(args.output_json, result, ranked_results=ranked_results)
+        _write_run_json(args.output_json, result, ranked_results=ranked_results, replay_summary=replay_summary)
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
+    if replay_summary is not None:
+        print("")
+        print(format_replay_summary(replay_summary))
     if diagnostics_level == "full" or display_mode == "full":
         print("")
         print(_format_run_diagnostics(result))
@@ -568,10 +593,11 @@ def _write_run_json(
     result: ScannerRunResult,
     *,
     ranked_results: Sequence[Any] | None = None,
+    replay_summary: ReplaySummary | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(_json_payload(result, ranked_results), indent=2, ensure_ascii=False),
+        json.dumps(_json_payload(result, ranked_results, replay_summary=replay_summary), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -600,6 +626,69 @@ async def _run_scanner(
         for index, symbol_result in enumerate(result.results, start=1):
             await after_symbol(symbol_result, index, total)
         return result
+
+
+async def _run_replay(
+    args: argparse.Namespace,
+    watchlist: WatchlistResolution,
+    scanner_config: ScannerRunConfig,
+    cache: MarketDataCache | None,
+) -> ReplaySummary:
+    replay_scan_config = ScannerRunConfig.model_validate(
+        {
+            **scanner_config.model_dump(),
+            "symbols": list(watchlist.symbols),
+            "interval": args.execution_timeframe,
+            "candle_limit": args.replay_candles,
+        }
+    )
+    runner = _scanner_runner(cache)
+    client, owns_client = runner._exchange_client_for(replay_scan_config)
+    candles_by_symbol: dict[str, Mapping[str, Sequence[Any]]] = {}
+    timeframe_context_by_symbol: dict[str, Mapping[str, Any]] = {}
+    data_notes_by_symbol: dict[str, Sequence[str]] = {}
+
+    try:
+        for symbol in watchlist.symbols:
+            primary_candles = await client.get_klines(symbol, args.execution_timeframe, args.replay_candles)
+            candles_by_timeframe, missing_data, timeframe_context = await runner._fetch_strategy_timeframe_candles(
+                client=client,
+                symbol=symbol,
+                config=replay_scan_config,
+                primary_candles=primary_candles,
+            )
+            candles_by_symbol[symbol] = candles_by_timeframe
+            timeframe_context_by_symbol[symbol] = timeframe_context
+            data_notes_by_symbol[symbol] = missing_data
+    finally:
+        if owns_client and hasattr(client, "aclose"):
+            await _maybe_await(client.aclose())
+
+    replay_config = ReplayConfig(
+        strategy_name=args.strategy,
+        modes=tuple(args.modes),
+        execution_timeframe=args.execution_timeframe,
+        confirmation_timeframe=args.confirmation_timeframe,
+        htf_timeframe=args.htf_timeframe,
+        bias_timeframe=args.bias_timeframe,
+        replay_candles=args.replay_candles,
+        same_candle_policy=args.same_candle_policy,
+        max_hold_candles=args.replay_max_hold_candles,
+        max_fill_candles=args.replay_max_fill_candles,
+        aggressive_toggle=args.aggressive_toggle,
+    )
+    return StrategyReplayEngine().run(
+        candles_by_symbol,
+        replay_config,
+        timeframe_context_by_symbol=timeframe_context_by_symbol,
+        data_notes_by_symbol=data_notes_by_symbol,
+    )
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def _progress_line(symbol_result: ScannerSymbolResult, *, completed: int, total: int) -> str:
@@ -645,7 +734,12 @@ def _parse_bucket_filter(values: Sequence[str] | None) -> set[DisplayBucket] | N
     return buckets
 
 
-def _json_payload(result: ScannerRunResult, ranked_results=None) -> dict[str, object]:
+def _json_payload(
+    result: ScannerRunResult,
+    ranked_results=None,
+    *,
+    replay_summary: ReplaySummary | None = None,
+) -> dict[str, object]:
     payload = result.model_dump(mode="json")
     universe = result.resume_metadata.get("universe") if isinstance(result.resume_metadata, Mapping) else None
     if isinstance(universe, Mapping):
@@ -657,6 +751,8 @@ def _json_payload(result: ScannerRunResult, ranked_results=None) -> dict[str, ob
         ranks_by_index[ranked.original_index] = ranked.display_rank
     for index, symbol_result in enumerate(result.results):
         payload["results"][index].update(display_fields(symbol_result, display_rank=ranks_by_index.get(index)))
+    if replay_summary is not None:
+        payload["replay_result"] = replay_summary.model_dump(mode="json")
     return payload
 
 

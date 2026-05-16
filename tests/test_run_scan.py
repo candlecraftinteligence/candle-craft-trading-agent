@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.backtesting import ReplayStats, ReplaySummary, ReplaySymbolResult
 from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.setup_quality import SetupQualityState, validate_setup_quality
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
@@ -336,6 +337,40 @@ class RetryDiagnosticsScannerRunner:
             ),
             resume_metadata=dict(resume_metadata or {}),
         )
+
+
+def _fake_replay_summary() -> ReplaySummary:
+    stats = ReplayStats(
+        total_setups=1,
+        filled_trades=1,
+        win_rate=Decimal("100.00"),
+        tp1_rate=Decimal("100.00"),
+        tp2_rate=Decimal("0.00"),
+        average_r=Decimal("1.25"),
+        median_r=Decimal("1.25"),
+        expectancy_r=Decimal("1.25"),
+        max_win_streak=1,
+    )
+    return ReplaySummary(
+        symbols_tested=1,
+        historical_candles=1000,
+        stats=stats,
+        replay_edge="mixed",
+        sample_size="low_sample_size",
+        sample_size_warning="low_sample_size",
+        symbols=(
+            ReplaySymbolResult(
+                symbol="BTCUSDT",
+                historical_candles=1000,
+                stats=stats,
+                replay_edge="mixed",
+                sample_size="low_sample_size",
+                sample_size_warning="low_sample_size",
+                main_failure_reason="N/A",
+                quality_note="Replay sample is too small for confidence.",
+            ),
+        ),
+    )
 
 
 def test_verbose_cli_flag_accepted() -> None:
@@ -889,6 +924,15 @@ def test_strategy_cli_flags_accepted() -> None:
             "15m",
             "--confirmation-timeframe",
             "5m",
+            "--replay",
+            "--replay-candles",
+            "1000",
+            "--same-candle-policy",
+            "conservative",
+            "--replay-max-hold-candles",
+            "48",
+            "--replay-max-fill-candles",
+            "12",
             "--telegram-format",
         ]
     )
@@ -901,6 +945,11 @@ def test_strategy_cli_flags_accepted() -> None:
     assert args.bias_timeframe == "12h"
     assert args.execution_timeframe == "15m"
     assert args.confirmation_timeframe == "5m"
+    assert args.replay is True
+    assert args.replay_candles == 1000
+    assert args.same_candle_policy == "conservative"
+    assert args.replay_max_hold_candles == 48
+    assert args.replay_max_fill_candles == 12
     assert args.telegram_format is True
 
 
@@ -988,6 +1037,54 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["setup_quality"]["decision_reason"] == (
         "Sweep passed but 5m BOS/CHoCH confirmation is missing."
     )
+
+
+def test_replay_output_json_includes_replay_result(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "scan_output.json"
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    async def fake_run_replay(args, watchlist, scanner_config, cache):
+        return _fake_replay_summary()
+
+    monkeypatch.setattr(run_scan, "_run_replay", fake_run_replay)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--replay", "--output-json", str(output_path)]))
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["replay_result"]["strategy"] == "Liquidity Grab Pullback"
+    assert payload["replay_result"]["stats"]["total_setups"] == 1
+    assert payload["replay_result"]["symbols"][0]["sample_size_warning"] == "low_sample_size"
+
+
+def test_replay_cli_output_includes_replay_summary(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    async def fake_run_replay(args, watchlist, scanner_config, cache):
+        return _fake_replay_summary()
+
+    monkeypatch.setattr(run_scan, "_run_replay", fake_run_replay)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--replay", "--show-no-setups"]))
+
+    captured = capsys.readouterr()
+    assert "Candle Craft Replay" in captured.out
+    assert "Replay edge: mixed" in captured.out
+    assert "Sample size warning: low_sample_size" in captured.out
+
+
+def test_normal_scanner_does_not_run_replay_when_flag_is_absent(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    async def fail_run_replay(args, watchlist, scanner_config, cache):
+        raise AssertionError("replay should not run")
+
+    monkeypatch.setattr(run_scan, "_run_replay", fail_run_replay)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--show-no-setups"]))
+
+    captured = capsys.readouterr()
+    assert "Candle Craft Scanner" in captured.out
+    assert "Candle Craft Replay" not in captured.out
 
 
 def test_show_strategy_output_prints_formatted_output(monkeypatch, capsys) -> None:
