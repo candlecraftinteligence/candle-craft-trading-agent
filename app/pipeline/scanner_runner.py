@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -21,6 +22,7 @@ from app.analytics.derivatives_enrichment import (
     enrich_derivatives,
 )
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
+from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
 from app.data.timeframes import resample_ohlcv_candles
@@ -50,6 +52,7 @@ MIN_12H_VOLUME_PROFILE_CANDLES = 20
 
 
 class ScannerPipelineStatus(str, Enum):
+    SCAN_ERROR = "scan_error"
     SCANNED_NO_SETUP = "scanned_no_setup"
     REJECTED_BY_TECHNICAL = "rejected_by_technical"
     REJECTED_BY_DERIVATIVES = "rejected_by_derivatives"
@@ -121,6 +124,9 @@ class ScannerRunConfig(BaseModel):
     bias_timeframe: str = "12h"
     execution_timeframe: str = "15m"
     confirmation_timeframe: str = "5m"
+    cache_enabled: bool = True
+    cache_ttl_seconds: int | None = None
+    cache_file: Path | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -184,6 +190,13 @@ class ScannerRunConfig(BaseModel):
     def _candle_limit_in_range(cls, value: int) -> int:
         if value < 1:
             raise ValueError("candle_limit must be at least 1")
+        return value
+
+    @field_validator("cache_ttl_seconds")
+    @classmethod
+    def _cache_ttl_in_range(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("cache_ttl_seconds must be zero or greater")
         return value
 
     @model_validator(mode="after")
@@ -290,6 +303,9 @@ class ScannerRunResult(BaseModel):
     trade_ideas_created: int
     dry_run_alerts_created: int
     journal_entries_created: int
+    cache_stats: dict[str, Any] = Field(default_factory=dict)
+    retry_diagnostics: tuple[dict[str, Any], ...] = ()
+    resume_metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True)
 
@@ -375,6 +391,7 @@ class ScannerRunner:
         trade_idea_agent: TradeIdeaAgent | None = None,
         alert_agent: AlertAgent | None = None,
         journal_agent: JournalAgent | None = None,
+        market_data_cache: MarketDataCache | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         self.exchange_client = exchange_client
@@ -386,29 +403,40 @@ class ScannerRunner:
         self.trade_idea_agent = trade_idea_agent or TradeIdeaAgent()
         self.alert_agent = alert_agent or AlertAgent()
         self.journal_agent = journal_agent or JournalAgent()
+        self.market_data_cache = market_data_cache
         self.logger = log or logger
 
-    async def run(self, config: ScannerRunConfig | Mapping[str, Any]) -> ScannerRunResult:
+    async def run(
+        self,
+        config: ScannerRunConfig | Mapping[str, Any],
+        *,
+        after_symbol: Callable[[ScannerSymbolResult, int, int], Any] | None = None,
+        resume_metadata: Mapping[str, Any] | None = None,
+    ) -> ScannerRunResult:
         run_config = config if isinstance(config, ScannerRunConfig) else ScannerRunConfig.model_validate(config)
         client, owns_client = self._exchange_client_for(run_config)
         results: list[ScannerSymbolResult] = []
+        total_symbols = len(run_config.symbols)
 
         try:
             for symbol_config in run_config.symbols:
                 try:
-                    results.append(await self._scan_symbol(symbol_config, run_config, client))
+                    symbol_result = await self._scan_symbol(symbol_config, run_config, client)
                 except Exception as exc:
-                    self.logger.exception("Scanner failed for symbol=%s", symbol_config.symbol)
-                    results.append(
-                        ScannerSymbolResult(
-                            symbol=symbol_config.symbol,
-                            status=ScannerPipelineStatus.FAILED,
-                            status_history=(ScannerPipelineStatus.FAILED,),
-                            error_message=str(exc),
-                            rejection_stage="scanner",
-                            rejection_reasons=(str(exc),),
-                        )
+                    reason = _clean_error_message(exc)
+                    self.logger.error("Scanner failed for symbol=%s: %s", symbol_config.symbol, reason)
+                    symbol_result = ScannerSymbolResult(
+                        symbol=symbol_config.symbol,
+                        status=ScannerPipelineStatus.SCAN_ERROR,
+                        status_history=(ScannerPipelineStatus.SCAN_ERROR,),
+                        error_message=reason,
+                        rejection_reason=reason,
+                        rejection_stage="scanner",
+                        rejection_reasons=(reason,),
                     )
+                results.append(symbol_result)
+                if after_symbol is not None:
+                    await _maybe_await(after_symbol(symbol_result, len(results), total_symbols))
         finally:
             if owns_client and hasattr(client, "aclose"):
                 await _maybe_await(client.aclose())
@@ -417,20 +445,38 @@ class ScannerRunner:
             config=run_config,
             results=tuple(results),
             scanned_symbols=len(results),
-            failed_symbols=sum(1 for result in results if result.status == ScannerPipelineStatus.FAILED),
+            failed_symbols=sum(1 for result in results if _is_scan_error(result)),
             trade_ideas_created=sum(1 for result in results if result.trade_idea is not None),
             dry_run_alerts_created=sum(
                 1 for result in results if ScannerPipelineStatus.ALERT_DRY_RUN_CREATED in result.status_history
             ),
             journal_entries_created=sum(1 for result in results if result.journal_entry is not None),
+            cache_stats=_cache_stats_for(client, run_config),
+            retry_diagnostics=_retry_diagnostics_for(client),
+            resume_metadata=dict(resume_metadata or {}),
         )
 
     def _exchange_client_for(self, config: ScannerRunConfig) -> tuple[BaseExchangeClient, bool]:
+        cache = self.market_data_cache
         if self.exchange_client is not None:
-            return self.exchange_client, False
-        if config.exchange == "binance":
-            return BinanceFuturesClient(), True
-        return BybitLinearClient(), True
+            client = self.exchange_client
+            owns_client = False
+        elif config.exchange == "binance":
+            client = BinanceFuturesClient()
+            owns_client = True
+        else:
+            client = BybitLinearClient()
+            owns_client = True
+
+        if config.cache_enabled and not isinstance(client, CachedMarketDataClient):
+            if cache is None:
+                cache = MarketDataCache(
+                    enabled=True,
+                    ttl_seconds=config.cache_ttl_seconds,
+                    file_path=config.cache_file,
+                )
+            client = CachedMarketDataClient(client, cache)
+        return client, owns_client
 
     async def _scan_symbol(
         self,
@@ -1152,6 +1198,7 @@ def _latest_swing_price(points: Sequence[Any]) -> MaybeDecimal:
 
 def _rejection_stage_for(status: ScannerPipelineStatus) -> str:
     stages = {
+        ScannerPipelineStatus.SCAN_ERROR: "scanner",
         ScannerPipelineStatus.SCANNED_NO_SETUP: "technical",
         ScannerPipelineStatus.REJECTED_BY_TECHNICAL: "technical",
         ScannerPipelineStatus.REJECTED_BY_DERIVATIVES: "derivatives",
@@ -1165,6 +1212,8 @@ def _rejection_stage_for(status: ScannerPipelineStatus) -> str:
 def _rejection_reasons_for(status: ScannerPipelineStatus, rejection_reason: str | None) -> tuple[str, ...]:
     if rejection_reason:
         return (rejection_reason,)
+    if status == ScannerPipelineStatus.SCAN_ERROR:
+        return ("scan_error",)
     if status in (
         ScannerPipelineStatus.IDEA_CREATED,
         ScannerPipelineStatus.ALERT_DRY_RUN_CREATED,
@@ -1830,6 +1879,41 @@ async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def _is_scan_error(result: ScannerSymbolResult) -> bool:
+    return result.status in (ScannerPipelineStatus.SCAN_ERROR, ScannerPipelineStatus.FAILED)
+
+
+def _clean_error_message(exc: Exception) -> str:
+    text = str(exc).strip()
+    if text:
+        return text
+    return exc.__class__.__name__
+
+
+def _cache_stats_for(client: BaseExchangeClient, config: ScannerRunConfig) -> dict[str, Any]:
+    stats = getattr(client, "cache_stats", None)
+    if callable(stats):
+        return dict(stats())
+    return {
+        "enabled": config.cache_enabled,
+        "file_cache_enabled": config.cache_file is not None and config.cache_enabled,
+        "file_path": str(config.cache_file) if config.cache_file is not None else None,
+        "hits": 0,
+        "misses": 0,
+        "expired": 0,
+        "writes": 0,
+        "errors": 0,
+        "entries": 0,
+    }
+
+
+def _retry_diagnostics_for(client: BaseExchangeClient) -> tuple[dict[str, Any], ...]:
+    events = getattr(client, "retry_events", None)
+    if callable(events):
+        return tuple(dict(event) for event in events())
+    return ()
 
 
 def _decimal_field(source: Any | None, names: Sequence[str]) -> MaybeDecimal:

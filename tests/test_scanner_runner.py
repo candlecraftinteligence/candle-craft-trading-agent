@@ -321,9 +321,18 @@ def test_scanner_continues_if_one_symbol_fails() -> None:
     result = run(ScannerRunner(exchange_client=client).run(_config(["FAILUSDT", "BTCUSDT"])))
 
     assert result.scanned_symbols == 2
-    assert result.results[0].status == ScannerPipelineStatus.FAILED
+    assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
     assert result.results[0].error_message == "mocked kline failure for FAILUSDT"
     assert result.results[1].status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+
+
+def test_scanner_summary_includes_cache_counts() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _flat_candles()})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    assert result.cache_stats["enabled"] is True
+    assert result.cache_stats["misses"] > 0
+    assert result.cache_stats["hits"] >= 0
 
 
 def test_scanner_rejects_candidate_without_invalidation() -> None:

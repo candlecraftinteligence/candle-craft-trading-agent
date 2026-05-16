@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, and Phase 19 watchlist presets.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, and Phase 20 batch-scan reliability.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -26,6 +26,7 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 |   |-- analytics/
 |   |-- alerts/
 |   |-- api/
+|   |-- cache/
 |   |-- core/
 |   |-- data/
 |   |   |-- exchange_clients/
@@ -100,7 +101,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, and the Phase 19 watchlist preset resolver. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, and the Phase 20 cache/resume reliability layer. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -795,6 +796,43 @@ Scan a custom preset file:
 
 Safety note: Phase 19 only resolves scanner inputs. It does not create trades, loosen or modify Liquidity-Grab Pullback strategy gates, alter sweep/BOS/CHoCH/OB/FVG/fib/RR/Trust Meter/risk rules, place orders, use private exchange endpoints, send live Telegram messages, or add withdrawals/transfers.
 
+## Phase 20 Batch-Scan Reliability
+
+Phase 20 improves larger watchlist scans without changing strategy gates, result ranking, or watchlist preset behavior.
+
+- Public market-data caching is enabled in memory by default for the current scan run.
+- Optional file caching is available only with `--cache-file PATH`.
+- `--no-cache` disables all cache reads and writes.
+- Cached data is limited to public GET market-data responses: candles/klines, ticker, funding, open interest, open interest history, and public long/short ratio where supported.
+- Cache keys include exchange, symbol, endpoint/data type, interval/timeframe, limit, and relevant params. Failures are never cached.
+- Default TTLs are candles 60s, ticker 15s, funding 60s, open interest 30s, and long/short ratio 60s. `--cache-ttl-seconds N` overrides the TTL for a run.
+- Retry/backoff events from public HTTP clients are exposed in full diagnostics and JSON output.
+- Per-symbol scan errors are isolated as `scan_error`; one failing symbol does not stop the batch.
+- `--save-run PATH` writes structured JSON after each symbol finishes.
+- `--resume-from PATH` loads a prior run and skips already completed non-error symbols by default. Use `--no-resume-skip` to rescan everything.
+
+Large preset scan with concise progress:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress
+```
+
+Save and resume a large scan:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress --save-run scan_runs\latest_scan.json
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress --resume-from scan_runs\latest_scan.json
+```
+
+Disable caching completely:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset majors --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress --no-cache
+```
+
+Safety note: Phase 20 is reliability and output persistence only. It does not create trades, change Phase 18 ranking, change Phase 19 preset resolution, loosen sweep/BOS/CHoCH/pullback/fib/RR/Trust Meter/risk rules, place orders, use private exchange endpoints, send live Telegram messages, or add withdrawals/transfers.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -816,3 +854,4 @@ Safety note: Phase 19 only resolves scanner inputs. It does not create trades, l
 - The Phase 17 premium scanner display is output-only. It does not send live Telegram messages, create fake setups, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or loosen any sweep, BOS/CHoCH, OB/FVG, pullback, fib, RR, scoring, or risk gate.
 - The Phase 18 scanner result ranking layer is output-only. It does not create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or modify scan artifacts by itself.
 - The Phase 19 watchlist preset layer resolves symbol inputs only. It does not create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, live Telegram sending, or modify scan artifacts by itself.
+- The Phase 20 cache/resume layer is public-data reliability only. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.

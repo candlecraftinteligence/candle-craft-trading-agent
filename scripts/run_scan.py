@@ -4,19 +4,22 @@ import argparse
 import asyncio
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.data.dtos import NA  # noqa: E402
+from app.cache.market_data_cache import MarketDataCache  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
     DisplayBucket,
+    build_symbol_display,
     display_fields,
     filter_ranked_results,
     format_scan_dashboard,
@@ -26,7 +29,13 @@ from app.formatters.scanner_display import (  # noqa: E402
     representative_strategy_diagnostics,
 )
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
-from app.pipeline.scanner_runner import ScannerRunConfig, ScannerRunResult, ScannerRunner, ScannerSymbolResult  # noqa: E402
+from app.pipeline.scanner_runner import (  # noqa: E402
+    ScannerPipelineStatus,
+    ScannerRunConfig,
+    ScannerRunResult,
+    ScannerRunner,
+    ScannerSymbolResult,
+)
 from app.watchlists.presets import (  # noqa: E402
     WatchlistPresetError,
     dedupe_symbols,
@@ -44,6 +53,13 @@ DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 class WatchlistResolution:
     symbols: tuple[str, ...]
     source_label: str
+
+
+@dataclass(frozen=True)
+class ResumeState:
+    results_by_symbol: dict[str, ScannerSymbolResult]
+    skipped_symbols: tuple[str, ...]
+    loaded_symbols: tuple[str, ...]
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -85,7 +101,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bucket-filter", nargs="+")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-json", type=Path)
+    parser.add_argument("--cache", dest="cache_enabled", action="store_true", default=True)
+    parser.add_argument("--no-cache", dest="cache_enabled", action="store_false")
+    parser.add_argument("--cache-ttl-seconds", type=int)
+    parser.add_argument("--cache-file", type=Path)
+    parser.add_argument("--resume-from", type=Path)
+    parser.add_argument("--save-run", type=Path)
+    parser.add_argument("--no-resume-skip", action="store_true")
+    parser.add_argument("--progress", action="store_true")
     args = parser.parse_args(argv)
+    if args.cache_ttl_seconds is not None and args.cache_ttl_seconds < 0:
+        parser.error("--cache-ttl-seconds must be zero or greater.")
     args.symbols_explicit = symbols_explicit
     args.diagnostics_level_explicit = diagnostics_level_explicit
     args.display_explicit = display_explicit
@@ -125,13 +151,84 @@ async def main(argv: Sequence[str] | None = None) -> None:
         bias_timeframe=args.bias_timeframe,
         execution_timeframe=args.execution_timeframe,
         confirmation_timeframe=args.confirmation_timeframe,
+        cache_enabled=args.cache_enabled,
+        cache_ttl_seconds=args.cache_ttl_seconds,
+        cache_file=args.cache_file,
     )
 
     print(f"Watchlist: {watchlist.source_label}")
     print(f"Symbols queued: {len(watchlist.symbols)}")
     print("")
 
-    result = await ScannerRunner().run(config)
+    resume_state = _load_resume_state(args.resume_from, watchlist.symbols, skip_completed=not args.no_resume_skip)
+    if args.progress and resume_state.skipped_symbols:
+        print(f"Resume: skipped {len(resume_state.skipped_symbols)} completed symbol(s).")
+
+    cache = (
+        MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
+        if args.cache_enabled
+        else None
+    )
+    latest_results_by_symbol = dict(resume_state.results_by_symbol)
+    symbols_to_scan = tuple(symbol for symbol in watchlist.symbols if symbol not in resume_state.skipped_symbols)
+    scan_config = (
+        ScannerRunConfig.model_validate({**config.model_dump(), "symbols": list(symbols_to_scan)})
+        if symbols_to_scan
+        else config
+    )
+    resume_metadata = _resume_metadata(args, watchlist.symbols, resume_state, symbols_to_scan)
+
+    async def after_symbol(symbol_result: ScannerSymbolResult, completed: int, total: int) -> None:
+        latest_results_by_symbol[symbol_result.symbol] = symbol_result
+        if args.progress:
+            print(_progress_line(symbol_result, completed=completed, total=total))
+        if args.save_run is not None:
+            partial_result = _combined_run_result(
+                config=config,
+                watchlist_symbols=watchlist.symbols,
+                results_by_symbol=latest_results_by_symbol,
+                cache=cache,
+                retry_diagnostics=(),
+                resume_metadata={
+                    **resume_metadata,
+                    "pending_symbols": [
+                        symbol for symbol in watchlist.symbols if symbol not in latest_results_by_symbol
+                    ],
+                },
+            )
+            _write_run_json(args.save_run, partial_result)
+
+    if symbols_to_scan:
+        runner = _scanner_runner(cache)
+        scan_result = await _run_scanner(
+            runner,
+            scan_config,
+            after_symbol=after_symbol if (args.progress or args.save_run is not None) else None,
+            resume_metadata=resume_metadata,
+        )
+        for symbol_result in scan_result.results:
+            latest_results_by_symbol[symbol_result.symbol] = symbol_result
+        result = _combined_run_result(
+            config=config,
+            watchlist_symbols=watchlist.symbols,
+            results_by_symbol=latest_results_by_symbol,
+            cache=cache,
+            retry_diagnostics=scan_result.retry_diagnostics,
+            resume_metadata={**resume_metadata, "pending_symbols": []},
+        )
+    else:
+        result = _combined_run_result(
+            config=config,
+            watchlist_symbols=watchlist.symbols,
+            results_by_symbol=latest_results_by_symbol,
+            cache=cache,
+            retry_diagnostics=(),
+            resume_metadata={**resume_metadata, "pending_symbols": []},
+        )
+
+    if args.save_run is not None:
+        _write_run_json(args.save_run, result)
+
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     visible_results = filter_ranked_results(
@@ -142,12 +239,12 @@ async def main(argv: Sequence[str] | None = None) -> None:
     )
 
     if args.output_json is not None:
-        args.output_json.write_text(
-            json.dumps(_json_payload(result, ranked_results), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_run_json(args.output_json, result, ranked_results=ranked_results)
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
+    if display_mode == "full":
+        print("")
+        print(_format_run_diagnostics(result))
     print("")
 
     for ranked in visible_results:
@@ -221,6 +318,171 @@ def _resolve_watchlist(args: argparse.Namespace) -> WatchlistResolution:
         )
 
     return WatchlistResolution(symbols=resolved_symbols, source_label=source_label)
+
+
+def _load_resume_state(
+    path: Path | None,
+    watchlist_symbols: Sequence[str],
+    *,
+    skip_completed: bool,
+) -> ResumeState:
+    if path is None:
+        return ResumeState(results_by_symbol={}, skipped_symbols=(), loaded_symbols=())
+    if not path.exists():
+        raise SystemExit(f"--resume-from file not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--resume-from must be valid JSON: {path}") from exc
+
+    raw_results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(raw_results, list):
+        raise SystemExit("--resume-from JSON must contain a results list.")
+
+    watchlist_set = set(watchlist_symbols)
+    results_by_symbol: dict[str, ScannerSymbolResult] = {}
+    for raw_result in raw_results:
+        try:
+            symbol_result = ScannerSymbolResult.model_validate(raw_result)
+        except Exception:
+            continue
+        if symbol_result.symbol in watchlist_set:
+            results_by_symbol[symbol_result.symbol] = symbol_result
+
+    skipped_symbols = tuple(
+        symbol
+        for symbol in watchlist_symbols
+        if skip_completed
+        and symbol in results_by_symbol
+        and _resume_result_is_completed(results_by_symbol[symbol])
+    )
+    return ResumeState(
+        results_by_symbol=results_by_symbol,
+        skipped_symbols=skipped_symbols,
+        loaded_symbols=tuple(results_by_symbol.keys()),
+    )
+
+
+def _resume_result_is_completed(symbol_result: ScannerSymbolResult) -> bool:
+    if symbol_result.error_message:
+        return False
+    return symbol_result.status not in (ScannerPipelineStatus.SCAN_ERROR, ScannerPipelineStatus.FAILED)
+
+
+def _resume_metadata(
+    args: argparse.Namespace,
+    watchlist_symbols: Sequence[str],
+    resume_state: ResumeState,
+    symbols_to_scan: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "resume_from": str(args.resume_from) if args.resume_from is not None else None,
+        "save_run": str(args.save_run) if args.save_run is not None else None,
+        "resume_skip_enabled": not args.no_resume_skip,
+        "loaded_symbols": list(resume_state.loaded_symbols),
+        "skipped_symbols": list(resume_state.skipped_symbols),
+        "symbols_to_scan": list(symbols_to_scan),
+        "watchlist_symbols": list(watchlist_symbols),
+    }
+
+
+def _combined_run_result(
+    *,
+    config: ScannerRunConfig,
+    watchlist_symbols: Sequence[str],
+    results_by_symbol: dict[str, ScannerSymbolResult],
+    cache: MarketDataCache | None,
+    retry_diagnostics: Sequence[dict[str, Any]],
+    resume_metadata: Mapping[str, Any],
+) -> ScannerRunResult:
+    ordered_results = tuple(
+        results_by_symbol[symbol]
+        for symbol in watchlist_symbols
+        if symbol in results_by_symbol
+    )
+    cache_stats = cache.stats() if cache is not None else _empty_cache_stats(config)
+    return ScannerRunResult(
+        config=config,
+        results=ordered_results,
+        scanned_symbols=len(ordered_results),
+        failed_symbols=sum(1 for result in ordered_results if _result_is_scan_error(result)),
+        trade_ideas_created=sum(1 for result in ordered_results if result.trade_idea is not None),
+        dry_run_alerts_created=sum(
+            1 for result in ordered_results if ScannerPipelineStatus.ALERT_DRY_RUN_CREATED in result.status_history
+        ),
+        journal_entries_created=sum(1 for result in ordered_results if result.journal_entry is not None),
+        cache_stats=cache_stats,
+        retry_diagnostics=tuple(dict(event) for event in retry_diagnostics),
+        resume_metadata=dict(resume_metadata),
+    )
+
+
+def _empty_cache_stats(config: ScannerRunConfig) -> dict[str, Any]:
+    return {
+        "enabled": config.cache_enabled,
+        "file_cache_enabled": config.cache_enabled and config.cache_file is not None,
+        "file_path": str(config.cache_file) if config.cache_file is not None else None,
+        "hits": 0,
+        "misses": 0,
+        "expired": 0,
+        "writes": 0,
+        "errors": 0,
+        "entries": 0,
+    }
+
+
+def _result_is_scan_error(symbol_result: ScannerSymbolResult) -> bool:
+    return symbol_result.status in (ScannerPipelineStatus.SCAN_ERROR, ScannerPipelineStatus.FAILED)
+
+
+def _write_run_json(
+    path: Path,
+    result: ScannerRunResult,
+    *,
+    ranked_results: Sequence[Any] | None = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_json_payload(result, ranked_results), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _scanner_runner(cache: MarketDataCache | None) -> Any:
+    try:
+        return ScannerRunner(market_data_cache=cache)
+    except TypeError:
+        return ScannerRunner()
+
+
+async def _run_scanner(
+    runner: Any,
+    config: ScannerRunConfig,
+    *,
+    after_symbol: Any | None,
+    resume_metadata: Mapping[str, Any],
+) -> ScannerRunResult:
+    if after_symbol is None:
+        return await runner.run(config)
+    try:
+        return await runner.run(config, after_symbol=after_symbol, resume_metadata=resume_metadata)
+    except TypeError:
+        result = await runner.run(config)
+        total = len(result.results)
+        for index, symbol_result in enumerate(result.results, start=1):
+            await after_symbol(symbol_result, index, total)
+        return result
+
+
+def _progress_line(symbol_result: ScannerSymbolResult, *, completed: int, total: int) -> str:
+    display = build_symbol_display(symbol_result)
+    reason = display.short_reason
+    if len(reason) > 120:
+        reason = f"{reason[:117]}..."
+    return (
+        f"[{completed}/{total}] {symbol_result.symbol}: "
+        f"{display.display_status} | {display.setup_progress_passed}/{display.setup_progress_total} | {reason}"
+    )
 
 
 def _parse_bucket_filter(values: Sequence[str] | None) -> set[DisplayBucket] | None:
@@ -327,6 +589,39 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
             f"Strategy unverified data: {_sequence_text(symbol_result.strategy_unverified_data)}",
             "Strategy diagnostics:",
             _format_strategy_diagnostics(symbol_result),
+        )
+    )
+
+
+def _format_run_diagnostics(result: ScannerRunResult) -> str:
+    cache_stats = result.cache_stats or {}
+    retry_events = tuple(result.retry_diagnostics or ())
+    retry_lines = [f"Retry events: {len(retry_events)}"]
+    for event in retry_events[:10]:
+        retry_lines.append(
+            (
+                f"- {event.get('operation', 'N/A')} attempt {event.get('attempt', 'N/A')}/"
+                f"{event.get('attempts', 'N/A')} retry={event.get('will_retry', False)} "
+                f"delay={event.get('delay_seconds', 0)}s error={event.get('error_type', 'N/A')}"
+            )
+        )
+    if len(retry_events) > 10:
+        retry_lines.append(f"- {len(retry_events) - 10} more retry event(s) omitted.")
+
+    return "\n".join(
+        (
+            "Run diagnostics:",
+            "Cache diagnostics:",
+            f"Enabled: {cache_stats.get('enabled', False)}",
+            f"File cache: {cache_stats.get('file_cache_enabled', False)}",
+            f"File path: {_display(cache_stats.get('file_path'))}",
+            f"Hits: {cache_stats.get('hits', 0)}",
+            f"Misses: {cache_stats.get('misses', 0)}",
+            f"Expired: {cache_stats.get('expired', 0)}",
+            f"Writes: {cache_stats.get('writes', 0)}",
+            f"Errors: {cache_stats.get('errors', 0)}",
+            "Retry diagnostics:",
+            *retry_lines,
         )
     )
 

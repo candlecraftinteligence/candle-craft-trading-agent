@@ -10,7 +10,7 @@ from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, rank_scan_results
-from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
+from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
 from scripts import run_scan
 
 
@@ -231,6 +231,44 @@ def _no_setup_rank_result(symbol: str = "NOSETUPUSDT") -> ScannerSymbolResult:
     )
 
 
+class Phase20ScannerRunner:
+    configs = []
+    save_path = None
+
+    async def run(self, config, after_symbol=None, resume_metadata=None):
+        self.__class__.configs.append(config)
+        results = tuple(_no_setup_rank_result(symbol.symbol) for symbol in config.symbols)
+        if after_symbol is not None:
+            total = len(results)
+            for index, symbol_result in enumerate(results, start=1):
+                await after_symbol(symbol_result, index, total)
+                if self.__class__.save_path is not None:
+                    payload = json.loads(self.__class__.save_path.read_text(encoding="utf-8"))
+                    assert len(payload["results"]) == index
+        return ScannerRunResult(
+            config=config,
+            results=results,
+            scanned_symbols=len(results),
+            failed_symbols=0,
+            trade_ideas_created=0,
+            dry_run_alerts_created=0,
+            journal_entries_created=0,
+            cache_stats={
+                "enabled": True,
+                "file_cache_enabled": False,
+                "file_path": None,
+                "hits": 2,
+                "misses": 4,
+                "expired": 0,
+                "writes": 4,
+                "errors": 0,
+                "entries": 4,
+            },
+            retry_diagnostics=(),
+            resume_metadata=dict(resume_metadata or {}),
+        )
+
+
 def test_verbose_cli_flag_accepted() -> None:
     args = run_scan.parse_args(["--symbols", "BTCUSDT", "--verbose"])
 
@@ -263,6 +301,42 @@ def test_phase_18_cli_flags_default_to_ranked_hidden_no_setups() -> None:
     assert args.show_no_setups is False
     assert args.max_display_results == 20
     assert args.bucket_filter is None
+
+
+def test_phase_20_cli_flags_accepted() -> None:
+    args = run_scan.parse_args(
+        [
+            "--symbols",
+            "BTCUSDT",
+            "--cache",
+            "--cache-ttl-seconds",
+            "5",
+            "--cache-file",
+            "scan_runs/cache.json",
+            "--resume-from",
+            "scan_runs/latest_scan.json",
+            "--save-run",
+            "scan_runs/latest_scan.json",
+            "--progress",
+        ]
+    )
+
+    assert args.cache_enabled is True
+    assert args.cache_ttl_seconds == 5
+    assert args.cache_file.parts[-2:] == ("scan_runs", "cache.json")
+    assert args.resume_from.parts[-2:] == ("scan_runs", "latest_scan.json")
+    assert args.save_run.parts[-2:] == ("scan_runs", "latest_scan.json")
+    assert args.progress is True
+
+
+def test_no_cache_flag_is_passed_to_scanner_config(monkeypatch, capsys) -> None:
+    CapturingScannerRunner.configs = []
+    monkeypatch.setattr(run_scan, "ScannerRunner", CapturingScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--no-cache"]))
+
+    config = CapturingScannerRunner.configs[0]
+    assert config.cache_enabled is False
 
 
 def test_list_presets_prints_available_presets(capsys) -> None:
@@ -382,6 +456,86 @@ def test_cli_integration_passes_resolved_watchlist_to_scanner(monkeypatch, capsy
     assert [symbol.symbol for symbol in config.symbols] == ["BTCUSDT", "ETHUSDT"]
     assert "Watchlist: preset large_caps" in captured.out
     assert "Symbols queued: 2" in captured.out
+
+
+def test_resume_from_skips_completed_symbols(tmp_path, monkeypatch, capsys) -> None:
+    resume_path = tmp_path / "resume.json"
+    resume_path.write_text(
+        json.dumps({"results": [_no_setup_rank_result("BTCUSDT").model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+    CapturingScannerRunner.configs = []
+    monkeypatch.setattr(run_scan, "ScannerRunner", CapturingScannerRunner)
+
+    asyncio.run(
+        run_scan.main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "ETHUSDT",
+                "--resume-from",
+                str(resume_path),
+            ]
+        )
+    )
+
+    config = CapturingScannerRunner.configs[0]
+    assert [symbol.symbol for symbol in config.symbols] == ["ETHUSDT"]
+
+
+def test_no_resume_skip_scans_loaded_completed_symbols(tmp_path, monkeypatch, capsys) -> None:
+    resume_path = tmp_path / "resume.json"
+    resume_path.write_text(
+        json.dumps({"results": [_no_setup_rank_result("BTCUSDT").model_dump(mode="json")]}),
+        encoding="utf-8",
+    )
+    CapturingScannerRunner.configs = []
+    monkeypatch.setattr(run_scan, "ScannerRunner", CapturingScannerRunner)
+
+    asyncio.run(
+        run_scan.main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "ETHUSDT",
+                "--resume-from",
+                str(resume_path),
+                "--no-resume-skip",
+            ]
+        )
+    )
+
+    config = CapturingScannerRunner.configs[0]
+    assert [symbol.symbol for symbol in config.symbols] == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_save_run_writes_after_each_symbol(tmp_path, monkeypatch, capsys) -> None:
+    save_path = tmp_path / "scan_runs" / "latest_scan.json"
+    Phase20ScannerRunner.configs = []
+    Phase20ScannerRunner.save_path = save_path
+    monkeypatch.setattr(run_scan, "ScannerRunner", Phase20ScannerRunner)
+
+    asyncio.run(
+        run_scan.main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "ETHUSDT",
+                "--save-run",
+                str(save_path),
+                "--progress",
+                "--show-no-setups",
+            ]
+        )
+    )
+
+    payload = json.loads(save_path.read_text(encoding="utf-8"))
+    assert [result["symbol"] for result in payload["results"]] == ["BTCUSDT", "ETHUSDT"]
+    assert "cache_stats" in payload
+    assert payload["resume_metadata"]["save_run"] == str(save_path)
+    captured = capsys.readouterr()
+    assert "[1/2] BTCUSDT:" in captured.out
+    assert "[2/2] ETHUSDT:" in captured.out
 
 
 def test_valid_setup_ranks_above_near_miss() -> None:
@@ -577,6 +731,8 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     serialized = output_path.read_text(encoding="utf-8")
+    assert payload["cache_stats"]["enabled"] is True
+    assert payload["resume_metadata"]["resume_from"] is None
     assert payload["results"][0]["symbol"] == "BTCUSDT"
     assert payload["results"][0]["candles_fetched"] == 250
     assert payload["results"][0]["rejection_reasons"] == ["No sweep, BOS, or CHoCH context was detected."]
@@ -696,6 +852,47 @@ def test_default_display_hides_no_setups(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "⚪ No setups hidden: 1" in captured.out
     assert "BTCUSDT — NO SETUP" not in captured.out
+
+
+def test_dashboard_includes_phase_20_cache_and_error_counts() -> None:
+    config = ScannerRunConfig.model_validate(
+        {
+            "symbols": ["BTCUSDT", "FAILUSDT"],
+            "exchange": "binance",
+            "account_equity": Decimal("1000"),
+            "risk_per_trade_pct": Decimal("1"),
+        }
+    )
+    result = ScannerRunResult(
+        config=config,
+        results=(
+            _no_setup_rank_result("BTCUSDT"),
+            ScannerSymbolResult(
+                symbol="FAILUSDT",
+                status=ScannerPipelineStatus.SCAN_ERROR,
+                status_history=(ScannerPipelineStatus.SCAN_ERROR,),
+                error_message="mocked failure",
+                rejection_reason="mocked failure",
+                rejection_stage="scanner",
+                rejection_reasons=("mocked failure",),
+            ),
+        ),
+        scanned_symbols=2,
+        failed_symbols=1,
+        trade_ideas_created=0,
+        dry_run_alerts_created=0,
+        journal_entries_created=0,
+        cache_stats={"hits": 3, "misses": 5},
+    )
+
+    text = run_scan.format_scan_dashboard(result)
+
+    assert "Symbols scanned: 2" in text
+    assert "Completed: 1" in text
+    assert "No setup: 1" in text
+    assert "Scan errors: 1" in text
+    assert "Cache hits: 3" in text
+    assert "Cache misses: 5" in text
 
 
 def test_bucket_filter_reveals_selected_no_setup_bucket(monkeypatch, capsys) -> None:
