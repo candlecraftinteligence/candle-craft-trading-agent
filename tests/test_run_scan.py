@@ -329,6 +329,12 @@ def test_phase_20_cli_flags_accepted() -> None:
     assert args.progress is True
 
 
+def test_save_run_without_path_defaults_to_latest_scan() -> None:
+    args = run_scan.parse_args(["--symbols", "BTCUSDT", "--save-run"])
+
+    assert args.save_run.parts[-2:] == ("scan_runs", "latest_scan.json")
+
+
 def test_no_cache_flag_is_passed_to_scanner_config(monkeypatch, capsys) -> None:
     CapturingScannerRunner.configs = []
     monkeypatch.setattr(run_scan, "ScannerRunner", CapturingScannerRunner)

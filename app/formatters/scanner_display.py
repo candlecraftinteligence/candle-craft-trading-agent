@@ -10,7 +10,7 @@ from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult,
 
 DisplayMode = Literal["compact", "normal", "full"]
 DisplayBucket = Literal["valid", "near_miss", "no_setup", "data_issue"]
-DisplayStatus = Literal["valid_setup", "near_miss", "no_setup", "data_issue"]
+DisplayStatus = Literal["valid_setup", "near_miss", "no_setup", "data_issue", "scan_error"]
 
 BULLET = "\u2022"
 CHECK = "\u2705"
@@ -267,6 +267,9 @@ def format_scan_dashboard(
 
     config = result.config
     hidden_no_setups = max(0, counts["no_setup"] - visible_counts["no_setup"])
+    scan_errors = sum(1 for item in ranked if item.display.display_status == "scan_error")
+    completed = max(0, result.scanned_symbols - scan_errors)
+    cache_stats = result.cache_stats or {}
     return "\n".join(
         (
             "Candle Craft Scanner",
@@ -279,6 +282,13 @@ def format_scan_dashboard(
                 f"{_timeframe_label(config.confirmation_timeframe)}"
             ),
             f"Symbols scanned: {result.scanned_symbols}",
+            f"Completed: {completed}",
+            f"No setup: {counts['no_setup']}",
+            f"Near miss: {counts['near_miss']}",
+            f"Trade ideas: {counts['valid']}",
+            f"Scan errors: {scan_errors}",
+            f"Cache hits: {int(cache_stats.get('hits', 0) or 0)}",
+            f"Cache misses: {int(cache_stats.get('misses', 0) or 0)}",
             "",
             f"{GREEN_CIRCLE} Valid setups: {counts['valid']}",
             f"{YELLOW_CIRCLE} Near misses: {counts['near_miss']}",
@@ -382,6 +392,8 @@ def _display_status(
 ) -> DisplayStatus:
     if _trade_idea_created(symbol_result):
         return "valid_setup"
+    if symbol_result.status in (ScannerPipelineStatus.SCAN_ERROR, ScannerPipelineStatus.FAILED) or symbol_result.error_message:
+        return "scan_error"
     if _data_incomplete(symbol_result, diagnostics, failed_gate):
         return "data_issue"
     if _near_miss_eligible(diagnostics, failed_gate, progress_items):
@@ -405,7 +417,7 @@ def _near_miss_eligible(
 def _display_bucket(display_status: DisplayStatus) -> DisplayBucket:
     if display_status == "valid_setup":
         return "valid"
-    if display_status == "data_issue":
+    if display_status in ("data_issue", "scan_error"):
         return "data_issue"
     return display_status
 
@@ -491,6 +503,7 @@ def _display_status_label(display_status: DisplayStatus) -> str:
         "near_miss": f"{YELLOW_CIRCLE} NEAR MISS",
         "no_setup": f"{WHITE_CIRCLE} NO SETUP",
         "data_issue": f"{RED_CIRCLE} DATA ISSUE",
+        "scan_error": f"{RED_CIRCLE} SCAN ERROR",
     }
     return labels[display_status]
 
@@ -502,6 +515,10 @@ def _short_reason(
 ) -> str:
     if display_status == "valid_setup":
         return "Trade idea created after scanner gates passed."
+    if display_status == "scan_error":
+        if symbol_result.error_message:
+            return f"scan_error: {symbol_result.error_message}"
+        return "scan_error"
 
     failed_gate = _failed_gate(symbol_result, diagnostics)
     if failed_gate in ("missing_confirmation_structure_shift", "missing_confirmation_candles"):

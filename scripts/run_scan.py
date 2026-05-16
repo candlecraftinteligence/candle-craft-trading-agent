@@ -6,7 +6,7 @@ import json
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,13 @@ from app.pipeline.scanner_runner import (  # noqa: E402
     ScannerRunner,
     ScannerSymbolResult,
 )
+from app.universe.symbol_universe import (  # noqa: E402
+    MANUAL_UNIVERSE_MODE,
+    UNIVERSE_MODES,
+    SymbolUniverse,
+    manual_symbol_universe,
+    resolve_symbol_universe,
+)
 from app.watchlists.presets import (  # noqa: E402
     WatchlistPresetError,
     dedupe_symbols,
@@ -53,6 +60,7 @@ DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 class WatchlistResolution:
     symbols: tuple[str, ...]
     source_label: str
+    universe: SymbolUniverse
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,16 @@ class ResumeState:
     results_by_symbol: dict[str, ScannerSymbolResult]
     skipped_symbols: tuple[str, ...]
     loaded_symbols: tuple[str, ...]
+
+
+def _non_negative_decimal_arg(value: str) -> Decimal:
+    try:
+        decimal = Decimal(value)
+    except (InvalidOperation, ValueError) as exc:
+        raise argparse.ArgumentTypeError("must be a decimal number") from exc
+    if not decimal.is_finite() or decimal < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return decimal
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -71,6 +89,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     display_explicit = any(token == "--display" or token.startswith("--display=") for token in tokens)
     parser = argparse.ArgumentParser(description="Run the Candle Craft dry-run scanner pipeline.")
     parser.add_argument("--symbols", nargs="*", default=list(DEFAULT_SYMBOLS))
+    parser.add_argument("--universe", choices=UNIVERSE_MODES, default=MANUAL_UNIVERSE_MODE)
+    parser.add_argument("--universe-size", type=int, default=50)
+    parser.add_argument("--min-quote-volume", type=_non_negative_decimal_arg, default=Decimal("0"))
     parser.add_argument("--preset")
     parser.add_argument("--list-presets", action="store_true")
     parser.add_argument("--max-symbols", type=int)
@@ -106,10 +127,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-ttl-seconds", type=int)
     parser.add_argument("--cache-file", type=Path)
     parser.add_argument("--resume-from", type=Path)
-    parser.add_argument("--save-run", type=Path)
+    parser.add_argument("--save-run", nargs="?", const=Path("scan_runs/latest_scan.json"), type=Path)
     parser.add_argument("--no-resume-skip", action="store_true")
     parser.add_argument("--progress", action="store_true")
     args = parser.parse_args(argv)
+    if args.universe_size < 1:
+        parser.error("--universe-size must be at least 1.")
     if args.cache_ttl_seconds is not None and args.cache_ttl_seconds < 0:
         parser.error("--cache-ttl-seconds must be zero or greater.")
     args.symbols_explicit = symbols_explicit
@@ -124,7 +147,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         print(_format_available_presets())
         return
 
-    watchlist = _resolve_watchlist(args)
+    watchlist = await _resolve_watchlist_for_scan(args)
     diagnostics_level = args.diagnostics_level
     if args.verbose and not args.diagnostics_level_explicit:
         diagnostics_level = "full"
@@ -156,6 +179,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         cache_file=args.cache_file,
     )
 
+    print(_format_universe_header(watchlist.universe))
     print(f"Watchlist: {watchlist.source_label}")
     print(f"Symbols queued: {len(watchlist.symbols)}")
     print("")
@@ -176,7 +200,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         if symbols_to_scan
         else config
     )
-    resume_metadata = _resume_metadata(args, watchlist.symbols, resume_state, symbols_to_scan)
+    resume_metadata = _resume_metadata(args, watchlist.symbols, resume_state, symbols_to_scan, watchlist.universe)
 
     async def after_symbol(symbol_result: ScannerSymbolResult, completed: int, total: int) -> None:
         latest_results_by_symbol[symbol_result.symbol] = symbol_result
@@ -272,6 +296,29 @@ def _format_available_presets() -> str:
     return "\n".join(lines)
 
 
+def _format_universe_header(universe: SymbolUniverse) -> str:
+    top_symbols = universe.top_by_quote_volume(limit=5)
+    if top_symbols:
+        top_text = ", ".join(f"{item.symbol} ({_display(item.quote_volume)})" for item in top_symbols)
+    else:
+        top_text = "N/A"
+    return "\n".join(
+        (
+            f"Universe mode: {universe.mode}",
+            f"Universe size requested: {universe.requested_size}",
+            f"Symbols resolved: {len(universe.resolved_symbols)}",
+            f"Excluded count: {len(universe.excluded_symbols)}",
+            f"Top 5 by quote volume: {top_text}",
+        )
+    )
+
+
+async def _resolve_watchlist_for_scan(args: argparse.Namespace) -> WatchlistResolution:
+    if args.universe == MANUAL_UNIVERSE_MODE:
+        return _resolve_watchlist(args)
+    return await _resolve_universe_watchlist(args)
+
+
 def _resolve_watchlist(args: argparse.Namespace) -> WatchlistResolution:
     source_count = sum(
         (
@@ -303,7 +350,9 @@ def _resolve_watchlist(args: argparse.Namespace) -> WatchlistResolution:
     except WatchlistPresetError as exc:
         raise SystemExit(str(exc)) from exc
 
-    resolved_symbols = dedupe_symbols((*symbols, *include_symbols))
+    pre_exclude_symbols = dedupe_symbols((*symbols, *include_symbols))
+    excluded_cli_symbols = tuple(symbol for symbol in pre_exclude_symbols if symbol in exclude_symbols)
+    resolved_symbols = pre_exclude_symbols
     if exclude_symbols:
         resolved_symbols = tuple(symbol for symbol in resolved_symbols if symbol not in exclude_symbols)
 
@@ -317,7 +366,56 @@ def _resolve_watchlist(args: argparse.Namespace) -> WatchlistResolution:
             "Resolved watchlist is empty after include/exclude/max-symbols processing. Provide at least one symbol."
         )
 
-    return WatchlistResolution(symbols=resolved_symbols, source_label=source_label)
+    universe = manual_symbol_universe(
+        resolved_symbols,
+        requested_size=len(resolved_symbols),
+        excluded_symbols=excluded_cli_symbols,
+        min_quote_volume=args.min_quote_volume,
+    )
+    return WatchlistResolution(symbols=resolved_symbols, source_label=source_label, universe=universe)
+
+
+async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistResolution:
+    if args.exchange != "binance":
+        raise SystemExit("Binance symbol universes require --exchange binance.")
+    if args.preset or args.preset_file is not None:
+        raise SystemExit("Use either --universe or manual watchlist sources such as --preset/--preset-file, not both.")
+
+    try:
+        universe = await resolve_symbol_universe(
+            args.universe,
+            universe_size=args.universe_size,
+            min_quote_volume=args.min_quote_volume,
+        )
+        include_symbols = validate_symbols(args.include_symbols, context="--include-symbols")
+        exclude_symbols = set(validate_symbols(args.exclude_symbols, context="--exclude-symbols"))
+    except WatchlistPresetError as exc:
+        raise SystemExit(str(exc)) from exc
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    pre_exclude_symbols = dedupe_symbols((*universe.resolved_symbols, *include_symbols))
+    excluded_cli_symbols = tuple(symbol for symbol in pre_exclude_symbols if symbol in exclude_symbols)
+    resolved_symbols = pre_exclude_symbols
+    if exclude_symbols:
+        resolved_symbols = tuple(symbol for symbol in resolved_symbols if symbol not in exclude_symbols)
+
+    if args.max_symbols is not None:
+        if args.max_symbols < 1:
+            raise SystemExit("--max-symbols must be at least 1.")
+        resolved_symbols = resolved_symbols[: args.max_symbols]
+
+    if not resolved_symbols:
+        raise SystemExit(
+            "Resolved watchlist is empty after universe/include/exclude/max-symbols processing. Provide at least one symbol."
+        )
+
+    universe = universe.with_resolved_symbols(resolved_symbols, extra_excluded_symbols=excluded_cli_symbols)
+    return WatchlistResolution(
+        symbols=resolved_symbols,
+        source_label=f"universe {args.universe}",
+        universe=universe,
+    )
 
 
 def _load_resume_state(
@@ -374,6 +472,7 @@ def _resume_metadata(
     watchlist_symbols: Sequence[str],
     resume_state: ResumeState,
     symbols_to_scan: Sequence[str],
+    universe: SymbolUniverse,
 ) -> dict[str, Any]:
     return {
         "resume_from": str(args.resume_from) if args.resume_from is not None else None,
@@ -383,6 +482,7 @@ def _resume_metadata(
         "skipped_symbols": list(resume_state.skipped_symbols),
         "symbols_to_scan": list(symbols_to_scan),
         "watchlist_symbols": list(watchlist_symbols),
+        "universe": universe.to_json(),
     }
 
 
@@ -519,6 +619,9 @@ def _parse_bucket_filter(values: Sequence[str] | None) -> set[DisplayBucket] | N
 
 def _json_payload(result: ScannerRunResult, ranked_results=None) -> dict[str, object]:
     payload = result.model_dump(mode="json")
+    universe = result.resume_metadata.get("universe") if isinstance(result.resume_metadata, Mapping) else None
+    if isinstance(universe, Mapping):
+        payload["universe"] = dict(universe)
     ranks_by_index = {}
     if ranked_results is None:
         ranked_results = rank_scan_results(result.results)

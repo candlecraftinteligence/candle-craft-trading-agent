@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, and Phase 20 batch-scan reliability.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, and Phase 21 public symbol universes.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -833,6 +833,37 @@ Disable caching completely:
 
 Safety note: Phase 20 is reliability and output persistence only. It does not create trades, change Phase 18 ranking, change Phase 19 preset resolution, loosen sweep/BOS/CHoCH/pullback/fib/RR/Trust Meter/risk rules, place orders, use private exchange endpoints, send live Telegram messages, or add withdrawals/transfers.
 
+## Phase 21 Symbol Universe Layer
+
+Phase 21 adds public-data-only scanner universes so larger Binance USD-M futures scans can be resolved without manually typing every symbol.
+
+- `--universe manual` preserves existing `--symbols`, `--preset`, and `--preset-file` behavior.
+- `--universe binance_usdt_perp_top_volume` resolves the top Binance USD-M USDT symbols by public 24h ticker `quoteVolume`.
+- `--universe binance_usdt_perp_top_tradable` uses the same public ticker data, then filters obvious bad scan targets such as stablecoin/stable pairs, leveraged tokens, missing quote volume, non-USDT symbols, and symbols below `--min-quote-volume`.
+- `--universe-size N` controls how many symbols are requested from public ticker sorting.
+- `--min-quote-volume N` is optional and defaults to `0`.
+- Scanner headers and saved JSON include the selected universe mode, requested size, resolved symbols, excluded symbols, source, generated time, minimum quote volume, and top resolved symbols by quote volume where available.
+
+Example A - manual scan:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --strategy liquidity_grab_pullback
+```
+
+Example B - top 50 Binance USDT perp volume scan:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_volume --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level summary --display normal --rank-results --max-display-results 50 --show-no-setups --save-run
+```
+
+Example C - top 50 tradable filtered scan:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_tradable --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level summary --display normal --rank-results --max-display-results 50 --show-no-setups --save-run
+```
+
+Safety note: Phase 21 resolves scanner inputs from public Binance USD-M ticker data only. It does not create trades, weaken strategy gates, use private exchange API keys, call private/account/order endpoints, place orders, send live Telegram messages, withdraw funds, or transfer funds.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -855,3 +886,4 @@ Safety note: Phase 20 is reliability and output persistence only. It does not cr
 - The Phase 18 scanner result ranking layer is output-only. It does not create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or modify scan artifacts by itself.
 - The Phase 19 watchlist preset layer resolves symbol inputs only. It does not create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, live Telegram sending, or modify scan artifacts by itself.
 - The Phase 20 cache/resume layer is public-data reliability only. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
+- The Phase 21 symbol universe layer resolves public scanner inputs only. It does not cache private/account data, create trades, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
