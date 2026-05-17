@@ -27,3 +27,5 @@ build/
 
 postgres_data/
 *.log
+
+scan_output.json

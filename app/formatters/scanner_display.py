@@ -341,6 +341,22 @@ def format_scan_dashboard(
     completed = max(0, result.scanned_symbols - scan_errors)
     cache_stats = result.cache_stats or {}
     data_warning_count = _optional_data_warning_count(result)
+    runtime = result.runtime_stats
+    runtime_populated = bool(
+        runtime.total_runtime_seconds
+        or runtime.completed_symbols
+        or runtime.skipped_symbols
+        or runtime.errored_symbols
+        or runtime.timeout_count
+        or runtime.global_timeout_hit
+    )
+    completed_count = runtime.completed_symbols if runtime_populated else completed
+    skipped_errored_count = runtime.skipped_errored_symbols if runtime_populated else scan_errors
+    slowest = (
+        f"{runtime.slowest_symbol} ({_seconds_text(runtime.slowest_symbol_seconds)})"
+        if runtime.slowest_symbol != NA
+        else NA
+    )
     return "\n".join(
         (
             "Candle Craft Scanner",
@@ -353,7 +369,12 @@ def format_scan_dashboard(
                 f"{_timeframe_label(config.confirmation_timeframe)}"
             ),
             f"Symbols scanned: {result.scanned_symbols}",
-            f"Completed: {completed}",
+            f"Completed: {completed_count}",
+            f"Runtime: {_seconds_text(runtime.total_runtime_seconds)}",
+            f"Average per symbol: {_seconds_text(runtime.average_seconds_per_symbol)}",
+            f"Slowest symbol: {slowest}",
+            f"Timeouts: {runtime.timeout_count}",
+            f"Skipped/errored: {skipped_errored_count}",
             f"No setup: {counts['no_setup']}",
             f"Near miss: {counts['near_miss']}",
             f"Trade ideas: {counts['valid']}",
@@ -1555,6 +1576,21 @@ def _price_display(value: object) -> str:
     whole = whole.lstrip("-")
     grouped = f"{int(whole):,}" if whole else "0"
     return f"{sign}{grouped}.{fractional}" if fractional else f"{sign}{grouped}"
+
+
+def _seconds_text(value: object) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    try:
+        seconds = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return text
+    if seconds == 0:
+        return "0s"
+    if seconds < Decimal("1"):
+        return f"{seconds:.3f}".rstrip("0").rstrip(".") + "s"
+    return f"{seconds:.1f}".rstrip("0").rstrip(".") + "s"
 
 
 def _clean_diagnostic_sentence(value: object) -> str:

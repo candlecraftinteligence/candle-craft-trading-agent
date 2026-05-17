@@ -49,6 +49,7 @@ from app.pipeline.scanner_runner import (  # noqa: E402
     ScannerPipelineStatus,
     ScannerRunConfig,
     ScannerRunResult,
+    ScannerRuntimeStats,
     ScannerRunner,
     ScannerSymbolResult,
 )
@@ -145,7 +146,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--replay-max-fill-candles", type=int)
     parser.add_argument("--request-timeout-sec", type=_positive_float_arg, default=DEFAULT_REQUEST_TIMEOUT_SEC)
     parser.add_argument("--symbol-timeout-sec", type=_positive_float_arg, default=DEFAULT_SYMBOL_TIMEOUT_SEC)
-    parser.add_argument("--scan-timeout-sec", type=_positive_float_arg)
+    parser.add_argument("--scan-timeout-sec", "--max-scan-seconds", dest="scan_timeout_sec", type=_positive_float_arg)
     parser.add_argument("--fast", action="store_true")
     parser.add_argument("--show-strategy-output", action="store_true")
     parser.add_argument("--telegram-format", action="store_true")
@@ -273,6 +274,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                         symbol for symbol in watchlist.symbols if symbol not in latest_results_by_symbol
                     ],
                 },
+                runtime_stats=None,
             )
             _write_run_json(args.save_run, partial_result)
 
@@ -302,6 +304,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                     symbol for symbol in watchlist.symbols if symbol not in latest_results_by_symbol
                 ],
             },
+            runtime_stats=scan_result.runtime_stats,
         )
     else:
         result = _combined_run_result(
@@ -311,6 +314,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             cache=cache,
             retry_diagnostics=(),
             resume_metadata={**resume_metadata, "pending_symbols": []},
+            runtime_stats=None,
         )
 
     if args.save_run is not None:
@@ -612,6 +616,7 @@ def _combined_run_result(
     cache: MarketDataCache | None,
     retry_diagnostics: Sequence[dict[str, Any]],
     resume_metadata: Mapping[str, Any],
+    runtime_stats: ScannerRuntimeStats | None,
 ) -> ScannerRunResult:
     ordered_results = tuple(
         results_by_symbol[symbol]
@@ -632,6 +637,11 @@ def _combined_run_result(
         cache_stats=cache_stats,
         retry_diagnostics=tuple(dict(event) for event in retry_diagnostics),
         resume_metadata=dict(resume_metadata),
+        runtime_stats=_combined_runtime_stats(
+            ordered_results,
+            total_symbols=len(watchlist_symbols),
+            runtime_stats=runtime_stats,
+        ),
     )
 
 
@@ -647,6 +657,51 @@ def _empty_cache_stats(config: ScannerRunConfig) -> dict[str, Any]:
         "errors": 0,
         "entries": 0,
     }
+
+
+def _combined_runtime_stats(
+    results: Sequence[ScannerSymbolResult],
+    *,
+    total_symbols: int,
+    runtime_stats: ScannerRuntimeStats | None,
+) -> ScannerRuntimeStats:
+    runtimes = tuple(
+        (result.symbol, result.runtime_seconds)
+        for result in results
+        if result.runtime_seconds is not None
+    )
+    slowest_symbol = NA
+    slowest_seconds = 0.0
+    if runtimes:
+        slowest_symbol, slowest_seconds = max(runtimes, key=lambda item: item[1])
+
+    errored_symbols = sum(1 for result in results if _result_is_scan_error(result))
+    skipped_symbols = max(0, total_symbols - len(results))
+    timeout_count = sum(1 for result in results if result.timed_out)
+    total_runtime = (
+        runtime_stats.total_runtime_seconds
+        if runtime_stats is not None
+        else sum(seconds for _symbol, seconds in runtimes)
+    )
+    global_timeout_hit = runtime_stats.global_timeout_hit if runtime_stats is not None else False
+    return ScannerRuntimeStats(
+        total_runtime_seconds=_round_seconds(total_runtime),
+        average_seconds_per_symbol=_round_seconds(sum(seconds for _symbol, seconds in runtimes) / len(runtimes))
+        if runtimes
+        else 0.0,
+        slowest_symbol=slowest_symbol,
+        slowest_symbol_seconds=_round_seconds(slowest_seconds),
+        timeout_count=timeout_count,
+        completed_symbols=max(0, len(results) - errored_symbols),
+        skipped_symbols=skipped_symbols,
+        errored_symbols=errored_symbols,
+        skipped_errored_symbols=skipped_symbols + errored_symbols,
+        global_timeout_hit=global_timeout_hit,
+    )
+
+
+def _round_seconds(value: float) -> float:
+    return round(max(float(value), 0.0), 3)
 
 
 def _result_is_scan_error(symbol_result: ScannerSymbolResult) -> bool:
@@ -942,6 +997,9 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
         (
             symbol_result.symbol,
             f"Status: {symbol_result.status.value}",
+            f"Runtime: {_seconds_text(symbol_result.runtime_seconds)}",
+            f"Timed out: {_bool_text(symbol_result.timed_out)}",
+            f"Timeout status: {symbol_result.timeout_status}",
             f"Latest close: {_display(symbol_result.latest_close)}",
             f"Trend: {_display(symbol_result.trend_context)}",
             f"Technical score: {_display(symbol_result.technical_score)}",
@@ -998,6 +1056,7 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
 
 def _format_run_diagnostics(result: ScannerRunResult) -> str:
     cache_stats = result.cache_stats or {}
+    runtime = result.runtime_stats
     retry_events = tuple(result.retry_diagnostics or ())
     retry_lines = [f"Retry events: {len(retry_events)}"]
     for event in retry_events[:10]:
@@ -1014,6 +1073,17 @@ def _format_run_diagnostics(result: ScannerRunResult) -> str:
     return "\n".join(
         (
             "Run diagnostics:",
+            "Runtime diagnostics:",
+            f"Total runtime: {_seconds_text(runtime.total_runtime_seconds)}",
+            f"Average seconds per symbol: {_seconds_text(runtime.average_seconds_per_symbol)}",
+            f"Slowest symbol: {_display(runtime.slowest_symbol)} ({_seconds_text(runtime.slowest_symbol_seconds)})",
+            f"Timeout count: {runtime.timeout_count}",
+            f"Completed symbols: {runtime.completed_symbols}",
+            f"Skipped symbols: {runtime.skipped_symbols}",
+            f"Errored symbols: {runtime.errored_symbols}",
+            f"Global timeout hit: {_bool_text(runtime.global_timeout_hit)}",
+            "Per-symbol timing:",
+            *_runtime_symbol_lines(result),
             "Cache diagnostics:",
             f"Enabled: {cache_stats.get('enabled', False)}",
             f"File cache: {cache_stats.get('file_cache_enabled', False)}",
@@ -1026,6 +1096,18 @@ def _format_run_diagnostics(result: ScannerRunResult) -> str:
             "Retry diagnostics:",
             *retry_lines,
         )
+    )
+
+
+def _runtime_symbol_lines(result: ScannerRunResult) -> tuple[str, ...]:
+    if not result.results:
+        return ("- N/A",)
+    return tuple(
+        (
+            f"- {symbol_result.symbol}: runtime={_seconds_text(symbol_result.runtime_seconds)} "
+            f"timeout={symbol_result.timeout_status} status={symbol_result.status.value}"
+        )
+        for symbol_result in result.results
     )
 
 
@@ -1186,6 +1268,21 @@ def _percentage_display(value: object) -> str:
     if text == NA:
         return NA
     return f"{text}%"
+
+
+def _seconds_text(value: object) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    try:
+        seconds = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return text
+    if seconds == 0:
+        return "0s"
+    if seconds < Decimal("1"):
+        return f"{seconds:.3f}".rstrip("0").rstrip(".") + "s"
+    return f"{seconds:.1f}".rstrip("0").rstrip(".") + "s"
 
 
 def _format_derivatives_diagnostics(symbol_result: ScannerSymbolResult) -> str:

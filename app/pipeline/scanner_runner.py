@@ -67,6 +67,7 @@ DEFAULT_REPLAY_CANDLES = 300
 SAFE_REPLAY_CANDLE_LIMIT_MAX = 500
 FAST_CANDLE_LIMIT = 220
 FAST_REPLAY_CANDLES = 240
+FAST_OPTIONAL_REQUEST_TIMEOUT_SEC = 0.5
 
 
 class ScannerPipelineStatus(str, Enum):
@@ -273,6 +274,9 @@ class ScannerSymbolResult(BaseModel):
     status_history: tuple[ScannerPipelineStatus, ...]
     error_message: str | None = None
     rejection_reason: str | None = None
+    runtime_seconds: float | None = None
+    timed_out: bool = False
+    timeout_status: Literal["none", "request_timeout", "symbol_timeout", "global_timeout"] = "none"
     candle_count: int = 0
     current_price: MaybeDecimal = NA
     funding_rate: MaybeDecimal = NA
@@ -340,6 +344,21 @@ class ScannerSymbolResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class ScannerRuntimeStats(BaseModel):
+    total_runtime_seconds: float = 0.0
+    average_seconds_per_symbol: float = 0.0
+    slowest_symbol: str = NA
+    slowest_symbol_seconds: float = 0.0
+    timeout_count: int = 0
+    completed_symbols: int = 0
+    skipped_symbols: int = 0
+    errored_symbols: int = 0
+    skipped_errored_symbols: int = 0
+    global_timeout_hit: bool = False
+
+    model_config = ConfigDict(frozen=True)
+
+
 class ScannerRunResult(BaseModel):
     config: ScannerRunConfig
     results: tuple[ScannerSymbolResult, ...]
@@ -351,6 +370,7 @@ class ScannerRunResult(BaseModel):
     cache_stats: dict[str, Any] = Field(default_factory=dict)
     retry_diagnostics: tuple[dict[str, Any], ...] = ()
     resume_metadata: dict[str, Any] = Field(default_factory=dict)
+    runtime_stats: ScannerRuntimeStats = Field(default_factory=ScannerRuntimeStats)
 
     model_config = ConfigDict(frozen=True)
 
@@ -463,6 +483,8 @@ class ScannerRunner:
         client, owns_client = self._exchange_client_for(run_config)
         results: list[ScannerSymbolResult] = []
         total_symbols = len(run_config.symbols)
+        scan_started = time.monotonic()
+        global_timeout_hit = False
         scan_deadline = (
             time.monotonic() + run_config.scan_timeout_sec
             if run_config.scan_timeout_sec is not None
@@ -472,6 +494,7 @@ class ScannerRunner:
         try:
             for symbol_config in run_config.symbols:
                 if scan_deadline is not None and time.monotonic() >= scan_deadline:
+                    global_timeout_hit = True
                     self.logger.warning("Full scan timeout reached before symbol=%s.", symbol_config.symbol)
                     break
 
@@ -493,19 +516,39 @@ class ScannerRunner:
                     scan_timeout_hit = scan_deadline is not None and time.monotonic() >= scan_deadline
                     if scan_timeout_hit and symbol_timeout < run_config.symbol_timeout_sec:
                         reason = f"full scan timeout exceeded after {_format_seconds(run_config.scan_timeout_sec)} seconds"
+                        timeout_status: Literal["symbol_timeout", "global_timeout"] = "global_timeout"
+                        global_timeout_hit = True
                         stop_after_symbol = True
                     else:
                         reason = f"symbol timeout exceeded after {_format_seconds(run_config.symbol_timeout_sec)} seconds"
+                        timeout_status = "symbol_timeout"
                     self.logger.error("Scanner timed out for symbol=%s after %.2fs: %s", symbol_config.symbol, elapsed, reason)
-                    symbol_result = _scan_error_result(symbol_config.symbol, reason)
+                    symbol_result = _scan_error_result(
+                        symbol_config.symbol,
+                        reason,
+                        runtime_seconds=elapsed,
+                        timeout_status=timeout_status,
+                    )
                 except Exception as exc:
+                    elapsed = time.monotonic() - symbol_started
                     reason = _clean_error_message(exc)
                     self.logger.error("Scanner failed for symbol=%s: %s", symbol_config.symbol, reason)
-                    symbol_result = _scan_error_result(symbol_config.symbol, reason)
+                    symbol_result = _scan_error_result(
+                        symbol_config.symbol,
+                        reason,
+                        runtime_seconds=elapsed,
+                        timeout_status="request_timeout" if isinstance(exc, ExchangeTimeoutError) else "none",
+                    )
+                symbol_elapsed = time.monotonic() - symbol_started
+                symbol_result = _with_symbol_runtime(
+                    symbol_result,
+                    runtime_seconds=symbol_elapsed,
+                    timeout_status=symbol_result.timeout_status,
+                )
                 results.append(symbol_result)
                 await _emit_progress(
                     progress,
-                    f"Done {symbol_config.symbol} in {_format_seconds(time.monotonic() - symbol_started)} seconds.",
+                    f"Done {symbol_config.symbol} in {_format_seconds(symbol_elapsed)} seconds.",
                 )
                 if after_symbol is not None:
                     await _maybe_await(after_symbol(symbol_result, len(results), total_symbols))
@@ -514,6 +557,14 @@ class ScannerRunner:
         finally:
             if owns_client and hasattr(client, "aclose"):
                 await _maybe_await(client.aclose())
+
+        total_runtime_seconds = time.monotonic() - scan_started
+        if (
+            scan_deadline is not None
+            and len(results) < total_symbols
+            and time.monotonic() >= scan_deadline
+        ):
+            global_timeout_hit = True
 
         return ScannerRunResult(
             config=run_config,
@@ -528,6 +579,12 @@ class ScannerRunner:
             cache_stats=_cache_stats_for(client, run_config),
             retry_diagnostics=_retry_diagnostics_for(client),
             resume_metadata=dict(resume_metadata or {}),
+            runtime_stats=_runtime_stats_for(
+                results,
+                total_symbols=total_symbols,
+                total_runtime_seconds=total_runtime_seconds,
+                global_timeout_hit=global_timeout_hit,
+            ),
         )
 
     def _exchange_client_for(self, config: ScannerRunConfig) -> tuple[BaseExchangeClient, bool]:
@@ -1185,7 +1242,12 @@ class ScannerRunner:
         if not callable(method):
             return label, None, f"{label}: N/A", None
         try:
-            value = await self._request_public_api(config, f"{symbol} {label}", lambda: method(symbol))
+            value = await self._request_public_api(
+                config,
+                f"{symbol} {label}",
+                lambda: method(symbol),
+                timeout_sec=_optional_request_timeout(config),
+            )
             return label, value, None, None
         except Exception as exc:
             self.logger.debug("Optional %s fetch failed for symbol=%s: %s", label, symbol, exc)
@@ -1196,12 +1258,15 @@ class ScannerRunner:
         config: ScannerRunConfig,
         label: str,
         call: Callable[[], Any],
+        *,
+        timeout_sec: float | None = None,
     ) -> Any:
+        timeout = timeout_sec if timeout_sec is not None else config.request_timeout_sec
         try:
-            return await asyncio.wait_for(_maybe_await(call()), timeout=config.request_timeout_sec)
+            return await asyncio.wait_for(_maybe_await(call()), timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise ExchangeTimeoutError(
-                f"{label} request timed out after {_format_seconds(config.request_timeout_sec)} seconds"
+                f"{label} request timed out after {_format_seconds(timeout)} seconds"
             ) from exc
 
     def _symbol_result(
@@ -1867,6 +1932,12 @@ def _fast_mode_skips_timeframe(config: ScannerRunConfig, timeframe: str) -> bool
     return normalized in {"4h", "1h"} and normalized not in required_timeframes
 
 
+def _optional_request_timeout(config: ScannerRunConfig) -> float:
+    if not config.fast_mode:
+        return config.request_timeout_sec
+    return min(config.request_timeout_sec, FAST_OPTIONAL_REQUEST_TIMEOUT_SEC)
+
+
 def _progress_message_for_timeframe(config: ScannerRunConfig, timeframe: str) -> str | None:
     normalized = timeframe.strip().lower()
     if normalized == config.htf_timeframe.strip().lower():
@@ -2471,13 +2542,22 @@ def _is_scan_error(result: ScannerSymbolResult) -> bool:
     return result.status in (ScannerPipelineStatus.SCAN_ERROR, ScannerPipelineStatus.FAILED)
 
 
-def _scan_error_result(symbol: str, reason: str) -> ScannerSymbolResult:
+def _scan_error_result(
+    symbol: str,
+    reason: str,
+    *,
+    runtime_seconds: float | None = None,
+    timeout_status: Literal["none", "request_timeout", "symbol_timeout", "global_timeout"] = "none",
+) -> ScannerSymbolResult:
     return ScannerSymbolResult(
         symbol=symbol,
         status=ScannerPipelineStatus.SCAN_ERROR,
         status_history=(ScannerPipelineStatus.SCAN_ERROR,),
         error_message=reason,
         rejection_reason=reason,
+        runtime_seconds=_rounded_seconds(runtime_seconds) if runtime_seconds is not None else None,
+        timed_out=timeout_status != "none",
+        timeout_status=timeout_status,
         rejection_stage="scanner",
         rejection_reasons=(reason,),
         setup_quality=validate_setup_quality(
@@ -2489,6 +2569,63 @@ def _scan_error_result(symbol: str, reason: str) -> ScannerSymbolResult:
             )
         ),
     )
+
+
+def _with_symbol_runtime(
+    result: ScannerSymbolResult,
+    *,
+    runtime_seconds: float,
+    timeout_status: Literal["none", "request_timeout", "symbol_timeout", "global_timeout"],
+) -> ScannerSymbolResult:
+    rounded_runtime = _rounded_seconds(runtime_seconds)
+    if result.runtime_seconds == rounded_runtime and result.timeout_status == timeout_status:
+        return result
+    return result.model_copy(
+        update={
+            "runtime_seconds": rounded_runtime,
+            "timed_out": timeout_status != "none",
+            "timeout_status": timeout_status,
+        }
+    )
+
+
+def _runtime_stats_for(
+    results: Sequence[ScannerSymbolResult],
+    *,
+    total_symbols: int,
+    total_runtime_seconds: float,
+    global_timeout_hit: bool,
+) -> ScannerRuntimeStats:
+    runtimes = tuple(
+        (result.symbol, result.runtime_seconds)
+        for result in results
+        if result.runtime_seconds is not None
+    )
+    slowest_symbol = NA
+    slowest_seconds = 0.0
+    if runtimes:
+        slowest_symbol, slowest_seconds = max(runtimes, key=lambda item: item[1])
+    errored_symbols = sum(1 for result in results if _is_scan_error(result))
+    skipped_symbols = max(0, total_symbols - len(results))
+    timeout_count = sum(1 for result in results if result.timed_out)
+    return ScannerRuntimeStats(
+        total_runtime_seconds=_rounded_seconds(total_runtime_seconds),
+        average_seconds_per_symbol=_rounded_seconds(sum(seconds for _symbol, seconds in runtimes) / len(runtimes))
+        if runtimes
+        else 0.0,
+        slowest_symbol=slowest_symbol,
+        slowest_symbol_seconds=_rounded_seconds(slowest_seconds),
+        timeout_count=timeout_count,
+        completed_symbols=max(0, len(results) - errored_symbols),
+        skipped_symbols=skipped_symbols,
+        errored_symbols=errored_symbols,
+        skipped_errored_symbols=skipped_symbols + errored_symbols,
+        global_timeout_hit=global_timeout_hit,
+    )
+
+
+def _rounded_seconds(value: float) -> float:
+    return round(max(value, 0.0), 3)
 
 
 def _clean_error_message(exc: Exception) -> str:
@@ -2601,9 +2738,11 @@ __all__ = [
     "DEFAULT_REQUEST_TIMEOUT_SEC",
     "DEFAULT_SYMBOL_TIMEOUT_SEC",
     "FAST_CANDLE_LIMIT",
+    "FAST_OPTIONAL_REQUEST_TIMEOUT_SEC",
     "FAST_REPLAY_CANDLES",
     "ScannerPipelineStatus",
     "ScannerRiskConfig",
+    "ScannerRuntimeStats",
     "ScannerRunConfig",
     "ScannerRunResult",
     "ScannerRunner",

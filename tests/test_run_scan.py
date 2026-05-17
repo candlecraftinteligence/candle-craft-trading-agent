@@ -454,6 +454,12 @@ def test_phase_23_timeout_and_fast_cli_flags_accepted() -> None:
     assert args.fast is True
 
 
+def test_max_scan_seconds_alias_sets_scan_timeout() -> None:
+    args = run_scan.parse_args(["--symbols", "BTCUSDT", "--max-scan-seconds", "15"])
+
+    assert args.scan_timeout_sec == 15
+
+
 def test_replay_candles_default_is_300() -> None:
     args = run_scan.parse_args(["--replay"])
 
@@ -1008,8 +1014,12 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     serialized = output_path.read_text(encoding="utf-8")
     assert payload["cache_stats"]["enabled"] is True
+    assert payload["runtime_stats"]["total_runtime_seconds"] == 0.0
+    assert payload["runtime_stats"]["completed_symbols"] == 1
     assert payload["resume_metadata"]["resume_from"] is None
     assert payload["results"][0]["symbol"] == "BTCUSDT"
+    assert payload["results"][0]["runtime_seconds"] is None
+    assert payload["results"][0]["timeout_status"] == "none"
     assert payload["results"][0]["candles_fetched"] == 250
     assert payload["results"][0]["rejection_reasons"] == ["No sweep, BOS, or CHoCH context was detected."]
     assert payload["results"][0]["strategy_name"] == "liquidity_grab_pullback"
@@ -1222,6 +1232,11 @@ def test_dashboard_includes_phase_20_cache_and_error_counts() -> None:
 
     assert "Symbols scanned: 2" in text
     assert "Completed: 1" in text
+    assert "Runtime:" in text
+    assert "Average per symbol:" in text
+    assert "Slowest symbol:" in text
+    assert "Timeouts:" in text
+    assert "Skipped/errored: 1" in text
     assert "No setup: 1" in text
     assert "Scan errors: 1" in text
     assert "Cache hits: 3" in text

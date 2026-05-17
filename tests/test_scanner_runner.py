@@ -363,6 +363,10 @@ def test_request_timeout_marks_symbol_scan_error() -> None:
     symbol_result = result.results[0]
     assert symbol_result.status == ScannerPipelineStatus.SCAN_ERROR
     assert "request timed out after 0.01 seconds" in str(symbol_result.error_message)
+    assert symbol_result.runtime_seconds is not None
+    assert symbol_result.timed_out is True
+    assert symbol_result.timeout_status == "request_timeout"
+    assert result.runtime_stats.timeout_count == 1
 
 
 def test_symbol_timeout_marks_symbol_scan_error_and_continues() -> None:
@@ -389,7 +393,16 @@ def test_symbol_timeout_marks_symbol_scan_error_and_continues() -> None:
     assert result.scanned_symbols == 2
     assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
     assert "symbol timeout exceeded after 0.2 seconds" in str(result.results[0].error_message)
+    assert result.results[0].runtime_seconds is not None
+    assert result.results[0].timed_out is True
+    assert result.results[0].timeout_status == "symbol_timeout"
     assert result.results[1].status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+    assert result.results[1].runtime_seconds is not None
+    assert result.results[1].timeout_status == "none"
+    assert result.runtime_stats.completed_symbols == 1
+    assert result.runtime_stats.errored_symbols == 1
+    assert result.runtime_stats.timeout_count == 1
+    assert result.runtime_stats.slowest_symbol in {"SLOWUSDT", "BTCUSDT"}
 
 
 def test_scan_timeout_stops_gracefully_with_partial_results() -> None:
@@ -410,6 +423,42 @@ def test_scan_timeout_stops_gracefully_with_partial_results() -> None:
     assert result.scanned_symbols == 1
     assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
     assert "full scan timeout exceeded after 0.01 seconds" in str(result.results[0].error_message)
+    assert result.results[0].timed_out is True
+    assert result.results[0].timeout_status == "global_timeout"
+    assert result.runtime_stats.global_timeout_hit is True
+    assert result.runtime_stats.timeout_count == 1
+    assert result.runtime_stats.skipped_symbols == 1
+
+
+def test_one_slow_symbol_does_not_stop_full_scan_runtime_stats() -> None:
+    class OneSlowSymbolClient(FakeExchangeClient):
+        async def get_klines(self, symbol: str, interval: str, limit: int) -> list[dict[str, Decimal | int]]:
+            if symbol == "SLOWUSDT":
+                await asyncio.sleep(0.3)
+            return await super().get_klines(symbol, interval, limit)
+
+    client = OneSlowSymbolClient(
+        {
+            "SLOWUSDT": _flat_candles(),
+            "ETHUSDT": _flat_candles(),
+            "BTCUSDT": _strategy_pullback_candles(),
+        },
+        failing_timeframes={"2d"},
+    )
+
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(["SLOWUSDT", "ETHUSDT", "BTCUSDT"], request_timeout_sec=1, symbol_timeout_sec=0.2)
+        )
+    )
+
+    assert [item.symbol for item in result.results] == ["SLOWUSDT", "ETHUSDT", "BTCUSDT"]
+    assert result.results[0].timeout_status == "symbol_timeout"
+    assert result.results[1].status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert result.results[2].status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+    assert result.runtime_stats.completed_symbols == 2
+    assert result.runtime_stats.errored_symbols == 1
+    assert result.runtime_stats.skipped_symbols == 0
 
 
 def test_optional_endpoint_timeout_is_marked_na_without_blocking_scan() -> None:
@@ -689,6 +738,48 @@ def test_fast_mode_does_not_weaken_strategy_gates_for_no_setup() -> None:
     assert fast.valid_strategy_modes == ()
     assert normal.strategy_diagnostics["challenge"]["first_failed_gate"] == "missing_confirmed_sweep"
     assert fast.strategy_diagnostics["challenge"]["first_failed_gate"] == "missing_confirmed_sweep"
+
+
+def test_fast_mode_skips_optional_derivatives_history_that_could_block() -> None:
+    class BlockingOptionalHistoryClient(FakeExchangeClient):
+        async def get_funding_rate_history(self, symbol: str) -> list[dict[str, Decimal | str | int]]:
+            raise AssertionError("fast mode should skip funding history")
+
+        async def get_open_interest_history(self, symbol: str) -> list[dict[str, Decimal | str | int]]:
+            raise AssertionError("fast mode should skip open interest history")
+
+        async def get_long_short_ratio(self, symbol: str) -> Decimal | str:
+            raise AssertionError("fast mode should skip long/short ratio")
+
+    client = BlockingOptionalHistoryClient({"BTCUSDT": _flat_candles()})
+
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"], fast_mode=True)))
+
+    symbol_result = result.results[0]
+    assert symbol_result.status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert "funding_history: N/A" in symbol_result.missing_data
+    assert "open_interest_history: N/A" in symbol_result.missing_data
+    assert "long_short_ratio: N/A" in symbol_result.missing_data
+    assert any("funding_history skipped in fast mode." in warning for warning in symbol_result.derivatives_warnings)
+
+
+def test_fast_mode_caps_remaining_optional_derivatives_timeout() -> None:
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        delayed_methods={"get_funding_rate": 1.0},
+    )
+
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(["BTCUSDT"], fast_mode=True, request_timeout_sec=5, symbol_timeout_sec=2)
+        )
+    )
+
+    symbol_result = result.results[0]
+    assert symbol_result.status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert symbol_result.timeout_status == "none"
+    assert "funding_rate: N/A" in symbol_result.missing_data
+    assert any("funding_rate unavailable from public endpoint" in warning for warning in symbol_result.derivatives_warnings)
 
 
 def test_scanner_fetches_12h_15m_and_5m_for_strategy_context() -> None:
