@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -31,6 +33,7 @@ from app.analytics.setup_quality import (
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
+from app.data.exceptions import ExchangeTimeoutError
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
 from app.data.timeframes import resample_ohlcv_candles
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
@@ -58,6 +61,12 @@ NO_VALID_STRATEGY_SETUP_REASON = "No valid Liquidity-Grab Pullback setup."
 MIN_12H_VOLUME_PROFILE_CANDLES = 20
 BINANCE_KLINE_LIMIT_MIN = 1
 BINANCE_KLINE_LIMIT_MAX = 1500
+DEFAULT_REQUEST_TIMEOUT_SEC = 10.0
+DEFAULT_SYMBOL_TIMEOUT_SEC = 60.0
+DEFAULT_REPLAY_CANDLES = 300
+SAFE_REPLAY_CANDLE_LIMIT_MAX = 500
+FAST_CANDLE_LIMIT = 220
+FAST_REPLAY_CANDLES = 240
 
 
 class ScannerPipelineStatus(str, Enum):
@@ -137,6 +146,10 @@ class ScannerRunConfig(BaseModel):
     cache_enabled: bool = True
     cache_ttl_seconds: int | None = None
     cache_file: Path | None = None
+    request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC
+    symbol_timeout_sec: float = DEFAULT_SYMBOL_TIMEOUT_SEC
+    scan_timeout_sec: float | None = None
+    fast_mode: bool = False
 
     model_config = ConfigDict(frozen=True)
 
@@ -215,6 +228,19 @@ class ScannerRunConfig(BaseModel):
         if value is not None and value < 0:
             raise ValueError("cache_ttl_seconds must be zero or greater")
         return value
+
+    @field_validator("request_timeout_sec", "symbol_timeout_sec", "scan_timeout_sec", mode="before")
+    @classmethod
+    def _timeout_positive(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("timeout values must be numbers") from exc
+        if normalized <= 0:
+            raise ValueError("timeout values must be greater than zero")
+        return normalized
 
     @model_validator(mode="after")
     def _validate_config(self) -> ScannerRunConfig:
@@ -430,40 +456,61 @@ class ScannerRunner:
         config: ScannerRunConfig | Mapping[str, Any],
         *,
         after_symbol: Callable[[ScannerSymbolResult, int, int], Any] | None = None,
+        progress: Callable[[str], Any] | None = None,
         resume_metadata: Mapping[str, Any] | None = None,
     ) -> ScannerRunResult:
         run_config = config if isinstance(config, ScannerRunConfig) else ScannerRunConfig.model_validate(config)
         client, owns_client = self._exchange_client_for(run_config)
         results: list[ScannerSymbolResult] = []
         total_symbols = len(run_config.symbols)
+        scan_deadline = (
+            time.monotonic() + run_config.scan_timeout_sec
+            if run_config.scan_timeout_sec is not None
+            else None
+        )
 
         try:
             for symbol_config in run_config.symbols:
+                if scan_deadline is not None and time.monotonic() >= scan_deadline:
+                    self.logger.warning("Full scan timeout reached before symbol=%s.", symbol_config.symbol)
+                    break
+
+                symbol_started = time.monotonic()
+                stop_after_symbol = False
+                await _emit_progress(progress, f"Starting {symbol_config.symbol}...")
+                symbol_timeout = run_config.symbol_timeout_sec
+                if scan_deadline is not None:
+                    remaining_scan_seconds = max(scan_deadline - time.monotonic(), 0.001)
+                    symbol_timeout = min(symbol_timeout, remaining_scan_seconds)
+
                 try:
-                    symbol_result = await self._scan_symbol(symbol_config, run_config, client)
+                    symbol_result = await asyncio.wait_for(
+                        self._scan_symbol(symbol_config, run_config, client, progress=progress),
+                        timeout=symbol_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    elapsed = time.monotonic() - symbol_started
+                    scan_timeout_hit = scan_deadline is not None and time.monotonic() >= scan_deadline
+                    if scan_timeout_hit and symbol_timeout < run_config.symbol_timeout_sec:
+                        reason = f"full scan timeout exceeded after {_format_seconds(run_config.scan_timeout_sec)} seconds"
+                        stop_after_symbol = True
+                    else:
+                        reason = f"symbol timeout exceeded after {_format_seconds(run_config.symbol_timeout_sec)} seconds"
+                    self.logger.error("Scanner timed out for symbol=%s after %.2fs: %s", symbol_config.symbol, elapsed, reason)
+                    symbol_result = _scan_error_result(symbol_config.symbol, reason)
                 except Exception as exc:
                     reason = _clean_error_message(exc)
                     self.logger.error("Scanner failed for symbol=%s: %s", symbol_config.symbol, reason)
-                    symbol_result = ScannerSymbolResult(
-                        symbol=symbol_config.symbol,
-                        status=ScannerPipelineStatus.SCAN_ERROR,
-                        status_history=(ScannerPipelineStatus.SCAN_ERROR,),
-                        error_message=reason,
-                        rejection_reason=reason,
-                        rejection_stage="scanner",
-                        rejection_reasons=(reason,),
-                        setup_quality=validate_setup_quality(
-                            SetupQualityInput(
-                                symbol=symbol_config.symbol,
-                                first_failed_gate="scanner_error",
-                                missing_data=("scanner: N/A",),
-                                rejection_reason=reason,
-                            )
-                        ),
-                    )
+                    symbol_result = _scan_error_result(symbol_config.symbol, reason)
                 results.append(symbol_result)
+                await _emit_progress(
+                    progress,
+                    f"Done {symbol_config.symbol} in {_format_seconds(time.monotonic() - symbol_started)} seconds.",
+                )
                 if after_symbol is not None:
                     await _maybe_await(after_symbol(symbol_result, len(results), total_symbols))
+                if stop_after_symbol:
+                    break
         finally:
             if owns_client and hasattr(client, "aclose"):
                 await _maybe_await(client.aclose())
@@ -489,10 +536,10 @@ class ScannerRunner:
             client = self.exchange_client
             owns_client = False
         elif config.exchange == "binance":
-            client = BinanceFuturesClient()
+            client = BinanceFuturesClient(timeout=config.request_timeout_sec)
             owns_client = True
         else:
-            client = BybitLinearClient()
+            client = BybitLinearClient(timeout=config.request_timeout_sec)
             owns_client = True
 
         if config.cache_enabled and not isinstance(client, CachedMarketDataClient):
@@ -510,12 +557,15 @@ class ScannerRunner:
         symbol_config: ScannerSymbolConfig,
         config: ScannerRunConfig,
         client: BaseExchangeClient,
+        *,
+        progress: Callable[[str], Any] | None = None,
     ) -> ScannerSymbolResult:
         symbol = symbol_config.symbol
-        candles = await self._fetch_primary_candles(client, symbol, config)
+        candles = await self._fetch_primary_candles(client, symbol, config, progress=progress)
         technical_candles = _technical_candles(candles)
         current_price = _current_price_from_candles(candles)
-        optional_data = await self._fetch_optional_market_data(client, symbol)
+        await _emit_progress(progress, "Fetching derivatives...")
+        optional_data = await self._fetch_optional_market_data(client, symbol, config)
 
         ticker_price = _decimal_field(optional_data.ticker, ("last_price", "mark_price"))
         if ticker_price != NA:
@@ -545,9 +595,11 @@ class ScannerRunner:
             optional_data=optional_data,
             technical=technical,
             derivatives_enrichment=derivatives_enrichment,
+            progress=progress,
         )
         base_missing.extend(strategy_execution.strategy_missing_data)
         base_unverified.extend(strategy_execution.strategy_unverified_data)
+        await _emit_progress(progress, "Scoring...")
 
         if not technical.is_valid:
             reason = "; ".join(technical.errors) if technical.errors else "Technical structure is invalid."
@@ -830,14 +882,18 @@ class ScannerRunner:
         client: BaseExchangeClient,
         symbol: str,
         config: ScannerRunConfig,
+        *,
+        progress: Callable[[str], Any] | None = None,
     ) -> Sequence[Any]:
         primary_timeframe = config.interval.strip().lower()
         limit_warnings: list[str] = []
+        await _emit_progress(progress, _progress_message_for_timeframe(config, primary_timeframe))
         if config.exchange == "binance" and primary_timeframe == "2d":
-            source_candles = await client.get_klines(
-                symbol,
-                SYNTHETIC_2D_SOURCE_TIMEFRAME,
-                _synthetic_2d_source_limit(config, limit_warnings),
+            source_limit = _synthetic_2d_source_limit(config, limit_warnings)
+            source_candles = await self._request_public_api(
+                config,
+                f"{symbol} {SYNTHETIC_2D_SOURCE_TIMEFRAME} candles for synthetic 2d",
+                lambda: client.get_klines(symbol, SYNTHETIC_2D_SOURCE_TIMEFRAME, source_limit),
             )
             for warning in _unique_strings(limit_warnings):
                 self.logger.warning("Scanner candle limit adjusted for symbol=%s: %s", symbol, warning)
@@ -845,7 +901,11 @@ class ScannerRunner:
         fetch_limit = _timeframe_fetch_limit(config, primary_timeframe, limit_warnings)
         for warning in _unique_strings(limit_warnings):
             self.logger.warning("Scanner candle limit adjusted for symbol=%s: %s", symbol, warning)
-        return await client.get_klines(symbol, config.interval, fetch_limit)
+        return await self._request_public_api(
+            config,
+            f"{symbol} {config.interval} candles",
+            lambda: client.get_klines(symbol, config.interval, fetch_limit),
+        )
 
     async def _run_strategy(
         self,
@@ -858,6 +918,7 @@ class ScannerRunner:
         optional_data: _OptionalMarketData,
         technical: TechnicalStructureResult,
         derivatives_enrichment: DerivativesEnrichmentResult | None = None,
+        progress: Callable[[str], Any] | None = None,
     ) -> _StrategyExecution:
         if not config.enable_strategy_output or config.strategy_name is None:
             execution_timeframe = config.execution_timeframe.strip().lower()
@@ -878,6 +939,7 @@ class ScannerRunner:
             symbol=symbol,
             config=config,
             primary_candles=primary_candles,
+            progress=progress,
         )
         execution_timeframe = config.execution_timeframe.strip().lower()
         execution_volume_profile = _volume_profile_for_timeframe(
@@ -967,6 +1029,7 @@ class ScannerRunner:
         symbol: str,
         config: ScannerRunConfig,
         primary_candles: Sequence[Any],
+        progress: Callable[[str], Any] | None = None,
     ) -> tuple[dict[str, Sequence[Any]], tuple[str, ...], dict[str, Any]]:
         candles_by_timeframe: dict[str, Sequence[Any]] = {}
         missing_data: list[str] = []
@@ -976,14 +1039,16 @@ class ScannerRunner:
 
         if config.htf_timeframe.strip().lower() == "2d":
             source_candles: Sequence[Any] = ()
+            await _emit_progress(progress, "Fetching HTF 2d...")
             try:
                 if primary_timeframe == SYNTHETIC_2D_SOURCE_TIMEFRAME:
                     source_candles = primary_candles
                 else:
-                    source_candles = await client.get_klines(
-                        symbol,
-                        SYNTHETIC_2D_SOURCE_TIMEFRAME,
-                        _synthetic_2d_source_limit(config, limit_warnings),
+                    source_limit = _synthetic_2d_source_limit(config, limit_warnings)
+                    source_candles = await self._request_public_api(
+                        config,
+                        f"{symbol} {SYNTHETIC_2D_SOURCE_TIMEFRAME} candles for synthetic 2d",
+                        lambda: client.get_klines(symbol, SYNTHETIC_2D_SOURCE_TIMEFRAME, source_limit),
                     )
                 synthetic_2d = resample_ohlcv_candles(source_candles, target_interval="2d")
             except Exception as exc:
@@ -1005,11 +1070,18 @@ class ScannerRunner:
                 candles_by_timeframe[timeframe] = primary_candles
                 continue
 
+            if config.fast_mode and _fast_mode_skips_timeframe(config, timeframe):
+                missing_data.append(f"candles_{timeframe}: N/A")
+                limit_warnings.append(f"{timeframe} candles skipped in fast mode.")
+                continue
+
+            await _emit_progress(progress, _progress_message_for_timeframe(config, timeframe))
             try:
-                candles = await client.get_klines(
-                    symbol,
-                    timeframe,
-                    _timeframe_fetch_limit(config, timeframe, limit_warnings),
+                fetch_limit = _timeframe_fetch_limit(config, timeframe, limit_warnings)
+                candles = await self._request_public_api(
+                    config,
+                    f"{symbol} {timeframe} candles",
+                    lambda: client.get_klines(symbol, timeframe, fetch_limit),
                 )
             except Exception as exc:
                 self.logger.warning("Optional strategy candles fetch failed for symbol=%s timeframe=%s: %s", symbol, timeframe, exc)
@@ -1030,44 +1102,56 @@ class ScannerRunner:
             },
         )
 
-    async def _fetch_optional_market_data(self, client: BaseExchangeClient, symbol: str) -> _OptionalMarketData:
+    async def _fetch_optional_market_data(
+        self,
+        client: BaseExchangeClient,
+        symbol: str,
+        config: ScannerRunConfig,
+    ) -> _OptionalMarketData:
         missing_data: list[str] = []
         unverified_data: list[str] = []
         warnings: list[str] = []
-        ticker = await self._optional_call(client, "get_ticker", symbol, missing_data, warnings, "ticker")
-        funding = await self._optional_call(client, "get_funding_rate", symbol, missing_data, warnings, "funding_rate")
-        funding_history = await self._optional_call(
-            client,
-            "get_funding_rate_history",
-            symbol,
-            missing_data,
-            warnings,
+        optional_specs = (
+            ("ticker", "get_ticker"),
+            ("funding_rate", "get_funding_rate"),
+            ("funding_history", "get_funding_rate_history"),
+            ("open_interest", "get_open_interest"),
+            ("open_interest_history", "get_open_interest_history"),
+            ("long_short_ratio", "get_long_short_ratio"),
+        )
+        skipped_fast_labels = {
             "funding_history",
-        )
-        open_interest = await self._optional_call(
-            client,
-            "get_open_interest",
-            symbol,
-            missing_data,
-            warnings,
-            "open_interest",
-        )
-        open_interest_history = await self._optional_call(
-            client,
-            "get_open_interest_history",
-            symbol,
-            missing_data,
-            warnings,
             "open_interest_history",
-        )
-        long_short_ratio = await self._optional_call(
-            client,
-            "get_long_short_ratio",
-            symbol,
-            missing_data,
-            warnings,
             "long_short_ratio",
+        } if config.fast_mode else set()
+        optional_results = await asyncio.gather(
+            *(
+                self._optional_call(client, method_name, symbol, config, label)
+                for label, method_name in optional_specs
+                if label not in skipped_fast_labels
+            )
         )
+        values_by_label = {label: value for label, value, _missing, _warning in optional_results}
+        for label, _method_name in optional_specs:
+            if label in skipped_fast_labels:
+                missing_data.append(f"{label}: N/A")
+                warnings.append(f"{label} skipped in fast mode.")
+                continue
+            result = next((item for item in optional_results if item[0] == label), None)
+            if result is None:
+                continue
+            _label, _value, missing, warning = result
+            if missing is not None:
+                missing_data.append(missing)
+            if warning is not None:
+                warnings.append(warning)
+
+        ticker = values_by_label.get("ticker")
+        funding = values_by_label.get("funding_rate")
+        funding_history = values_by_label.get("funding_history")
+        open_interest = values_by_label.get("open_interest")
+        open_interest_history = values_by_label.get("open_interest_history")
+        long_short_ratio = values_by_label.get("long_short_ratio")
         previous_open_interest = _previous_open_interest_from(open_interest)
 
         if previous_open_interest == NA:
@@ -1094,21 +1178,31 @@ class ScannerRunner:
         client: BaseExchangeClient,
         method_name: str,
         symbol: str,
-        missing_data: list[str],
-        warnings: list[str],
+        config: ScannerRunConfig,
         label: str,
-    ) -> Any | None:
+    ) -> tuple[str, Any | None, str | None, str | None]:
         method = getattr(client, method_name, None)
         if not callable(method):
-            missing_data.append(f"{label}: N/A")
-            return None
+            return label, None, f"{label}: N/A", None
         try:
-            return await _maybe_await(method(symbol))
+            value = await self._request_public_api(config, f"{symbol} {label}", lambda: method(symbol))
+            return label, value, None, None
         except Exception as exc:
             self.logger.debug("Optional %s fetch failed for symbol=%s: %s", label, symbol, exc)
-            missing_data.append(f"{label}: N/A")
-            warnings.append(f"{label} unavailable from public endpoint: {exc}")
-            return None
+            return label, None, f"{label}: N/A", f"{label} unavailable from public endpoint: {exc}"
+
+    async def _request_public_api(
+        self,
+        config: ScannerRunConfig,
+        label: str,
+        call: Callable[[], Any],
+    ) -> Any:
+        try:
+            return await asyncio.wait_for(_maybe_await(call()), timeout=config.request_timeout_sec)
+        except asyncio.TimeoutError as exc:
+            raise ExchangeTimeoutError(
+                f"{label} request timed out after {_format_seconds(config.request_timeout_sec)} seconds"
+            ) from exc
 
     def _symbol_result(
         self,
@@ -1711,7 +1805,7 @@ def _strategy_levels(*values: MaybeDecimal) -> tuple[Decimal, ...]:
 
 
 def _synthetic_2d_source_limit(config: ScannerRunConfig, warnings: list[str]) -> int:
-    requested_source_limit = config.candle_limit * 2
+    requested_source_limit = _base_candle_limit(config, warnings) * 2
     return _exchange_kline_limit(
         exchange=config.exchange,
         requested_limit=requested_source_limit,
@@ -1722,9 +1816,14 @@ def _synthetic_2d_source_limit(config: ScannerRunConfig, warnings: list[str]) ->
 
 def _timeframe_fetch_limit(config: ScannerRunConfig, timeframe: str, warnings: list[str]) -> int:
     normalized_timeframe = timeframe.strip().lower()
-    requested_limit = config.candle_limit
+    requested_limit = _base_candle_limit(config, warnings)
     if config.replay_candles is not None and normalized_timeframe in _replay_execution_timeframes(config):
-        requested_limit = config.replay_candles
+        requested_limit = _safe_replay_candles(config.replay_candles, warnings)
+        if config.fast_mode and requested_limit > FAST_REPLAY_CANDLES:
+            warnings.append(
+                f"replay_candles limit clamped from {requested_limit} to {FAST_REPLAY_CANDLES} for fast mode."
+            )
+            requested_limit = FAST_REPLAY_CANDLES
     return _exchange_kline_limit(
         exchange=config.exchange,
         requested_limit=requested_limit,
@@ -1738,6 +1837,47 @@ def _replay_execution_timeframes(config: ScannerRunConfig) -> set[str]:
         config.execution_timeframe.strip().lower(),
         config.confirmation_timeframe.strip().lower(),
     }
+
+
+def _base_candle_limit(config: ScannerRunConfig, warnings: list[str]) -> int:
+    requested_limit = config.candle_limit
+    if config.fast_mode and requested_limit > FAST_CANDLE_LIMIT:
+        warnings.append(f"candle_limit clamped from {requested_limit} to {FAST_CANDLE_LIMIT} for fast mode.")
+        return FAST_CANDLE_LIMIT
+    return requested_limit
+
+
+def _safe_replay_candles(replay_candles: int, warnings: list[str]) -> int:
+    if replay_candles > SAFE_REPLAY_CANDLE_LIMIT_MAX:
+        warnings.append(
+            f"replay_candles limit clamped from {replay_candles} to {SAFE_REPLAY_CANDLE_LIMIT_MAX} "
+            f"for safe replay maximum {SAFE_REPLAY_CANDLE_LIMIT_MAX}."
+        )
+        return SAFE_REPLAY_CANDLE_LIMIT_MAX
+    return replay_candles
+
+
+def _fast_mode_skips_timeframe(config: ScannerRunConfig, timeframe: str) -> bool:
+    normalized = timeframe.strip().lower()
+    required_timeframes = {
+        config.bias_timeframe.strip().lower(),
+        config.execution_timeframe.strip().lower(),
+        config.confirmation_timeframe.strip().lower(),
+    }
+    return normalized in {"4h", "1h"} and normalized not in required_timeframes
+
+
+def _progress_message_for_timeframe(config: ScannerRunConfig, timeframe: str) -> str | None:
+    normalized = timeframe.strip().lower()
+    if normalized == config.htf_timeframe.strip().lower():
+        return f"Fetching HTF {normalized}..."
+    if normalized == config.bias_timeframe.strip().lower():
+        return f"Fetching {normalized} bias..."
+    if normalized == config.execution_timeframe.strip().lower():
+        return f"Fetching {normalized} execution..."
+    if normalized == config.confirmation_timeframe.strip().lower():
+        return f"Fetching {normalized} confirmation..."
+    return None
 
 
 def _exchange_kline_limit(*, exchange: str, requested_limit: int, label: str, warnings: list[str]) -> int:
@@ -2311,8 +2451,44 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+async def _emit_progress(progress: Callable[[str], Any] | None, message: str | None) -> None:
+    if progress is None or not message:
+        return
+    await _maybe_await(progress(message))
+
+
+def _format_seconds(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    if value < 1:
+        formatted = f"{value:.2f}"
+    else:
+        formatted = f"{value:.1f}"
+    return formatted.rstrip("0").rstrip(".")
+
+
 def _is_scan_error(result: ScannerSymbolResult) -> bool:
     return result.status in (ScannerPipelineStatus.SCAN_ERROR, ScannerPipelineStatus.FAILED)
+
+
+def _scan_error_result(symbol: str, reason: str) -> ScannerSymbolResult:
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=ScannerPipelineStatus.SCAN_ERROR,
+        status_history=(ScannerPipelineStatus.SCAN_ERROR,),
+        error_message=reason,
+        rejection_reason=reason,
+        rejection_stage="scanner",
+        rejection_reasons=(reason,),
+        setup_quality=validate_setup_quality(
+            SetupQualityInput(
+                symbol=symbol,
+                first_failed_gate="scanner_error",
+                missing_data=("scanner: N/A",),
+                rejection_reason=reason,
+            )
+        ),
+    )
 
 
 def _clean_error_message(exc: Exception) -> str:
@@ -2421,6 +2597,11 @@ def _unique_strings(values: Sequence[str]) -> tuple[str, ...]:
 
 
 __all__ = [
+    "DEFAULT_REPLAY_CANDLES",
+    "DEFAULT_REQUEST_TIMEOUT_SEC",
+    "DEFAULT_SYMBOL_TIMEOUT_SEC",
+    "FAST_CANDLE_LIMIT",
+    "FAST_REPLAY_CANDLES",
     "ScannerPipelineStatus",
     "ScannerRiskConfig",
     "ScannerRunConfig",
@@ -2428,4 +2609,5 @@ __all__ = [
     "ScannerRunner",
     "ScannerSymbolConfig",
     "ScannerSymbolResult",
+    "SAFE_REPLAY_CANDLE_LIMIT_MAX",
 ]

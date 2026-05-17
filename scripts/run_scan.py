@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import json
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -39,6 +40,12 @@ from app.formatters.telegram_formatter import format_telegram_strategy_output  #
 from app.pipeline.scanner_runner import (  # noqa: E402
     BINANCE_KLINE_LIMIT_MAX,
     BINANCE_KLINE_LIMIT_MIN,
+    DEFAULT_REPLAY_CANDLES,
+    DEFAULT_REQUEST_TIMEOUT_SEC,
+    DEFAULT_SYMBOL_TIMEOUT_SEC,
+    FAST_CANDLE_LIMIT,
+    FAST_REPLAY_CANDLES,
+    SAFE_REPLAY_CANDLE_LIMIT_MAX,
     ScannerPipelineStatus,
     ScannerRunConfig,
     ScannerRunResult,
@@ -90,6 +97,16 @@ def _non_negative_decimal_arg(value: str) -> Decimal:
     return decimal
 
 
+def _positive_float_arg(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     tokens = list(sys.argv[1:] if argv is None else argv)
     symbols_explicit = any(token == "--symbols" or token.startswith("--symbols=") for token in tokens)
@@ -122,10 +139,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--confirmation-timeframe", default="5m")
     parser.add_argument("--aggressive-toggle", action="store_true")
     parser.add_argument("--replay", action="store_true")
-    parser.add_argument("--replay-candles", type=int, default=1000)
+    parser.add_argument("--replay-candles", type=int, default=DEFAULT_REPLAY_CANDLES)
     parser.add_argument("--same-candle-policy", choices=["conservative", "optimistic"], default="conservative")
     parser.add_argument("--replay-max-hold-candles", type=int)
     parser.add_argument("--replay-max-fill-candles", type=int)
+    parser.add_argument("--request-timeout-sec", type=_positive_float_arg, default=DEFAULT_REQUEST_TIMEOUT_SEC)
+    parser.add_argument("--symbol-timeout-sec", type=_positive_float_arg, default=DEFAULT_SYMBOL_TIMEOUT_SEC)
+    parser.add_argument("--scan-timeout-sec", type=_positive_float_arg)
+    parser.add_argument("--fast", action="store_true")
     parser.add_argument("--show-strategy-output", action="store_true")
     parser.add_argument("--telegram-format", action="store_true")
     parser.add_argument("--diagnostics-level", choices=["summary", "normal", "full"], default="normal")
@@ -180,12 +201,13 @@ async def main(argv: Sequence[str] | None = None) -> None:
     display_mode = args.display
     if (args.verbose or diagnostics_level == "full") and not args.display_explicit:
         display_mode = "full"
+    effective_candle_limit = _effective_candle_limit(args)
 
     config = ScannerRunConfig(
         symbols=watchlist.symbols,
         exchange=args.exchange,
         interval=args.interval,
-        candle_limit=args.candle_limit,
+        candle_limit=effective_candle_limit,
         dry_run_alerts=True,
         account_equity=Decimal(args.account_equity),
         risk_per_trade_pct=Decimal(args.risk_per_trade_pct),
@@ -203,11 +225,17 @@ async def main(argv: Sequence[str] | None = None) -> None:
         cache_enabled=args.cache_enabled,
         cache_ttl_seconds=args.cache_ttl_seconds,
         cache_file=args.cache_file,
+        request_timeout_sec=args.request_timeout_sec,
+        symbol_timeout_sec=args.symbol_timeout_sec,
+        scan_timeout_sec=args.scan_timeout_sec,
+        fast_mode=args.fast,
     )
 
     print(_format_universe_header(watchlist.universe))
     print(f"Watchlist: {watchlist.source_label}")
     print(f"Symbols queued: {len(watchlist.symbols)}")
+    for warning in _startup_warnings(args, effective_candle_limit):
+        print(f"Warning: {warning}")
     print("")
 
     resume_state = _load_resume_state(args.resume_from, watchlist.symbols, skip_completed=not args.no_resume_skip)
@@ -248,12 +276,16 @@ async def main(argv: Sequence[str] | None = None) -> None:
             )
             _write_run_json(args.save_run, partial_result)
 
+    async def progress(message: str) -> None:
+        print(message, flush=True)
+
     if symbols_to_scan:
         runner = _scanner_runner(cache)
         scan_result = await _run_scanner(
             runner,
             scan_config,
             after_symbol=after_symbol if (args.progress or args.save_run is not None) else None,
+            progress=progress,
             resume_metadata=resume_metadata,
         )
         for symbol_result in scan_result.results:
@@ -264,7 +296,12 @@ async def main(argv: Sequence[str] | None = None) -> None:
             results_by_symbol=latest_results_by_symbol,
             cache=cache,
             retry_diagnostics=scan_result.retry_diagnostics,
-            resume_metadata={**resume_metadata, "pending_symbols": []},
+            resume_metadata={
+                **resume_metadata,
+                "pending_symbols": [
+                    symbol for symbol in watchlist.symbols if symbol not in latest_results_by_symbol
+                ],
+            },
         )
     else:
         result = _combined_run_result(
@@ -336,6 +373,32 @@ def _format_available_presets() -> str:
     for name, count in presets_with_counts():
         lines.append(f"- {name} ({count} symbols)")
     return "\n".join(lines)
+
+
+def _effective_candle_limit(args: argparse.Namespace) -> int:
+    if args.fast and args.candle_limit > FAST_CANDLE_LIMIT:
+        return FAST_CANDLE_LIMIT
+    return args.candle_limit
+
+
+def _effective_replay_candles(args: argparse.Namespace) -> int:
+    replay_candles = min(args.replay_candles, SAFE_REPLAY_CANDLE_LIMIT_MAX)
+    if args.fast:
+        replay_candles = min(replay_candles, FAST_REPLAY_CANDLES)
+    return replay_candles
+
+
+def _startup_warnings(args: argparse.Namespace, effective_candle_limit: int) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if args.fast and effective_candle_limit != args.candle_limit:
+        warnings.append(f"Fast mode clamped candle limit from {args.candle_limit} to {effective_candle_limit}.")
+    if args.replay and args.replay_candles > SAFE_REPLAY_CANDLE_LIMIT_MAX:
+        warnings.append(
+            f"Replay candles {args.replay_candles} is high; clamped to {SAFE_REPLAY_CANDLE_LIMIT_MAX} per timeframe."
+        )
+    if args.replay and args.fast and min(args.replay_candles, SAFE_REPLAY_CANDLE_LIMIT_MAX) > FAST_REPLAY_CANDLES:
+        warnings.append(f"Fast mode clamped replay candles to {FAST_REPLAY_CANDLES}.")
+    return tuple(warnings)
 
 
 def _format_universe_header(universe: SymbolUniverse) -> str:
@@ -616,13 +679,19 @@ async def _run_scanner(
     config: ScannerRunConfig,
     *,
     after_symbol: Any | None,
+    progress: Any | None,
     resume_metadata: Mapping[str, Any],
 ) -> ScannerRunResult:
-    if after_symbol is None:
-        return await runner.run(config)
     try:
-        return await runner.run(config, after_symbol=after_symbol, resume_metadata=resume_metadata)
+        return await runner.run(config, after_symbol=after_symbol, progress=progress, resume_metadata=resume_metadata)
     except TypeError:
+        if after_symbol is not None:
+            try:
+                return await runner.run(config, after_symbol=after_symbol, resume_metadata=resume_metadata)
+            except TypeError:
+                pass
+        if after_symbol is None:
+            return await runner.run(config)
         result = await runner.run(config)
         total = len(result.results)
         for index, symbol_result in enumerate(result.results, start=1):
@@ -636,12 +705,13 @@ async def _run_replay(
     scanner_config: ScannerRunConfig,
     cache: MarketDataCache | None,
 ) -> ReplaySummary:
+    replay_candles = _effective_replay_candles(args)
     replay_scan_config = ScannerRunConfig.model_validate(
         {
             **scanner_config.model_dump(),
             "symbols": list(watchlist.symbols),
             "interval": args.execution_timeframe,
-            "replay_candles": args.replay_candles,
+            "replay_candles": replay_candles,
         }
     )
     runner = _scanner_runner(cache)
@@ -649,21 +719,41 @@ async def _run_replay(
     candles_by_symbol: dict[str, Mapping[str, Sequence[Any]]] = {}
     timeframe_context_by_symbol: dict[str, Mapping[str, Any]] = {}
     data_notes_by_symbol: dict[str, Sequence[str]] = {}
+    replay_deadline = time.monotonic() + args.scan_timeout_sec if args.scan_timeout_sec is not None else None
 
     try:
         for symbol in watchlist.symbols:
-            limit_warnings: list[str] = []
-            primary_candles = await client.get_klines(
-                symbol,
-                args.execution_timeframe,
-                _replay_primary_fetch_limit(args, limit_warnings),
+            if replay_deadline is not None and time.monotonic() >= replay_deadline:
+                break
+            remaining = (
+                max(replay_deadline - time.monotonic(), 0.001)
+                if replay_deadline is not None
+                else args.symbol_timeout_sec
             )
-            candles_by_timeframe, missing_data, timeframe_context = await runner._fetch_strategy_timeframe_candles(
-                client=client,
-                symbol=symbol,
-                config=replay_scan_config,
-                primary_candles=primary_candles,
-            )
+            symbol_timeout = min(args.symbol_timeout_sec, remaining)
+            try:
+                (
+                    candles_by_timeframe,
+                    missing_data,
+                    timeframe_context,
+                    limit_warnings,
+                ) = await asyncio.wait_for(
+                    _fetch_replay_symbol_timeframes(
+                        runner=runner,
+                        client=client,
+                        symbol=symbol,
+                        args=args,
+                        config=replay_scan_config,
+                    ),
+                    timeout=symbol_timeout,
+                )
+            except Exception as exc:
+                message = _clean_error_message(exc)
+                candles_by_timeframe = {}
+                missing_data = (f"replay_{symbol}: N/A",)
+                timeframe_context = {}
+                limit_warnings = (f"replay unavailable for {symbol}: {message}",)
+
             candles_by_symbol[symbol] = candles_by_timeframe
             timeframe_context_by_symbol[symbol] = timeframe_context
             data_notes_by_symbol[symbol] = _unique_texts(
@@ -684,7 +774,7 @@ async def _run_replay(
         confirmation_timeframe=args.confirmation_timeframe,
         htf_timeframe=args.htf_timeframe,
         bias_timeframe=args.bias_timeframe,
-        replay_candles=args.replay_candles,
+        replay_candles=replay_candles,
         same_candle_policy=args.same_candle_policy,
         max_hold_candles=args.replay_max_hold_candles,
         max_fill_candles=args.replay_max_fill_candles,
@@ -698,8 +788,41 @@ async def _run_replay(
     )
 
 
+async def _fetch_replay_symbol_timeframes(
+    *,
+    runner: Any,
+    client: Any,
+    symbol: str,
+    args: argparse.Namespace,
+    config: ScannerRunConfig,
+) -> tuple[Mapping[str, Sequence[Any]], tuple[str, ...], Mapping[str, Any], tuple[str, ...]]:
+    limit_warnings: list[str] = []
+    primary_limit = _replay_primary_fetch_limit(args, limit_warnings)
+    primary_candles = await runner._request_public_api(
+        config,
+        f"{symbol} replay {args.execution_timeframe} candles",
+        lambda: client.get_klines(symbol, args.execution_timeframe, primary_limit),
+    )
+    candles_by_timeframe, missing_data, timeframe_context = await runner._fetch_strategy_timeframe_candles(
+        client=client,
+        symbol=symbol,
+        config=config,
+        primary_candles=primary_candles,
+    )
+    return candles_by_timeframe, missing_data, timeframe_context, _unique_texts(limit_warnings)
+
+
 def _replay_primary_fetch_limit(args: argparse.Namespace, warnings: list[str]) -> int:
     requested_limit = args.replay_candles
+    if requested_limit > SAFE_REPLAY_CANDLE_LIMIT_MAX:
+        warnings.append(
+            f"replay_candles limit clamped from {requested_limit} to {SAFE_REPLAY_CANDLE_LIMIT_MAX} "
+            f"for safe replay maximum {SAFE_REPLAY_CANDLE_LIMIT_MAX}."
+        )
+        requested_limit = SAFE_REPLAY_CANDLE_LIMIT_MAX
+    if args.fast and requested_limit > FAST_REPLAY_CANDLES:
+        warnings.append(f"replay_candles limit clamped from {requested_limit} to {FAST_REPLAY_CANDLES} for fast mode.")
+        requested_limit = FAST_REPLAY_CANDLES
     if args.exchange != "binance":
         return requested_limit
 
@@ -710,6 +833,13 @@ def _replay_primary_fetch_limit(args: argparse.Namespace, warnings: list[str]) -
             f"for Binance kline limit {BINANCE_KLINE_LIMIT_MIN}-{BINANCE_KLINE_LIMIT_MAX}."
         )
     return clamped
+
+
+def _clean_error_message(exc: Exception) -> str:
+    text = str(exc).strip()
+    if text:
+        return text
+    return exc.__class__.__name__
 
 
 def _sequence_values(value: object) -> tuple[str, ...]:

@@ -433,6 +433,33 @@ def test_phase_20_cli_flags_accepted() -> None:
     assert args.progress is True
 
 
+def test_phase_23_timeout_and_fast_cli_flags_accepted() -> None:
+    args = run_scan.parse_args(
+        [
+            "--symbols",
+            "BTCUSDT",
+            "--request-timeout-sec",
+            "3.5",
+            "--symbol-timeout-sec",
+            "12",
+            "--scan-timeout-sec",
+            "30",
+            "--fast",
+        ]
+    )
+
+    assert args.request_timeout_sec == 3.5
+    assert args.symbol_timeout_sec == 12
+    assert args.scan_timeout_sec == 30
+    assert args.fast is True
+
+
+def test_replay_candles_default_is_300() -> None:
+    args = run_scan.parse_args(["--replay"])
+
+    assert args.replay_candles == 300
+
+
 def test_save_run_without_path_defaults_to_latest_scan() -> None:
     args = run_scan.parse_args(["--symbols", "BTCUSDT", "--save-run"])
 
@@ -959,8 +986,8 @@ def test_replay_candles_above_binance_limit_clamps_with_diagnostic_warning() -> 
 
     limit = run_scan._replay_primary_fetch_limit(args, warnings)
 
-    assert limit == 1500
-    assert warnings == ["replay_candles limit clamped from 2000 to 1500 for Binance kline limit 1-1500."]
+    assert limit == 500
+    assert warnings == ["replay_candles limit clamped from 2000 to 500 for safe replay maximum 500."]
 
 
 def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None:

@@ -132,6 +132,7 @@ class FakeExchangeClient:
         long_short_ratio: Decimal | str = Decimal("1.10"),
         failing_symbols: set[str] | None = None,
         failing_timeframes: set[str] | None = None,
+        delayed_methods: dict[str, float] | None = None,
     ) -> None:
         self.candles_by_symbol = candles_by_symbol
         self.funding = funding
@@ -140,11 +141,13 @@ class FakeExchangeClient:
         self.long_short_ratio = long_short_ratio
         self.failing_symbols = failing_symbols or set()
         self.failing_timeframes = failing_timeframes or set()
+        self.delayed_methods = delayed_methods or {}
         self.requested_symbols: list[str] = []
         self.requested_klines: list[tuple[str, str]] = []
         self.requested_kline_limits: list[tuple[str, str, int]] = []
 
     async def get_klines(self, symbol: str, interval: str, limit: int) -> list[dict[str, Decimal | int]]:
+        await self._maybe_delay("get_klines")
         self.requested_symbols.append(symbol)
         self.requested_klines.append((symbol, interval))
         self.requested_kline_limits.append((symbol, interval, limit))
@@ -155,6 +158,7 @@ class FakeExchangeClient:
         return self.candles_by_symbol[symbol][-limit:]
 
     async def get_ticker(self, symbol: str) -> dict[str, Decimal | str | int]:
+        await self._maybe_delay("get_ticker")
         close = self.candles_by_symbol.get(symbol, _flat_candles())[-1]["close"]
         return {
             "symbol": symbol,
@@ -164,11 +168,13 @@ class FakeExchangeClient:
         }
 
     async def get_funding_rate(self, symbol: str) -> dict[str, Decimal | str | int]:
+        await self._maybe_delay("get_funding_rate")
         if self.funding == NA:
             raise RuntimeError("funding unavailable")
         return {"symbol": symbol, "funding_rate": self.funding, "timestamp": 1}
 
     async def get_funding_rate_history(self, symbol: str) -> list[dict[str, Decimal | str | int]]:
+        await self._maybe_delay("get_funding_rate_history")
         if self.funding == NA:
             raise RuntimeError("funding history unavailable")
         return [
@@ -177,6 +183,7 @@ class FakeExchangeClient:
         ]
 
     async def get_open_interest(self, symbol: str) -> dict[str, Decimal | str | int]:
+        await self._maybe_delay("get_open_interest")
         if self.open_interest == NA:
             raise RuntimeError("open interest unavailable")
         return {
@@ -186,6 +193,7 @@ class FakeExchangeClient:
         }
 
     async def get_open_interest_history(self, symbol: str) -> list[dict[str, Decimal | str | int]]:
+        await self._maybe_delay("get_open_interest_history")
         if self.open_interest == NA:
             raise RuntimeError("open interest history unavailable")
         return [
@@ -194,9 +202,15 @@ class FakeExchangeClient:
         ]
 
     async def get_long_short_ratio(self, symbol: str) -> Decimal | str:
+        await self._maybe_delay("get_long_short_ratio")
         if self.long_short_ratio == NA:
             raise RuntimeError("long/short ratio unavailable")
         return self.long_short_ratio
+
+    async def _maybe_delay(self, method_name: str) -> None:
+        delay = self.delayed_methods.get(method_name)
+        if delay is not None:
+            await asyncio.sleep(delay)
 
 
 class SpyAlertAgent(AlertAgent):
@@ -332,6 +346,104 @@ def test_scanner_continues_if_one_symbol_fails() -> None:
     assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
     assert result.results[0].error_message == "mocked kline failure for FAILUSDT"
     assert result.results[1].status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+
+
+def test_request_timeout_marks_symbol_scan_error() -> None:
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        delayed_methods={"get_klines": 0.05},
+    )
+
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(["BTCUSDT"], request_timeout_sec=0.01, symbol_timeout_sec=1)
+        )
+    )
+
+    symbol_result = result.results[0]
+    assert symbol_result.status == ScannerPipelineStatus.SCAN_ERROR
+    assert "request timed out after 0.01 seconds" in str(symbol_result.error_message)
+
+
+def test_symbol_timeout_marks_symbol_scan_error_and_continues() -> None:
+    class OneSlowSymbolClient(FakeExchangeClient):
+        async def get_klines(self, symbol: str, interval: str, limit: int) -> list[dict[str, Decimal | int]]:
+            if symbol == "SLOWUSDT":
+                await asyncio.sleep(0.3)
+            return await super().get_klines(symbol, interval, limit)
+
+    client = OneSlowSymbolClient(
+        {
+            "SLOWUSDT": _flat_candles(),
+            "BTCUSDT": _strategy_pullback_candles(),
+        },
+        failing_timeframes={"2d"},
+    )
+
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(["SLOWUSDT", "BTCUSDT"], request_timeout_sec=1, symbol_timeout_sec=0.2)
+        )
+    )
+
+    assert result.scanned_symbols == 2
+    assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
+    assert "symbol timeout exceeded after 0.2 seconds" in str(result.results[0].error_message)
+    assert result.results[1].status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+
+
+def test_scan_timeout_stops_gracefully_with_partial_results() -> None:
+    client = FakeExchangeClient(
+        {
+            "BTCUSDT": _flat_candles(),
+            "ETHUSDT": _flat_candles(),
+        },
+        delayed_methods={"get_klines": 0.05},
+    )
+
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(["BTCUSDT", "ETHUSDT"], request_timeout_sec=1, symbol_timeout_sec=1, scan_timeout_sec=0.01)
+        )
+    )
+
+    assert result.scanned_symbols == 1
+    assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
+    assert "full scan timeout exceeded after 0.01 seconds" in str(result.results[0].error_message)
+
+
+def test_optional_endpoint_timeout_is_marked_na_without_blocking_scan() -> None:
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        delayed_methods={"get_open_interest_history": 0.05},
+    )
+
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(["BTCUSDT"], request_timeout_sec=0.01, symbol_timeout_sec=1)
+        )
+    )
+
+    symbol_result = result.results[0]
+    assert symbol_result.status != ScannerPipelineStatus.SCAN_ERROR
+    assert "open_interest_history: N/A" in symbol_result.missing_data
+    assert any("open_interest_history unavailable" in warning for warning in symbol_result.derivatives_warnings)
+
+
+def test_progress_output_callback_receives_symbol_stages() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _flat_candles()})
+    messages: list[str] = []
+
+    run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"]), progress=messages.append))
+
+    assert "Starting BTCUSDT..." in messages
+    assert "Fetching HTF 2d..." in messages
+    assert "Fetching 12h bias..." in messages
+    assert "Fetching 15m execution..." in messages
+    assert "Fetching 5m confirmation..." in messages
+    assert "Fetching derivatives..." in messages
+    assert "Scoring..." in messages
+    assert any(message.startswith("Done BTCUSDT in ") for message in messages)
 
 
 def test_scanner_summary_includes_cache_counts() -> None:
@@ -515,18 +627,19 @@ def test_scanner_does_not_request_binance_2d_and_uses_synthetic_2d() -> None:
     assert diagnostics["candles_2d_count"] == 110
 
 
-def test_replay_candles_1000_does_not_drive_synthetic_2d_source_limit() -> None:
+def test_replay_candles_1000_clamps_execution_timeframes_only() -> None:
     client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
     result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"], replay_candles=1000)))
 
     requested_limits = {(interval, limit) for _symbol, interval, limit in client.requested_kline_limits}
     diagnostics = result.results[0].strategy_diagnostics["challenge"]
 
-    assert ("15m", 1000) in requested_limits
-    assert ("5m", 1000) in requested_limits
+    assert ("15m", 500) in requested_limits
+    assert ("5m", 500) in requested_limits
     assert ("12h", 220) in requested_limits
     assert ("1d", 440) in requested_limits
     assert ("1d", 2000) not in requested_limits
+    assert any("replay_candles limit clamped from 1000 to 500" in warning for warning in diagnostics["timeframe_limit_warnings"])
     assert diagnostics["htf_2d_context_source"] == "synthetic_from_1d"
     assert diagnostics["candles_2d_count"] == 110
 
@@ -544,8 +657,9 @@ def test_scanner_clamps_binance_kline_limits_and_reports_diagnostic_warning() ->
     assert client.requested_kline_limits
     assert all(limit <= 1500 for _symbol, _interval, limit in client.requested_kline_limits)
     assert ("BTCUSDT", "1d", 1500) in client.requested_kline_limits
-    assert ("BTCUSDT", "5m", 1500) in client.requested_kline_limits
-    assert any("clamped from 2000 to 1500" in warning for warning in diagnostics["timeframe_limit_warnings"])
+    assert ("BTCUSDT", "5m", 500) in client.requested_kline_limits
+    assert any("1d source for synthetic 2D candles limit clamped from 2000 to 1500" in warning for warning in diagnostics["timeframe_limit_warnings"])
+    assert any("replay_candles limit clamped from 2000 to 500" in warning for warning in diagnostics["timeframe_limit_warnings"])
 
 
 def test_normal_scan_still_uses_configured_candle_limit_without_replay() -> None:
@@ -560,6 +674,21 @@ def test_normal_scan_still_uses_configured_candle_limit_without_replay() -> None
     assert diagnostics["candles_15m_count"] == 220
     assert diagnostics["candles_12h_count"] == 220
     assert diagnostics["candles_5m_count"] == 220
+
+
+def test_fast_mode_does_not_weaken_strategy_gates_for_no_setup() -> None:
+    normal_client = FakeExchangeClient({"BTCUSDT": _flat_candles()})
+    fast_client = FakeExchangeClient({"BTCUSDT": _flat_candles()})
+
+    normal = run(ScannerRunner(exchange_client=normal_client).run(_config(["BTCUSDT"]))).results[0]
+    fast = run(ScannerRunner(exchange_client=fast_client).run(_config(["BTCUSDT"], fast_mode=True))).results[0]
+
+    assert normal.status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert fast.status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert normal.valid_strategy_modes == ()
+    assert fast.valid_strategy_modes == ()
+    assert normal.strategy_diagnostics["challenge"]["first_failed_gate"] == "missing_confirmed_sweep"
+    assert fast.strategy_diagnostics["challenge"]["first_failed_gate"] == "missing_confirmed_sweep"
 
 
 def test_scanner_fetches_12h_15m_and_5m_for_strategy_context() -> None:
