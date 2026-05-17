@@ -1,4 +1,7 @@
 from app.backtesting.strategy_replay import (
+    EdgeAnalyticsReport,
+    EdgeConditionKey,
+    ExpectancyMetrics,
     ReplayConfig,
     ReplayDirection,
     ReplayOutcome,
@@ -8,11 +11,15 @@ from app.backtesting.strategy_replay import (
     ReplaySymbolResult,
     ReplayTradeResult,
     StrategyReplayEngine,
+    backtest_json_payload,
     format_replay_summary,
     replay_liquidity_grab_pullback,
 )
 
 __all__ = [
+    "EdgeAnalyticsReport",
+    "EdgeConditionKey",
+    "ExpectancyMetrics",
     "ReplayConfig",
     "ReplayDirection",
     "ReplayOutcome",
@@ -22,6 +29,7 @@ __all__ = [
     "ReplaySymbolResult",
     "ReplayTradeResult",
     "StrategyReplayEngine",
+    "backtest_json_payload",
     "format_replay_summary",
     "replay_liquidity_grab_pullback",
 ]

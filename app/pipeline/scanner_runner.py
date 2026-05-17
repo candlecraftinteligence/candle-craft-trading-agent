@@ -340,6 +340,10 @@ class ScannerSymbolResult(BaseModel):
     journal_entry: JournalEntryResult | None = None
     near_miss_intelligence: NearMissIntelligence | None = None
     setup_quality: SetupQualityResult = Field(default_factory=default_setup_quality_result)
+    edge_analytics: dict[str, Any] = Field(default_factory=dict)
+    expectancy_metrics: dict[str, Any] = Field(default_factory=dict)
+    confidence_label: str = NA
+    historical_match_summary: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True)
 
@@ -1990,6 +1994,7 @@ def _strategy_setup_for_mode(result: LiquidityGrabResult, mode: LiquidityGrabMod
 
 def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]:
     return {
+        "mode": setup.mode.value,
         "is_valid": setup.is_valid,
         "status": setup.status,
         "bias": setup.bias,
@@ -2008,6 +2013,7 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "ltf_confirmation_timeframe": setup.ltf_confirmation_timeframe,
         "ltf_confirmation_status": setup.ltf_confirmation_status,
         "execution_sweep_status": setup.execution_sweep_status,
+        "sweep_magnitude_atr": setup.sweep.magnitude_atr,
         "confirmation_structure_shift_status": setup.confirmation_structure_shift_status,
         "confirmation_bos_choch_reason": setup.confirmation_bos_choch_reason,
         "first_failed_gate": setup.first_failed_gate,
@@ -2030,6 +2036,7 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "fib_786": setup.fib_786,
         "entry_low": setup.entry_low,
         "entry_high": setup.entry_high,
+        "entry": setup.entry,
         "stop": setup.stop,
         "tp1": setup.tp1,
         "tp2": setup.tp2,

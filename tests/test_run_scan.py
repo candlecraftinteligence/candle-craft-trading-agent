@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.analytics.edge_analytics import EdgeAnalyticsRecord, condition_key_from_diagnostics, build_edge_analytics_report
 from app.backtesting import ReplayStats, ReplaySummary, ReplaySymbolResult
 from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.setup_quality import SetupQualityState, validate_setup_quality
@@ -487,6 +488,27 @@ def test_backtest_cli_flags_are_accepted(tmp_path) -> None:
     assert args.backtest_max_setups == 5
     assert args.backtest_output_json == output_path
     assert args.backtest_summary_only is True
+
+
+def test_edge_analytics_cli_flags_are_accepted(tmp_path) -> None:
+    output_path = tmp_path / "edge.json"
+
+    args = run_scan.parse_args(
+        [
+            "--symbols",
+            "BTCUSDT",
+            "--edge-analytics",
+            "--edge-min-sample",
+            "3",
+            "--edge-export-json",
+            str(output_path),
+        ]
+    )
+
+    assert args.edge_analytics is True
+    assert args.replay is True
+    assert args.edge_min_sample == 3
+    assert args.edge_export_json == output_path
 
 
 def test_save_run_without_path_defaults_to_latest_scan() -> None:
@@ -1128,6 +1150,50 @@ def test_replay_output_json_includes_replay_result(tmp_path, monkeypatch) -> Non
     assert "per_symbol_stats" in payload
     assert "per_mode_stats" in payload
     assert "individual_setup_results" in payload
+
+
+def test_live_symbol_historical_edge_match_updates_json_fields() -> None:
+    symbol_result = _valid_rank_result("BTCUSDT")
+    condition_key = run_scan._condition_key_for_symbol_result(symbol_result)
+    report = build_edge_analytics_report(
+        (
+            EdgeAnalyticsRecord(condition_key=condition_key, filled=True, tp1_hit=True, r_multiple=Decimal("1")),
+            EdgeAnalyticsRecord(condition_key=condition_key, filled=True, tp1_hit=True, r_multiple=Decimal("2")),
+        ),
+        min_sample=2,
+    )
+
+    updated = run_scan._apply_edge_analytics_to_symbol(symbol_result, report)
+
+    assert updated.confidence_label == "HIGH CONFIDENCE"
+    assert updated.expectancy_metrics["expectancy"] == "1.50000000"
+    assert updated.historical_match_summary["matched"] is True
+    assert updated.historical_match_summary["matching_sample_size"] == 2
+    assert updated.edge_analytics["condition_key"]["symbol"] == "BTCUSDT"
+
+
+def test_edge_export_json_writes_phase_27_payload(tmp_path) -> None:
+    output_path = tmp_path / "edge.json"
+    condition_key = condition_key_from_diagnostics(
+        symbol="BTCUSDT",
+        mode="swing",
+        diagnostics={"bias": "long", "htf_2d_trend": "bullish", "rr_to_tp2": Decimal("3.2")},
+        readiness_score=90,
+    )
+    report = build_edge_analytics_report(
+        (
+            EdgeAnalyticsRecord(condition_key=condition_key, filled=True, tp1_hit=True, r_multiple=Decimal("1")),
+            EdgeAnalyticsRecord(condition_key=condition_key, filled=True, tp1_hit=True, r_multiple=Decimal("2")),
+        ),
+        min_sample=2,
+    )
+
+    run_scan._write_edge_json(output_path, report)
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert "edge_analytics" in payload
+    assert "expectancy_metrics" in payload
+    assert payload["confidence_label"] == "HIGH CONFIDENCE"
 
 
 def test_backtest_output_json_writes_phase_26_payload(tmp_path, monkeypatch) -> None:

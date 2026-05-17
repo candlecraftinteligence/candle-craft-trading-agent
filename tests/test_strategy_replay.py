@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from app.backtesting.strategy_replay import ReplayConfig, ReplayOutcome, StrategyReplayEngine
+from app.backtesting.strategy_replay import (
+    ReplayConfig,
+    ReplayOutcome,
+    StrategyReplayEngine,
+    backtest_json_payload,
+)
 
 
 def _base_candles(count: int = 45, *, volume: Decimal = Decimal("100")) -> list[dict[str, Decimal | int]]:
@@ -103,7 +108,19 @@ def test_replay_detects_valid_historical_setup_and_limit_fill() -> None:
     assert summary.stats.total_setups == 1
     assert trade.candidate.entry == Decimal("97.00000000")
     assert trade.filled is True
+    assert trade.entry_filled is True
     assert trade.fill_index == 36
+    assert trade.time_to_entry == 1
+
+
+def test_replay_does_not_use_pre_confirmation_entry_touch() -> None:
+    summary = _run_replay([], max_fill_candles=1)
+
+    trade = summary.symbols[0].trades[0]
+    assert trade.candidate.detected_at_index == 35
+    assert trade.outcome == ReplayOutcome.NOT_FILLED
+    assert trade.filled is False
+    assert trade.fill_index == "N/A"
 
 
 def test_replay_simulates_tp_hit() -> None:
@@ -131,6 +148,8 @@ def test_replay_simulates_tp_hit() -> None:
     trade = summary.symbols[0].trades[0]
     assert trade.outcome == ReplayOutcome.TP1_HIT
     assert trade.highest_tp_hit == 1
+    assert trade.tp1_hit is True
+    assert trade.time_to_tp1 == 1
     assert trade.r_multiple > 0
 
 
@@ -158,7 +177,80 @@ def test_replay_simulates_stop_hit() -> None:
 
     trade = summary.symbols[0].trades[0]
     assert trade.outcome == ReplayOutcome.STOPPED
+    assert trade.sl_hit is True
     assert trade.r_multiple == Decimal("-1.00000000")
+
+
+def test_replay_keeps_sl_before_later_tp_as_stop() -> None:
+    summary = _run_replay(
+        [
+            {
+                "timestamp": 36,
+                "open": Decimal("99"),
+                "high": Decimal("100"),
+                "low": Decimal("97"),
+                "close": Decimal("98"),
+                "volume": Decimal("100"),
+            },
+            {
+                "timestamp": 37,
+                "open": Decimal("98"),
+                "high": Decimal("99"),
+                "low": Decimal("83"),
+                "close": Decimal("84"),
+                "volume": Decimal("100"),
+            },
+            {
+                "timestamp": 38,
+                "open": Decimal("84"),
+                "high": Decimal("130"),
+                "low": Decimal("84"),
+                "close": Decimal("125"),
+                "volume": Decimal("100"),
+            },
+        ]
+    )
+
+    trade = summary.symbols[0].trades[0]
+    assert trade.outcome == ReplayOutcome.STOPPED
+    assert trade.tp1_hit is False
+    assert trade.r_multiple == Decimal("-1.00000000")
+
+
+def test_replay_keeps_tp_before_later_sl_as_tp() -> None:
+    summary = _run_replay(
+        [
+            {
+                "timestamp": 36,
+                "open": Decimal("99"),
+                "high": Decimal("100"),
+                "low": Decimal("97"),
+                "close": Decimal("98"),
+                "volume": Decimal("100"),
+            },
+            {
+                "timestamp": 37,
+                "open": Decimal("98"),
+                "high": Decimal("125"),
+                "low": Decimal("98"),
+                "close": Decimal("120"),
+                "volume": Decimal("100"),
+            },
+            {
+                "timestamp": 38,
+                "open": Decimal("120"),
+                "high": Decimal("121"),
+                "low": Decimal("83"),
+                "close": Decimal("85"),
+                "volume": Decimal("100"),
+            },
+        ]
+    )
+
+    trade = summary.symbols[0].trades[0]
+    assert trade.outcome == ReplayOutcome.TP1_HIT
+    assert trade.tp1_hit is True
+    assert trade.sl_hit is False
 
 
 def test_same_candle_conservative_policy_chooses_stop_first() -> None:
@@ -206,8 +298,11 @@ def test_not_filled_setup_expires_correctly() -> None:
 
     trade = summary.symbols[0].trades[0]
     assert trade.outcome == ReplayOutcome.NOT_FILLED
+    assert trade.outcome.value == "missed_entry"
     assert trade.filled is False
+    assert trade.entry_filled is False
     assert summary.stats.filled_trades == 0
+    assert summary.stats.missed_entries == 1
 
 
 def test_filled_trade_expires_correctly() -> None:
@@ -245,6 +340,36 @@ def test_filled_trade_expires_correctly() -> None:
     assert trade.outcome == ReplayOutcome.EXPIRED
     assert trade.filled is True
     assert trade.candles_held == 2
+
+
+def test_replay_r_multiple_and_excursions_calculate_from_trade_levels() -> None:
+    summary = _run_replay(
+        [
+            {
+                "timestamp": 36,
+                "open": Decimal("112"),
+                "high": Decimal("113"),
+                "low": Decimal("97"),
+                "close": Decimal("105"),
+                "volume": Decimal("100"),
+            },
+            {
+                "timestamp": 37,
+                "open": Decimal("105"),
+                "high": Decimal("125"),
+                "low": Decimal("104"),
+                "close": Decimal("122"),
+                "volume": Decimal("100"),
+            },
+        ]
+    )
+
+    trade = summary.symbols[0].trades[0]
+    risk = abs(trade.entry - trade.stop)
+    expected_r = ((trade.tp1 - trade.entry) / risk).quantize(Decimal("0.00000001"))
+    assert trade.final_r_multiple == expected_r
+    assert trade.max_favorable_excursion >= expected_r
+    assert trade.max_adverse_excursion <= Decimal("0")
 
 
 def test_summary_stats_calculate_correctly_and_low_sample_warning_appears() -> None:
@@ -296,8 +421,46 @@ def test_summary_stats_calculate_correctly_and_low_sample_warning_appears() -> N
 
     assert summary.stats.total_setups == 2
     assert summary.stats.filled_trades == 2
+    assert summary.stats.missed_entries == 0
     assert summary.stats.win_rate == Decimal("50.00")
     assert summary.stats.tp1_rate == Decimal("50.00")
+    assert summary.stats.average_r != "N/A"
+    assert summary.stats.median_r != "N/A"
+    assert summary.stats.max_drawdown_r != "N/A"
+    assert summary.stats.best_r != "N/A"
+    assert summary.stats.worst_r != "N/A"
     assert summary.stats.max_win_streak == 1
     assert summary.stats.max_loss_streak == 1
     assert summary.sample_size_warning == "low_sample_size"
+    assert summary.per_mode_stats["swing"].total_setups == 2
+
+
+def test_backtest_json_payload_contains_phase_26_sections() -> None:
+    summary = _run_replay(
+        [
+            {
+                "timestamp": 36,
+                "open": Decimal("112"),
+                "high": Decimal("113"),
+                "low": Decimal("97"),
+                "close": Decimal("105"),
+                "volume": Decimal("100"),
+            }
+        ]
+    )
+
+    payload = backtest_json_payload(summary)
+
+    assert "backtest_summary" in payload
+    assert "per_symbol_stats" in payload
+    assert "per_mode_stats" in payload
+    assert "individual_setup_results" in payload
+    assert "edge_analytics" in payload
+    assert "expectancy_metrics" in payload
+    assert payload["confidence_label"] == "LOW SAMPLE"
+    setup = payload["individual_setup_results"][0]
+    assert setup["entry"] == "97"
+    assert setup["entry_filled"] is True
+    assert "risk_warning" in setup
+    assert setup["condition_key"]["symbol"] == "BTCUSDT"
+    assert setup["condition_key"]["mode"] == "swing"

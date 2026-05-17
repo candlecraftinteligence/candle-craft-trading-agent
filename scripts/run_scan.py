@@ -23,6 +23,12 @@ from app.backtesting import (  # noqa: E402
     backtest_json_payload,
     format_replay_summary,
 )
+from app.analytics.edge_analytics import (  # noqa: E402
+    DEFAULT_EDGE_MIN_SAMPLE,
+    EdgeAnalyticsReport,
+    condition_key_from_diagnostics,
+    match_historical_condition,
+)
 from app.data.dtos import NA  # noqa: E402
 from app.cache.market_data_cache import MarketDataCache  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
@@ -148,6 +154,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--backtest-max-setups", type=int)
     parser.add_argument("--backtest-output-json", type=Path)
     parser.add_argument("--backtest-summary-only", action="store_true")
+    parser.add_argument("--edge-analytics", action="store_true")
+    parser.add_argument("--edge-min-sample", type=int, default=DEFAULT_EDGE_MIN_SAMPLE)
+    parser.add_argument("--edge-export-json", type=Path)
     parser.add_argument("--request-timeout-sec", type=_positive_float_arg, default=DEFAULT_REQUEST_TIMEOUT_SEC)
     parser.add_argument("--symbol-timeout-sec", type=_positive_float_arg, default=DEFAULT_SYMBOL_TIMEOUT_SEC)
     parser.add_argument("--scan-timeout-sec", "--max-scan-seconds", dest="scan_timeout_sec", type=_positive_float_arg)
@@ -189,7 +198,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--replay-max-fill-candles must be at least 1.")
     if args.backtest_max_setups is not None and args.backtest_max_setups < 1:
         parser.error("--backtest-max-setups must be at least 1.")
+    if args.edge_min_sample < 1:
+        parser.error("--edge-min-sample must be at least 1.")
     if args.backtest_output_json is not None:
+        args.replay = True
+    if args.edge_export_json is not None:
+        args.edge_analytics = True
+    if args.edge_analytics:
         args.replay = True
     args.symbols_explicit = symbols_explicit
     args.diagnostics_level_explicit = diagnostics_level_explicit
@@ -331,6 +346,10 @@ async def main(argv: Sequence[str] | None = None) -> None:
     replay_summary: ReplaySummary | None = None
     if args.replay:
         replay_summary = await _run_replay(args, watchlist, config, cache)
+    if args.edge_analytics and replay_summary is not None:
+        result = _apply_edge_analytics_to_result(result, replay_summary.edge_analytics)
+        if args.save_run is not None:
+            _write_run_json(args.save_run, result, replay_summary=replay_summary)
 
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
@@ -345,6 +364,8 @@ async def main(argv: Sequence[str] | None = None) -> None:
         _write_run_json(args.output_json, result, ranked_results=ranked_results, replay_summary=replay_summary)
     if args.backtest_output_json is not None and replay_summary is not None:
         _write_backtest_json(args.backtest_output_json, replay_summary)
+    if args.edge_export_json is not None and replay_summary is not None:
+        _write_edge_json(args.edge_export_json, replay_summary.edge_analytics)
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
     if replay_summary is not None:
@@ -746,6 +767,83 @@ def _write_backtest_json(path: Path, replay_summary: ReplaySummary) -> None:
     )
 
 
+def _write_edge_json(path: Path, edge_report: EdgeAnalyticsReport) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "edge_analytics": edge_report.model_dump(mode="json"),
+                "expectancy_metrics": edge_report.expectancy_metrics.model_dump(mode="json"),
+                "confidence_label": edge_report.confidence_label,
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _apply_edge_analytics_to_result(
+    result: ScannerRunResult,
+    edge_report: EdgeAnalyticsReport,
+) -> ScannerRunResult:
+    updated_results = tuple(
+        _apply_edge_analytics_to_symbol(symbol_result, edge_report)
+        for symbol_result in result.results
+    )
+    return result.model_copy(update={"results": updated_results})
+
+
+def _apply_edge_analytics_to_symbol(
+    symbol_result: ScannerSymbolResult,
+    edge_report: EdgeAnalyticsReport,
+) -> ScannerSymbolResult:
+    condition_key = _condition_key_for_symbol_result(symbol_result)
+    match = match_historical_condition(edge_report, condition_key)
+    return symbol_result.model_copy(
+        update={
+            "edge_analytics": {
+                "enabled": True,
+                "min_sample": edge_report.min_sample,
+                "condition_key": condition_key.model_dump(mode="json"),
+                "top_historical_edges": [
+                    item.model_dump(mode="json")
+                    for item in edge_report.strongest_conditions[:3]
+                ],
+                "safety_note": edge_report.safety_note,
+            },
+            "expectancy_metrics": match.expectancy_metrics.model_dump(mode="json"),
+            "confidence_label": match.confidence_label,
+            "historical_match_summary": match.model_dump(mode="json"),
+        }
+    )
+
+
+def _condition_key_for_symbol_result(symbol_result: ScannerSymbolResult):
+    diagnostics = dict(representative_strategy_diagnostics(symbol_result))
+    diagnostics.setdefault("value_area_high", symbol_result.value_area_high)
+    diagnostics.setdefault("value_area_low", symbol_result.value_area_low)
+    mode = _display(diagnostics.get("mode"))
+    if mode == NA:
+        mode = _first_mode(symbol_result)
+    readiness_score = build_symbol_display(symbol_result).readiness_score
+    return condition_key_from_diagnostics(
+        symbol=symbol_result.symbol,
+        mode=mode,
+        diagnostics=diagnostics,
+        readiness_score=readiness_score,
+    )
+
+
+def _first_mode(symbol_result: ScannerSymbolResult) -> str:
+    for values in (symbol_result.valid_strategy_modes, symbol_result.rejected_strategy_modes):
+        if values:
+            return str(values[0])
+    if symbol_result.strategy_diagnostics:
+        return str(next(iter(symbol_result.strategy_diagnostics.keys())))
+    return NA
+
+
 def _scanner_runner(cache: MarketDataCache | None) -> Any:
     try:
         return ScannerRunner(market_data_cache=cache)
@@ -858,6 +956,7 @@ async def _run_replay(
         max_hold_candles=args.replay_max_hold_candles,
         max_fill_candles=args.replay_max_fill_candles,
         max_setups=args.backtest_max_setups,
+        edge_min_sample=args.edge_min_sample,
         aggressive_toggle=args.aggressive_toggle,
     )
     return StrategyReplayEngine().run(
@@ -1074,6 +1173,8 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
             _format_near_miss_intelligence(symbol_result),
             "Setup quality:",
             _format_setup_quality_diagnostics(symbol_result),
+            "Historical edge analytics:",
+            _format_historical_match(symbol_result),
             "Strategy diagnostics:",
             _format_strategy_diagnostics(symbol_result),
         )
@@ -1374,6 +1475,26 @@ def _format_setup_quality_diagnostics(symbol_result: ScannerSymbolResult) -> str
             f"Weakest: {_sequence_text(quality.weakest_factors)}",
             f"Action: {quality.action_label}",
             f"Reason: {quality.decision_reason}",
+        )
+    )
+
+
+def _format_historical_match(symbol_result: ScannerSymbolResult) -> str:
+    summary = symbol_result.historical_match_summary
+    if not isinstance(summary, Mapping) or not summary:
+        return NA
+    metrics = summary.get("expectancy_metrics")
+    if not isinstance(metrics, Mapping):
+        metrics = {}
+    return "\n".join(
+        (
+            f"Matched: {_display(summary.get('matched'))}",
+            f"Confidence: {_display(summary.get('confidence_label'))}",
+            f"Sample size: {_display(summary.get('matching_sample_size'))}",
+            f"Expectancy: {_display(metrics.get('expectancy'))}",
+            f"TP1 hit rate: {_percentage_display(metrics.get('tp1_hit_rate'))}",
+            f"TP2 hit rate: {_percentage_display(metrics.get('tp2_hit_rate'))}",
+            f"Warning: {_display(summary.get('warning'))}",
         )
     )
 

@@ -398,10 +398,12 @@ def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int 
     status_text = display.display_status_label.split(" ", 1)[1]
     rank_text = f"#{rank} " if rank is not None else ""
     if _quality_evaluated(quality):
-        return (
+        line = (
             f"{rank_text}{symbol_result.symbol} {DASH} {quality.quality_state.value} {DASH} "
             f"{quality.quality_grade.value} {DASH} {quality.quality_score} {DASH} {quality.action_label}"
         )
+        historical = _historical_edge_compact(symbol_result)
+        return f"{line} | {historical}" if historical != NA else line
     parts = [
         f"{rank_text}{display.display_status_label.split(' ', 1)[0]} {symbol_result.symbol} {DASH} {status_text}",
         f"Readiness {display.readiness_score}/100 {display.readiness_label}",
@@ -413,6 +415,9 @@ def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int 
         parts.append(f"Gate: {display.failed_gate}")
     parts.append(display.display_reason)
     parts.append(display.action_label)
+    historical = _historical_edge_compact(symbol_result)
+    if historical != NA:
+        parts.append(historical)
     return " | ".join(parts)
 
 
@@ -446,6 +451,7 @@ def format_symbol_card(
         f"{BULLET} HTF/Bias/Execution: {_execution_summary(diagnostics)}",
         *(_card_failed_gate_lines(display)),
         *_quality_summary_lines(symbol_result.setup_quality),
+        *_historical_edge_lines(symbol_result),
         "",
         f"{PIN} Context",
         f"{BULLET} 2D HTF: {_title_value(diagnostics.get('htf_2d_trend'))}",
@@ -507,6 +513,7 @@ def _format_near_miss_card(
         f"Failed gate: {failed_gate}",
         f"Reason: {reason}",
         *_quality_summary_lines(symbol_result.setup_quality),
+        *_historical_edge_lines(symbol_result),
         "",
         "Needs next:",
         *_numbered_condition_lines(conditions),
@@ -1043,6 +1050,51 @@ def _quality_summary_lines(quality: SetupQualityResult) -> tuple[str, ...]:
         f"{BULLET} Weakest: {_sequence_text(quality.weakest_factors)}",
         f"{BULLET} Reason: {quality.decision_reason}",
     )
+
+
+def _historical_edge_lines(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    summary = symbol_result.historical_match_summary
+    if not isinstance(summary, Mapping) or not summary:
+        return ()
+    metrics = summary.get("expectancy_metrics")
+    if not isinstance(metrics, Mapping):
+        metrics = {}
+    sample = _first_non_na_text(summary.get("matching_sample_size"), metrics.get("fills"))
+    expectancy = _display(metrics.get("expectancy"))
+    tp1 = _display(metrics.get("tp1_hit_rate"))
+    tp2 = _display(metrics.get("tp2_hit_rate"))
+    label = _display(summary.get("confidence_label"))
+    line = (
+        f"{BULLET} Historical edge: {label} | expectancy {_r_text(expectancy)} | "
+        f"sample {sample} | TP1 {_percent_text(tp1)} | TP2 {_percent_text(tp2)}"
+    )
+    warning = _display(summary.get("warning"))
+    if label == "LOW SAMPLE" and warning != NA:
+        return (line, f"{BULLET} Historical warning: {warning}")
+    return (line,)
+
+
+def _historical_edge_compact(symbol_result: ScannerSymbolResult) -> str:
+    summary = symbol_result.historical_match_summary
+    if not isinstance(summary, Mapping) or not summary:
+        return NA
+    metrics = summary.get("expectancy_metrics")
+    if not isinstance(metrics, Mapping):
+        metrics = {}
+    label = _display(summary.get("confidence_label"))
+    sample = _first_non_na_text(summary.get("matching_sample_size"), metrics.get("fills"))
+    expectancy = _display(metrics.get("expectancy"))
+    return f"Historical {label} exp {_r_text(expectancy)} sample {sample}"
+
+
+def _r_text(value: object) -> str:
+    text = _display(value)
+    return text if text == NA else f"{text} R"
+
+
+def _percent_text(value: object) -> str:
+    text = _display(value)
+    return text if text == NA else f"{text}%"
 
 
 def _quality_evaluated(quality: SetupQualityResult) -> bool:
