@@ -38,6 +38,14 @@ from app.analytics.portfolio_selection import (  # noqa: E402
 )
 from app.data.dtos import NA  # noqa: E402
 from app.cache.market_data_cache import MarketDataCache  # noqa: E402
+from app.command_center import (  # noqa: E402
+    build_command_center_payload,
+    format_command_center_report,
+    format_command_center_summary,
+    format_portfolio_command_summary,
+    format_top_setup_spotlight,
+    format_watchlist_export,
+)
 from app.core.config import Settings  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
@@ -131,6 +139,102 @@ class WatchScanExecution:
     portfolio_selection: PortfolioSelectionResult | None
 
 
+@dataclass(frozen=True)
+class CommandPreset:
+    name: str
+    modes: tuple[str, ...]
+    htf_timeframe: str
+    bias_timeframe: str
+    execution_timeframe: str
+    confirmation_timeframe: str
+    min_score_for_idea: str
+    min_rr: Decimal
+    diagnostics_level: str
+    display: str
+    rank_results: bool = True
+    portfolio_select: bool = False
+    continue_watch: bool = False
+    candle_limit: int | None = None
+    fast: bool = False
+    request_timeout_sec: float | None = None
+    symbol_timeout_sec: float | None = None
+    scan_timeout_sec: float | None = None
+    max_display_results: int | None = None
+
+
+COMMAND_PRESETS: dict[str, CommandPreset] = {
+    "daily": CommandPreset(
+        name="daily",
+        modes=("challenge", "swing", "scalp"),
+        htf_timeframe="2d",
+        bias_timeframe="12h",
+        execution_timeframe="15m",
+        confirmation_timeframe="5m",
+        min_score_for_idea="80",
+        min_rr=Decimal("2.5"),
+        diagnostics_level="normal",
+        display="normal",
+        rank_results=True,
+        portfolio_select=True,
+        continue_watch=True,
+        max_display_results=10,
+    ),
+    "swing": CommandPreset(
+        name="swing",
+        modes=("swing",),
+        htf_timeframe="2d",
+        bias_timeframe="12h",
+        execution_timeframe="15m",
+        confirmation_timeframe="5m",
+        min_score_for_idea="80",
+        min_rr=Decimal("2.5"),
+        diagnostics_level="normal",
+        display="normal",
+        rank_results=True,
+        portfolio_select=True,
+        continue_watch=True,
+        max_display_results=10,
+    ),
+    "challenge": CommandPreset(
+        name="challenge",
+        modes=("challenge",),
+        htf_timeframe="2d",
+        bias_timeframe="12h",
+        execution_timeframe="15m",
+        confirmation_timeframe="5m",
+        min_score_for_idea="85",
+        min_rr=Decimal("3.0"),
+        diagnostics_level="normal",
+        display="normal",
+        rank_results=True,
+        portfolio_select=True,
+        continue_watch=True,
+        max_display_results=10,
+    ),
+    "scalp": CommandPreset(
+        name="scalp",
+        modes=("scalp",),
+        htf_timeframe="12h",
+        bias_timeframe="4h",
+        execution_timeframe="15m",
+        confirmation_timeframe="5m",
+        min_score_for_idea="80",
+        min_rr=Decimal("2.5"),
+        diagnostics_level="summary",
+        display="compact",
+        rank_results=True,
+        portfolio_select=False,
+        continue_watch=True,
+        candle_limit=180,
+        fast=True,
+        request_timeout_sec=5.0,
+        symbol_timeout_sec=20.0,
+        scan_timeout_sec=90.0,
+        max_display_results=8,
+    ),
+}
+
+
 def _non_negative_decimal_arg(value: str) -> Decimal:
     try:
         decimal = Decimal(value)
@@ -162,8 +266,54 @@ def _bool_arg(value: str | bool) -> bool:
     raise argparse.ArgumentTypeError("must be true or false")
 
 
+def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
+    aliases = {
+        "--symbols": "symbols",
+        "--universe": "universe",
+        "--preset": "preset",
+        "--command-preset": "command_preset",
+        "--command": "command_preset",
+        "--modes": "modes",
+        "--htf-timeframe": "htf_timeframe",
+        "--bias-timeframe": "bias_timeframe",
+        "--execution-timeframe": "execution_timeframe",
+        "--confirmation-timeframe": "confirmation_timeframe",
+        "--min-score-for-idea": "min_score_for_idea",
+        "--min-rr": "min_rr",
+        "--diagnostics-level": "diagnostics_level",
+        "--display": "display",
+        "--rank-results": "rank_results",
+        "--no-rank-results": "rank_results",
+        "--portfolio-select": "portfolio_select",
+        "--no-portfolio-select": "portfolio_select",
+        "--continue-watch": "continue_watch",
+        "--no-continue-watch": "continue_watch",
+        "--watch-only-near-misses": "watch_only_near_misses",
+        "--fast": "fast",
+        "--no-fast": "fast",
+        "--candle-limit": "candle_limit",
+        "--request-timeout-sec": "request_timeout_sec",
+        "--symbol-timeout-sec": "symbol_timeout_sec",
+        "--scan-timeout-sec": "scan_timeout_sec",
+        "--max-scan-seconds": "scan_timeout_sec",
+        "--max-display-results": "max_display_results",
+        "--max-selected-setups": "max_selected_setups",
+        "--max-portfolio-risk-pct": "max_portfolio_risk_pct",
+        "--max-beta-group-risk-pct": "max_beta_group_risk_pct",
+        "--allow-correlated-setups": "allow_correlated_setups",
+    }
+    explicit: set[str] = set()
+    for token in tokens:
+        option = token.split("=", 1)[0]
+        field = aliases.get(option)
+        if field is not None:
+            explicit.add(field)
+    return explicit
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     tokens = list(sys.argv[1:] if argv is None else argv)
+    explicit_options = _explicit_cli_options(tokens)
     symbols_explicit = any(token == "--symbols" or token.startswith("--symbols=") for token in tokens)
     diagnostics_level_explicit = any(
         token == "--diagnostics-level" or token.startswith("--diagnostics-level=") for token in tokens
@@ -171,6 +321,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     display_explicit = any(token == "--display" or token.startswith("--display=") for token in tokens)
     parser = argparse.ArgumentParser(description="Run the Candle Craft dry-run scanner pipeline.")
     parser.add_argument("--symbols", nargs="*", default=list(DEFAULT_SYMBOLS))
+    parser.add_argument("--command-preset", "--command", choices=sorted(COMMAND_PRESETS))
+    parser.add_argument("--list-command-presets", action="store_true")
     parser.add_argument("--universe", choices=UNIVERSE_MODES, default=MANUAL_UNIVERSE_MODE)
     parser.add_argument("--universe-size", type=int, default=50)
     parser.add_argument("--min-quote-volume", type=_non_negative_decimal_arg, default=Decimal("0"))
@@ -186,6 +338,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--account-equity", default="10000")
     parser.add_argument("--risk-per-trade-pct", default="1")
     parser.add_argument("--min-score-for-idea", default="80")
+    parser.add_argument("--min-rr", type=_non_negative_decimal_arg, default=Decimal("2.5"))
     parser.add_argument("--strategy", choices=["liquidity_grab_pullback"], default="liquidity_grab_pullback")
     parser.add_argument("--modes", nargs="+", choices=["challenge", "swing", "scalp"], default=["challenge", "swing", "scalp"])
     parser.add_argument("--htf-timeframe", default="2d")
@@ -207,7 +360,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--request-timeout-sec", type=_positive_float_arg, default=DEFAULT_REQUEST_TIMEOUT_SEC)
     parser.add_argument("--symbol-timeout-sec", type=_positive_float_arg, default=DEFAULT_SYMBOL_TIMEOUT_SEC)
     parser.add_argument("--scan-timeout-sec", "--max-scan-seconds", dest="scan_timeout_sec", type=_positive_float_arg)
-    parser.add_argument("--fast", action="store_true")
+    parser.add_argument("--fast", dest="fast", action="store_true", default=False)
+    parser.add_argument("--no-fast", dest="fast", action="store_false")
     parser.add_argument("--show-strategy-output", action="store_true")
     parser.add_argument("--telegram-format", action="store_true")
     parser.add_argument("--diagnostics-level", choices=["summary", "normal", "full"], default="normal")
@@ -217,11 +371,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--show-no-setups", action="store_true")
     parser.add_argument("--max-display-results", type=int, default=DEFAULT_MAX_DISPLAY_RESULTS)
     parser.add_argument("--bucket-filter", nargs="+")
-    parser.add_argument("--portfolio-select", action="store_true")
+    parser.add_argument("--portfolio-select", dest="portfolio_select", action="store_true", default=False)
+    parser.add_argument("--no-portfolio-select", dest="portfolio_select", action="store_false")
     parser.add_argument("--max-selected-setups", type=int, default=3)
     parser.add_argument("--max-portfolio-risk-pct", type=_non_negative_decimal_arg, default=Decimal("3"))
     parser.add_argument("--max-beta-group-risk-pct", type=_non_negative_decimal_arg, default=Decimal("1.5"))
     parser.add_argument("--allow-correlated-setups", action="store_true")
+    parser.add_argument("--continue-watch", dest="continue_watch", action="store_true", default=False)
+    parser.add_argument("--no-continue-watch", dest="continue_watch", action="store_false")
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--watch-interval-sec", type=_positive_float_arg, default=60.0)
     parser.add_argument("--watch-max-iterations", type=int)
@@ -236,6 +393,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-json", type=Path)
+    parser.add_argument("--export-report", nargs="?", const=Path("scan_runs/latest_report.txt"), type=Path)
+    parser.add_argument("--export-json", nargs="?", const=Path("scan_runs/latest_command_center.json"), type=Path)
+    parser.add_argument("--export-watchlist", nargs="?", const=Path("scan_runs/latest_watchlist.txt"), type=Path)
     parser.add_argument("--cache", dest="cache_enabled", action="store_true", default=True)
     parser.add_argument("--no-cache", dest="cache_enabled", action="store_false")
     parser.add_argument("--cache-ttl-seconds", type=int)
@@ -245,6 +405,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-resume-skip", action="store_true")
     parser.add_argument("--progress", action="store_true")
     args = parser.parse_args(argv)
+    _apply_command_preset(args, explicit_options)
     if args.universe_size < 1:
         parser.error("--universe-size must be at least 1.")
     if args.cache_ttl_seconds is not None and args.cache_ttl_seconds < 0:
@@ -275,8 +436,45 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def _apply_command_preset(args: argparse.Namespace, explicit_options: set[str]) -> None:
+    if args.command_preset is None:
+        return
+    preset = COMMAND_PRESETS[args.command_preset]
+    preset_values: dict[str, object] = {
+        "modes": list(preset.modes),
+        "htf_timeframe": preset.htf_timeframe,
+        "bias_timeframe": preset.bias_timeframe,
+        "execution_timeframe": preset.execution_timeframe,
+        "confirmation_timeframe": preset.confirmation_timeframe,
+        "min_score_for_idea": preset.min_score_for_idea,
+        "min_rr": preset.min_rr,
+        "diagnostics_level": preset.diagnostics_level,
+        "display": preset.display,
+        "rank_results": preset.rank_results,
+        "portfolio_select": preset.portfolio_select,
+        "continue_watch": preset.continue_watch,
+        "fast": preset.fast,
+    }
+    optional_values = {
+        "candle_limit": preset.candle_limit,
+        "request_timeout_sec": preset.request_timeout_sec,
+        "symbol_timeout_sec": preset.symbol_timeout_sec,
+        "scan_timeout_sec": preset.scan_timeout_sec,
+        "max_display_results": preset.max_display_results,
+    }
+    for field, value in optional_values.items():
+        if value is not None:
+            preset_values[field] = value
+    for field, value in preset_values.items():
+        if field not in explicit_options:
+            setattr(args, field, value)
+
+
 async def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.list_command_presets:
+        print(_format_available_command_presets())
+        return
     if args.list_presets:
         print(_format_available_presets())
         return
@@ -436,6 +634,20 @@ async def main(argv: Sequence[str] | None = None) -> None:
         bucket_filter=bucket_filter,
         max_display_results=args.max_display_results,
     )
+    continued_watch_symbols = tuple(getattr(args, "continued_watch_symbols", ()))
+    promoted_watch_symbols = _update_continue_watch_state(args, result) if args.continue_watch else ()
+    export_watch_symbols = promoted_watch_symbols or _watch_candidate_symbols(result)
+    replay_warnings = _replay_warning_lines(replay_summary)
+    command_center_payload = build_command_center_payload(
+        result,
+        ranked_results=ranked_results,
+        portfolio_selection=portfolio_selection,
+        promoted_watch_symbols=promoted_watch_symbols,
+        continued_watch_symbols=continued_watch_symbols,
+        command_preset=args.command_preset,
+        min_rr=args.min_rr,
+        replay_warnings=replay_warnings,
+    )
 
     if args.output_json is not None:
         _write_run_json(
@@ -457,8 +669,60 @@ async def main(argv: Sequence[str] | None = None) -> None:
         _write_backtest_json(args.backtest_output_json, replay_summary)
     if args.edge_export_json is not None and replay_summary is not None:
         _write_edge_json(args.edge_export_json, replay_summary.edge_analytics)
+    if args.export_json is not None:
+        _write_export_json(
+            args.export_json,
+            result,
+            ranked_results=ranked_results,
+            replay_summary=replay_summary,
+            portfolio_selection=portfolio_selection,
+            command_center=command_center_payload,
+        )
+    if args.export_report is not None:
+        _write_text_file(
+            args.export_report,
+            format_command_center_report(
+                result,
+                ranked_results=ranked_results,
+                portfolio_selection=portfolio_selection,
+                promoted_watch_symbols=promoted_watch_symbols,
+                continued_watch_symbols=continued_watch_symbols,
+                command_preset=args.command_preset,
+                min_rr=args.min_rr,
+                replay_warnings=replay_warnings,
+            ),
+        )
+    if args.export_watchlist is not None:
+        _write_text_file(
+            args.export_watchlist,
+            format_watchlist_export(
+                result,
+                promoted_watch_symbols=export_watch_symbols,
+                continued_watch_symbols=continued_watch_symbols,
+            ),
+        )
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
+    print("")
+    print(
+        format_command_center_summary(
+            result,
+            ranked_results=ranked_results,
+            portfolio_selection=portfolio_selection,
+            promoted_watch_symbols=promoted_watch_symbols,
+            continued_watch_symbols=continued_watch_symbols,
+            command_preset=args.command_preset,
+            min_rr=args.min_rr,
+            replay_warnings=replay_warnings,
+        )
+    )
+    top_setup_result = _top_setup_result(ranked_results)
+    if top_setup_result is not None:
+        print("")
+        print(format_top_setup_spotlight(top_setup_result))
+    if portfolio_selection is not None:
+        print("")
+        print(format_portfolio_command_summary(portfolio_selection))
     if portfolio_selection is not None:
         print("")
         print(format_portfolio_selection_summary(portfolio_selection))
@@ -507,6 +771,18 @@ def _format_available_presets() -> str:
     lines = ["Available watchlist presets:"]
     for name, count in presets_with_counts():
         lines.append(f"- {name} ({count} symbols)")
+    return "\n".join(lines)
+
+
+def _format_available_command_presets() -> str:
+    lines = ["Available command presets:"]
+    for name, preset in COMMAND_PRESETS.items():
+        lines.append(
+            f"- {name}: modes {','.join(preset.modes)}; "
+            f"timeframes {preset.htf_timeframe}>{preset.bias_timeframe}>"
+            f"{preset.execution_timeframe}>{preset.confirmation_timeframe}; "
+            f"min score {preset.min_score_for_idea}; min RR {_display(preset.min_rr)}"
+        )
     return "\n".join(lines)
 
 
@@ -577,6 +853,8 @@ async def _resolve_watchlist_for_args(args: argparse.Namespace) -> WatchlistReso
     watchlist = await _resolve_watchlist_for_scan(args)
     if args.watch and args.watch_only_near_misses:
         return _filter_watchlist_to_prior_watch_symbols(args, watchlist)
+    if args.continue_watch and not args.watch:
+        return _extend_watchlist_for_continue_watch(args, watchlist)
     return watchlist
 
 
@@ -619,6 +897,38 @@ def _filter_watchlist_to_prior_watch_symbols(
         args,
         symbols,
         source_label=f"{watchlist.source_label} prior near-miss/watch symbols",
+    )
+
+
+def _extend_watchlist_for_continue_watch(
+    args: argparse.Namespace,
+    watchlist: WatchlistResolution,
+) -> WatchlistResolution:
+    try:
+        state = load_watch_state(WATCH_STATE_PATH)
+    except WatchModeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    state_symbols = state_watch_symbols(state, tuple(state.symbols))
+    latest_symbols: tuple[str, ...] = ()
+    if LATEST_RUN_PATH.exists():
+        try:
+            latest_symbols = load_symbols_from_run(LATEST_RUN_PATH, near_miss_only=True)
+        except WatchModeError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    continued_symbols = dedupe_symbols((*state_symbols, *latest_symbols))
+    args.continued_watch_symbols = continued_symbols
+    if not continued_symbols:
+        return watchlist
+
+    combined = dedupe_symbols((*watchlist.symbols, *continued_symbols))
+    if combined == watchlist.symbols:
+        return watchlist
+    return WatchlistResolution(
+        symbols=combined,
+        source_label=f"{watchlist.source_label} + continued watch candidates",
+        universe=manual_symbol_universe(combined, requested_size=len(combined)),
     )
 
 
@@ -942,6 +1252,32 @@ def _write_run_json(
         ),
         encoding="utf-8",
     )
+
+
+def _write_export_json(
+    path: Path,
+    result: ScannerRunResult,
+    *,
+    ranked_results: Sequence[Any] | None = None,
+    replay_summary: ReplaySummary | None = None,
+    portfolio_selection: PortfolioSelectionResult | None = None,
+    command_center: Mapping[str, Any] | None = None,
+) -> None:
+    payload = _json_payload(
+        result,
+        ranked_results,
+        replay_summary=replay_summary,
+        portfolio_selection=portfolio_selection,
+    )
+    if command_center is not None:
+        payload["command_center"] = dict(command_center)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _write_text_file(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.rstrip() + "\n", encoding="utf-8")
 
 
 def _write_backtest_json(path: Path, replay_summary: ReplaySummary) -> None:
@@ -1534,6 +1870,73 @@ def _ranked_results_with_selected_first(
         )
         for index, item in enumerate(ordered)
     )
+
+
+def _top_setup_result(ranked_results: Sequence[Any]) -> ScannerSymbolResult | None:
+    for ranked in ranked_results:
+        if ranked.display.display_bucket == "valid":
+            return ranked.symbol_result
+    return None
+
+
+def _update_continue_watch_state(args: argparse.Namespace, result: ScannerRunResult) -> tuple[str, ...]:
+    try:
+        state = load_watch_state(WATCH_STATE_PATH)
+    except WatchModeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    timestamp = _watch_iteration_timestamp()
+    promoted: list[str] = []
+    updated_state = state
+    continued_symbols = set(getattr(args, "continued_watch_symbols", ()))
+
+    for symbol_result in result.results:
+        display = build_symbol_display(symbol_result)
+        previous = updated_state.symbols.get(symbol_result.symbol)
+        should_track = (
+            display.display_bucket == "near_miss"
+            or symbol_result.symbol in continued_symbols
+            or previous is not None
+        )
+        if not should_track:
+            continue
+        if display.display_bucket == "near_miss" and symbol_result.symbol not in promoted:
+            if previous is None or not previous.invalidated:
+                promoted.append(symbol_result.symbol)
+        updated_state = update_watch_state_for_result(
+            updated_state,
+            symbol_result,
+            alert_triggered=False,
+            seen_at=timestamp,
+        )
+
+    try:
+        save_watch_state(WATCH_STATE_PATH, updated_state)
+    except WatchModeError as exc:
+        raise SystemExit(str(exc)) from exc
+    return tuple(promoted)
+
+
+def _watch_candidate_symbols(result: ScannerRunResult) -> tuple[str, ...]:
+    symbols: list[str] = []
+    for symbol_result in result.results:
+        display = build_symbol_display(symbol_result)
+        if display.display_bucket == "near_miss" or display.readiness_label in {"HOT WATCH", "WATCH"}:
+            symbols.append(symbol_result.symbol)
+    return tuple(symbols)
+
+
+def _replay_warning_lines(replay_summary: ReplaySummary | None) -> tuple[str, ...]:
+    if replay_summary is None:
+        return ()
+    warnings: list[str] = []
+    if _display(replay_summary.sample_size_warning) != NA:
+        warnings.append(f"replay sample size: {replay_summary.sample_size_warning}")
+    for symbol in replay_summary.symbols:
+        warning = _display(symbol.sample_size_warning)
+        if warning != NA and warning not in warnings:
+            warnings.append(f"{symbol.symbol}: {warning}")
+    return tuple(warnings)
 
 
 def _json_payload(

@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.alerts.telegram import send_telegram_messages
 from app.analytics.portfolio_selection import PortfolioSelectionResult, selected_symbols
@@ -62,6 +62,7 @@ class WatchSymbolState(BaseModel):
     readiness_label: str = NA
     last_seen_at: str = NA
     alert_sent: bool = False
+    invalidated: bool = False
     activation_count: int = 0
     history: tuple[WatchHistoryEntry, ...] = ()
 
@@ -74,6 +75,14 @@ class WatchSymbolState(BaseModel):
         if not normalized:
             raise ValueError("symbol must not be blank")
         return normalized
+
+    @model_validator(mode="after")
+    def _derive_invalidated(self) -> WatchSymbolState:
+        if self.invalidated:
+            return self
+        if _state_status_is_invalidated(self.last_status, self.readiness_label):
+            object.__setattr__(self, "invalidated", True)
+        return self
 
 
 class WatchState(BaseModel):
@@ -252,6 +261,8 @@ def state_watch_symbols(state: WatchState, symbols: Sequence[str]) -> tuple[str,
         symbol_state = state.symbols.get(normalized)
         if symbol_state is None:
             continue
+        if symbol_state.invalidated:
+            continue
         if _state_is_watch_candidate(symbol_state) and normalized not in output:
             output.append(normalized)
     return tuple(output)
@@ -264,6 +275,8 @@ def should_trigger_activation_alert(
     portfolio_selection: PortfolioSelectionResult | None = None,
 ) -> bool:
     if previous_state is None:
+        return False
+    if previous_state.invalidated:
         return False
     if previous_state.alert_sent:
         return False
@@ -310,6 +323,8 @@ def update_watch_state_for_result(
     previous_history = previous.history if previous is not None else ()
     previous_alert_sent = previous.alert_sent if previous is not None else False
     previous_activation_count = previous.activation_count if previous is not None else 0
+    previous_invalidated = previous.invalidated if previous is not None else False
+    invalidated = previous_invalidated or _current_result_invalidated(display.display_status, quality_state)
 
     history_entry = WatchHistoryEntry(
         seen_at=timestamp,
@@ -328,6 +343,7 @@ def update_watch_state_for_result(
         readiness_label=display.readiness_label,
         last_seen_at=timestamp,
         alert_sent=previous_alert_sent or alert_triggered,
+        invalidated=invalidated,
         activation_count=previous_activation_count + (1 if alert_triggered else 0),
         history=(*previous_history, history_entry),
     )
@@ -493,11 +509,22 @@ def _quality_state_from_payload(raw_result: Mapping[str, Any]) -> str:
 
 
 def _state_is_watch_candidate(symbol_state: WatchSymbolState) -> bool:
+    if symbol_state.invalidated:
+        return False
     return (
         symbol_state.last_status in WATCH_SOURCE_STATUSES
         or symbol_state.readiness_label in WATCH_READINESS_LABELS
         or symbol_state.last_status == SetupQualityState.WATCHLIST_NEAR_MISS.value
     )
+
+
+def _state_status_is_invalidated(status: str, readiness_label: str) -> bool:
+    normalized_status = status.strip().lower().replace(" ", "_").replace("-", "_")
+    return normalized_status in {"no_setup", "rejected", "rejected_no_edge"} or readiness_label == "REJECTED"
+
+
+def _current_result_invalidated(display_status: str, quality_state: str) -> bool:
+    return display_status == "no_setup" or quality_state == SetupQualityState.REJECTED_NO_EDGE.value
 
 
 def _previous_state_allows_activation(symbol_state: WatchSymbolState) -> bool:
