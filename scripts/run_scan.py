@@ -29,6 +29,13 @@ from app.analytics.edge_analytics import (  # noqa: E402
     condition_key_from_diagnostics,
     match_historical_condition,
 )
+from app.analytics.portfolio_selection import (  # noqa: E402
+    PortfolioRiskLimits,
+    PortfolioSelectionResult,
+    build_portfolio_selection_from_scan,
+    format_portfolio_selection_summary,
+    selected_symbols,
+)
 from app.data.dtos import NA  # noqa: E402
 from app.cache.market_data_cache import MarketDataCache  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
@@ -170,6 +177,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--show-no-setups", action="store_true")
     parser.add_argument("--max-display-results", type=int, default=DEFAULT_MAX_DISPLAY_RESULTS)
     parser.add_argument("--bucket-filter", nargs="+")
+    parser.add_argument("--portfolio-select", action="store_true")
+    parser.add_argument("--max-selected-setups", type=int, default=3)
+    parser.add_argument("--max-portfolio-risk-pct", type=_non_negative_decimal_arg, default=Decimal("3"))
+    parser.add_argument("--max-beta-group-risk-pct", type=_non_negative_decimal_arg, default=Decimal("1.5"))
+    parser.add_argument("--allow-correlated-setups", action="store_true")
     parser.add_argument(
         "--show-near-miss-plan",
         action="store_true",
@@ -200,6 +212,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--backtest-max-setups must be at least 1.")
     if args.edge_min_sample < 1:
         parser.error("--edge-min-sample must be at least 1.")
+    if args.max_selected_setups < 1:
+        parser.error("--max-selected-setups must be at least 1.")
     if args.backtest_output_json is not None:
         args.replay = True
     if args.edge_export_json is not None:
@@ -353,6 +367,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
 
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
+    portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None
+    if portfolio_selection is not None:
+        ranked_results = _ranked_results_with_selected_first(ranked_results, portfolio_selection)
     visible_results = filter_ranked_results(
         ranked_results,
         show_no_setups=args.show_no_setups,
@@ -361,13 +378,30 @@ async def main(argv: Sequence[str] | None = None) -> None:
     )
 
     if args.output_json is not None:
-        _write_run_json(args.output_json, result, ranked_results=ranked_results, replay_summary=replay_summary)
+        _write_run_json(
+            args.output_json,
+            result,
+            ranked_results=ranked_results,
+            replay_summary=replay_summary,
+            portfolio_selection=portfolio_selection,
+        )
+    if args.save_run is not None and portfolio_selection is not None:
+        _write_run_json(
+            args.save_run,
+            result,
+            ranked_results=ranked_results,
+            replay_summary=replay_summary,
+            portfolio_selection=portfolio_selection,
+        )
     if args.backtest_output_json is not None and replay_summary is not None:
         _write_backtest_json(args.backtest_output_json, replay_summary)
     if args.edge_export_json is not None and replay_summary is not None:
         _write_edge_json(args.edge_export_json, replay_summary.edge_analytics)
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
+    if portfolio_selection is not None:
+        print("")
+        print(format_portfolio_selection_summary(portfolio_selection))
     if replay_summary is not None:
         print("")
         print(
@@ -751,10 +785,20 @@ def _write_run_json(
     *,
     ranked_results: Sequence[Any] | None = None,
     replay_summary: ReplaySummary | None = None,
+    portfolio_selection: PortfolioSelectionResult | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(_json_payload(result, ranked_results, replay_summary=replay_summary), indent=2, ensure_ascii=False),
+        json.dumps(
+            _json_payload(
+                result,
+                ranked_results,
+                replay_summary=replay_summary,
+                portfolio_selection=portfolio_selection,
+            ),
+            indent=2,
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -1085,11 +1129,49 @@ def _parse_bucket_filter(values: Sequence[str] | None) -> set[DisplayBucket] | N
     return buckets
 
 
+def _portfolio_selection_for_result(
+    args: argparse.Namespace,
+    result: ScannerRunResult,
+) -> PortfolioSelectionResult:
+    limits = PortfolioRiskLimits(
+        max_selected_setups=args.max_selected_setups,
+        max_portfolio_risk_pct=args.max_portfolio_risk_pct,
+        max_beta_group_risk_pct=args.max_beta_group_risk_pct,
+        allow_correlated_setups=args.allow_correlated_setups,
+    )
+    return build_portfolio_selection_from_scan(result, risk_limits=limits)
+
+
+def _ranked_results_with_selected_first(
+    ranked_results: Sequence[Any],
+    portfolio_selection: PortfolioSelectionResult,
+) -> tuple[Any, ...]:
+    selected_order = {symbol: index for index, symbol in enumerate(selected_symbols(portfolio_selection))}
+    ordered = sorted(
+        ranked_results,
+        key=lambda item: (
+            0 if item.symbol_result.symbol in selected_order else 1,
+            selected_order.get(item.symbol_result.symbol, item.display_rank),
+            item.display_rank,
+        ),
+    )
+    return tuple(
+        item.__class__(
+            symbol_result=item.symbol_result,
+            display=item.display,
+            display_rank=index + 1,
+            original_index=item.original_index,
+        )
+        for index, item in enumerate(ordered)
+    )
+
+
 def _json_payload(
     result: ScannerRunResult,
     ranked_results=None,
     *,
     replay_summary: ReplaySummary | None = None,
+    portfolio_selection: PortfolioSelectionResult | None = None,
 ) -> dict[str, object]:
     payload = result.model_dump(mode="json")
     universe = result.resume_metadata.get("universe") if isinstance(result.resume_metadata, Mapping) else None
@@ -1102,6 +1184,18 @@ def _json_payload(
         ranks_by_index[ranked.original_index] = ranked.display_rank
     for index, symbol_result in enumerate(result.results):
         payload["results"][index].update(display_fields(symbol_result, display_rank=ranks_by_index.get(index)))
+    if portfolio_selection is not None:
+        payload["portfolio_selection"] = portfolio_selection.model_dump(mode="json")
+        payload["selected_candidates"] = [
+            candidate.model_dump(mode="json") for candidate in portfolio_selection.selected_candidates
+        ]
+        payload["rejected_candidates"] = [
+            candidate.model_dump(mode="json") for candidate in portfolio_selection.rejected_candidates
+        ]
+        payload["exposure_summary"] = [
+            exposure.model_dump(mode="json") for exposure in portfolio_selection.exposure_summary
+        ]
+        payload["portfolio_warnings"] = list(portfolio_selection.portfolio_warnings)
     if replay_summary is not None:
         payload["replay_result"] = replay_summary.model_dump(mode="json")
         payload.update(backtest_json_payload(replay_summary))

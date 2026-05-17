@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, and Phase 24 historical replay validation.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, and Phase 28 portfolio selection.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -102,7 +102,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, and the Phase 24 historical replay layer. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, and the Phase 28 portfolio selection layer. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -1015,6 +1015,48 @@ Safety boundaries:
 - Telegram remains dry-run/output-only by default.
 - Existing scan artifacts are not changed unless the user explicitly uses existing output flags such as `--output-json` or `--save-run`.
 
+## Phase 28 Portfolio Selection / Exposure Control
+
+Phase 28 adds `app/analytics/portfolio_selection.py`, a deterministic post-scan selection layer for choosing the best opportunities when several valid setups appear at the same time. It exists to avoid treating every valid setup equally, reduce overtrading, and control correlated beta exposure and total portfolio heat.
+
+Default rules:
+
+- `--portfolio-select` must be enabled explicitly.
+- Only valid trade candidates can be selected. Near-misses remain `WATCHLIST_ONLY`.
+- Default max selected setups: `3`.
+- Default max portfolio risk: `3%` total.
+- Default max beta-group risk: `1.5%`.
+- Correlated beta-group duplicates are rejected by default. Use `--allow-correlated-setups` only when you intentionally want multiple setups from the same beta group, still subject to the risk caps.
+- Selection ranking prefers higher quality score, higher edge/expectancy, better RR, cleaner derivatives, and lower execution risk.
+
+Beta groups:
+
+- `BTC_MAJOR`
+- `ETH_BETA`
+- `SOL_BETA`
+- `L1_L2`
+- `MEME`
+- `AI`
+- `RWA`
+- `DEFI`
+- `UNKNOWN`
+
+When a symbol has no reliable sector or narrative metadata, the selector marks those fields as `N/A`. Unknown beta groups are kept as `UNKNOWN` instead of inventing market data.
+
+Example command:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 20 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --strategy liquidity_grab_pullback --modes challenge swing scalp --display normal --rank-results --portfolio-select --max-selected-setups 3 --max-portfolio-risk-pct 3 --max-beta-group-risk-pct 1.5
+```
+
+When `--portfolio-select` and `--output-json` are used together, the output includes `portfolio_selection`, `selected_candidates`, `rejected_candidates`, `exposure_summary`, and `portfolio_warnings`.
+
+Safety boundaries:
+
+- Phase 28 does not weaken strategy gates or change signal generation logic.
+- It does not create trades from invalid or near-miss setups.
+- It does not place orders, add private exchange API access, call account endpoints, send live Telegram messages, withdraw funds, or transfer funds.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -1041,3 +1083,4 @@ Safety boundaries:
 - The Phase 22 near-miss intelligence layer is output-only. It does not create trade ideas from near-misses, send Telegram alerts, change strategy gate strictness, place orders, use private exchange API access, withdrawals, transfers, or account endpoints.
 - The Phase 23 setup quality layer is post-strategy validation only. It does not weaken strategy gates, create trades from invalid setups, place orders, use private exchange API access, withdrawals, transfers, account endpoints, or send live Telegram messages.
 - The Phase 24 historical replay layer is diagnostic candle replay only. It does not weaken live strategy gates, replace live ranking, place orders, call private exchange APIs, send live Telegram messages, withdraw funds, or transfer funds.
+- The Phase 28 portfolio selection layer is output-side selection and risk intelligence only. It does not weaken strategy gates, create invalid trades, place orders, call private exchange APIs, send live Telegram messages, withdraw funds, or transfer funds.
