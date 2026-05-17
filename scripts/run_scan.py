@@ -20,6 +20,7 @@ from app.backtesting import (  # noqa: E402
     ReplayConfig,
     ReplaySummary,
     StrategyReplayEngine,
+    backtest_json_payload,
     format_replay_summary,
 )
 from app.data.dtos import NA  # noqa: E402
@@ -139,11 +140,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--execution-timeframe", default="15m")
     parser.add_argument("--confirmation-timeframe", default="5m")
     parser.add_argument("--aggressive-toggle", action="store_true")
-    parser.add_argument("--replay", action="store_true")
-    parser.add_argument("--replay-candles", type=int, default=DEFAULT_REPLAY_CANDLES)
+    parser.add_argument("--replay", "--backtest", dest="replay", action="store_true")
+    parser.add_argument("--replay-candles", "--backtest-candles", dest="replay_candles", type=int, default=DEFAULT_REPLAY_CANDLES)
     parser.add_argument("--same-candle-policy", choices=["conservative", "optimistic"], default="conservative")
     parser.add_argument("--replay-max-hold-candles", type=int)
     parser.add_argument("--replay-max-fill-candles", type=int)
+    parser.add_argument("--backtest-max-setups", type=int)
+    parser.add_argument("--backtest-output-json", type=Path)
+    parser.add_argument("--backtest-summary-only", action="store_true")
     parser.add_argument("--request-timeout-sec", type=_positive_float_arg, default=DEFAULT_REQUEST_TIMEOUT_SEC)
     parser.add_argument("--symbol-timeout-sec", type=_positive_float_arg, default=DEFAULT_SYMBOL_TIMEOUT_SEC)
     parser.add_argument("--scan-timeout-sec", "--max-scan-seconds", dest="scan_timeout_sec", type=_positive_float_arg)
@@ -183,6 +187,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--replay-max-hold-candles must be at least 1.")
     if args.replay_max_fill_candles is not None and args.replay_max_fill_candles < 1:
         parser.error("--replay-max-fill-candles must be at least 1.")
+    if args.backtest_max_setups is not None and args.backtest_max_setups < 1:
+        parser.error("--backtest-max-setups must be at least 1.")
+    if args.backtest_output_json is not None:
+        args.replay = True
     args.symbols_explicit = symbols_explicit
     args.diagnostics_level_explicit = diagnostics_level_explicit
     args.display_explicit = display_explicit
@@ -335,11 +343,19 @@ async def main(argv: Sequence[str] | None = None) -> None:
 
     if args.output_json is not None:
         _write_run_json(args.output_json, result, ranked_results=ranked_results, replay_summary=replay_summary)
+    if args.backtest_output_json is not None and replay_summary is not None:
+        _write_backtest_json(args.backtest_output_json, replay_summary)
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
     if replay_summary is not None:
         print("")
-        print(format_replay_summary(replay_summary))
+        print(
+            format_replay_summary(
+                replay_summary,
+                summary_only=args.backtest_summary_only,
+                include_setup_diagnostics=diagnostics_level == "full" or display_mode == "full",
+            )
+        )
     if diagnostics_level == "full" or display_mode == "full":
         print("")
         print(_format_run_diagnostics(result))
@@ -722,6 +738,14 @@ def _write_run_json(
     )
 
 
+def _write_backtest_json(path: Path, replay_summary: ReplaySummary) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(backtest_json_payload(replay_summary), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def _scanner_runner(cache: MarketDataCache | None) -> Any:
     try:
         return ScannerRunner(market_data_cache=cache)
@@ -833,6 +857,7 @@ async def _run_replay(
         same_candle_policy=args.same_candle_policy,
         max_hold_candles=args.replay_max_hold_candles,
         max_fill_candles=args.replay_max_fill_candles,
+        max_setups=args.backtest_max_setups,
         aggressive_toggle=args.aggressive_toggle,
     )
     return StrategyReplayEngine().run(
@@ -980,6 +1005,7 @@ def _json_payload(
         payload["results"][index].update(display_fields(symbol_result, display_rank=ranks_by_index.get(index)))
     if replay_summary is not None:
         payload["replay_result"] = replay_summary.model_dump(mode="json")
+        payload.update(backtest_json_payload(replay_summary))
     return payload
 
 

@@ -466,6 +466,29 @@ def test_replay_candles_default_is_300() -> None:
     assert args.replay_candles == 300
 
 
+def test_backtest_cli_flags_are_accepted(tmp_path) -> None:
+    output_path = tmp_path / "backtest.json"
+
+    args = run_scan.parse_args(
+        [
+            "--backtest",
+            "--backtest-candles",
+            "120",
+            "--backtest-max-setups",
+            "5",
+            "--backtest-output-json",
+            str(output_path),
+            "--backtest-summary-only",
+        ]
+    )
+
+    assert args.replay is True
+    assert args.replay_candles == 120
+    assert args.backtest_max_setups == 5
+    assert args.backtest_output_json == output_path
+    assert args.backtest_summary_only is True
+
+
 def test_save_run_without_path_defaults_to_latest_scan() -> None:
     args = run_scan.parse_args(["--symbols", "BTCUSDT", "--save-run"])
 
@@ -1101,6 +1124,28 @@ def test_replay_output_json_includes_replay_result(tmp_path, monkeypatch) -> Non
     assert payload["replay_result"]["strategy"] == "Liquidity Grab Pullback"
     assert payload["replay_result"]["stats"]["total_setups"] == 1
     assert payload["replay_result"]["symbols"][0]["sample_size_warning"] == "low_sample_size"
+    assert payload["backtest_summary"]["setups_found"] == 1
+    assert "per_symbol_stats" in payload
+    assert "per_mode_stats" in payload
+    assert "individual_setup_results" in payload
+
+
+def test_backtest_output_json_writes_phase_26_payload(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "backtest_output.json"
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    async def fake_run_replay(args, watchlist, scanner_config, cache):
+        return _fake_replay_summary()
+
+    monkeypatch.setattr(run_scan, "_run_replay", fake_run_replay)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--backtest-output-json", str(output_path)]))
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["backtest_summary"]["strategy"] == "Liquidity Grab Pullback"
+    assert payload["backtest_summary"]["setups_found"] == 1
+    assert payload["per_symbol_stats"]["BTCUSDT"]["total_setups"] == 1
+    assert "individual_setup_results" in payload
 
 
 def test_replay_cli_output_includes_replay_summary(monkeypatch, capsys) -> None:
