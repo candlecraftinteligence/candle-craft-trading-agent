@@ -13,6 +13,7 @@ from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult,
 DisplayMode = Literal["compact", "normal", "full"]
 DisplayBucket = Literal["valid", "near_miss", "no_setup", "data_issue"]
 DisplayStatus = Literal["valid_setup", "near_miss", "no_setup", "data_issue", "scan_error"]
+ReadinessLabel = Literal["VALID SETUP", "HOT WATCH", "WATCH", "REJECTED", "DATA ISSUE"]
 
 BULLET = "\u2022"
 CHECK = "\u2705"
@@ -81,6 +82,24 @@ FINAL_CONFLUENCE_FAIL_GATES = {
     "derivatives_conflict",
     "funding_oi_guard",
 }
+HOT_WATCH_GATES = (
+    RR_FAIL_GATES
+    | {
+        "trust_meter_below_minimum",
+        "challenge_trust_below_85",
+        "quality_filter",
+    }
+)
+CONTEXT_REJECTION_GATES = {
+    "challenge_illiquid_token",
+    "challenge_btc_abnormal",
+    "challenge_event_window",
+    "btc_volatility_guard",
+    "btc_d_guard",
+    "event_guard",
+    "derivatives_conflict",
+    "funding_oi_guard",
+}
 LATE_FAILURE_GATES = (
     PULLBACK_FAIL_GATES
     | RR_FAIL_GATES
@@ -104,6 +123,13 @@ QUALITY_STATE_ORDER = {
     SetupQualityState.REJECTED_NO_EDGE: 3,
     SetupQualityState.DATA_ISSUE: 4,
 }
+READINESS_LABEL_ORDER: dict[ReadinessLabel, int] = {
+    "VALID SETUP": 0,
+    "HOT WATCH": 1,
+    "WATCH": 2,
+    "REJECTED": 3,
+    "DATA ISSUE": 4,
+}
 
 
 @dataclass(frozen=True)
@@ -111,6 +137,14 @@ class ProgressItem:
     label: str
     passed: bool
     evaluated: bool = True
+
+
+@dataclass(frozen=True)
+class SetupReadiness:
+    readiness_score: int
+    readiness_label: ReadinessLabel
+    next_trigger_needed: str
+    priority_rank_reason: str
 
 
 @dataclass(frozen=True)
@@ -132,6 +166,10 @@ class SymbolDisplay:
     progress_items: tuple[ProgressItem, ...]
     failed_gate: str
     near_miss_intelligence: NearMissIntelligence | None
+    readiness_score: int
+    readiness_label: ReadinessLabel
+    next_trigger_needed: str
+    priority_rank_reason: str
 
 
 @dataclass(frozen=True)
@@ -157,6 +195,16 @@ def build_symbol_display(symbol_result: ScannerSymbolResult) -> SymbolDisplay:
     setup_progress_passed = sum(1 for item in progress_items if item.passed)
     short_reason = _short_reason(symbol_result, diagnostics, display_status)
     near_miss_intelligence = _near_miss_intelligence(symbol_result, diagnostics, failed_gate, short_reason)
+    action_label = _action_label(symbol_result, display_bucket, near_miss_intelligence)
+    readiness = _setup_readiness(
+        symbol_result,
+        diagnostics=diagnostics,
+        display_status=display_status,
+        display_bucket=display_bucket,
+        failed_gate=failed_gate,
+        progress_items=progress_items,
+        setup_progress_passed=setup_progress_passed,
+    )
     return SymbolDisplay(
         display_status=display_status,
         display_status_label=_display_status_label(display_status),
@@ -171,10 +219,14 @@ def build_symbol_display(symbol_result: ScannerSymbolResult) -> SymbolDisplay:
         passed_checks=passed_checks,
         failed_checks=failed_checks,
         short_reason=short_reason,
-        action_label=_action_label(symbol_result, display_bucket, near_miss_intelligence),
+        action_label=action_label,
         progress_items=progress_items,
         failed_gate=failed_gate,
         near_miss_intelligence=near_miss_intelligence,
+        readiness_score=readiness.readiness_score,
+        readiness_label=readiness.readiness_label,
+        next_trigger_needed=readiness.next_trigger_needed,
+        priority_rank_reason=readiness.priority_rank_reason,
     )
 
 
@@ -195,6 +247,10 @@ def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | No
         "failed_checks": list(display.failed_checks),
         "short_reason": display.short_reason,
         "action_label": display.action_label,
+        "readiness_score": display.readiness_score,
+        "readiness_label": display.readiness_label,
+        "next_trigger_needed": display.next_trigger_needed,
+        "priority_rank_reason": display.priority_rank_reason,
         "near_miss_intelligence": display.near_miss_intelligence.model_dump(mode="json")
         if display.near_miss_intelligence is not None
         else None,
@@ -327,6 +383,7 @@ def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int 
         )
     parts = [
         f"{rank_text}{display.display_status_label.split(' ', 1)[0]} {symbol_result.symbol} {DASH} {status_text}",
+        f"Readiness {display.readiness_score}/100 {display.readiness_label}",
         f"Modes {_mode_summary(symbol_result)}",
         _execution_summary(diagnostics),
         f"Progress {display.setup_progress_passed}/{display.setup_progress_total}",
@@ -363,6 +420,7 @@ def format_symbol_card(
         CARD_RULE,
         "",
         f"{BULLET} Bucket: {display.display_bucket_label}",
+        *_readiness_summary_lines(display),
         f"{BULLET} Mode(s): {_mode_summary(symbol_result)}",
         f"{BULLET} HTF/Bias/Execution: {_execution_summary(diagnostics)}",
         *(_card_failed_gate_lines(display)),
@@ -422,6 +480,9 @@ def _format_near_miss_card(
         CARD_RULE,
         "",
         f"Status: {status}",
+        f"Readiness score: {display.readiness_score}/100",
+        f"Readiness label: {display.readiness_label}",
+        f"Next trigger needed: {display.next_trigger_needed}",
         f"Failed gate: {failed_gate}",
         f"Reason: {reason}",
         *_quality_summary_lines(symbol_result.setup_quality),
@@ -704,16 +765,244 @@ def _action_label(
     return "Rejected"
 
 
-def _ranking_priority(item: RankedSymbolDisplay) -> tuple[int, int, int, int]:
+def _setup_readiness(
+    symbol_result: ScannerSymbolResult,
+    *,
+    diagnostics: Mapping[str, Any],
+    display_status: DisplayStatus,
+    display_bucket: DisplayBucket,
+    failed_gate: str,
+    progress_items: tuple[ProgressItem, ...],
+    setup_progress_passed: int,
+) -> SetupReadiness:
+    score = _readiness_score(symbol_result, diagnostics, display_status, failed_gate, progress_items)
+    label = _readiness_label(
+        symbol_result,
+        diagnostics=diagnostics,
+        display_status=display_status,
+        display_bucket=display_bucket,
+        failed_gate=failed_gate,
+        progress_items=progress_items,
+        setup_progress_passed=setup_progress_passed,
+        readiness_score=score,
+    )
+    next_trigger = _next_trigger_needed(
+        symbol_result,
+        diagnostics=diagnostics,
+        display_status=display_status,
+        failed_gate=failed_gate,
+        readiness_label=label,
+    )
+    return SetupReadiness(
+        readiness_score=score,
+        readiness_label=label,
+        next_trigger_needed=next_trigger,
+        priority_rank_reason=_priority_rank_reason(
+            label=label,
+            score=score,
+            next_trigger=next_trigger,
+            failed_gate=failed_gate,
+            progress_passed=setup_progress_passed,
+            diagnostics=diagnostics,
+        ),
+    )
+
+
+def _readiness_score(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    display_status: DisplayStatus,
+    failed_gate: str,
+    progress_items: tuple[ProgressItem, ...],
+) -> int:
+    score = Decimal("0")
+    expected_trend = _expected_trend(_setup_bias(diagnostics))
+    score += _trend_alignment_points(diagnostics.get("htf_2d_trend"), expected_trend, Decimal("10"))
+    score += _trend_alignment_points(diagnostics.get("mtf_12h_trend"), expected_trend, Decimal("10"))
+
+    if len(progress_items) > 0 and progress_items[0].passed:
+        score += Decimal("15")
+    if len(progress_items) > 1 and progress_items[1].passed:
+        score += Decimal("15")
+    if len(progress_items) > 2 and progress_items[2].passed:
+        score += Decimal("15")
+    score += _rr_readiness_points(diagnostics, failed_gate)
+    score += _derivatives_readiness_points(symbol_result, diagnostics)
+    score += _volume_profile_readiness_points(symbol_result)
+    score += _data_certainty_points(symbol_result, diagnostics, failed_gate)
+
+    quality = symbol_result.setup_quality
+    if _quality_evaluated(quality):
+        if quality.quality_state in (
+            SetupQualityState.HIGH_QUALITY_TRADE,
+            SetupQualityState.VALID_BUT_LOWER_QUALITY,
+        ):
+            score = max(score, Decimal(min(100, max(75, quality.quality_score))))
+        elif quality.quality_state == SetupQualityState.WATCHLIST_NEAR_MISS:
+            score = max(score, Decimal(min(89, max(45, quality.quality_score))))
+        elif quality.quality_state == SetupQualityState.DATA_ISSUE:
+            score = min(score, Decimal("25"))
+
+    if display_status == "valid_setup":
+        score = max(score, Decimal("90"))
+    if display_status in ("data_issue", "scan_error"):
+        score = min(score, Decimal("25"))
+    if _critical_data_issue(symbol_result, diagnostics, failed_gate):
+        score = min(score, Decimal("30"))
+    if _severe_derivatives_conflict(symbol_result, diagnostics, failed_gate):
+        score = min(score, Decimal("55"))
+
+    return _bounded_int(score)
+
+
+def _readiness_label(
+    symbol_result: ScannerSymbolResult,
+    *,
+    diagnostics: Mapping[str, Any],
+    display_status: DisplayStatus,
+    display_bucket: DisplayBucket,
+    failed_gate: str,
+    progress_items: tuple[ProgressItem, ...],
+    setup_progress_passed: int,
+    readiness_score: int,
+) -> ReadinessLabel:
+    quality = symbol_result.setup_quality
+    if display_status in ("data_issue", "scan_error") or _critical_data_issue(symbol_result, diagnostics, failed_gate):
+        return "DATA ISSUE"
+    if _quality_evaluated(quality) and quality.quality_state == SetupQualityState.DATA_ISSUE:
+        return "DATA ISSUE"
+    if _trade_idea_created(symbol_result) or (
+        _quality_evaluated(quality)
+        and quality.quality_state
+        in (SetupQualityState.HIGH_QUALITY_TRADE, SetupQualityState.VALID_BUT_LOWER_QUALITY)
+    ):
+        return "VALID SETUP"
+    if _severe_derivatives_conflict(symbol_result, diagnostics, failed_gate):
+        return "REJECTED"
+    if _hot_watch_eligible(
+        diagnostics=diagnostics,
+        failed_gate=failed_gate,
+        progress_items=progress_items,
+        setup_progress_passed=setup_progress_passed,
+    ):
+        return "HOT WATCH"
+    if _quality_evaluated(quality) and quality.quality_state == SetupQualityState.WATCHLIST_NEAR_MISS:
+        return "WATCH"
+    if display_bucket == "near_miss":
+        return "WATCH"
+    if _watch_eligible(progress_items, failed_gate, readiness_score):
+        return "WATCH"
+    return "REJECTED"
+
+
+def _hot_watch_eligible(
+    *,
+    diagnostics: Mapping[str, Any],
+    failed_gate: str,
+    progress_items: tuple[ProgressItem, ...],
+    setup_progress_passed: int,
+) -> bool:
+    if not _core_checks_passed(progress_items):
+        return False
+    if setup_progress_passed < 3:
+        return False
+    if failed_gate == NA or failed_gate in EARLY_CORE_GATES or failed_gate in CONTEXT_REJECTION_GATES:
+        return False
+    gates_failed = set(_sequence_values(diagnostics.get("gates_failed")))
+    if not gates_failed and failed_gate != NA:
+        gates_failed = {failed_gate}
+    if len(gates_failed) != 1:
+        return False
+    if not gates_failed <= HOT_WATCH_GATES:
+        return False
+    return not _severe_derivatives_conflict_from_diagnostics(diagnostics, failed_gate)
+
+
+def _watch_eligible(
+    progress_items: tuple[ProgressItem, ...],
+    failed_gate: str,
+    readiness_score: int,
+) -> bool:
+    if failed_gate in CONTEXT_REJECTION_GATES:
+        return False
+    if failed_gate in DATA_INCOMPLETE_GATES:
+        return False
+    if len(progress_items) >= 2 and progress_items[0].passed:
+        return True
+    return readiness_score >= 45 and failed_gate not in {"missing_confirmed_sweep"}
+
+
+def _next_trigger_needed(
+    symbol_result: ScannerSymbolResult,
+    *,
+    diagnostics: Mapping[str, Any],
+    display_status: DisplayStatus,
+    failed_gate: str,
+    readiness_label: ReadinessLabel,
+) -> str:
+    if readiness_label == "DATA ISSUE" or display_status in ("data_issue", "scan_error"):
+        return "Avoid: data unreliable"
+    if _severe_derivatives_conflict(symbol_result, diagnostics, failed_gate):
+        return "Avoid: derivatives conflict"
+    if readiness_label == "VALID SETUP":
+        return "No trigger needed; setup is already valid"
+    if failed_gate == "missing_confirmed_sweep":
+        return "Wait for new sweep"
+    if failed_gate in ("missing_confirmation_structure_shift", "missing_confirmation_candles"):
+        return "Wait for 5m BOS/CHoCH"
+    if failed_gate in PULLBACK_FAIL_GATES or failed_gate in {"missing_displacement_impulse", "missing_stop"}:
+        return "Wait for clean OB/FVG pullback"
+    if failed_gate in RR_FAIL_GATES:
+        return "Wait for RR expansion above minimum"
+    if failed_gate in {"trust_meter_below_minimum", "challenge_trust_below_85", "quality_filter"}:
+        return "Wait for final quality gate to improve"
+    if failed_gate in CONTEXT_REJECTION_GATES:
+        return "Avoid: derivatives conflict" if failed_gate in {"derivatives_conflict", "funding_oi_guard"} else "Avoid: context guard active"
+    if failed_gate == "risk":
+        return "Avoid: risk gate failed"
+    return "Wait for failed gate to clear"
+
+
+def _priority_rank_reason(
+    *,
+    label: ReadinessLabel,
+    score: int,
+    next_trigger: str,
+    failed_gate: str,
+    progress_passed: int,
+    diagnostics: Mapping[str, Any],
+) -> str:
+    return (
+        f"{label}: score {score}/100; progress {progress_passed}/{SETUP_PROGRESS_TOTAL}; "
+        f"2D {_title_value(diagnostics.get('htf_2d_trend'))}; "
+        f"12H {_title_value(diagnostics.get('mtf_12h_trend'))}; "
+        f"failed gate {_display(failed_gate)}; next {next_trigger}."
+    )
+
+
+def _readiness_summary_lines(display: SymbolDisplay) -> tuple[str, ...]:
+    return (
+        f"{BULLET} Readiness score: {display.readiness_score}/100",
+        f"{BULLET} Readiness label: {display.readiness_label}",
+        f"{BULLET} Next trigger needed: {display.next_trigger_needed}",
+    )
+
+
+def _ranking_priority(item: RankedSymbolDisplay) -> tuple[int, int, int, int, int, int]:
     quality = item.symbol_result.setup_quality
+    readiness_order = READINESS_LABEL_ORDER[item.display.readiness_label]
     if _quality_evaluated(quality):
         return (
+            readiness_order,
+            -item.display.readiness_score,
             QUALITY_STATE_ORDER[quality.quality_state],
             -quality.quality_score,
             BUCKET_ORDER[item.display.display_bucket],
             -item.display.display_priority_score,
         )
     return (
+        readiness_order,
+        -item.display.readiness_score,
         BUCKET_ORDER[item.display.display_bucket],
         -item.display.display_priority_score,
         0,
@@ -794,8 +1083,6 @@ def _diagnostic_lines(symbol_result: ScannerSymbolResult, diagnostics: Mapping[s
 
 
 def _card_failed_gate_lines(display: SymbolDisplay) -> tuple[str, ...]:
-    if display.display_bucket == "valid" or display.failed_gate == NA:
-        return ()
     return (f"{BULLET} Failed gate: {display.failed_gate}",)
 
 
@@ -842,6 +1129,217 @@ def _summary_status(value: object) -> str:
     if text == "not_evaluated":
         return "not evaluated"
     return text
+
+
+def _setup_bias(diagnostics: Mapping[str, Any]) -> str:
+    bias = _display(diagnostics.get("bias")).lower()
+    if bias in ("long", "short"):
+        return bias
+    for key in ("sweep_diagnostics", "bos_choch_diagnostics"):
+        text = _display(diagnostics.get(key)).lower()
+        if "bullish" in text:
+            return "long"
+        if "bearish" in text:
+            return "short"
+    return NA
+
+
+def _expected_trend(bias: str) -> str:
+    if bias == "long":
+        return "bullish"
+    if bias == "short":
+        return "bearish"
+    return NA
+
+
+def _trend_alignment_points(value: object, expected_trend: str, maximum: Decimal) -> Decimal:
+    trend = _display(value).lower()
+    if trend == NA.lower() or expected_trend == NA:
+        return Decimal("0")
+    if trend == expected_trend:
+        return maximum
+    if trend in ("neutral", "range", "ranging", "sideways"):
+        return maximum * Decimal("0.5")
+    return Decimal("0")
+
+
+def _rr_readiness_points(
+    diagnostics: Mapping[str, Any],
+    failed_gate: str,
+) -> Decimal:
+    gates_passed = set(_sequence_values(diagnostics.get("gates_passed")))
+    gates_failed = set(_sequence_values(diagnostics.get("gates_failed")))
+    rr_failed = failed_gate in RR_FAIL_GATES or bool(gates_failed & RR_FAIL_GATES)
+    rr = _numeric(diagnostics.get("rr_to_tp2"))
+    if rr == 0 and "rr" in gates_passed and not rr_failed:
+        return Decimal("15")
+    if rr <= 0:
+        return Decimal("0")
+    required = _required_rr(diagnostics, failed_gate)
+    ratio = min(rr / required, Decimal("1"))
+    return ratio * Decimal("15")
+
+
+def _required_rr(diagnostics: Mapping[str, Any], failed_gate: str) -> Decimal:
+    mode = _display(diagnostics.get("mode")).lower()
+    if mode == "challenge" or failed_gate.startswith("challenge_"):
+        return Decimal("3.0")
+    return Decimal("2.5")
+
+
+def _derivatives_readiness_points(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> Decimal:
+    if _severe_derivatives_conflict(symbol_result, diagnostics, _failed_gate(symbol_result, diagnostics)):
+        return Decimal("0")
+    support = _display(diagnostics.get("derivatives_supports_trade"))
+    if support == "True":
+        score = Decimal("6")
+    elif support == "False":
+        score = Decimal("2")
+    else:
+        score = Decimal("5")
+
+    context_score = _numeric(symbol_result.derivatives_score)
+    if context_score == 0:
+        context_score = _numeric(diagnostics.get("derivatives_score"))
+    if context_score >= Decimal("70"):
+        score += Decimal("2")
+    elif context_score >= Decimal("40"):
+        score += Decimal("1")
+    return _bounded_decimal(score, Decimal("8"))
+
+
+def _volume_profile_readiness_points(symbol_result: ScannerSymbolResult) -> Decimal:
+    score = Decimal("0")
+    if symbol_result.poc != NA:
+        score += Decimal("3")
+    if symbol_result.value_area_high != NA and symbol_result.value_area_low != NA:
+        score += Decimal("2")
+    return score
+
+
+def _data_certainty_points(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    failed_gate: str,
+) -> Decimal:
+    if _critical_data_issue(symbol_result, diagnostics, failed_gate):
+        return Decimal("0")
+
+    score = Decimal("7")
+    missing_items = (
+        *symbol_result.missing_data,
+        *symbol_result.strategy_missing_data,
+        *symbol_result.derivatives_missing_data,
+        *_sequence_values(diagnostics.get("missing_data")),
+    )
+    unverified_items = (
+        *symbol_result.unverified_data,
+        *symbol_result.strategy_unverified_data,
+        *symbol_result.derivatives_unverified_data,
+        *_sequence_values(diagnostics.get("unverified_data")),
+    )
+    warning_items = (*symbol_result.derivatives_warnings, *symbol_result.volume_profile_warnings)
+    for item in _unique_strings(missing_items):
+        score -= Decimal("0.5") if _optional_missing_item(item) else Decimal("1")
+    score -= Decimal(len(_unique_strings(unverified_items)) * 2)
+    score -= Decimal(min(4, len(_unique_strings(warning_items)))) * Decimal("0.5")
+    return _bounded_decimal(score, Decimal("7"))
+
+
+def _critical_data_issue(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    failed_gate: str,
+) -> bool:
+    if symbol_result.error_message:
+        return True
+    if diagnostics.get("error"):
+        return True
+    if failed_gate in DATA_INCOMPLETE_GATES or failed_gate in {"current_price", "scanner_error"}:
+        return True
+    critical_prefixes = (
+        "candles:",
+        "candles_15m:",
+        "candles_5m:",
+        "execution_candles:",
+        "confirmation_candles:",
+        "current_price:",
+        "latest_close:",
+    )
+    values = (
+        *symbol_result.missing_data,
+        *symbol_result.strategy_missing_data,
+        *_sequence_values(diagnostics.get("missing_data")),
+    )
+    return any(str(item).startswith(critical_prefixes) for item in values)
+
+
+def _optional_missing_item(value: str) -> bool:
+    return value.startswith(("cvd:", "liquidation_data:", "btc", "event", "sector"))
+
+
+def _severe_derivatives_conflict(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    failed_gate: str,
+) -> bool:
+    if _severe_derivatives_conflict_from_diagnostics(diagnostics, failed_gate):
+        return True
+    support = _display(diagnostics.get("derivatives_supports_trade"))
+    funding_status = _first_non_na_text(
+        symbol_result.funding_status,
+        _nested_value(diagnostics, "funding_context", "funding_status"),
+    )
+    crowding = _first_non_na_text(symbol_result.crowding_risk, diagnostics.get("crowding_risk"))
+    if support == "False" and crowding == "high":
+        return True
+    if support == "False" and funding_status in ("extreme_positive", "extreme_negative"):
+        return True
+    return False
+
+
+def _severe_derivatives_conflict_from_diagnostics(
+    diagnostics: Mapping[str, Any],
+    failed_gate: str,
+) -> bool:
+    if failed_gate in {"derivatives_conflict", "funding_oi_guard"}:
+        return True
+    if _display(diagnostics.get("derivatives_conflict_reason")) != NA:
+        return True
+    support = _display(diagnostics.get("derivatives_supports_trade"))
+    funding_status = _display(_nested_value(diagnostics, "funding_context", "funding_status"))
+    crowding = _display(diagnostics.get("crowding_risk"))
+    if support == "False" and crowding == "high":
+        return True
+    if support == "False" and funding_status in ("extreme_positive", "extreme_negative"):
+        return True
+    return False
+
+
+def _nested_value(diagnostics: Mapping[str, Any], key: str, nested_key: str) -> object:
+    value = diagnostics.get(key)
+    if isinstance(value, Mapping):
+        return value.get(nested_key, NA)
+    return NA
+
+
+def _first_non_na_text(*values: object) -> str:
+    for value in values:
+        text = _display(value)
+        if text != NA:
+            return text
+    return NA
+
+
+def _bounded_decimal(value: Decimal, maximum: Decimal) -> Decimal:
+    return min(maximum, max(Decimal("0"), value))
+
+
+def _bounded_int(value: Decimal) -> int:
+    return int(_bounded_decimal(value, Decimal("100")).to_integral_value(rounding="ROUND_HALF_UP"))
 
 
 def _display_priority_score(
@@ -1077,6 +1575,15 @@ def _sequence_values(values: Any) -> tuple[str, ...]:
     return tuple(_display(value) for value in values if _display(value) != NA)
 
 
+def _unique_strings(values: Sequence[str]) -> tuple[str, ...]:
+    output: list[str] = []
+    for value in values:
+        text = _display(value)
+        if text != NA and text not in output:
+            output.append(text)
+    return tuple(output)
+
+
 def _display(value: object) -> str:
     if value is None or value == "":
         return NA
@@ -1094,7 +1601,9 @@ __all__ = [
     "DisplayMode",
     "DisplayStatus",
     "FOOTER",
+    "ReadinessLabel",
     "RankedSymbolDisplay",
+    "SetupReadiness",
     "SymbolDisplay",
     "build_symbol_display",
     "display_fields",

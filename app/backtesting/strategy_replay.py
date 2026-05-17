@@ -52,7 +52,7 @@ class ReplayConfig(BaseModel):
     confirmation_timeframe: str = "5m"
     htf_timeframe: str = "2d"
     bias_timeframe: str = "12h"
-    replay_candles: int = 1000
+    replay_candles: int = 300
     same_candle_policy: Literal["conservative", "optimistic"] = "conservative"
     max_hold_candles: int | None = None
     max_fill_candles: int | None = None
