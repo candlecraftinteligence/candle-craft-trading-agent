@@ -38,6 +38,7 @@ from app.analytics.portfolio_selection import (  # noqa: E402
 )
 from app.data.dtos import NA  # noqa: E402
 from app.cache.market_data_cache import MarketDataCache  # noqa: E402
+from app.core.config import Settings  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
     DisplayBucket,
@@ -83,9 +84,30 @@ from app.watchlists.presets import (  # noqa: E402
     presets_with_counts,
     validate_symbols,
 )
+from app.watch_mode import (  # noqa: E402
+    DEFAULT_LATEST_RUN_PATH,
+    DEFAULT_WATCH_STATE_PATH,
+    WatchActivation,
+    WatchModeError,
+    append_watch_output,
+    build_watch_iteration_summary,
+    deliver_watch_activation_alert,
+    format_watch_activation_alert,
+    format_watch_iteration_summary,
+    load_run_payload,
+    load_symbols_from_run,
+    load_watch_state,
+    save_watch_state,
+    seed_watch_state_from_run_payload,
+    should_trigger_activation_alert,
+    state_watch_symbols,
+    update_watch_state_for_result,
+)
 
 
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+LATEST_RUN_PATH = DEFAULT_LATEST_RUN_PATH
+WATCH_STATE_PATH = DEFAULT_WATCH_STATE_PATH
 
 
 @dataclass(frozen=True)
@@ -100,6 +122,13 @@ class ResumeState:
     results_by_symbol: dict[str, ScannerSymbolResult]
     skipped_symbols: tuple[str, ...]
     loaded_symbols: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WatchScanExecution:
+    result: ScannerRunResult
+    ranked_results: tuple[Any, ...]
+    portfolio_selection: PortfolioSelectionResult | None
 
 
 def _non_negative_decimal_arg(value: str) -> Decimal:
@@ -120,6 +149,17 @@ def _positive_float_arg(value: str) -> float:
     if number <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return number
+
+
+def _bool_arg(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("must be true or false")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -182,6 +222,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-portfolio-risk-pct", type=_non_negative_decimal_arg, default=Decimal("3"))
     parser.add_argument("--max-beta-group-risk-pct", type=_non_negative_decimal_arg, default=Decimal("1.5"))
     parser.add_argument("--allow-correlated-setups", action="store_true")
+    parser.add_argument("--watch", action="store_true")
+    parser.add_argument("--watch-interval-sec", type=_positive_float_arg, default=60.0)
+    parser.add_argument("--watch-max-iterations", type=int)
+    parser.add_argument("--watch-symbols-from-latest-run", action="store_true")
+    parser.add_argument("--watch-only-near-misses", action="store_true")
+    parser.add_argument("--watch-output-file", type=Path)
+    parser.add_argument("--telegram-live-alerts", nargs="?", const=True, default=False, type=_bool_arg)
     parser.add_argument(
         "--show-near-miss-plan",
         action="store_true",
@@ -214,6 +261,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--edge-min-sample must be at least 1.")
     if args.max_selected_setups < 1:
         parser.error("--max-selected-setups must be at least 1.")
+    if args.watch_max_iterations is not None and args.watch_max_iterations < 1:
+        parser.error("--watch-max-iterations must be at least 1.")
     if args.backtest_output_json is not None:
         args.replay = True
     if args.edge_export_json is not None:
@@ -232,7 +281,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         print(_format_available_presets())
         return
 
-    watchlist = await _resolve_watchlist_for_scan(args)
+    watchlist = await _resolve_watchlist_for_args(args)
     diagnostics_level = args.diagnostics_level
     if args.verbose and not args.diagnostics_level_explicit:
         diagnostics_level = "full"
@@ -268,6 +317,17 @@ async def main(argv: Sequence[str] | None = None) -> None:
         scan_timeout_sec=args.scan_timeout_sec,
         fast_mode=args.fast,
     )
+
+    if args.watch:
+        await _run_watch_mode(
+            args,
+            watchlist=watchlist,
+            config=config,
+            diagnostics_level=diagnostics_level,
+            display_mode=display_mode,
+            effective_candle_limit=effective_candle_limit,
+        )
+        return
 
     print(_format_universe_header(watchlist.universe))
     print(f"Watchlist: {watchlist.source_label}")
@@ -508,6 +568,87 @@ async def _resolve_watchlist_for_scan(args: argparse.Namespace) -> WatchlistReso
     if args.universe == MANUAL_UNIVERSE_MODE:
         return _resolve_watchlist(args)
     return await _resolve_universe_watchlist(args)
+
+
+async def _resolve_watchlist_for_args(args: argparse.Namespace) -> WatchlistResolution:
+    if args.watch and args.watch_symbols_from_latest_run:
+        return _resolve_watchlist_from_latest_run(args)
+
+    watchlist = await _resolve_watchlist_for_scan(args)
+    if args.watch and args.watch_only_near_misses:
+        return _filter_watchlist_to_prior_watch_symbols(args, watchlist)
+    return watchlist
+
+
+def _resolve_watchlist_from_latest_run(args: argparse.Namespace) -> WatchlistResolution:
+    try:
+        symbols = load_symbols_from_run(LATEST_RUN_PATH, near_miss_only=args.watch_only_near_misses)
+    except WatchModeError as exc:
+        raise SystemExit(str(exc)) from exc
+    if not symbols:
+        label = "near-miss symbols" if args.watch_only_near_misses else "symbols"
+        raise SystemExit(f"No {label} found in latest saved run file: {LATEST_RUN_PATH}")
+    return _watch_resolution_from_symbols(args, symbols, source_label=f"latest run {LATEST_RUN_PATH}")
+
+
+def _filter_watchlist_to_prior_watch_symbols(
+    args: argparse.Namespace,
+    watchlist: WatchlistResolution,
+) -> WatchlistResolution:
+    try:
+        state = load_watch_state(WATCH_STATE_PATH)
+    except WatchModeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    symbols = state_watch_symbols(state, watchlist.symbols)
+    if not symbols and LATEST_RUN_PATH.exists():
+        try:
+            latest_symbols = load_symbols_from_run(LATEST_RUN_PATH, near_miss_only=True)
+        except WatchModeError as exc:
+            raise SystemExit(str(exc)) from exc
+        watchlist_set = set(watchlist.symbols)
+        symbols = tuple(symbol for symbol in latest_symbols if symbol in watchlist_set)
+
+    if not symbols:
+        raise SystemExit(
+            "--watch-only-near-misses did not find prior NEAR MISS, HOT WATCH, or WATCH symbols. "
+            "Use --watch-symbols-from-latest-run or run a scan with --save-run first."
+        )
+
+    return _watch_resolution_from_symbols(
+        args,
+        symbols,
+        source_label=f"{watchlist.source_label} prior near-miss/watch symbols",
+    )
+
+
+def _watch_resolution_from_symbols(
+    args: argparse.Namespace,
+    symbols: Sequence[str],
+    *,
+    source_label: str,
+) -> WatchlistResolution:
+    try:
+        normalized_symbols = validate_symbols(symbols, context=source_label)
+        exclude_symbols = set(validate_symbols(args.exclude_symbols, context="--exclude-symbols"))
+    except WatchlistPresetError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    resolved_symbols = tuple(symbol for symbol in dedupe_symbols(normalized_symbols) if symbol not in exclude_symbols)
+    if args.max_symbols is not None:
+        if args.max_symbols < 1:
+            raise SystemExit("--max-symbols must be at least 1.")
+        resolved_symbols = resolved_symbols[: args.max_symbols]
+    if not resolved_symbols:
+        raise SystemExit("Resolved watch mode symbol list is empty.")
+
+    universe = manual_symbol_universe(
+        resolved_symbols,
+        requested_size=len(resolved_symbols),
+        excluded_symbols=tuple(symbol for symbol in normalized_symbols if symbol in exclude_symbols),
+        min_quote_volume=args.min_quote_volume,
+    )
+    return WatchlistResolution(symbols=resolved_symbols, source_label=source_label, universe=universe)
 
 
 def _resolve_watchlist(args: argparse.Namespace) -> WatchlistResolution:
@@ -918,6 +1059,235 @@ async def _run_scanner(
         for index, symbol_result in enumerate(result.results, start=1):
             await after_symbol(symbol_result, index, total)
         return result
+
+
+async def _run_watch_mode(
+    args: argparse.Namespace,
+    *,
+    watchlist: WatchlistResolution,
+    config: ScannerRunConfig,
+    diagnostics_level: str,
+    display_mode: str,
+    effective_candle_limit: int,
+) -> None:
+    telegram_bot_token, telegram_chat_id = _watch_telegram_credentials(args)
+    try:
+        state = load_watch_state(WATCH_STATE_PATH)
+    except WatchModeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.watch_symbols_from_latest_run:
+        try:
+            state = seed_watch_state_from_run_payload(
+                state,
+                load_run_payload(LATEST_RUN_PATH),
+                watchlist.symbols,
+            )
+        except WatchModeError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    print(_format_universe_header(watchlist.universe))
+    print(f"Watchlist: {watchlist.source_label}")
+    print(f"Symbols queued: {len(watchlist.symbols)}")
+    print("Watch mode: enabled")
+    print(f"Telegram alerts: {'live' if args.telegram_live_alerts else 'dry-run'}")
+    for warning in _startup_warnings(args, effective_candle_limit):
+        print(f"Warning: {warning}")
+    print("")
+
+    iteration = 0
+    while True:
+        iteration += 1
+        previous_state = state
+        execution = await _run_watch_scan_iteration(
+            args,
+            watchlist=watchlist,
+            config=config,
+            iteration=iteration,
+        )
+        timestamp = _watch_iteration_timestamp()
+        activations: list[WatchActivation] = []
+        updated_state = previous_state
+
+        for symbol_result in execution.result.results:
+            previous_symbol_state = previous_state.symbols.get(symbol_result.symbol)
+            should_alert = should_trigger_activation_alert(
+                symbol_result,
+                previous_symbol_state,
+                portfolio_selection=execution.portfolio_selection if args.portfolio_select else None,
+            )
+            alert_triggered = False
+            if should_alert:
+                message = format_watch_activation_alert(symbol_result)
+                delivery = await deliver_watch_activation_alert(
+                    message,
+                    live=args.telegram_live_alerts,
+                    telegram_bot_token=telegram_bot_token,
+                    telegram_chat_id=telegram_chat_id,
+                )
+                alert_triggered = delivery.status in {"dry_run", "sent"}
+                activation = WatchActivation(
+                    symbol=symbol_result.symbol,
+                    mode=_watch_activation_mode(symbol_result),
+                    message=message,
+                    delivery_status=delivery.status,
+                    delivery_detail=delivery.detail,
+                )
+                activations.append(activation)
+                if not args.telegram_live_alerts:
+                    print(message)
+                    print("")
+                elif delivery.status == "failed":
+                    print(f"Telegram watch alert failed for {symbol_result.symbol}: {delivery.detail}")
+
+            updated_state = update_watch_state_for_result(
+                updated_state,
+                symbol_result,
+                alert_triggered=alert_triggered,
+                seen_at=timestamp,
+            )
+
+        state = updated_state
+        try:
+            save_watch_state(WATCH_STATE_PATH, state)
+        except WatchModeError as exc:
+            raise SystemExit(str(exc)) from exc
+
+        continue_watching = args.watch_max_iterations is None or iteration < args.watch_max_iterations
+        next_scan_seconds = args.watch_interval_sec if continue_watching else 0
+        summary = build_watch_iteration_summary(
+            iteration=iteration,
+            result=execution.result,
+            activations=activations,
+            next_scan_seconds=next_scan_seconds,
+            scanned_at=timestamp,
+        )
+        if args.watch_output_file is not None:
+            append_watch_output(args.watch_output_file, summary)
+        print(format_watch_iteration_summary(summary))
+        print("")
+
+        if not continue_watching:
+            break
+        await asyncio.sleep(args.watch_interval_sec)
+
+
+async def _run_watch_scan_iteration(
+    args: argparse.Namespace,
+    *,
+    watchlist: WatchlistResolution,
+    config: ScannerRunConfig,
+    iteration: int,
+) -> WatchScanExecution:
+    cache = (
+        MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
+        if args.cache_enabled
+        else None
+    )
+    latest_results_by_symbol: dict[str, ScannerSymbolResult] = {}
+    scan_config = ScannerRunConfig.model_validate({**config.model_dump(), "symbols": list(watchlist.symbols)})
+    resume_state = ResumeState(results_by_symbol={}, skipped_symbols=(), loaded_symbols=())
+    resume_metadata = {
+        **_resume_metadata(args, watchlist.symbols, resume_state, watchlist.symbols, watchlist.universe),
+        "watch_mode": True,
+        "watch_iteration": iteration,
+    }
+
+    async def after_symbol(symbol_result: ScannerSymbolResult, completed: int, total: int) -> None:
+        latest_results_by_symbol[symbol_result.symbol] = symbol_result
+        if args.progress:
+            print(_progress_line(symbol_result, completed=completed, total=total))
+        if args.save_run is not None:
+            partial_result = _combined_run_result(
+                config=config,
+                watchlist_symbols=watchlist.symbols,
+                results_by_symbol=latest_results_by_symbol,
+                cache=cache,
+                retry_diagnostics=(),
+                resume_metadata={
+                    **resume_metadata,
+                    "pending_symbols": [
+                        symbol for symbol in watchlist.symbols if symbol not in latest_results_by_symbol
+                    ],
+                },
+                runtime_stats=None,
+            )
+            _write_run_json(args.save_run, partial_result)
+
+    async def progress(message: str) -> None:
+        print(message, flush=True)
+
+    runner = _scanner_runner(cache)
+    scan_result = await _run_scanner(
+        runner,
+        scan_config,
+        after_symbol=after_symbol if (args.progress or args.save_run is not None) else None,
+        progress=progress if args.progress else None,
+        resume_metadata=resume_metadata,
+    )
+    for symbol_result in scan_result.results:
+        latest_results_by_symbol[symbol_result.symbol] = symbol_result
+
+    result = _combined_run_result(
+        config=config,
+        watchlist_symbols=watchlist.symbols,
+        results_by_symbol=latest_results_by_symbol,
+        cache=cache,
+        retry_diagnostics=scan_result.retry_diagnostics,
+        resume_metadata={
+            **resume_metadata,
+            "pending_symbols": [
+                symbol for symbol in watchlist.symbols if symbol not in latest_results_by_symbol
+            ],
+        },
+        runtime_stats=scan_result.runtime_stats,
+    )
+    ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
+    portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None
+    if portfolio_selection is not None:
+        ranked_results = _ranked_results_with_selected_first(ranked_results, portfolio_selection)
+
+    if args.output_json is not None:
+        _write_run_json(args.output_json, result, ranked_results=ranked_results, portfolio_selection=portfolio_selection)
+    if args.save_run is not None:
+        _write_run_json(args.save_run, result, ranked_results=ranked_results, portfolio_selection=portfolio_selection)
+
+    return WatchScanExecution(
+        result=result,
+        ranked_results=ranked_results,
+        portfolio_selection=portfolio_selection,
+    )
+
+
+def _watch_telegram_credentials(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    if not args.telegram_live_alerts:
+        return None, None
+    settings = Settings()
+    bot_token = (settings.telegram_bot_token or "").strip()
+    chat_id = (settings.telegram_chat_id or "").strip()
+    if not bot_token or not chat_id:
+        raise SystemExit(
+            "--telegram-live-alerts true requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env. "
+            "No live Telegram alert was sent."
+        )
+    return bot_token, chat_id
+
+
+def _watch_iteration_timestamp() -> str:
+    from app.watch_mode import now_utc_iso
+
+    return now_utc_iso()
+
+
+def _watch_activation_mode(symbol_result: ScannerSymbolResult) -> str:
+    if symbol_result.valid_strategy_modes:
+        return symbol_result.valid_strategy_modes[0]
+    trade_idea = symbol_result.trade_idea
+    setup_type = _display(getattr(trade_idea, "setup_type", NA))
+    for mode in ("challenge", "swing", "scalp"):
+        if setup_type.endswith(f"_{mode}") or mode in setup_type:
+            return mode
+    return NA
 
 
 async def _run_replay(

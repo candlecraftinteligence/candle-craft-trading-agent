@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     database_url: str = "postgresql+psycopg://candle@localhost:5432/candle_craft"
     sql_echo: bool = False
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
