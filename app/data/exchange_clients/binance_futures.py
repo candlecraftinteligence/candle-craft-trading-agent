@@ -44,11 +44,11 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         )
 
     async def get_klines(self, symbol: str, interval: str, limit: int) -> list[CandleDTO]:
-        _validate_limit(limit, maximum=1500)
+        safe_limit = _clamp_limit(limit, maximum=1500)
         normalized_symbol = symbol.upper()
         payload = await self._get_json(
             "/fapi/v1/klines",
-            params={"symbol": normalized_symbol, "interval": interval, "limit": limit},
+            params={"symbol": normalized_symbol, "interval": interval, "limit": safe_limit},
         )
         return normalize_binance_klines(normalized_symbol, interval, payload)
 
@@ -121,3 +121,7 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
 def _validate_limit(limit: int, *, maximum: int) -> None:
     if limit < 1 or limit > maximum:
         raise ValueError(f"limit must be between 1 and {maximum}")
+
+
+def _clamp_limit(limit: int, *, maximum: int) -> int:
+    return min(max(limit, 1), maximum)

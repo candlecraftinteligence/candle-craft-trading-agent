@@ -56,6 +56,8 @@ DIRECT_STRATEGY_TIMEFRAMES = ("12h", "4h", "1h", "15m", "5m")
 SYNTHETIC_2D_SOURCE_TIMEFRAME = "1d"
 NO_VALID_STRATEGY_SETUP_REASON = "No valid Liquidity-Grab Pullback setup."
 MIN_12H_VOLUME_PROFILE_CANDLES = 20
+BINANCE_KLINE_LIMIT_MIN = 1
+BINANCE_KLINE_LIMIT_MAX = 1500
 
 
 class ScannerPipelineStatus(str, Enum):
@@ -114,6 +116,7 @@ class ScannerRunConfig(BaseModel):
     exchange: Literal["binance", "bybit"]
     interval: str = "15m"
     candle_limit: int = 250
+    replay_candles: int | None = None
     dry_run_alerts: bool = True
     account_equity: Decimal
     risk_per_trade_pct: Decimal
@@ -197,6 +200,13 @@ class ScannerRunConfig(BaseModel):
     def _candle_limit_in_range(cls, value: int) -> int:
         if value < 1:
             raise ValueError("candle_limit must be at least 1")
+        return value
+
+    @field_validator("replay_candles")
+    @classmethod
+    def _replay_candles_in_range(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("replay_candles must be at least 1")
         return value
 
     @field_validator("cache_ttl_seconds")
@@ -822,10 +832,20 @@ class ScannerRunner:
         config: ScannerRunConfig,
     ) -> Sequence[Any]:
         primary_timeframe = config.interval.strip().lower()
+        limit_warnings: list[str] = []
         if config.exchange == "binance" and primary_timeframe == "2d":
-            source_candles = await client.get_klines(symbol, SYNTHETIC_2D_SOURCE_TIMEFRAME, config.candle_limit * 2)
+            source_candles = await client.get_klines(
+                symbol,
+                SYNTHETIC_2D_SOURCE_TIMEFRAME,
+                _synthetic_2d_source_limit(config, limit_warnings),
+            )
+            for warning in _unique_strings(limit_warnings):
+                self.logger.warning("Scanner candle limit adjusted for symbol=%s: %s", symbol, warning)
             return resample_ohlcv_candles(source_candles, target_interval="2d")
-        return await client.get_klines(symbol, config.interval, config.candle_limit)
+        fetch_limit = _timeframe_fetch_limit(config, primary_timeframe, limit_warnings)
+        for warning in _unique_strings(limit_warnings):
+            self.logger.warning("Scanner candle limit adjusted for symbol=%s: %s", symbol, warning)
+        return await client.get_klines(symbol, config.interval, fetch_limit)
 
     async def _run_strategy(
         self,
@@ -892,6 +912,7 @@ class ScannerRunner:
         missing_data = list(timeframe_missing)
         missing_data.extend(execution_volume_profile.missing_data)
         unverified_data: list[str] = []
+        timeframe_limit_warnings = _sequence_from_diagnostics(timeframe_context.get("timeframe_limit_warnings"))
         formatted_output = NA
         selected_setup: LiquidityGrabSetup | None = None
 
@@ -908,7 +929,10 @@ class ScannerRunner:
 
             strategy_results[mode_name] = result
             setup = _strategy_setup_for_mode(result, mode)
-            diagnostics[mode_name] = _strategy_diagnostics_for_setup(setup)
+            mode_diagnostics = _strategy_diagnostics_for_setup(setup)
+            if timeframe_limit_warnings:
+                mode_diagnostics["timeframe_limit_warnings"] = timeframe_limit_warnings
+            diagnostics[mode_name] = mode_diagnostics
             missing_data.extend(result.missing_data)
             unverified_data.extend(result.unverified_data)
 
@@ -946,6 +970,7 @@ class ScannerRunner:
     ) -> tuple[dict[str, Sequence[Any]], tuple[str, ...], dict[str, Any]]:
         candles_by_timeframe: dict[str, Sequence[Any]] = {}
         missing_data: list[str] = []
+        limit_warnings: list[str] = []
         primary_timeframe = config.interval.strip().lower()
         htf_source: str = NA
 
@@ -958,7 +983,7 @@ class ScannerRunner:
                     source_candles = await client.get_klines(
                         symbol,
                         SYNTHETIC_2D_SOURCE_TIMEFRAME,
-                        config.candle_limit * 2,
+                        _synthetic_2d_source_limit(config, limit_warnings),
                     )
                 synthetic_2d = resample_ohlcv_candles(source_candles, target_interval="2d")
             except Exception as exc:
@@ -981,7 +1006,11 @@ class ScannerRunner:
                 continue
 
             try:
-                candles = await client.get_klines(symbol, timeframe, config.candle_limit)
+                candles = await client.get_klines(
+                    symbol,
+                    timeframe,
+                    _timeframe_fetch_limit(config, timeframe, limit_warnings),
+                )
             except Exception as exc:
                 self.logger.warning("Optional strategy candles fetch failed for symbol=%s timeframe=%s: %s", symbol, timeframe, exc)
                 missing_data.append(f"candles_{timeframe}: N/A")
@@ -995,7 +1024,10 @@ class ScannerRunner:
         return (
             candles_by_timeframe,
             _unique_strings(missing_data),
-            {"htf_2d_context_source": htf_source},
+            {
+                "htf_2d_context_source": htf_source,
+                "timeframe_limit_warnings": _unique_strings(limit_warnings),
+            },
         )
 
     async def _fetch_optional_market_data(self, client: BaseExchangeClient, symbol: str) -> _OptionalMarketData:
@@ -1676,6 +1708,49 @@ def _strategy_levels(*values: MaybeDecimal) -> tuple[Decimal, ...]:
         if value != NA:
             levels.append(_quantize(value))
     return tuple(levels)
+
+
+def _synthetic_2d_source_limit(config: ScannerRunConfig, warnings: list[str]) -> int:
+    requested_source_limit = config.candle_limit * 2
+    return _exchange_kline_limit(
+        exchange=config.exchange,
+        requested_limit=requested_source_limit,
+        label="1d source for synthetic 2D candles",
+        warnings=warnings,
+    )
+
+
+def _timeframe_fetch_limit(config: ScannerRunConfig, timeframe: str, warnings: list[str]) -> int:
+    normalized_timeframe = timeframe.strip().lower()
+    requested_limit = config.candle_limit
+    if config.replay_candles is not None and normalized_timeframe in _replay_execution_timeframes(config):
+        requested_limit = config.replay_candles
+    return _exchange_kline_limit(
+        exchange=config.exchange,
+        requested_limit=requested_limit,
+        label=f"{normalized_timeframe} candles",
+        warnings=warnings,
+    )
+
+
+def _replay_execution_timeframes(config: ScannerRunConfig) -> set[str]:
+    return {
+        config.execution_timeframe.strip().lower(),
+        config.confirmation_timeframe.strip().lower(),
+    }
+
+
+def _exchange_kline_limit(*, exchange: str, requested_limit: int, label: str, warnings: list[str]) -> int:
+    if exchange != "binance":
+        return requested_limit
+
+    clamped = min(max(requested_limit, BINANCE_KLINE_LIMIT_MIN), BINANCE_KLINE_LIMIT_MAX)
+    if clamped != requested_limit:
+        warnings.append(
+            f"{label} limit clamped from {requested_limit} to {clamped} "
+            f"for Binance kline limit {BINANCE_KLINE_LIMIT_MIN}-{BINANCE_KLINE_LIMIT_MAX}."
+        )
+    return clamped
 
 
 def _direct_strategy_timeframes(config: ScannerRunConfig) -> tuple[str, ...]:

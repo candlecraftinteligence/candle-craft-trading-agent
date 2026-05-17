@@ -75,6 +75,45 @@ def test_binance_klines_mocked_response() -> None:
     run(scenario())
 
 
+def test_binance_klines_limit_is_clamped_before_request() -> None:
+    async def scenario() -> None:
+        requested_limits: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/fapi/v1/klines"
+            requested_limits.append(request.url.params["limit"])
+            return httpx.Response(
+                200,
+                json=[
+                    [
+                        1710000000000,
+                        "100.0",
+                        "110.0",
+                        "95.0",
+                        "105.0",
+                        "12.5",
+                        1710000059999,
+                        "1312.5",
+                        42,
+                        "6.0",
+                        "630.0",
+                        "0",
+                    ]
+                ],
+            )
+
+        client = await _binance_client(httpx.MockTransport(handler))
+        high_limit_candles = await client.get_klines("BTCUSDT", "1m", 2000)
+        low_limit_candles = await client.get_klines("BTCUSDT", "1m", 0)
+        await client._http_client.aclose()
+
+        assert requested_limits == ["1500", "1"]
+        assert len(high_limit_candles) == 1
+        assert len(low_limit_candles) == 1
+
+    run(scenario())
+
+
 def test_binance_ticker_mocked_response() -> None:
     async def scenario() -> None:
         def handler(request: httpx.Request) -> httpx.Response:

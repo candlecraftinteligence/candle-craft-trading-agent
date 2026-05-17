@@ -37,6 +37,8 @@ from app.formatters.scanner_display import (  # noqa: E402
 )
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
 from app.pipeline.scanner_runner import (  # noqa: E402
+    BINANCE_KLINE_LIMIT_MAX,
+    BINANCE_KLINE_LIMIT_MIN,
     ScannerPipelineStatus,
     ScannerRunConfig,
     ScannerRunResult,
@@ -639,7 +641,7 @@ async def _run_replay(
             **scanner_config.model_dump(),
             "symbols": list(watchlist.symbols),
             "interval": args.execution_timeframe,
-            "candle_limit": args.replay_candles,
+            "replay_candles": args.replay_candles,
         }
     )
     runner = _scanner_runner(cache)
@@ -650,7 +652,12 @@ async def _run_replay(
 
     try:
         for symbol in watchlist.symbols:
-            primary_candles = await client.get_klines(symbol, args.execution_timeframe, args.replay_candles)
+            limit_warnings: list[str] = []
+            primary_candles = await client.get_klines(
+                symbol,
+                args.execution_timeframe,
+                _replay_primary_fetch_limit(args, limit_warnings),
+            )
             candles_by_timeframe, missing_data, timeframe_context = await runner._fetch_strategy_timeframe_candles(
                 client=client,
                 symbol=symbol,
@@ -659,7 +666,13 @@ async def _run_replay(
             )
             candles_by_symbol[symbol] = candles_by_timeframe
             timeframe_context_by_symbol[symbol] = timeframe_context
-            data_notes_by_symbol[symbol] = missing_data
+            data_notes_by_symbol[symbol] = _unique_texts(
+                (
+                    *missing_data,
+                    *limit_warnings,
+                    *_sequence_values(timeframe_context.get("timeframe_limit_warnings")),
+                )
+            )
     finally:
         if owns_client and hasattr(client, "aclose"):
             await _maybe_await(client.aclose())
@@ -683,6 +696,35 @@ async def _run_replay(
         timeframe_context_by_symbol=timeframe_context_by_symbol,
         data_notes_by_symbol=data_notes_by_symbol,
     )
+
+
+def _replay_primary_fetch_limit(args: argparse.Namespace, warnings: list[str]) -> int:
+    requested_limit = args.replay_candles
+    if args.exchange != "binance":
+        return requested_limit
+
+    clamped = min(max(requested_limit, BINANCE_KLINE_LIMIT_MIN), BINANCE_KLINE_LIMIT_MAX)
+    if clamped != requested_limit:
+        warnings.append(
+            f"replay_candles limit clamped from {requested_limit} to {clamped} "
+            f"for Binance kline limit {BINANCE_KLINE_LIMIT_MIN}-{BINANCE_KLINE_LIMIT_MAX}."
+        )
+    return clamped
+
+
+def _sequence_values(value: object) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+def _unique_texts(values: Sequence[str]) -> tuple[str, ...]:
+    output: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        if cleaned and cleaned not in output:
+            output.append(cleaned)
+    return tuple(output)
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -1134,6 +1176,7 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
 
         failed_gates = _sequence_text(tuple(str(value) for value in diagnostics.get("gates_failed", ())))
         hard_rejections = _sequence_text(tuple(str(value) for value in diagnostics.get("hard_rejection_reasons", ())))
+        limit_warnings = _sequence_text(_sequence_values(diagnostics.get("timeframe_limit_warnings")))
         candles_12h_count = int(diagnostics.get("candles_12h_count") or 0)
         htf_timeframe = _display(diagnostics.get("htf_timeframe"))
         bias_timeframe = _display(diagnostics.get("bias_timeframe"))
@@ -1159,6 +1202,7 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
                 f"{mode} POC: {_display(diagnostics.get('poc'))}",
                 f"{mode} POC diagnostics: {_display(diagnostics.get('poc_diagnostics'))}",
                 f"{mode} confirmation reason: {_display(diagnostics.get('confirmation_bos_choch_reason'))}",
+                f"{mode} timeframe limit warnings: {limit_warnings}",
                 f"{mode} Pullback Zone: {_display(diagnostics.get('pullback_zone_status'))} | "
                 f"OB/FVG: {_display(diagnostics.get('selected_zone_type'))} | "
                 f"Fib: {_display(diagnostics.get('fib_alignment_status'))} | "

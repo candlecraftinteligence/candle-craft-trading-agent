@@ -953,6 +953,16 @@ def test_strategy_cli_flags_accepted() -> None:
     assert args.telegram_format is True
 
 
+def test_replay_candles_above_binance_limit_clamps_with_diagnostic_warning() -> None:
+    args = run_scan.parse_args(["--replay", "--replay-candles", "2000"])
+    warnings: list[str] = []
+
+    limit = run_scan._replay_primary_fetch_limit(args, warnings)
+
+    assert limit == 1500
+    assert warnings == ["replay_candles limit clamped from 2000 to 1500 for Binance kline limit 1-1500."]
+
+
 def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None:
     output_path = tmp_path / "scan_output.json"
     monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)

@@ -142,10 +142,12 @@ class FakeExchangeClient:
         self.failing_timeframes = failing_timeframes or set()
         self.requested_symbols: list[str] = []
         self.requested_klines: list[tuple[str, str]] = []
+        self.requested_kline_limits: list[tuple[str, str, int]] = []
 
     async def get_klines(self, symbol: str, interval: str, limit: int) -> list[dict[str, Decimal | int]]:
         self.requested_symbols.append(symbol)
         self.requested_klines.append((symbol, interval))
+        self.requested_kline_limits.append((symbol, interval, limit))
         if symbol in self.failing_symbols:
             raise RuntimeError(f"mocked kline failure for {symbol}")
         if interval in self.failing_timeframes:
@@ -511,6 +513,53 @@ def test_scanner_does_not_request_binance_2d_and_uses_synthetic_2d() -> None:
     assert "1d" in requested_intervals
     assert diagnostics["htf_2d_context_source"] == "synthetic_from_1d"
     assert diagnostics["candles_2d_count"] == 110
+
+
+def test_replay_candles_1000_does_not_drive_synthetic_2d_source_limit() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"], replay_candles=1000)))
+
+    requested_limits = {(interval, limit) for _symbol, interval, limit in client.requested_kline_limits}
+    diagnostics = result.results[0].strategy_diagnostics["challenge"]
+
+    assert ("15m", 1000) in requested_limits
+    assert ("5m", 1000) in requested_limits
+    assert ("12h", 220) in requested_limits
+    assert ("1d", 440) in requested_limits
+    assert ("1d", 2000) not in requested_limits
+    assert diagnostics["htf_2d_context_source"] == "synthetic_from_1d"
+    assert diagnostics["candles_2d_count"] == 110
+
+
+def test_scanner_clamps_binance_kline_limits_and_reports_diagnostic_warning() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(["BTCUSDT"], candle_limit=1000, replay_candles=2000)
+        )
+    )
+
+    diagnostics = result.results[0].strategy_diagnostics["challenge"]
+
+    assert client.requested_kline_limits
+    assert all(limit <= 1500 for _symbol, _interval, limit in client.requested_kline_limits)
+    assert ("BTCUSDT", "1d", 1500) in client.requested_kline_limits
+    assert ("BTCUSDT", "5m", 1500) in client.requested_kline_limits
+    assert any("clamped from 2000 to 1500" in warning for warning in diagnostics["timeframe_limit_warnings"])
+
+
+def test_normal_scan_still_uses_configured_candle_limit_without_replay() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    diagnostics = result.results[0].strategy_diagnostics["challenge"]
+
+    assert ("BTCUSDT", "15m", 220) in client.requested_kline_limits
+    assert ("BTCUSDT", "12h", 220) in client.requested_kline_limits
+    assert ("BTCUSDT", "5m", 220) in client.requested_kline_limits
+    assert diagnostics["candles_15m_count"] == 220
+    assert diagnostics["candles_12h_count"] == 220
+    assert diagnostics["candles_5m_count"] == 220
 
 
 def test_scanner_fetches_12h_15m_and_5m_for_strategy_context() -> None:
