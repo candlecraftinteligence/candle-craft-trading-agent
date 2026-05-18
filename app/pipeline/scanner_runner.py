@@ -24,6 +24,7 @@ from app.analytics.derivatives_enrichment import (
     enrich_derivatives,
 )
 from app.analytics.near_miss_intelligence import NearMissIntelligence, build_near_miss_intelligence
+from app.analytics.pullback_intelligence import PullbackIntelligenceResult, build_pullback_intelligence
 from app.analytics.market_regime import (
     MarketRegimeInput,
     MarketRegimeResult,
@@ -357,6 +358,7 @@ class ScannerSymbolResult(BaseModel):
     alert_result: AlertResult | None = None
     journal_entry: JournalEntryResult | None = None
     near_miss_intelligence: NearMissIntelligence | None = None
+    pullback_intelligence: PullbackIntelligenceResult | None = None
     setup_quality: SetupQualityResult = Field(default_factory=default_setup_quality_result)
     regime_warnings: tuple[str, ...] = ()
     regime_state: str = NA
@@ -474,6 +476,7 @@ class _StrategyExecution(BaseModel):
     volume_profile: VolumeProfileResult | None = None
     volume_profile_12h: VolumeProfileResult | None = None
     selected_setup: LiquidityGrabSetup | None = None
+    pullback_intelligence: PullbackIntelligenceResult | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -1134,6 +1137,9 @@ class ScannerRunner:
             strategy_results[mode_name] = result
             setup = _strategy_setup_for_mode(result, mode)
             mode_diagnostics = _strategy_diagnostics_for_setup(setup)
+            mode_diagnostics["required_rr"] = "3.0" if mode == LiquidityGrabMode.challenge else "2.5"
+            pullback_intelligence = build_pullback_intelligence(mode_diagnostics)
+            mode_diagnostics["pullback_intelligence"] = pullback_intelligence.model_dump(mode="json")
             if timeframe_limit_warnings:
                 mode_diagnostics["timeframe_limit_warnings"] = timeframe_limit_warnings
             diagnostics[mode_name] = mode_diagnostics
@@ -1162,6 +1168,11 @@ class ScannerRunner:
             volume_profile=execution_volume_profile,
             volume_profile_12h=higher_timeframe_volume_profile,
             selected_setup=selected_setup,
+            pullback_intelligence=_representative_pullback_intelligence(
+                diagnostics,
+                valid_modes=_unique_strings(valid_modes),
+                rejected_modes=_unique_strings(rejected_modes),
+            ),
         )
 
     async def _fetch_strategy_timeframe_candles(
@@ -1503,6 +1514,7 @@ class ScannerRunner:
             alert_result=alert_result,
             journal_entry=journal_entry,
             near_miss_intelligence=near_miss_intelligence,
+            pullback_intelligence=strategy_execution.pullback_intelligence,
             setup_quality=setup_quality,
         )
 
@@ -1778,6 +1790,31 @@ def _representative_strategy_diagnostics(strategy_execution: _StrategyExecution)
         if isinstance(diagnostics, Mapping):
             return diagnostics
     return {}
+
+
+def _representative_pullback_intelligence(
+    diagnostics_by_mode: Mapping[str, Any],
+    *,
+    valid_modes: Sequence[str],
+    rejected_modes: Sequence[str],
+) -> PullbackIntelligenceResult | None:
+    for mode in (*valid_modes, *rejected_modes, "challenge", "swing", "scalp"):
+        diagnostics = diagnostics_by_mode.get(mode)
+        if not isinstance(diagnostics, Mapping):
+            continue
+        payload = diagnostics.get("pullback_intelligence")
+        if isinstance(payload, PullbackIntelligenceResult):
+            return payload
+        if isinstance(payload, Mapping):
+            return PullbackIntelligenceResult.model_validate(payload)
+        return build_pullback_intelligence(diagnostics)
+    for diagnostics in diagnostics_by_mode.values():
+        if isinstance(diagnostics, Mapping):
+            payload = diagnostics.get("pullback_intelligence")
+            if isinstance(payload, Mapping):
+                return PullbackIntelligenceResult.model_validate(payload)
+            return build_pullback_intelligence(diagnostics)
+    return None
 
 
 def _strategy_failed_gate(diagnostics: Mapping[str, Any]) -> str:
@@ -2116,6 +2153,7 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "fib_618": setup.fib_618,
         "fib_65": setup.fib_65,
         "fib_786": setup.fib_786,
+        "pullback_depth_ratio": setup.pullback_depth_ratio,
         "entry_low": setup.entry_low,
         "entry_high": setup.entry_high,
         "entry": setup.entry,

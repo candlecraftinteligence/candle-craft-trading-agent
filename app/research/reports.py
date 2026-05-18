@@ -66,6 +66,14 @@ def format_research_report(report: Mapping[str, Any]) -> str:
         return _format_lifecycle_state_duration(report)
     if query == "lifecycle_symbol_detail":
         return _format_lifecycle_symbol_detail(report)
+    if query == "pullback_failures":
+        return _format_pullback_failures(report)
+    if query == "pullback_quality_distribution":
+        return _format_pullback_quality_distribution(report)
+    if query == "pullback_depth_analysis":
+        return _format_pullback_depth_analysis(report)
+    if query == "pullback_lifecycle_dropoffs":
+        return _format_pullback_lifecycle_dropoffs(report)
     return "\n".join(("Candle Craft Research", f"Unsupported report: {query}"))
 
 
@@ -619,6 +627,142 @@ def _format_lifecycle_symbol_detail(report: Mapping[str, Any]) -> str:
         _table(("timestamp", "from", "to", "gate", "reason"), transition_rows),
         _warning_block(report),
     )
+
+
+def _format_pullback_failures(report: Mapping[str, Any]) -> str:
+    failure_rows = [
+        (
+            row.get("pullback_failure_type"),
+            row.get("count"),
+            _pct_value(row.get("percentage")),
+            row.get("average_depth"),
+            ", ".join(str(symbol) for symbol in _sequence(row.get("affected_symbols"))),
+        )
+        for row in _sequence(report.get("failure_type_counts"))
+    ]
+    symbol_rows = [
+        (
+            row.get("symbol"),
+            row.get("count"),
+            row.get("most_common_failure_type"),
+            row.get("average_depth"),
+        )
+        for row in _sequence(report.get("most_common_failed_symbols"))
+    ]
+    return _join_sections(
+        "Pullback Failures",
+        _metric_table((("Total pullback failures", report.get("total_pullback_failures")),)),
+        "Failure type counts",
+        _table(("failure_type", "count", "pct", "avg_depth", "symbols"), failure_rows),
+        "Most common failed symbols",
+        _table(("symbol", "count", "top_failure", "avg_depth"), symbol_rows),
+        "Failure by regime",
+        _format_pullback_group_rows(report.get("failure_by_regime"), "regime_state"),
+        "Failure by lifecycle state",
+        _format_pullback_group_rows(report.get("failure_by_lifecycle_state"), "lifecycle_current_state"),
+        "Conversion rate by pullback grade",
+        _format_pullback_grade_rows(report.get("conversion_rate_by_pullback_grade")),
+        _warning_block(report),
+    )
+
+
+def _format_pullback_quality_distribution(report: Mapping[str, Any]) -> str:
+    return _join_sections(
+        "Pullback Quality Distribution",
+        _metric_table((("Total pullback rows", report.get("total_pullback_rows")),)),
+        _format_pullback_grade_rows(report.get("pullback_quality_grades")),
+        _warning_block(report),
+    )
+
+
+def _format_pullback_depth_analysis(report: Mapping[str, Any]) -> str:
+    depth_rows = [
+        (
+            row.get("pullback_failure_type"),
+            row.get("samples"),
+            row.get("average_depth"),
+        )
+        for row in _sequence(report.get("average_depth_by_failure_type"))
+    ]
+    band_rows = [
+        (
+            row.get("depth_band"),
+            row.get("count"),
+            _pct_value(row.get("percentage")),
+            row.get("most_common_failure_type"),
+        )
+        for row in _sequence(report.get("depth_bands"))
+    ]
+    deepest_rows = [
+        (
+            row.get("symbol"),
+            row.get("pullback_depth_ratio"),
+            row.get("pullback_failure_type"),
+            row.get("pullback_quality_grade"),
+            row.get("regime_state"),
+        )
+        for row in _sequence(report.get("deepest_pullbacks"))
+    ]
+    return _join_sections(
+        "Pullback Depth Analysis",
+        _metric_table(
+            (
+                ("Depth samples", report.get("total_depth_samples")),
+                ("Average depth", report.get("average_depth")),
+            )
+        ),
+        "Average depth by failure type",
+        _table(("failure_type", "samples", "avg_depth"), depth_rows),
+        "Depth bands",
+        _table(("band", "count", "pct", "top_failure"), band_rows),
+        "Deepest pullbacks",
+        _table(("symbol", "depth", "failure", "grade", "regime"), deepest_rows),
+        _warning_block(report),
+    )
+
+
+def _format_pullback_lifecycle_dropoffs(report: Mapping[str, Any]) -> str:
+    return _join_sections(
+        "Pullback Lifecycle Dropoffs",
+        _metric_table(
+            (
+                ("Total pullback failures", report.get("total_pullback_failures")),
+                ("TOO_DEEP failures", report.get("too_deep_failures")),
+                ("TOO_DEEP invalidated/cooldown", report.get("too_deep_invalidated_or_cooldown")),
+            )
+        ),
+        "Failure by lifecycle state",
+        _format_pullback_group_rows(report.get("failure_by_lifecycle_state"), "lifecycle_current_state"),
+        "Failure by regime",
+        _format_pullback_group_rows(report.get("failure_by_regime"), "regime_state"),
+        _warning_block(report),
+    )
+
+
+def _format_pullback_grade_rows(rows: Any) -> str:
+    grade_rows = [
+        (
+            row.get("pullback_quality_grade"),
+            row.get("count"),
+            row.get("valid_setup_count"),
+            _pct_value(row.get("conversion_to_valid_pct")),
+            row.get("average_depth"),
+        )
+        for row in _sequence(rows)
+    ]
+    return _table(("grade", "count", "valid", "valid_pct", "avg_depth"), grade_rows)
+
+
+def _format_pullback_group_rows(rows: Any, key: str) -> str:
+    table_rows = [
+        (
+            row.get(key),
+            row.get("count"),
+            row.get("most_common_failure_type"),
+        )
+        for row in _sequence(rows)
+    ]
+    return _table((key, "count", "top_failure"), table_rows)
 
 
 def _warning_block(report: Mapping[str, Any]) -> str:

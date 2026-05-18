@@ -87,6 +87,10 @@ RESEARCH_QUERIES = (
     "lifecycle_symbol_conversion",
     "lifecycle_state_duration",
     "lifecycle_symbol_detail",
+    "pullback_failures",
+    "pullback_quality_distribution",
+    "pullback_depth_analysis",
+    "pullback_lifecycle_dropoffs",
 )
 MODES = ("challenge", "swing", "scalp")
 
@@ -332,6 +336,14 @@ def _build_query_report(query: str, data: ResearchData, filters: ResearchFilters
         return _lifecycle_state_duration_report(data, filters)
     if query == "lifecycle_symbol_detail":
         return _lifecycle_symbol_detail_report(data, filters)
+    if query == "pullback_failures":
+        return _pullback_failures_report(data, filters)
+    if query == "pullback_quality_distribution":
+        return _pullback_quality_distribution_report(data, filters)
+    if query == "pullback_depth_analysis":
+        return _pullback_depth_analysis_report(data, filters)
+    if query == "pullback_lifecycle_dropoffs":
+        return _pullback_lifecycle_dropoffs_report(data, filters)
     raise ValueError(f"Unsupported research query: {query}")
 
 
@@ -902,6 +914,82 @@ def _lifecycle_symbol_detail_report(data: ResearchData, filters: ResearchFilters
     }
 
 
+def _pullback_failures_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = _pullback_failure_rows(data.symbols)
+    return {
+        "query": "pullback_failures",
+        "filters": filters.to_json(),
+        "total_pullback_failures": len(rows),
+        "failure_type_counts": _pullback_failure_type_counts(rows),
+        "average_depth_by_failure_type": _average_depth_by_failure_type(rows),
+        "most_common_failed_symbols": _pullback_symbol_counts(rows)[: filters.normalized_limit],
+        "failure_by_regime": _pullback_failure_by_group(rows, "regime_state")[: filters.normalized_limit],
+        "failure_by_lifecycle_state": _pullback_failure_by_group(rows, "lifecycle_current_state")[: filters.normalized_limit],
+        "conversion_rate_by_pullback_grade": _pullback_grade_conversion(data.symbols),
+        "warnings": [],
+    }
+
+
+def _pullback_quality_distribution_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = tuple(row for row in data.symbols if _display(row.get("pullback_quality_grade")) != NA)
+    return {
+        "query": "pullback_quality_distribution",
+        "filters": filters.to_json(),
+        "total_pullback_rows": len(rows),
+        "pullback_quality_grades": _pullback_grade_conversion(rows),
+        "failure_type_counts": _pullback_failure_type_counts(_pullback_failure_rows(rows)),
+        "conversion_rate_by_pullback_grade": _pullback_grade_conversion(rows),
+        "warnings": [],
+    }
+
+
+def _pullback_depth_analysis_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = tuple(row for row in data.symbols if _decimal_or_none(row.get("pullback_depth_ratio")) is not None)
+    deepest = sorted(
+        (
+            {
+                "symbol": row["symbol"],
+                "timestamp": row.get("timestamp", NA),
+                "pullback_depth_ratio": row.get("pullback_depth_ratio"),
+                "pullback_failure_type": row.get("pullback_failure_type"),
+                "pullback_quality_grade": row.get("pullback_quality_grade"),
+                "regime_state": row.get("regime_state"),
+            }
+            for row in rows
+        ),
+        key=lambda item: _sort_number(item["pullback_depth_ratio"]),
+        reverse=True,
+    )
+    return {
+        "query": "pullback_depth_analysis",
+        "filters": filters.to_json(),
+        "total_depth_samples": len(rows),
+        "average_depth": _number(_mean(_numeric_values(row.get("pullback_depth_ratio") for row in rows))),
+        "average_depth_by_failure_type": _average_depth_by_failure_type(rows),
+        "depth_bands": _pullback_depth_bands(rows),
+        "deepest_pullbacks": deepest[: filters.normalized_limit],
+        "warnings": [],
+    }
+
+
+def _pullback_lifecycle_dropoffs_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = _pullback_failure_rows(data.symbols)
+    too_deep_rows = tuple(row for row in rows if row.get("pullback_failure_type") == "TOO_DEEP")
+    lifecycle_rows = tuple(row for row in rows if _display(row.get("lifecycle_current_state")) != NA)
+    return {
+        "query": "pullback_lifecycle_dropoffs",
+        "filters": filters.to_json(),
+        "total_pullback_failures": len(rows),
+        "too_deep_failures": len(too_deep_rows),
+        "too_deep_invalidated_or_cooldown": sum(
+            1 for row in too_deep_rows if row.get("lifecycle_current_state") in {"INVALIDATED", "COOLDOWN"}
+        ),
+        "failure_by_lifecycle_state": _pullback_failure_by_group(lifecycle_rows, "lifecycle_current_state"),
+        "failure_by_regime": _pullback_failure_by_group(rows, "regime_state"),
+        "warnings": [],
+    }
+
+
 def _lifecycle_analytics(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
     paths = _lifecycle_paths(data.lifecycle_records, data.lifecycle_events)
     ids_by_state = {
@@ -1344,6 +1432,130 @@ def _counter_rows(counter: Counter[str], key: str) -> list[dict[str, Any]]:
     ]
 
 
+def _pullback_failure_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    return tuple(
+        row
+        for row in rows
+        if _display(row.get("pullback_failure_type")) != NA
+        and _display(row.get("pullback_failure_type")) != "N/A"
+    )
+
+
+def _pullback_failure_type_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    total = len(rows)
+    output = []
+    for failure_type, group_rows in _group_by(rows, "pullback_failure_type").items():
+        output.append(
+            {
+                "pullback_failure_type": failure_type,
+                "count": len(group_rows),
+                "percentage": _rate(len(group_rows), total),
+                "average_depth": _number(_mean(_numeric_values(row.get("pullback_depth_ratio") for row in group_rows))),
+                "affected_symbols": sorted({row["symbol"] for row in group_rows}),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], item["pullback_failure_type"]), reverse=True)
+    return output
+
+
+def _average_depth_by_failure_type(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for failure_type, group_rows in _group_by(rows, "pullback_failure_type").items():
+        depths = _numeric_values(row.get("pullback_depth_ratio") for row in group_rows)
+        output.append(
+            {
+                "pullback_failure_type": failure_type,
+                "samples": len(depths),
+                "average_depth": _number(_mean(depths)),
+            }
+        )
+    output.sort(key=lambda item: (_sort_number(item["average_depth"]), item["samples"]), reverse=True)
+    return output
+
+
+def _pullback_symbol_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for symbol, group_rows in _group_by(rows, "symbol").items():
+        output.append(
+            {
+                "symbol": symbol,
+                "count": len(group_rows),
+                "most_common_failure_type": _most_common_text(row.get("pullback_failure_type") for row in group_rows),
+                "average_depth": _number(_mean(_numeric_values(row.get("pullback_depth_ratio") for row in group_rows))),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _sort_number(item["average_depth"]), item["symbol"]), reverse=True)
+    return output
+
+
+def _pullback_failure_by_group(rows: Sequence[Mapping[str, Any]], key: str) -> list[dict[str, Any]]:
+    output = []
+    for value, group_rows in _group_by(rows, key).items():
+        failure_counts = _pullback_failure_type_counts(group_rows)
+        output.append(
+            {
+                key: value,
+                "count": len(group_rows),
+                "most_common_failure_type": failure_counts[0]["pullback_failure_type"] if failure_counts else NA,
+                "failure_type_counts": failure_counts,
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _display(item.get(key))), reverse=True)
+    return output
+
+
+def _pullback_grade_conversion(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    grade_rows = tuple(row for row in rows if _display(row.get("pullback_quality_grade")) != NA)
+    output = []
+    for grade, group_rows in _group_by(grade_rows, "pullback_quality_grade").items():
+        valid = _bucket_count(group_rows, "valid")
+        output.append(
+            {
+                "pullback_quality_grade": grade,
+                "count": len(group_rows),
+                "valid_setup_count": valid,
+                "conversion_to_valid_pct": _rate(valid, len(group_rows)),
+                "average_depth": _number(_mean(_numeric_values(row.get("pullback_depth_ratio") for row in group_rows))),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _sort_number(item["conversion_to_valid_pct"])), reverse=True)
+    return output
+
+
+def _pullback_depth_bands(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    bands = (
+        ("too_shallow_lt_0_382", None, Decimal("0.382")),
+        ("ideal_0_382_to_0_618", Decimal("0.382"), Decimal("0.618")),
+        ("deep_0_618_to_0_786", Decimal("0.618"), Decimal("0.786")),
+        ("invalid_gt_0_786", Decimal("0.786"), None),
+    )
+    output = []
+    depths = [(row, _decimal_or_none(row.get("pullback_depth_ratio"))) for row in rows]
+    for label, lower, upper in bands:
+        band_rows = [
+            row
+            for row, depth in depths
+            if depth is not None and _depth_in_band(depth, lower, upper)
+        ]
+        output.append(
+            {
+                "depth_band": label,
+                "count": len(band_rows),
+                "percentage": _rate(len(band_rows), len(rows)),
+                "most_common_failure_type": _most_common_text(row.get("pullback_failure_type") for row in band_rows),
+            }
+        )
+    return output
+
+
+def _depth_in_band(depth: Decimal, lower: Decimal | None, upper: Decimal | None) -> bool:
+    if lower is None:
+        return upper is not None and depth < upper
+    if upper is None:
+        return depth > lower
+    return lower <= depth <= upper
+
+
 def _symbol_metrics(symbol: str, rows: Sequence[Mapping[str, Any]], replays: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     symbol_replays = tuple(row for row in replays if row["symbol"] == symbol)
     replay_stats = _replay_stats(symbol_replays)
@@ -1484,6 +1696,7 @@ def _normalize_symbol_row(row: sqlite3.Row) -> dict[str, Any]:
     raw = _json_loads(data.get("raw_result_json"))
     quality = raw.get("setup_quality") if isinstance(raw.get("setup_quality"), Mapping) else {}
     near_miss = raw.get("near_miss_intelligence") if isinstance(raw.get("near_miss_intelligence"), Mapping) else {}
+    pullback = raw.get("pullback_intelligence") if isinstance(raw.get("pullback_intelligence"), Mapping) else {}
     failed_gate = _first_non_na(data.get("failed_gate"), near_miss.get("primary_failed_gate"))
     next_trigger = _first_non_na(data.get("next_trigger_needed"), near_miss.get("activation_hint"))
     data.update(
@@ -1502,6 +1715,18 @@ def _normalize_symbol_row(row: sqlite3.Row) -> dict[str, Any]:
             "quality_grade": _display(quality.get("quality_grade")),
             "quality_state": _display(quality.get("quality_state")),
             "readiness_label": _display(raw.get("readiness_label")),
+            "lifecycle_current_state": _display(raw.get("lifecycle_current_state")),
+            "pullback_failure_type": _display(pullback.get("pullback_failure_type")),
+            "pullback_quality_grade": _display(pullback.get("pullback_quality_grade")),
+            "pullback_depth_ratio": _display(pullback.get("pullback_depth_ratio")),
+            "pullback_fib_zone_status": _display(pullback.get("fib_zone_status")),
+            "pullback_ob_fvg_status": _display(pullback.get("ob_fvg_status")),
+            "pullback_freshness_score": _display(pullback.get("freshness_score")),
+            "pullback_rr_potential_score": _display(pullback.get("rr_potential_score")),
+            "pullback_structure_risk_score": _display(pullback.get("structure_risk_score")),
+            "pullback_next_condition": _display(
+                _first_non_na(pullback.get("next_pullback_condition"), pullback.get("next_condition"))
+            ),
             "raw": raw,
             "modes": _row_modes(raw),
             "has_data_issue": _has_data_issue(raw, data),

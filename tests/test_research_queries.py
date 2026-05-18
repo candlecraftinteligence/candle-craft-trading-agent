@@ -74,6 +74,15 @@ def _seed_research_database(db_path) -> None:
             quality_state="WATCHLIST_NEAR_MISS",
             quality_grade="C",
             readiness_label="HOT WATCH",
+            pullback={
+                "pullback_failure_type": "NO_OB_FVG",
+                "pullback_quality_grade": "C",
+                "pullback_depth_ratio": "0.5",
+                "fib_zone_status": "aligned",
+                "ob_fvg_status": "missing",
+                "next_pullback_condition": "valid OB/FVG inside displacement required",
+            },
+            lifecycle_state="TRIGGERED",
         )
         _insert_symbol(
             connection,
@@ -93,6 +102,15 @@ def _seed_research_database(db_path) -> None:
             readiness_label="REJECTED",
             missing_data=("cvd: N/A",),
             unverified_data=("derivatives: Unverified",),
+            pullback={
+                "pullback_failure_type": "TOO_DEEP",
+                "pullback_quality_grade": "REJECT",
+                "pullback_depth_ratio": "0.82",
+                "fib_zone_status": "failed",
+                "ob_fvg_status": "present",
+                "next_pullback_condition": "fresh sweep + BOS required",
+            },
+            lifecycle_state="INVALIDATED",
         )
         _insert_symbol(
             connection,
@@ -188,6 +206,8 @@ def _insert_symbol(
     readiness_label,
     missing_data=(),
     unverified_data=(),
+    pullback=None,
+    lifecycle_state="N/A",
 ) -> None:
     modes = tuple(valid_modes or rejected_modes or ("swing",))
     raw = {
@@ -206,6 +226,8 @@ def _insert_symbol(
             "quality_score": quality,
         },
         "readiness_label": readiness_label,
+        "pullback_intelligence": pullback,
+        "lifecycle_current_state": lifecycle_state,
         "missing_data": list(missing_data),
         "unverified_data": list(unverified_data),
     }
@@ -334,6 +356,24 @@ def test_rejection_reasons_query(tmp_path) -> None:
     assert gates["missing_confirmed_sweep"]["count"] == 1
     assert gates["not_enough_candles"]["affected_symbols"] == ["XRPUSDT"]
     assert "Required public data" in gates["not_enough_candles"]["possible_interpretation"]
+
+
+def test_pullback_failure_research_query(tmp_path) -> None:
+    db_path = tmp_path / "research.db"
+    _seed_research_database(db_path)
+
+    report = build_research_report(db_path, query="pullback_failures")
+
+    failure_counts = {row["pullback_failure_type"]: row["count"] for row in report["failure_type_counts"]}
+    lifecycle_counts = {
+        row["lifecycle_current_state"]: row["most_common_failure_type"]
+        for row in report["failure_by_lifecycle_state"]
+    }
+    assert report["total_pullback_failures"] == 2
+    assert failure_counts["TOO_DEEP"] == 1
+    assert failure_counts["NO_OB_FVG"] == 1
+    assert lifecycle_counts["INVALIDATED"] == "TOO_DEEP"
+    assert report["conversion_rate_by_pullback_grade"]
 
 
 def test_symbol_detail_query(tmp_path) -> None:

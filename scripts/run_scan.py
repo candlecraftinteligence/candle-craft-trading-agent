@@ -63,6 +63,7 @@ from app.formatters.scanner_display import (  # noqa: E402
     build_symbol_display,
     display_fields,
     filter_ranked_results,
+    format_pullback_intelligence_block,
     format_scan_dashboard,
     format_symbol_card,
     format_symbol_compact_line,
@@ -337,6 +338,7 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--regime-risk-mode": "regime_risk_mode",
         "--regime-strictness": "regime_strictness",
         "--show-regime-details": "show_regime_details",
+        "--show-pullback-details": "show_pullback_details",
         "--performance-memory": "performance_memory",
         "--disable-performance-memory": "performance_memory",
         "--reset-performance-memory": "reset_performance_memory",
@@ -460,6 +462,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--show-near-miss-plan",
         action="store_true",
         help="Print the near-miss plan block even when compact display is selected.",
+    )
+    parser.add_argument(
+        "--show-pullback-details",
+        action="store_true",
+        help="Print pullback intelligence diagnostics for visible non-valid setup cards.",
     )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output-json", type=Path)
@@ -914,6 +921,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
             if args.show_near_miss_plan and ranked.display.display_bucket == "near_miss":
                 print("")
                 print(format_symbol_card(symbol_result, rank=ranked.display_rank))
+            elif args.show_pullback_details and ranked.display.display_bucket != "valid":
+                print("")
+                print(format_pullback_intelligence_block(symbol_result))
         else:
             print(
                 format_symbol_card(
@@ -925,6 +935,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
             if display_mode == "full":
                 print("")
                 print(_format_symbol_diagnostics(symbol_result))
+            elif args.show_pullback_details and ranked.display.display_bucket != "valid":
+                print("")
+                print(format_pullback_intelligence_block(symbol_result))
         if args.show_strategy_output:
             print("")
             print(f"{symbol_result.symbol} Candle Craft strategy output:")
@@ -2337,6 +2350,7 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
             f"Strategy unverified data: {_sequence_text(symbol_result.strategy_unverified_data)}",
             "Near-miss intelligence:",
             _format_near_miss_intelligence(symbol_result),
+            format_pullback_intelligence_block(symbol_result),
             "Setup quality:",
             _format_setup_quality_diagnostics(symbol_result),
             "Historical edge analytics:",

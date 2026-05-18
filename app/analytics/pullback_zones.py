@@ -145,6 +145,7 @@ class PullbackZoneResult(BaseModel):
     fib_786: MaybeDecimal = NA
     fib_min: MaybeDecimal = NA
     fib_max: MaybeDecimal = NA
+    pullback_depth_ratio: MaybeDecimal = NA
     entry_low: MaybeDecimal = NA
     entry_high: MaybeDecimal = NA
     entry: MaybeDecimal = NA
@@ -221,6 +222,14 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
 
     impulse_start, impulse_end, impulse_low, impulse_high = impulse
     fib_levels = _fib_levels(data.direction, impulse_start, impulse_end)
+    pullback_depth_ratio = _deepest_pullback_ratio(
+        candles,
+        data.direction,
+        bos_index,
+        impulse_start,
+        impulse_end,
+        data.latest_price,
+    )
     fib_alignment = _fib_alignment_for_levels(data.direction, impulse_start, impulse_end, None, data.aggressive_toggle)
     deep_reject = _pullback_deeper_than_786(candles, data.direction, bos_index, fib_levels, data.latest_price)
     ob_zone = _detect_order_block(candles, data.direction, sweep_index, bos_index, impulse_end)
@@ -245,6 +254,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         "fib_786": fib_levels["0.786"],
         "fib_min": fib_levels["min"],
         "fib_max": fib_levels["max"],
+        "pullback_depth_ratio": pullback_depth_ratio if pullback_depth_ratio is not None else NA,
     }
 
     if deep_reject:
@@ -391,6 +401,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         fib_786=fib_levels["0.786"],
         fib_min=fib_levels["min"],
         fib_max=fib_levels["max"],
+        pullback_depth_ratio=pullback_depth_ratio if pullback_depth_ratio is not None else NA,
         entry_low=selected.entry_low,
         entry_high=selected.entry_high,
         entry=_quantize(entry),
@@ -832,6 +843,36 @@ def _pullback_deeper_than_786(
     if any(candle.high > fib_786 for candle in sample):
         return True
     return latest_price != NA and _decimal_from(latest_price, "latest_price") > fib_786
+
+
+def _deepest_pullback_ratio(
+    candles: Sequence[_Candle],
+    direction: TradeDirection,
+    bos_index: int,
+    sweep: Decimal,
+    bos: Decimal,
+    latest_price: MaybeDecimal,
+) -> Decimal | None:
+    impulse = abs(bos - sweep)
+    if impulse <= 0:
+        return None
+
+    sample = candles[bos_index + 1 :]
+    if direction == "long":
+        pullback_prices = [candle.low for candle in sample]
+        if latest_price != NA:
+            pullback_prices.append(_decimal_from(latest_price, "latest_price"))
+        if not pullback_prices:
+            return Decimal("0")
+        ratio = (bos - min(pullback_prices)) / impulse
+    else:
+        pullback_prices = [candle.high for candle in sample]
+        if latest_price != NA:
+            pullback_prices.append(_decimal_from(latest_price, "latest_price"))
+        if not pullback_prices:
+            return Decimal("0")
+        ratio = (max(pullback_prices) - bos) / impulse
+    return _quantize(max(Decimal("0"), ratio))
 
 
 def _pullback_ratio(

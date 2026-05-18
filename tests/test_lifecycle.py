@@ -241,6 +241,30 @@ def _near_miss_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
     )
 
 
+def _too_deep_pullback_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        rejected_strategy_modes=("swing",),
+        strategy_diagnostics={
+            "swing": {
+                "mode": "swing",
+                "bias": "long",
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "failed",
+                "first_failed_gate": "pullback_too_deep",
+                "gates_passed": ("sweep", "bos_choch"),
+                "gates_failed": ("pullback_too_deep",),
+                "pullback_depth_ratio": Decimal("0.82"),
+                "fib_alignment_status": "pullback_too_deep",
+                "pullback_failure_reason": "Pullback tagged beyond 0.786 before entry.",
+            }
+        },
+    )
+
+
 def test_valid_state_progression() -> None:
     initial = evaluate_lifecycle_transition(
         None,
@@ -283,6 +307,26 @@ def test_valid_state_progression() -> None:
         now="2026-05-18T09:20:00+00:00",
     )
     assert executing.to_state == SetupLifecycleState.EXECUTING
+
+
+def test_lifecycle_invalidates_triggered_setup_on_too_deep_pullback(tmp_path) -> None:
+    db_path = tmp_path / "lifecycle.db"
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(_record(SetupLifecycleState.TRIGGERED))
+
+    result = apply_lifecycle_to_run_result(
+        _scan_result(_too_deep_pullback_symbol()),
+        database_path=db_path,
+        now="2026-05-18T09:30:00+00:00",
+    )
+
+    lifecycle = result.results[0].lifecycle_state
+    transition = result.results[0].lifecycle_transition
+    assert lifecycle is not None
+    assert transition is not None
+    assert lifecycle.current_state == SetupLifecycleState.INVALIDATED
+    assert lifecycle.invalidation_reason == "pullback exceeded valid structure depth"
+    assert transition.reason == SetupTransitionReason.SETUP_INVALIDATED
 
 
 def test_invalid_state_transition_rejected() -> None:

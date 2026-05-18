@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from app.analytics.near_miss_intelligence import NearMissIntelligence, build_near_miss_intelligence
+from app.analytics.pullback_intelligence import PullbackIntelligenceResult, build_pullback_intelligence
 from app.analytics.setup_quality import SetupQualityResult, SetupQualityState
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
@@ -233,6 +234,8 @@ def build_symbol_display(symbol_result: ScannerSymbolResult) -> SymbolDisplay:
 
 def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | None = None) -> dict[str, Any]:
     display = build_symbol_display(symbol_result)
+    diagnostics = representative_strategy_diagnostics(symbol_result)
+    pullback_intelligence = _pullback_intelligence(symbol_result, diagnostics)
     return {
         "display_rank": display_rank,
         "display_bucket": display.display_bucket,
@@ -260,6 +263,9 @@ def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | No
         else NA,
         "near_miss_intelligence": display.near_miss_intelligence.model_dump(mode="json")
         if display.near_miss_intelligence is not None
+        else None,
+        "pullback_intelligence": pullback_intelligence.model_dump(mode="json")
+        if pullback_intelligence is not None
         else None,
     }
 
@@ -492,6 +498,7 @@ def format_symbol_card(
         "",
         f"{CROSS} Failed",
         *_failed_lines(display),
+        *_optional_pullback_intelligence_lines(symbol_result, diagnostics, display.display_bucket),
         "",
         f"{CHART} Setup Progress: {display.setup_progress_passed}/{display.setup_progress_total}",
         *_progress_lines(display),
@@ -542,6 +549,7 @@ def _format_near_miss_card(
         f"Failed gate: {failed_gate}",
         f"Reason: {reason}",
         *_quality_summary_lines(symbol_result.setup_quality),
+        *_optional_pullback_intelligence_lines(symbol_result, diagnostics, display.display_bucket),
         *_historical_edge_lines(symbol_result),
         "",
         "Needs next:",
@@ -569,6 +577,14 @@ def _format_near_miss_card(
 
     lines.extend(("", FOOTER))
     return "\n".join(lines)
+
+
+def format_pullback_intelligence_block(symbol_result: ScannerSymbolResult) -> str:
+    diagnostics = representative_strategy_diagnostics(symbol_result)
+    intelligence = _pullback_intelligence(symbol_result, diagnostics)
+    if intelligence is None:
+        return "Pullback Intelligence\nN/A"
+    return "\n".join(("Pullback Intelligence", *_pullback_intelligence_lines(intelligence)))
 
 
 def _numbered_condition_lines(conditions: Sequence[str]) -> list[str]:
@@ -804,6 +820,102 @@ def _near_miss_intelligence(
         short_reason=short_reason,
         diagnostics=diagnostics,
     )
+
+
+def _pullback_intelligence(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> PullbackIntelligenceResult | None:
+    if symbol_result.pullback_intelligence is not None:
+        return symbol_result.pullback_intelligence
+    payload = diagnostics.get("pullback_intelligence")
+    if isinstance(payload, PullbackIntelligenceResult):
+        return payload
+    if isinstance(payload, Mapping):
+        return PullbackIntelligenceResult.model_validate(payload)
+    if diagnostics:
+        return build_pullback_intelligence(diagnostics)
+    return None
+
+
+def _optional_pullback_intelligence_lines(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    display_bucket: DisplayBucket,
+) -> tuple[str, ...]:
+    if display_bucket == "valid":
+        return ()
+    intelligence = _pullback_intelligence(symbol_result, diagnostics)
+    if intelligence is None:
+        return ()
+    return ("", "Pullback Intelligence", *_pullback_intelligence_lines(intelligence))
+
+
+def _pullback_intelligence_lines(intelligence: PullbackIntelligenceResult) -> tuple[str, ...]:
+    failure_type = _enum_value(intelligence.pullback_failure_type)
+    grade = _enum_value(intelligence.pullback_quality_grade)
+    return (
+        f"- Failure type: {failure_type}",
+        f"- Grade: {grade}",
+        f"- Depth: {_display(intelligence.pullback_depth_ratio)}",
+        f"- Fib status: {_display(intelligence.fib_zone_status)}",
+        f"- OB/FVG: {_display(intelligence.ob_fvg_status)}",
+        f"- Displacement: {_display(intelligence.displacement_strength)}",
+        f"- Candles since BOS: {_display(intelligence.candles_since_bos)}",
+        f"- Freshness: {_freshness_label(intelligence.freshness_score)}",
+        f"- RR potential: {_score_label(intelligence.rr_potential_score)}",
+        f"- Structure risk: {_risk_label(intelligence.structure_risk_score)}",
+        f"- Next condition: {_display(intelligence.next_pullback_condition)}",
+    )
+
+
+def _score_label(value: object) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    try:
+        score = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return text
+    if score >= 75:
+        return "high"
+    if score >= 50:
+        return "moderate"
+    return "low"
+
+
+def _freshness_label(value: object) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    try:
+        score = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return text
+    if score >= 75:
+        return "strong"
+    if score >= 50:
+        return "acceptable"
+    return "weak"
+
+
+def _risk_label(value: object) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    try:
+        score = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return text
+    if score >= 75:
+        return "high"
+    if score >= 50:
+        return "elevated"
+    return "low"
+
+
+def _enum_value(value: object) -> str:
+    return _display(getattr(value, "value", value))
 
 
 def _action_label(
@@ -1900,6 +2012,7 @@ __all__ = [
     "build_symbol_display",
     "display_fields",
     "filter_ranked_results",
+    "format_pullback_intelligence_block",
     "format_scan_dashboard",
     "format_symbol_card",
     "format_symbol_compact_line",

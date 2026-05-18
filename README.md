@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, and Phase 37 lifecycle conversion analytics.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, and Phase 38 pullback structure intelligence.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -103,7 +103,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, and the Phase 36 lifecycle engine. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, and the Phase 38 pullback intelligence layer. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -1536,6 +1536,111 @@ Safety boundaries:
 - `EXECUTING` and `MANAGING` are lifecycle states only; they do not place orders.
 - Missing data remains `N/A`; unreliable data remains `Unverified`; lifecycle never invents market data or outcomes.
 
+## Phase 38 - Pullback Structure Intelligence
+
+Purpose:
+
+- Add read-only diagnostics for why pullbacks fail after sweep and BOS/CHoCH, especially at the `TRIGGERED` lifecycle stage.
+- Keep the existing strategy strictness intact. Phase 38 does not loosen pullback depth, OB/FVG, fib, RR, Trust Meter, risk, or regime gates.
+- Make `pullback_too_deep`, `no_ob_or_fvg_zone`, and `rr_below_minimum` easier to research without converting failed setups into valid setups.
+
+New module:
+
+- `app/analytics/pullback_intelligence.py`
+- Models: `PullbackIntelligenceInput`, `PullbackIntelligenceResult`, `PullbackFailureType`, `PullbackQualityGrade`, and `PullbackProjection`.
+
+Failure types:
+
+```text
+TOO_DEEP
+TOO_SHALLOW
+NO_OB_FVG
+FIB_MISALIGNMENT
+LATE_PULLBACK
+WEAK_DISPLACEMENT
+OPPOSING_STRUCTURE_BLOCK
+RR_COMPRESSION
+DATA_INCOMPLETE
+```
+
+Pullback intelligence fields include:
+
+```text
+pullback_depth_ratio
+fib_zone_status
+ob_fvg_status
+displacement_strength
+candles_since_bos
+freshness_score
+rr_potential_score
+structure_risk_score
+pullback_quality_grade
+pullback_failure_type
+next_pullback_condition
+```
+
+Quality grades:
+
+- `A`: ideal pullback.
+- `B`: acceptable but imperfect.
+- `C`: weak or watch only.
+- `REJECT`: invalid pullback.
+- `N/A`: insufficient data.
+
+Lifecycle behavior:
+
+- `TOO_DEEP` means the pullback exceeded 0.786. The scanner marks intent as weakened before entry, requires a fresh sweep plus BOS/CHoCH, and prevents same-structure reactivation. Existing `TRIGGERED` lifecycles move to `INVALIDATED` under the current lifecycle rules.
+- `NO_OB_FVG` means there is no clean execution zone inside displacement. It can remain watchlisted or triggered only when sweep and BOS/CHoCH are already confirmed; activation still requires a valid OB/FVG.
+- `RR_COMPRESSION` means target distance is not worth the risk. It can remain watchlisted, but it cannot become confirmed until RR improves through a better entry, wider clean TP2, or new structure.
+- `DATA_INCOMPLETE` keeps fields as `N/A`; the scanner does not infer missing market data.
+
+Display:
+
+Near-miss and visible rejected cards can show:
+
+```text
+Pullback Intelligence
+- Failure type: TOO_DEEP
+- Depth: 0.82
+- Fib status: failed
+- OB/FVG: missing
+- Freshness: weak
+- RR potential: low
+- Next condition: fresh sweep + BOS required
+```
+
+Use `--show-pullback-details` to print the same pullback block for visible compact/non-full output.
+
+Research queries:
+
+```text
+pullback_failures
+pullback_quality_distribution
+pullback_depth_analysis
+pullback_lifecycle_dropoffs
+```
+
+Research output includes failure type counts, average depth by failure type, most common failed symbols, failure by regime, failure by lifecycle state, and conversion rate by pullback grade.
+
+Examples:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT --show-pullback-details
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query pullback_failures --database-path scan_runs/candle_craft.db
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query pullback_quality_distribution --database-path scan_runs/candle_craft.db
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query pullback_depth_analysis --database-path scan_runs/candle_craft.db
+```
+
+Safety boundaries:
+
+- Phase 38 is intelligence, diagnostics, and research only.
+- It does not weaken strategy gates, lower RR requirements, allow pullbacks beyond invalidation limits, or create valid setups from failed pullbacks.
+- It does not add order execution, private exchange API access, withdrawals, transfers, account endpoints, or live Telegram sending.
+- Missing data remains `N/A`; unreliable data remains `Unverified`; market data is never invented.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -1571,3 +1676,4 @@ Safety boundaries:
 - The Phase 35 regime intelligence layer is an environment filter only. It can reject or downgrade weak environments, but it cannot create setups, bypass strategy gates, invent unavailable regime inputs, place orders, call private APIs, send live Telegram messages by default, withdraw funds, or transfer funds.
 - The Phase 36 lifecycle engine is state tracking only. It does not weaken strategy gates, create valid setups from invalid setups, place orders, call private APIs, send live Telegram messages by default, invent market data or outcomes, withdraw funds, or transfer funds.
 - The Phase 37 lifecycle conversion analytics layer is read-only reporting only. It does not weaken setup rules, create trades from invalid states, place orders, call private APIs, send live Telegram messages by default, delete lifecycle records, invent market data, withdraw funds, or transfer funds.
+- The Phase 38 pullback intelligence layer is diagnostics and research only. It does not loosen pullback, fib, OB/FVG, RR, Trust Meter, risk, or lifecycle gates; create valid setups from failed pullbacks; place orders; call private APIs; send live Telegram by default; invent data; withdraw funds; or transfer funds.

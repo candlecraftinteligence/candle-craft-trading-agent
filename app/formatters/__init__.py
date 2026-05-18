@@ -1,6 +1,7 @@
 from app.formatters.scanner_display import (
     build_symbol_display,
     display_fields,
+    format_pullback_intelligence_block,
     format_scan_dashboard,
     format_symbol_card,
     format_symbol_compact_line,
@@ -15,6 +16,7 @@ from app.formatters.telegram_formatter import (
 __all__ = [
     "build_symbol_display",
     "display_fields",
+    "format_pullback_intelligence_block",
     "format_scan_dashboard",
     "format_symbol_card",
     "format_symbol_compact_line",

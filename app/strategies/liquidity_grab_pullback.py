@@ -200,6 +200,7 @@ class LiquidityGrabSetup(BaseModel):
     fib_618: MaybeDecimal = NA
     fib_65: MaybeDecimal = NA
     fib_786: MaybeDecimal = NA
+    pullback_depth_ratio: MaybeDecimal = NA
     pullback_failure_reason: str = NA
     atr_stop_buffer: MaybeDecimal = NA
     momentum: MomentumConfirmation = MomentumConfirmation()
@@ -721,6 +722,7 @@ class LiquidityGrabEngine:
             fib_618=pullback_zone.fib_618,
             fib_65=pullback_zone.fib_65,
             fib_786=pullback_zone.fib_786,
+            pullback_depth_ratio=pullback_zone.pullback_depth_ratio,
             pullback_failure_reason=pullback_zone.pullback_failure_reason,
             atr_stop_buffer=pullback_zone.atr_stop_buffer,
             momentum=momentum,
@@ -1717,6 +1719,7 @@ def _rejected_setup(
         fib_618=pullback_zone.fib_618,
         fib_65=pullback_zone.fib_65,
         fib_786=pullback_zone.fib_786,
+        pullback_depth_ratio=pullback_zone.pullback_depth_ratio,
         pullback_failure_reason=pullback_zone.pullback_failure_reason,
         atr_stop_buffer=pullback_zone.atr_stop_buffer,
         entry_low=entry_low,
@@ -1779,6 +1782,7 @@ def _setup_diagnostic_fields(setup: LiquidityGrabSetup) -> dict[str, Any]:
         "fib_618": setup.pullback_zone.fib_618,
         "fib_65": setup.pullback_zone.fib_65,
         "fib_786": setup.pullback_zone.fib_786,
+        "pullback_depth_ratio": setup.pullback_zone.pullback_depth_ratio,
         "pullback_failure_reason": setup.pullback_zone.pullback_failure_reason,
         "atr_stop_buffer": setup.pullback_zone.atr_stop_buffer,
         "sweep_diagnostics": _sweep_diagnostics(setup.sweep),
