@@ -6,6 +6,19 @@ from typing import Any
 from app.data.dtos import NA
 from app.research.queries import SAMPLE_SIZE_WARNING
 
+LIFECYCLE_FUNNEL_DISPLAY_STATES = (
+    "DISCOVERED",
+    "WATCHLISTED",
+    "STALKING",
+    "TRIGGERED",
+    "CONFIRMED",
+    "EXECUTING",
+    "TP_HIT",
+    "SL_HIT",
+    "INVALIDATED",
+    "ARCHIVED",
+)
+
 
 def format_research_report(report: Mapping[str, Any]) -> str:
     query = str(report.get("query", NA))
@@ -43,6 +56,14 @@ def format_research_report(report: Mapping[str, Any]) -> str:
         return _format_lifecycle_transitions(report)
     if query == "lifecycle_conversion":
         return _format_lifecycle_conversion(report)
+    if query == "lifecycle_funnel":
+        return _format_lifecycle_funnel(report)
+    if query == "lifecycle_dropoffs":
+        return _format_lifecycle_dropoffs(report)
+    if query == "lifecycle_symbol_conversion":
+        return _format_lifecycle_symbol_conversion(report)
+    if query == "lifecycle_state_duration":
+        return _format_lifecycle_state_duration(report)
     if query == "lifecycle_symbol_detail":
         return _format_lifecycle_symbol_detail(report)
     return "\n".join(("Candle Craft Research", f"Unsupported report: {query}"))
@@ -429,22 +450,138 @@ def _format_lifecycle_transitions(report: Mapping[str, Any]) -> str:
 
 
 def _format_lifecycle_conversion(report: Mapping[str, Any]) -> str:
-    watchlisted = _mapping(report.get("watchlisted_to_valid"))
-    triggered = _mapping(report.get("triggered_to_confirmed"))
-    outcomes = _mapping(report.get("confirmed_outcomes"))
+    rates = _mapping(report.get("conversion_rates"))
+    counts = _mapping(report.get("conversion_counts"))
+    executing_tp = _mapping(counts.get("EXECUTING_to_TP_HIT"))
+    executing_sl = _mapping(counts.get("EXECUTING_to_SL_HIT"))
+    executing_invalidated = _mapping(counts.get("EXECUTING_to_INVALIDATED"))
+    executing_expired = _mapping(counts.get("EXECUTING_to_EXPIRED"))
     return _join_sections(
         "Lifecycle Conversion",
         _metric_table(
             (
-                ("WATCHLISTED count", watchlisted.get("watchlisted_count")),
-                ("WATCHLISTED -> VALID", _pct_value(watchlisted.get("conversion_rate_pct"))),
-                ("TRIGGERED count", triggered.get("triggered_count")),
-                ("TRIGGERED -> CONFIRMED", _pct_value(triggered.get("conversion_rate_pct"))),
-                ("CONFIRMED count", outcomes.get("confirmed_count")),
-                ("CONFIRMED -> TP_HIT", _pct_value(outcomes.get("tp_hit_rate_pct"))),
-                ("CONFIRMED -> SL_HIT", _pct_value(outcomes.get("sl_hit_rate_pct"))),
+                ("Total lifecycles", report.get("total_lifecycles")),
+                ("Active lifecycles", report.get("active_lifecycles")),
+                ("Archived lifecycles", report.get("archived_lifecycles")),
+                ("WATCHLISTED -> STALKING", _pct_value(rates.get("watchlisted_to_stalking_pct"))),
+                ("STALKING -> TRIGGERED", _pct_value(rates.get("stalking_to_triggered_pct"))),
+                ("TRIGGERED -> CONFIRMED", _pct_value(rates.get("triggered_to_confirmed_pct"))),
+                ("CONFIRMED -> EXECUTING", _pct_value(rates.get("confirmed_to_executing_pct"))),
+                ("EXECUTING -> TP_HIT", _pct_value(executing_tp.get("conversion_rate_pct"))),
+                ("EXECUTING -> SL_HIT", _pct_value(executing_sl.get("conversion_rate_pct"))),
+                ("EXECUTING -> INVALIDATED", _pct_value(executing_invalidated.get("conversion_rate_pct"))),
+                ("EXECUTING -> EXPIRED", _pct_value(executing_expired.get("conversion_rate_pct"))),
             )
         ),
+        _warning_block(report),
+    )
+
+
+def _format_lifecycle_funnel(report: Mapping[str, Any]) -> str:
+    counts = _mapping(report.get("funnel_counts"))
+    rates = _mapping(report.get("conversion_rates"))
+    funnel_lines = [
+        "Lifecycle Funnel",
+        *(f"{state}: {_display(counts.get(state, 0))}" for state in LIFECYCLE_FUNNEL_DISPLAY_STATES),
+    ]
+    conversion_lines = (
+        "Conversion:",
+        f"STALKING -> TRIGGERED: {_pct_value(rates.get('stalking_to_triggered_pct'))}",
+        f"TRIGGERED -> CONFIRMED: {_pct_value(rates.get('triggered_to_confirmed_pct'))}",
+        f"CONFIRMED -> EXECUTING: {_pct_value(rates.get('confirmed_to_executing_pct'))}",
+    )
+    return _join_sections(
+        "\n".join(funnel_lines),
+        "\n".join(conversion_lines),
+        _warning_block(report),
+    )
+
+
+def _format_lifecycle_dropoffs(report: Mapping[str, Any]) -> str:
+    stats = _mapping(report.get("dropoff_stats"))
+    stage_rows = [
+        (row.get("stage"), row.get("count"))
+        for row in _sequence(stats.get("dropoff_stages"))
+    ]
+    gate_rows = [
+        (row.get("failed_gate"), row.get("count"))
+        for row in _sequence(stats.get("failed_gate_counts"))
+    ]
+    return _join_sections(
+        "Lifecycle Dropoffs",
+        _metric_table(
+            (
+                ("Dropoff lifecycles", stats.get("dropoff_lifecycle_count")),
+                ("Biggest dropoff stage", stats.get("biggest_dropoff_stage")),
+                ("Most common failed gate", stats.get("most_common_failed_gate")),
+                ("Most common invalidation", stats.get("most_common_invalidation_reason")),
+                ("Average readiness at dropoff", stats.get("average_readiness_score")),
+                ("Average quality at dropoff", stats.get("average_quality_score")),
+                ("Regime at dropoff", stats.get("most_common_regime_state")),
+            )
+        ),
+        "Dropoff stages",
+        _table(("stage", "count"), stage_rows),
+        "Failed gates",
+        _table(("failed_gate", "count"), gate_rows),
+        _warning_block(report),
+    )
+
+
+def _format_lifecycle_symbol_conversion(report: Mapping[str, Any]) -> str:
+    rows = [
+        (
+            row.get("symbol"),
+            row.get("lifecycle_count"),
+            row.get("highest_state_reached"),
+            _pct_value(row.get("conversion_to_confirmed_pct")),
+            _pct_value(row.get("conversion_to_executing_pct")),
+            row.get("average_time_to_highest_state_seconds"),
+            row.get("most_common_failure_point"),
+        )
+        for row in _sequence(report.get("per_symbol_conversion"))
+    ]
+    return _join_sections(
+        "Lifecycle Symbol Conversion",
+        _table(("symbol", "lifecycles", "highest", "confirmed", "executing", "avg_to_high", "failure"), rows),
+        _warning_block(report),
+    )
+
+
+def _format_lifecycle_state_duration(report: Mapping[str, Any]) -> str:
+    stats = _mapping(report.get("state_duration_stats"))
+    duration_rows = [
+        (
+            row.get("state"),
+            row.get("average_seconds"),
+            row.get("median_seconds"),
+            row.get("longest_seconds"),
+            row.get("samples"),
+        )
+        for row in _sequence(stats.get("states"))
+    ]
+    stuck_rows = [
+        (
+            row.get("symbol"),
+            row.get("current_state"),
+            row.get("hours_in_state"),
+            row.get("last_transition_at"),
+        )
+        for row in _sequence(stats.get("longest_stuck_symbols"))
+    ]
+    return _join_sections(
+        "Lifecycle State Duration",
+        _metric_table(
+            (
+                ("Analysis as of", stats.get("analysis_as_of")),
+                ("Stale after hours", stats.get("stale_after_hours")),
+                ("Stale lifecycle count", stats.get("stale_lifecycle_count")),
+            )
+        ),
+        "State duration",
+        _table(("state", "avg_seconds", "median_seconds", "longest_seconds", "samples"), duration_rows),
+        "Longest stuck symbols",
+        _table(("symbol", "state", "hours", "last_transition"), stuck_rows),
         _warning_block(report),
     )
 

@@ -480,6 +480,8 @@ def test_phase_34_research_cli_flags_accepted(tmp_path) -> None:
             "trend_expansion",
             "--research-output-json",
             str(output_path),
+            "--lifecycle-stale-hours",
+            "12",
             "--database-path",
             str(db_path),
         ]
@@ -492,6 +494,7 @@ def test_phase_34_research_cli_flags_accepted(tmp_path) -> None:
     assert args.research_mode == "swing"
     assert args.research_regime == "trend_expansion"
     assert args.research_output_json == output_path
+    assert args.lifecycle_stale_hours == 12
     assert args.database_path == db_path
 
 

@@ -18,6 +18,51 @@ from app.storage.database import DEFAULT_DATABASE_PATH, StorageError
 MISSING_SCAN_DATABASE_MESSAGE = "No scan database found. Run scans with --store-scan first."
 SAMPLE_SIZE_WARNING = "Sample size too small for reliable conclusion."
 MIN_RELIABLE_SAMPLE_SIZE = 30
+DEFAULT_LIFECYCLE_STALE_HOURS = 24.0
+LIFECYCLE_FUNNEL_STATES = (
+    "DISCOVERED",
+    "WATCHLISTED",
+    "STALKING",
+    "TRIGGERED",
+    "CONFIRMED",
+    "EXECUTING",
+    "TP_HIT",
+    "SL_HIT",
+    "INVALIDATED",
+    "EXPIRED",
+    "ARCHIVED",
+)
+LIFECYCLE_CONVERSION_STEPS = (
+    ("WATCHLISTED", "STALKING"),
+    ("STALKING", "TRIGGERED"),
+    ("TRIGGERED", "CONFIRMED"),
+    ("CONFIRMED", "EXECUTING"),
+)
+LIFECYCLE_EXECUTING_OUTCOMES = ("TP_HIT", "SL_HIT", "INVALIDATED", "EXPIRED")
+LIFECYCLE_ACTIVE_STATES = {
+    "DISCOVERED",
+    "WATCHLISTED",
+    "STALKING",
+    "TRIGGERED",
+    "CONFIRMED",
+    "EXECUTING",
+    "MANAGING",
+}
+LIFECYCLE_STALE_STATES = {"WATCHLISTED", "STALKING", "TRIGGERED", "CONFIRMED"}
+LIFECYCLE_PROGRESS_RANK = {
+    "DISCOVERED": 0,
+    "REJECTED": 1,
+    "WATCHLISTED": 2,
+    "STALKING": 3,
+    "TRIGGERED": 4,
+    "CONFIRMED": 5,
+    "EXECUTING": 6,
+    "MANAGING": 7,
+    "TP_HIT": 8,
+    "SL_HIT": 8,
+    "INVALIDATED": 8,
+    "EXPIRED": 8,
+}
 RESEARCH_QUERIES = (
     "summary",
     "best_symbols",
@@ -37,6 +82,10 @@ RESEARCH_QUERIES = (
     "lifecycle_summary",
     "lifecycle_transitions",
     "lifecycle_conversion",
+    "lifecycle_funnel",
+    "lifecycle_dropoffs",
+    "lifecycle_symbol_conversion",
+    "lifecycle_state_duration",
     "lifecycle_symbol_detail",
 )
 MODES = ("challenge", "swing", "scalp")
@@ -52,6 +101,7 @@ class ResearchFilters:
     mode: str | None = None
     regime: str | None = None
     limit: int = 10
+    lifecycle_stale_hours: float = DEFAULT_LIFECYCLE_STALE_HOURS
 
     @property
     def normalized_symbol(self) -> str | None:
@@ -69,12 +119,22 @@ class ResearchFilters:
     def normalized_limit(self) -> int:
         return max(1, int(self.limit or 10))
 
+    @property
+    def normalized_lifecycle_stale_hours(self) -> float:
+        try:
+            hours = float(self.lifecycle_stale_hours)
+        except (TypeError, ValueError):
+            return DEFAULT_LIFECYCLE_STALE_HOURS
+        return max(0.0, hours)
+
     def to_json(self) -> dict[str, Any]:
+        stale_hours = self.normalized_lifecycle_stale_hours
         return {
             "symbol": self.normalized_symbol or NA,
             "mode": self.normalized_mode or NA,
             "regime": self.normalized_regime or NA,
             "limit": self.normalized_limit,
+            "lifecycle_stale_hours": int(stale_hours) if stale_hours.is_integer() else stale_hours,
         }
 
 
@@ -262,6 +322,14 @@ def _build_query_report(query: str, data: ResearchData, filters: ResearchFilters
         return _lifecycle_transitions_report(data, filters)
     if query == "lifecycle_conversion":
         return _lifecycle_conversion_report(data, filters)
+    if query == "lifecycle_funnel":
+        return _lifecycle_funnel_report(data, filters)
+    if query == "lifecycle_dropoffs":
+        return _lifecycle_dropoffs_report(data, filters)
+    if query == "lifecycle_symbol_conversion":
+        return _lifecycle_symbol_conversion_report(data, filters)
+    if query == "lifecycle_state_duration":
+        return _lifecycle_state_duration_report(data, filters)
     if query == "lifecycle_symbol_detail":
         return _lifecycle_symbol_detail_report(data, filters)
     raise ValueError(f"Unsupported research query: {query}")
@@ -694,13 +762,17 @@ def _regime_quality_distribution_report(data: ResearchData, filters: ResearchFil
 def _lifecycle_summary_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
     records = data.lifecycle_records
     events = data.lifecycle_events
+    analytics = _lifecycle_analytics(data, filters)
     return {
         "query": "lifecycle_summary",
         "filters": filters.to_json(),
-        "total_lifecycles": len(records),
-        "active_lifecycles": sum(1 for row in records if row.get("current_state") not in {"ARCHIVED", "COOLDOWN"}),
+        "total_lifecycles": analytics["total_lifecycles"],
+        "active_lifecycles": analytics["active_lifecycles"],
+        "archived_lifecycles": analytics["archived_lifecycles"],
         "states": _state_counts(records),
-        "average_time_in_state_seconds": _average_time_in_state(events, records),
+        "average_time_in_state_seconds": analytics["state_duration_stats"]["states"],
+        "state_duration_stats": analytics["state_duration_stats"],
+        "stale_lifecycles": analytics["stale_lifecycles"],
         "most_common_invalidation_reason": _most_common_text(
             row.get("invalidation_reason")
             for row in records
@@ -738,58 +810,47 @@ def _lifecycle_transitions_report(data: ResearchData, filters: ResearchFilters) 
 
 
 def _lifecycle_conversion_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
-    events_by_lifecycle = _group_by(data.lifecycle_events, "lifecycle_id")
-    watchlisted_ids = {
-        lifecycle_id
-        for lifecycle_id, events in events_by_lifecycle.items()
-        if any(row.get("to_state") == "WATCHLISTED" for row in events)
-    }
-    triggered_ids = {
-        lifecycle_id
-        for lifecycle_id, events in events_by_lifecycle.items()
-        if any(row.get("to_state") == "TRIGGERED" for row in events)
-    }
-    confirmed_ids = {
-        lifecycle_id
-        for lifecycle_id, events in events_by_lifecycle.items()
-        if any(row.get("to_state") == "CONFIRMED" for row in events)
-    }
-    valid_states = {"CONFIRMED", "EXECUTING", "MANAGING", "TP_HIT", "SL_HIT"}
-    valid_ids = {
-        lifecycle_id
-        for lifecycle_id, events in events_by_lifecycle.items()
-        if any(row.get("to_state") in valid_states for row in events)
-    }
-    tp_ids = {
-        lifecycle_id
-        for lifecycle_id, events in events_by_lifecycle.items()
-        if any(row.get("to_state") == "TP_HIT" for row in events)
-    }
-    sl_ids = {
-        lifecycle_id
-        for lifecycle_id, events in events_by_lifecycle.items()
-        if any(row.get("to_state") == "SL_HIT" for row in events)
-    }
+    analytics = _lifecycle_analytics(data, filters)
     return {
         "query": "lifecycle_conversion",
         "filters": filters.to_json(),
-        "watchlisted_to_valid": {
-            "watchlisted_count": len(watchlisted_ids),
-            "valid_count": len(watchlisted_ids & valid_ids),
-            "conversion_rate_pct": _rate(len(watchlisted_ids & valid_ids), len(watchlisted_ids)),
-        },
-        "triggered_to_confirmed": {
-            "triggered_count": len(triggered_ids),
-            "confirmed_count": len(triggered_ids & confirmed_ids),
-            "conversion_rate_pct": _rate(len(triggered_ids & confirmed_ids), len(triggered_ids)),
-        },
-        "confirmed_outcomes": {
-            "confirmed_count": len(confirmed_ids),
-            "tp_hit_count": len(confirmed_ids & tp_ids),
-            "sl_hit_count": len(confirmed_ids & sl_ids),
-            "tp_hit_rate_pct": _rate(len(confirmed_ids & tp_ids), len(confirmed_ids)),
-            "sl_hit_rate_pct": _rate(len(confirmed_ids & sl_ids), len(confirmed_ids)),
-        },
+        **analytics,
+        "warnings": [],
+    }
+
+
+def _lifecycle_funnel_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    return {
+        "query": "lifecycle_funnel",
+        "filters": filters.to_json(),
+        **_lifecycle_analytics(data, filters),
+        "warnings": [],
+    }
+
+
+def _lifecycle_dropoffs_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    return {
+        "query": "lifecycle_dropoffs",
+        "filters": filters.to_json(),
+        **_lifecycle_analytics(data, filters),
+        "warnings": [],
+    }
+
+
+def _lifecycle_symbol_conversion_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    return {
+        "query": "lifecycle_symbol_conversion",
+        "filters": filters.to_json(),
+        **_lifecycle_analytics(data, filters),
+        "warnings": [],
+    }
+
+
+def _lifecycle_state_duration_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    return {
+        "query": "lifecycle_state_duration",
+        "filters": filters.to_json(),
+        **_lifecycle_analytics(data, filters),
         "warnings": [],
     }
 
@@ -839,6 +900,448 @@ def _lifecycle_symbol_detail_report(data: ResearchData, filters: ResearchFilters
         ],
         "warnings": [],
     }
+
+
+def _lifecycle_analytics(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    paths = _lifecycle_paths(data.lifecycle_records, data.lifecycle_events)
+    ids_by_state = {
+        state: {path["lifecycle_id"] for path in paths if _path_reached_state(path, state)}
+        for state in (*LIFECYCLE_FUNNEL_STATES, "MANAGING", "REJECTED")
+    }
+    funnel_counts = {
+        state: len(ids_by_state.get(state, set()))
+        for state in LIFECYCLE_FUNNEL_STATES
+    }
+    conversion_counts = _lifecycle_conversion_counts(ids_by_state)
+    conversion_rates = {
+        "watchlisted_to_stalking_pct": conversion_counts["WATCHLISTED_to_STALKING"]["conversion_rate_pct"],
+        "stalking_to_triggered_pct": conversion_counts["STALKING_to_TRIGGERED"]["conversion_rate_pct"],
+        "triggered_to_confirmed_pct": conversion_counts["TRIGGERED_to_CONFIRMED"]["conversion_rate_pct"],
+        "confirmed_to_executing_pct": conversion_counts["CONFIRMED_to_EXECUTING"]["conversion_rate_pct"],
+        "executing_to_tp_hit_pct": conversion_counts["EXECUTING_to_TP_HIT"]["conversion_rate_pct"],
+        "executing_to_sl_hit_pct": conversion_counts["EXECUTING_to_SL_HIT"]["conversion_rate_pct"],
+        "executing_to_invalidated_pct": conversion_counts["EXECUTING_to_INVALIDATED"]["conversion_rate_pct"],
+        "executing_to_expired_pct": conversion_counts["EXECUTING_to_EXPIRED"]["conversion_rate_pct"],
+    }
+    watchlisted_ids = ids_by_state.get("WATCHLISTED", set())
+    triggered_ids = ids_by_state.get("TRIGGERED", set())
+    confirmed_ids = ids_by_state.get("CONFIRMED", set())
+    valid_ids = {
+        path["lifecycle_id"]
+        for path in paths
+        if any(_path_reached_state(path, state) for state in ("CONFIRMED", "EXECUTING", "MANAGING", "TP_HIT", "SL_HIT"))
+    }
+    state_duration_stats = _lifecycle_state_duration_stats(
+        data.lifecycle_events,
+        data.lifecycle_records,
+        filters=filters,
+        as_of=_lifecycle_analysis_as_of(data.lifecycle_records, data.lifecycle_events),
+    )
+    return {
+        "total_lifecycles": len(paths),
+        "active_lifecycles": sum(1 for path in paths if path["current_state"] in LIFECYCLE_ACTIVE_STATES),
+        "archived_lifecycles": sum(
+            1
+            for path in paths
+            if path["current_state"] == "ARCHIVED" or _display(path["record"].get("archived_at")) != NA
+        ),
+        "funnel_counts": funnel_counts,
+        "conversion_counts": conversion_counts,
+        "conversion_rates": conversion_rates,
+        "dropoff_stats": _lifecycle_dropoff_stats(paths),
+        "state_duration_stats": state_duration_stats,
+        "stale_lifecycles": state_duration_stats["stale_lifecycles"],
+        "per_symbol_conversion": _per_symbol_lifecycle_conversion(paths),
+        "watchlisted_to_valid": {
+            "watchlisted_count": len(watchlisted_ids),
+            "valid_count": len(watchlisted_ids & valid_ids),
+            "conversion_rate_pct": _rate(len(watchlisted_ids & valid_ids), len(watchlisted_ids)),
+        },
+        "triggered_to_confirmed": {
+            "triggered_count": len(triggered_ids),
+            "confirmed_count": len(triggered_ids & confirmed_ids),
+            "conversion_rate_pct": _rate(len(triggered_ids & confirmed_ids), len(triggered_ids)),
+        },
+        "confirmed_outcomes": {
+            "confirmed_count": len(confirmed_ids),
+            "tp_hit_count": len(confirmed_ids & ids_by_state.get("TP_HIT", set())),
+            "sl_hit_count": len(confirmed_ids & ids_by_state.get("SL_HIT", set())),
+            "tp_hit_rate_pct": _rate(len(confirmed_ids & ids_by_state.get("TP_HIT", set())), len(confirmed_ids)),
+            "sl_hit_rate_pct": _rate(len(confirmed_ids & ids_by_state.get("SL_HIT", set())), len(confirmed_ids)),
+        },
+    }
+
+
+def _lifecycle_paths(
+    records: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    records_by_lifecycle = {
+        _display(row.get("lifecycle_id")): row
+        for row in records
+        if _display(row.get("lifecycle_id")) != NA
+    }
+    events_by_lifecycle = _group_by(events, "lifecycle_id")
+    lifecycle_ids = sorted(
+        lifecycle_id
+        for lifecycle_id in set(records_by_lifecycle) | set(events_by_lifecycle)
+        if lifecycle_id != NA
+    )
+    return [
+        _lifecycle_path(
+            lifecycle_id,
+            records_by_lifecycle.get(lifecycle_id, {}),
+            events_by_lifecycle.get(lifecycle_id, ()),
+        )
+        for lifecycle_id in lifecycle_ids
+    ]
+
+
+def _lifecycle_path(
+    lifecycle_id: str,
+    record: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    ordered_events = sorted(events, key=lambda row: (row.get("timestamp", ""), int(row.get("event_id") or 0)))
+    states: list[str] = []
+    first_seen_by_state: dict[str, datetime] = {}
+    for event in ordered_events:
+        from_state = _display(event.get("from_state"))
+        if from_state != NA and not states:
+            states.append(from_state)
+        to_state = _display(event.get("to_state"))
+        if to_state == NA:
+            continue
+        states.append(to_state)
+        timestamp = _parse_time(event.get("timestamp"))
+        if timestamp is not None:
+            first_seen_by_state.setdefault(to_state, timestamp)
+
+    current_state = _display(record.get("current_state"))
+    if current_state == NA and ordered_events:
+        current_state = _display(ordered_events[-1].get("to_state"))
+    if current_state != NA and current_state not in states:
+        states.append(current_state)
+    if current_state != NA:
+        current_timestamp = (
+            _parse_time(record.get("last_transition_at"))
+            or _parse_time(record.get("last_seen_at"))
+            or _parse_time(record.get("first_seen_at"))
+        )
+        if current_timestamp is not None:
+            first_seen_by_state.setdefault(current_state, current_timestamp)
+
+    first_seen = _parse_time(record.get("first_seen_at"))
+    if first_seen is None and ordered_events:
+        first_seen = _parse_time(ordered_events[0].get("timestamp"))
+    highest_state = _highest_lifecycle_state(states)
+    highest_at = first_seen_by_state.get(highest_state)
+    time_to_highest_seconds = (
+        Decimal(str((highest_at - first_seen).total_seconds()))
+        if first_seen is not None and highest_at is not None and highest_at >= first_seen
+        else None
+    )
+    return {
+        "lifecycle_id": lifecycle_id,
+        "record": record,
+        "events": tuple(ordered_events),
+        "states": tuple(states),
+        "reached_states": frozenset(states),
+        "current_state": current_state,
+        "highest_state": highest_state,
+        "highest_state_at": highest_at.isoformat() if highest_at is not None else NA,
+        "time_to_highest_state_seconds": _number(time_to_highest_seconds),
+        "dropoff_stage": _lifecycle_dropoff_stage(tuple(states)),
+        "symbol": _display(record.get("symbol") or (ordered_events[-1].get("symbol") if ordered_events else NA)).upper(),
+    }
+
+
+def _lifecycle_conversion_counts(ids_by_state: Mapping[str, set[str]]) -> dict[str, dict[str, Any]]:
+    counts = {}
+    for from_state, to_state in LIFECYCLE_CONVERSION_STEPS:
+        from_ids = ids_by_state.get(from_state, set())
+        to_ids = ids_by_state.get(to_state, set())
+        converted = from_ids & to_ids
+        counts[f"{from_state}_to_{to_state}"] = {
+            "from_state": from_state,
+            "to_state": to_state,
+            "from_count": len(from_ids),
+            "to_count": len(converted),
+            "conversion_rate_pct": _rate(len(converted), len(from_ids)),
+        }
+    executing_ids = ids_by_state.get("EXECUTING", set())
+    for outcome in LIFECYCLE_EXECUTING_OUTCOMES:
+        outcome_ids = executing_ids & ids_by_state.get(outcome, set())
+        counts[f"EXECUTING_to_{outcome}"] = {
+            "from_state": "EXECUTING",
+            "to_state": outcome,
+            "from_count": len(executing_ids),
+            "to_count": len(outcome_ids),
+            "conversion_rate_pct": _rate(len(outcome_ids), len(executing_ids)),
+        }
+    return counts
+
+
+def _lifecycle_dropoff_stats(paths: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    dropoffs = [path for path in paths if _display(path.get("dropoff_stage")) != NA]
+    records = [path["record"] for path in dropoffs if isinstance(path.get("record"), Mapping)]
+    stage_counter = Counter(_display(path.get("dropoff_stage")) for path in dropoffs if _display(path.get("dropoff_stage")) != NA)
+    failed_gate_counter = Counter(
+        _display(record.get("failed_gate"))
+        for record in records
+        if _display(record.get("failed_gate")) != NA
+    )
+    invalidation_counter = Counter(
+        _display(record.get("invalidation_reason"))
+        for record in records
+        if _display(record.get("invalidation_reason")) != NA
+    )
+    regime_counter = Counter(
+        _display(record.get("regime_state"))
+        for record in records
+        if _display(record.get("regime_state")) != NA
+    )
+    return {
+        "dropoff_lifecycle_count": len(dropoffs),
+        "biggest_dropoff_stage": stage_counter.most_common(1)[0][0] if stage_counter else NA,
+        "dropoff_stages": _counter_rows(stage_counter, "stage"),
+        "most_common_failed_gate": failed_gate_counter.most_common(1)[0][0] if failed_gate_counter else NA,
+        "failed_gate_counts": _counter_rows(failed_gate_counter, "failed_gate"),
+        "most_common_invalidation_reason": invalidation_counter.most_common(1)[0][0] if invalidation_counter else NA,
+        "invalidation_reason_counts": _counter_rows(invalidation_counter, "invalidation_reason"),
+        "average_readiness_score": _number(_mean(_numeric_values(record.get("readiness_score") for record in records))),
+        "average_quality_score": _number(_mean(_numeric_values(record.get("quality_score") for record in records))),
+        "most_common_regime_state": regime_counter.most_common(1)[0][0] if regime_counter else NA,
+        "regime_state_counts": _counter_rows(regime_counter, "regime_state"),
+    }
+
+
+def _per_symbol_lifecycle_conversion(paths: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for symbol, symbol_paths in _group_by(paths, "symbol").items():
+        lifecycle_count = len(symbol_paths)
+        confirmed = sum(1 for path in symbol_paths if _path_reached_state(path, "CONFIRMED"))
+        executing = sum(1 for path in symbol_paths if _path_reached_state(path, "EXECUTING"))
+        dropoff_counter = Counter(
+            _display(path.get("dropoff_stage"))
+            for path in symbol_paths
+            if _display(path.get("dropoff_stage")) != NA
+        )
+        rows.append(
+            {
+                "symbol": symbol,
+                "lifecycle_count": lifecycle_count,
+                "highest_state_reached": _highest_lifecycle_state(
+                    tuple(_display(path.get("highest_state")) for path in symbol_paths)
+                ),
+                "conversion_to_confirmed_pct": _rate(confirmed, lifecycle_count),
+                "conversion_to_executing_pct": _rate(executing, lifecycle_count),
+                "average_time_to_highest_state_seconds": _number(
+                    _mean(_numeric_values(path.get("time_to_highest_state_seconds") for path in symbol_paths))
+                ),
+                "most_common_failure_point": dropoff_counter.most_common(1)[0][0] if dropoff_counter else NA,
+            }
+        )
+    rows.sort(
+        key=lambda item: (
+            item["lifecycle_count"],
+            _sort_number(item["conversion_to_executing_pct"]),
+            _sort_number(item["conversion_to_confirmed_pct"]),
+            item["symbol"],
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def _lifecycle_state_duration_stats(
+    events: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    *,
+    filters: ResearchFilters,
+    as_of: datetime | None,
+) -> dict[str, Any]:
+    durations_by_state = _lifecycle_durations_by_state(events, records)
+    state_rows = []
+    for state, durations in durations_by_state.items():
+        state_rows.append(
+            {
+                "state": state,
+                "average_seconds": _number(_mean(durations)),
+                "median_seconds": _number(Decimal(str(median(durations))) if durations else None),
+                "longest_seconds": _number(max(durations) if durations else None),
+                "samples": len(durations),
+            }
+        )
+    state_rows.sort(key=lambda item: item["state"])
+    stuck_rows = _stuck_lifecycle_rows(records, as_of, filters)
+    stale_rows = [
+        row
+        for row in stuck_rows
+        if row["current_state"] in LIFECYCLE_STALE_STATES
+        and row["_seconds_in_state"] >= Decimal(str(filters.normalized_lifecycle_stale_hours)) * Decimal("3600")
+    ]
+    return {
+        "analysis_as_of": as_of.isoformat() if as_of is not None else NA,
+        "stale_after_hours": _number(Decimal(str(filters.normalized_lifecycle_stale_hours))),
+        "states": state_rows,
+        "longest_stuck_symbols": [_public_stuck_row(row) for row in stuck_rows[: filters.normalized_limit]],
+        "stale_lifecycle_count": len(stale_rows),
+        "stale_lifecycles": [_public_stuck_row(row) for row in stale_rows],
+    }
+
+
+def _lifecycle_durations_by_state(
+    events: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, list[Decimal]]:
+    durations_by_state: dict[str, list[Decimal]] = defaultdict(list)
+    if not events and not records:
+        return durations_by_state
+    last_seen_by_lifecycle = {
+        row["lifecycle_id"]: _parse_time(row.get("last_seen_at"))
+        for row in records
+    }
+    events_by_lifecycle = _group_by(events, "lifecycle_id")
+    for lifecycle_id, lifecycle_events in events_by_lifecycle.items():
+        ordered = sorted(lifecycle_events, key=lambda row: (row.get("timestamp", ""), int(row.get("event_id") or 0)))
+        for index, event in enumerate(ordered):
+            started = _parse_time(event.get("timestamp"))
+            if started is None:
+                continue
+            if index + 1 < len(ordered):
+                ended = _parse_time(ordered[index + 1].get("timestamp"))
+            else:
+                ended = last_seen_by_lifecycle.get(lifecycle_id)
+            if ended is None or ended < started:
+                continue
+            durations_by_state[_display(event.get("to_state"))].append(Decimal(str((ended - started).total_seconds())))
+
+    event_lifecycle_ids = set(events_by_lifecycle)
+    for record in records:
+        lifecycle_id = _display(record.get("lifecycle_id"))
+        if lifecycle_id in event_lifecycle_ids:
+            continue
+        started = _parse_time(record.get("first_seen_at"))
+        ended = _parse_time(record.get("last_seen_at"))
+        if started is None or ended is None or ended < started:
+            continue
+        durations_by_state[_display(record.get("current_state"))].append(Decimal(str((ended - started).total_seconds())))
+    return durations_by_state
+
+
+def _stuck_lifecycle_rows(
+    records: Sequence[Mapping[str, Any]],
+    as_of: datetime | None,
+    filters: ResearchFilters,
+) -> list[dict[str, Any]]:
+    if as_of is None:
+        return []
+    rows = []
+    for record in records:
+        current_state = _display(record.get("current_state"))
+        if current_state not in LIFECYCLE_ACTIVE_STATES:
+            continue
+        started = (
+            _parse_time(record.get("last_transition_at"))
+            or _parse_time(record.get("last_seen_at"))
+            or _parse_time(record.get("first_seen_at"))
+        )
+        if started is None or as_of < started:
+            continue
+        seconds = Decimal(str((as_of - started).total_seconds()))
+        rows.append(
+            {
+                "lifecycle_id": record.get("lifecycle_id"),
+                "symbol": record.get("symbol"),
+                "mode": record.get("mode"),
+                "direction": record.get("direction"),
+                "current_state": current_state,
+                "last_transition_at": record.get("last_transition_at"),
+                "hours_in_state": _number(seconds / Decimal("3600")),
+                "stale_after_hours": _number(Decimal(str(filters.normalized_lifecycle_stale_hours))),
+                "failed_gate": record.get("failed_gate"),
+                "readiness_score": record.get("readiness_score"),
+                "quality_score": record.get("quality_score"),
+                "_seconds_in_state": seconds,
+            }
+        )
+    rows.sort(key=lambda item: (item["_seconds_in_state"], str(item["symbol"])), reverse=True)
+    return rows
+
+
+def _public_stuck_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if not key.startswith("_")}
+
+
+def _lifecycle_analysis_as_of(
+    records: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
+) -> datetime | None:
+    timestamps: list[datetime] = []
+    for record in records:
+        for key in ("last_seen_at", "last_transition_at", "first_seen_at"):
+            parsed = _parse_time(record.get(key))
+            if parsed is not None:
+                timestamps.append(parsed)
+    for event in events:
+        parsed = _parse_time(event.get("timestamp"))
+        if parsed is not None:
+            timestamps.append(parsed)
+    return max(timestamps) if timestamps else None
+
+
+def _path_reached_state(path: Mapping[str, Any], state: str) -> bool:
+    reached = path.get("reached_states")
+    return isinstance(reached, frozenset) and state in reached
+
+
+def _highest_lifecycle_state(states: Sequence[Any]) -> str:
+    best_state = NA
+    best_rank = -1
+    for value in states:
+        state = _display(value)
+        rank = LIFECYCLE_PROGRESS_RANK.get(state, -1)
+        if rank >= best_rank and state != NA:
+            best_state = state
+            best_rank = rank
+    return best_state
+
+
+def _lifecycle_dropoff_stage(states: Sequence[str]) -> str:
+    state_set = set(states)
+    for outcome in ("SL_HIT", "INVALIDATED", "EXPIRED"):
+        if outcome in state_set:
+            previous_stage = _previous_progress_stage(states, outcome)
+            return previous_stage if previous_stage != NA else outcome
+    if "REJECTED" in state_set and "WATCHLISTED" not in state_set:
+        return "DISCOVERED"
+    if "DISCOVERED" in state_set and "WATCHLISTED" not in state_set:
+        return "DISCOVERED"
+    for from_state, to_state in LIFECYCLE_CONVERSION_STEPS:
+        if from_state in state_set and to_state not in state_set:
+            return from_state
+    if "EXECUTING" in state_set and not any(outcome in state_set for outcome in LIFECYCLE_EXECUTING_OUTCOMES):
+        return "EXECUTING"
+    return NA
+
+
+def _previous_progress_stage(states: Sequence[str], marker_state: str) -> str:
+    try:
+        marker_index = next(index for index, state in enumerate(states) if state == marker_state)
+    except StopIteration:
+        return NA
+    for state in reversed(states[:marker_index]):
+        if state in LIFECYCLE_ACTIVE_STATES or state == "MANAGING":
+            return state
+    return NA
+
+
+def _counter_rows(counter: Counter[str], key: str) -> list[dict[str, Any]]:
+    return [
+        {key: value, "count": count}
+        for value, count in sorted(counter.items(), key=lambda item: (item[1], item[0]), reverse=True)
+    ]
 
 
 def _symbol_metrics(symbol: str, rows: Sequence[Mapping[str, Any]], replays: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -913,37 +1416,6 @@ def _state_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     output.sort(key=lambda item: (item["count"], item["state"]), reverse=True)
-    return output
-
-
-def _average_time_in_state(
-    events: Sequence[Mapping[str, Any]],
-    records: Sequence[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    if not events:
-        return []
-    last_seen_by_lifecycle = {
-        row["lifecycle_id"]: _parse_time(row.get("last_seen_at"))
-        for row in records
-    }
-    durations_by_state: dict[str, list[Decimal]] = defaultdict(list)
-    for lifecycle_id, lifecycle_events in _group_by(events, "lifecycle_id").items():
-        ordered = sorted(lifecycle_events, key=lambda row: row.get("timestamp", ""))
-        for index, event in enumerate(ordered):
-            started = _parse_time(event.get("timestamp"))
-            if started is None:
-                continue
-            if index + 1 < len(ordered):
-                ended = _parse_time(ordered[index + 1].get("timestamp"))
-            else:
-                ended = last_seen_by_lifecycle.get(lifecycle_id)
-            if ended is None or ended < started:
-                continue
-            durations_by_state[_display(event.get("to_state"))].append(Decimal(str((ended - started).total_seconds())))
-    output = []
-    for state, durations in durations_by_state.items():
-        output.append({"state": state, "average_seconds": _number(_mean(durations)), "samples": len(durations)})
-    output.sort(key=lambda item: item["state"])
     return output
 
 

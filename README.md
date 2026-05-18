@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, and Phase 36 setup lifecycle state progression.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, and Phase 37 lifecycle conversion analytics.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -1195,6 +1195,10 @@ regime_quality_distribution
 lifecycle_summary
 lifecycle_transitions
 lifecycle_conversion
+lifecycle_funnel
+lifecycle_dropoffs
+lifecycle_symbol_conversion
+lifecycle_state_duration
 lifecycle_symbol_detail
 ```
 
@@ -1467,10 +1471,14 @@ Lifecycle research queries:
 lifecycle_summary
 lifecycle_transitions
 lifecycle_conversion
+lifecycle_funnel
+lifecycle_dropoffs
+lifecycle_symbol_conversion
+lifecycle_state_duration
 lifecycle_symbol_detail
 ```
 
-Lifecycle metrics include `WATCHLISTED -> VALID` conversion rate, `TRIGGERED -> CONFIRMED` conversion rate, `CONFIRMED -> TP_HIT / SL_HIT` outcomes, average time in state, and most common invalidation reason.
+Lifecycle metrics include `WATCHLISTED -> STALKING`, `STALKING -> TRIGGERED`, `TRIGGERED -> CONFIRMED`, `CONFIRMED -> EXECUTING`, and `EXECUTING -> TP_HIT / SL_HIT / INVALIDATED / EXPIRED` conversion rates, funnel counts, dropoff causes, symbol-level conversion, state duration, and stale lifecycle counts.
 
 Examples:
 
@@ -1481,12 +1489,49 @@ Examples:
 
 .\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query lifecycle_conversion --database-path scan_runs/candle_craft.db
 
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query lifecycle_funnel --database-path scan_runs/candle_craft.db
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query lifecycle_dropoffs --lifecycle-stale-hours 12 --database-path scan_runs/candle_craft.db
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query lifecycle_symbol_conversion --database-path scan_runs/candle_craft.db
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query lifecycle_state_duration --lifecycle-stale-hours 24 --database-path scan_runs/candle_craft.db
+
 .\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query lifecycle_symbol_detail --research-symbol BTCUSDT --database-path scan_runs/candle_craft.db
 ```
+
+### Phase 37 - Lifecycle Conversion Analytics
+
+Purpose:
+
+- Turn stored lifecycle history into conversion analytics that show where setups progress, where they stall, and which paths move toward valid or executable opportunities.
+- Keep the analysis read-only. It reports lifecycle outcomes from `setup_lifecycle_records` and `setup_lifecycle_events`; it does not create trades, modify strategy gates, or delete stale records.
+
+Available queries:
+
+- `lifecycle_conversion` summarizes total, active, archived, funnel counts, conversion rates, outcomes, dropoffs, duration stats, stale lifecycles, and per-symbol conversion.
+- `lifecycle_funnel` prints the main funnel: `DISCOVERED`, `WATCHLISTED`, `STALKING`, `TRIGGERED`, `CONFIRMED`, `EXECUTING`, `TP_HIT`, `SL_HIT`, `INVALIDATED`, and `ARCHIVED`.
+- `lifecycle_dropoffs` shows the biggest dropoff stage, common failed gates, common invalidation reasons, average readiness and quality at dropoff, and regime state when available.
+- `lifecycle_symbol_conversion` shows lifecycle count, highest state reached, conversion to `CONFIRMED`, conversion to `EXECUTING`, average time to highest state, and most common failure point for each symbol.
+- `lifecycle_state_duration` shows average and median time in each state, longest stuck symbols, stale lifecycle count, and stale lifecycle details.
+
+Interpretation examples:
+
+- High `WATCHLISTED -> STALKING` but low `STALKING -> TRIGGERED` means sweeps are appearing, but confirmation structure is not completing.
+- High `TRIGGERED -> CONFIRMED` but low `CONFIRMED -> EXECUTING` means pullback/RR setups are forming, but valid trade ideas are not consistently appearing.
+- A common `rr_below_minimum` dropoff means the setup may have structure, but reward-to-risk is not compensating for the risk.
+- Stale `WATCHLISTED`, `STALKING`, `TRIGGERED`, or `CONFIRMED` lifecycles are reported after `--lifecycle-stale-hours`; no records are deleted by default.
+
+Sample size warnings:
+
+- Treat small lifecycle samples as exploratory only. A handful of paths can identify failure points, but they are not enough to prove an edge.
+- Prefer comparing conversion rates after enough repeated scans across regimes, modes, and symbols.
+- Missing data is reported as `N/A`; unreliable data remains `Unverified`. Do not infer market data that was not recorded.
 
 Safety boundaries:
 
 - Phase 36 tracks state only. It does not weaken strategy gates, create valid setups from invalid setups, or bypass existing quality/risk checks.
+- Phase 37 is analytics only. It does not weaken setup rules, change strategy logic, create trades from invalid states, add order execution, add private exchange API access, or send live Telegram by default.
 - It does not add order execution, private exchange API access, withdrawals, transfers, account endpoints, or live Telegram sending.
 - `EXECUTING` and `MANAGING` are lifecycle states only; they do not place orders.
 - Missing data remains `N/A`; unreliable data remains `Unverified`; lifecycle never invents market data or outcomes.
@@ -1525,3 +1570,4 @@ Safety boundaries:
 - The Phase 34 research query layer is read-only analytics only. It does not change strategy gates, place orders, call private exchange APIs, send live Telegram messages by default, invent unavailable market data, withdraw funds, or transfer funds.
 - The Phase 35 regime intelligence layer is an environment filter only. It can reject or downgrade weak environments, but it cannot create setups, bypass strategy gates, invent unavailable regime inputs, place orders, call private APIs, send live Telegram messages by default, withdraw funds, or transfer funds.
 - The Phase 36 lifecycle engine is state tracking only. It does not weaken strategy gates, create valid setups from invalid setups, place orders, call private APIs, send live Telegram messages by default, invent market data or outcomes, withdraw funds, or transfer funds.
+- The Phase 37 lifecycle conversion analytics layer is read-only reporting only. It does not weaken setup rules, create trades from invalid states, place orders, call private APIs, send live Telegram messages by default, delete lifecycle records, invent market data, withdraw funds, or transfer funds.

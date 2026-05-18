@@ -357,6 +357,7 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--research-mode": "research_mode",
         "--research-regime": "research_regime",
         "--research-output-json": "research_output_json",
+        "--lifecycle-stale-hours": "lifecycle_stale_hours",
     }
     explicit: set[str] = set()
     for token in tokens:
@@ -486,6 +487,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--research-symbol")
     parser.add_argument("--research-mode", choices=["challenge", "swing", "scalp"])
     parser.add_argument("--research-regime")
+    parser.add_argument("--lifecycle-stale-hours", type=_positive_float_arg, default=24.0)
     parser.add_argument(
         "--research-output-json",
         nargs="?",
@@ -1507,6 +1509,7 @@ def _handle_research_command(args: argparse.Namespace) -> None:
         mode=args.research_mode,
         regime=args.research_regime,
         limit=args.research_limit,
+        lifecycle_stale_hours=args.lifecycle_stale_hours,
     )
     try:
         report = build_research_report(
