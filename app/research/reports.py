@@ -37,6 +37,14 @@ def format_research_report(report: Mapping[str, Any]) -> str:
         return _format_regime_rejection_patterns(report)
     if query == "regime_quality_distribution":
         return _format_regime_quality_distribution(report)
+    if query == "lifecycle_summary":
+        return _format_lifecycle_summary(report)
+    if query == "lifecycle_transitions":
+        return _format_lifecycle_transitions(report)
+    if query == "lifecycle_conversion":
+        return _format_lifecycle_conversion(report)
+    if query == "lifecycle_symbol_detail":
+        return _format_lifecycle_symbol_detail(report)
     return "\n".join(("Candle Craft Research", f"Unsupported report: {query}"))
 
 
@@ -368,6 +376,110 @@ def _format_regime_quality_distribution(report: Mapping[str, Any]) -> str:
     return _join_sections(
         "Regime Quality Distribution",
         _table(("regime", "symbols", "avg_quality", "avg_ready", "top_grade", "top_state", "top_compat"), rows),
+        _warning_block(report),
+    )
+
+
+def _format_lifecycle_summary(report: Mapping[str, Any]) -> str:
+    state_rows = [
+        (row.get("state"), row.get("count"), _pct_value(row.get("percentage")))
+        for row in _sequence(report.get("states"))
+    ]
+    time_rows = [
+        (row.get("state"), row.get("average_seconds"), row.get("samples"))
+        for row in _sequence(report.get("average_time_in_state_seconds"))
+    ]
+    return _join_sections(
+        "Lifecycle Summary",
+        _metric_table(
+            (
+                ("Total lifecycles", report.get("total_lifecycles")),
+                ("Active lifecycles", report.get("active_lifecycles")),
+                ("Most common invalidation", report.get("most_common_invalidation_reason")),
+            )
+        ),
+        "Current states",
+        _table(("state", "count", "pct"), state_rows),
+        "Average time in state",
+        _table(("state", "avg_seconds", "samples"), time_rows),
+        _warning_block(report),
+    )
+
+
+def _format_lifecycle_transitions(report: Mapping[str, Any]) -> str:
+    rows = [
+        (
+            row.get("timestamp"),
+            row.get("symbol"),
+            row.get("from_state"),
+            row.get("to_state"),
+            row.get("readiness_score"),
+            row.get("quality_score"),
+            row.get("failed_gate"),
+            row.get("reason"),
+        )
+        for row in _sequence(report.get("transitions"))
+    ]
+    return _join_sections(
+        "Lifecycle Transitions",
+        f"Total transitions: {_display(report.get('total_transitions'))}",
+        _table(("timestamp", "symbol", "from", "to", "ready", "quality", "gate", "reason"), rows),
+        _warning_block(report),
+    )
+
+
+def _format_lifecycle_conversion(report: Mapping[str, Any]) -> str:
+    watchlisted = _mapping(report.get("watchlisted_to_valid"))
+    triggered = _mapping(report.get("triggered_to_confirmed"))
+    outcomes = _mapping(report.get("confirmed_outcomes"))
+    return _join_sections(
+        "Lifecycle Conversion",
+        _metric_table(
+            (
+                ("WATCHLISTED count", watchlisted.get("watchlisted_count")),
+                ("WATCHLISTED -> VALID", _pct_value(watchlisted.get("conversion_rate_pct"))),
+                ("TRIGGERED count", triggered.get("triggered_count")),
+                ("TRIGGERED -> CONFIRMED", _pct_value(triggered.get("conversion_rate_pct"))),
+                ("CONFIRMED count", outcomes.get("confirmed_count")),
+                ("CONFIRMED -> TP_HIT", _pct_value(outcomes.get("tp_hit_rate_pct"))),
+                ("CONFIRMED -> SL_HIT", _pct_value(outcomes.get("sl_hit_rate_pct"))),
+            )
+        ),
+        _warning_block(report),
+    )
+
+
+def _format_lifecycle_symbol_detail(report: Mapping[str, Any]) -> str:
+    if report.get("error"):
+        return "\n".join(("Lifecycle Symbol Detail", str(report["error"])))
+    lifecycle_rows = [
+        (
+            row.get("mode"),
+            row.get("direction"),
+            row.get("current_state"),
+            row.get("previous_state"),
+            row.get("readiness_score"),
+            row.get("quality_score"),
+            row.get("failed_gate"),
+        )
+        for row in _sequence(report.get("lifecycles"))
+    ]
+    transition_rows = [
+        (
+            row.get("timestamp"),
+            row.get("from_state"),
+            row.get("to_state"),
+            row.get("failed_gate"),
+            row.get("reason"),
+        )
+        for row in _sequence(report.get("recent_transitions"))
+    ]
+    return _join_sections(
+        f"Lifecycle Symbol Detail - {_display(report.get('symbol'))}",
+        "Lifecycles",
+        _table(("mode", "direction", "state", "previous", "ready", "quality", "gate"), lifecycle_rows),
+        "Recent transitions",
+        _table(("timestamp", "from", "to", "gate", "reason"), transition_rows),
         _warning_block(report),
     )
 

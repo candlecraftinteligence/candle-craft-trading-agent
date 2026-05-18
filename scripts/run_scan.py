@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -69,6 +70,11 @@ from app.formatters.scanner_display import (  # noqa: E402
     representative_strategy_diagnostics,
 )
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
+from app.lifecycle.service import (  # noqa: E402
+    SetupLifecycleService,
+    apply_lifecycle_to_run_result,
+    prioritize_watch_symbols,
+)
 from app.pipeline.scanner_runner import (  # noqa: E402
     BINANCE_KLINE_LIMIT_MAX,
     BINANCE_KLINE_LIMIT_MIN,
@@ -337,6 +343,10 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--min-memory-confidence": "min_memory_confidence",
         "--store-scan": "store_scan",
         "--database-path": "database_path",
+        "--lifecycle": "lifecycle",
+        "--disable-lifecycle": "lifecycle",
+        "--show-lifecycle": "show_lifecycle",
+        "--reset-lifecycle": "reset_lifecycle",
         "--show-history": "show_history",
         "--history-limit": "history_limit",
         "--export-history-json": "export_history_json",
@@ -463,6 +473,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--save-run", nargs="?", const=Path("scan_runs/latest_scan.json"), type=Path)
     parser.add_argument("--store-scan", action="store_true")
     parser.add_argument("--database-path", type=Path, default=DEFAULT_DATABASE_PATH)
+    parser.add_argument("--lifecycle", dest="lifecycle", action="store_true", default=None)
+    parser.add_argument("--disable-lifecycle", dest="lifecycle", action="store_false")
+    parser.add_argument("--show-lifecycle", action="store_true")
+    parser.add_argument("--reset-lifecycle", action="store_true")
     parser.add_argument("--show-history", action="store_true")
     parser.add_argument("--history-limit", type=int, default=10)
     parser.add_argument("--export-history-json", type=Path)
@@ -552,6 +566,8 @@ def _apply_command_preset(args: argparse.Namespace, explicit_options: set[str]) 
 
 async def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.reset_lifecycle:
+        _reset_lifecycle_state(args)
     if args.list_command_presets:
         print(_format_available_command_presets())
         return
@@ -742,6 +758,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
             min_confidence=args.min_memory_confidence,
         )
 
+    lifecycle_scan_run_id = uuid4().hex if args.store_scan and _lifecycle_enabled(args) else None
+    result = _apply_lifecycle_if_enabled(args, result, scan_run_id=lifecycle_scan_run_id)
+
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None
@@ -776,7 +795,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             replay_summary=replay_summary,
             portfolio_selection=portfolio_selection,
         )
-    if args.save_run is not None and portfolio_selection is not None:
+    if args.save_run is not None:
         _write_run_json(
             args.save_run,
             result,
@@ -837,6 +856,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 command_preset=args.command_preset,
                 command_used=_command_used(argv),
                 raw_payload=raw_payload,
+                run_id=lifecycle_scan_run_id,
             )
         except StorageError as exc:
             raise SystemExit(str(exc)) from exc
@@ -1507,6 +1527,55 @@ def _handle_research_command(args: argparse.Namespace) -> None:
     print(format_research_report(report))
 
 
+def _lifecycle_enabled(args: argparse.Namespace) -> bool:
+    if args.lifecycle is not None:
+        return bool(args.lifecycle)
+    return bool(args.watch or args.store_scan or args.show_lifecycle)
+
+
+def _reset_lifecycle_state(args: argparse.Namespace) -> None:
+    try:
+        SetupLifecycleService(args.database_path).reset()
+    except StorageError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(f"Reset lifecycle state: {args.database_path}")
+
+
+def _apply_lifecycle_if_enabled(
+    args: argparse.Namespace,
+    result: ScannerRunResult,
+    *,
+    scan_run_id: str | None = None,
+) -> ScannerRunResult:
+    if not _lifecycle_enabled(args):
+        return result
+    try:
+        return apply_lifecycle_to_run_result(result, database_path=args.database_path, scan_run_id=scan_run_id)
+    except StorageError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _watchlist_with_lifecycle_priority(
+    args: argparse.Namespace,
+    watchlist: WatchlistResolution,
+) -> WatchlistResolution:
+    if not _lifecycle_enabled(args):
+        return watchlist
+    try:
+        prioritized = prioritize_watch_symbols(watchlist.symbols, database_path=args.database_path)
+    except StorageError as exc:
+        raise SystemExit(str(exc)) from exc
+    if not prioritized:
+        return watchlist
+    if prioritized == watchlist.symbols:
+        return watchlist
+    return WatchlistResolution(
+        symbols=prioritized,
+        source_label=f"{watchlist.source_label} + lifecycle priority",
+        universe=watchlist.universe,
+    )
+
+
 def _write_history_json(path: Path, payload: Sequence[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(list(payload), indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1639,6 +1708,8 @@ async def _run_watch_mode(
             )
         except WatchModeError as exc:
             raise SystemExit(str(exc)) from exc
+
+    watchlist = _watchlist_with_lifecycle_priority(args, watchlist)
 
     print(_format_universe_header(watchlist.universe))
     print(f"Watchlist: {watchlist.source_label}")
@@ -1798,6 +1869,7 @@ async def _run_watch_scan_iteration(
         runtime_stats=scan_result.runtime_stats,
         market_regime=scan_result.market_regime,
     )
+    result = _apply_lifecycle_if_enabled(args, result)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None
     if portfolio_selection is not None:
@@ -2140,6 +2212,10 @@ def _update_continue_watch_state(args: argparse.Namespace, result: ScannerRunRes
 def _watch_candidate_symbols(result: ScannerRunResult) -> tuple[str, ...]:
     symbols: list[str] = []
     for symbol_result in result.results:
+        lifecycle = symbol_result.lifecycle_state
+        if lifecycle is not None and lifecycle.current_state.value in {"STALKING", "TRIGGERED", "CONFIRMED", "WATCHLISTED"}:
+            symbols.append(symbol_result.symbol)
+            continue
         display = build_symbol_display(symbol_result)
         if display.display_bucket == "near_miss" or display.readiness_label in {"HOT WATCH", "WATCH"}:
             symbols.append(symbol_result.symbol)

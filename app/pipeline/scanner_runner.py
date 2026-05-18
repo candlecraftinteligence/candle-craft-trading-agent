@@ -49,6 +49,7 @@ from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, Ope
 from app.data.exceptions import ExchangeTimeoutError
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
 from app.data.timeframes import resample_ohlcv_candles
+from app.lifecycle.models import SetupLifecycleRecord, SetupTransitionResult
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
 from app.strategies.liquidity_grab_pullback import (
     LiquidityGrabEngine,
@@ -375,6 +376,8 @@ class ScannerSymbolResult(BaseModel):
     confidence_bucket: str = NA
     memory_adjustments: dict[str, Any] = Field(default_factory=dict)
     historical_warning: str = NA
+    lifecycle_state: SetupLifecycleRecord | None = None
+    lifecycle_transition: SetupTransitionResult | None = None
 
     model_config = ConfigDict(frozen=True)
 

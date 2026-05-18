@@ -252,6 +252,12 @@ def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | No
         "readiness_label": display.readiness_label,
         "next_trigger_needed": display.next_trigger_needed,
         "priority_rank_reason": display.priority_rank_reason,
+        "lifecycle_current_state": symbol_result.lifecycle_state.current_state.value
+        if symbol_result.lifecycle_state is not None
+        else NA,
+        "lifecycle_previous_state": _state_value(symbol_result.lifecycle_state.previous_state)
+        if symbol_result.lifecycle_state is not None
+        else NA,
         "near_miss_intelligence": display.near_miss_intelligence.model_dump(mode="json")
         if display.near_miss_intelligence is not None
         else None,
@@ -410,6 +416,9 @@ def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int 
         historical = _historical_edge_compact(symbol_result)
         regime_warning = _first_regime_warning(symbol_result)
         parts = [line]
+        lifecycle = _lifecycle_compact(symbol_result)
+        if lifecycle != NA:
+            parts.append(lifecycle)
         if regime_warning != NA:
             parts.append(f"Regime: {regime_warning}")
         if historical != NA:
@@ -422,6 +431,9 @@ def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int 
         _execution_summary(diagnostics),
         f"Progress {display.setup_progress_passed}/{display.setup_progress_total}",
     ]
+    lifecycle = _lifecycle_compact(symbol_result)
+    if lifecycle != NA:
+        parts.append(lifecycle)
     if display.display_bucket != "valid" and display.failed_gate != NA:
         parts.append(f"Gate: {display.failed_gate}")
     parts.append(display.display_reason)
@@ -461,6 +473,7 @@ def format_symbol_card(
         "",
         f"{BULLET} Bucket: {display.display_bucket_label}",
         *_readiness_summary_lines(display),
+        *_lifecycle_card_lines(symbol_result),
         f"{BULLET} Mode(s): {_mode_summary(symbol_result)}",
         f"{BULLET} HTF/Bias/Execution: {_execution_summary(diagnostics)}",
         *(_card_failed_gate_lines(display)),
@@ -524,6 +537,7 @@ def _format_near_miss_card(
         f"Status: {status}",
         f"Readiness score: {display.readiness_score}/100",
         f"Readiness label: {display.readiness_label}",
+        *_lifecycle_card_lines(symbol_result),
         f"Next trigger needed: {display.next_trigger_needed}",
         f"Failed gate: {failed_gate}",
         f"Reason: {reason}",
@@ -1694,6 +1708,43 @@ def _symbol_regime_warning_lines(symbol_result: ScannerSymbolResult) -> tuple[st
     if warning == NA:
         return ()
     return (f"{BULLET} Regime: {warning}",)
+
+
+def _lifecycle_compact(symbol_result: ScannerSymbolResult) -> str:
+    record = symbol_result.lifecycle_state
+    if record is None:
+        return NA
+    return f"Lifecycle {record.current_state.value}"
+
+
+def _lifecycle_card_lines(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    record = symbol_result.lifecycle_state
+    if record is None:
+        return ()
+    transition = symbol_result.lifecycle_transition
+    from_state = (
+        transition.from_state.value
+        if transition is not None and transition.from_state is not None
+        else _state_value(record.previous_state)
+    )
+    to_state = transition.to_state.value if transition is not None else record.current_state.value
+    reason = transition.reason.value if transition is not None else NA
+    return (
+        "",
+        "Lifecycle:",
+        f"- State: {record.current_state.value}",
+        f"- Previous: {_state_value(record.previous_state)}",
+        f"- Transition: {from_state} {ARROW} {to_state}",
+        f"- Reason: {reason}",
+        f"- First seen: {record.first_seen_at}",
+        f"- Last updated: {record.last_seen_at}",
+    )
+
+
+def _state_value(value: object) -> str:
+    if value is None:
+        return NA
+    return _display(getattr(value, "value", value))
 
 
 def _first_regime_warning(symbol_result: ScannerSymbolResult) -> str:

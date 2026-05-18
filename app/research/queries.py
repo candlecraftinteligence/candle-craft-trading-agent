@@ -5,6 +5,7 @@ import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from statistics import median
@@ -33,6 +34,10 @@ RESEARCH_QUERIES = (
     "regime_setup_density",
     "regime_rejection_patterns",
     "regime_quality_distribution",
+    "lifecycle_summary",
+    "lifecycle_transitions",
+    "lifecycle_conversion",
+    "lifecycle_symbol_detail",
 )
 MODES = ("challenge", "swing", "scalp")
 
@@ -79,6 +84,8 @@ class ResearchData:
     symbols: tuple[dict[str, Any], ...]
     setups: tuple[dict[str, Any], ...]
     replays: tuple[dict[str, Any], ...]
+    lifecycle_records: tuple[dict[str, Any], ...] = ()
+    lifecycle_events: tuple[dict[str, Any], ...] = ()
 
 
 def build_research_report(
@@ -147,6 +154,30 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
                     """
                 ).fetchall()
             )
+            lifecycle_record_rows: tuple[dict[str, Any], ...] = ()
+            lifecycle_event_rows: tuple[dict[str, Any], ...] = ()
+            if _table_exists(connection, "setup_lifecycle_records"):
+                lifecycle_record_rows = tuple(
+                    _normalize_lifecycle_record(row)
+                    for row in connection.execute(
+                        """
+                        SELECT * FROM setup_lifecycle_records
+                        ORDER BY last_seen_at ASC
+                        """
+                    ).fetchall()
+                )
+            if _table_exists(connection, "setup_lifecycle_events"):
+                lifecycle_event_rows = tuple(
+                    _normalize_lifecycle_event(row)
+                    for row in connection.execute(
+                        """
+                        SELECT e.*, r.mode, r.direction, r.regime_state
+                        FROM setup_lifecycle_events e
+                        LEFT JOIN setup_lifecycle_records r ON r.lifecycle_id = e.lifecycle_id
+                        ORDER BY e.timestamp ASC, e.event_id ASC
+                        """
+                    ).fetchall()
+                )
     except sqlite3.Error as exc:
         raise StorageError(f"Unable to read research database: {database_path}") from exc
 
@@ -154,6 +185,8 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
     filtered_symbols = tuple(row for row in symbol_rows if _include_symbol_row(row, filters))
     filtered_setups = tuple(row for row in setup_rows if _include_mode_row(row, filters))
     filtered_replays = tuple(row for row in replay_rows if _include_mode_row(row, filters))
+    filtered_lifecycle_records = tuple(row for row in lifecycle_record_rows if _include_lifecycle_row(row, filters))
+    filtered_lifecycle_events = tuple(row for row in lifecycle_event_rows if _include_lifecycle_row(row, filters))
     run_ids = {row["run_id"] for row in (*filtered_symbols, *filtered_setups, *filtered_replays)}
     if run_ids:
         filtered_runs = tuple(row for row in filtered_runs if row["run_id"] in run_ids)
@@ -162,6 +195,8 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
         symbols=filtered_symbols,
         setups=filtered_setups,
         replays=filtered_replays,
+        lifecycle_records=filtered_lifecycle_records,
+        lifecycle_events=filtered_lifecycle_events,
     )
 
 
@@ -180,6 +215,14 @@ def _require_schema(connection: sqlite3.Connection) -> None:
     missing = required - tables
     if missing:
         raise StorageError(f"Research database is missing required tables: {', '.join(sorted(missing))}")
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 def _build_query_report(query: str, data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
@@ -213,6 +256,14 @@ def _build_query_report(query: str, data: ResearchData, filters: ResearchFilters
         return _regime_rejection_patterns_report(data, filters)
     if query == "regime_quality_distribution":
         return _regime_quality_distribution_report(data, filters)
+    if query == "lifecycle_summary":
+        return _lifecycle_summary_report(data, filters)
+    if query == "lifecycle_transitions":
+        return _lifecycle_transitions_report(data, filters)
+    if query == "lifecycle_conversion":
+        return _lifecycle_conversion_report(data, filters)
+    if query == "lifecycle_symbol_detail":
+        return _lifecycle_symbol_detail_report(data, filters)
     raise ValueError(f"Unsupported research query: {query}")
 
 
@@ -640,6 +691,156 @@ def _regime_quality_distribution_report(data: ResearchData, filters: ResearchFil
     }
 
 
+def _lifecycle_summary_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    records = data.lifecycle_records
+    events = data.lifecycle_events
+    return {
+        "query": "lifecycle_summary",
+        "filters": filters.to_json(),
+        "total_lifecycles": len(records),
+        "active_lifecycles": sum(1 for row in records if row.get("current_state") not in {"ARCHIVED", "COOLDOWN"}),
+        "states": _state_counts(records),
+        "average_time_in_state_seconds": _average_time_in_state(events, records),
+        "most_common_invalidation_reason": _most_common_text(
+            row.get("invalidation_reason")
+            for row in records
+            if row.get("current_state") in {"INVALIDATED", "COOLDOWN", "ARCHIVED", "EXPIRED", "SL_HIT"}
+        ),
+        "warnings": [],
+    }
+
+
+def _lifecycle_transitions_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    recent = sorted(data.lifecycle_events, key=lambda row: row.get("timestamp", ""), reverse=True)[
+        : filters.normalized_limit
+    ]
+    return {
+        "query": "lifecycle_transitions",
+        "filters": filters.to_json(),
+        "total_transitions": len(data.lifecycle_events),
+        "transitions": [
+            {
+                "timestamp": row["timestamp"],
+                "symbol": row["symbol"],
+                "from_state": row["from_state"],
+                "to_state": row["to_state"],
+                "reason": row["reason"],
+                "scan_run_id": _display(row.get("scan_run_id")),
+                "readiness_score": row["readiness_score"],
+                "quality_score": row["quality_score"],
+                "failed_gate": row["failed_gate"],
+                "notes": row["notes"],
+            }
+            for row in recent
+        ],
+        "warnings": [],
+    }
+
+
+def _lifecycle_conversion_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    events_by_lifecycle = _group_by(data.lifecycle_events, "lifecycle_id")
+    watchlisted_ids = {
+        lifecycle_id
+        for lifecycle_id, events in events_by_lifecycle.items()
+        if any(row.get("to_state") == "WATCHLISTED" for row in events)
+    }
+    triggered_ids = {
+        lifecycle_id
+        for lifecycle_id, events in events_by_lifecycle.items()
+        if any(row.get("to_state") == "TRIGGERED" for row in events)
+    }
+    confirmed_ids = {
+        lifecycle_id
+        for lifecycle_id, events in events_by_lifecycle.items()
+        if any(row.get("to_state") == "CONFIRMED" for row in events)
+    }
+    valid_states = {"CONFIRMED", "EXECUTING", "MANAGING", "TP_HIT", "SL_HIT"}
+    valid_ids = {
+        lifecycle_id
+        for lifecycle_id, events in events_by_lifecycle.items()
+        if any(row.get("to_state") in valid_states for row in events)
+    }
+    tp_ids = {
+        lifecycle_id
+        for lifecycle_id, events in events_by_lifecycle.items()
+        if any(row.get("to_state") == "TP_HIT" for row in events)
+    }
+    sl_ids = {
+        lifecycle_id
+        for lifecycle_id, events in events_by_lifecycle.items()
+        if any(row.get("to_state") == "SL_HIT" for row in events)
+    }
+    return {
+        "query": "lifecycle_conversion",
+        "filters": filters.to_json(),
+        "watchlisted_to_valid": {
+            "watchlisted_count": len(watchlisted_ids),
+            "valid_count": len(watchlisted_ids & valid_ids),
+            "conversion_rate_pct": _rate(len(watchlisted_ids & valid_ids), len(watchlisted_ids)),
+        },
+        "triggered_to_confirmed": {
+            "triggered_count": len(triggered_ids),
+            "confirmed_count": len(triggered_ids & confirmed_ids),
+            "conversion_rate_pct": _rate(len(triggered_ids & confirmed_ids), len(triggered_ids)),
+        },
+        "confirmed_outcomes": {
+            "confirmed_count": len(confirmed_ids),
+            "tp_hit_count": len(confirmed_ids & tp_ids),
+            "sl_hit_count": len(confirmed_ids & sl_ids),
+            "tp_hit_rate_pct": _rate(len(confirmed_ids & tp_ids), len(confirmed_ids)),
+            "sl_hit_rate_pct": _rate(len(confirmed_ids & sl_ids), len(confirmed_ids)),
+        },
+        "warnings": [],
+    }
+
+
+def _lifecycle_symbol_detail_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    symbol = filters.normalized_symbol
+    if symbol is None:
+        return {
+            "query": "lifecycle_symbol_detail",
+            "filters": filters.to_json(),
+            "error": "Provide --research-symbol for lifecycle_symbol_detail.",
+            "warnings": [],
+        }
+    records = tuple(row for row in data.lifecycle_records if row["symbol"] == symbol)
+    events = tuple(row for row in data.lifecycle_events if row["symbol"] == symbol)
+    recent = sorted(events, key=lambda row: row.get("timestamp", ""), reverse=True)[: filters.normalized_limit]
+    return {
+        "query": "lifecycle_symbol_detail",
+        "filters": filters.to_json(),
+        "symbol": symbol,
+        "lifecycles": [
+            {
+                "lifecycle_id": row["lifecycle_id"],
+                "mode": row["mode"],
+                "direction": row["direction"],
+                "current_state": row["current_state"],
+                "previous_state": row["previous_state"],
+                "first_seen_at": row["first_seen_at"],
+                "last_seen_at": row["last_seen_at"],
+                "failed_gate": row["failed_gate"],
+                "readiness_score": row["readiness_score"],
+                "quality_score": row["quality_score"],
+                "invalidation_reason": row["invalidation_reason"],
+            }
+            for row in records
+        ],
+        "recent_transitions": [
+            {
+                "timestamp": row["timestamp"],
+                "from_state": row["from_state"],
+                "to_state": row["to_state"],
+                "reason": row["reason"],
+                "failed_gate": row["failed_gate"],
+                "notes": row["notes"],
+            }
+            for row in recent
+        ],
+        "warnings": [],
+    }
+
+
 def _symbol_metrics(symbol: str, rows: Sequence[Mapping[str, Any]], replays: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     symbol_replays = tuple(row for row in replays if row["symbol"] == symbol)
     replay_stats = _replay_stats(symbol_replays)
@@ -700,6 +901,65 @@ def _conversion_groups(rows: Sequence[Mapping[str, Any]], key: str) -> list[dict
     return output
 
 
+def _state_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    total = len(rows)
+    output = []
+    for state, state_rows in _group_by(rows, "current_state").items():
+        output.append(
+            {
+                "state": state,
+                "count": len(state_rows),
+                "percentage": _rate(len(state_rows), total),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], item["state"]), reverse=True)
+    return output
+
+
+def _average_time_in_state(
+    events: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not events:
+        return []
+    last_seen_by_lifecycle = {
+        row["lifecycle_id"]: _parse_time(row.get("last_seen_at"))
+        for row in records
+    }
+    durations_by_state: dict[str, list[Decimal]] = defaultdict(list)
+    for lifecycle_id, lifecycle_events in _group_by(events, "lifecycle_id").items():
+        ordered = sorted(lifecycle_events, key=lambda row: row.get("timestamp", ""))
+        for index, event in enumerate(ordered):
+            started = _parse_time(event.get("timestamp"))
+            if started is None:
+                continue
+            if index + 1 < len(ordered):
+                ended = _parse_time(ordered[index + 1].get("timestamp"))
+            else:
+                ended = last_seen_by_lifecycle.get(lifecycle_id)
+            if ended is None or ended < started:
+                continue
+            durations_by_state[_display(event.get("to_state"))].append(Decimal(str((ended - started).total_seconds())))
+    output = []
+    for state, durations in durations_by_state.items():
+        output.append({"state": state, "average_seconds": _number(_mean(durations)), "samples": len(durations)})
+    output.sort(key=lambda item: item["state"])
+    return output
+
+
+def _parse_time(value: Any) -> datetime | None:
+    text = _display(value)
+    if text == NA:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _filter_runs(rows: Sequence[Mapping[str, Any]], filters: ResearchFilters) -> tuple[dict[str, Any], ...]:
     regime = filters.normalized_regime
     if regime is None:
@@ -730,6 +990,19 @@ def _include_mode_row(row: Mapping[str, Any], filters: ResearchFilters) -> bool:
         return False
     row_regime = _display(row.get("regime") or row.get("run_market_regime"))
     if regime is not None and row_regime != regime:
+        return False
+    return True
+
+
+def _include_lifecycle_row(row: Mapping[str, Any], filters: ResearchFilters) -> bool:
+    symbol = filters.normalized_symbol
+    mode = filters.normalized_mode
+    regime = filters.normalized_regime
+    if symbol is not None and row.get("symbol") != symbol:
+        return False
+    if mode is not None and row.get("mode") != mode:
+        return False
+    if regime is not None and _display(row.get("regime_state")) != regime:
         return False
     return True
 
@@ -790,6 +1063,49 @@ def _normalize_replay_row(row: sqlite3.Row) -> dict[str, Any]:
             "mode": _display(data.get("mode")).lower(),
             "regime": _first_non_na(data.get("regime"), data.get("run_market_regime")),
             "raw": _json_loads(data.get("raw_result_json")),
+        }
+    )
+    return data
+
+
+def _normalize_lifecycle_record(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    mode = _display(data.get("mode"))
+    direction = _display(data.get("direction"))
+    data.update(
+        {
+            "symbol": _display(data.get("symbol")).upper(),
+            "mode": mode.lower() if mode != NA else NA,
+            "direction": direction.lower() if direction != NA else NA,
+            "current_state": _display(data.get("current_state")),
+            "previous_state": _display(data.get("previous_state")),
+            "failed_gate": _display(data.get("failed_gate")),
+            "regime_state": _display(data.get("regime_state")),
+            "invalidation_reason": _display(data.get("invalidation_reason")),
+            "readiness_score": int(data.get("readiness_score") or 0),
+            "quality_score": int(data.get("quality_score") or 0),
+        }
+    )
+    return data
+
+
+def _normalize_lifecycle_event(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    mode = _display(data.get("mode"))
+    direction = _display(data.get("direction"))
+    data.update(
+        {
+            "symbol": _display(data.get("symbol")).upper(),
+            "from_state": _display(data.get("from_state")),
+            "to_state": _display(data.get("to_state")),
+            "reason": _display(data.get("reason")),
+            "failed_gate": _display(data.get("failed_gate")),
+            "notes": _display(data.get("notes")),
+            "readiness_score": int(data.get("readiness_score") or 0),
+            "quality_score": int(data.get("quality_score") or 0),
+            "mode": mode.lower() if mode != NA else NA,
+            "direction": direction.lower() if direction != NA else NA,
+            "regime_state": _display(data.get("regime_state")),
         }
     )
     return data

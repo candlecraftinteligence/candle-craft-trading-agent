@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StorageError(RuntimeError):
@@ -119,6 +119,50 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS ix_setup_candidates_run_id ON setup_candidates(run_id);
             CREATE INDEX IF NOT EXISTS ix_replay_results_run_id ON replay_results(run_id);
             CREATE INDEX IF NOT EXISTS ix_scan_runs_timestamp ON scan_runs(timestamp);
+
+            CREATE TABLE IF NOT EXISTS setup_lifecycle_records (
+                lifecycle_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                current_state TEXT NOT NULL,
+                previous_state TEXT NOT NULL DEFAULT 'N/A',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                last_transition_at TEXT NOT NULL,
+                failed_gate TEXT NOT NULL DEFAULT 'N/A',
+                readiness_score INTEGER NOT NULL DEFAULT 0,
+                quality_score INTEGER NOT NULL DEFAULT 0,
+                edge_score TEXT NOT NULL DEFAULT 'N/A',
+                regime_state TEXT NOT NULL DEFAULT 'N/A',
+                action_label TEXT NOT NULL DEFAULT 'N/A',
+                invalidation_reason TEXT NOT NULL DEFAULT 'N/A',
+                cooldown_until TEXT,
+                archived_at TEXT,
+                UNIQUE(symbol, mode, direction)
+            );
+
+            CREATE TABLE IF NOT EXISTS setup_lifecycle_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lifecycle_id TEXT NOT NULL REFERENCES setup_lifecycle_records(lifecycle_id) ON DELETE CASCADE,
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                from_state TEXT NOT NULL DEFAULT 'N/A',
+                to_state TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                scan_run_id TEXT,
+                readiness_score INTEGER NOT NULL DEFAULT 0,
+                quality_score INTEGER NOT NULL DEFAULT 0,
+                failed_gate TEXT NOT NULL DEFAULT 'N/A',
+                notes TEXT NOT NULL DEFAULT 'N/A'
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_lifecycle_records_symbol_mode_direction
+                ON setup_lifecycle_records(symbol, mode, direction);
+            CREATE INDEX IF NOT EXISTS ix_lifecycle_events_lifecycle_id
+                ON setup_lifecycle_events(lifecycle_id);
+            CREATE INDEX IF NOT EXISTS ix_lifecycle_events_symbol_timestamp
+                ON setup_lifecycle_events(symbol, timestamp);
             """
         )
         _ensure_column(connection, "scan_runs", "regime_confidence", "INTEGER NOT NULL DEFAULT 0")
@@ -129,6 +173,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "symbol_results", "regime_compatibility_label", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_results", "regime_penalty", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_results", "environment_notes_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "setup_lifecycle_records", "cooldown_until", "TEXT")
+        _ensure_column(connection, "setup_lifecycle_records", "archived_at", "TEXT")
+        _ensure_column(connection, "setup_lifecycle_events", "scan_run_id", "TEXT")
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:

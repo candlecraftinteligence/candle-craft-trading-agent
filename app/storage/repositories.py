@@ -39,8 +39,9 @@ def store_scan_result(
     command_preset: str | None = None,
     command_used: str | None = None,
     raw_payload: Mapping[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> str:
-    run_id = uuid4().hex
+    run_id = run_id or uuid4().hex
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     ranked_by_symbol = {item.symbol_result.symbol: item for item in ranked_results or ()}
     payload = _json_ready(

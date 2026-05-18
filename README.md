@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, and Phase 35 regime intelligence and environment filtering.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, and Phase 36 setup lifecycle state progression.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -103,7 +103,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, and the Phase 35 regime intelligence layer. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, and the Phase 36 lifecycle engine. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -1192,6 +1192,10 @@ regime_expectancy
 regime_setup_density
 regime_rejection_patterns
 regime_quality_distribution
+lifecycle_summary
+lifecycle_transitions
+lifecycle_conversion
+lifecycle_symbol_detail
 ```
 
 Examples:
@@ -1388,6 +1392,105 @@ Safety boundaries:
 - Phase 34 is read-only analytics. It does not run scans, alter strategy gates, weaken setup logic, place orders, call private exchange APIs, send Telegram alerts, withdraw funds, or transfer funds.
 - It does not invent market data, setups, or replay outcomes; unavailable metrics remain `N/A`.
 
+## Phase 36 Setup Lifecycle / State Progression Engine
+
+Phase 36 adds `app/lifecycle/`, a deterministic state engine that tracks each `symbol/mode/direction` setup across scan iterations. Instead of treating every scan as a fresh snapshot, Candle Craft can now persist where a setup is in its lifecycle and record the transition history that got it there.
+
+Lifecycle is enabled by default when `--watch` or `--store-scan` is used. It can also be enabled explicitly with `--lifecycle`, disabled with `--disable-lifecycle`, shown with `--show-lifecycle`, and cleared with `--reset-lifecycle`.
+
+Lifecycle states:
+
+```text
+DISCOVERED
+REJECTED
+WATCHLISTED
+STALKING
+TRIGGERED
+CONFIRMED
+EXECUTING
+MANAGING
+TP_HIT
+SL_HIT
+INVALIDATED
+EXPIRED
+COOLDOWN
+ARCHIVED
+```
+
+Core progression:
+
+```text
+DISCOVERED -> WATCHLISTED -> STALKING -> TRIGGERED -> CONFIRMED -> EXECUTING -> MANAGING
+MANAGING -> TP_HIT / SL_HIT / INVALIDATED / EXPIRED
+INVALIDATED / TP_HIT / SL_HIT / EXPIRED -> COOLDOWN -> ARCHIVED
+```
+
+Transition rules:
+
+- `REJECTED` can move to `WATCHLISTED` only when readiness improves.
+- `WATCHLISTED` moves to `STALKING` when an execution sweep appears.
+- `STALKING` moves to `TRIGGERED` when 5m BOS/CHoCH appears after the sweep.
+- `TRIGGERED` moves to `CONFIRMED` when pullback zone and RR are valid.
+- `CONFIRMED` moves to `EXECUTING` only when a valid trade idea already exists.
+- `EXECUTING` moves to `MANAGING` only after an entry fill is simulated or confirmed by lifecycle input.
+- `MANAGING` can move to `TP_HIT`, `SL_HIT`, `INVALIDATED`, or `EXPIRED`.
+- No lifecycle can skip directly from `WATCHLISTED` to `EXECUTING`.
+
+Persistence:
+
+- Lifecycle state is stored in `scan_runs/candle_craft.db` when lifecycle is enabled.
+- `setup_lifecycle_records` stores current state, previous state, timestamps, failed gate, readiness score, quality score, edge score, regime state, action label, invalidation reason, cooldown expiry, and archive time.
+- `setup_lifecycle_events` stores every transition with timestamp, symbol, from/to state, reason, optional scan run id, readiness score, quality score, failed gate, and notes.
+
+Display output includes a lifecycle block when state is attached:
+
+```text
+Lifecycle:
+- State: TRIGGERED
+- Previous: STALKING
+- Transition: STALKING -> TRIGGERED
+- Reason: 5m BOS/CHoCH confirmed after sweep.
+- First seen: 2026-05-18T09:00:00+00:00
+- Last updated: 2026-05-18T09:10:00+00:00
+```
+
+Watch mode behavior:
+
+- Watch scans prioritize lifecycle states in this order: `STALKING`, `TRIGGERED`, `CONFIRMED`, `WATCHLISTED`.
+- `ARCHIVED` and `COOLDOWN` records are not prioritized for watch mode.
+- If lifecycle priority would empty an explicitly requested watchlist, the original requested symbols are preserved so a new structure can reactivate the setup.
+- Telegram remains dry-run by default. Live Telegram still requires the explicit `--telegram-live-alerts true` path and credentials.
+
+Lifecycle research queries:
+
+```text
+lifecycle_summary
+lifecycle_transitions
+lifecycle_conversion
+lifecycle_symbol_detail
+```
+
+Lifecycle metrics include `WATCHLISTED -> VALID` conversion rate, `TRIGGERED -> CONFIRMED` conversion rate, `CONFIRMED -> TP_HIT / SL_HIT` outcomes, average time in state, and most common invalidation reason.
+
+Examples:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT --store-scan --show-lifecycle
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --watch --symbols BTCUSDT ETHUSDT --show-lifecycle
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query lifecycle_conversion --database-path scan_runs/candle_craft.db
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query lifecycle_symbol_detail --research-symbol BTCUSDT --database-path scan_runs/candle_craft.db
+```
+
+Safety boundaries:
+
+- Phase 36 tracks state only. It does not weaken strategy gates, create valid setups from invalid setups, or bypass existing quality/risk checks.
+- It does not add order execution, private exchange API access, withdrawals, transfers, account endpoints, or live Telegram sending.
+- `EXECUTING` and `MANAGING` are lifecycle states only; they do not place orders.
+- Missing data remains `N/A`; unreliable data remains `Unverified`; lifecycle never invents market data or outcomes.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -1421,3 +1524,4 @@ Safety boundaries:
 - The Phase 33 scan history database is local persistence only. It does not change strategy gates, place orders, call private exchange APIs, send live Telegram messages by default, invent unavailable market data, withdraw funds, or transfer funds.
 - The Phase 34 research query layer is read-only analytics only. It does not change strategy gates, place orders, call private exchange APIs, send live Telegram messages by default, invent unavailable market data, withdraw funds, or transfer funds.
 - The Phase 35 regime intelligence layer is an environment filter only. It can reject or downgrade weak environments, but it cannot create setups, bypass strategy gates, invent unavailable regime inputs, place orders, call private APIs, send live Telegram messages by default, withdraw funds, or transfer funds.
+- The Phase 36 lifecycle engine is state tracking only. It does not weaken strategy gates, create valid setups from invalid setups, place orders, call private APIs, send live Telegram messages by default, invent market data or outcomes, withdraw funds, or transfer funds.
