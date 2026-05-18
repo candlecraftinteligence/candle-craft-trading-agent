@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, and Phase 32 performance memory.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, and Phase 33 structured scan history storage.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -37,6 +37,7 @@ This project is intentionally not an auto-trading bot. It does not place orders,
 |   |-- models/
 |   |-- pipeline/
 |   |-- scoring/
+|   |-- storage/
 |   |-- strategies/
 |   `-- watchlists/
 |-- scripts/
@@ -102,7 +103,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, and the Phase 32 performance memory layer. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, and the Phase 33 scan history database. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -1198,6 +1199,58 @@ Safety boundaries:
 - It does not add live order execution, private exchange APIs, withdrawal or transfer functionality, or live Telegram sending.
 - It does not weaken sweep, BOS/CHoCH, OB/FVG, fib, RR, Trust Meter, risk, scoring, portfolio, or market-regime gates.
 
+## Phase 33 Structured Dataset & Scan History Database
+
+Phase 33 adds a durable local SQLite dataset in `app/storage/`. The dataset is meant to become the analyzable asset for Candle Craft Intelligence: every stored scan can preserve scan metadata, symbol outcomes, valid setup candidates, replay/backtest outcomes, regime readings, quality scores, and portfolio decisions.
+
+Default database location:
+
+```text
+scan_runs/candle_craft.db
+```
+
+Storage is opt-in. A normal scan does not write to the database unless `--store-scan` is provided.
+
+Store a scan:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --command-preset daily --symbols BTCUSDT ETHUSDT SOLUSDT --store-scan
+```
+
+Use a custom database path:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT --store-scan --database-path scan_runs/candle_craft.db
+```
+
+When storage is enabled, the CLI prints:
+
+```text
+Stored scan run: [run_id]
+Database: [path]
+```
+
+View recent history:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --show-history --history-limit 10
+```
+
+Export recent history:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --export-history-json scan_runs/history.json --history-limit 50
+```
+
+Stored scan runs include exchange, universe, symbols scanned, strategy, timeframes, market regime, runtime stats, command/preset, valid setup count, near misses, rejected symbols, and data issues. Symbol records include display bucket, readiness score, setup quality score, edge score, failed gate, rejection reason, next trigger, action label, regime state, derivatives context, volume profile context, pullback status, and portfolio decision. Valid setups and replay outcomes are stored in separate tables for later analysis.
+
+Safety boundaries:
+
+- Phase 33 is local persistence only. It does not alter strategy gates, setup validation, risk validation, market-regime filtering, portfolio selection, or ranking logic.
+- It does not add order execution, private exchange API access, withdrawals, transfers, account endpoints, or live Telegram sending.
+- Missing data remains `N/A`; unreliable data remains `Unverified`.
+- Storage writes scan outputs as produced by the existing dry-run scanner and does not invent market data or outcomes.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -1228,3 +1281,4 @@ Safety boundaries:
 - The Phase 29 alert watch mode is repeat scanning and notification gating only. It does not weaken strategy gates, create trades from near-misses, place orders, call private exchange APIs, send live Telegram messages by default, withdraw funds, or transfer funds.
 - The Phase 31 market regime filter is a public-data, scan-level overlay only. It does not weaken strategy gates, create trades from invalid setups, place orders, call private exchange APIs, send live Telegram messages by default, invent unavailable market data, withdraw funds, or transfer funds.
 - The Phase 32 performance memory layer is local historical evidence only. It does not predict, fabricate statistics, weaken gates, create valid setups from invalid setups, place orders, call private exchange APIs, send live Telegram messages by default, withdraw funds, or transfer funds.
+- The Phase 33 scan history database is local persistence only. It does not change strategy gates, place orders, call private exchange APIs, send live Telegram messages by default, invent unavailable market data, withdraw funds, or transfer funds.

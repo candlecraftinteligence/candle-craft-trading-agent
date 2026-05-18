@@ -14,6 +14,7 @@ from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileRes
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, filter_ranked_results, rank_scan_results
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
+from app.storage.models import ScanHistorySummary
 from scripts import run_scan
 
 
@@ -432,6 +433,90 @@ def test_phase_20_cli_flags_accepted() -> None:
     assert args.resume_from.parts[-2:] == ("scan_runs", "latest_scan.json")
     assert args.save_run.parts[-2:] == ("scan_runs", "latest_scan.json")
     assert args.progress is True
+
+
+def test_phase_33_storage_cli_flags_accepted(tmp_path) -> None:
+    db_path = tmp_path / "history.db"
+    export_path = tmp_path / "history.json"
+
+    args = run_scan.parse_args(
+        [
+            "--symbols",
+            "BTCUSDT",
+            "--store-scan",
+            "--database-path",
+            str(db_path),
+            "--show-history",
+            "--history-limit",
+            "7",
+            "--export-history-json",
+            str(export_path),
+        ]
+    )
+
+    assert args.store_scan is True
+    assert args.database_path == db_path
+    assert args.show_history is True
+    assert args.history_limit == 7
+    assert args.export_history_json == export_path
+
+
+def test_no_storage_when_store_scan_flag_absent(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+
+    def fail_store_scan(*args, **kwargs):
+        raise AssertionError("scan storage should be opt-in")
+
+    monkeypatch.setattr(run_scan, "store_scan_result", fail_store_scan)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--database-path", str(tmp_path / "history.db")]))
+
+    captured = capsys.readouterr()
+    assert "Stored scan run:" not in captured.out
+
+
+def test_store_scan_prints_run_id_and_database(tmp_path, monkeypatch, capsys) -> None:
+    db_path = tmp_path / "history.db"
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+    monkeypatch.setattr(run_scan, "store_scan_result", lambda *args, **kwargs: "run_123")
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--store-scan", "--database-path", str(db_path)]))
+
+    captured = capsys.readouterr()
+    assert "Stored scan run: run_123" in captured.out
+    assert f"Database: {db_path}" in captured.out
+
+
+def test_show_history_displays_recent_runs_without_scanning(tmp_path, monkeypatch, capsys) -> None:
+    def fail_scanner(*args, **kwargs):
+        raise AssertionError("history command should not run scanner")
+
+    monkeypatch.setattr(run_scan, "ScannerRunner", fail_scanner)
+    monkeypatch.setattr(
+        run_scan,
+        "list_scan_history",
+        lambda *args, **kwargs: (
+            ScanHistorySummary(
+                run_id="run_123",
+                timestamp="2026-05-18T09:00:00+00:00",
+                universe="manual",
+                symbols_scanned=3,
+                total_valid_setups=1,
+                near_misses=1,
+                rejected=1,
+                data_issues=0,
+                market_regime="normal",
+                runtime_seconds="1.2s",
+            ),
+        ),
+    )
+
+    asyncio.run(run_scan.main(["--show-history", "--database-path", str(tmp_path / "history.db")]))
+
+    captured = capsys.readouterr()
+    assert "timestamp" in captured.out
+    assert "2026-05-18T09:00:00+00:00" in captured.out
+    assert "manual" in captured.out
 
 
 def test_phase_23_timeout_and_fast_cli_flags_accepted() -> None:

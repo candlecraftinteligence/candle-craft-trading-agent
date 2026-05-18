@@ -85,6 +85,14 @@ from app.pipeline.scanner_runner import (  # noqa: E402
     ScannerRunner,
     ScannerSymbolResult,
 )
+from app.storage import (  # noqa: E402
+    DEFAULT_DATABASE_PATH,
+    StorageError,
+    export_history_payload,
+    format_history_table,
+    list_scan_history,
+    store_scan_result,
+)
 from app.universe.symbol_universe import (  # noqa: E402
     MANUAL_UNIVERSE_MODE,
     UNIVERSE_MODES,
@@ -318,6 +326,11 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--disable-performance-memory": "performance_memory",
         "--reset-performance-memory": "reset_performance_memory",
         "--min-memory-confidence": "min_memory_confidence",
+        "--store-scan": "store_scan",
+        "--database-path": "database_path",
+        "--show-history": "show_history",
+        "--history-limit": "history_limit",
+        "--export-history-json": "export_history_json",
     }
     explicit: set[str] = set()
     for token in tokens:
@@ -430,6 +443,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-file", type=Path)
     parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--save-run", nargs="?", const=Path("scan_runs/latest_scan.json"), type=Path)
+    parser.add_argument("--store-scan", action="store_true")
+    parser.add_argument("--database-path", type=Path, default=DEFAULT_DATABASE_PATH)
+    parser.add_argument("--show-history", action="store_true")
+    parser.add_argument("--history-limit", type=int, default=10)
+    parser.add_argument("--export-history-json", type=Path)
     parser.add_argument("--no-resume-skip", action="store_true")
     parser.add_argument("--progress", action="store_true")
     args = parser.parse_args(argv)
@@ -452,6 +470,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--max-selected-setups must be at least 1.")
     if args.watch_max_iterations is not None and args.watch_max_iterations < 1:
         parser.error("--watch-max-iterations must be at least 1.")
+    if args.history_limit < 1:
+        parser.error("--history-limit must be at least 1.")
     if args.backtest_output_json is not None:
         args.replay = True
     if args.edge_export_json is not None:
@@ -505,6 +525,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
         return
     if args.list_presets:
         print(_format_available_presets())
+        return
+    if args.show_history or args.export_history_json is not None:
+        _handle_history_command(args)
         return
 
     watchlist = await _resolve_watchlist_for_args(args)
@@ -761,6 +784,29 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 continued_watch_symbols=continued_watch_symbols,
             ),
         )
+    if args.store_scan:
+        raw_payload = _json_payload(
+            result,
+            ranked_results=ranked_results,
+            replay_summary=replay_summary,
+            portfolio_selection=portfolio_selection,
+        )
+        try:
+            run_id = store_scan_result(
+                args.database_path,
+                result,
+                ranked_results=ranked_results,
+                replay_summary=replay_summary,
+                portfolio_selection=portfolio_selection,
+                command_preset=args.command_preset,
+                command_used=_command_used(argv),
+                raw_payload=raw_payload,
+            )
+        except StorageError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"Stored scan run: {run_id}")
+        print(f"Database: {args.database_path}")
+        print("")
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
     print("")
@@ -1379,6 +1425,31 @@ def _write_edge_json(path: Path, edge_report: EdgeAnalyticsReport) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _handle_history_command(args: argparse.Namespace) -> None:
+    try:
+        history = list_scan_history(args.database_path, limit=args.history_limit)
+        if args.export_history_json is not None:
+            _write_history_json(
+                args.export_history_json,
+                export_history_payload(args.database_path, limit=args.history_limit),
+            )
+            print(f"Exported scan history: {args.export_history_json}")
+        if args.show_history:
+            print(format_history_table(history))
+    except StorageError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _write_history_json(path: Path, payload: Sequence[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(list(payload), indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _command_used(argv: Sequence[str] | None) -> str:
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    return "run_scan.py " + " ".join(str(token) for token in tokens) if tokens else "run_scan.py"
 
 
 def _apply_edge_analytics_to_result(
