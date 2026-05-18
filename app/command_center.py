@@ -68,6 +68,7 @@ def build_command_center_payload(
             "cache_efficiency": _cache_efficiency(cache_stats),
             "runtime_warnings": list(runtime_warnings),
         },
+        "performance_memory_summary": _performance_memory_payload(result),
     }
     if top_setup is not None:
         payload["top_setup"] = build_top_setup_payload(top_setup.symbol_result)
@@ -114,6 +115,7 @@ def format_command_center_summary(
             f"- Most common rejection reason: {payload['most_common_rejection_reason']}",
             f"- Scan runtime: {payload['scan_runtime']}",
             f"- Data quality status: {payload['data_quality_status']}",
+            *_performance_memory_summary_lines(payload["performance_memory_summary"]),
             f"- Runtime metrics: avg symbol {runtime['average_symbol_runtime']}; "
             f"slowest {runtime['slowest_symbol']}; retries {runtime['retry_count']}; "
             f"cache efficiency {runtime['cache_efficiency']}",
@@ -192,6 +194,38 @@ def build_portfolio_summary_payload(selection: PortfolioSelectionResult) -> dict
         "strongest_portfolio_candidate": strongest.symbol if strongest is not None else NA,
         "warnings": list(selection.portfolio_warnings),
     }
+
+
+def _performance_memory_payload(result: ScannerRunResult) -> dict[str, Any]:
+    summary = result.performance_memory_summary
+    if not isinstance(summary, Mapping) or not summary:
+        return {
+            "best_performing_setup_type": NA,
+            "weakest_setup_type": NA,
+            "best_regime_historically": NA,
+            "worst_regime_historically": NA,
+            "strongest_symbols": NA,
+            "weakest_symbols": NA,
+            "memory_confidence_level": "VERY_LOW",
+            "total_historical_samples": 0,
+        }
+    return dict(summary)
+
+
+def _performance_memory_summary_lines(summary: Mapping[str, Any]) -> tuple[str, ...]:
+    if summary.get("enabled") is False:
+        return ("- Performance Memory Summary: disabled",)
+    return (
+        "- Performance Memory Summary:",
+        f"  Best-performing setup type: {_display(summary.get('best_performing_setup_type'))}",
+        f"  Weakest setup type: {_display(summary.get('weakest_setup_type'))}",
+        f"  Best regime historically: {_display(summary.get('best_regime_historically'))}",
+        f"  Worst regime historically: {_display(summary.get('worst_regime_historically'))}",
+        f"  Strongest symbols: {_display(summary.get('strongest_symbols'))}",
+        f"  Weakest symbols: {_display(summary.get('weakest_symbols'))}",
+        f"  Memory confidence level: {_display(summary.get('memory_confidence_level'))}",
+        f"  Total historical samples: {_display(summary.get('total_historical_samples'))}",
+    )
 
 
 def format_portfolio_command_summary(selection: PortfolioSelectionResult | None) -> str:

@@ -359,6 +359,11 @@ class ScannerSymbolResult(BaseModel):
     expectancy_metrics: dict[str, Any] = Field(default_factory=dict)
     confidence_label: str = NA
     historical_match_summary: dict[str, Any] = Field(default_factory=dict)
+    performance_memory: dict[str, Any] = Field(default_factory=dict)
+    historical_expectancy: MaybeDecimal = NA
+    confidence_bucket: str = NA
+    memory_adjustments: dict[str, Any] = Field(default_factory=dict)
+    historical_warning: str = NA
 
     model_config = ConfigDict(frozen=True)
 
@@ -393,6 +398,7 @@ class ScannerRunResult(BaseModel):
     market_regime: MarketRegimeResult = Field(default_factory=default_market_regime_result)
     regime_adjustments: RegimeAdjustment = Field(default_factory=lambda: default_market_regime_result().adjustment)
     regime_warnings: tuple[str, ...] = ()
+    performance_memory_summary: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True)
 

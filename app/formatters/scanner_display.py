@@ -385,6 +385,8 @@ def format_scan_dashboard(
             "",
             *_market_regime_lines(result),
             "",
+            *_performance_memory_dashboard_lines(result),
+            "",
             f"{GREEN_CIRCLE} Valid setups: {counts['valid']}",
             f"{YELLOW_CIRCLE} Near misses: {counts['near_miss']}",
             f"{WHITE_CIRCLE} Hidden rejected/no-setup symbols: {hidden_no_setups}",
@@ -1065,6 +1067,31 @@ def _quality_summary_lines(quality: SetupQualityResult) -> tuple[str, ...]:
 
 
 def _historical_edge_lines(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    memory = symbol_result.performance_memory
+    if isinstance(memory, Mapping) and memory:
+        adjustments = memory.get("memory_adjustments")
+        if not isinstance(adjustments, Mapping):
+            adjustments = {}
+        samples = _first_non_na_text(memory.get("historical_samples"), memory.get("samples"))
+        confidence = _display(memory.get("confidence_bucket"))
+        avg_r = _first_non_na_text(memory.get("average_r"), memory.get("historical_expectancy"))
+        tp1 = _display(memory.get("tp1_rate"))
+        tp2 = _display(memory.get("tp2_rate"))
+        warning = _display(memory.get("historical_warning"))
+        lines = [
+            f"{BULLET} Performance Memory: samples {samples} | confidence {confidence} | "
+            f"Avg R {_r_text(avg_r)} | TP1 {_percent_text(tp1)} | TP2 {_percent_text(tp2)}",
+            f"{BULLET} Similar setup performance: {_display(memory.get('similar_setup_performance'))}",
+            f"{BULLET} Regime compatibility: {_display(memory.get('regime_compatibility'))}",
+            f"{BULLET} Symbol historical quality: {_display(memory.get('symbol_historical_quality'))}",
+        ]
+        if warning != NA:
+            lines.append(f"{BULLET} Confidence note: {warning}")
+        edge_adjustment = _display(adjustments.get("edge_score_adjustment"))
+        if edge_adjustment != NA:
+            lines.append(f"{BULLET} Memory adjustment: edge {edge_adjustment}")
+        return tuple(lines)
+
     summary = symbol_result.historical_match_summary
     if not isinstance(summary, Mapping) or not summary:
         return ()
@@ -1087,6 +1114,13 @@ def _historical_edge_lines(symbol_result: ScannerSymbolResult) -> tuple[str, ...
 
 
 def _historical_edge_compact(symbol_result: ScannerSymbolResult) -> str:
+    memory = symbol_result.performance_memory
+    if isinstance(memory, Mapping) and memory:
+        confidence = _display(memory.get("confidence_bucket"))
+        sample = _display(memory.get("historical_samples"))
+        expectancy = _first_non_na_text(memory.get("average_r"), memory.get("historical_expectancy"))
+        return f"Memory {confidence} exp {_r_text(expectancy)} sample {sample}"
+
     summary = symbol_result.historical_match_summary
     if not isinstance(summary, Mapping) or not summary:
         return NA
@@ -1578,6 +1612,49 @@ def _funding_status_display(status: str) -> str:
 
 def _optional_data_warning_count(result: ScannerRunResult) -> int:
     return sum(len(symbol_result.derivatives_warnings) for symbol_result in result.results)
+
+
+def _performance_memory_dashboard_lines(result: ScannerRunResult) -> tuple[str, ...]:
+    summary = result.performance_memory_summary
+    if not isinstance(summary, Mapping) or not summary:
+        return ("Performance Memory", "Performance memory confidence too low.")
+    if summary.get("enabled") is False:
+        return ("Performance Memory", "Performance memory disabled.")
+    return (
+        "Performance Memory",
+        f"Samples: {_display(summary.get('total_historical_samples'))}",
+        f"Confidence: {_display(summary.get('memory_confidence_level'))}",
+        f"Avg expectancy: {_summary_expectancy(result)}",
+        f"Strongest regime: {_display(summary.get('best_regime_historically'))}",
+        f"Weakest regime: {_display(summary.get('worst_regime_historically'))}",
+        f"Historical TP1: {_summary_rate(result, 'tp1_rate')}",
+        f"Historical TP2: {_summary_rate(result, 'tp2_rate')}",
+    )
+
+
+def _summary_expectancy(result: ScannerRunResult) -> str:
+    values = [
+        _numeric(memory.get("average_r"))
+        for memory in (symbol_result.performance_memory for symbol_result in result.results)
+        if isinstance(memory, Mapping) and _display(memory.get("average_r")) != NA
+    ]
+    if not values:
+        return NA
+    average = sum(values, Decimal("0")) / Decimal(len(values))
+    sign = "+" if average > 0 else ""
+    return f"{sign}{_display(average.quantize(Decimal('0.1')))}R"
+
+
+def _summary_rate(result: ScannerRunResult, key: str) -> str:
+    values = [
+        _numeric(memory.get(key))
+        for memory in (symbol_result.performance_memory for symbol_result in result.results)
+        if isinstance(memory, Mapping) and _display(memory.get(key)) != NA
+    ]
+    if not values:
+        return NA
+    average = sum(values, Decimal("0")) / Decimal(len(values))
+    return _percent_text(average.quantize(Decimal("0.1")))
 
 
 def _market_regime_lines(result: ScannerRunResult) -> tuple[str, ...]:

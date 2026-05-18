@@ -79,6 +79,8 @@ class PortfolioCandidate(BaseModel):
     derivatives_score: int = Field(default=0, ge=0, le=100)
     execution_risk_score: int = Field(default=100, ge=0, le=100)
     derivatives_clean: bool | Literal["N/A"] = NA
+    memory_confidence: str = NA
+    memory_preference_adjustment: int = Field(default=0, ge=-5, le=5)
     valid_trade: bool = False
     near_miss: bool = False
     data_incomplete: bool = False
@@ -97,7 +99,7 @@ class PortfolioCandidate(BaseModel):
             raise ValueError("symbol must not be blank")
         return normalized
 
-    @field_validator("mode", "quality_state", "sector", "narrative", "decision_reason", mode="before")
+    @field_validator("mode", "quality_state", "sector", "narrative", "memory_confidence", "decision_reason", mode="before")
     @classmethod
     def _normalize_text(cls, value: Any) -> str:
         text = _display(value)
@@ -416,6 +418,8 @@ def _candidate_from_symbol_result(symbol_result: Any, *, default_risk_pct: Maybe
         derivatives_score=_int_score(getattr(symbol_result, "derivatives_score", 0)),
         execution_risk_score=execution_risk_score,
         derivatives_clean=_derivatives_clean(symbol_result, diagnostics),
+        memory_confidence=_memory_confidence(symbol_result),
+        memory_preference_adjustment=_memory_preference_adjustment(symbol_result),
         valid_trade=valid_trade,
         near_miss=near_miss,
         data_incomplete=data_incomplete,
@@ -448,6 +452,7 @@ def _candidate_sort_key(candidate: PortfolioCandidate) -> tuple[Any, ...]:
         0 if candidate.valid_trade else 1,
         -candidate.quality_score,
         -_ranking_edge(candidate),
+        -candidate.memory_preference_adjustment,
         -_decimal_score(candidate.rr),
         -candidate.tradeability_score,
         -_derivatives_cleanliness_score(candidate),
@@ -460,6 +465,7 @@ def _quality_tuple(candidate: PortfolioCandidate) -> tuple[Any, ...]:
     return (
         candidate.quality_score,
         _ranking_edge(candidate),
+        candidate.memory_preference_adjustment,
         _decimal_score(candidate.rr),
         candidate.tradeability_score,
         _derivatives_cleanliness_score(candidate),
@@ -731,6 +737,30 @@ def _expectancy(symbol_result: Any) -> MaybeDecimal:
             if value != NA:
                 return value
     return NA
+
+
+def _memory_confidence(symbol_result: Any) -> str:
+    memory = getattr(symbol_result, "performance_memory", {}) or {}
+    if isinstance(memory, Mapping):
+        confidence = _display(memory.get("confidence_bucket"))
+        if confidence != NA:
+            return confidence
+    return _display(getattr(symbol_result, "confidence_bucket", NA))
+
+
+def _memory_preference_adjustment(symbol_result: Any) -> int:
+    memory = getattr(symbol_result, "performance_memory", {}) or {}
+    adjustments: Any = {}
+    if isinstance(memory, Mapping):
+        adjustments = memory.get("memory_adjustments") or {}
+    if not isinstance(adjustments, Mapping):
+        adjustments = getattr(symbol_result, "memory_adjustments", {}) or {}
+    if not isinstance(adjustments, Mapping):
+        return 0
+    value = _maybe_decimal(adjustments.get("portfolio_preference_adjustment"))
+    if value == NA:
+        return 0
+    return int(max(Decimal("-5"), min(Decimal("5"), value)).to_integral_value(rounding="ROUND_HALF_UP"))
 
 
 def _beta_group(symbol: str, supplied: str, sector: str, narrative: str) -> BetaGroup:

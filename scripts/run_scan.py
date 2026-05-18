@@ -30,6 +30,14 @@ from app.analytics.edge_analytics import (  # noqa: E402
     match_historical_condition,
 )
 from app.analytics.market_regime import default_market_regime_result, disabled_market_regime_result  # noqa: E402
+from app.analytics.performance_memory import (  # noqa: E402
+    ConfidenceBucket,
+    apply_performance_memory_to_result,
+    ingest_replay_summary,
+    load_performance_memory,
+    reset_performance_memory,
+    save_performance_memory,
+)
 from app.analytics.portfolio_selection import (  # noqa: E402
     PortfolioRiskLimits,
     PortfolioSelectionResult,
@@ -117,6 +125,7 @@ from app.watch_mode import (  # noqa: E402
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 LATEST_RUN_PATH = DEFAULT_LATEST_RUN_PATH
 WATCH_STATE_PATH = DEFAULT_WATCH_STATE_PATH
+PERFORMANCE_MEMORY_PATH = PROJECT_ROOT / "scan_runs" / "performance_memory.json"
 
 
 @dataclass(frozen=True)
@@ -305,6 +314,10 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--market-regime": "market_regime",
         "--disable-regime-filter": "market_regime",
         "--regime-risk-mode": "regime_risk_mode",
+        "--performance-memory": "performance_memory",
+        "--disable-performance-memory": "performance_memory",
+        "--reset-performance-memory": "reset_performance_memory",
+        "--min-memory-confidence": "min_memory_confidence",
     }
     explicit: set[str] = set()
     for token in tokens:
@@ -384,6 +397,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--market-regime", dest="market_regime", action="store_true", default=True)
     parser.add_argument("--disable-regime-filter", dest="market_regime", action="store_false")
     parser.add_argument("--regime-risk-mode", choices=["conservative", "balanced", "aggressive"], default="balanced")
+    parser.add_argument("--performance-memory", dest="performance_memory", action="store_true", default=None)
+    parser.add_argument("--disable-performance-memory", dest="performance_memory", action="store_false")
+    parser.add_argument("--reset-performance-memory", action="store_true")
+    parser.add_argument(
+        "--min-memory-confidence",
+        choices=[bucket.value for bucket in ConfidenceBucket],
+        default=ConfidenceBucket.LOW.value,
+    )
     parser.add_argument("--continue-watch", dest="continue_watch", action="store_true", default=False)
     parser.add_argument("--no-continue-watch", dest="continue_watch", action="store_false")
     parser.add_argument("--watch", action="store_true")
@@ -635,6 +656,33 @@ async def main(argv: Sequence[str] | None = None) -> None:
         if args.save_run is not None:
             _write_run_json(args.save_run, result, replay_summary=replay_summary)
 
+    memory_enabled = _performance_memory_enabled(args)
+    if args.reset_performance_memory:
+        reset_performance_memory(PERFORMANCE_MEMORY_PATH)
+    if memory_enabled:
+        memory_store = load_performance_memory(PERFORMANCE_MEMORY_PATH)
+        if replay_summary is not None:
+            ingestion = ingest_replay_summary(memory_store, replay_summary)
+            memory_store = ingestion.store
+            save_performance_memory(memory_store, PERFORMANCE_MEMORY_PATH)
+        elif not PERFORMANCE_MEMORY_PATH.exists():
+            save_performance_memory(memory_store, PERFORMANCE_MEMORY_PATH)
+        result = apply_performance_memory_to_result(
+            result,
+            memory_store,
+            enabled=True,
+            min_confidence=args.min_memory_confidence,
+        )
+        if args.save_run is not None:
+            _write_run_json(args.save_run, result, replay_summary=replay_summary)
+    elif args.performance_memory is False:
+        result = apply_performance_memory_to_result(
+            result,
+            load_performance_memory(PERFORMANCE_MEMORY_PATH),
+            enabled=False,
+            min_confidence=args.min_memory_confidence,
+        )
+
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None
@@ -809,6 +857,12 @@ def _effective_replay_candles(args: argparse.Namespace) -> int:
     if args.fast:
         replay_candles = min(replay_candles, FAST_REPLAY_CANDLES)
     return replay_candles
+
+
+def _performance_memory_enabled(args: argparse.Namespace) -> bool:
+    if args.performance_memory is not None:
+        return bool(args.performance_memory)
+    return bool(args.replay or args.command_preset == "daily")
 
 
 def _startup_warnings(args: argparse.Namespace, effective_candle_limit: int) -> tuple[str, ...]:
