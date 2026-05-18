@@ -85,6 +85,13 @@ from app.pipeline.scanner_runner import (  # noqa: E402
     ScannerRunner,
     ScannerSymbolResult,
 )
+from app.research import (  # noqa: E402
+    RESEARCH_QUERIES,
+    ResearchDatabaseMissing,
+    ResearchFilters,
+    build_research_report,
+    format_research_report,
+)
 from app.storage import (  # noqa: E402
     DEFAULT_DATABASE_PATH,
     StorageError,
@@ -331,6 +338,13 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--show-history": "show_history",
         "--history-limit": "history_limit",
         "--export-history-json": "export_history_json",
+        "--research": "research",
+        "--research-query": "research_query",
+        "--research-limit": "research_limit",
+        "--research-symbol": "research_symbol",
+        "--research-mode": "research_mode",
+        "--research-regime": "research_regime",
+        "--research-output-json": "research_output_json",
     }
     explicit: set[str] = set()
     for token in tokens:
@@ -448,6 +462,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--show-history", action="store_true")
     parser.add_argument("--history-limit", type=int, default=10)
     parser.add_argument("--export-history-json", type=Path)
+    parser.add_argument("--research", action="store_true")
+    parser.add_argument("--research-query", choices=RESEARCH_QUERIES, default="summary")
+    parser.add_argument("--research-limit", type=int, default=10)
+    parser.add_argument("--research-symbol")
+    parser.add_argument("--research-mode", choices=["challenge", "swing", "scalp"])
+    parser.add_argument("--research-regime")
+    parser.add_argument(
+        "--research-output-json",
+        nargs="?",
+        const=Path("scan_runs") / "research_report.json",
+        type=Path,
+    )
     parser.add_argument("--no-resume-skip", action="store_true")
     parser.add_argument("--progress", action="store_true")
     args = parser.parse_args(argv)
@@ -464,6 +490,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--replay-max-fill-candles must be at least 1.")
     if args.backtest_max_setups is not None and args.backtest_max_setups < 1:
         parser.error("--backtest-max-setups must be at least 1.")
+    if args.research_limit < 1:
+        parser.error("--research-limit must be at least 1.")
     if args.edge_min_sample < 1:
         parser.error("--edge-min-sample must be at least 1.")
     if args.max_selected_setups < 1:
@@ -525,6 +553,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
         return
     if args.list_presets:
         print(_format_available_presets())
+        return
+    if args.research:
+        _handle_research_command(args)
         return
     if args.show_history or args.export_history_json is not None:
         _handle_history_command(args)
@@ -1442,9 +1473,40 @@ def _handle_history_command(args: argparse.Namespace) -> None:
         raise SystemExit(str(exc)) from exc
 
 
+def _handle_research_command(args: argparse.Namespace) -> None:
+    filters = ResearchFilters(
+        symbol=args.research_symbol,
+        mode=args.research_mode,
+        regime=args.research_regime,
+        limit=args.research_limit,
+    )
+    try:
+        report = build_research_report(
+            args.database_path,
+            query=args.research_query,
+            filters=filters,
+        )
+    except ResearchDatabaseMissing as exc:
+        print(str(exc))
+        return
+    except StorageError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.research_output_json is not None:
+        _write_research_json(args.research_output_json, report)
+        print(f"Exported research report: {args.research_output_json}")
+        return
+    print(format_research_report(report))
+
+
 def _write_history_json(path: Path, payload: Sequence[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(list(payload), indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _write_research_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(payload), indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _command_used(argv: Sequence[str] | None) -> str:

@@ -461,6 +461,40 @@ def test_phase_33_storage_cli_flags_accepted(tmp_path) -> None:
     assert args.export_history_json == export_path
 
 
+def test_phase_34_research_cli_flags_accepted(tmp_path) -> None:
+    db_path = tmp_path / "history.db"
+    output_path = tmp_path / "research.json"
+
+    args = run_scan.parse_args(
+        [
+            "--research",
+            "--research-query",
+            "symbol_detail",
+            "--research-limit",
+            "5",
+            "--research-symbol",
+            "BTCUSDT",
+            "--research-mode",
+            "swing",
+            "--research-regime",
+            "trend_expansion",
+            "--research-output-json",
+            str(output_path),
+            "--database-path",
+            str(db_path),
+        ]
+    )
+
+    assert args.research is True
+    assert args.research_query == "symbol_detail"
+    assert args.research_limit == 5
+    assert args.research_symbol == "BTCUSDT"
+    assert args.research_mode == "swing"
+    assert args.research_regime == "trend_expansion"
+    assert args.research_output_json == output_path
+    assert args.database_path == db_path
+
+
 def test_no_storage_when_store_scan_flag_absent(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
 
