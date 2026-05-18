@@ -82,6 +82,8 @@ class PortfolioCandidate(BaseModel):
     valid_trade: bool = False
     near_miss: bool = False
     data_incomplete: bool = False
+    regime_blocked: bool = False
+    regime_warnings: tuple[str, ...] = ()
     decision: PortfolioDecision = PortfolioDecision.REJECTED_NO_VALID_TRADE
     decision_reason: str = NA
 
@@ -100,6 +102,11 @@ class PortfolioCandidate(BaseModel):
     def _normalize_text(cls, value: Any) -> str:
         text = _display(value)
         return text if text else NA
+
+    @field_validator("regime_warnings", mode="before")
+    @classmethod
+    def _normalize_warnings(cls, value: Any) -> tuple[str, ...]:
+        return _sequence_values(value)
 
     @field_validator("edge_score", "expectancy", "rr", mode="before")
     @classmethod
@@ -321,8 +328,12 @@ def build_portfolio_selection_from_scan(
     )
     config = getattr(scan_result, "config", None)
     default_risk_pct = _decimal_or_na(getattr(config, "risk_per_trade_pct", NA))
+    adjustment = _regime_adjustment(scan_result)
     candidates = tuple(
-        _candidate_from_symbol_result(symbol_result, default_risk_pct=default_risk_pct)
+        _apply_regime_to_candidate(
+            _candidate_from_symbol_result(symbol_result, default_risk_pct=default_risk_pct),
+            adjustment,
+        )
         for symbol_result in getattr(scan_result, "results", ())
     )
     return select_portfolio(PortfolioSelectionInput(candidates=candidates, risk_limits=limits))
@@ -412,6 +423,9 @@ def _candidate_from_symbol_result(symbol_result: Any, *, default_risk_pct: Maybe
 
 
 def _preselection_decision(candidate: PortfolioCandidate) -> tuple[PortfolioDecision, str] | None:
+    if candidate.regime_blocked:
+        reason = candidate.regime_warnings[0] if candidate.regime_warnings else "Market regime blocks this setup mode."
+        return PortfolioDecision.WATCHLIST_ONLY, reason
     if candidate.data_incomplete:
         return PortfolioDecision.DATA_INCOMPLETE, "Required setup or risk data is incomplete."
     if candidate.near_miss:
@@ -497,6 +511,10 @@ def _portfolio_warnings(
         warnings.append("No valid setup survived portfolio selection.")
     if any(candidate.decision == PortfolioDecision.DATA_INCOMPLETE for candidate in rejected):
         warnings.append("Some candidates had incomplete data and were not selected.")
+    regime_warnings = _unique_strings(
+        tuple(warning for candidate in (*selected, *rejected) for warning in candidate.regime_warnings)
+    )
+    warnings.extend(regime_warnings)
     if any(
         candidate.decision
         in (
@@ -507,6 +525,62 @@ def _portfolio_warnings(
     ):
         warnings.append("Correlated beta exposure was reduced by keeping the strongest setup per group.")
     return tuple(warnings)
+
+
+def _regime_adjustment(scan_result: Any) -> Any | None:
+    market_regime = getattr(scan_result, "market_regime", None)
+    if market_regime is None or getattr(market_regime, "enabled", True) is False:
+        return None
+    return getattr(market_regime, "adjustment", None)
+
+
+def _apply_regime_to_candidate(candidate: PortfolioCandidate, adjustment: Any | None) -> PortfolioCandidate:
+    if adjustment is None:
+        return candidate
+    warnings = list(candidate.regime_warnings)
+    mode_allowed = _mode_allowed_by_regime(candidate.mode, adjustment)
+    if candidate.valid_trade and not mode_allowed:
+        warnings.append(f"Market regime blocks {candidate.mode} setups: {_display(getattr(adjustment, 'explanation', NA))}")
+        return candidate.model_copy(
+            update={
+                "valid_trade": False,
+                "near_miss": True,
+                "regime_blocked": True,
+                "regime_warnings": _unique_strings(warnings),
+            }
+        )
+    risk_multiplier = _regime_risk_multiplier(adjustment)
+    if candidate.valid_trade and risk_multiplier < Decimal("1"):
+        warnings.append(
+            f"Market regime risk multiplier {risk_multiplier} applies: {_display(getattr(adjustment, 'explanation', NA))}"
+        )
+        return candidate.model_copy(
+            update={
+                "risk_pct": _quantize(candidate.risk_pct * risk_multiplier),
+                "regime_warnings": _unique_strings(warnings),
+            }
+        )
+    return candidate
+
+
+def _regime_risk_multiplier(adjustment: Any | None) -> Decimal:
+    if adjustment is None:
+        return Decimal("1")
+    value = _maybe_decimal(getattr(adjustment, "risk_multiplier", Decimal("1")))
+    if value == NA:
+        return Decimal("1")
+    return min(Decimal("1"), max(Decimal("0"), value))
+
+
+def _mode_allowed_by_regime(mode: str, adjustment: Any) -> bool:
+    normalized = _display(mode).lower()
+    if normalized == "challenge":
+        return bool(getattr(adjustment, "allow_challenge", True))
+    if normalized == "swing":
+        return bool(getattr(adjustment, "allow_swings", True))
+    if normalized == "scalp":
+        return bool(getattr(adjustment, "allow_scalps", True))
+    return True
 
 
 def _mode_from_symbol_result(symbol_result: Any) -> str:
@@ -778,6 +852,15 @@ def _sequence_values(values: Any) -> tuple[str, ...]:
         values = (values,)
     if not isinstance(values, Sequence):
         return ()
+    output: list[str] = []
+    for value in values:
+        text = _display(value)
+        if text != NA and text not in output:
+            output.append(text)
+    return tuple(output)
+
+
+def _unique_strings(values: Sequence[str]) -> tuple[str, ...]:
     output: list[str] = []
     for value in values:
         text = _display(value)

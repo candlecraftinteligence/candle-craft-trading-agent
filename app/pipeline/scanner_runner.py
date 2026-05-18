@@ -24,9 +24,21 @@ from app.analytics.derivatives_enrichment import (
     enrich_derivatives,
 )
 from app.analytics.near_miss_intelligence import NearMissIntelligence, build_near_miss_intelligence
+from app.analytics.market_regime import (
+    MarketRegimeInput,
+    MarketRegimeResult,
+    RegimeAdjustment,
+    RegimeRiskLevel,
+    RegimeState,
+    default_market_regime_result,
+    disabled_market_regime_result,
+    evaluate_market_regime,
+)
 from app.analytics.setup_quality import (
+    SetupQualityGrade,
     SetupQualityInput,
     SetupQualityResult,
+    SetupQualityState,
     default_setup_quality_result,
     validate_setup_quality,
 )
@@ -151,6 +163,8 @@ class ScannerRunConfig(BaseModel):
     symbol_timeout_sec: float = DEFAULT_SYMBOL_TIMEOUT_SEC
     scan_timeout_sec: float | None = None
     fast_mode: bool = False
+    market_regime_enabled: bool = False
+    regime_risk_mode: Literal["conservative", "balanced", "aggressive"] = "balanced"
 
     model_config = ConfigDict(frozen=True)
 
@@ -340,6 +354,7 @@ class ScannerSymbolResult(BaseModel):
     journal_entry: JournalEntryResult | None = None
     near_miss_intelligence: NearMissIntelligence | None = None
     setup_quality: SetupQualityResult = Field(default_factory=default_setup_quality_result)
+    regime_warnings: tuple[str, ...] = ()
     edge_analytics: dict[str, Any] = Field(default_factory=dict)
     expectancy_metrics: dict[str, Any] = Field(default_factory=dict)
     confidence_label: str = NA
@@ -375,6 +390,9 @@ class ScannerRunResult(BaseModel):
     retry_diagnostics: tuple[dict[str, Any], ...] = ()
     resume_metadata: dict[str, Any] = Field(default_factory=dict)
     runtime_stats: ScannerRuntimeStats = Field(default_factory=ScannerRuntimeStats)
+    market_regime: MarketRegimeResult = Field(default_factory=default_market_regime_result)
+    regime_adjustments: RegimeAdjustment = Field(default_factory=lambda: default_market_regime_result().adjustment)
+    regime_warnings: tuple[str, ...] = ()
 
     model_config = ConfigDict(frozen=True)
 
@@ -489,6 +507,11 @@ class ScannerRunner:
         total_symbols = len(run_config.symbols)
         scan_started = time.monotonic()
         global_timeout_hit = False
+        market_regime_context = (
+            await self._fetch_market_regime_context(client, run_config, progress=progress)
+            if run_config.market_regime_enabled
+            else {"btc_candles": (), "eth_candles": (), "missing_data": ("market_regime: N/A",)}
+        )
         scan_deadline = (
             time.monotonic() + run_config.scan_timeout_sec
             if run_config.scan_timeout_sec is not None
@@ -570,25 +593,35 @@ class ScannerRunner:
         ):
             global_timeout_hit = True
 
+        market_regime = _market_regime_for_scan(
+            run_config,
+            results,
+            market_regime_context=market_regime_context,
+        )
+        adjusted_results = _apply_market_regime_to_results(results, market_regime)
+
         return ScannerRunResult(
             config=run_config,
-            results=tuple(results),
-            scanned_symbols=len(results),
-            failed_symbols=sum(1 for result in results if _is_scan_error(result)),
-            trade_ideas_created=sum(1 for result in results if result.trade_idea is not None),
+            results=adjusted_results,
+            scanned_symbols=len(adjusted_results),
+            failed_symbols=sum(1 for result in adjusted_results if _is_scan_error(result)),
+            trade_ideas_created=sum(1 for result in adjusted_results if result.trade_idea is not None),
             dry_run_alerts_created=sum(
-                1 for result in results if ScannerPipelineStatus.ALERT_DRY_RUN_CREATED in result.status_history
+                1 for result in adjusted_results if ScannerPipelineStatus.ALERT_DRY_RUN_CREATED in result.status_history
             ),
-            journal_entries_created=sum(1 for result in results if result.journal_entry is not None),
+            journal_entries_created=sum(1 for result in adjusted_results if result.journal_entry is not None),
             cache_stats=_cache_stats_for(client, run_config),
             retry_diagnostics=_retry_diagnostics_for(client),
             resume_metadata=dict(resume_metadata or {}),
             runtime_stats=_runtime_stats_for(
-                results,
+                adjusted_results,
                 total_symbols=total_symbols,
                 total_runtime_seconds=total_runtime_seconds,
                 global_timeout_hit=global_timeout_hit,
             ),
+            market_regime=market_regime,
+            regime_adjustments=market_regime.adjustment,
+            regime_warnings=market_regime.warnings,
         )
 
     def _exchange_client_for(self, config: ScannerRunConfig) -> tuple[BaseExchangeClient, bool]:
@@ -967,6 +1000,34 @@ class ScannerRunner:
             f"{symbol} {config.interval} candles",
             lambda: client.get_klines(symbol, config.interval, fetch_limit),
         )
+
+    async def _fetch_market_regime_context(
+        self,
+        client: BaseExchangeClient,
+        config: ScannerRunConfig,
+        *,
+        progress: Callable[[str], Any] | None = None,
+    ) -> dict[str, Any]:
+        await _emit_progress(progress, "Evaluating market regime...")
+        timeframe = config.bias_timeframe.strip().lower()
+        if timeframe == "2d":
+            timeframe = SYNTHETIC_2D_SOURCE_TIMEFRAME
+        limit_warnings: list[str] = []
+        fetch_limit = _timeframe_fetch_limit(config, timeframe, limit_warnings)
+        context: dict[str, Any] = {"btc_candles": (), "eth_candles": (), "missing_data": []}
+        for symbol, key in (("BTCUSDT", "btc_candles"), ("ETHUSDT", "eth_candles")):
+            try:
+                context[key] = await self._request_public_api(
+                    config,
+                    f"{symbol} {timeframe} candles for market regime",
+                    lambda symbol=symbol: client.get_klines(symbol, timeframe, fetch_limit),
+                    timeout_sec=_optional_request_timeout(config),
+                )
+            except Exception as exc:
+                self.logger.debug("Market regime %s candles unavailable: %s", symbol, exc)
+                context["missing_data"].append(f"{symbol}_candles: N/A")
+        context["missing_data"].extend(limit_warnings)
+        return context
 
     async def _run_strategy(
         self,
@@ -2503,6 +2564,280 @@ def _unverified_data_from_derivatives(result: DerivativesOrderflowResult) -> tup
     if result.data_quality.reliability == "Unverified":
         values.append("derivatives: Unverified")
     return tuple(values)
+
+
+def _market_regime_for_scan(
+    config: ScannerRunConfig,
+    results: Sequence[ScannerSymbolResult],
+    *,
+    market_regime_context: Mapping[str, Any],
+) -> MarketRegimeResult:
+    if not config.market_regime_enabled:
+        return disabled_market_regime_result()
+    breadth = _market_regime_breadth(results)
+    return evaluate_market_regime(
+        MarketRegimeInput(
+            btc_candles=market_regime_context.get("btc_candles", ()),
+            eth_candles=market_regime_context.get("eth_candles", ()),
+            scanned_symbols=len(results),
+            bullish_bias_pct=breadth["bullish_bias_pct"],
+            bearish_bias_pct=breadth["bearish_bias_pct"],
+            valid_sweep_pct=breadth["valid_sweep_pct"],
+            confirmation_pct=breadth["confirmation_pct"],
+            failed_confirmation_pct=breadth["failed_confirmation_pct"],
+            risk_mode=config.regime_risk_mode,
+            missing_data=_sequence_from_diagnostics(market_regime_context.get("missing_data")),
+        )
+    )
+
+
+def _market_regime_breadth(results: Sequence[ScannerSymbolResult]) -> dict[str, MaybeDecimal]:
+    completed = [result for result in results if not _is_scan_error(result)]
+    if not completed:
+        return {
+            "bullish_bias_pct": NA,
+            "bearish_bias_pct": NA,
+            "valid_sweep_pct": NA,
+            "confirmation_pct": NA,
+            "failed_confirmation_pct": NA,
+        }
+
+    bullish = bearish = valid_sweep = confirmed = failed_confirmation = 0
+    for result in completed:
+        diagnostics = _symbol_representative_diagnostics(result)
+        bias = _symbol_context_bias(result, diagnostics)
+        if bias == "bullish":
+            bullish += 1
+        elif bias == "bearish":
+            bearish += 1
+
+        sweep_passed = _symbol_diagnostic_passed(result, diagnostics, "execution_sweep_status", result.sweep_detected)
+        confirmation_passed = _symbol_diagnostic_passed(
+            result,
+            diagnostics,
+            "confirmation_structure_shift_status",
+            result.bos_detected or result.choch_detected,
+        )
+        if sweep_passed:
+            valid_sweep += 1
+        if confirmation_passed:
+            confirmed += 1
+        if sweep_passed and not confirmation_passed:
+            failed_confirmation += 1
+
+    total = Decimal(len(completed))
+    return {
+        "bullish_bias_pct": _percentage(bullish, total),
+        "bearish_bias_pct": _percentage(bearish, total),
+        "valid_sweep_pct": _percentage(valid_sweep, total),
+        "confirmation_pct": _percentage(confirmed, total),
+        "failed_confirmation_pct": _percentage(failed_confirmation, total),
+    }
+
+
+def _apply_market_regime_to_results(
+    results: Sequence[ScannerSymbolResult],
+    market_regime: MarketRegimeResult,
+) -> tuple[ScannerSymbolResult, ...]:
+    if not market_regime.enabled:
+        return tuple(results)
+    return tuple(_apply_market_regime_to_symbol(result, market_regime) for result in results)
+
+
+def _apply_market_regime_to_symbol(
+    result: ScannerSymbolResult,
+    market_regime: MarketRegimeResult,
+) -> ScannerSymbolResult:
+    warnings = _symbol_regime_warnings(result, market_regime)
+    setup_quality = _adjust_setup_quality_for_regime(result.setup_quality, result, market_regime)
+    if not warnings and setup_quality == result.setup_quality:
+        return result
+    return result.model_copy(
+        update={
+            "setup_quality": setup_quality,
+            "regime_warnings": warnings,
+        }
+    )
+
+
+def _symbol_regime_warnings(
+    result: ScannerSymbolResult,
+    market_regime: MarketRegimeResult,
+) -> tuple[str, ...]:
+    if market_regime.risk_level == RegimeRiskLevel.NA:
+        return ()
+    if not _symbol_has_actionable_setup(result):
+        return ()
+    adjustment = market_regime.adjustment
+    mode = _symbol_mode_for_regime(result)
+    warnings: list[str] = []
+    if market_regime.risk_level in (RegimeRiskLevel.HIGH, RegimeRiskLevel.EXTREME):
+        warnings.append(
+            f"Market regime {market_regime.state.value} risk {market_regime.risk_level.value}: {adjustment.explanation}"
+        )
+    if mode != NA and not _mode_allowed_by_regime(mode, adjustment):
+        warnings.append(f"Market regime blocks {mode} setups: {adjustment.explanation}")
+    elif adjustment.risk_multiplier < Decimal("1"):
+        warnings.append(f"Market regime risk multiplier {adjustment.risk_multiplier} applies: {adjustment.explanation}")
+    return _unique_strings(warnings)
+
+
+def _adjust_setup_quality_for_regime(
+    quality: SetupQualityResult,
+    result: ScannerSymbolResult,
+    market_regime: MarketRegimeResult,
+) -> SetupQualityResult:
+    if (
+        not quality.is_evaluated
+        or market_regime.risk_level == RegimeRiskLevel.NA
+        or quality.quality_state
+        not in (
+            SetupQualityState.HIGH_QUALITY_TRADE,
+            SetupQualityState.VALID_BUT_LOWER_QUALITY,
+            SetupQualityState.WATCHLIST_NEAR_MISS,
+        )
+    ):
+        return quality
+
+    adjustment = market_regime.adjustment
+    mode = _symbol_mode_for_regime(result)
+    mode_blocked = mode != NA and not _mode_allowed_by_regime(mode, adjustment)
+    score_penalty = adjustment.min_quality_score_adjustment
+    if score_penalty == 0 and not mode_blocked and adjustment.risk_multiplier == Decimal("1"):
+        return quality
+
+    quality_score = max(0, quality.quality_score - score_penalty)
+    tradeability_score = max(0, quality.tradeability_score - score_penalty)
+    edge_score = max(0, quality.profitability_edge_score - max(0, score_penalty // 2))
+    execution_risk_score = min(100, quality.execution_risk_score + score_penalty)
+    state = quality.quality_state
+    if mode_blocked and state in (SetupQualityState.HIGH_QUALITY_TRADE, SetupQualityState.VALID_BUT_LOWER_QUALITY):
+        state = SetupQualityState.WATCHLIST_NEAR_MISS
+    elif state == SetupQualityState.HIGH_QUALITY_TRADE and quality_score < 85:
+        state = SetupQualityState.VALID_BUT_LOWER_QUALITY
+
+    weakest = _unique_strings((*quality.weakest_factors, "market regime risk"))
+    decision_reason = f"{quality.decision_reason} Market regime overlay: {adjustment.explanation}"
+    action_label = "Wait for cleaner regime" if mode_blocked else quality.action_label
+    return quality.model_copy(
+        update={
+            "quality_state": state,
+            "quality_grade": _regime_adjusted_grade(state, quality_score),
+            "quality_score": quality_score,
+            "tradeability_score": tradeability_score,
+            "profitability_edge_score": edge_score,
+            "execution_risk_score": execution_risk_score,
+            "weakest_factors": weakest,
+            "decision_reason": decision_reason,
+            "action_label": action_label,
+        }
+    )
+
+
+def _regime_adjusted_grade(state: SetupQualityState, quality_score: int) -> SetupQualityGrade:
+    if state == SetupQualityState.DATA_ISSUE:
+        return SetupQualityGrade.NA
+    if state == SetupQualityState.REJECTED_NO_EDGE:
+        return SetupQualityGrade.REJECT
+    if quality_score >= 90:
+        return SetupQualityGrade.A_PLUS
+    if quality_score >= 80:
+        return SetupQualityGrade.A
+    if quality_score >= 65:
+        return SetupQualityGrade.B
+    if quality_score >= 50:
+        return SetupQualityGrade.C
+    return SetupQualityGrade.REJECT
+
+
+def _symbol_has_actionable_setup(result: ScannerSymbolResult) -> bool:
+    return (
+        result.trade_idea is not None
+        or bool(result.valid_strategy_modes)
+        or result.setup_quality.quality_state
+        in (
+            SetupQualityState.HIGH_QUALITY_TRADE,
+            SetupQualityState.VALID_BUT_LOWER_QUALITY,
+            SetupQualityState.WATCHLIST_NEAR_MISS,
+        )
+    )
+
+
+def _symbol_mode_for_regime(result: ScannerSymbolResult) -> str:
+    if result.valid_strategy_modes:
+        return result.valid_strategy_modes[0]
+    if result.rejected_strategy_modes:
+        return result.rejected_strategy_modes[0]
+    diagnostics = _symbol_representative_diagnostics(result)
+    mode = _display_decimal_or_text(diagnostics.get("mode"))
+    if mode != NA:
+        return mode.lower()
+    return NA
+
+
+def _mode_allowed_by_regime(mode: str, adjustment: RegimeAdjustment) -> bool:
+    normalized = mode.lower()
+    if normalized == "challenge":
+        return adjustment.allow_challenge
+    if normalized == "swing":
+        return adjustment.allow_swings
+    if normalized == "scalp":
+        return adjustment.allow_scalps
+    return True
+
+
+def _symbol_representative_diagnostics(result: ScannerSymbolResult) -> Mapping[str, Any]:
+    for mode in result.valid_strategy_modes:
+        diagnostics = result.strategy_diagnostics.get(mode)
+        if isinstance(diagnostics, Mapping):
+            return diagnostics
+    for mode in result.rejected_strategy_modes:
+        diagnostics = result.strategy_diagnostics.get(mode)
+        if isinstance(diagnostics, Mapping):
+            return diagnostics
+    for mode in ("challenge", "swing", "scalp"):
+        diagnostics = result.strategy_diagnostics.get(mode)
+        if isinstance(diagnostics, Mapping):
+            return diagnostics
+    for diagnostics in result.strategy_diagnostics.values():
+        if isinstance(diagnostics, Mapping):
+            return diagnostics
+    return {}
+
+
+def _symbol_context_bias(result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    trends = (
+        _display_decimal_or_text(diagnostics.get("htf_2d_trend")),
+        _display_decimal_or_text(diagnostics.get("mtf_12h_trend")),
+        result.trend_context,
+    )
+    bullish = sum(1 for trend in trends if trend == "bullish")
+    bearish = sum(1 for trend in trends if trend == "bearish")
+    if bullish > bearish:
+        return "bullish"
+    if bearish > bullish:
+        return "bearish"
+    return NA
+
+
+def _symbol_diagnostic_passed(
+    result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    key: str,
+    fallback: bool,
+) -> bool:
+    status = _display_decimal_or_text(diagnostics.get(key))
+    if status == "passed":
+        return True
+    if status in ("failed", "not_evaluated"):
+        return False
+    return fallback
+
+
+def _percentage(count: int, total: Decimal) -> Decimal:
+    if total <= 0:
+        return Decimal("0")
+    return _quantize(Decimal(count) / total * Decimal("100"))
 
 
 def _scoring_missing_data(values: Sequence[str]) -> tuple[str, ...]:

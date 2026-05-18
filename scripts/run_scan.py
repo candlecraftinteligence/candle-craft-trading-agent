@@ -29,6 +29,7 @@ from app.analytics.edge_analytics import (  # noqa: E402
     condition_key_from_diagnostics,
     match_historical_condition,
 )
+from app.analytics.market_regime import default_market_regime_result, disabled_market_regime_result  # noqa: E402
 from app.analytics.portfolio_selection import (  # noqa: E402
     PortfolioRiskLimits,
     PortfolioSelectionResult,
@@ -301,6 +302,9 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--max-portfolio-risk-pct": "max_portfolio_risk_pct",
         "--max-beta-group-risk-pct": "max_beta_group_risk_pct",
         "--allow-correlated-setups": "allow_correlated_setups",
+        "--market-regime": "market_regime",
+        "--disable-regime-filter": "market_regime",
+        "--regime-risk-mode": "regime_risk_mode",
     }
     explicit: set[str] = set()
     for token in tokens:
@@ -377,6 +381,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-portfolio-risk-pct", type=_non_negative_decimal_arg, default=Decimal("3"))
     parser.add_argument("--max-beta-group-risk-pct", type=_non_negative_decimal_arg, default=Decimal("1.5"))
     parser.add_argument("--allow-correlated-setups", action="store_true")
+    parser.add_argument("--market-regime", dest="market_regime", action="store_true", default=True)
+    parser.add_argument("--disable-regime-filter", dest="market_regime", action="store_false")
+    parser.add_argument("--regime-risk-mode", choices=["conservative", "balanced", "aggressive"], default="balanced")
     parser.add_argument("--continue-watch", dest="continue_watch", action="store_true", default=False)
     parser.add_argument("--no-continue-watch", dest="continue_watch", action="store_false")
     parser.add_argument("--watch", action="store_true")
@@ -514,6 +521,8 @@ async def main(argv: Sequence[str] | None = None) -> None:
         symbol_timeout_sec=args.symbol_timeout_sec,
         scan_timeout_sec=args.scan_timeout_sec,
         fast_mode=args.fast,
+        market_regime_enabled=args.market_regime,
+        regime_risk_mode=args.regime_risk_mode,
     )
 
     if args.watch:
@@ -570,6 +579,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                     ],
                 },
                 runtime_stats=None,
+                market_regime=None,
             )
             _write_run_json(args.save_run, partial_result)
 
@@ -600,6 +610,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 ],
             },
             runtime_stats=scan_result.runtime_stats,
+            market_regime=scan_result.market_regime,
         )
     else:
         result = _combined_run_result(
@@ -610,6 +621,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             retry_diagnostics=(),
             resume_metadata={**resume_metadata, "pending_symbols": []},
             runtime_stats=None,
+            market_regime=None,
         )
 
     if args.save_run is not None:
@@ -1139,6 +1151,7 @@ def _combined_run_result(
     retry_diagnostics: Sequence[dict[str, Any]],
     resume_metadata: Mapping[str, Any],
     runtime_stats: ScannerRuntimeStats | None,
+    market_regime: Any | None = None,
 ) -> ScannerRunResult:
     ordered_results = tuple(
         results_by_symbol[symbol]
@@ -1146,6 +1159,13 @@ def _combined_run_result(
         if symbol in results_by_symbol
     )
     cache_stats = cache.stats() if cache is not None else _empty_cache_stats(config)
+    effective_market_regime = market_regime
+    if effective_market_regime is None:
+        effective_market_regime = (
+            disabled_market_regime_result()
+            if not config.market_regime_enabled
+            else default_market_regime_result()
+        )
     return ScannerRunResult(
         config=config,
         results=ordered_results,
@@ -1164,6 +1184,9 @@ def _combined_run_result(
             total_symbols=len(watchlist_symbols),
             runtime_stats=runtime_stats,
         ),
+        market_regime=effective_market_regime,
+        regime_adjustments=effective_market_regime.adjustment,
+        regime_warnings=effective_market_regime.warnings,
     )
 
 
@@ -1547,6 +1570,7 @@ async def _run_watch_scan_iteration(
                     ],
                 },
                 runtime_stats=None,
+                market_regime=None,
             )
             _write_run_json(args.save_run, partial_result)
 
@@ -1577,6 +1601,7 @@ async def _run_watch_scan_iteration(
             ],
         },
         runtime_stats=scan_result.runtime_stats,
+        market_regime=scan_result.market_regime,
     )
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None

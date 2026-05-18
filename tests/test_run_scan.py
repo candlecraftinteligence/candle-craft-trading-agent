@@ -527,6 +527,20 @@ def test_no_cache_flag_is_passed_to_scanner_config(monkeypatch, capsys) -> None:
     assert config.cache_enabled is False
 
 
+def test_market_regime_cli_flags_are_passed_to_scanner_config(monkeypatch, capsys) -> None:
+    CapturingScannerRunner.configs = []
+    monkeypatch.setattr(run_scan, "ScannerRunner", CapturingScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--regime-risk-mode", "conservative"]))
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--disable-regime-filter"]))
+
+    enabled_config = CapturingScannerRunner.configs[0]
+    disabled_config = CapturingScannerRunner.configs[1]
+    assert enabled_config.market_regime_enabled is True
+    assert enabled_config.regime_risk_mode == "conservative"
+    assert disabled_config.market_regime_enabled is False
+
+
 def test_list_presets_prints_available_presets(capsys) -> None:
     asyncio.run(run_scan.main(["--list-presets"]))
 

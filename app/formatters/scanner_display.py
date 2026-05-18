@@ -383,6 +383,8 @@ def format_scan_dashboard(
             f"Cache hits: {int(cache_stats.get('hits', 0) or 0)}",
             f"Cache misses: {int(cache_stats.get('misses', 0) or 0)}",
             "",
+            *_market_regime_lines(result),
+            "",
             f"{GREEN_CIRCLE} Valid setups: {counts['valid']}",
             f"{YELLOW_CIRCLE} Near misses: {counts['near_miss']}",
             f"{WHITE_CIRCLE} Hidden rejected/no-setup symbols: {hidden_no_setups}",
@@ -403,7 +405,13 @@ def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int 
             f"{quality.quality_grade.value} {DASH} {quality.quality_score} {DASH} {quality.action_label}"
         )
         historical = _historical_edge_compact(symbol_result)
-        return f"{line} | {historical}" if historical != NA else line
+        regime_warning = _first_regime_warning(symbol_result)
+        parts = [line]
+        if regime_warning != NA:
+            parts.append(f"Regime: {regime_warning}")
+        if historical != NA:
+            parts.append(historical)
+        return " | ".join(parts)
     parts = [
         f"{rank_text}{display.display_status_label.split(' ', 1)[0]} {symbol_result.symbol} {DASH} {status_text}",
         f"Readiness {display.readiness_score}/100 {display.readiness_label}",
@@ -418,6 +426,9 @@ def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int 
     historical = _historical_edge_compact(symbol_result)
     if historical != NA:
         parts.append(historical)
+    regime_warning = _first_regime_warning(symbol_result)
+    if regime_warning != NA:
+        parts.append(f"Regime: {regime_warning}")
     return " | ".join(parts)
 
 
@@ -458,6 +469,7 @@ def format_symbol_card(
         f"{BULLET} 12H Bias: {_title_value(diagnostics.get('mtf_12h_trend'))}",
         f"{BULLET} {_volume_profile_text(symbol_result)}",
         f"{BULLET} {_derivatives_context_text(symbol_result)}",
+        *_symbol_regime_warning_lines(symbol_result),
         "",
         f"{CHECK} Passed",
         *_passed_lines(symbol_result, diagnostics, display),
@@ -1152,6 +1164,7 @@ def _diagnostic_lines(symbol_result: ScannerSymbolResult, diagnostics: Mapping[s
         f"{BULLET} Hard rejections: {_sequence_text(diagnostics.get('hard_rejection_reasons'))}",
         f"{BULLET} Missing data: {_sequence_text(symbol_result.strategy_missing_data or symbol_result.missing_data)}",
         f"{BULLET} Unverified data: {_sequence_text(symbol_result.strategy_unverified_data or symbol_result.unverified_data)}",
+        f"{BULLET} Regime warnings: {_sequence_text(symbol_result.regime_warnings)}",
     ]
 
 
@@ -1565,6 +1578,41 @@ def _funding_status_display(status: str) -> str:
 
 def _optional_data_warning_count(result: ScannerRunResult) -> int:
     return sum(len(symbol_result.derivatives_warnings) for symbol_result in result.results)
+
+
+def _market_regime_lines(result: ScannerRunResult) -> tuple[str, ...]:
+    regime = result.market_regime
+    adjustment = regime.adjustment
+    if not regime.enabled:
+        return ("Market Regime", "Market regime filter disabled")
+    return (
+        "Market Regime",
+        f"State: {regime.state.value}",
+        f"Risk: {regime.risk_level.value}",
+        (
+            "Trade permission: "
+            f"Scalp {_yes_no(adjustment.allow_scalps)} | "
+            f"Swing {_yes_no(adjustment.allow_swings)} | "
+            f"Challenge {_yes_no(adjustment.allow_challenge)}"
+        ),
+        f"Risk multiplier: {_display(adjustment.risk_multiplier)}x",
+        f"Notes: {_display(adjustment.explanation)}",
+    )
+
+
+def _symbol_regime_warning_lines(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    warning = _first_regime_warning(symbol_result)
+    if warning == NA:
+        return ()
+    return (f"{BULLET} Regime: {warning}",)
+
+
+def _first_regime_warning(symbol_result: ScannerSymbolResult) -> str:
+    return symbol_result.regime_warnings[0] if symbol_result.regime_warnings else NA
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
 
 
 def _failed_gate(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
