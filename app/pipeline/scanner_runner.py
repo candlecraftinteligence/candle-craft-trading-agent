@@ -30,6 +30,7 @@ from app.analytics.market_regime import (
     RegimeAdjustment,
     RegimeRiskLevel,
     RegimeState,
+    RegimeStrictness,
     default_market_regime_result,
     disabled_market_regime_result,
     evaluate_market_regime,
@@ -89,6 +90,7 @@ class ScannerPipelineStatus(str, Enum):
     REJECTED_BY_DERIVATIVES = "rejected_by_derivatives"
     REJECTED_BY_RISK = "rejected_by_risk"
     REJECTED_BY_SCORING = "rejected_by_scoring"
+    REJECTED_BY_REGIME = "rejected_by_regime"
     IDEA_CREATED = "idea_created"
     ALERT_DRY_RUN_CREATED = "alert_dry_run_created"
     JOURNAL_ENTRY_CREATED = "journal_entry_created"
@@ -165,6 +167,7 @@ class ScannerRunConfig(BaseModel):
     fast_mode: bool = False
     market_regime_enabled: bool = False
     regime_risk_mode: Literal["conservative", "balanced", "aggressive"] = "balanced"
+    regime_strictness: Literal["low", "normal", "high"] = "normal"
 
     model_config = ConfigDict(frozen=True)
 
@@ -355,6 +358,14 @@ class ScannerSymbolResult(BaseModel):
     near_miss_intelligence: NearMissIntelligence | None = None
     setup_quality: SetupQualityResult = Field(default_factory=default_setup_quality_result)
     regime_warnings: tuple[str, ...] = ()
+    regime_state: str = NA
+    regime_confidence_score: MaybeInt = NA
+    regime_compatibility_score: MaybeInt = NA
+    regime_compatibility_label: str = NA
+    regime_penalty: int = Field(default=0, ge=0, le=100)
+    regime_blocked: bool = False
+    regime_notes: tuple[str, ...] = ()
+    regime_diagnostics: dict[str, Any] = Field(default_factory=dict)
     edge_analytics: dict[str, Any] = Field(default_factory=dict)
     expectancy_metrics: dict[str, Any] = Field(default_factory=dict)
     confidence_label: str = NA
@@ -1821,6 +1832,7 @@ def _rejection_stage_for(status: ScannerPipelineStatus) -> str:
         ScannerPipelineStatus.REJECTED_BY_DERIVATIVES: "derivatives",
         ScannerPipelineStatus.REJECTED_BY_RISK: "risk",
         ScannerPipelineStatus.REJECTED_BY_SCORING: "scoring",
+        ScannerPipelineStatus.REJECTED_BY_REGIME: "regime",
         ScannerPipelineStatus.FAILED: "scanner",
     }
     return stages.get(status, NA)
@@ -2591,7 +2603,14 @@ def _market_regime_for_scan(
             valid_sweep_pct=breadth["valid_sweep_pct"],
             confirmation_pct=breadth["confirmation_pct"],
             failed_confirmation_pct=breadth["failed_confirmation_pct"],
+            htf_agreement_pct=breadth["htf_agreement_pct"],
+            htf_conflict_pct=breadth["htf_conflict_pct"],
+            average_rr=breadth["average_rr"],
+            setup_density_pct=breadth["setup_density_pct"],
+            rejection_clustering_pct=breadth["rejection_clustering_pct"],
+            broad_participation_pct=breadth["broad_participation_pct"],
             risk_mode=config.regime_risk_mode,
+            strictness=_regime_strictness_for_config(config),
             missing_data=_sequence_from_diagnostics(market_regime_context.get("missing_data")),
         )
     )
@@ -2606,9 +2625,17 @@ def _market_regime_breadth(results: Sequence[ScannerSymbolResult]) -> dict[str, 
             "valid_sweep_pct": NA,
             "confirmation_pct": NA,
             "failed_confirmation_pct": NA,
+            "htf_agreement_pct": NA,
+            "htf_conflict_pct": NA,
+            "average_rr": NA,
+            "setup_density_pct": NA,
+            "rejection_clustering_pct": NA,
+            "broad_participation_pct": NA,
         }
 
     bullish = bearish = valid_sweep = confirmed = failed_confirmation = 0
+    htf_agreement = htf_conflict = setup_density = rejection_cluster = 0
+    rr_values: list[Decimal] = []
     for result in completed:
         diagnostics = _symbol_representative_diagnostics(result)
         bias = _symbol_context_bias(result, diagnostics)
@@ -2630,15 +2657,105 @@ def _market_regime_breadth(results: Sequence[ScannerSymbolResult]) -> dict[str, 
             confirmed += 1
         if sweep_passed and not confirmation_passed:
             failed_confirmation += 1
+        if _symbol_htf_agrees_with_bias(diagnostics, bias):
+            htf_agreement += 1
+        elif _symbol_htf_conflicts_with_bias(diagnostics, bias):
+            htf_conflict += 1
+        if result.valid_strategy_modes or _diagnostic_has_setup_progress(result, diagnostics):
+            setup_density += 1
+        if result.rejected_strategy_modes or _diagnostic_has_late_rejection(diagnostics):
+            rejection_cluster += 1
+        rr = _decimal_or_na(diagnostics.get("rr_to_tp2"))
+        if rr != NA:
+            rr_values.append(rr)
 
     total = Decimal(len(completed))
+    participating = max(bullish, bearish)
     return {
         "bullish_bias_pct": _percentage(bullish, total),
         "bearish_bias_pct": _percentage(bearish, total),
         "valid_sweep_pct": _percentage(valid_sweep, total),
         "confirmation_pct": _percentage(confirmed, total),
         "failed_confirmation_pct": _percentage(failed_confirmation, total),
+        "htf_agreement_pct": _percentage(htf_agreement, total),
+        "htf_conflict_pct": _percentage(htf_conflict, total),
+        "average_rr": _average_decimal_or_na(rr_values),
+        "setup_density_pct": _percentage(setup_density, total),
+        "rejection_clustering_pct": _percentage(rejection_cluster, total),
+        "broad_participation_pct": _percentage(participating, total),
     }
+
+
+def _regime_strictness_for_config(config: ScannerRunConfig) -> RegimeStrictness:
+    if config.regime_risk_mode == "conservative":
+        return RegimeStrictness.HIGH
+    if config.regime_risk_mode == "aggressive":
+        return RegimeStrictness.LOW
+    return RegimeStrictness(config.regime_strictness)
+
+
+def _symbol_htf_agrees_with_bias(diagnostics: Mapping[str, Any], bias: str) -> bool:
+    if bias not in ("bullish", "bearish"):
+        return False
+    trends = (
+        _display_decimal_or_text(diagnostics.get("htf_2d_trend")),
+        _display_decimal_or_text(diagnostics.get("mtf_12h_trend")),
+    )
+    evaluated = [trend for trend in trends if trend in ("bullish", "bearish")]
+    return bool(evaluated) and all(trend == bias for trend in evaluated)
+
+
+def _symbol_htf_conflicts_with_bias(diagnostics: Mapping[str, Any], bias: str) -> bool:
+    if bias not in ("bullish", "bearish"):
+        return False
+    opposite = "bearish" if bias == "bullish" else "bullish"
+    trends = (
+        _display_decimal_or_text(diagnostics.get("htf_2d_trend")),
+        _display_decimal_or_text(diagnostics.get("mtf_12h_trend")),
+    )
+    return any(trend == opposite for trend in trends)
+
+
+def _diagnostic_has_setup_progress(result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> bool:
+    if result.trade_idea is not None:
+        return True
+    gates_passed = set(_sequence_from_diagnostics(diagnostics.get("gates_passed")))
+    if {"sweep", "bos_choch"} & gates_passed:
+        return True
+    return _display_decimal_or_text(diagnostics.get("pullback_zone_status")) in ("valid", "passed")
+
+
+def _diagnostic_has_late_rejection(diagnostics: Mapping[str, Any]) -> bool:
+    gate = _display_decimal_or_text(diagnostics.get("first_failed_gate"))
+    gates_failed = set(_sequence_from_diagnostics(diagnostics.get("gates_failed")))
+    late_gates = {
+        "no_ob_or_fvg_zone",
+        "pullback_too_deep",
+        "pullback_beyond_786",
+        "missing_rr",
+        "rr_below_minimum",
+        "trust_meter_below_minimum",
+        "challenge_trust_below_85",
+        "derivatives_conflict",
+        "funding_oi_guard",
+        "regime_compatibility",
+    }
+    return gate in late_gates or bool(gates_failed & late_gates)
+
+
+def _decimal_or_na(value: Any) -> MaybeDecimal:
+    if _display_decimal_or_text(value) == NA:
+        return NA
+    try:
+        return _quantize(_decimal_from(value, "market_regime_breadth"))
+    except ValueError:
+        return NA
+
+
+def _average_decimal_or_na(values: Sequence[Decimal]) -> MaybeDecimal:
+    if not values:
+        return NA
+    return _quantize(sum(values, Decimal("0")) / Decimal(len(values)))
 
 
 def _apply_market_regime_to_results(
@@ -2656,14 +2773,59 @@ def _apply_market_regime_to_symbol(
 ) -> ScannerSymbolResult:
     warnings = _symbol_regime_warnings(result, market_regime)
     setup_quality = _adjust_setup_quality_for_regime(result.setup_quality, result, market_regime)
-    if not warnings and setup_quality == result.setup_quality:
-        return result
-    return result.model_copy(
-        update={
-            "setup_quality": setup_quality,
-            "regime_warnings": warnings,
-        }
+    mode = _symbol_mode_for_regime(result)
+    compatibility = _compatibility_for_mode(market_regime, mode)
+    mode_blocked = (
+        _symbol_has_actionable_setup(result)
+        and mode != NA
+        and compatibility is not None
+        and not compatibility.allowed
     )
+    update: dict[str, Any] = {
+        "setup_quality": setup_quality,
+        "regime_warnings": warnings,
+        "regime_state": market_regime.state.value,
+        "regime_confidence_score": market_regime.confidence_score,
+        "regime_penalty": market_regime.adjustment.regime_penalty,
+        "regime_notes": market_regime.environment_notes,
+        "regime_diagnostics": _regime_diagnostics_payload(market_regime, mode),
+    }
+    if compatibility is not None:
+        update["regime_compatibility_score"] = compatibility.score
+        update["regime_compatibility_label"] = compatibility.label
+    if mode != NA and result.strategy_diagnostics:
+        update["strategy_diagnostics"] = _strategy_diagnostics_with_regime_overlay(result, mode, market_regime, compatibility)
+    if mode_blocked:
+        reason = _regime_block_reason(market_regime, mode, compatibility)
+        update.update(
+            {
+                "status": ScannerPipelineStatus.REJECTED_BY_REGIME,
+                "status_history": (ScannerPipelineStatus.REJECTED_BY_REGIME,),
+                "rejection_reason": reason,
+                "rejection_stage": "regime",
+                "rejection_reasons": _unique_strings((*result.rejection_reasons, reason)),
+                "valid_strategy_modes": (),
+                "rejected_strategy_modes": _unique_strings((*result.rejected_strategy_modes, *result.valid_strategy_modes, mode)),
+                "strategy_diagnostics": _strategy_diagnostics_with_regime_block(result, mode, reason, compatibility),
+                "trade_idea": None,
+                "alert_result": None,
+                "journal_entry": None,
+                "regime_blocked": True,
+            }
+        )
+    if not warnings and setup_quality == result.setup_quality and not mode_blocked:
+        unchanged_keys = {
+            "regime_state",
+            "regime_confidence_score",
+            "regime_penalty",
+            "regime_notes",
+            "regime_diagnostics",
+            "regime_compatibility_score",
+            "regime_compatibility_label",
+        }
+        if all(getattr(result, key) == value for key, value in update.items() if key in unchanged_keys):
+            return result
+    return result.model_copy(update=update)
 
 
 def _symbol_regime_warnings(
@@ -2676,16 +2838,122 @@ def _symbol_regime_warnings(
         return ()
     adjustment = market_regime.adjustment
     mode = _symbol_mode_for_regime(result)
+    compatibility = _compatibility_for_mode(market_regime, mode)
     warnings: list[str] = []
     if market_regime.risk_level in (RegimeRiskLevel.HIGH, RegimeRiskLevel.EXTREME):
         warnings.append(
             f"Market regime {market_regime.state.value} risk {market_regime.risk_level.value}: {adjustment.explanation}"
         )
-    if mode != NA and not _mode_allowed_by_regime(mode, adjustment):
+    if mode != NA and compatibility is not None and not compatibility.allowed:
+        warnings.append(_regime_block_reason(market_regime, mode, compatibility))
+    elif mode != NA and not _mode_allowed_by_regime(mode, adjustment):
         warnings.append(f"Market regime blocks {mode} setups: {adjustment.explanation}")
     elif adjustment.risk_multiplier < Decimal("1"):
         warnings.append(f"Market regime risk multiplier {adjustment.risk_multiplier} applies: {adjustment.explanation}")
     return _unique_strings(warnings)
+
+
+def _compatibility_for_mode(market_regime: MarketRegimeResult, mode: str) -> Any | None:
+    if mode == NA:
+        return None
+    return market_regime.compatibility_scores.get(mode.lower())
+
+
+def _regime_block_reason(market_regime: MarketRegimeResult, mode: str, compatibility: Any | None) -> str:
+    if compatibility is None:
+        return f"Setup rejected by regime weakness: {market_regime.adjustment.explanation}"
+    conflicting = "; ".join(compatibility.notes) if compatibility.notes else market_regime.adjustment.explanation
+    return (
+        f"Setup rejected by regime weakness: penalty {market_regime.adjustment.regime_penalty}; "
+        f"{mode} compatibility {compatibility.label} ({compatibility.score}/100). {conflicting}"
+    )
+
+
+def _regime_diagnostics_payload(market_regime: MarketRegimeResult, mode: str) -> dict[str, Any]:
+    compatibility = _compatibility_for_mode(market_regime, mode)
+    payload: dict[str, Any] = {
+        "state": market_regime.state.value,
+        "confidence_score": market_regime.confidence_score,
+        "confidence_band": market_regime.confidence_band.value,
+        "risk_level": market_regime.risk_level.value,
+        "strictness": market_regime.strictness.value,
+        "regime_penalty": market_regime.adjustment.regime_penalty,
+        "portfolio_confidence_adjustment": market_regime.adjustment.portfolio_confidence_adjustment,
+        "notes": list(market_regime.environment_notes),
+        "boosts": list(market_regime.boosts),
+        "penalties": list(market_regime.penalties),
+    }
+    if compatibility is not None:
+        payload["mode"] = compatibility.mode
+        payload["compatibility"] = compatibility.model_dump(mode="json")
+    return payload
+
+
+def _strategy_diagnostics_with_regime_block(
+    result: ScannerSymbolResult,
+    mode: str,
+    reason: str,
+    compatibility: Any | None,
+) -> dict[str, Any]:
+    diagnostics_by_mode: dict[str, Any] = dict(result.strategy_diagnostics)
+    selected = diagnostics_by_mode.get(mode)
+    if not isinstance(selected, Mapping):
+        selected = _symbol_representative_diagnostics(result)
+    selected_dict = dict(selected) if isinstance(selected, Mapping) else {}
+    gates_failed = _unique_strings((*_sequence_from_diagnostics(selected_dict.get("gates_failed")), "regime_compatibility"))
+    hard_rejections = _unique_strings((*_sequence_from_diagnostics(selected_dict.get("hard_rejection_reasons")), reason))
+    selected_dict.update(
+        {
+            "is_valid": False,
+            "first_failed_gate": "regime_compatibility",
+            "gates_failed": gates_failed,
+            "hard_rejection_reasons": hard_rejections,
+            "regime_compatibility_status": "failed",
+            "regime_compatibility_reason": reason,
+            "regime_compatibility_score": getattr(compatibility, "score", NA),
+            "regime_compatibility_label": getattr(compatibility, "label", NA),
+        }
+    )
+    if mode != NA:
+        diagnostics_by_mode[mode] = selected_dict
+    return diagnostics_by_mode
+
+
+def _strategy_diagnostics_with_regime_overlay(
+    result: ScannerSymbolResult,
+    mode: str,
+    market_regime: MarketRegimeResult,
+    compatibility: Any | None,
+) -> dict[str, Any]:
+    diagnostics_by_mode: dict[str, Any] = dict(result.strategy_diagnostics)
+    selected = diagnostics_by_mode.get(mode)
+    if not isinstance(selected, Mapping):
+        return diagnostics_by_mode
+    selected_dict = dict(selected)
+    trust_percentage = _integer_or_na(selected_dict.get("trust_percentage"))
+    adjusted_trust: Any = NA
+    if trust_percentage != NA:
+        adjusted_trust = max(0, min(100, int(trust_percentage) + market_regime.adjustment.trust_score_adjustment))
+    edge = _display_decimal_or_text(getattr(result.setup_quality, "profitability_edge_score", NA))
+    selected_dict.update(
+        {
+            "regime_state": market_regime.state.value,
+            "regime_confidence_score": market_regime.confidence_score,
+            "regime_confidence_band": market_regime.confidence_band.value,
+            "regime_penalty": market_regime.adjustment.regime_penalty,
+            "regime_readiness_adjustment": market_regime.adjustment.readiness_score_adjustment,
+            "regime_edge_adjustment": market_regime.adjustment.edge_score_adjustment,
+            "regime_trust_adjustment": market_regime.adjustment.trust_score_adjustment,
+            "regime_adjusted_trust_percentage": adjusted_trust,
+            "regime_adjusted_edge_score": edge,
+            "regime_compatibility_status": "passed" if compatibility is None or compatibility.allowed else "failed",
+            "regime_compatibility_score": getattr(compatibility, "score", NA),
+            "regime_compatibility_label": getattr(compatibility, "label", NA),
+            "regime_compatibility_notes": tuple(getattr(compatibility, "notes", ())),
+        }
+    )
+    diagnostics_by_mode[mode] = selected_dict
+    return diagnostics_by_mode
 
 
 def _adjust_setup_quality_for_regime(

@@ -29,6 +29,10 @@ RESEARCH_QUERIES = (
     "replay_expectancy",
     "mode_performance",
     "symbol_detail",
+    "regime_expectancy",
+    "regime_setup_density",
+    "regime_rejection_patterns",
+    "regime_quality_distribution",
 )
 MODES = ("challenge", "swing", "scalp")
 
@@ -201,6 +205,14 @@ def _build_query_report(query: str, data: ResearchData, filters: ResearchFilters
         return _mode_performance_report(data)
     if query == "symbol_detail":
         return _symbol_detail_report(data, filters)
+    if query == "regime_expectancy":
+        return _regime_expectancy_report(data, filters)
+    if query == "regime_setup_density":
+        return _regime_setup_density_report(data, filters)
+    if query == "regime_rejection_patterns":
+        return _regime_rejection_patterns_report(data, filters)
+    if query == "regime_quality_distribution":
+        return _regime_quality_distribution_report(data, filters)
     raise ValueError(f"Unsupported research query: {query}")
 
 
@@ -505,6 +517,129 @@ def _symbol_detail_report(data: ResearchData, filters: ResearchFilters) -> dict[
     }
 
 
+def _regime_expectancy_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = []
+    symbols_by_regime = _group_by(data.symbols, "regime_state")
+    replays_by_regime = _group_by(data.replays, "regime")
+    for regime, symbol_rows in symbols_by_regime.items():
+        replay_stats = _replay_stats(tuple(replays_by_regime.get(regime, ())))
+        confidence_values = _numeric_values(row.get("regime_confidence") for row in symbol_rows)
+        rows.append(
+            {
+                "regime": regime,
+                "average_confidence": _number(_mean(confidence_values)),
+                "symbols_scanned": len(symbol_rows),
+                "valid_setups": _bucket_count(symbol_rows, "valid"),
+                "near_misses": _bucket_count(symbol_rows, "near_miss"),
+                "replay_samples": replay_stats["total_replay_samples"],
+                "expectancy_r": replay_stats["expectancy_r"],
+                "win_rate_pct": replay_stats["win_rate_pct"],
+                "tp1_rate_pct": replay_stats["tp1_rate_pct"],
+                "tp2_rate_pct": replay_stats["tp2_rate_pct"],
+            }
+        )
+    rows.sort(
+        key=lambda item: (
+            _sort_number(item["expectancy_r"]),
+            item["valid_setups"],
+            _sort_number(item["average_confidence"]),
+        ),
+        reverse=True,
+    )
+    return {
+        "query": "regime_expectancy",
+        "filters": filters.to_json(),
+        "regimes": rows[: filters.normalized_limit],
+        "warnings": _replay_sample_warnings(data.replays),
+    }
+
+
+def _regime_setup_density_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = []
+    setup_counts: dict[str, int] = defaultdict(int)
+    for setup in data.setups:
+        setup_counts[_display(setup.get("regime"))] += 1
+    for regime, symbol_rows in _group_by(data.symbols, "regime_state").items():
+        valid = _bucket_count(symbol_rows, "valid")
+        near = _bucket_count(symbol_rows, "near_miss")
+        rows.append(
+            {
+                "regime": regime,
+                "symbols_scanned": len(symbol_rows),
+                "setup_candidates": setup_counts.get(regime, 0),
+                "valid_setups": valid,
+                "near_misses": near,
+                "rejected": _bucket_count(symbol_rows, "no_setup"),
+                "data_issues": _bucket_count(symbol_rows, "data_issue"),
+                "setup_density_pct": _rate(valid + near, len(symbol_rows)),
+                "valid_density_pct": _rate(valid, len(symbol_rows)),
+            }
+        )
+    rows.sort(key=lambda item: (_sort_number(item["setup_density_pct"]), item["setup_candidates"]), reverse=True)
+    return {
+        "query": "regime_setup_density",
+        "filters": filters.to_json(),
+        "regimes": rows[: filters.normalized_limit],
+        "warnings": [],
+    }
+
+
+def _regime_rejection_patterns_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = []
+    for regime, symbol_rows in _group_by(data.symbols, "regime_state").items():
+        rejected_rows = tuple(row for row in symbol_rows if row["display_bucket"] in {"near_miss", "no_setup", "data_issue"})
+        gates = []
+        for gate, gate_rows in _group_by(rejected_rows, "failed_gate").items():
+            gates.append(
+                {
+                    "failed_gate": gate,
+                    "count": len(gate_rows),
+                    "percentage": _rate(len(gate_rows), len(rejected_rows)),
+                    "affected_symbols": sorted({row["symbol"] for row in gate_rows}),
+                    "possible_interpretation": _gate_interpretation(gate),
+                }
+            )
+        gates.sort(key=lambda item: (item["count"], item["failed_gate"]), reverse=True)
+        rows.append(
+            {
+                "regime": regime,
+                "total_rejections": len(rejected_rows),
+                "most_common_failed_gate": gates[0]["failed_gate"] if gates else NA,
+                "patterns": gates[: filters.normalized_limit],
+            }
+        )
+    rows.sort(key=lambda item: item["total_rejections"], reverse=True)
+    return {
+        "query": "regime_rejection_patterns",
+        "filters": filters.to_json(),
+        "regimes": rows[: filters.normalized_limit],
+        "warnings": [],
+    }
+
+
+def _regime_quality_distribution_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = []
+    for regime, symbol_rows in _group_by(data.symbols, "regime_state").items():
+        rows.append(
+            {
+                "regime": regime,
+                "symbols_scanned": len(symbol_rows),
+                "average_quality_score": _number(_mean(_numeric_values(row.get("setup_quality_score") for row in symbol_rows))),
+                "average_readiness_score": _number(_mean(_numeric_values(row.get("readiness_score") for row in symbol_rows))),
+                "quality_grades": _conversion_groups(symbol_rows, "quality_grade"),
+                "quality_states": _conversion_groups(symbol_rows, "quality_state"),
+                "compatibility_labels": _conversion_groups(symbol_rows, "regime_compatibility_label"),
+            }
+        )
+    rows.sort(key=lambda item: (_sort_number(item["average_quality_score"]), item["symbols_scanned"]), reverse=True)
+    return {
+        "query": "regime_quality_distribution",
+        "filters": filters.to_json(),
+        "regimes": rows[: filters.normalized_limit],
+        "warnings": [],
+    }
+
+
 def _symbol_metrics(symbol: str, rows: Sequence[Mapping[str, Any]], replays: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     symbol_replays = tuple(row for row in replays if row["symbol"] == symbol)
     replay_stats = _replay_stats(symbol_replays)
@@ -611,6 +746,10 @@ def _normalize_symbol_row(row: sqlite3.Row) -> dict[str, Any]:
             "symbol": _display(data.get("symbol")).upper(),
             "display_bucket": _display(data.get("display_bucket")),
             "regime_state": _first_non_na(data.get("regime_state"), data.get("run_market_regime")),
+            "regime_confidence": _display(data.get("regime_confidence")),
+            "regime_compatibility_score": _display(data.get("regime_compatibility_score")),
+            "regime_compatibility_label": _display(data.get("regime_compatibility_label")),
+            "regime_penalty": _display(data.get("regime_penalty")),
             "failed_gate": failed_gate,
             "rejection_reason": _display(data.get("rejection_reason")),
             "next_trigger_needed": next_trigger,
@@ -706,6 +845,8 @@ def _gate_interpretation(gate: str) -> str:
         return "Final confluence is below the required quality threshold."
     if gate in {"derivatives_conflict", "funding_oi_guard"}:
         return "Public derivatives context is conflicting with the idea."
+    if gate == "regime_compatibility":
+        return "The setup passed local structure but the broader regime was too weak for the selected mode."
     if gate in {"no_execution_candles", "not_enough_candles", "atr_unavailable", "scanner_error", "current_price"}:
         return "Required public data is incomplete; treat conclusions as unreliable."
     return "Review this gate in raw scanner diagnostics before drawing a conclusion."

@@ -29,6 +29,14 @@ def format_research_report(report: Mapping[str, Any]) -> str:
         return _format_mode_performance(report)
     if query == "symbol_detail":
         return _format_symbol_detail(report)
+    if query == "regime_expectancy":
+        return _format_regime_expectancy(report)
+    if query == "regime_setup_density":
+        return _format_regime_setup_density(report)
+    if query == "regime_rejection_patterns":
+        return _format_regime_rejection_patterns(report)
+    if query == "regime_quality_distribution":
+        return _format_regime_quality_distribution(report)
     return "\n".join(("Candle Craft Research", f"Unsupported report: {query}"))
 
 
@@ -284,6 +292,86 @@ def _format_symbol_detail(report: Mapping[str, Any]) -> str:
     )
 
 
+def _format_regime_expectancy(report: Mapping[str, Any]) -> str:
+    rows = [
+        (
+            row.get("regime"),
+            row.get("average_confidence"),
+            row.get("symbols_scanned"),
+            row.get("valid_setups"),
+            row.get("replay_samples"),
+            _r_value(row.get("expectancy_r")),
+            _pct_value(row.get("win_rate_pct")),
+            _pct_value(row.get("tp1_rate_pct")),
+            _pct_value(row.get("tp2_rate_pct")),
+        )
+        for row in _sequence(report.get("regimes"))
+    ]
+    return _join_sections(
+        "Regime Expectancy",
+        _table(("regime", "conf", "symbols", "valid", "samples", "expectancy", "win", "TP1", "TP2"), rows),
+        _warning_block(report),
+    )
+
+
+def _format_regime_setup_density(report: Mapping[str, Any]) -> str:
+    rows = [
+        (
+            row.get("regime"),
+            row.get("symbols_scanned"),
+            row.get("setup_candidates"),
+            row.get("valid_setups"),
+            row.get("near_misses"),
+            row.get("rejected"),
+            _pct_value(row.get("setup_density_pct")),
+            _pct_value(row.get("valid_density_pct")),
+        )
+        for row in _sequence(report.get("regimes"))
+    ]
+    return _join_sections(
+        "Regime Setup Density",
+        _table(("regime", "symbols", "candidates", "valid", "near", "rejected", "setup_density", "valid_density"), rows),
+        _warning_block(report),
+    )
+
+
+def _format_regime_rejection_patterns(report: Mapping[str, Any]) -> str:
+    lines = ["Regime Rejection Patterns"]
+    for regime in _sequence(report.get("regimes")):
+        lines.append(f"{_display(regime.get('regime'))}: {_display(regime.get('total_rejections'))} rejections")
+        pattern_rows = [
+            (
+                row.get("failed_gate"),
+                row.get("count"),
+                _pct_value(row.get("percentage")),
+                ", ".join(str(symbol) for symbol in _sequence(row.get("affected_symbols"))),
+            )
+            for row in _sequence(regime.get("patterns"))
+        ]
+        lines.append(_table(("failed_gate", "count", "pct", "symbols"), pattern_rows))
+    return _join_sections("\n\n".join(lines), _warning_block(report))
+
+
+def _format_regime_quality_distribution(report: Mapping[str, Any]) -> str:
+    rows = [
+        (
+            row.get("regime"),
+            row.get("symbols_scanned"),
+            row.get("average_quality_score"),
+            row.get("average_readiness_score"),
+            _top_group(row.get("quality_grades"), "quality_grade"),
+            _top_group(row.get("quality_states"), "quality_state"),
+            _top_group(row.get("compatibility_labels"), "regime_compatibility_label"),
+        )
+        for row in _sequence(report.get("regimes"))
+    ]
+    return _join_sections(
+        "Regime Quality Distribution",
+        _table(("regime", "symbols", "avg_quality", "avg_ready", "top_grade", "top_state", "top_compat"), rows),
+        _warning_block(report),
+    )
+
+
 def _warning_block(report: Mapping[str, Any]) -> str:
     warnings = [str(warning) for warning in _sequence(report.get("warnings"))]
     if not warnings:
@@ -322,6 +410,16 @@ def _table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> str:
 
 def _join_sections(*sections: str) -> str:
     return "\n\n".join(section for section in sections if section)
+
+
+def _top_group(value: Any, key: str) -> str:
+    groups = _sequence(value)
+    if not groups:
+        return NA
+    first = groups[0]
+    if not isinstance(first, Mapping):
+        return NA
+    return f"{_display(first.get(key))} ({_display(first.get('count'))})"
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

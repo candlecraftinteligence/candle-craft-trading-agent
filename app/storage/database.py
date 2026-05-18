@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StorageError(RuntimeError):
@@ -39,6 +39,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 strategy TEXT NOT NULL,
                 timeframes_json TEXT NOT NULL,
                 market_regime TEXT NOT NULL,
+                regime_confidence INTEGER NOT NULL DEFAULT 0,
+                regime_compatibility_json TEXT NOT NULL DEFAULT '{}',
+                environment_notes_json TEXT NOT NULL DEFAULT '[]',
                 runtime_stats_json TEXT NOT NULL,
                 command_preset TEXT NOT NULL,
                 command_used TEXT NOT NULL,
@@ -64,6 +67,11 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 next_trigger_needed TEXT NOT NULL,
                 action_label TEXT NOT NULL,
                 regime_state TEXT NOT NULL,
+                regime_confidence TEXT NOT NULL DEFAULT 'N/A',
+                regime_compatibility_score TEXT NOT NULL DEFAULT 'N/A',
+                regime_compatibility_label TEXT NOT NULL DEFAULT 'N/A',
+                regime_penalty INTEGER NOT NULL DEFAULT 0,
+                environment_notes_json TEXT NOT NULL DEFAULT '[]',
                 derivatives_context_json TEXT NOT NULL,
                 volume_profile_context_json TEXT NOT NULL,
                 pullback_status TEXT NOT NULL,
@@ -113,6 +121,14 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS ix_scan_runs_timestamp ON scan_runs(timestamp);
             """
         )
+        _ensure_column(connection, "scan_runs", "regime_confidence", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "regime_compatibility_json", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(connection, "scan_runs", "environment_notes_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "symbol_results", "regime_confidence", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "symbol_results", "regime_compatibility_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "symbol_results", "regime_compatibility_label", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "symbol_results", "regime_penalty", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "symbol_results", "environment_notes_json", "TEXT NOT NULL DEFAULT '[]'")
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
@@ -127,3 +143,12 @@ def open_initialized_database(path: Path | str = DEFAULT_DATABASE_PATH) -> sqlit
     except Exception:
         connection.close()
         raise
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {
+        row[1]
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

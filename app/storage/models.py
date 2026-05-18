@@ -15,6 +15,9 @@ class ScanRunRecord:
     strategy: str
     timeframes_json: str
     market_regime: str
+    regime_confidence: int
+    regime_compatibility_json: str
+    environment_notes_json: str
     runtime_stats_json: str
     command_preset: str
     command_used: str
@@ -40,6 +43,11 @@ class SymbolResultRecord:
     next_trigger_needed: str
     action_label: str
     regime_state: str
+    regime_confidence: str
+    regime_compatibility_score: str
+    regime_compatibility_label: str
+    regime_penalty: int
+    environment_notes_json: str
     derivatives_context_json: str
     volume_profile_context_json: str
     pullback_status: str
@@ -94,6 +102,7 @@ class ScanHistorySummary:
     data_issues: int
     market_regime: str
     runtime_seconds: str
+    regime_confidence: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -106,5 +115,6 @@ class ScanHistorySummary:
             "rejected": self.rejected,
             "data_issues": self.data_issues,
             "regime": self.market_regime,
+            "regime_confidence": self.regime_confidence,
             "runtime": self.runtime_seconds,
         }

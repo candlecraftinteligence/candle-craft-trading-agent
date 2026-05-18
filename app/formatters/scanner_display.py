@@ -81,6 +81,7 @@ FINAL_CONFLUENCE_FAIL_GATES = {
     "event_guard",
     "derivatives_conflict",
     "funding_oi_guard",
+    "regime_compatibility",
 }
 HOT_WATCH_GATES = (
     RR_FAIL_GATES
@@ -640,6 +641,8 @@ def _display_bucket(display_status: DisplayStatus) -> DisplayBucket:
 
 
 def _trade_idea_created(symbol_result: ScannerSymbolResult) -> bool:
+    if symbol_result.regime_blocked:
+        return False
     return (
         symbol_result.trade_idea is not None
         or ScannerPipelineStatus.IDEA_CREATED in symbol_result.status_history
@@ -744,6 +747,7 @@ def _short_reason(
             return reason
 
     for key in (
+        "regime_compatibility_reason",
         "pullback_failure_reason",
         "derivatives_conflict_reason",
         "confirmation_bos_choch_reason",
@@ -892,6 +896,10 @@ def _readiness_score(
     if _critical_data_issue(symbol_result, diagnostics, failed_gate):
         score = min(score, Decimal("30"))
     if _severe_derivatives_conflict(symbol_result, diagnostics, failed_gate):
+        score = min(score, Decimal("55"))
+    if symbol_result.regime_penalty:
+        score -= Decimal(min(25, symbol_result.regime_penalty))
+    if symbol_result.regime_blocked:
         score = min(score, Decimal("55"))
 
     return _bounded_int(score)
@@ -1665,7 +1673,11 @@ def _market_regime_lines(result: ScannerRunResult) -> tuple[str, ...]:
     return (
         "Market Regime",
         f"State: {regime.state.value}",
+        f"Confidence: {regime.confidence_score}",
         f"Risk: {regime.risk_level.value}",
+        f"Challenge compatibility: {_compatibility_text(regime, 'challenge')}",
+        f"Swing compatibility: {_compatibility_text(regime, 'swing')}",
+        f"Scalp compatibility: {_compatibility_text(regime, 'scalp')}",
         (
             "Trade permission: "
             f"Scalp {_yes_no(adjustment.allow_scalps)} | "
@@ -1673,7 +1685,7 @@ def _market_regime_lines(result: ScannerRunResult) -> tuple[str, ...]:
             f"Challenge {_yes_no(adjustment.allow_challenge)}"
         ),
         f"Risk multiplier: {_display(adjustment.risk_multiplier)}x",
-        f"Notes: {_display(adjustment.explanation)}",
+        f"Notes: {_notes_text((*regime.environment_notes, adjustment.explanation))}",
     )
 
 
@@ -1690,6 +1702,22 @@ def _first_regime_warning(symbol_result: ScannerSymbolResult) -> str:
 
 def _yes_no(value: bool) -> str:
     return "yes" if value else "no"
+
+
+def _compatibility_text(regime: Any, mode: str) -> str:
+    item = regime.compatibility_scores.get(mode)
+    if item is None:
+        return NA
+    return f"{item.label} ({item.score})"
+
+
+def _notes_text(values: Sequence[str]) -> str:
+    notes = []
+    for value in values:
+        text = _display(value)
+        if text != NA and text not in notes:
+            notes.append(text)
+    return "; ".join(notes) if notes else NA
 
 
 def _failed_gate(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:

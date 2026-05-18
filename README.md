@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, and Phase 34 research analytics queries.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, and Phase 35 regime intelligence and environment filtering.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -103,7 +103,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, and the Phase 34 research query layer. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, and the Phase 35 regime intelligence layer. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -1133,6 +1133,82 @@ Safety boundaries:
 - Missing regime inputs are marked `N/A`; unreliable data must be marked `Unverified`.
 - It does not add order execution, private exchange API access, account endpoints, withdrawals, transfers, or live Telegram sending.
 
+## Phase 35 Regime Intelligence & Environment Filtering
+
+Phase 35 moves the richer regime logic into `app/regime/`:
+
+- `app/regime/models.py`: structured regime inputs, states, compatibility, confidence, and adjustment models.
+- `app/regime/scoring.py`: weighted confidence, compatibility, penalties, boosts, and strictness scoring.
+- `app/regime/classifier.py`: deterministic public-data classifier for BTC/ETH structure, volatility, breadth, sweep follow-through, HTF agreement/conflict, RR quality, setup density, and rejection clustering.
+
+Supported regime states:
+
+```text
+TREND_EXPANSION
+TREND_PULLBACK
+RANGE_COMPRESSION
+HIGH_VOLATILITY
+LOW_VOLATILITY
+CHOP
+RISK_OFF
+RISK_ON
+MIXED
+TRANSITION
+```
+
+Confidence score:
+
+- `0-30`: hostile
+- `31-50`: weak
+- `51-70`: acceptable
+- `71-85`: favorable
+- `86-100`: exceptional
+
+Compatibility logic:
+
+- The scanner calculates separate `challenge`, `swing`, and `scalp` compatibility scores.
+- Each mode score combines regime compatibility, volatility suitability, trend suitability, execution-quality suitability, and the scan-level confidence score.
+- Weighted notes explain penalties and boosts such as HTF alignment, mixed direction, unstable volatility, broad participation, RR expansion, weak follow-through, and rejection clustering.
+- A weak environment can downgrade readiness, edge, trust diagnostics, and portfolio preference. It can also turn an otherwise valid setup into a watchlist-only `rejected_by_regime` result when the selected mode is incompatible.
+- Regime never creates a setup and never makes an invalid setup valid.
+
+Strictness:
+
+- `--regime-strictness low`: allows more borderline environments and applies smaller hostile-regime penalties.
+- `--regime-strictness normal`: default balanced behavior.
+- `--regime-strictness high`: applies stronger hostile-regime penalties and tighter mode acceptance.
+- `--regime-risk-mode conservative|balanced|aggressive` remains supported as a backward-compatible alias for high/normal/low strictness.
+
+CLI:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --command-preset daily --market-regime --regime-strictness high --show-regime-details
+```
+
+Stored scan history now includes regime confidence, compatibility scores, and environment notes. Phase 35 also adds research queries:
+
+```text
+regime_expectancy
+regime_setup_density
+regime_rejection_patterns
+regime_quality_distribution
+```
+
+Examples:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query regime_expectancy --database-path scan_runs/candle_craft.db
+
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query regime_rejection_patterns --research-regime CHOP --database-path scan_runs/candle_craft.db
+```
+
+Safety limitations:
+
+- Phase 35 uses already-available public data and scan-derived statistics only.
+- BTC.D, USDT.D, breadth, TOTAL/TOTAL2, RR quality, setup density, and rejection clustering remain `N/A` unless actually available.
+- Missing or weak context stays cautious/neutral. The classifier does not fabricate regime labels from unavailable inputs.
+- It does not add order execution, private API access, withdrawals, transfers, or live Telegram sending by default.
+
 ## Phase 32 Performance Memory Layer
 
 Phase 32 adds `app/analytics/performance_memory.py`, a deterministic local evidence layer that stores historical setup performance from real replay/backtest outcomes. It is not AI prediction, not black-box machine learning, and not trade execution. The scanner remains rule-based and auditable.
@@ -1242,7 +1318,7 @@ Export recent history:
 .\.venv\Scripts\python.exe scripts\run_scan.py --export-history-json scan_runs/history.json --history-limit 50
 ```
 
-Stored scan runs include exchange, universe, symbols scanned, strategy, timeframes, market regime, runtime stats, command/preset, valid setup count, near misses, rejected symbols, and data issues. Symbol records include display bucket, readiness score, setup quality score, edge score, failed gate, rejection reason, next trigger, action label, regime state, derivatives context, volume profile context, pullback status, and portfolio decision. Valid setups and replay outcomes are stored in separate tables for later analysis.
+Stored scan runs include exchange, universe, symbols scanned, strategy, timeframes, market regime, regime confidence, compatibility scores, environment notes, runtime stats, command/preset, valid setup count, near misses, rejected symbols, and data issues. Symbol records include display bucket, readiness score, setup quality score, edge score, failed gate, rejection reason, next trigger, action label, regime state, regime compatibility, regime penalty, derivatives context, volume profile context, pullback status, and portfolio decision. Valid setups and replay outcomes are stored in separate tables for later analysis.
 
 Safety boundaries:
 
@@ -1275,6 +1351,10 @@ near_misses
 replay_expectancy
 mode_performance
 symbol_detail
+regime_expectancy
+regime_setup_density
+regime_rejection_patterns
+regime_quality_distribution
 ```
 
 Examples:
@@ -1340,3 +1420,4 @@ Safety boundaries:
 - The Phase 32 performance memory layer is local historical evidence only. It does not predict, fabricate statistics, weaken gates, create valid setups from invalid setups, place orders, call private exchange APIs, send live Telegram messages by default, withdraw funds, or transfer funds.
 - The Phase 33 scan history database is local persistence only. It does not change strategy gates, place orders, call private exchange APIs, send live Telegram messages by default, invent unavailable market data, withdraw funds, or transfer funds.
 - The Phase 34 research query layer is read-only analytics only. It does not change strategy gates, place orders, call private exchange APIs, send live Telegram messages by default, invent unavailable market data, withdraw funds, or transfer funds.
+- The Phase 35 regime intelligence layer is an environment filter only. It can reject or downgrade weak environments, but it cannot create setups, bypass strategy gates, invent unavailable regime inputs, place orders, call private APIs, send live Telegram messages by default, withdraw funds, or transfer funds.

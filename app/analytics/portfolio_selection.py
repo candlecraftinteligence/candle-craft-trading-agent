@@ -81,6 +81,8 @@ class PortfolioCandidate(BaseModel):
     derivatives_clean: bool | Literal["N/A"] = NA
     memory_confidence: str = NA
     memory_preference_adjustment: int = Field(default=0, ge=-5, le=5)
+    regime_compatibility_score: int = Field(default=50, ge=0, le=100)
+    regime_confidence_adjustment: int = Field(default=0, ge=-20, le=10)
     valid_trade: bool = False
     near_miss: bool = False
     data_incomplete: bool = False
@@ -420,6 +422,15 @@ def _candidate_from_symbol_result(symbol_result: Any, *, default_risk_pct: Maybe
         derivatives_clean=_derivatives_clean(symbol_result, diagnostics),
         memory_confidence=_memory_confidence(symbol_result),
         memory_preference_adjustment=_memory_preference_adjustment(symbol_result),
+        regime_compatibility_score=_int_score(getattr(symbol_result, "regime_compatibility_score", 50), default=50),
+        regime_confidence_adjustment=_int_score(
+            getattr(symbol_result, "regime_diagnostics", {}).get("portfolio_confidence_adjustment")
+            if isinstance(getattr(symbol_result, "regime_diagnostics", {}), Mapping)
+            else getattr(symbol_result, "regime_penalty", 0),
+            default=0,
+            lower=-20,
+            upper=10,
+        ),
         valid_trade=valid_trade,
         near_miss=near_miss,
         data_incomplete=data_incomplete,
@@ -453,6 +464,8 @@ def _candidate_sort_key(candidate: PortfolioCandidate) -> tuple[Any, ...]:
         -candidate.quality_score,
         -_ranking_edge(candidate),
         -candidate.memory_preference_adjustment,
+        -candidate.regime_confidence_adjustment,
+        -candidate.regime_compatibility_score,
         -_decimal_score(candidate.rr),
         -candidate.tradeability_score,
         -_derivatives_cleanliness_score(candidate),
@@ -466,6 +479,8 @@ def _quality_tuple(candidate: PortfolioCandidate) -> tuple[Any, ...]:
         candidate.quality_score,
         _ranking_edge(candidate),
         candidate.memory_preference_adjustment,
+        candidate.regime_confidence_adjustment,
+        candidate.regime_compatibility_score,
         _decimal_score(candidate.rr),
         candidate.tradeability_score,
         _derivatives_cleanliness_score(candidate),
@@ -544,28 +559,35 @@ def _apply_regime_to_candidate(candidate: PortfolioCandidate, adjustment: Any | 
     if adjustment is None:
         return candidate
     warnings = list(candidate.regime_warnings)
+    updates: dict[str, Any] = {
+        "regime_confidence_adjustment": int(getattr(adjustment, "portfolio_confidence_adjustment", 0) or 0),
+    }
     mode_allowed = _mode_allowed_by_regime(candidate.mode, adjustment)
     if candidate.valid_trade and not mode_allowed:
         warnings.append(f"Market regime blocks {candidate.mode} setups: {_display(getattr(adjustment, 'explanation', NA))}")
-        return candidate.model_copy(
-            update={
+        updates.update(
+            {
                 "valid_trade": False,
                 "near_miss": True,
                 "regime_blocked": True,
                 "regime_warnings": _unique_strings(warnings),
             }
         )
+        return candidate.model_copy(update=updates)
     risk_multiplier = _regime_risk_multiplier(adjustment)
     if candidate.valid_trade and risk_multiplier < Decimal("1"):
         warnings.append(
             f"Market regime risk multiplier {risk_multiplier} applies: {_display(getattr(adjustment, 'explanation', NA))}"
         )
-        return candidate.model_copy(
-            update={
+        updates.update(
+            {
                 "risk_pct": _quantize(candidate.risk_pct * risk_multiplier),
                 "regime_warnings": _unique_strings(warnings),
             }
         )
+        return candidate.model_copy(update=updates)
+    if updates["regime_confidence_adjustment"] != 0:
+        return candidate.model_copy(update=updates)
     return candidate
 
 
@@ -852,14 +874,14 @@ def _decimal_score(value: Any) -> Decimal:
     return Decimal("0") if decimal == NA else decimal
 
 
-def _int_score(value: Any, *, default: int = 0) -> int:
+def _int_score(value: Any, *, default: int = 0, lower: int = 0, upper: int = 100) -> int:
     if _is_missing(value):
         return default
     try:
         decimal = _decimal_from(value, "portfolio score")
     except ValueError:
         return default
-    return int(min(Decimal("100"), max(Decimal("0"), decimal)).to_integral_value(rounding="ROUND_HALF_UP"))
+    return int(min(Decimal(upper), max(Decimal(lower), decimal)).to_integral_value(rounding="ROUND_HALF_UP"))
 
 
 def _attr(source: Any, name: str | None = None) -> Any:

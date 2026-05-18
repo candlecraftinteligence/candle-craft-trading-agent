@@ -329,6 +329,8 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--market-regime": "market_regime",
         "--disable-regime-filter": "market_regime",
         "--regime-risk-mode": "regime_risk_mode",
+        "--regime-strictness": "regime_strictness",
+        "--show-regime-details": "show_regime_details",
         "--performance-memory": "performance_memory",
         "--disable-performance-memory": "performance_memory",
         "--reset-performance-memory": "reset_performance_memory",
@@ -424,6 +426,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--market-regime", dest="market_regime", action="store_true", default=True)
     parser.add_argument("--disable-regime-filter", dest="market_regime", action="store_false")
     parser.add_argument("--regime-risk-mode", choices=["conservative", "balanced", "aggressive"], default="balanced")
+    parser.add_argument("--regime-strictness", choices=["low", "normal", "high"], default="normal")
+    parser.add_argument("--show-regime-details", action="store_true")
     parser.add_argument("--performance-memory", dest="performance_memory", action="store_true", default=None)
     parser.add_argument("--disable-performance-memory", dest="performance_memory", action="store_false")
     parser.add_argument("--reset-performance-memory", action="store_true")
@@ -598,6 +602,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         fast_mode=args.fast,
         market_regime_enabled=args.market_regime,
         regime_risk_mode=args.regime_risk_mode,
+        regime_strictness=args.regime_strictness,
     )
 
     if args.watch:
@@ -840,6 +845,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
         print("")
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
+    if args.show_regime_details:
+        print("")
+        print(_format_regime_details(result))
     print("")
     print(
         format_command_center_summary(
@@ -2258,6 +2266,35 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
             _format_strategy_diagnostics(symbol_result),
         )
     )
+
+
+def _format_regime_details(result: ScannerRunResult) -> str:
+    regime = result.market_regime
+    lines = [
+        "Market Regime Details",
+        f"State: {_display(regime.state.value)}",
+        f"Confidence: {_display(regime.confidence_score)}",
+        f"Band: {_display(regime.confidence_band.value)}",
+        f"Risk: {_display(regime.risk_level.value)}",
+        f"Strictness: {_display(regime.strictness.value)}",
+        f"Notes: {_sequence_text(regime.environment_notes)}",
+        f"Boosts: {_sequence_text(regime.boosts)}",
+        f"Penalties: {_sequence_text(regime.penalties)}",
+    ]
+    for mode in ("challenge", "swing", "scalp"):
+        compatibility = regime.compatibility_scores.get(mode)
+        if compatibility is None:
+            continue
+        lines.append(
+            (
+                f"{mode}: {compatibility.label} {compatibility.score}/100 "
+                f"vol={compatibility.volatility_suitability} "
+                f"trend={compatibility.trend_suitability} "
+                f"execution={compatibility.execution_quality_suitability} "
+                f"allowed={_bool_text(compatibility.allowed)}"
+            )
+        )
+    return "\n".join(lines)
 
 
 def _format_run_diagnostics(result: ScannerRunResult) -> str:

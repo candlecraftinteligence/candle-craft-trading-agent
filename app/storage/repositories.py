@@ -98,7 +98,7 @@ def list_scan_history(
             rows = connection.execute(
                 """
                 SELECT run_id, timestamp, universe, symbols_scanned, total_valid_setups,
-                       near_misses, rejected, data_issues, market_regime, runtime_stats_json
+                       near_misses, rejected, data_issues, market_regime, regime_confidence, runtime_stats_json
                 FROM scan_runs
                 ORDER BY timestamp DESC
                 LIMIT ?
@@ -186,6 +186,11 @@ def _scan_run_record(
             }
         ),
         market_regime=_display(result.market_regime.state.value),
+        regime_confidence=int(result.market_regime.confidence_score),
+        regime_compatibility_json=_json_dump(
+            {mode: item.model_dump(mode="json") for mode, item in result.market_regime.compatibility_scores.items()}
+        ),
+        environment_notes_json=_json_dump(result.market_regime.environment_notes),
         runtime_stats_json=_json_dump(result.runtime_stats.model_dump(mode="json")),
         command_preset=_display(command_preset),
         command_used=_display(command_used),
@@ -259,6 +264,11 @@ def _symbol_result_record(
         next_trigger_needed=_display(fields.get("next_trigger_needed")),
         action_label=_display(fields.get("action_label")),
         regime_state=_display(result.market_regime.state.value),
+        regime_confidence=_display(result.market_regime.confidence_score),
+        regime_compatibility_score=_display(symbol_result.regime_compatibility_score),
+        regime_compatibility_label=_display(symbol_result.regime_compatibility_label),
+        regime_penalty=int(symbol_result.regime_penalty),
+        environment_notes_json=_json_dump(symbol_result.regime_notes or result.market_regime.environment_notes),
         derivatives_context_json=_json_dump(
             {
                 "funding_rate": _display(symbol_result.funding_rate),
@@ -354,10 +364,11 @@ def _insert_scan_run(connection: sqlite3.Connection, record: ScanRunRecord) -> N
         """
         INSERT INTO scan_runs (
             run_id, timestamp, exchange, universe, symbols_scanned, symbols_json,
-            strategy, timeframes_json, market_regime, runtime_stats_json,
+            strategy, timeframes_json, market_regime, regime_confidence,
+            regime_compatibility_json, environment_notes_json, runtime_stats_json,
             command_preset, command_used, total_valid_setups, near_misses, rejected,
             data_issues, data_issues_json, raw_payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         astuple(record),
     )
@@ -369,9 +380,10 @@ def _insert_symbol_results(connection: sqlite3.Connection, records: Sequence[Sym
         INSERT INTO symbol_results (
             run_id, symbol, status, display_bucket, readiness_score, setup_quality_score,
             edge_score, failed_gate, rejection_reason, next_trigger_needed, action_label,
-            regime_state, derivatives_context_json, volume_profile_context_json,
+            regime_state, regime_confidence, regime_compatibility_score, regime_compatibility_label,
+            regime_penalty, environment_notes_json, derivatives_context_json, volume_profile_context_json,
             pullback_status, portfolio_decision, raw_result_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [astuple(record) for record in records],
     )
@@ -413,6 +425,7 @@ def _history_summary_from_row(row: sqlite3.Row) -> ScanHistorySummary:
         rejected=int(row["rejected"]),
         data_issues=int(row["data_issues"]),
         market_regime=row["market_regime"],
+        regime_confidence=int(row["regime_confidence"] or 0),
         runtime_seconds=_runtime_text(runtime_stats),
     )
 
