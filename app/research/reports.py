@@ -74,6 +74,8 @@ def format_research_report(report: Mapping[str, Any]) -> str:
         return _format_pullback_depth_analysis(report)
     if query == "pullback_lifecycle_dropoffs":
         return _format_pullback_lifecycle_dropoffs(report)
+    if query in {"symbol_health", "slow_symbols", "timeout_symbols", "priority_symbols"}:
+        return _format_symbol_health(report)
     return "\n".join(("Candle Craft Research", f"Unsupported report: {query}"))
 
 
@@ -124,6 +126,41 @@ def _format_symbols(report: Mapping[str, Any]) -> str:
                 "expectancy",
                 "near_quality",
                 "data_ok",
+            ),
+            rows,
+        ),
+        _warning_block(report),
+    )
+
+
+def _format_symbol_health(report: Mapping[str, Any]) -> str:
+    rows = [
+        (
+            row.get("symbol"),
+            row.get("current_health_score"),
+            row.get("successful_scans"),
+            row.get("timeout_count"),
+            row.get("timeout_strikes"),
+            row.get("data_issue_count"),
+            row.get("average_runtime_sec"),
+            row.get("last_priority_rank"),
+            row.get("cooldown_until"),
+        )
+        for row in _sequence(report.get("symbols"))
+    ]
+    return _join_sections(
+        str(report.get("title", "Symbol Health")),
+        _table(
+            (
+                "symbol",
+                "health",
+                "success",
+                "timeouts",
+                "strikes",
+                "data",
+                "avg_sec",
+                "rank",
+                "cooldown_until",
             ),
             rows,
         ),

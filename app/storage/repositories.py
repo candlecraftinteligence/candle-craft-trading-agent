@@ -15,6 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from app.analytics.portfolio_selection import PortfolioSelectionResult
+from app.analytics.symbol_health import update_symbol_health_records
 from app.backtesting import ReplaySummary
 from app.data.dtos import NA
 from app.formatters.scanner_display import RankedSymbolDisplay, display_fields
@@ -26,6 +27,11 @@ from app.storage.models import (
     ScanRunRecord,
     SetupCandidateRecord,
     SymbolResultRecord,
+)
+from app.storage.symbol_health import (
+    _load_symbol_health_records,
+    _upsert_symbol_health_records,
+    symbol_health_records_from_payload,
 )
 
 
@@ -82,10 +88,25 @@ def store_scan_result(
             _insert_symbol_results(connection, symbol_records)
             _insert_setup_candidates(connection, setup_records)
             _insert_replay_results(connection, replay_records)
+            _store_symbol_health(connection, result, timestamp=timestamp)
             connection.commit()
     except sqlite3.Error as exc:
         raise StorageError(f"Unable to store scan run in database: {database_path}") from exc
     return run_id
+
+
+def _store_symbol_health(connection: sqlite3.Connection, result: ScannerRunResult, *, timestamp: str) -> None:
+    existing_payload = getattr(result, "symbol_health", None)
+    health_records = symbol_health_records_from_payload(existing_payload if isinstance(existing_payload, Mapping) else None)
+    if not health_records:
+        symbols = tuple(symbol_result.symbol for symbol_result in result.results)
+        existing_records = _load_symbol_health_records(connection, symbols)
+        health_records = update_symbol_health_records(
+            existing_records,
+            result.results,
+            now=timestamp,
+        )
+    _upsert_symbol_health_records(connection, health_records.values())
 
 
 def list_scan_history(

@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class StorageError(RuntimeError):
@@ -163,6 +163,33 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 ON setup_lifecycle_events(lifecycle_id);
             CREATE INDEX IF NOT EXISTS ix_lifecycle_events_symbol_timestamp
                 ON setup_lifecycle_events(symbol, timestamp);
+
+            CREATE TABLE IF NOT EXISTS symbol_health (
+                symbol TEXT PRIMARY KEY,
+                successful_scans INTEGER NOT NULL DEFAULT 0,
+                timeout_count INTEGER NOT NULL DEFAULT 0,
+                data_issue_count INTEGER NOT NULL DEFAULT 0,
+                average_runtime_sec REAL NOT NULL DEFAULT 0,
+                last_success_at TEXT,
+                last_timeout_at TEXT,
+                current_health_score INTEGER NOT NULL DEFAULT 70,
+                cooldown_until TEXT,
+                timeout_strikes INTEGER NOT NULL DEFAULT 0,
+                last_priority_rank INTEGER,
+                last_prioritized_at TEXT,
+                last_scanned_at TEXT,
+                last_data_issue_at TEXT,
+                last_display_bucket TEXT NOT NULL DEFAULT 'N/A',
+                last_readiness_label TEXT NOT NULL DEFAULT 'N/A',
+                useful_scan_count INTEGER NOT NULL DEFAULT 0,
+                rejected_count INTEGER NOT NULL DEFAULT 0,
+                last_rejected_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_symbol_health_score
+                ON symbol_health(current_health_score DESC);
+            CREATE INDEX IF NOT EXISTS ix_symbol_health_cooldown
+                ON symbol_health(cooldown_until);
             """
         )
         _ensure_column(connection, "scan_runs", "regime_confidence", "INTEGER NOT NULL DEFAULT 0")
@@ -176,6 +203,16 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "setup_lifecycle_records", "cooldown_until", "TEXT")
         _ensure_column(connection, "setup_lifecycle_records", "archived_at", "TEXT")
         _ensure_column(connection, "setup_lifecycle_events", "scan_run_id", "TEXT")
+        _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "symbol_health", "last_priority_rank", "INTEGER")
+        _ensure_column(connection, "symbol_health", "last_prioritized_at", "TEXT")
+        _ensure_column(connection, "symbol_health", "last_scanned_at", "TEXT")
+        _ensure_column(connection, "symbol_health", "last_data_issue_at", "TEXT")
+        _ensure_column(connection, "symbol_health", "last_display_bucket", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "symbol_health", "last_readiness_label", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "symbol_health", "useful_scan_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "symbol_health", "rejected_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "symbol_health", "last_rejected_at", "TEXT")
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:

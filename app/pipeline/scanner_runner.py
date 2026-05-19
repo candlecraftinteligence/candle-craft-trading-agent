@@ -415,6 +415,7 @@ class ScannerRunResult(BaseModel):
     regime_adjustments: RegimeAdjustment = Field(default_factory=lambda: default_market_regime_result().adjustment)
     regime_warnings: tuple[str, ...] = ()
     performance_memory_summary: dict[str, Any] = Field(default_factory=dict)
+    symbol_health: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True)
 

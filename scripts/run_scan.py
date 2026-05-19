@@ -39,6 +39,13 @@ from app.analytics.performance_memory import (  # noqa: E402
     reset_performance_memory,
     save_performance_memory,
 )
+from app.analytics.symbol_health import (  # noqa: E402
+    DEFAULT_MAX_TIMEOUT_STRIKES,
+    DEFAULT_SYMBOL_COOLDOWN_MINUTES,
+    SymbolPriorityPlan,
+    build_symbol_priority_plan,
+    empty_symbol_priority_plan,
+)
 from app.analytics.portfolio_selection import (  # noqa: E402
     PortfolioRiskLimits,
     PortfolioSelectionResult,
@@ -76,6 +83,7 @@ from app.lifecycle.service import (  # noqa: E402
     apply_lifecycle_to_run_result,
     prioritize_watch_symbols,
 )
+from app.lifecycle.repositories import SQLiteSetupLifecycleRepository  # noqa: E402
 from app.pipeline.scanner_runner import (  # noqa: E402
     BINANCE_KLINE_LIMIT_MAX,
     BINANCE_KLINE_LIMIT_MIN,
@@ -105,7 +113,9 @@ from app.storage import (  # noqa: E402
     export_history_payload,
     format_history_table,
     list_scan_history,
+    load_symbol_health_records,
     store_scan_result,
+    update_symbol_health_for_result,
 )
 from app.universe.symbol_universe import (  # noqa: E402
     MANUAL_UNIVERSE_MODE,
@@ -169,6 +179,7 @@ class WatchScanExecution:
     result: ScannerRunResult
     ranked_results: tuple[Any, ...]
     portfolio_selection: PortfolioSelectionResult | None
+    symbol_priority_plan: SymbolPriorityPlan
 
 
 @dataclass(frozen=True)
@@ -360,6 +371,11 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--research-regime": "research_regime",
         "--research-output-json": "research_output_json",
         "--lifecycle-stale-hours": "lifecycle_stale_hours",
+        "--adaptive-symbol-priority": "adaptive_symbol_priority",
+        "--no-adaptive-symbol-priority": "adaptive_symbol_priority",
+        "--symbol-cooldown-minutes": "symbol_cooldown_minutes",
+        "--max-timeout-strikes": "max_timeout_strikes",
+        "--show-symbol-health": "show_symbol_health",
     }
     explicit: set[str] = set()
     for token in tokens:
@@ -419,6 +435,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--request-timeout-sec", type=_positive_float_arg, default=DEFAULT_REQUEST_TIMEOUT_SEC)
     parser.add_argument("--symbol-timeout-sec", type=_positive_float_arg, default=DEFAULT_SYMBOL_TIMEOUT_SEC)
     parser.add_argument("--scan-timeout-sec", "--max-scan-seconds", dest="scan_timeout_sec", type=_positive_float_arg)
+    parser.add_argument("--adaptive-symbol-priority", dest="adaptive_symbol_priority", action="store_true", default=None)
+    parser.add_argument("--no-adaptive-symbol-priority", dest="adaptive_symbol_priority", action="store_false")
+    parser.add_argument(
+        "--symbol-cooldown-minutes",
+        type=_positive_float_arg,
+        default=DEFAULT_SYMBOL_COOLDOWN_MINUTES,
+    )
+    parser.add_argument("--max-timeout-strikes", type=int, default=DEFAULT_MAX_TIMEOUT_STRIKES)
+    parser.add_argument("--show-symbol-health", action="store_true")
     parser.add_argument("--fast", dest="fast", action="store_true", default=False)
     parser.add_argument("--no-fast", dest="fast", action="store_false")
     parser.add_argument("--show-strategy-output", action="store_true")
@@ -527,6 +552,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--watch-max-iterations must be at least 1.")
     if args.history_limit < 1:
         parser.error("--history-limit must be at least 1.")
+    if args.max_timeout_strikes < 1:
+        parser.error("--max-timeout-strikes must be at least 1.")
     if args.backtest_output_json is not None:
         args.replay = True
     if args.edge_export_json is not None:
@@ -629,6 +656,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         regime_risk_mode=args.regime_risk_mode,
         regime_strictness=args.regime_strictness,
     )
+    symbol_priority_plan = _symbol_priority_plan_for_watchlist(args, watchlist)
 
     if args.watch:
         await _run_watch_mode(
@@ -658,7 +686,8 @@ async def main(argv: Sequence[str] | None = None) -> None:
         else None
     )
     latest_results_by_symbol = dict(resume_state.results_by_symbol)
-    symbols_to_scan = tuple(symbol for symbol in watchlist.symbols if symbol not in resume_state.skipped_symbols)
+    queued_symbols = _queued_symbols_for_scan(args, watchlist, symbol_priority_plan)
+    symbols_to_scan = tuple(symbol for symbol in queued_symbols if symbol not in resume_state.skipped_symbols)
     scan_config = (
         ScannerRunConfig.model_validate({**config.model_dump(), "symbols": list(symbols_to_scan)})
         if symbols_to_scan
@@ -724,7 +753,12 @@ async def main(argv: Sequence[str] | None = None) -> None:
             results_by_symbol=latest_results_by_symbol,
             cache=cache,
             retry_diagnostics=(),
-            resume_metadata={**resume_metadata, "pending_symbols": []},
+            resume_metadata={
+                **resume_metadata,
+                "pending_symbols": [
+                    symbol for symbol in watchlist.symbols if symbol not in latest_results_by_symbol
+                ],
+            },
             runtime_stats=None,
             market_regime=None,
         )
@@ -769,6 +803,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
 
     lifecycle_scan_run_id = uuid4().hex if args.store_scan and _lifecycle_enabled(args) else None
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=lifecycle_scan_run_id)
+    result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
 
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
@@ -1592,6 +1627,90 @@ def _watchlist_with_lifecycle_priority(
     )
 
 
+def _adaptive_symbol_priority_enabled(args: argparse.Namespace, watchlist: WatchlistResolution) -> bool:
+    if args.adaptive_symbol_priority is not None:
+        return bool(args.adaptive_symbol_priority)
+    return bool(args.watch or args.universe_size >= 100 or len(watchlist.symbols) >= 100)
+
+
+def _symbol_priority_plan_for_watchlist(
+    args: argparse.Namespace,
+    watchlist: WatchlistResolution,
+) -> SymbolPriorityPlan:
+    enabled = _adaptive_symbol_priority_enabled(args, watchlist)
+    if not enabled:
+        return empty_symbol_priority_plan(watchlist.symbols, enabled=False)
+    try:
+        health_records = load_symbol_health_records(args.database_path, watchlist.symbols)
+        lifecycle_states = _lifecycle_states_for_symbols(args, watchlist.symbols)
+    except StorageError as exc:
+        raise SystemExit(str(exc)) from exc
+    return build_symbol_priority_plan(
+        watchlist.symbols,
+        health_records,
+        lifecycle_states=lifecycle_states,
+        enabled=True,
+    )
+
+
+def _lifecycle_states_for_symbols(args: argparse.Namespace, symbols: Sequence[str]) -> dict[str, str]:
+    if not symbols:
+        return {}
+    try:
+        with SQLiteSetupLifecycleRepository(args.database_path) as repository:
+            records = repository.get_records_for_symbols(symbols)
+    except StorageError:
+        raise
+    priority = {
+        "EXECUTING": 0,
+        "CONFIRMED": 0,
+        "TRIGGERED": 0,
+        "MANAGING": 0,
+        "STALKING": 1,
+        "WATCHLISTED": 1,
+    }
+    output: dict[str, str] = {}
+    best_rank: dict[str, int] = {}
+    for record in records:
+        state = record.current_state.value
+        rank = priority.get(state, 2)
+        if record.symbol not in output or rank < best_rank[record.symbol]:
+            output[record.symbol] = state
+            best_rank[record.symbol] = rank
+    return output
+
+
+def _queued_symbols_for_scan(
+    args: argparse.Namespace,
+    watchlist: WatchlistResolution,
+    symbol_priority_plan: SymbolPriorityPlan,
+) -> tuple[str, ...]:
+    if symbol_priority_plan.enabled:
+        return symbol_priority_plan.symbols_to_scan
+    return watchlist.symbols
+
+
+def _apply_symbol_health_if_enabled(
+    args: argparse.Namespace,
+    result: ScannerRunResult,
+    symbol_priority_plan: SymbolPriorityPlan,
+) -> ScannerRunResult:
+    if not (symbol_priority_plan.enabled or args.show_symbol_health or args.store_scan):
+        return result
+    try:
+        _records, summary = update_symbol_health_for_result(
+            args.database_path,
+            result,
+            plan=symbol_priority_plan,
+            cooldown_minutes=args.symbol_cooldown_minutes,
+            max_timeout_strikes=args.max_timeout_strikes,
+            enabled=symbol_priority_plan.enabled or args.show_symbol_health,
+        )
+    except StorageError as exc:
+        raise SystemExit(str(exc)) from exc
+    return result.model_copy(update={"symbol_health": summary})
+
+
 def _write_history_json(path: Path, payload: Sequence[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(list(payload), indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1826,10 +1945,16 @@ async def _run_watch_scan_iteration(
         else None
     )
     latest_results_by_symbol: dict[str, ScannerSymbolResult] = {}
-    scan_config = ScannerRunConfig.model_validate({**config.model_dump(), "symbols": list(watchlist.symbols)})
+    symbol_priority_plan = _symbol_priority_plan_for_watchlist(args, watchlist)
+    queued_symbols = _queued_symbols_for_scan(args, watchlist, symbol_priority_plan)
+    scan_config = (
+        ScannerRunConfig.model_validate({**config.model_dump(), "symbols": list(queued_symbols)})
+        if queued_symbols
+        else config
+    )
     resume_state = ResumeState(results_by_symbol={}, skipped_symbols=(), loaded_symbols=())
     resume_metadata = {
-        **_resume_metadata(args, watchlist.symbols, resume_state, watchlist.symbols, watchlist.universe),
+        **_resume_metadata(args, watchlist.symbols, resume_state, queued_symbols, watchlist.universe),
         "watch_mode": True,
         "watch_iteration": iteration,
     }
@@ -1859,33 +1984,46 @@ async def _run_watch_scan_iteration(
     async def progress(message: str) -> None:
         print(message, flush=True)
 
-    runner = _scanner_runner(cache)
-    scan_result = await _run_scanner(
-        runner,
-        scan_config,
-        after_symbol=after_symbol if (args.progress or args.save_run is not None) else None,
-        progress=progress if args.progress else None,
-        resume_metadata=resume_metadata,
-    )
-    for symbol_result in scan_result.results:
-        latest_results_by_symbol[symbol_result.symbol] = symbol_result
+    if queued_symbols:
+        runner = _scanner_runner(cache)
+        scan_result = await _run_scanner(
+            runner,
+            scan_config,
+            after_symbol=after_symbol if (args.progress or args.save_run is not None) else None,
+            progress=progress if args.progress else None,
+            resume_metadata=resume_metadata,
+        )
+        for symbol_result in scan_result.results:
+            latest_results_by_symbol[symbol_result.symbol] = symbol_result
 
-    result = _combined_run_result(
-        config=config,
-        watchlist_symbols=watchlist.symbols,
-        results_by_symbol=latest_results_by_symbol,
-        cache=cache,
-        retry_diagnostics=scan_result.retry_diagnostics,
-        resume_metadata={
-            **resume_metadata,
-            "pending_symbols": [
-                symbol for symbol in watchlist.symbols if symbol not in latest_results_by_symbol
-            ],
-        },
-        runtime_stats=scan_result.runtime_stats,
-        market_regime=scan_result.market_regime,
-    )
+        result = _combined_run_result(
+            config=config,
+            watchlist_symbols=watchlist.symbols,
+            results_by_symbol=latest_results_by_symbol,
+            cache=cache,
+            retry_diagnostics=scan_result.retry_diagnostics,
+            resume_metadata={
+                **resume_metadata,
+                "pending_symbols": [
+                    symbol for symbol in watchlist.symbols if symbol not in latest_results_by_symbol
+                ],
+            },
+            runtime_stats=scan_result.runtime_stats,
+            market_regime=scan_result.market_regime,
+        )
+    else:
+        result = _combined_run_result(
+            config=config,
+            watchlist_symbols=watchlist.symbols,
+            results_by_symbol=latest_results_by_symbol,
+            cache=cache,
+            retry_diagnostics=(),
+            resume_metadata={**resume_metadata, "pending_symbols": list(watchlist.symbols)},
+            runtime_stats=None,
+            market_regime=None,
+        )
     result = _apply_lifecycle_if_enabled(args, result)
+    result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None
     if portfolio_selection is not None:
@@ -1900,6 +2038,7 @@ async def _run_watch_scan_iteration(
         result=result,
         ranked_results=ranked_results,
         portfolio_selection=portfolio_selection,
+        symbol_priority_plan=symbol_priority_plan,
     )
 
 

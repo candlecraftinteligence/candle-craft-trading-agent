@@ -400,12 +400,42 @@ def format_scan_dashboard(
             "",
             *_performance_memory_dashboard_lines(result),
             "",
+            *_symbol_health_dashboard_lines(result),
+            "",
             f"{GREEN_CIRCLE} Valid setups: {counts['valid']}",
             f"{YELLOW_CIRCLE} Near misses: {counts['near_miss']}",
             f"{WHITE_CIRCLE} Hidden rejected/no-setup symbols: {hidden_no_setups}",
             f"{RED_CIRCLE} Data issues: {counts['data_issue']}",
         )
     )
+
+
+def _symbol_health_dashboard_lines(result: ScannerRunResult) -> tuple[str, ...]:
+    health = result.symbol_health
+    if not isinstance(health, Mapping) or not health or not health.get("enabled"):
+        return ()
+    return (
+        "Symbol Health",
+        f"Prioritized symbols: {_display(health.get('prioritized_symbols'))}",
+        f"Cooldown symbols: {_display(health.get('cooldown_symbols'))}",
+        f"Timeout strikes this run: {_display(health.get('timeout_strikes_this_run'))}",
+        f"Slowest symbols: {_slow_symbol_text(health.get('slowest_symbols'))}",
+        f"Skipped due to cooldown: {_display(health.get('skipped_due_to_cooldown'))}",
+    )
+
+
+def _slow_symbol_text(values: Any) -> str:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return NA
+    items: list[str] = []
+    for value in values:
+        if not isinstance(value, Mapping):
+            continue
+        symbol = _display(value.get("symbol"))
+        runtime = _display(value.get("runtime_sec"))
+        if symbol != NA and runtime != NA:
+            items.append(f"{symbol} {_seconds_text(runtime)}")
+    return "[" + ", ".join(items) + "]" if items else "[]"
 
 
 def format_symbol_compact_line(symbol_result: ScannerSymbolResult, *, rank: int | None = None) -> str:

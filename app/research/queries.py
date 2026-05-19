@@ -91,6 +91,10 @@ RESEARCH_QUERIES = (
     "pullback_quality_distribution",
     "pullback_depth_analysis",
     "pullback_lifecycle_dropoffs",
+    "symbol_health",
+    "slow_symbols",
+    "timeout_symbols",
+    "priority_symbols",
 )
 MODES = ("challenge", "swing", "scalp")
 
@@ -150,6 +154,7 @@ class ResearchData:
     replays: tuple[dict[str, Any], ...]
     lifecycle_records: tuple[dict[str, Any], ...] = ()
     lifecycle_events: tuple[dict[str, Any], ...] = ()
+    symbol_health: tuple[dict[str, Any], ...] = ()
 
 
 def build_research_report(
@@ -242,6 +247,17 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
                         """
                     ).fetchall()
                 )
+            symbol_health_rows: tuple[dict[str, Any], ...] = ()
+            if _table_exists(connection, "symbol_health"):
+                symbol_health_rows = tuple(
+                    _normalize_symbol_health(row)
+                    for row in connection.execute(
+                        """
+                        SELECT * FROM symbol_health
+                        ORDER BY current_health_score DESC, symbol ASC
+                        """
+                    ).fetchall()
+                )
     except sqlite3.Error as exc:
         raise StorageError(f"Unable to read research database: {database_path}") from exc
 
@@ -251,6 +267,7 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
     filtered_replays = tuple(row for row in replay_rows if _include_mode_row(row, filters))
     filtered_lifecycle_records = tuple(row for row in lifecycle_record_rows if _include_lifecycle_row(row, filters))
     filtered_lifecycle_events = tuple(row for row in lifecycle_event_rows if _include_lifecycle_row(row, filters))
+    filtered_symbol_health = tuple(row for row in symbol_health_rows if _include_symbol_health_row(row, filters))
     run_ids = {row["run_id"] for row in (*filtered_symbols, *filtered_setups, *filtered_replays)}
     if run_ids:
         filtered_runs = tuple(row for row in filtered_runs if row["run_id"] in run_ids)
@@ -261,6 +278,7 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
         replays=filtered_replays,
         lifecycle_records=filtered_lifecycle_records,
         lifecycle_events=filtered_lifecycle_events,
+        symbol_health=filtered_symbol_health,
     )
 
 
@@ -344,6 +362,14 @@ def _build_query_report(query: str, data: ResearchData, filters: ResearchFilters
         return _pullback_depth_analysis_report(data, filters)
     if query == "pullback_lifecycle_dropoffs":
         return _pullback_lifecycle_dropoffs_report(data, filters)
+    if query == "symbol_health":
+        return _symbol_health_report(data, filters)
+    if query == "slow_symbols":
+        return _slow_symbols_report(data, filters)
+    if query == "timeout_symbols":
+        return _timeout_symbols_report(data, filters)
+    if query == "priority_symbols":
+        return _priority_symbols_report(data, filters)
     raise ValueError(f"Unsupported research query: {query}")
 
 
@@ -987,6 +1013,73 @@ def _pullback_lifecycle_dropoffs_report(data: ResearchData, filters: ResearchFil
         "failure_by_lifecycle_state": _pullback_failure_by_group(lifecycle_rows, "lifecycle_current_state"),
         "failure_by_regime": _pullback_failure_by_group(rows, "regime_state"),
         "warnings": [],
+    }
+
+
+def _symbol_health_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = sorted(
+        data.symbol_health,
+        key=lambda row: (_sort_number(row.get("current_health_score")), -_sort_number(row.get("last_priority_rank"))),
+        reverse=True,
+    )
+    return {
+        "query": "symbol_health",
+        "filters": filters.to_json(),
+        "title": "Symbol Health",
+        "symbols": rows[: filters.normalized_limit],
+        "warnings": _symbol_health_warnings(rows),
+    }
+
+
+def _slow_symbols_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = sorted(
+        data.symbol_health,
+        key=lambda row: _sort_number(row.get("average_runtime_sec")),
+        reverse=True,
+    )
+    return {
+        "query": "slow_symbols",
+        "filters": filters.to_json(),
+        "title": "Slow Symbols",
+        "symbols": rows[: filters.normalized_limit],
+        "warnings": _symbol_health_warnings(rows),
+    }
+
+
+def _timeout_symbols_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = sorted(
+        (row for row in data.symbol_health if int(row.get("timeout_count") or 0) > 0 or int(row.get("timeout_strikes") or 0) > 0),
+        key=lambda row: (
+            int(row.get("timeout_strikes") or 0),
+            int(row.get("timeout_count") or 0),
+            _sort_number(row.get("average_runtime_sec")),
+        ),
+        reverse=True,
+    )
+    return {
+        "query": "timeout_symbols",
+        "filters": filters.to_json(),
+        "title": "Timeout Symbols",
+        "symbols": rows[: filters.normalized_limit],
+        "warnings": _symbol_health_warnings(rows),
+    }
+
+
+def _priority_symbols_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = sorted(
+        (row for row in data.symbol_health if row.get("last_priority_rank") not in (None, "", NA)),
+        key=lambda row: (
+            int(row.get("last_priority_rank") or 999999),
+            -int(row.get("current_health_score") or 0),
+            row.get("symbol"),
+        ),
+    )
+    return {
+        "query": "priority_symbols",
+        "filters": filters.to_json(),
+        "title": "Priority Symbols",
+        "symbols": rows[: filters.normalized_limit],
+        "warnings": _symbol_health_warnings(rows),
     }
 
 
@@ -1691,6 +1784,13 @@ def _include_lifecycle_row(row: Mapping[str, Any], filters: ResearchFilters) -> 
     return True
 
 
+def _include_symbol_health_row(row: Mapping[str, Any], filters: ResearchFilters) -> bool:
+    symbol = filters.normalized_symbol
+    if symbol is not None and row.get("symbol") != symbol:
+        return False
+    return True
+
+
 def _normalize_symbol_row(row: sqlite3.Row) -> dict[str, Any]:
     data = _row_dict(row)
     raw = _json_loads(data.get("raw_result_json"))
@@ -1808,6 +1908,34 @@ def _normalize_lifecycle_event(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
+def _normalize_symbol_health(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    data.update(
+        {
+            "symbol": _display(data.get("symbol")).upper(),
+            "successful_scans": int(data.get("successful_scans") or 0),
+            "timeout_count": int(data.get("timeout_count") or 0),
+            "data_issue_count": int(data.get("data_issue_count") or 0),
+            "average_runtime_sec": _number(_decimal_or_none(data.get("average_runtime_sec"))),
+            "current_health_score": int(data.get("current_health_score") or 0),
+            "timeout_strikes": int(data.get("timeout_strikes") or 0),
+            "cooldown_until": _display(data.get("cooldown_until")),
+            "last_success_at": _display(data.get("last_success_at")),
+            "last_timeout_at": _display(data.get("last_timeout_at")),
+            "last_priority_rank": data.get("last_priority_rank") if data.get("last_priority_rank") is not None else NA,
+            "last_prioritized_at": _display(data.get("last_prioritized_at")),
+            "last_scanned_at": _display(data.get("last_scanned_at")),
+            "last_data_issue_at": _display(data.get("last_data_issue_at")),
+            "last_display_bucket": _display(data.get("last_display_bucket")),
+            "last_readiness_label": _display(data.get("last_readiness_label")),
+            "useful_scan_count": int(data.get("useful_scan_count") or 0),
+            "rejected_count": int(data.get("rejected_count") or 0),
+            "last_rejected_at": _display(data.get("last_rejected_at")),
+        }
+    )
+    return data
+
+
 def _row_modes(raw: Mapping[str, Any]) -> tuple[str, ...]:
     modes: list[str] = []
     for key in ("valid_strategy_modes", "rejected_strategy_modes"):
@@ -1868,6 +1996,12 @@ def _gate_interpretation(gate: str) -> str:
 def _replay_sample_warnings(replays: Sequence[Mapping[str, Any]]) -> list[str]:
     if replays and len(replays) < MIN_RELIABLE_SAMPLE_SIZE:
         return [SAMPLE_SIZE_WARNING]
+    return []
+
+
+def _symbol_health_warnings(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    if not rows:
+        return ["No symbol health data found. Run an adaptive or stored scan first."]
     return []
 
 
