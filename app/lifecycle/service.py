@@ -100,6 +100,7 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
     gates_failed = _sequence_values(diagnostics.get("gates_failed"))
     failed_gate = _first_non_na(display.failed_gate, diagnostics.get("first_failed_gate"), symbol_result.rejection_stage)
     pullback_failure_type = _pullback_failure_type(symbol_result, diagnostics)
+    acceptance_status = _acceptance_status(symbol_result, diagnostics)
     mode = _mode_from_result(symbol_result, diagnostics)
     direction = _direction_from_result(symbol_result, diagnostics)
     rr = _decimal_or_none(_first_non_na(diagnostics.get("rr_to_tp2"), _risk_best_rr(symbol_result)))
@@ -140,14 +141,20 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
         failed_gate=failed_gate,
         regime_state=_first_non_na(symbol_result.regime_state, symbol_result.regime_diagnostics.get("state")),
         action_label=display.action_label,
-        invalidation_reason=_invalidation_reason(symbol_result, diagnostics, failed_gate, pullback_failure_type),
+        invalidation_reason=_invalidation_reason(
+            symbol_result,
+            diagnostics,
+            failed_gate,
+            pullback_failure_type,
+            acceptance_status,
+        ),
         sweep_detected=sweep_detected,
         structure_shift_detected=structure_shift_detected,
         pullback_valid=pullback_valid,
         rr_valid=rr_valid,
         valid_trade_idea=valid_trade_idea,
         entry_filled=False,
-        invalidated=pullback_failure_type == "TOO_DEEP" or failed_gate in {"pullback_too_deep", "pullback_beyond_786"},
+        invalidated=_structural_acceptance_invalidated(pullback_failure_type, acceptance_status, failed_gate),
         expired=failed_gate == "entry_window_expired",
     )
 
@@ -244,7 +251,12 @@ def _invalidation_reason(
     diagnostics: Mapping[str, Any],
     failed_gate: str,
     pullback_failure_type: str = NA,
+    acceptance_status: str = NA,
 ) -> str:
+    if acceptance_status == "STRUCTURAL_BREAKDOWN" or failed_gate == "structural_breakdown":
+        return "structure broke after body acceptance beyond 0.786"
+    if acceptance_status == "BODY_ACCEPTANCE_FAILURE" or failed_gate == "body_acceptance_failure":
+        return "body accepted beyond 0.786 invalidation zone"
     if pullback_failure_type == "TOO_DEEP" or failed_gate in {"pullback_too_deep", "pullback_beyond_786"}:
         return "pullback exceeded valid structure depth"
     trade_idea = symbol_result.trade_idea
@@ -269,6 +281,35 @@ def _pullback_failure_type(symbol_result: ScannerSymbolResult, diagnostics: Mapp
     if isinstance(payload, Mapping):
         return _display(payload.get("pullback_failure_type"))
     return NA
+
+
+def _acceptance_status(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    intelligence = symbol_result.pullback_intelligence
+    if intelligence is not None:
+        return _display(getattr(intelligence, "acceptance_status", NA))
+    payload = diagnostics.get("pullback_intelligence")
+    if isinstance(payload, Mapping):
+        status = _display(payload.get("acceptance_status"))
+        if status != NA:
+            return status
+        structure = payload.get("wick_close_structure")
+        if isinstance(structure, Mapping):
+            return _display(structure.get("acceptance_status"))
+    status = _display(diagnostics.get("acceptance_status"))
+    if status != NA:
+        return status
+    structure = diagnostics.get("wick_close_structure")
+    if isinstance(structure, Mapping):
+        return _display(structure.get("acceptance_status"))
+    return NA
+
+
+def _structural_acceptance_invalidated(pullback_failure_type: str, acceptance_status: str, failed_gate: str) -> bool:
+    return (
+        pullback_failure_type == "TOO_DEEP"
+        or failed_gate in {"pullback_too_deep", "pullback_beyond_786", "body_acceptance_failure", "structural_breakdown"}
+        or acceptance_status in {"BODY_ACCEPTANCE_FAILURE", "STRUCTURAL_BREAKDOWN"}
+    )
 
 
 def _rr_failure_gates() -> set[str]:

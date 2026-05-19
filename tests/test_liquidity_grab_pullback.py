@@ -117,7 +117,7 @@ def _fib_failure_candles() -> list[dict[str, Decimal | int]]:
             "open": Decimal("112"),
             "high": Decimal("113"),
             "low": Decimal("87"),
-            "close": Decimal("100"),
+            "close": Decimal("87"),
             "volume": Decimal("100"),
         }
     )
@@ -401,9 +401,9 @@ def test_liquidity_diagnostics_explain_failed_fib_alignment() -> None:
         {"symbol": "BTCUSDT", "candles_15m": _full_bullish_setup_candles(), "candles_5m": _fib_failure_candles()}
     )
 
-    assert result.swing.gates_failed[0] == "pullback_too_deep"
+    assert result.swing.gates_failed[0] == "body_acceptance_failure"
     assert "Pullback Zone: failed" in result.swing.strategy_diagnostics
-    assert "Pullback tagged beyond 0.786 before entry." in result.swing.fib_diagnostics
+    assert "Candle body closed beyond 0.786 before entry." in result.swing.fib_diagnostics
 
 
 def test_liquidity_diagnostics_explain_failed_rr() -> None:

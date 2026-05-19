@@ -8,6 +8,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
+from app.analytics.wick_close_structure import AcceptanceStatus, WickCloseStructure
 
 OUTPUT_QUANT = Decimal("0.00000001")
 DEFAULT_REQUIRED_RR = Decimal("2.5")
@@ -70,6 +71,17 @@ class PullbackIntelligenceInput(BaseModel):
     hard_rejection_reasons: tuple[str, ...] = ()
     pullback_failure_reason: str = NA
     pullback_depth_ratio: MaybeDecimal = NA
+    wick_depth_ratio: MaybeDecimal = NA
+    close_depth_ratio: MaybeDecimal = NA
+    body_acceptance_ratio: MaybeDecimal = NA
+    max_wick_breach: MaybeDecimal = NA
+    max_body_breach: MaybeDecimal = NA
+    reclaim_detected: bool | Literal["N/A"] = NA
+    reclaim_strength: str = NA
+    candles_below_fib_zone: MaybeInt = NA
+    acceptance_status: str = AcceptanceStatus.DATA_INCOMPLETE.value
+    structural_reclaim_status: str = NA
+    wick_close_structure: dict[str, Any] = Field(default_factory=dict)
     fib_alignment_status: str = NA
     selected_zone_type: str = NA
     ob_zone: dict[str, Any] = Field(default_factory=dict)
@@ -100,6 +112,9 @@ class PullbackIntelligenceInput(BaseModel):
         "pullback_failure_reason",
         "fib_alignment_status",
         "selected_zone_type",
+        "reclaim_strength",
+        "acceptance_status",
+        "structural_reclaim_status",
         "pullback_calculation_timeframe",
         "execution_sweep_status",
         "confirmation_structure_shift_status",
@@ -122,7 +137,17 @@ class PullbackIntelligenceInput(BaseModel):
     def _normalize_tuple(cls, value: Any) -> tuple[str, ...]:
         return _sequence_values(value)
 
-    @field_validator("pullback_depth_ratio", "sweep_magnitude_atr", "rr_to_tp2", mode="before")
+    @field_validator(
+        "pullback_depth_ratio",
+        "wick_depth_ratio",
+        "close_depth_ratio",
+        "body_acceptance_ratio",
+        "max_wick_breach",
+        "max_body_breach",
+        "sweep_magnitude_atr",
+        "rr_to_tp2",
+        mode="before",
+    )
     @classmethod
     def _normalize_optional_decimal(cls, value: Any) -> Any:
         if _is_missing(value):
@@ -141,6 +166,7 @@ class PullbackIntelligenceInput(BaseModel):
         "pullback_bos_choch_candle_index",
         "displacement_start_index",
         "displacement_end_index",
+        "candles_below_fib_zone",
         mode="before",
     )
     @classmethod
@@ -152,7 +178,7 @@ class PullbackIntelligenceInput(BaseModel):
         except (TypeError, ValueError):
             return NA
 
-    @field_validator("ob_zone", "fvg_zone", mode="before")
+    @field_validator("ob_zone", "fvg_zone", "wick_close_structure", mode="before")
     @classmethod
     def _normalize_zone(cls, value: Any) -> dict[str, Any]:
         if hasattr(value, "model_dump"):
@@ -163,6 +189,17 @@ class PullbackIntelligenceInput(BaseModel):
 class PullbackIntelligenceResult(BaseModel):
     is_diagnostic_only: bool = True
     pullback_depth_ratio: MaybeDecimal = NA
+    wick_depth_ratio: MaybeDecimal = NA
+    close_depth_ratio: MaybeDecimal = NA
+    body_acceptance_ratio: MaybeDecimal = NA
+    max_wick_breach: MaybeDecimal = NA
+    max_body_breach: MaybeDecimal = NA
+    reclaim_detected: bool | Literal["N/A"] = NA
+    reclaim_strength: str = NA
+    candles_below_fib_zone: MaybeInt = NA
+    acceptance_status: str = AcceptanceStatus.DATA_INCOMPLETE.value
+    structural_reclaim_status: str = NA
+    wick_close_structure: WickCloseStructure = Field(default_factory=WickCloseStructure)
     fib_zone_status: str = NA
     ob_fvg_status: str = NA
     displacement_strength: str = NA
@@ -191,6 +228,7 @@ def build_pullback_intelligence(
         else:
             payload.update(dict(input_data))
     payload.update(overrides)
+    _apply_wick_close_payload(payload)
     data = PullbackIntelligenceInput.model_validate(payload)
 
     failure_type = _failure_type(data)
@@ -211,8 +249,20 @@ def build_pullback_intelligence(
         fib_status=fib_status,
     )
     projection = _projection(data, failure_type)
+    wick_close_structure = _wick_close_structure(data)
     return PullbackIntelligenceResult(
         pullback_depth_ratio=data.pullback_depth_ratio,
+        wick_depth_ratio=data.wick_depth_ratio,
+        close_depth_ratio=data.close_depth_ratio,
+        body_acceptance_ratio=data.body_acceptance_ratio,
+        max_wick_breach=data.max_wick_breach,
+        max_body_breach=data.max_body_breach,
+        reclaim_detected=data.reclaim_detected,
+        reclaim_strength=data.reclaim_strength,
+        candles_below_fib_zone=data.candles_below_fib_zone,
+        acceptance_status=data.acceptance_status,
+        structural_reclaim_status=data.structural_reclaim_status,
+        wick_close_structure=wick_close_structure,
         fib_zone_status=fib_status,
         ob_fvg_status=ob_fvg_status,
         displacement_strength=displacement_strength,
@@ -229,16 +279,76 @@ def build_pullback_intelligence(
     )
 
 
+def _apply_wick_close_payload(payload: dict[str, Any]) -> None:
+    structure = payload.get("wick_close_structure")
+    if not isinstance(structure, Mapping):
+        return
+    for key in (
+        "wick_depth_ratio",
+        "close_depth_ratio",
+        "body_acceptance_ratio",
+        "max_wick_breach",
+        "max_body_breach",
+        "reclaim_detected",
+        "reclaim_strength",
+        "candles_below_fib_zone",
+        "acceptance_status",
+        "structural_reclaim_status",
+    ):
+        if _is_missing(payload.get(key)) and key in structure:
+            payload[key] = structure[key]
+
+
+def _wick_close_structure(data: PullbackIntelligenceInput) -> WickCloseStructure:
+    payload = dict(data.wick_close_structure)
+    payload.update(
+        {
+            "wick_depth_ratio": data.wick_depth_ratio,
+            "close_depth_ratio": data.close_depth_ratio,
+            "body_acceptance_ratio": data.body_acceptance_ratio,
+            "max_wick_breach": data.max_wick_breach,
+            "max_body_breach": data.max_body_breach,
+            "reclaim_detected": data.reclaim_detected,
+            "reclaim_strength": data.reclaim_strength,
+            "candles_below_fib_zone": data.candles_below_fib_zone,
+            "acceptance_status": data.acceptance_status,
+            "structural_reclaim_status": data.structural_reclaim_status,
+        }
+    )
+    return WickCloseStructure.model_validate(payload)
+
+
 def _failure_type(data: PullbackIntelligenceInput) -> PullbackFailureType | Literal["N/A"]:
     gate = data.first_failed_gate
     gates_failed = set(data.gates_failed)
     reason = data.pullback_failure_reason.lower()
+    acceptance_status = _acceptance_status(data)
 
     if gate in DATA_INCOMPLETE_GATES or bool(gates_failed & DATA_INCOMPLETE_GATES) or _critical_missing_data(data):
         return PullbackFailureType.DATA_INCOMPLETE
-    if data.pullback_depth_ratio != NA and data.pullback_depth_ratio > HARD_INVALIDATION_DEPTH:
+    if acceptance_status in {
+        AcceptanceStatus.BODY_ACCEPTANCE_FAILURE.value,
+        AcceptanceStatus.STRUCTURAL_BREAKDOWN.value,
+    }:
         return PullbackFailureType.TOO_DEEP
-    if gate in {"pullback_too_deep", "pullback_beyond_786"} or "beyond 0.786" in reason:
+    if (
+        data.pullback_depth_ratio != NA
+        and data.pullback_depth_ratio > HARD_INVALIDATION_DEPTH
+        and acceptance_status
+        not in {
+            AcceptanceStatus.WICK_SWEEP_RECLAIM.value,
+            AcceptanceStatus.DEEP_RECLAIM_VALID.value,
+        }
+    ):
+        return PullbackFailureType.TOO_DEEP
+    if gate in {"pullback_too_deep", "pullback_beyond_786", "body_acceptance_failure", "structural_breakdown"} or (
+        "beyond 0.786" in reason
+        and acceptance_status
+        not in {
+            AcceptanceStatus.WICK_SWEEP_RECLAIM.value,
+            AcceptanceStatus.DEEP_RECLAIM_VALID.value,
+        }
+    ):
         return PullbackFailureType.TOO_DEEP
     if gate in RR_GATES or bool(gates_failed & RR_GATES):
         return PullbackFailureType.RR_COMPRESSION
@@ -260,16 +370,32 @@ def _failure_type(data: PullbackIntelligenceInput) -> PullbackFailureType | Lite
 def _fib_status(data: PullbackIntelligenceInput) -> str:
     status = data.fib_alignment_status.lower()
     gate = data.first_failed_gate
-    if gate in {"pullback_too_deep", "pullback_beyond_786"}:
+    acceptance_status = _acceptance_status(data)
+    if acceptance_status in {
+        AcceptanceStatus.WICK_SWEEP_RECLAIM.value,
+        AcceptanceStatus.DEEP_RECLAIM_VALID.value,
+    }:
+        return "imperfect"
+    if gate in {"pullback_too_deep", "pullback_beyond_786", "body_acceptance_failure", "structural_breakdown"}:
         return "failed"
-    if status in {"aligned", "aligned_aggressive_0_65", "valid", "passed"}:
+    if status in {"aligned", "aligned_aggressive_0_65", "valid", "passed", "wick_sweep_reclaim"}:
         return "aligned"
-    if status in {"failed", "failed_outside_preferred_zone", "failed_no_overlap", "pullback_too_deep"}:
+    if status in {
+        "failed",
+        "failed_outside_preferred_zone",
+        "failed_no_overlap",
+        "pullback_too_deep",
+        "body_acceptance_failure",
+        "structural_breakdown",
+    }:
         return "failed"
     if data.pullback_depth_ratio != NA:
         if IDEAL_MIN_DEPTH <= data.pullback_depth_ratio <= IDEAL_MAX_DEPTH:
             return "aligned"
-        if data.pullback_depth_ratio > HARD_INVALIDATION_DEPTH:
+        if data.pullback_depth_ratio > HARD_INVALIDATION_DEPTH and acceptance_status not in {
+            AcceptanceStatus.WICK_SWEEP_RECLAIM.value,
+            AcceptanceStatus.DEEP_RECLAIM_VALID.value,
+        }:
             return "failed"
         return "imperfect"
     return NA
@@ -354,8 +480,17 @@ def _structure_risk_score(
     data: PullbackIntelligenceInput,
     failure_type: PullbackFailureType | Literal["N/A"],
 ) -> MaybeInt:
+    acceptance_status = _acceptance_status(data)
     if failure_type == PullbackFailureType.DATA_INCOMPLETE:
         return NA
+    if acceptance_status == AcceptanceStatus.STRUCTURAL_BREAKDOWN.value:
+        return 98
+    if acceptance_status == AcceptanceStatus.BODY_ACCEPTANCE_FAILURE.value:
+        return 90
+    if acceptance_status == AcceptanceStatus.WICK_SWEEP_RECLAIM.value:
+        return 70
+    if acceptance_status == AcceptanceStatus.DEEP_RECLAIM_VALID.value:
+        return 55
     if failure_type == PullbackFailureType.TOO_DEEP:
         return 95
     if failure_type == PullbackFailureType.OPPOSING_STRUCTURE_BLOCK:
@@ -390,8 +525,18 @@ def _quality_grade(
     ob_fvg_status: str,
     fib_status: str,
 ) -> PullbackQualityGrade:
+    acceptance_status = _acceptance_status(data)
     if failure_type == PullbackFailureType.DATA_INCOMPLETE or _critical_missing_data(data):
         return PullbackQualityGrade.NA
+    if acceptance_status in {
+        AcceptanceStatus.BODY_ACCEPTANCE_FAILURE.value,
+        AcceptanceStatus.STRUCTURAL_BREAKDOWN.value,
+    }:
+        return PullbackQualityGrade.REJECT
+    if acceptance_status == AcceptanceStatus.WICK_SWEEP_RECLAIM.value:
+        return PullbackQualityGrade.C
+    if acceptance_status == AcceptanceStatus.DEEP_RECLAIM_VALID.value and data.pullback_zone_status not in {"valid", "passed"}:
+        return PullbackQualityGrade.C
     if failure_type in {
         PullbackFailureType.TOO_DEEP,
         PullbackFailureType.OPPOSING_STRUCTURE_BLOCK,
@@ -420,6 +565,39 @@ def _projection(
     data: PullbackIntelligenceInput,
     failure_type: PullbackFailureType | Literal["N/A"],
 ) -> PullbackProjection:
+    acceptance_status = _acceptance_status(data)
+    if acceptance_status == AcceptanceStatus.WICK_SWEEP_RECLAIM.value:
+        return PullbackProjection(
+            next_pullback_condition="strong reclaim above 0.786 plus intact structure required",
+            can_reactivate_same_structure=True,
+            fresh_lifecycle_required=False,
+            lifecycle_action="WATCHLIST",
+            rationale="Wick swept beyond 0.786, but body reclaimed; keep watch only until reclaim quality improves.",
+        )
+    if acceptance_status == AcceptanceStatus.BODY_ACCEPTANCE_FAILURE.value:
+        return PullbackProjection(
+            next_pullback_condition="fresh reclaim or new sweep + BOS required",
+            can_reactivate_same_structure=False,
+            fresh_lifecycle_required=True,
+            lifecycle_action="INVALIDATE",
+            rationale="A candle body accepted beyond 0.786, which is higher risk than a wick sweep.",
+        )
+    if acceptance_status == AcceptanceStatus.STRUCTURAL_BREAKDOWN.value:
+        return PullbackProjection(
+            next_pullback_condition="new structure required after breakdown",
+            can_reactivate_same_structure=False,
+            fresh_lifecycle_required=True,
+            lifecycle_action="INVALIDATE",
+            rationale="Acceptance beyond 0.786 persisted or structure broke.",
+        )
+    if acceptance_status == AcceptanceStatus.DEEP_RECLAIM_VALID.value and failure_type == NA:
+        return PullbackProjection(
+            next_pullback_condition="OB/FVG, RR, and final quality gates must still pass",
+            can_reactivate_same_structure=True,
+            fresh_lifecycle_required=False,
+            lifecycle_action="WATCHLIST" if data.pullback_zone_status not in {"valid", "passed"} else "NONE",
+            rationale="Deep wick reclaimed strongly while structure remained intact; this is tracking only, not gate bypass.",
+        )
     if failure_type == PullbackFailureType.TOO_DEEP:
         return PullbackProjection(
             next_pullback_condition="fresh sweep + BOS required",
@@ -508,6 +686,15 @@ def _explanation(
     data: PullbackIntelligenceInput,
     failure_type: PullbackFailureType | Literal["N/A"],
 ) -> str:
+    acceptance_status = _acceptance_status(data)
+    if acceptance_status == AcceptanceStatus.WICK_SWEEP_RECLAIM.value:
+        return "Wick swept beyond 0.786, but the candle body reclaimed the zone; keep this as watch-only until reclaim strengthens."
+    if acceptance_status == AcceptanceStatus.DEEP_RECLAIM_VALID.value:
+        return "Deep wick reclaimed strongly while BOS/CHoCH structure remained intact; OB/FVG, RR, and quality gates still decide validity."
+    if acceptance_status == AcceptanceStatus.BODY_ACCEPTANCE_FAILURE.value:
+        return "Candle body accepted beyond 0.786; risk is higher and the structure should not be confirmed from this pullback."
+    if acceptance_status == AcceptanceStatus.STRUCTURAL_BREAKDOWN.value:
+        return "Multiple closes accepted beyond the invalidation zone or structure broke; a new structure is required."
     if failure_type == PullbackFailureType.TOO_DEEP:
         return "Pullback went beyond 0.786; intent weakened before entry and a new sweep plus BOS/CHoCH is required."
     if failure_type == PullbackFailureType.NO_OB_FVG:
@@ -536,8 +723,14 @@ def _warnings(
     failure_type: PullbackFailureType | Literal["N/A"],
 ) -> tuple[str, ...]:
     warnings: list[str] = []
+    acceptance_status = _acceptance_status(data)
     if failure_type != NA:
         warnings.append("Diagnostic only; does not loosen strategy gates or create a valid setup.")
+    if acceptance_status in {
+        AcceptanceStatus.WICK_SWEEP_RECLAIM.value,
+        AcceptanceStatus.DEEP_RECLAIM_VALID.value,
+    }:
+        warnings.append("Wick reclaim diagnostics do not bypass OB/FVG, RR, Trust Meter, or risk gates.")
     if failure_type == PullbackFailureType.TOO_DEEP:
         warnings.append("Same structure must not be reactivated after a >0.786 pullback.")
     if data.unverified_data:
@@ -548,6 +741,18 @@ def _warnings(
 def _critical_missing_data(data: PullbackIntelligenceInput) -> bool:
     critical_prefixes = ("candles:", "candles_15m:", "candles_5m:", "execution_candles:", "confirmation_candles:")
     return any(item.startswith(critical_prefixes) for item in data.missing_data)
+
+
+def _acceptance_status(data: PullbackIntelligenceInput) -> str:
+    status = _display(data.acceptance_status)
+    if status != NA:
+        return status
+    structure = data.wick_close_structure
+    if isinstance(structure, Mapping):
+        nested = _display(structure.get("acceptance_status"))
+        if nested != NA:
+            return nested
+    return NA
 
 
 def _zone_present(zone: Mapping[str, Any]) -> bool:
@@ -610,6 +815,7 @@ def _display(value: Any) -> str:
 
 
 __all__ = [
+    "AcceptanceStatus",
     "PullbackFailureType",
     "PullbackIntelligenceInput",
     "PullbackIntelligenceResult",

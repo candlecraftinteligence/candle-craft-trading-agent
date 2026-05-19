@@ -78,6 +78,16 @@ def _seed_research_database(db_path) -> None:
                 "pullback_failure_type": "NO_OB_FVG",
                 "pullback_quality_grade": "C",
                 "pullback_depth_ratio": "0.5",
+                "wick_depth_ratio": "0.82",
+                "close_depth_ratio": "0.76",
+                "body_acceptance_ratio": "0.76",
+                "max_wick_breach": "0.034",
+                "max_body_breach": "0",
+                "reclaim_detected": True,
+                "reclaim_strength": "weak",
+                "candles_below_fib_zone": 0,
+                "acceptance_status": "WICK_SWEEP_RECLAIM",
+                "structural_reclaim_status": "intact",
                 "fib_zone_status": "aligned",
                 "ob_fvg_status": "missing",
                 "next_pullback_condition": "valid OB/FVG inside displacement required",
@@ -106,6 +116,18 @@ def _seed_research_database(db_path) -> None:
                 "pullback_failure_type": "TOO_DEEP",
                 "pullback_quality_grade": "REJECT",
                 "pullback_depth_ratio": "0.82",
+                "wick_close_structure": {
+                    "wick_depth_ratio": "0.86",
+                    "close_depth_ratio": "0.84",
+                    "body_acceptance_ratio": "0.84",
+                    "max_wick_breach": "0.074",
+                    "max_body_breach": "0.054",
+                    "reclaim_detected": False,
+                    "reclaim_strength": "N/A",
+                    "candles_below_fib_zone": 2,
+                    "acceptance_status": "STRUCTURAL_BREAKDOWN",
+                    "structural_reclaim_status": "broken",
+                },
                 "fib_zone_status": "failed",
                 "ob_fvg_status": "present",
                 "next_pullback_condition": "fresh sweep + BOS required",
@@ -474,6 +496,23 @@ def test_pullback_failure_research_query(tmp_path) -> None:
     assert failure_counts["NO_OB_FVG"] == 1
     assert lifecycle_counts["INVALIDATED"] == "TOO_DEEP"
     assert report["conversion_rate_by_pullback_grade"]
+
+
+def test_wick_close_research_queries(tmp_path) -> None:
+    db_path = tmp_path / "research.db"
+    _seed_research_database(db_path)
+
+    failures = build_research_report(db_path, query="wick_close_failures")
+    distribution = build_research_report(db_path, query="acceptance_status_distribution")
+    reclaim = build_research_report(db_path, query="reclaim_quality_analysis")
+    text = format_research_report(distribution)
+
+    status_counts = {row["acceptance_status"]: row["count"] for row in distribution["acceptance_status_counts"]}
+    assert failures["total_wick_close_failures"] == 2
+    assert status_counts["WICK_SWEEP_RECLAIM"] == 1
+    assert status_counts["STRUCTURAL_BREAKDOWN"] == 1
+    assert reclaim["reclaim_strength_counts"][0]["reclaim_strength"] == "weak"
+    assert "Acceptance Status Distribution" in text
 
 
 def test_symbol_detail_query(tmp_path) -> None:

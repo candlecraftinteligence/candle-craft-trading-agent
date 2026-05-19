@@ -91,6 +91,9 @@ RESEARCH_QUERIES = (
     "pullback_quality_distribution",
     "pullback_depth_analysis",
     "pullback_lifecycle_dropoffs",
+    "wick_close_failures",
+    "acceptance_status_distribution",
+    "reclaim_quality_analysis",
     "symbol_health",
     "slow_symbols",
     "timeout_symbols",
@@ -363,6 +366,12 @@ def _build_query_report(query: str, data: ResearchData, filters: ResearchFilters
         return _pullback_depth_analysis_report(data, filters)
     if query == "pullback_lifecycle_dropoffs":
         return _pullback_lifecycle_dropoffs_report(data, filters)
+    if query == "wick_close_failures":
+        return _wick_close_failures_report(data, filters)
+    if query == "acceptance_status_distribution":
+        return _acceptance_status_distribution_report(data, filters)
+    if query == "reclaim_quality_analysis":
+        return _reclaim_quality_analysis_report(data, filters)
     if query == "symbol_health":
         return _symbol_health_report(data, filters)
     if query == "slow_symbols":
@@ -1056,6 +1065,51 @@ def _pullback_lifecycle_dropoffs_report(data: ResearchData, filters: ResearchFil
     }
 
 
+def _wick_close_failures_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    failure_statuses = {"WICK_SWEEP_RECLAIM", "BODY_ACCEPTANCE_FAILURE", "STRUCTURAL_BREAKDOWN"}
+    rows = tuple(row for row in data.symbols if row.get("acceptance_status") in failure_statuses)
+    return {
+        "query": "wick_close_failures",
+        "filters": filters.to_json(),
+        "total_wick_close_failures": len(rows),
+        "acceptance_status_counts": _acceptance_status_counts(rows),
+        "failure_by_gate": _wick_close_gate_counts(rows),
+        "failure_by_lifecycle_state": _acceptance_group_counts(rows, "lifecycle_current_state"),
+        "largest_wick_breaches": _largest_wick_breaches(rows, filters.normalized_limit),
+        "warnings": [],
+    }
+
+
+def _acceptance_status_distribution_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = tuple(row for row in data.symbols if _display(row.get("acceptance_status")) != NA)
+    return {
+        "query": "acceptance_status_distribution",
+        "filters": filters.to_json(),
+        "total_acceptance_samples": len(rows),
+        "acceptance_status_counts": _acceptance_status_counts(rows),
+        "status_by_regime": _acceptance_group_counts(rows, "regime_state"),
+        "status_by_lifecycle_state": _acceptance_group_counts(rows, "lifecycle_current_state"),
+        "warnings": [],
+    }
+
+
+def _reclaim_quality_analysis_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = tuple(
+        row
+        for row in data.symbols
+        if _display(row.get("reclaim_strength")) != NA or _display(row.get("reclaim_detected")) == "True"
+    )
+    return {
+        "query": "reclaim_quality_analysis",
+        "filters": filters.to_json(),
+        "total_reclaim_samples": len(rows),
+        "reclaim_strength_counts": _reclaim_strength_counts(rows),
+        "acceptance_status_counts": _acceptance_status_counts(rows),
+        "conversion_by_reclaim_strength": _reclaim_conversion(rows),
+        "warnings": [],
+    }
+
+
 def _symbol_health_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
     rows = sorted(
         data.symbol_health,
@@ -1681,6 +1735,108 @@ def _pullback_depth_bands(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, A
     return output
 
 
+def _acceptance_status_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    total = len(rows)
+    output = []
+    for status, group_rows in _group_by(rows, "acceptance_status").items():
+        output.append(
+            {
+                "acceptance_status": status,
+                "count": len(group_rows),
+                "percentage": _rate(len(group_rows), total),
+                "average_wick_depth": _number(_mean(_numeric_values(row.get("wick_depth_ratio") for row in group_rows))),
+                "average_close_depth": _number(_mean(_numeric_values(row.get("close_depth_ratio") for row in group_rows))),
+                "average_body_acceptance": _number(
+                    _mean(_numeric_values(row.get("body_acceptance_ratio") for row in group_rows))
+                ),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], item["acceptance_status"]), reverse=True)
+    return output
+
+
+def _wick_close_gate_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for gate, group_rows in _group_by(rows, "failed_gate").items():
+        output.append(
+            {
+                "failed_gate": gate,
+                "count": len(group_rows),
+                "most_common_acceptance_status": _most_common_text(row.get("acceptance_status") for row in group_rows),
+                "average_wick_breach": _number(_mean(_numeric_values(row.get("max_wick_breach") for row in group_rows))),
+                "average_body_breach": _number(_mean(_numeric_values(row.get("max_body_breach") for row in group_rows))),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _display(item["failed_gate"])), reverse=True)
+    return output
+
+
+def _acceptance_group_counts(rows: Sequence[Mapping[str, Any]], key: str) -> list[dict[str, Any]]:
+    output = []
+    for value, group_rows in _group_by(rows, key).items():
+        output.append(
+            {
+                key: value,
+                "count": len(group_rows),
+                "acceptance_status_counts": _acceptance_status_counts(group_rows),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _display(item.get(key))), reverse=True)
+    return output
+
+
+def _largest_wick_breaches(rows: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
+    output = [
+        {
+            "symbol": row["symbol"],
+            "timestamp": row.get("timestamp", NA),
+            "acceptance_status": row.get("acceptance_status"),
+            "max_wick_breach": row.get("max_wick_breach"),
+            "max_body_breach": row.get("max_body_breach"),
+            "reclaim_strength": row.get("reclaim_strength"),
+            "candles_below_fib_zone": row.get("candles_below_fib_zone"),
+            "lifecycle_current_state": row.get("lifecycle_current_state"),
+        }
+        for row in rows
+    ]
+    output.sort(key=lambda item: _sort_number(item["max_wick_breach"]), reverse=True)
+    return output[:limit]
+
+
+def _reclaim_strength_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for strength, group_rows in _group_by(rows, "reclaim_strength").items():
+        output.append(
+            {
+                "reclaim_strength": strength,
+                "count": len(group_rows),
+                "average_wick_breach": _number(_mean(_numeric_values(row.get("max_wick_breach") for row in group_rows))),
+                "most_common_acceptance_status": _most_common_text(row.get("acceptance_status") for row in group_rows),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _display(item["reclaim_strength"])), reverse=True)
+    return output
+
+
+def _reclaim_conversion(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for strength, group_rows in _group_by(rows, "reclaim_strength").items():
+        valid = _bucket_count(group_rows, "valid")
+        output.append(
+            {
+                "reclaim_strength": strength,
+                "count": len(group_rows),
+                "valid_setup_count": valid,
+                "conversion_to_valid_pct": _rate(valid, len(group_rows)),
+                "invalidated_or_cooldown": sum(
+                    1 for row in group_rows if row.get("lifecycle_current_state") in {"INVALIDATED", "COOLDOWN"}
+                ),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _sort_number(item["conversion_to_valid_pct"])), reverse=True)
+    return output
+
+
 def _depth_in_band(depth: Decimal, lower: Decimal | None, upper: Decimal | None) -> bool:
     if lower is None:
         return upper is not None and depth < upper
@@ -1890,6 +2046,16 @@ def _normalize_symbol_row(row: sqlite3.Row) -> dict[str, Any]:
             "pullback_failure_type": _display(pullback.get("pullback_failure_type")),
             "pullback_quality_grade": _display(pullback.get("pullback_quality_grade")),
             "pullback_depth_ratio": _display(pullback.get("pullback_depth_ratio")),
+            "wick_depth_ratio": _display(_pullback_value(pullback, "wick_depth_ratio")),
+            "close_depth_ratio": _display(_pullback_value(pullback, "close_depth_ratio")),
+            "body_acceptance_ratio": _display(_pullback_value(pullback, "body_acceptance_ratio")),
+            "max_wick_breach": _display(_pullback_value(pullback, "max_wick_breach")),
+            "max_body_breach": _display(_pullback_value(pullback, "max_body_breach")),
+            "reclaim_detected": _display(_pullback_value(pullback, "reclaim_detected")),
+            "reclaim_strength": _display(_pullback_value(pullback, "reclaim_strength")),
+            "candles_below_fib_zone": _display(_pullback_value(pullback, "candles_below_fib_zone")),
+            "acceptance_status": _display(_pullback_value(pullback, "acceptance_status")),
+            "structural_reclaim_status": _display(_pullback_value(pullback, "structural_reclaim_status")),
             "pullback_fib_zone_status": _display(pullback.get("fib_zone_status")),
             "pullback_ob_fvg_status": _display(pullback.get("ob_fvg_status")),
             "pullback_freshness_score": _display(pullback.get("freshness_score")),
@@ -1921,6 +2087,16 @@ def _normalize_setup_row(row: sqlite3.Row) -> dict[str, Any]:
         }
     )
     return data
+
+
+def _pullback_value(pullback: Mapping[str, Any], key: str) -> Any:
+    value = pullback.get(key)
+    if _display(value) != NA:
+        return value
+    structure = pullback.get("wick_close_structure")
+    if isinstance(structure, Mapping):
+        return structure.get(key)
+    return NA
 
 
 def _normalize_replay_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -2051,6 +2227,10 @@ def _gate_interpretation(gate: str) -> str:
         return "Structure progresses, but no clean execution zone is available."
     if gate in {"pullback_too_deep", "pullback_beyond_786", "entry_window_expired"}:
         return "Pullback quality is weak or stale before activation."
+    if gate == "wick_sweep_reclaim":
+        return "Price wicked beyond 0.786 but reclaimed by close; watch reclaim quality without bypassing gates."
+    if gate in {"body_acceptance_failure", "structural_breakdown"}:
+        return "Price accepted beyond the invalidation zone by close; structure should be treated as failed."
     if gate in {"missing_rr", "missing_target", "rr_below_minimum", "challenge_rr_below_3", "rr_too_low"}:
         return "Reward-to-risk is not compensating for the setup."
     if gate in {"trust_meter_below_minimum", "challenge_trust_below_85", "quality_filter"}:

@@ -60,6 +60,9 @@ PULLBACK_FAIL_GATES = {
     "no_ob_or_fvg_zone",
     "pullback_too_deep",
     "pullback_beyond_786",
+    "wick_sweep_reclaim",
+    "body_acceptance_failure",
+    "structural_breakdown",
     "no_displacement_candle",
     "challenge_limit_entry_missing",
 }
@@ -267,6 +270,14 @@ def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | No
         "pullback_intelligence": pullback_intelligence.model_dump(mode="json")
         if pullback_intelligence is not None
         else None,
+        "wick_close_structure": pullback_intelligence.wick_close_structure.model_dump(mode="json")
+        if pullback_intelligence is not None
+        else None,
+        "acceptance_status": _display(pullback_intelligence.acceptance_status) if pullback_intelligence is not None else NA,
+        "reclaim_strength": _display(pullback_intelligence.reclaim_strength) if pullback_intelligence is not None else NA,
+        "body_acceptance_ratio": _display(pullback_intelligence.body_acceptance_ratio)
+        if pullback_intelligence is not None
+        else NA,
     }
 
 
@@ -896,6 +907,14 @@ def _pullback_intelligence_lines(intelligence: PullbackIntelligenceResult) -> tu
         f"- RR potential: {_score_label(intelligence.rr_potential_score)}",
         f"- Structure risk: {_risk_label(intelligence.structure_risk_score)}",
         f"- Next condition: {_display(intelligence.next_pullback_condition)}",
+        "",
+        "Wick/Close Structure",
+        f"- Wick depth: {_display(intelligence.wick_depth_ratio)}",
+        f"- Close depth: {_display(intelligence.close_depth_ratio)}",
+        f"- Acceptance: {_display(intelligence.acceptance_status)}",
+        f"- Reclaim: {_display(intelligence.reclaim_strength)}",
+        f"- Candles below zone: {_display(intelligence.candles_below_fib_zone)}",
+        f"- Structural status: {_display(intelligence.structural_reclaim_status)}",
     )
 
 

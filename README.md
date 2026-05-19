@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, and Phase 40 graceful watch shutdown with watch iteration persistence.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, Phase 40 graceful watch shutdown with watch iteration persistence, and Phase 41 wick-vs-close structural intelligence.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -103,7 +103,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, the Phase 39 symbol health layer, and the Phase 40 watch persistence and shutdown layer. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, the Phase 39 symbol health layer, the Phase 40 watch persistence and shutdown layer, and the Phase 41 wick-vs-close structural intelligence layer. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -608,7 +608,7 @@ Phase 14 adds `app/analytics/pullback_zones.py` for the Liquidity-Grab Pullback 
 - Bullish and bearish FVGs are detected from the displacement candles and marked with high, low, midpoint, creation index, and freshness.
 - Bullish and bearish order blocks are detected as the last opposite-color candle before displacement/BOS and include body, wick, midpoint, creation index, and freshness.
 - A selected pullback zone must overlap the 0.382 to 0.618 fib retracement range. Aggressive mode can allow drift to 0.65.
-- Pullbacks that tag deeper than 0.786 before entry are rejected with `pullback_too_deep`.
+- Body-close acceptance beyond 0.786 or persistent acceptance beyond the invalidation zone is rejected. Wick-only breaches are classified by the Phase 41 wick/close layer instead of being treated as automatic `pullback_too_deep`.
 - Stops use the sweep wick plus a 0.10 ATR(15m) buffer, or the farther OB structure edge when that is more conservative. If ATR is unavailable, the structure edge is used and the ATR buffer remains `N/A`.
 - TP1 uses the nearest opposing liquidity/range level when available, otherwise fib 1.272. TP2 uses fib 1.618 and TP3 uses fib 2.0.
 - RR to TP2 must be at least 2.5 for swing/scalp and at least 3.0 for challenge mode. Failed RR rejects with `rr_too_low`.
@@ -661,7 +661,7 @@ The Liquidity-Grab Pullback strategy can reject only severe derivatives conflict
 Scanner summary output includes compact derivatives context when available:
 
 ```text
-BTCUSDT | No Setup | 2D: bearish | 12H: bearish | POC: 79704 | Funding: negative/normal | OI: rising | 15m sweep: passed | 5m BOS/CHoCH: passed | Pullback: failed | Reject: pullback_too_deep
+BTCUSDT | No Setup | 2D: bearish | 12H: bearish | POC: 79704 | Funding: negative/normal | OI: rising | 15m sweep: passed | 5m BOS/CHoCH: passed | Pullback: failed | Reject: body_acceptance_failure
 ```
 
 Normal CLI output includes a `Derivatives` block with funding, OI, price/OI, crowding, squeeze, and context score. Full diagnostics and JSON output include the nested `derivatives_enrichment` object.
@@ -685,7 +685,7 @@ Phase 15.2 fixes the multi-timeframe confirmation-to-pullback handoff:
 
 - The Liquidity-Grab Pullback strategy keeps the 15m execution sweep context while using the 5m confirmation BOS/CHoCH displacement for pullback-zone calculation.
 - Pullback diagnostics now expose the calculation timeframe, sweep index, BOS/CHoCH index, and displacement start/end indices.
-- Rejection reasons are more specific, including `missing_confirmation_candles`, `no_displacement_candle`, `no_ob_or_fvg_zone`, `pullback_too_deep`, and `rr_below_minimum`.
+- Rejection reasons are more specific, including `missing_confirmation_candles`, `no_displacement_candle`, `no_ob_or_fvg_zone`, `wick_sweep_reclaim`, `body_acceptance_failure`, `structural_breakdown`, and `rr_below_minimum`.
 - Normal CLI output prints one failed gate, one reason, and one action instead of duplicating pullback rejection lines.
 
 ## Phase 16 Telegram Formatter
@@ -889,7 +889,7 @@ Each near-miss intelligence object includes:
 Behavior examples:
 
 - `rr_below_minimum`: status is `Watchlist only`; the plan explains that RR must improve through a better pullback entry, wider TP2 distance, or cleaner opposing liquidity target before the setup can become valid.
-- `pullback_too_deep`: status is `Rejected`; the plan explains that the pullback tagged beyond 0.786 and a completely new sweep plus BOS/CHoCH is required.
+- `pullback_too_deep`, `body_acceptance_failure`, or `structural_breakdown`: status is `Rejected`; the plan explains that body acceptance or structural breakdown beyond 0.786 requires fresh structure.
 - `no_ob_or_fvg_zone`: status is `Watchlist only` only when the sweep and BOS/CHoCH passed; otherwise it stays `Rejected`.
 - `missing_confirmation_structure_shift`: status is `Wait for confirmation`; the plan waits for a 5m BOS/CHoCH close before any pullback, RR, risk, or trade-idea logic can matter.
 
@@ -1764,6 +1764,75 @@ Safety boundaries:
 - Phase 40 is operational reliability and local persistence only.
 - It does not change strategy gates, weaken setup logic, create trades from invalid setups, add order execution, add private exchange API access, add withdrawals or transfers, or send live Telegram by default.
 
+## Phase 41 - Wick vs Close Structural Intelligence
+
+Purpose:
+
+- Distinguish liquidity wicks from body-close acceptance beyond structural fib limits.
+- Avoid invalidating a pullback only because a wick swept beyond 0.786 when the candle closes back inside the valid side and structure remains intact.
+- Keep hard gates intact: OB/FVG, fib entry alignment, RR, Trust Meter, risk, regime, and final strategy gates still decide whether anything can become valid.
+
+Why wick vs close matters:
+
+- A wick beyond 0.786 can be a liquidity sweep if price reclaims quickly.
+- A body close beyond 0.786 is acceptance, not just a sweep, and is treated as higher risk.
+- Multiple closes beyond the invalidation zone or a close through the structure edge means the structure is broken.
+
+Acceptance classifications:
+
+- `CLEAN_PULLBACK`: wick and close stay within the accepted structure.
+- `WICK_SWEEP_RECLAIM`: wick breaches 0.786, but close reclaims the valid side with weak reclaim quality. This is watch-only.
+- `DEEP_RECLAIM_VALID`: wick breaches 0.786, close reclaims strongly, and structure remains intact. This allows continued tracking but does not bypass any gate.
+- `BODY_ACCEPTANCE_FAILURE`: a candle body closes beyond 0.786. This blocks confirmation from the current pullback.
+- `STRUCTURAL_BREAKDOWN`: multiple closes accept beyond the invalidation zone or structure breaks. Lifecycle moves toward invalidation and cooldown.
+- `DATA_INCOMPLETE`: required wick/close data is unavailable; fields remain `N/A`.
+
+Lifecycle behavior:
+
+- `WICK_SWEEP_RECLAIM` can remain `STALKING` or `TRIGGERED`, but it does not create a valid setup.
+- `DEEP_RECLAIM_VALID` can remain watch/near-miss while OB/FVG, RR, and final gates are evaluated normally.
+- `BODY_ACCEPTANCE_FAILURE` invalidates the current pullback context.
+- `STRUCTURAL_BREAKDOWN` invalidates the context and can progress to `COOLDOWN`.
+
+Display:
+
+When `--show-pullback-details` is enabled, pullback output includes:
+
+```text
+Wick/Close Structure
+- Wick depth: 0.82
+- Close depth: 0.76
+- Acceptance: WICK_SWEEP_RECLAIM
+- Reclaim: weak
+- Candles below zone: 0
+- Structural status: intact
+```
+
+JSON:
+
+Scanner JSON includes `wick_close_structure`, `acceptance_status`, `reclaim_strength`, and `body_acceptance_ratio` in pullback intelligence output and display metadata.
+
+Research queries:
+
+```text
+wick_close_failures
+acceptance_status_distribution
+reclaim_quality_analysis
+```
+
+Examples:
+
+- Wick sweeps below 0.786 and closes back above it with weak reclaim: watch-only `WICK_SWEEP_RECLAIM`.
+- Wick sweeps deeply and closes back strongly with BOS/CHoCH still intact: `DEEP_RECLAIM_VALID`, but OB/FVG and RR still must pass.
+- One body close below 0.786: `BODY_ACCEPTANCE_FAILURE`.
+- Multiple body closes below 0.786: `STRUCTURAL_BREAKDOWN`.
+
+Safety boundaries:
+
+- Phase 41 is structural diagnostics and classification only.
+- It does not lower RR requirements, create trades from invalid structures, bypass OB/FVG or Trust Meter gates, place orders, use private API access, add withdrawals/transfers, or send live Telegram by default.
+- Missing data remains `N/A`; unreliable data remains `Unverified`; market data is never invented.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -1802,3 +1871,4 @@ Safety boundaries:
 - The Phase 38 pullback intelligence layer is diagnostics and research only. It does not loosen pullback, fib, OB/FVG, RR, Trust Meter, risk, or lifecycle gates; create valid setups from failed pullbacks; place orders; call private APIs; send live Telegram by default; invent data; withdraw funds; or transfer funds.
 - The Phase 39 symbol health layer is scan ordering and timeout hygiene only. It does not weaken strategy gates, create trades from invalid setups, place orders, call private APIs, send live Telegram by default, invent data, withdraw funds, or transfer funds.
 - The Phase 40 watch shutdown and persistence layer is operational reliability only. It does not weaken strategy gates, create trades from invalid setups, place orders, call private APIs, send live Telegram by default, invent data, withdraw funds, or transfer funds.
+- The Phase 41 wick-vs-close structural intelligence layer is diagnostics and classification only. It does not weaken RR, OB/FVG, fib, Trust Meter, risk, or final strategy gates; place orders; call private APIs; send live Telegram by default; invent data; withdraw funds; or transfer funds.

@@ -21,6 +21,8 @@ RR_GATES = {
     "rr_too_low",
 }
 DEEP_PULLBACK_GATES = {"pullback_too_deep", "pullback_beyond_786"}
+WICK_RECLAIM_GATES = {"wick_sweep_reclaim"}
+BODY_ACCEPTANCE_GATES = {"body_acceptance_failure", "structural_breakdown"}
 OB_FVG_GATES = {"no_ob_or_fvg_zone", "challenge_limit_entry_missing"}
 CONFIRMATION_GATES = {"missing_confirmation_structure_shift"}
 EARLY_REJECTION_GATES = {"missing_confirmed_sweep"}
@@ -140,6 +142,38 @@ def build_near_miss_intelligence(
             activation_hint="This setup cannot activate from the current pullback; a new sweep and BOS/CHoCH are required.",
             invalidation_hint="Current idea is invalidated by the deep pullback beyond 0.786.",
             quality_note="Pullback tagged beyond 0.786; intent is weak.",
+            action_label=REJECTED,
+        )
+
+    if gate in WICK_RECLAIM_GATES:
+        return NearMissIntelligence(
+            primary_failed_gate=gate,
+            short_reason=reason,
+            watchlist_status=WATCHLIST_ONLY if core_passed else REJECTED,
+            next_required_conditions=(
+                "Reclaim strength must improve after the wick sweep.",
+                "BOS/CHoCH structure must remain intact.",
+                "OB/FVG, RR, and final quality gates must still pass.",
+            ),
+            activation_hint="A wick reclaim is watch-only until reclaim quality and all standard gates pass.",
+            invalidation_hint=_structure_invalidation_hint(core_passed),
+            quality_note="The deep move is a wick sweep, not body acceptance, but reclaim quality is still weak.",
+            action_label=WATCHLIST_ONLY if core_passed else REJECTED,
+        )
+
+    if gate in BODY_ACCEPTANCE_GATES:
+        return NearMissIntelligence(
+            primary_failed_gate=gate,
+            short_reason=reason,
+            watchlist_status=REJECTED,
+            next_required_conditions=(
+                "Do not confirm this pullback after body acceptance beyond 0.786.",
+                "Wait for a fresh liquidity sweep.",
+                "Require a new BOS/CHoCH before evaluating another pullback.",
+            ),
+            activation_hint="Body acceptance beyond the invalidation zone blocks activation from this structure.",
+            invalidation_hint="Current idea is invalidated by body acceptance beyond 0.786 or structural breakdown.",
+            quality_note="Body-close acceptance is materially weaker than a wick-only sweep.",
             action_label=REJECTED,
         )
 

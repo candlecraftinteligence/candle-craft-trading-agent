@@ -201,6 +201,17 @@ class LiquidityGrabSetup(BaseModel):
     fib_65: MaybeDecimal = NA
     fib_786: MaybeDecimal = NA
     pullback_depth_ratio: MaybeDecimal = NA
+    wick_depth_ratio: MaybeDecimal = NA
+    close_depth_ratio: MaybeDecimal = NA
+    body_acceptance_ratio: MaybeDecimal = NA
+    max_wick_breach: MaybeDecimal = NA
+    max_body_breach: MaybeDecimal = NA
+    reclaim_detected: bool | Literal["N/A"] = NA
+    reclaim_strength: str = NA
+    candles_below_fib_zone: int | Literal["N/A"] = NA
+    acceptance_status: str = NA
+    structural_reclaim_status: str = NA
+    wick_close_structure: dict[str, Any] = {}
     pullback_failure_reason: str = NA
     atr_stop_buffer: MaybeDecimal = NA
     momentum: MomentumConfirmation = MomentumConfirmation()
@@ -723,6 +734,17 @@ class LiquidityGrabEngine:
             fib_65=pullback_zone.fib_65,
             fib_786=pullback_zone.fib_786,
             pullback_depth_ratio=pullback_zone.pullback_depth_ratio,
+            wick_depth_ratio=pullback_zone.wick_depth_ratio,
+            close_depth_ratio=pullback_zone.close_depth_ratio,
+            body_acceptance_ratio=pullback_zone.body_acceptance_ratio,
+            max_wick_breach=pullback_zone.max_wick_breach,
+            max_body_breach=pullback_zone.max_body_breach,
+            reclaim_detected=pullback_zone.reclaim_detected,
+            reclaim_strength=pullback_zone.reclaim_strength,
+            candles_below_fib_zone=pullback_zone.candles_below_fib_zone,
+            acceptance_status=pullback_zone.acceptance_status,
+            structural_reclaim_status=pullback_zone.structural_reclaim_status,
+            wick_close_structure=pullback_zone.wick_close_structure.model_dump(),
             pullback_failure_reason=pullback_zone.pullback_failure_reason,
             atr_stop_buffer=pullback_zone.atr_stop_buffer,
             momentum=momentum,
@@ -1720,6 +1742,17 @@ def _rejected_setup(
         fib_65=pullback_zone.fib_65,
         fib_786=pullback_zone.fib_786,
         pullback_depth_ratio=pullback_zone.pullback_depth_ratio,
+        wick_depth_ratio=pullback_zone.wick_depth_ratio,
+        close_depth_ratio=pullback_zone.close_depth_ratio,
+        body_acceptance_ratio=pullback_zone.body_acceptance_ratio,
+        max_wick_breach=pullback_zone.max_wick_breach,
+        max_body_breach=pullback_zone.max_body_breach,
+        reclaim_detected=pullback_zone.reclaim_detected,
+        reclaim_strength=pullback_zone.reclaim_strength,
+        candles_below_fib_zone=pullback_zone.candles_below_fib_zone,
+        acceptance_status=pullback_zone.acceptance_status,
+        structural_reclaim_status=pullback_zone.structural_reclaim_status,
+        wick_close_structure=pullback_zone.wick_close_structure.model_dump(),
         pullback_failure_reason=pullback_zone.pullback_failure_reason,
         atr_stop_buffer=pullback_zone.atr_stop_buffer,
         entry_low=entry_low,
@@ -1783,6 +1816,17 @@ def _setup_diagnostic_fields(setup: LiquidityGrabSetup) -> dict[str, Any]:
         "fib_65": setup.pullback_zone.fib_65,
         "fib_786": setup.pullback_zone.fib_786,
         "pullback_depth_ratio": setup.pullback_zone.pullback_depth_ratio,
+        "wick_close_structure": setup.pullback_zone.wick_close_structure.model_dump(),
+        "wick_depth_ratio": setup.pullback_zone.wick_depth_ratio,
+        "close_depth_ratio": setup.pullback_zone.close_depth_ratio,
+        "body_acceptance_ratio": setup.pullback_zone.body_acceptance_ratio,
+        "max_wick_breach": setup.pullback_zone.max_wick_breach,
+        "max_body_breach": setup.pullback_zone.max_body_breach,
+        "reclaim_detected": setup.pullback_zone.reclaim_detected,
+        "reclaim_strength": setup.pullback_zone.reclaim_strength,
+        "candles_below_fib_zone": setup.pullback_zone.candles_below_fib_zone,
+        "acceptance_status": setup.pullback_zone.acceptance_status,
+        "structural_reclaim_status": setup.pullback_zone.structural_reclaim_status,
         "pullback_failure_reason": setup.pullback_zone.pullback_failure_reason,
         "atr_stop_buffer": setup.pullback_zone.atr_stop_buffer,
         "sweep_diagnostics": _sweep_diagnostics(setup.sweep),
@@ -1911,7 +1955,11 @@ def _pullback_zone_diagnostics(setup: LiquidityGrabSetup) -> str:
 def _fib_diagnostics(setup: LiquidityGrabSetup) -> str:
     if not setup.structure_shift.is_present:
         return "N/A."
-    if setup.pullback_zone.first_failed_gate == "pullback_too_deep":
+    if setup.pullback_zone.first_failed_gate in {
+        "pullback_too_deep",
+        "body_acceptance_failure",
+        "structural_breakdown",
+    }:
         return f"failed: {setup.pullback_zone.pullback_failure_reason}"
     if not setup.order_block.is_present and not setup.fair_value_gap.is_present:
         return "N/A because OB/FVG failed."
@@ -1987,6 +2035,7 @@ def _format_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> str:
             f"OB: {_pullback_zone_text(setup.ob_zone)}",
             f"FVG: {_pullback_zone_text(setup.fvg_zone)}",
             f"Fib: {_display(setup.fib_alignment.status)}",
+            f"Wick/Close acceptance: {_display(setup.acceptance_status)}; reclaim {_display(setup.reclaim_strength)}; structural {_display(setup.structural_reclaim_status)}",
             f"RR: {_display(setup.rr_to_tp2)}",
             f"OB/FVG: {_diagnostic_detail(setup.ob_fvg_diagnostics)}",
             f"Fib alignment: {_diagnostic_detail(setup.fib_diagnostics)}",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from app.analytics.pullback_zones import PullbackZoneInput, analyze_pullback_zone, calculate_fib_alignment
+from app.analytics.pullback_zones import AcceptanceStatus, PullbackZoneInput, analyze_pullback_zone, calculate_fib_alignment
 from app.data.dtos import NA
 
 
@@ -211,7 +211,84 @@ def test_confirmation_timeframe_indices_drive_pullback_calculation() -> None:
     assert result.displacement_end_index == 9
 
 
-def test_pullback_deeper_than_0786_rejects() -> None:
+def test_wick_below_0786_but_close_above_remains_watch() -> None:
+    candles = _bullish_valid_candles()
+    candles.append(
+        {
+            "timestamp": 10,
+            "open": Decimal("120"),
+            "high": Decimal("121"),
+            "low": Decimal("108"),
+            "close": Decimal("110"),
+            "volume": Decimal("100"),
+        }
+    )
+
+    result = analyze_pullback_zone(_input(candles, minimum_rr=Decimal("3.0")))
+
+    assert result.valid is False
+    assert result.first_failed_gate == "wick_sweep_reclaim"
+    assert result.acceptance_status == AcceptanceStatus.WICK_SWEEP_RECLAIM.value
+    assert result.reclaim_detected is True
+    assert result.reclaim_strength == "weak"
+    assert result.close_depth_ratio <= Decimal("0.78600000")
+
+
+def test_body_close_below_0786_invalidates() -> None:
+    candles = _bullish_valid_candles()
+    candles.append(
+        {
+            "timestamp": 10,
+            "open": Decimal("112"),
+            "high": Decimal("113"),
+            "low": Decimal("108"),
+            "close": Decimal("108"),
+            "volume": Decimal("100"),
+        }
+    )
+
+    result = analyze_pullback_zone(_input(candles, minimum_rr=Decimal("3.0")))
+
+    assert result.valid is False
+    assert result.first_failed_gate == "body_acceptance_failure"
+    assert result.acceptance_status == AcceptanceStatus.BODY_ACCEPTANCE_FAILURE.value
+    assert result.body_acceptance_ratio > Decimal("0.78600000")
+    assert result.candles_below_fib_zone == 1
+
+
+def test_multiple_closes_below_zone_cause_structural_breakdown() -> None:
+    candles = _bullish_valid_candles()
+    candles.extend(
+        [
+            {
+                "timestamp": 10,
+                "open": Decimal("112"),
+                "high": Decimal("113"),
+                "low": Decimal("108"),
+                "close": Decimal("108"),
+                "volume": Decimal("100"),
+            },
+            {
+                "timestamp": 11,
+                "open": Decimal("109"),
+                "high": Decimal("110"),
+                "low": Decimal("107"),
+                "close": Decimal("107"),
+                "volume": Decimal("100"),
+            },
+        ]
+    )
+
+    result = analyze_pullback_zone(_input(candles, minimum_rr=Decimal("3.0")))
+
+    assert result.valid is False
+    assert result.first_failed_gate == "structural_breakdown"
+    assert result.acceptance_status == AcceptanceStatus.STRUCTURAL_BREAKDOWN.value
+    assert result.candles_below_fib_zone == 2
+    assert result.structural_reclaim_status == "broken"
+
+
+def test_strong_reclaim_classification_does_not_bypass_other_gates() -> None:
     candles = _bullish_valid_candles()
     candles.append(
         {
@@ -226,8 +303,10 @@ def test_pullback_deeper_than_0786_rejects() -> None:
 
     result = analyze_pullback_zone(_input(candles, minimum_rr=Decimal("3.0")))
 
+    assert result.acceptance_status == AcceptanceStatus.DEEP_RECLAIM_VALID.value
+    assert result.reclaim_strength == "strong"
+    assert result.first_failed_gate != "pullback_too_deep"
     assert result.valid is False
-    assert result.first_failed_gate == "pullback_too_deep"
 
 
 def test_rr_below_25_rejects() -> None:

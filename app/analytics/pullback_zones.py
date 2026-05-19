@@ -8,6 +8,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
+from app.analytics.wick_close_structure import (
+    AcceptanceStatus,
+    WickCloseStructure,
+    analyze_wick_close_structure,
+    wick_close_fields,
+)
 
 OUTPUT_QUANT = Decimal("0.00000001")
 BASE_MIN_RR = Decimal("2.5")
@@ -146,6 +152,17 @@ class PullbackZoneResult(BaseModel):
     fib_min: MaybeDecimal = NA
     fib_max: MaybeDecimal = NA
     pullback_depth_ratio: MaybeDecimal = NA
+    wick_depth_ratio: MaybeDecimal = NA
+    close_depth_ratio: MaybeDecimal = NA
+    body_acceptance_ratio: MaybeDecimal = NA
+    max_wick_breach: MaybeDecimal = NA
+    max_body_breach: MaybeDecimal = NA
+    reclaim_detected: bool | Literal["N/A"] = NA
+    reclaim_strength: str = NA
+    candles_below_fib_zone: int | Literal["N/A"] = NA
+    acceptance_status: str = AcceptanceStatus.DATA_INCOMPLETE.value
+    structural_reclaim_status: str = NA
+    wick_close_structure: WickCloseStructure = WickCloseStructure()
     entry_low: MaybeDecimal = NA
     entry_high: MaybeDecimal = NA
     entry: MaybeDecimal = NA
@@ -231,7 +248,15 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         data.latest_price,
     )
     fib_alignment = _fib_alignment_for_levels(data.direction, impulse_start, impulse_end, None, data.aggressive_toggle)
-    deep_reject = _pullback_deeper_than_786(candles, data.direction, bos_index, fib_levels, data.latest_price)
+    wick_close_structure = analyze_wick_close_structure(
+        candles,
+        direction=data.direction,
+        bos_index=bos_index,
+        sweep_price=impulse_start,
+        bos_price=impulse_end,
+        fib_786=fib_levels["0.786"],
+        latest_price=data.latest_price,
+    )
     ob_zone = _detect_order_block(candles, data.direction, sweep_index, bos_index, impulse_end)
     fvg_zone = _detect_fvg(candles, data.direction, sweep_index, bos_index)
 
@@ -255,19 +280,47 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         "fib_min": fib_levels["min"],
         "fib_max": fib_levels["max"],
         "pullback_depth_ratio": pullback_depth_ratio if pullback_depth_ratio is not None else NA,
+        **wick_close_fields(wick_close_structure),
     }
 
-    if deep_reject:
+    if wick_close_structure.acceptance_status == AcceptanceStatus.STRUCTURAL_BREAKDOWN.value:
         return _failed_result(
             data,
-            "pullback_too_deep",
-            "Pullback tagged beyond 0.786 before entry.",
+            "structural_breakdown",
+            "Multiple body closes accepted beyond 0.786 or structure broke after the pullback.",
             **base_update,
             fib_alignment=fib_alignment.model_copy(
                 update={
                     "rejected_deeper_than_786": True,
-                    "status": "pullback_too_deep",
-                    "reason": "Pullback tagged beyond 0.786 before entry.",
+                    "status": "structural_breakdown",
+                    "reason": "Body acceptance persisted beyond 0.786 or structure broke after the pullback.",
+                }
+            ),
+        )
+    if wick_close_structure.acceptance_status == AcceptanceStatus.BODY_ACCEPTANCE_FAILURE.value:
+        return _failed_result(
+            data,
+            "body_acceptance_failure",
+            "Candle body closed beyond 0.786 before entry.",
+            **base_update,
+            fib_alignment=fib_alignment.model_copy(
+                update={
+                    "rejected_deeper_than_786": True,
+                    "status": "body_acceptance_failure",
+                    "reason": "Candle body closed beyond 0.786 before entry.",
+                }
+            ),
+        )
+    if wick_close_structure.acceptance_status == AcceptanceStatus.WICK_SWEEP_RECLAIM.value:
+        return _failed_result(
+            data,
+            "wick_sweep_reclaim",
+            "Wick swept beyond 0.786 but body reclaimed the zone with weak reclaim strength.",
+            **base_update,
+            fib_alignment=fib_alignment.model_copy(
+                update={
+                    "status": "wick_sweep_reclaim",
+                    "reason": "Wick swept beyond 0.786 but body close reclaimed the zone; watch only until reclaim improves.",
                 }
             ),
         )
@@ -402,6 +455,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         fib_min=fib_levels["min"],
         fib_max=fib_levels["max"],
         pullback_depth_ratio=pullback_depth_ratio if pullback_depth_ratio is not None else NA,
+        **wick_close_fields(wick_close_structure),
         entry_low=selected.entry_low,
         entry_high=selected.entry_high,
         entry=_quantize(entry),
@@ -1176,10 +1230,12 @@ def _unique_strings(values: Sequence[str]) -> tuple[str, ...]:
 
 
 __all__ = [
+    "AcceptanceStatus",
     "FibAlignmentResult",
     "PullbackZone",
     "PullbackZoneInput",
     "PullbackZoneResult",
+    "WickCloseStructure",
     "analyze_pullback_zone",
     "calculate_fib_alignment",
 ]

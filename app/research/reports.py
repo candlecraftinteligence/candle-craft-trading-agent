@@ -74,6 +74,12 @@ def format_research_report(report: Mapping[str, Any]) -> str:
         return _format_pullback_depth_analysis(report)
     if query == "pullback_lifecycle_dropoffs":
         return _format_pullback_lifecycle_dropoffs(report)
+    if query == "wick_close_failures":
+        return _format_wick_close_failures(report)
+    if query == "acceptance_status_distribution":
+        return _format_acceptance_status_distribution(report)
+    if query == "reclaim_quality_analysis":
+        return _format_reclaim_quality_analysis(report)
     if query in {"symbol_health", "slow_symbols", "timeout_symbols", "priority_symbols"}:
         return _format_symbol_health(report)
     if query == "watch_iterations":
@@ -801,6 +807,98 @@ def _format_pullback_lifecycle_dropoffs(report: Mapping[str, Any]) -> str:
         "Failure by regime",
         _format_pullback_group_rows(report.get("failure_by_regime"), "regime_state"),
         _warning_block(report),
+    )
+
+
+def _format_wick_close_failures(report: Mapping[str, Any]) -> str:
+    gate_rows = [
+        (
+            row.get("failed_gate"),
+            row.get("count"),
+            row.get("most_common_acceptance_status"),
+            row.get("average_wick_breach"),
+            row.get("average_body_breach"),
+        )
+        for row in _sequence(report.get("failure_by_gate"))
+    ]
+    breach_rows = [
+        (
+            row.get("symbol"),
+            row.get("acceptance_status"),
+            row.get("max_wick_breach"),
+            row.get("max_body_breach"),
+            row.get("reclaim_strength"),
+            row.get("candles_below_fib_zone"),
+        )
+        for row in _sequence(report.get("largest_wick_breaches"))
+    ]
+    return _join_sections(
+        "Wick/Close Failures",
+        _metric_table((("Total wick/close failures", report.get("total_wick_close_failures")),)),
+        "Acceptance status counts",
+        _format_acceptance_status_rows(report.get("acceptance_status_counts")),
+        "Failure by gate",
+        _table(("gate", "count", "top_status", "avg_wick_breach", "avg_body_breach"), gate_rows),
+        "Largest wick breaches",
+        _table(("symbol", "status", "wick_breach", "body_breach", "reclaim", "candles"), breach_rows),
+        _warning_block(report),
+    )
+
+
+def _format_acceptance_status_distribution(report: Mapping[str, Any]) -> str:
+    return _join_sections(
+        "Acceptance Status Distribution",
+        _metric_table((("Acceptance samples", report.get("total_acceptance_samples")),)),
+        _format_acceptance_status_rows(report.get("acceptance_status_counts")),
+        _warning_block(report),
+    )
+
+
+def _format_reclaim_quality_analysis(report: Mapping[str, Any]) -> str:
+    strength_rows = [
+        (
+            row.get("reclaim_strength"),
+            row.get("count"),
+            row.get("average_wick_breach"),
+            row.get("most_common_acceptance_status"),
+        )
+        for row in _sequence(report.get("reclaim_strength_counts"))
+    ]
+    conversion_rows = [
+        (
+            row.get("reclaim_strength"),
+            row.get("count"),
+            row.get("valid_setup_count"),
+            _pct_value(row.get("conversion_to_valid_pct")),
+            row.get("invalidated_or_cooldown"),
+        )
+        for row in _sequence(report.get("conversion_by_reclaim_strength"))
+    ]
+    return _join_sections(
+        "Reclaim Quality Analysis",
+        _metric_table((("Reclaim samples", report.get("total_reclaim_samples")),)),
+        "Reclaim strength",
+        _table(("strength", "count", "avg_wick_breach", "top_status"), strength_rows),
+        "Conversion by reclaim strength",
+        _table(("strength", "count", "valid", "conversion", "invalidated"), conversion_rows),
+        _warning_block(report),
+    )
+
+
+def _format_acceptance_status_rows(rows: Any) -> str:
+    return _table(
+        ("status", "count", "pct", "avg_wick", "avg_close", "avg_body"),
+        [
+            (
+                row.get("acceptance_status"),
+                row.get("count"),
+                _pct_value(row.get("percentage")),
+                row.get("average_wick_depth"),
+                row.get("average_close_depth"),
+                row.get("average_body_acceptance"),
+            )
+            for row in _sequence(rows)
+        ],
     )
 
 

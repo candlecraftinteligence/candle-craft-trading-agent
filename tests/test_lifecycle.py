@@ -265,6 +265,68 @@ def _too_deep_pullback_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
     )
 
 
+def _wick_reclaim_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        rejected_strategy_modes=("swing",),
+        strategy_diagnostics={
+            "swing": {
+                "mode": "swing",
+                "bias": "long",
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "failed",
+                "first_failed_gate": "wick_sweep_reclaim",
+                "gates_passed": ("sweep", "bos_choch"),
+                "gates_failed": ("wick_sweep_reclaim",),
+                "pullback_depth_ratio": Decimal("0.82"),
+                "wick_depth_ratio": Decimal("0.82"),
+                "close_depth_ratio": Decimal("0.76"),
+                "body_acceptance_ratio": Decimal("0.76"),
+                "reclaim_detected": True,
+                "reclaim_strength": "weak",
+                "candles_below_fib_zone": 0,
+                "acceptance_status": "WICK_SWEEP_RECLAIM",
+                "structural_reclaim_status": "intact",
+                "pullback_failure_reason": "Wick swept beyond 0.786 but body reclaimed the zone.",
+            }
+        },
+    )
+
+
+def _body_acceptance_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        rejected_strategy_modes=("swing",),
+        strategy_diagnostics={
+            "swing": {
+                "mode": "swing",
+                "bias": "long",
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "failed",
+                "first_failed_gate": "body_acceptance_failure",
+                "gates_passed": ("sweep", "bos_choch"),
+                "gates_failed": ("body_acceptance_failure",),
+                "pullback_depth_ratio": Decimal("0.82"),
+                "wick_depth_ratio": Decimal("0.82"),
+                "close_depth_ratio": Decimal("0.82"),
+                "body_acceptance_ratio": Decimal("0.82"),
+                "reclaim_detected": False,
+                "reclaim_strength": "N/A",
+                "candles_below_fib_zone": 1,
+                "acceptance_status": "BODY_ACCEPTANCE_FAILURE",
+                "structural_reclaim_status": "intact",
+                "pullback_failure_reason": "Candle body closed beyond 0.786 before entry.",
+            }
+        },
+    )
+
+
 def test_valid_state_progression() -> None:
     initial = evaluate_lifecycle_transition(
         None,
@@ -326,6 +388,45 @@ def test_lifecycle_invalidates_triggered_setup_on_too_deep_pullback(tmp_path) ->
     assert transition is not None
     assert lifecycle.current_state == SetupLifecycleState.INVALIDATED
     assert lifecycle.invalidation_reason == "pullback exceeded valid structure depth"
+    assert transition.reason == SetupTransitionReason.SETUP_INVALIDATED
+
+
+def test_lifecycle_keeps_wick_sweep_reclaim_triggered(tmp_path) -> None:
+    db_path = tmp_path / "lifecycle.db"
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(_record(SetupLifecycleState.TRIGGERED))
+
+    result = apply_lifecycle_to_run_result(
+        _scan_result(_wick_reclaim_symbol()),
+        database_path=db_path,
+        now="2026-05-18T09:30:00+00:00",
+    )
+
+    lifecycle = result.results[0].lifecycle_state
+    transition = result.results[0].lifecycle_transition
+    assert lifecycle is not None
+    assert transition is not None
+    assert lifecycle.current_state == SetupLifecycleState.TRIGGERED
+    assert transition.transitioned is False
+
+
+def test_lifecycle_invalidates_body_acceptance_failure(tmp_path) -> None:
+    db_path = tmp_path / "lifecycle.db"
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(_record(SetupLifecycleState.TRIGGERED))
+
+    result = apply_lifecycle_to_run_result(
+        _scan_result(_body_acceptance_symbol()),
+        database_path=db_path,
+        now="2026-05-18T09:30:00+00:00",
+    )
+
+    lifecycle = result.results[0].lifecycle_state
+    transition = result.results[0].lifecycle_transition
+    assert lifecycle is not None
+    assert transition is not None
+    assert lifecycle.current_state == SetupLifecycleState.INVALIDATED
+    assert lifecycle.invalidation_reason == "body accepted beyond 0.786 invalidation zone"
     assert transition.reason == SetupTransitionReason.SETUP_INVALIDATED
 
 
