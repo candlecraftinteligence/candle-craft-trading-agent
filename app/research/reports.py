@@ -80,6 +80,14 @@ def format_research_report(report: Mapping[str, Any]) -> str:
         return _format_acceptance_status_distribution(report)
     if query == "reclaim_quality_analysis":
         return _format_reclaim_quality_analysis(report)
+    if query == "target_failures":
+        return _format_target_failures(report)
+    if query == "rr_compression_analysis":
+        return _format_rr_compression_analysis(report)
+    if query == "target_quality_distribution":
+        return _format_target_quality_distribution(report)
+    if query == "best_target_conditions":
+        return _format_best_target_conditions(report)
     if query in {"symbol_health", "slow_symbols", "timeout_symbols", "priority_symbols"}:
         return _format_symbol_health(report)
     if query == "watch_iterations":
@@ -881,6 +889,117 @@ def _format_reclaim_quality_analysis(report: Mapping[str, Any]) -> str:
         _table(("strength", "count", "avg_wick_breach", "top_status"), strength_rows),
         "Conversion by reclaim strength",
         _table(("strength", "count", "valid", "conversion", "invalidated"), conversion_rows),
+        _warning_block(report),
+    )
+
+
+def _format_target_failures(report: Mapping[str, Any]) -> str:
+    failure_rows = [
+        (
+            row.get("target_failure_type"),
+            row.get("count"),
+            _pct_value(row.get("percentage")),
+            row.get("average_rr_to_tp2"),
+            row.get("average_clean_path_distance"),
+            ", ".join(str(symbol) for symbol in _sequence(row.get("affected_symbols"))),
+        )
+        for row in _sequence(report.get("failure_type_counts"))
+    ]
+    symbol_rows = [
+        (
+            row.get("symbol"),
+            row.get("count"),
+            row.get("most_common_target_failure"),
+            row.get("average_rr_to_tp2"),
+        )
+        for row in _sequence(report.get("most_common_failed_symbols"))
+    ]
+    return _join_sections(
+        "Target Failures",
+        _metric_table((("Total target failures", report.get("total_target_failures")),)),
+        "Failure type counts",
+        _table(("failure", "count", "pct", "avg_rr_tp2", "avg_clean_path", "symbols"), failure_rows),
+        "Most common failed symbols",
+        _table(("symbol", "count", "top_failure", "avg_rr_tp2"), symbol_rows),
+        _warning_block(report),
+    )
+
+
+def _format_rr_compression_analysis(report: Mapping[str, Any]) -> str:
+    reason_rows = [
+        (
+            row.get("rr_compression_reason"),
+            row.get("count"),
+            ", ".join(str(symbol) for symbol in _sequence(row.get("affected_symbols"))),
+        )
+        for row in _sequence(report.get("compression_reasons"))
+    ]
+    recent_rows = [
+        (
+            row.get("timestamp"),
+            row.get("symbol"),
+            row.get("failed_gate"),
+            row.get("target_failure_type"),
+            row.get("rr_to_tp2"),
+            row.get("next_condition"),
+        )
+        for row in _sequence(report.get("recent_cases"))
+    ]
+    return _join_sections(
+        "RR Compression Analysis",
+        _metric_table(
+            (
+                ("RR compression cases", report.get("total_rr_compression_cases")),
+                ("Average RR to TP2", report.get("average_rr_to_tp2")),
+                ("Average clean path", report.get("average_clean_path_distance")),
+            )
+        ),
+        "Compression reasons",
+        _table(("reason", "count", "symbols"), reason_rows),
+        "Recent cases",
+        _table(("timestamp", "symbol", "gate", "failure", "rr_tp2", "next"), recent_rows),
+        _warning_block(report),
+    )
+
+
+def _format_target_quality_distribution(report: Mapping[str, Any]) -> str:
+    rows = [
+        (
+            row.get("target_quality_grade"),
+            row.get("count"),
+            row.get("valid_setup_count"),
+            row.get("near_miss_count"),
+            _pct_value(row.get("conversion_to_valid_pct")),
+            row.get("average_rr_to_tp2"),
+            row.get("average_target_confidence"),
+        )
+        for row in _sequence(report.get("target_quality_grades"))
+    ]
+    return _join_sections(
+        "Target Quality Distribution",
+        _metric_table((("Total target rows", report.get("total_target_rows")),)),
+        _table(("grade", "count", "valid", "near", "valid_pct", "avg_rr_tp2", "avg_conf"), rows),
+        _warning_block(report),
+    )
+
+
+def _format_best_target_conditions(report: Mapping[str, Any]) -> str:
+    rows = [
+        (
+            row.get("symbol"),
+            row.get("target_quality_grade"),
+            row.get("rr_to_tp2"),
+            row.get("target_confidence"),
+            row.get("clean_path_distance"),
+            row.get("primary_target_source"),
+            row.get("display_bucket"),
+        )
+        for row in _sequence(report.get("conditions"))
+    ]
+    return _join_sections(
+        "Best Target Conditions",
+        _metric_table((("Best target conditions", report.get("total_best_target_conditions")),)),
+        _table(("symbol", "grade", "rr_tp2", "conf", "clean_path", "source", "bucket"), rows),
         _warning_block(report),
     )
 

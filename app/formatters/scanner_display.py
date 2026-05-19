@@ -8,6 +8,7 @@ from typing import Any, Literal
 from app.analytics.near_miss_intelligence import NearMissIntelligence, build_near_miss_intelligence
 from app.analytics.pullback_intelligence import PullbackIntelligenceResult, build_pullback_intelligence
 from app.analytics.setup_quality import SetupQualityResult, SetupQualityState
+from app.analytics.target_intelligence import TargetIntelligenceResult
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 
@@ -239,6 +240,7 @@ def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | No
     display = build_symbol_display(symbol_result)
     diagnostics = representative_strategy_diagnostics(symbol_result)
     pullback_intelligence = _pullback_intelligence(symbol_result, diagnostics)
+    target_intelligence = _target_intelligence(symbol_result, diagnostics)
     return {
         "display_rank": display_rank,
         "display_bucket": display.display_bucket,
@@ -270,6 +272,18 @@ def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | No
         "pullback_intelligence": pullback_intelligence.model_dump(mode="json")
         if pullback_intelligence is not None
         else None,
+        "target_intelligence": target_intelligence.model_dump(mode="json")
+        if target_intelligence is not None
+        else None,
+        "target_quality_grade": _enum_value(target_intelligence.target_quality_grade)
+        if target_intelligence is not None
+        else NA,
+        "target_failure_type": _enum_value(target_intelligence.target_failure_type)
+        if target_intelligence is not None
+        else NA,
+        "rr_compression_reason": _display(target_intelligence.rr_compression_reason)
+        if target_intelligence is not None
+        else NA,
         "wick_close_structure": pullback_intelligence.wick_close_structure.model_dump(mode="json")
         if pullback_intelligence is not None
         else None,
@@ -540,6 +554,7 @@ def format_symbol_card(
         f"{CROSS} Failed",
         *_failed_lines(display),
         *_optional_pullback_intelligence_lines(symbol_result, diagnostics, display.display_bucket),
+        *_optional_target_intelligence_lines(symbol_result, diagnostics),
         "",
         f"{CHART} Setup Progress: {display.setup_progress_passed}/{display.setup_progress_total}",
         *_progress_lines(display),
@@ -591,6 +606,7 @@ def _format_near_miss_card(
         f"Reason: {reason}",
         *_quality_summary_lines(symbol_result.setup_quality),
         *_optional_pullback_intelligence_lines(symbol_result, diagnostics, display.display_bucket),
+        *_optional_target_intelligence_lines(symbol_result, diagnostics),
         *_historical_edge_lines(symbol_result),
         "",
         "Needs next:",
@@ -626,6 +642,14 @@ def format_pullback_intelligence_block(symbol_result: ScannerSymbolResult) -> st
     if intelligence is None:
         return "Pullback Intelligence\nN/A"
     return "\n".join(("Pullback Intelligence", *_pullback_intelligence_lines(intelligence)))
+
+
+def format_target_intelligence_block(symbol_result: ScannerSymbolResult) -> str:
+    diagnostics = representative_strategy_diagnostics(symbol_result)
+    intelligence = _target_intelligence(symbol_result, diagnostics)
+    if intelligence is None:
+        return "Target Intelligence\nN/A"
+    return "\n".join(("Target Intelligence", *_target_intelligence_lines(intelligence)))
 
 
 def _numbered_condition_lines(conditions: Sequence[str]) -> list[str]:
@@ -879,6 +903,20 @@ def _pullback_intelligence(
     return None
 
 
+def _target_intelligence(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> TargetIntelligenceResult | None:
+    if symbol_result.target_intelligence is not None:
+        return symbol_result.target_intelligence
+    payload = diagnostics.get("target_intelligence")
+    if isinstance(payload, TargetIntelligenceResult):
+        return payload
+    if isinstance(payload, Mapping):
+        return TargetIntelligenceResult.model_validate(payload)
+    return None
+
+
 def _optional_pullback_intelligence_lines(
     symbol_result: ScannerSymbolResult,
     diagnostics: Mapping[str, Any],
@@ -890,6 +928,42 @@ def _optional_pullback_intelligence_lines(
     if intelligence is None:
         return ()
     return ("", "Pullback Intelligence", *_pullback_intelligence_lines(intelligence))
+
+
+def _optional_target_intelligence_lines(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> tuple[str, ...]:
+    intelligence = _target_intelligence(symbol_result, diagnostics)
+    if intelligence is None or not _target_has_visible_data(intelligence):
+        return ()
+    return ("", "Target Intelligence", *_target_intelligence_lines(intelligence))
+
+
+def _target_has_visible_data(intelligence: TargetIntelligenceResult) -> bool:
+    return any(
+        _display(value) != NA
+        for value in (
+            intelligence.tp1_candidate,
+            intelligence.tp2_candidate,
+            intelligence.rr_to_tp1,
+            intelligence.rr_to_tp2,
+            intelligence.target_failure_type,
+        )
+    ) and _enum_value(intelligence.target_failure_type) != "DATA_INCOMPLETE"
+
+
+def _target_intelligence_lines(intelligence: TargetIntelligenceResult) -> tuple[str, ...]:
+    return (
+        f"- TP1 candidate: {_price_display(intelligence.tp1_candidate)}",
+        f"- TP2 candidate: {_price_display(intelligence.tp2_candidate)}",
+        f"- Clean path: {_display(intelligence.clean_path_distance)}",
+        f"- RR to TP1: {_display(intelligence.rr_to_tp1)}",
+        f"- RR to TP2: {_display(intelligence.rr_to_tp2)}",
+        f"- Target quality: {_enum_value(intelligence.target_quality_grade)}",
+        f"- Failure: {_enum_value(intelligence.target_failure_type)}",
+        f"- Next condition: {_display(intelligence.next_target_condition)}",
+    )
 
 
 def _pullback_intelligence_lines(intelligence: PullbackIntelligenceResult) -> tuple[str, ...]:
@@ -2065,6 +2139,7 @@ __all__ = [
     "format_scan_dashboard",
     "format_symbol_card",
     "format_symbol_compact_line",
+    "format_target_intelligence_block",
     "rank_scan_results",
     "representative_strategy_diagnostics",
 ]

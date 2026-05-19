@@ -255,6 +255,8 @@ def test_scanner_handles_one_valid_mocked_symbol() -> None:
     assert symbol_result.trade_idea.quality_gate_result.passed is True
     assert symbol_result.strategy_name == "liquidity_grab_pullback"
     assert symbol_result.valid_strategy_modes == ("swing", "scalp")
+    assert symbol_result.target_intelligence is not None
+    assert "target_intelligence" in symbol_result.strategy_diagnostics["swing"]
     assert symbol_result.setup_quality.quality_state == SetupQualityState.HIGH_QUALITY_TRADE
     assert symbol_result.setup_quality.quality_score >= 85
     assert symbol_result.setup_quality.action_label == "Trade candidate"

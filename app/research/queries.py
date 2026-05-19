@@ -94,6 +94,10 @@ RESEARCH_QUERIES = (
     "wick_close_failures",
     "acceptance_status_distribution",
     "reclaim_quality_analysis",
+    "target_failures",
+    "rr_compression_analysis",
+    "target_quality_distribution",
+    "best_target_conditions",
     "symbol_health",
     "slow_symbols",
     "timeout_symbols",
@@ -372,6 +376,14 @@ def _build_query_report(query: str, data: ResearchData, filters: ResearchFilters
         return _acceptance_status_distribution_report(data, filters)
     if query == "reclaim_quality_analysis":
         return _reclaim_quality_analysis_report(data, filters)
+    if query == "target_failures":
+        return _target_failures_report(data, filters)
+    if query == "rr_compression_analysis":
+        return _rr_compression_analysis_report(data, filters)
+    if query == "target_quality_distribution":
+        return _target_quality_distribution_report(data, filters)
+    if query == "best_target_conditions":
+        return _best_target_conditions_report(data, filters)
     if query == "symbol_health":
         return _symbol_health_report(data, filters)
     if query == "slow_symbols":
@@ -1110,6 +1122,87 @@ def _reclaim_quality_analysis_report(data: ResearchData, filters: ResearchFilter
     }
 
 
+def _target_failures_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = _target_failure_rows(data.symbols)
+    return {
+        "query": "target_failures",
+        "filters": filters.to_json(),
+        "total_target_failures": len(rows),
+        "failure_type_counts": _target_failure_type_counts(rows),
+        "failure_by_gate": _target_failure_by_group(rows, "failed_gate")[: filters.normalized_limit],
+        "failure_by_regime": _target_failure_by_group(rows, "regime_state")[: filters.normalized_limit],
+        "most_common_failed_symbols": _target_symbol_counts(rows)[: filters.normalized_limit],
+        "warnings": [],
+    }
+
+
+def _rr_compression_analysis_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = _rr_compression_rows(data.symbols)
+    return {
+        "query": "rr_compression_analysis",
+        "filters": filters.to_json(),
+        "total_rr_compression_cases": len(rows),
+        "average_rr_to_tp2": _number(_mean(_numeric_values(row.get("target_rr_to_tp2") for row in rows))),
+        "average_clean_path_distance": _number(_mean(_numeric_values(row.get("clean_path_distance") for row in rows))),
+        "compression_by_failure_type": _target_failure_type_counts(rows),
+        "compression_reasons": _target_reason_counts(rows, "rr_compression_reason")[: filters.normalized_limit],
+        "next_conditions": _target_reason_counts(rows, "target_next_condition")[: filters.normalized_limit],
+        "recent_cases": _recent_target_cases(rows, filters.normalized_limit),
+        "warnings": [],
+    }
+
+
+def _target_quality_distribution_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = tuple(row for row in data.symbols if _display(row.get("target_quality_grade")) != NA)
+    return {
+        "query": "target_quality_distribution",
+        "filters": filters.to_json(),
+        "total_target_rows": len(rows),
+        "target_quality_grades": _target_quality_groups(rows),
+        "failure_type_counts": _target_failure_type_counts(_target_failure_rows(rows)),
+        "warnings": [],
+    }
+
+
+def _best_target_conditions_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = [
+        row
+        for row in data.symbols
+        if row.get("target_quality_grade") in {"A", "B"}
+        and _display(row.get("target_failure_type")) in {NA, "N/A"}
+    ]
+    rows.sort(
+        key=lambda row: (
+            _sort_number(row.get("target_rr_to_tp2")),
+            _sort_number(row.get("target_confidence")),
+            _sort_number(row.get("setup_quality_score")),
+            row.get("symbol", ""),
+        ),
+        reverse=True,
+    )
+    return {
+        "query": "best_target_conditions",
+        "filters": filters.to_json(),
+        "total_best_target_conditions": len(rows),
+        "conditions": [
+            {
+                "symbol": row["symbol"],
+                "timestamp": row.get("timestamp", NA),
+                "display_bucket": row.get("display_bucket", NA),
+                "target_quality_grade": row.get("target_quality_grade", NA),
+                "target_confidence": row.get("target_confidence", NA),
+                "rr_to_tp2": row.get("target_rr_to_tp2", NA),
+                "clean_path_distance": row.get("clean_path_distance", NA),
+                "nearest_opposing_liquidity": row.get("nearest_opposing_liquidity", NA),
+                "primary_target_source": row.get("primary_target_source", NA),
+                "regime_state": row.get("regime_state", NA),
+            }
+            for row in rows[: filters.normalized_limit]
+        ],
+        "warnings": [],
+    }
+
+
 def _symbol_health_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
     rows = sorted(
         data.symbol_health,
@@ -1837,6 +1930,136 @@ def _reclaim_conversion(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
     return output
 
 
+def _target_failure_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    return tuple(
+        row
+        for row in rows
+        if _display(row.get("target_failure_type")) not in {NA, "N/A"}
+    )
+
+
+def _rr_compression_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    compression_failures = {
+        "RR_BELOW_MINIMUM",
+        "TP_TOO_CLOSE",
+        "OPPOSING_STRUCTURE_BLOCK",
+        "TARGET_INSIDE_CHOP",
+        "HTF_RESISTANCE_TOO_CLOSE",
+    }
+    return tuple(
+        row
+        for row in rows
+        if row.get("target_failure_type") in compression_failures
+        or row.get("failed_gate") in {"missing_rr", "missing_target", "rr_below_minimum", "challenge_rr_below_3", "rr_too_low"}
+    )
+
+
+def _target_failure_type_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    total = len(rows)
+    output = []
+    for failure_type, group_rows in _group_by(rows, "target_failure_type").items():
+        output.append(
+            {
+                "target_failure_type": failure_type,
+                "count": len(group_rows),
+                "percentage": _rate(len(group_rows), total),
+                "average_rr_to_tp2": _number(_mean(_numeric_values(row.get("target_rr_to_tp2") for row in group_rows))),
+                "average_clean_path_distance": _number(
+                    _mean(_numeric_values(row.get("clean_path_distance") for row in group_rows))
+                ),
+                "affected_symbols": sorted({row["symbol"] for row in group_rows}),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], item["target_failure_type"]), reverse=True)
+    return output
+
+
+def _target_failure_by_group(rows: Sequence[Mapping[str, Any]], key: str) -> list[dict[str, Any]]:
+    output = []
+    for value, group_rows in _group_by(rows, key).items():
+        failure_counts = _target_failure_type_counts(group_rows)
+        output.append(
+            {
+                key: value,
+                "count": len(group_rows),
+                "most_common_target_failure": failure_counts[0]["target_failure_type"] if failure_counts else NA,
+                "failure_type_counts": failure_counts,
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _display(item.get(key))), reverse=True)
+    return output
+
+
+def _target_symbol_counts(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for symbol, group_rows in _group_by(rows, "symbol").items():
+        output.append(
+            {
+                "symbol": symbol,
+                "count": len(group_rows),
+                "most_common_target_failure": _most_common_text(row.get("target_failure_type") for row in group_rows),
+                "average_rr_to_tp2": _number(_mean(_numeric_values(row.get("target_rr_to_tp2") for row in group_rows))),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _sort_number(item["average_rr_to_tp2"]), item["symbol"]), reverse=True)
+    return output
+
+
+def _target_reason_counts(rows: Sequence[Mapping[str, Any]], key: str) -> list[dict[str, Any]]:
+    output = []
+    for value, group_rows in _group_by(rows, key).items():
+        if _display(value) == NA:
+            continue
+        output.append(
+            {
+                key: value,
+                "count": len(group_rows),
+                "affected_symbols": sorted({row["symbol"] for row in group_rows}),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _display(item.get(key))), reverse=True)
+    return output
+
+
+def _target_quality_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for grade, group_rows in _group_by(rows, "target_quality_grade").items():
+        valid = _bucket_count(group_rows, "valid")
+        near = _bucket_count(group_rows, "near_miss")
+        output.append(
+            {
+                "target_quality_grade": grade,
+                "count": len(group_rows),
+                "valid_setup_count": valid,
+                "near_miss_count": near,
+                "conversion_to_valid_pct": _rate(valid, len(group_rows)),
+                "average_rr_to_tp2": _number(_mean(_numeric_values(row.get("target_rr_to_tp2") for row in group_rows))),
+                "average_target_confidence": _number(
+                    _mean(_numeric_values(row.get("target_confidence") for row in group_rows))
+                ),
+            }
+        )
+    output.sort(key=lambda item: (item["count"], _sort_number(item["average_rr_to_tp2"])), reverse=True)
+    return output
+
+
+def _recent_target_cases(rows: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
+    ordered = sorted(rows, key=lambda row: row.get("timestamp", ""), reverse=True)
+    return [
+        {
+            "timestamp": row.get("timestamp", NA),
+            "symbol": row["symbol"],
+            "display_bucket": row.get("display_bucket", NA),
+            "failed_gate": row.get("failed_gate", NA),
+            "target_failure_type": row.get("target_failure_type", NA),
+            "rr_to_tp2": row.get("target_rr_to_tp2", NA),
+            "rr_compression_reason": row.get("rr_compression_reason", NA),
+            "next_condition": row.get("target_next_condition", NA),
+        }
+        for row in ordered[:limit]
+    ]
+
+
 def _depth_in_band(depth: Decimal, lower: Decimal | None, upper: Decimal | None) -> bool:
     if lower is None:
         return upper is not None and depth < upper
@@ -2024,6 +2247,7 @@ def _normalize_symbol_row(row: sqlite3.Row) -> dict[str, Any]:
     quality = raw.get("setup_quality") if isinstance(raw.get("setup_quality"), Mapping) else {}
     near_miss = raw.get("near_miss_intelligence") if isinstance(raw.get("near_miss_intelligence"), Mapping) else {}
     pullback = raw.get("pullback_intelligence") if isinstance(raw.get("pullback_intelligence"), Mapping) else {}
+    target = _target_intelligence_payload(raw)
     failed_gate = _first_non_na(data.get("failed_gate"), near_miss.get("primary_failed_gate"))
     next_trigger = _first_non_na(data.get("next_trigger_needed"), near_miss.get("activation_hint"))
     data.update(
@@ -2064,6 +2288,21 @@ def _normalize_symbol_row(row: sqlite3.Row) -> dict[str, Any]:
             "pullback_next_condition": _display(
                 _first_non_na(pullback.get("next_pullback_condition"), pullback.get("next_condition"))
             ),
+            "target_failure_type": _display(target.get("target_failure_type")),
+            "target_quality_grade": _display(target.get("target_quality_grade")),
+            "target_confidence": _display(target.get("target_confidence")),
+            "rr_compression_reason": _display(target.get("rr_compression_reason")),
+            "target_next_condition": _display(target.get("next_target_condition")),
+            "target_tp1": _display(target.get("tp1_candidate")),
+            "target_tp2": _display(target.get("tp2_candidate")),
+            "target_tp3": _display(target.get("tp3_candidate")),
+            "nearest_opposing_liquidity": _display(target.get("nearest_opposing_liquidity")),
+            "target_distance": _display(target.get("target_distance")),
+            "clean_path_distance": _display(target.get("clean_path_distance")),
+            "target_rr_to_tp1": _display(target.get("rr_to_tp1")),
+            "target_rr_to_tp2": _display(target.get("rr_to_tp2")),
+            "target_rr_to_tp3": _display(target.get("rr_to_tp3")),
+            "primary_target_source": _primary_target_source(target),
             "raw": raw,
             "modes": _row_modes(raw),
             "has_data_issue": _has_data_issue(raw, data),
@@ -2096,6 +2335,34 @@ def _pullback_value(pullback: Mapping[str, Any], key: str) -> Any:
     structure = pullback.get("wick_close_structure")
     if isinstance(structure, Mapping):
         return structure.get(key)
+    return NA
+
+
+def _target_intelligence_payload(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+    target = raw.get("target_intelligence")
+    if isinstance(target, Mapping):
+        return target
+    diagnostics = raw.get("strategy_diagnostics")
+    if isinstance(diagnostics, Mapping):
+        for mode in ("challenge", "swing", "scalp"):
+            payload = diagnostics.get(mode)
+            if isinstance(payload, Mapping) and isinstance(payload.get("target_intelligence"), Mapping):
+                return payload["target_intelligence"]
+        for payload in diagnostics.values():
+            if isinstance(payload, Mapping) and isinstance(payload.get("target_intelligence"), Mapping):
+                return payload["target_intelligence"]
+    return {}
+
+
+def _primary_target_source(target: Mapping[str, Any]) -> str:
+    targets = target.get("liquidity_targets")
+    if not isinstance(targets, Sequence) or isinstance(targets, (str, bytes)):
+        return NA
+    for item in targets:
+        if isinstance(item, Mapping):
+            source = _display(item.get("source"))
+            if source != NA:
+                return source
     return NA
 
 

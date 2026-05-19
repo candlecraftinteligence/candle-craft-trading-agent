@@ -44,6 +44,7 @@ from app.analytics.setup_quality import (
     default_setup_quality_result,
     validate_setup_quality,
 )
+from app.analytics.target_intelligence import TargetIntelligenceResult, build_target_intelligence
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
@@ -359,6 +360,7 @@ class ScannerSymbolResult(BaseModel):
     journal_entry: JournalEntryResult | None = None
     near_miss_intelligence: NearMissIntelligence | None = None
     pullback_intelligence: PullbackIntelligenceResult | None = None
+    target_intelligence: TargetIntelligenceResult | None = None
     setup_quality: SetupQualityResult = Field(default_factory=default_setup_quality_result)
     regime_warnings: tuple[str, ...] = ()
     regime_state: str = NA
@@ -478,6 +480,7 @@ class _StrategyExecution(BaseModel):
     volume_profile_12h: VolumeProfileResult | None = None
     selected_setup: LiquidityGrabSetup | None = None
     pullback_intelligence: PullbackIntelligenceResult | None = None
+    target_intelligence: TargetIntelligenceResult | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -1141,6 +1144,15 @@ class ScannerRunner:
             mode_diagnostics["required_rr"] = "3.0" if mode == LiquidityGrabMode.challenge else "2.5"
             pullback_intelligence = build_pullback_intelligence(mode_diagnostics)
             mode_diagnostics["pullback_intelligence"] = pullback_intelligence.model_dump(mode="json")
+            target_intelligence = _target_intelligence_for_setup(
+                setup=setup,
+                diagnostics=mode_diagnostics,
+                candles_by_timeframe=candles_by_timeframe,
+                technical=technical,
+                volume_profile=execution_volume_profile,
+                higher_timeframe_volume_profile=higher_timeframe_volume_profile,
+            )
+            mode_diagnostics["target_intelligence"] = target_intelligence.model_dump(mode="json")
             if timeframe_limit_warnings:
                 mode_diagnostics["timeframe_limit_warnings"] = timeframe_limit_warnings
             diagnostics[mode_name] = mode_diagnostics
@@ -1170,6 +1182,11 @@ class ScannerRunner:
             volume_profile_12h=higher_timeframe_volume_profile,
             selected_setup=selected_setup,
             pullback_intelligence=_representative_pullback_intelligence(
+                diagnostics,
+                valid_modes=_unique_strings(valid_modes),
+                rejected_modes=_unique_strings(rejected_modes),
+            ),
+            target_intelligence=_representative_target_intelligence(
                 diagnostics,
                 valid_modes=_unique_strings(valid_modes),
                 rejected_modes=_unique_strings(rejected_modes),
@@ -1516,6 +1533,7 @@ class ScannerRunner:
             journal_entry=journal_entry,
             near_miss_intelligence=near_miss_intelligence,
             pullback_intelligence=strategy_execution.pullback_intelligence,
+            target_intelligence=strategy_execution.target_intelligence,
             setup_quality=setup_quality,
         )
 
@@ -1815,6 +1833,31 @@ def _representative_pullback_intelligence(
             if isinstance(payload, Mapping):
                 return PullbackIntelligenceResult.model_validate(payload)
             return build_pullback_intelligence(diagnostics)
+    return None
+
+
+def _representative_target_intelligence(
+    diagnostics_by_mode: Mapping[str, Any],
+    *,
+    valid_modes: Sequence[str],
+    rejected_modes: Sequence[str],
+) -> TargetIntelligenceResult | None:
+    for mode in (*valid_modes, *rejected_modes, "challenge", "swing", "scalp"):
+        diagnostics = diagnostics_by_mode.get(mode)
+        if not isinstance(diagnostics, Mapping):
+            continue
+        payload = diagnostics.get("target_intelligence")
+        if isinstance(payload, TargetIntelligenceResult):
+            return payload
+        if isinstance(payload, Mapping):
+            return TargetIntelligenceResult.model_validate(payload)
+    for diagnostics in diagnostics_by_mode.values():
+        if isinstance(diagnostics, Mapping):
+            payload = diagnostics.get("target_intelligence")
+            if isinstance(payload, TargetIntelligenceResult):
+                return payload
+            if isinstance(payload, Mapping):
+                return TargetIntelligenceResult.model_validate(payload)
     return None
 
 
@@ -2149,6 +2192,13 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "selected_zone_type": setup.selected_zone_type,
         "ob_zone": setup.ob_zone.model_dump(),
         "fvg_zone": setup.fvg_zone.model_dump(),
+        "impulse_start": setup.pullback_zone.impulse_start,
+        "impulse_end": setup.pullback_zone.impulse_end,
+        "impulse_low": setup.pullback_zone.impulse_low,
+        "impulse_high": setup.pullback_zone.impulse_high,
+        "sweep_price": setup.pullback_zone.sweep_price,
+        "bos_price": setup.pullback_zone.bos_price,
+        "bos_origin_price": setup.structure_shift.level,
         "fib_alignment_status": setup.fib_alignment.status,
         "fib_382": setup.fib_382,
         "fib_618": setup.fib_618,
@@ -2197,6 +2247,98 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "missing_data": setup.missing_data,
         "unverified_data": setup.unverified_data,
     }
+
+
+def _target_intelligence_for_setup(
+    *,
+    setup: LiquidityGrabSetup,
+    diagnostics: Mapping[str, Any],
+    candles_by_timeframe: Mapping[str, Sequence[Any]],
+    technical: TechnicalStructureResult,
+    volume_profile: VolumeProfileResult,
+    higher_timeframe_volume_profile: VolumeProfileResult | None,
+) -> TargetIntelligenceResult:
+    calculation_timeframe = _display_decimal_or_text(diagnostics.get("pullback_calculation_timeframe"))
+    execution_timeframe = _display_decimal_or_text(diagnostics.get("execution_timeframe"))
+    confirmation_timeframe = _display_decimal_or_text(diagnostics.get("confirmation_timeframe"))
+    candles = _target_candles_for_timeframe(
+        candles_by_timeframe,
+        calculation_timeframe,
+        confirmation_timeframe,
+        execution_timeframe,
+    )
+    htf_candles = _target_htf_candles(candles_by_timeframe, setup)
+    profile = higher_timeframe_volume_profile or volume_profile
+    mode = setup.mode.value
+    required_rr = Decimal("3.0") if mode == "challenge" else Decimal("2.5")
+    return build_target_intelligence(
+        symbol=setup.pullback_zone.symbol if hasattr(setup.pullback_zone, "symbol") else diagnostics.get("symbol", NA),
+        mode=mode,
+        direction=_first_non_na(setup.bias, diagnostics.get("bias")),
+        entry=_first_non_na(setup.entry, diagnostics.get("entry")),
+        stop=_first_non_na(setup.stop, diagnostics.get("stop")),
+        current_price=_first_non_na(setup.current_price, diagnostics.get("current_price")),
+        minimum_rr=required_rr,
+        candles=candles,
+        htf_candles=htf_candles,
+        recent_range_high=technical.recent_range_high,
+        recent_range_low=technical.recent_range_low,
+        nearest_support=technical.nearest_support,
+        nearest_resistance=technical.nearest_resistance,
+        bos_origin_price=_first_non_na(setup.structure_shift.level, diagnostics.get("bos_origin_price")),
+        impulse_start=_first_non_na(setup.pullback_zone.impulse_start, diagnostics.get("impulse_start")),
+        impulse_end=_first_non_na(setup.pullback_zone.impulse_end, diagnostics.get("impulse_end")),
+        poc=_first_non_na(getattr(profile, "poc", NA), volume_profile.poc),
+        value_area_high=_first_non_na(getattr(profile, "value_area_high", NA), volume_profile.value_area_high),
+        value_area_low=_first_non_na(getattr(profile, "value_area_low", NA), volume_profile.value_area_low),
+        nearest_high_volume_node=_first_non_na(
+            getattr(profile, "nearest_high_volume_node", NA),
+            volume_profile.nearest_high_volume_node,
+        ),
+        nearest_low_volume_node=_first_non_na(
+            getattr(profile, "nearest_low_volume_node", NA),
+            volume_profile.nearest_low_volume_node,
+        ),
+        user_support_levels=_strategy_levels(technical.nearest_support, technical.recent_range_low),
+        user_resistance_levels=_strategy_levels(technical.nearest_resistance, technical.recent_range_high),
+        missing_data=(
+            *setup.missing_data,
+            *_sequence_from_diagnostics(diagnostics.get("missing_data")),
+        ),
+        unverified_data=(
+            *setup.unverified_data,
+            *_sequence_from_diagnostics(diagnostics.get("unverified_data")),
+        ),
+    )
+
+
+def _target_candles_for_timeframe(
+    candles_by_timeframe: Mapping[str, Sequence[Any]],
+    calculation_timeframe: str,
+    confirmation_timeframe: str,
+    execution_timeframe: str,
+) -> Sequence[Any]:
+    for timeframe in (calculation_timeframe, confirmation_timeframe, execution_timeframe, "15m", "5m"):
+        normalized = _display_decimal_or_text(timeframe).lower()
+        if normalized != NA.lower() and candles_by_timeframe.get(normalized):
+            return candles_by_timeframe[normalized]
+    return ()
+
+
+def _target_htf_candles(
+    candles_by_timeframe: Mapping[str, Sequence[Any]],
+    setup: LiquidityGrabSetup,
+) -> Sequence[Any]:
+    for timeframe in (
+        _display_decimal_or_text(setup.bias_timeframe).lower(),
+        _display_decimal_or_text(setup.htf_timeframe).lower(),
+        "12h",
+        "4h",
+        "1h",
+    ):
+        if timeframe != NA.lower() and candles_by_timeframe.get(timeframe):
+            return candles_by_timeframe[timeframe]
+    return ()
 
 
 def _is_valid_strategy_setup(setup: LiquidityGrabSetup) -> bool:
