@@ -76,6 +76,8 @@ def format_research_report(report: Mapping[str, Any]) -> str:
         return _format_pullback_lifecycle_dropoffs(report)
     if query in {"symbol_health", "slow_symbols", "timeout_symbols", "priority_symbols"}:
         return _format_symbol_health(report)
+    if query == "watch_iterations":
+        return _format_watch_iterations(report)
     return "\n".join(("Candle Craft Research", f"Unsupported report: {query}"))
 
 
@@ -88,6 +90,10 @@ def _format_summary(report: Mapping[str, Any]) -> str:
         ("Total near misses", summary.get("total_near_misses")),
         ("Total rejected", summary.get("total_rejected")),
         ("Total replay outcomes", summary.get("total_replay_outcomes")),
+        ("Total watch iterations", summary.get("total_watch_iterations")),
+        ("Last watch iteration", summary.get("last_watch_iteration")),
+        ("Average symbols/watch iteration", summary.get("average_symbols_per_watch_iteration")),
+        ("Valid activations from watch", summary.get("valid_activations_from_watch")),
         ("Average readiness score", summary.get("average_readiness_score")),
         ("Average quality score", summary.get("average_quality_score")),
         ("Most common regime", summary.get("most_common_regime")),
@@ -96,6 +102,28 @@ def _format_summary(report: Mapping[str, Any]) -> str:
     return _join_sections(
         "Candle Craft Research - Summary",
         _metric_table(rows),
+        _warning_block(report),
+    )
+
+
+def _format_watch_iterations(report: Mapping[str, Any]) -> str:
+    rows = [
+        (
+            row.get("iteration_number"),
+            row.get("timestamp"),
+            row.get("symbols_watched"),
+            row.get("valid_activations"),
+            row.get("still_watching"),
+            row.get("data_issues"),
+            row.get("runtime"),
+            row.get("regime"),
+        )
+        for row in _sequence(report.get("watch_iterations"))
+    ]
+    return _join_sections(
+        str(report.get("title", "Watch Iterations")),
+        f"Total watch iterations: {_display(report.get('total_watch_iterations'))}",
+        _table(("iteration", "timestamp", "symbols", "valid", "still", "data", "runtime", "regime"), rows),
         _warning_block(report),
     )
 

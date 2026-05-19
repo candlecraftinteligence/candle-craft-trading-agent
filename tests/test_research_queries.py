@@ -315,6 +315,71 @@ def _insert_replay(connection, run_id, symbol, mode, regime, outcome, filled, tp
     )
 
 
+def _insert_watch_run(connection) -> None:
+    _insert_run(
+        connection,
+        run_id="watch_1",
+        timestamp="2026-05-18T11:00:00+00:00",
+        symbols_scanned=2,
+        regime="trend_expansion",
+        valid=1,
+        near=1,
+        rejected=0,
+        data_issues=0,
+    )
+    connection.execute(
+        """
+        UPDATE scan_runs
+        SET is_watch_iteration = 1,
+            watch_iteration_number = 3,
+            started_at = '2026-05-18T10:59:55+00:00',
+            completed_at = '2026-05-18T11:00:01+00:00',
+            symbols_requested = 2,
+            symbols_queued = 2,
+            symbols_completed = 2,
+            valid_activations = 1,
+            still_watching = 1,
+            rejected_no_edge = 0,
+            runtime_sec = 6.2
+        WHERE run_id = 'watch_1'
+        """
+    )
+    _insert_symbol(
+        connection,
+        run_id="watch_1",
+        symbol="BTCUSDT",
+        bucket="valid",
+        readiness=90,
+        quality=86,
+        gate="N/A",
+        reason="N/A",
+        next_trigger="N/A",
+        regime="trend_expansion",
+        valid_modes=("swing",),
+        rejected_modes=(),
+        quality_state="HIGH_QUALITY_TRADE",
+        quality_grade="A",
+        readiness_label="VALID SETUP",
+    )
+    _insert_symbol(
+        connection,
+        run_id="watch_1",
+        symbol="ETHUSDT",
+        bucket="near_miss",
+        readiness=78,
+        quality=70,
+        gate="rr_below_minimum",
+        reason="RR below minimum.",
+        next_trigger="Need higher reward-to-risk.",
+        regime="trend_expansion",
+        valid_modes=(),
+        rejected_modes=("swing",),
+        quality_state="WATCHLIST_NEAR_MISS",
+        quality_grade="C",
+        readiness_label="WATCH",
+    )
+
+
 def test_missing_database_handling(tmp_path) -> None:
     with pytest.raises(ResearchDatabaseMissing, match=MISSING_SCAN_DATABASE_MESSAGE):
         build_research_report(tmp_path / "missing.db", query="summary")
@@ -333,6 +398,41 @@ def test_summary_query(tmp_path) -> None:
     assert report["summary"]["total_rejected"] == 1
     assert report["summary"]["total_replay_outcomes"] == 2
     assert report["summary"]["most_common_regime"] == "trend_expansion"
+
+
+def test_summary_counts_watch_iterations(tmp_path) -> None:
+    db_path = tmp_path / "research.db"
+    _seed_research_database(db_path)
+    with open_initialized_database(db_path) as connection:
+        _insert_watch_run(connection)
+        connection.commit()
+
+    report = build_research_report(db_path, query="summary")
+
+    assert report["summary"]["total_scan_runs"] == 3
+    assert report["summary"]["total_watch_iterations"] == 1
+    assert report["summary"]["last_watch_iteration"] == 3
+    assert report["summary"]["average_symbols_per_watch_iteration"] == 2
+    assert report["summary"]["valid_activations_from_watch"] == 1
+
+
+def test_watch_iterations_query(tmp_path) -> None:
+    db_path = tmp_path / "research.db"
+    _seed_research_database(db_path)
+    with open_initialized_database(db_path) as connection:
+        _insert_watch_run(connection)
+        connection.commit()
+
+    report = build_research_report(db_path, query="watch_iterations")
+    text = format_research_report(report)
+
+    assert report["total_watch_iterations"] == 1
+    assert report["watch_iterations"][0]["iteration_number"] == "3"
+    assert report["watch_iterations"][0]["symbols_watched"] == 2
+    assert report["watch_iterations"][0]["valid_activations"] == 1
+    assert report["watch_iterations"][0]["runtime"] == "6.2s"
+    assert "Watch Iterations" in text
+    assert "trend_expansion" in text
 
 
 def test_best_symbols_query(tmp_path) -> None:

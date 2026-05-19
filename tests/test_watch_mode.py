@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from decimal import Decimal
 
 import pytest
@@ -322,6 +323,120 @@ def test_watch_mode_single_iteration_updates_state_and_jsonl(tmp_path, monkeypat
     summary = json.loads(lines[0])
     assert summary["valid_activations"] == 1
     assert summary["activated_symbols"] == ["BTCUSDT"]
+
+
+def test_watch_iteration_stored_as_scan_run_when_store_scan_enabled(tmp_path, monkeypatch, capsys) -> None:
+    state_path = tmp_path / "watch_state.json"
+    db_path = tmp_path / "candle_craft.db"
+    save_watch_state(state_path, _prior_state())
+    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
+    SequenceWatchRunner.configs = []
+    SequenceWatchRunner.results_by_call = [(_valid_symbol(),)]
+
+    asyncio.run(
+        run_scan.main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "--watch",
+                "--watch-max-iterations",
+                "1",
+                "--watch-interval-sec",
+                "0.01",
+                "--store-scan",
+                "--database-path",
+                str(db_path),
+            ]
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "Stored watch iteration: 1" in captured.out
+    assert "Run ID:" in captured.out
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT is_watch_iteration, watch_iteration_number, symbols_requested,
+                   symbols_queued, symbols_completed, valid_activations,
+                   still_watching, rejected_no_edge, data_issues, runtime_sec
+            FROM scan_runs
+            """
+        ).fetchone()
+        symbol_count = connection.execute("SELECT COUNT(*) FROM symbol_results").fetchone()[0]
+
+    assert row[:9] == (1, 1, 1, 1, 1, 1, 0, 0, 0)
+    assert row[9] >= 0
+    assert symbol_count == 1
+
+
+def test_watch_mode_cancelled_sleep_shuts_down_cleanly(tmp_path, monkeypatch, capsys) -> None:
+    state_path = tmp_path / "watch_state.json"
+    db_path = tmp_path / "candle_craft.db"
+    save_watch_state(state_path, _prior_state())
+    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
+    SequenceWatchRunner.configs = []
+    SequenceWatchRunner.results_by_call = [(_near_miss_symbol(),)]
+
+    async def cancel_sleep(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(run_scan.asyncio, "sleep", cancel_sleep)
+
+    asyncio.run(
+        run_scan.main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "--watch",
+                "--watch-interval-sec",
+                "0.01",
+                "--store-scan",
+                "--database-path",
+                str(db_path),
+            ]
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "Watch mode stopped by user." in captured.out
+    assert "Completed iterations: 1" in captured.out
+    assert "Stored scan runs: 1" in captured.out
+    assert f"Data saved to: {db_path.as_posix()}" in captured.out
+    assert "CancelledError" not in captured.err
+    assert "KeyboardInterrupt" not in captured.err
+
+
+def test_watch_mode_does_not_store_scan_without_store_scan(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "watch_state.json"
+    db_path = tmp_path / "candle_craft.db"
+    save_watch_state(state_path, _prior_state())
+    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
+    SequenceWatchRunner.configs = []
+    SequenceWatchRunner.results_by_call = [(_near_miss_symbol(),)]
+
+    asyncio.run(
+        run_scan.main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "--watch",
+                "--watch-max-iterations",
+                "1",
+                "--watch-interval-sec",
+                "0.01",
+                "--database-path",
+                str(db_path),
+                "--disable-lifecycle",
+                "--no-adaptive-symbol-priority",
+            ]
+        )
+    )
+
+    assert not db_path.exists()
 
 
 def test_watch_mode_max_iterations_stop(tmp_path, monkeypatch) -> None:

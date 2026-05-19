@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError
+from app.storage.models import WatchIterationMetadata
 from app.storage.repositories import (
     export_history_payload,
     format_history_table,
@@ -16,6 +17,7 @@ from app.storage.symbol_health import (
 __all__ = [
     "DEFAULT_DATABASE_PATH",
     "StorageError",
+    "WatchIterationMetadata",
     "export_history_payload",
     "format_history_table",
     "list_scan_history",

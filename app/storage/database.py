@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class StorageError(RuntimeError):
@@ -50,7 +50,20 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 rejected INTEGER NOT NULL,
                 data_issues INTEGER NOT NULL,
                 data_issues_json TEXT NOT NULL,
-                raw_payload_json TEXT NOT NULL
+                raw_payload_json TEXT NOT NULL,
+                is_watch_iteration INTEGER NOT NULL DEFAULT 0,
+                watch_iteration_number INTEGER,
+                started_at TEXT,
+                completed_at TEXT,
+                symbols_requested INTEGER NOT NULL DEFAULT 0,
+                symbols_queued INTEGER NOT NULL DEFAULT 0,
+                symbols_completed INTEGER NOT NULL DEFAULT 0,
+                valid_activations INTEGER NOT NULL DEFAULT 0,
+                still_watching INTEGER NOT NULL DEFAULT 0,
+                rejected_no_edge INTEGER NOT NULL DEFAULT 0,
+                runtime_sec REAL,
+                portfolio_summary_json TEXT NOT NULL DEFAULT '{}',
+                symbol_health_summary_json TEXT NOT NULL DEFAULT '{}'
             );
 
             CREATE TABLE IF NOT EXISTS symbol_results (
@@ -195,6 +208,19 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "scan_runs", "regime_confidence", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "scan_runs", "regime_compatibility_json", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(connection, "scan_runs", "environment_notes_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "scan_runs", "is_watch_iteration", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "watch_iteration_number", "INTEGER")
+        _ensure_column(connection, "scan_runs", "started_at", "TEXT")
+        _ensure_column(connection, "scan_runs", "completed_at", "TEXT")
+        _ensure_column(connection, "scan_runs", "symbols_requested", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "symbols_queued", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "symbols_completed", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "valid_activations", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "still_watching", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "rejected_no_edge", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "runtime_sec", "REAL")
+        _ensure_column(connection, "scan_runs", "portfolio_summary_json", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(connection, "scan_runs", "symbol_health_summary_json", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(connection, "symbol_results", "regime_confidence", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_results", "regime_compatibility_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_results", "regime_compatibility_label", "TEXT NOT NULL DEFAULT 'N/A'")

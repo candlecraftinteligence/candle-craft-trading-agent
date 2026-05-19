@@ -110,6 +110,7 @@ from app.research import (  # noqa: E402
 from app.storage import (  # noqa: E402
     DEFAULT_DATABASE_PATH,
     StorageError,
+    WatchIterationMetadata,
     export_history_payload,
     format_history_table,
     list_scan_history,
@@ -137,6 +138,7 @@ from app.watch_mode import (  # noqa: E402
     DEFAULT_LATEST_RUN_PATH,
     DEFAULT_WATCH_STATE_PATH,
     WatchActivation,
+    WatchIterationSummary,
     WatchModeError,
     append_watch_output,
     build_watch_iteration_summary,
@@ -180,6 +182,8 @@ class WatchScanExecution:
     ranked_results: tuple[Any, ...]
     portfolio_selection: PortfolioSelectionResult | None
     symbol_priority_plan: SymbolPriorityPlan
+    queued_symbols: tuple[str, ...]
+    storage_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -666,6 +670,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             diagnostics_level=diagnostics_level,
             display_mode=display_mode,
             effective_candle_limit=effective_candle_limit,
+            command_used=_command_used(argv),
         )
         return
 
@@ -1827,6 +1832,7 @@ async def _run_watch_mode(
     diagnostics_level: str,
     display_mode: str,
     effective_candle_limit: int,
+    command_used: str,
 ) -> None:
     telegram_bot_token, telegram_chat_id = _watch_telegram_credentials(args)
     try:
@@ -1856,80 +1862,107 @@ async def _run_watch_mode(
     print("")
 
     iteration = 0
-    while True:
-        iteration += 1
-        previous_state = state
-        execution = await _run_watch_scan_iteration(
-            args,
-            watchlist=watchlist,
-            config=config,
-            iteration=iteration,
-        )
-        timestamp = _watch_iteration_timestamp()
-        activations: list[WatchActivation] = []
-        updated_state = previous_state
-
-        for symbol_result in execution.result.results:
-            previous_symbol_state = previous_state.symbols.get(symbol_result.symbol)
-            should_alert = should_trigger_activation_alert(
-                symbol_result,
-                previous_symbol_state,
-                portfolio_selection=execution.portfolio_selection if args.portfolio_select else None,
+    completed_iterations = 0
+    stored_scan_runs = 0
+    try:
+        while True:
+            iteration += 1
+            iteration_started_at = _watch_iteration_timestamp()
+            iteration_started_monotonic = time.monotonic()
+            previous_state = state
+            execution = await _run_watch_scan_iteration(
+                args,
+                watchlist=watchlist,
+                config=config,
+                iteration=iteration,
             )
-            alert_triggered = False
-            if should_alert:
-                message = format_watch_activation_alert(symbol_result)
-                delivery = await deliver_watch_activation_alert(
-                    message,
-                    live=args.telegram_live_alerts,
-                    telegram_bot_token=telegram_bot_token,
-                    telegram_chat_id=telegram_chat_id,
-                )
-                alert_triggered = delivery.status in {"dry_run", "sent"}
-                activation = WatchActivation(
-                    symbol=symbol_result.symbol,
-                    mode=_watch_activation_mode(symbol_result),
-                    message=message,
-                    delivery_status=delivery.status,
-                    delivery_detail=delivery.detail,
-                )
-                activations.append(activation)
-                if not args.telegram_live_alerts:
-                    print(message)
-                    print("")
-                elif delivery.status == "failed":
-                    print(f"Telegram watch alert failed for {symbol_result.symbol}: {delivery.detail}")
+            completed_at = _watch_iteration_timestamp()
+            activations: list[WatchActivation] = []
+            updated_state = previous_state
 
-            updated_state = update_watch_state_for_result(
-                updated_state,
-                symbol_result,
-                alert_triggered=alert_triggered,
-                seen_at=timestamp,
+            for symbol_result in execution.result.results:
+                previous_symbol_state = previous_state.symbols.get(symbol_result.symbol)
+                should_alert = should_trigger_activation_alert(
+                    symbol_result,
+                    previous_symbol_state,
+                    portfolio_selection=execution.portfolio_selection if args.portfolio_select else None,
+                )
+                alert_triggered = False
+                if should_alert:
+                    message = format_watch_activation_alert(symbol_result)
+                    delivery = await deliver_watch_activation_alert(
+                        message,
+                        live=args.telegram_live_alerts,
+                        telegram_bot_token=telegram_bot_token,
+                        telegram_chat_id=telegram_chat_id,
+                    )
+                    alert_triggered = delivery.status in {"dry_run", "sent"}
+                    activation = WatchActivation(
+                        symbol=symbol_result.symbol,
+                        mode=_watch_activation_mode(symbol_result),
+                        message=message,
+                        delivery_status=delivery.status,
+                        delivery_detail=delivery.detail,
+                    )
+                    activations.append(activation)
+                    if not args.telegram_live_alerts:
+                        print(message)
+                        print("")
+                    elif delivery.status == "failed":
+                        print(f"Telegram watch alert failed for {symbol_result.symbol}: {delivery.detail}")
+
+                updated_state = update_watch_state_for_result(
+                    updated_state,
+                    symbol_result,
+                    alert_triggered=alert_triggered,
+                    seen_at=completed_at,
+                )
+
+            state = updated_state
+            try:
+                save_watch_state(WATCH_STATE_PATH, state)
+            except WatchModeError as exc:
+                raise SystemExit(str(exc)) from exc
+
+            continue_watching = args.watch_max_iterations is None or iteration < args.watch_max_iterations
+            next_scan_seconds = args.watch_interval_sec if continue_watching else 0
+            runtime_sec = _round_seconds(time.monotonic() - iteration_started_monotonic)
+            summary = build_watch_iteration_summary(
+                iteration=iteration,
+                result=execution.result,
+                activations=activations,
+                next_scan_seconds=next_scan_seconds,
+                scanned_at=completed_at,
             )
+            if args.watch_output_file is not None:
+                append_watch_output(args.watch_output_file, summary)
+            print(format_watch_iteration_summary(summary))
+            if args.store_scan:
+                run_id = _store_watch_iteration_scan_run(
+                    args,
+                    execution=execution,
+                    summary=summary,
+                    started_at=iteration_started_at,
+                    completed_at=completed_at,
+                    runtime_sec=runtime_sec,
+                    command_used=command_used,
+                )
+                stored_scan_runs += 1
+                print(f"Stored watch iteration: {summary.iteration}")
+                print(f"Run ID: {run_id}")
+            print("")
+            completed_iterations = iteration
 
-        state = updated_state
-        try:
-            save_watch_state(WATCH_STATE_PATH, state)
-        except WatchModeError as exc:
-            raise SystemExit(str(exc)) from exc
-
-        continue_watching = args.watch_max_iterations is None or iteration < args.watch_max_iterations
-        next_scan_seconds = args.watch_interval_sec if continue_watching else 0
-        summary = build_watch_iteration_summary(
-            iteration=iteration,
-            result=execution.result,
-            activations=activations,
-            next_scan_seconds=next_scan_seconds,
-            scanned_at=timestamp,
+            if not continue_watching:
+                break
+            await asyncio.sleep(args.watch_interval_sec)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        _print_watch_shutdown(
+            completed_iterations=completed_iterations,
+            stored_scan_runs=stored_scan_runs,
+            database_path=args.database_path,
         )
-        if args.watch_output_file is not None:
-            append_watch_output(args.watch_output_file, summary)
-        print(format_watch_iteration_summary(summary))
-        print("")
-
-        if not continue_watching:
-            break
-        await asyncio.sleep(args.watch_interval_sec)
+        return
 
 
 async def _run_watch_scan_iteration(
@@ -2022,7 +2055,8 @@ async def _run_watch_scan_iteration(
             runtime_stats=None,
             market_regime=None,
         )
-    result = _apply_lifecycle_if_enabled(args, result)
+    storage_run_id = uuid4().hex if args.store_scan else None
+    result = _apply_lifecycle_if_enabled(args, result, scan_run_id=storage_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None
@@ -2039,7 +2073,104 @@ async def _run_watch_scan_iteration(
         ranked_results=ranked_results,
         portfolio_selection=portfolio_selection,
         symbol_priority_plan=symbol_priority_plan,
+        queued_symbols=queued_symbols,
+        storage_run_id=storage_run_id,
     )
+
+
+def _store_watch_iteration_scan_run(
+    args: argparse.Namespace,
+    *,
+    execution: WatchScanExecution,
+    summary: WatchIterationSummary,
+    started_at: str,
+    completed_at: str,
+    runtime_sec: float,
+    command_used: str,
+) -> str:
+    raw_payload = _json_payload(
+        execution.result,
+        ranked_results=execution.ranked_results,
+        portfolio_selection=execution.portfolio_selection,
+    )
+    raw_payload["watch_iteration"] = summary.model_dump(mode="json")
+    raw_payload["watch_iteration_storage"] = {
+        "watch_iteration_number": summary.iteration,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "symbols_requested": summary.symbols_watched,
+        "symbols_queued": len(execution.queued_symbols),
+        "symbols_completed": execution.result.runtime_stats.completed_symbols,
+        "valid_activations": summary.valid_activations,
+        "still_watching": summary.still_watching,
+        "rejected_no_edge": summary.rejected_no_edge,
+        "data_issues": summary.data_issues,
+        "runtime_sec": runtime_sec,
+        "market_regime": _display(execution.result.market_regime.state.value),
+    }
+    metadata = WatchIterationMetadata(
+        iteration_number=summary.iteration,
+        started_at=started_at,
+        completed_at=completed_at,
+        symbols_requested=summary.symbols_watched,
+        symbols_queued=len(execution.queued_symbols),
+        symbols_completed=execution.result.runtime_stats.completed_symbols,
+        valid_activations=summary.valid_activations,
+        still_watching=summary.still_watching,
+        rejected_no_edge=summary.rejected_no_edge,
+        data_issues=summary.data_issues,
+        runtime_sec=runtime_sec,
+        portfolio_summary=_watch_portfolio_summary(execution.portfolio_selection),
+        symbol_health_summary=_watch_symbol_health_summary(execution.result),
+    )
+    try:
+        return store_scan_result(
+            args.database_path,
+            execution.result,
+            ranked_results=execution.ranked_results,
+            portfolio_selection=execution.portfolio_selection,
+            command_preset=args.command_preset,
+            command_used=command_used,
+            raw_payload=raw_payload,
+            run_id=execution.storage_run_id,
+            watch_iteration=metadata,
+        )
+    except StorageError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _watch_portfolio_summary(portfolio_selection: PortfolioSelectionResult | None) -> dict[str, Any]:
+    if portfolio_selection is None:
+        return {}
+    return {
+        "selected_count": portfolio_selection.selected_count,
+        "total_risk_pct": portfolio_selection.total_risk_pct,
+        "selected_symbols": list(selected_symbols(portfolio_selection)),
+        "rejected_count": len(portfolio_selection.rejected_candidates),
+        "rejected_due_to_correlation": portfolio_selection.rejected_due_to_correlation,
+        "rejected_due_to_risk_limit": portfolio_selection.rejected_due_to_risk_limit,
+        "portfolio_warnings": list(portfolio_selection.portfolio_warnings),
+    }
+
+
+def _watch_symbol_health_summary(result: ScannerRunResult) -> dict[str, Any]:
+    return dict(result.symbol_health) if isinstance(result.symbol_health, Mapping) else {}
+
+
+def _print_watch_shutdown(
+    *,
+    completed_iterations: int,
+    stored_scan_runs: int,
+    database_path: Path | str,
+) -> None:
+    print("Watch mode stopped by user.")
+    print(f"Completed iterations: {completed_iterations}")
+    print(f"Stored scan runs: {stored_scan_runs}")
+    print(f"Data saved to: {_database_path_text(database_path)}")
+
+
+def _database_path_text(database_path: Path | str) -> str:
+    return Path(database_path).as_posix()
 
 
 def _watch_telegram_credentials(args: argparse.Namespace) -> tuple[str | None, str | None]:
@@ -2981,6 +3112,31 @@ def _configure_cli_encoding() -> None:
             stream.reconfigure(encoding="utf-8")
 
 
-if __name__ == "__main__":
+def _cli_database_path_from_argv(argv: Sequence[str]) -> Path:
+    for index, token in enumerate(argv):
+        if token == "--database-path" and index + 1 < len(argv):
+            return Path(argv[index + 1])
+        if token.startswith("--database-path="):
+            return Path(token.split("=", 1)[1])
+    return DEFAULT_DATABASE_PATH
+
+
+def cli_main() -> int:
     _configure_cli_encoding()
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        if "--watch" in sys.argv[1:]:
+            _print_watch_shutdown(
+                completed_iterations=0,
+                stored_scan_runs=0,
+                database_path=_cli_database_path_from_argv(sys.argv[1:]),
+            )
+            return 0
+        print("Stopped by user.")
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli_main())

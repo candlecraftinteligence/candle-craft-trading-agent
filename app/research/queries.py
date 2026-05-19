@@ -95,6 +95,7 @@ RESEARCH_QUERIES = (
     "slow_symbols",
     "timeout_symbols",
     "priority_symbols",
+    "watch_iterations",
 )
 MODES = ("challenge", "swing", "scalp")
 
@@ -185,7 +186,7 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
         with _connect_read_only(path) as connection:
             connection.row_factory = sqlite3.Row
             _require_schema(connection)
-            runs = tuple(_row_dict(row) for row in connection.execute("SELECT * FROM scan_runs").fetchall())
+            runs = tuple(_normalize_run_row(row) for row in connection.execute("SELECT * FROM scan_runs").fetchall())
             symbol_rows = tuple(
                 _normalize_symbol_row(row)
                 for row in connection.execute(
@@ -370,6 +371,8 @@ def _build_query_report(query: str, data: ResearchData, filters: ResearchFilters
         return _timeout_symbols_report(data, filters)
     if query == "priority_symbols":
         return _priority_symbols_report(data, filters)
+    if query == "watch_iterations":
+        return _watch_iterations_report(data, filters)
     raise ValueError(f"Unsupported research query: {query}")
 
 
@@ -378,6 +381,7 @@ def _summary_report(data: ResearchData, filters: ResearchFilters) -> dict[str, A
     readiness_scores = _numeric_values(row.get("readiness_score") for row in data.symbols)
     rejected_rows = tuple(row for row in data.symbols if row["display_bucket"] in {"near_miss", "no_setup", "data_issue"})
     replay_stats = _replay_stats(data.replays)
+    watch_rows = _watch_iteration_rows(data.runs)
     warnings = []
     if replay_stats["total_replay_samples"] and replay_stats["total_replay_samples"] < MIN_RELIABLE_SAMPLE_SIZE:
         warnings.append(SAMPLE_SIZE_WARNING)
@@ -393,6 +397,12 @@ def _summary_report(data: ResearchData, filters: ResearchFilters) -> dict[str, A
             "total_rejected": _bucket_count(data.symbols, "no_setup"),
             "total_data_issues": _bucket_count(data.symbols, "data_issue"),
             "total_replay_outcomes": len(data.replays),
+            "total_watch_iterations": len(watch_rows),
+            "last_watch_iteration": _last_watch_iteration(watch_rows),
+            "average_symbols_per_watch_iteration": _number(
+                _mean(_numeric_values(row.get("symbols_requested") or row.get("symbols_scanned") for row in watch_rows))
+            ),
+            "valid_activations_from_watch": sum(_int_value(row.get("valid_activations")) for row in watch_rows),
             "average_readiness_score": _number(_mean(readiness_scores)),
             "average_quality_score": _number(_mean(quality_scores)),
             "most_common_regime": _most_common_text(row.get("regime_state") for row in data.symbols),
@@ -402,6 +412,36 @@ def _summary_report(data: ResearchData, filters: ResearchFilters) -> dict[str, A
         },
         "replay": replay_stats,
         "warnings": warnings,
+    }
+
+
+def _watch_iterations_report(data: ResearchData, filters: ResearchFilters) -> dict[str, Any]:
+    rows = sorted(
+        _watch_iteration_rows(data.runs),
+        key=lambda row: (_display(row.get("completed_at") or row.get("timestamp")), _int_value(row.get("watch_iteration_number"))),
+        reverse=True,
+    )
+    return {
+        "query": "watch_iterations",
+        "filters": filters.to_json(),
+        "title": "Watch Iterations",
+        "watch_iterations": [
+            {
+                "run_id": row["run_id"],
+                "iteration_number": _display(row.get("watch_iteration_number")),
+                "timestamp": _display(row.get("completed_at") or row.get("timestamp")),
+                "symbols_watched": _int_value(row.get("symbols_requested") or row.get("symbols_scanned")),
+                "valid_activations": _int_value(row.get("valid_activations")),
+                "still_watching": _int_value(row.get("still_watching")),
+                "rejected_no_edge": _int_value(row.get("rejected_no_edge")),
+                "data_issues": _int_value(row.get("data_issues")),
+                "runtime": _runtime_query_text(row.get("runtime_sec"), row.get("runtime_stats_json")),
+                "regime": _display(row.get("market_regime")),
+            }
+            for row in rows[: filters.normalized_limit]
+        ],
+        "total_watch_iterations": len(rows),
+        "warnings": [],
     }
 
 
@@ -1791,6 +1831,37 @@ def _include_symbol_health_row(row: Mapping[str, Any], filters: ResearchFilters)
     return True
 
 
+def _normalize_run_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_dict(row)
+    defaults = {
+        "is_watch_iteration": 0,
+        "watch_iteration_number": None,
+        "started_at": None,
+        "completed_at": None,
+        "symbols_requested": 0,
+        "symbols_queued": 0,
+        "symbols_completed": 0,
+        "valid_activations": 0,
+        "still_watching": 0,
+        "rejected_no_edge": 0,
+        "runtime_sec": None,
+        "portfolio_summary_json": "{}",
+        "symbol_health_summary_json": "{}",
+    }
+    for key, value in defaults.items():
+        data.setdefault(key, value)
+    data["is_watch_iteration"] = _int_value(data.get("is_watch_iteration"))
+    data["symbols_scanned"] = _int_value(data.get("symbols_scanned"))
+    data["symbols_requested"] = _int_value(data.get("symbols_requested"))
+    data["symbols_queued"] = _int_value(data.get("symbols_queued"))
+    data["symbols_completed"] = _int_value(data.get("symbols_completed"))
+    data["valid_activations"] = _int_value(data.get("valid_activations"))
+    data["still_watching"] = _int_value(data.get("still_watching"))
+    data["rejected_no_edge"] = _int_value(data.get("rejected_no_edge"))
+    data["data_issues"] = _int_value(data.get("data_issues"))
+    return data
+
+
 def _normalize_symbol_row(row: sqlite3.Row) -> dict[str, Any]:
     data = _row_dict(row)
     raw = _json_loads(data.get("raw_result_json"))
@@ -2005,6 +2076,40 @@ def _symbol_health_warnings(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     return []
 
 
+def _watch_iteration_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    return tuple(
+        row
+        for row in rows
+        if _int_value(row.get("is_watch_iteration")) == 1
+        or _display(row.get("watch_iteration_number")) != NA
+    )
+
+
+def _last_watch_iteration(rows: Sequence[Mapping[str, Any]]) -> str | int:
+    if not rows:
+        return NA
+    latest = max(
+        rows,
+        key=lambda row: (_display(row.get("completed_at") or row.get("timestamp")), _int_value(row.get("watch_iteration_number"))),
+    )
+    iteration = _int_value(latest.get("watch_iteration_number"))
+    return iteration if iteration else NA
+
+
+def _runtime_query_text(value: Any, runtime_stats_json: Any) -> str:
+    seconds = _decimal_or_none(value)
+    if seconds is None:
+        runtime_stats = _json_loads(runtime_stats_json)
+        seconds = _decimal_or_none(runtime_stats.get("total_runtime_seconds"))
+    if seconds is None:
+        return NA
+    if seconds == 0:
+        return "0s"
+    if seconds < Decimal("1"):
+        return f"{seconds:.3f}".rstrip("0").rstrip(".") + "s"
+    return f"{seconds:.1f}".rstrip("0").rstrip(".") + "s"
+
+
 def _bucket_count(rows: Sequence[Mapping[str, Any]], bucket: str) -> int:
     return sum(1 for row in rows if row.get("display_bucket") == bucket)
 
@@ -2070,6 +2175,13 @@ def _tp_number(value: Any) -> int:
         except ValueError:
             return 0
     return 0
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _most_common_text(values: Iterable[Any]) -> str:

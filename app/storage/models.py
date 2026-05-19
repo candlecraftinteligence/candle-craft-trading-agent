@@ -5,6 +5,23 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class WatchIterationMetadata:
+    iteration_number: int
+    started_at: str
+    completed_at: str
+    symbols_requested: int
+    symbols_queued: int
+    symbols_completed: int
+    valid_activations: int
+    still_watching: int
+    rejected_no_edge: int
+    data_issues: int
+    runtime_sec: float
+    portfolio_summary: dict[str, Any] | None = None
+    symbol_health_summary: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class ScanRunRecord:
     run_id: str
     timestamp: str
@@ -27,6 +44,19 @@ class ScanRunRecord:
     data_issues: int
     data_issues_json: str
     raw_payload_json: str
+    is_watch_iteration: int = 0
+    watch_iteration_number: int | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    symbols_requested: int = 0
+    symbols_queued: int = 0
+    symbols_completed: int = 0
+    valid_activations: int = 0
+    still_watching: int = 0
+    rejected_no_edge: int = 0
+    runtime_sec: float | None = None
+    portfolio_summary_json: str = "{}"
+    symbol_health_summary_json: str = "{}"
 
 
 @dataclass(frozen=True)

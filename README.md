@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, and Phase 39 adaptive symbol prioritization.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, and Phase 40 graceful watch shutdown with watch iteration persistence.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -103,7 +103,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, and the Phase 39 symbol health layer. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, the Phase 39 symbol health layer, and the Phase 40 watch persistence and shutdown layer. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 2 Market Data
 
@@ -1363,6 +1363,7 @@ regime_expectancy
 regime_setup_density
 regime_rejection_patterns
 regime_quality_distribution
+watch_iterations
 ```
 
 Examples:
@@ -1718,6 +1719,51 @@ Safety boundaries:
 - It does not weaken sweep, BOS/CHoCH, pullback, OB/FVG, fib, RR, Trust Meter, risk, setup quality, portfolio selection, or regime gates.
 - It does not create trades from invalid setups, add order execution, add private exchange API access, add withdrawals or transfers, or send live Telegram by default.
 
+## Phase 40 - Graceful Watch Shutdown & Iteration Persistence
+
+Purpose:
+
+- Make long-running watch mode clean to stop with `Ctrl+C`.
+- Persist every completed watch iteration as a scan run when `--store-scan` is enabled.
+- Make research summaries and watch-specific research reflect actual stored watch iterations.
+
+Safe stopping:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --watch --watch-symbols-from-latest-run --store-scan --watch-interval-sec 60
+```
+
+Press `Ctrl+C` while watch mode is sleeping between iterations. The CLI exits cleanly without an asyncio traceback and prints:
+
+```text
+Watch mode stopped by user.
+Completed iterations: X
+Stored scan runs: X
+Data saved to: scan_runs/candle_craft.db
+```
+
+Watch iteration storage:
+
+- Storage remains opt-in with `--store-scan`.
+- Each completed watch iteration creates one row in `scan_runs`.
+- Stored watch fields include iteration number, start/completion timestamps, requested/queued/completed symbol counts, valid activations, still-watching count, rejected/no-edge count, data issues, runtime seconds, market regime, portfolio summary when available, and symbol health summary when available.
+- Existing `scan_runs/candle_craft.db` files are migrated in place with backward-compatible columns.
+- If `--store-scan` is not used, watch mode does not create a scan run for the iteration.
+
+Research:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query summary
+.\.venv\Scripts\python.exe scripts\run_scan.py --research --research-query watch_iterations
+```
+
+The summary report now includes total watch iterations, last watch iteration, average symbols per watch iteration, and valid activations from watch mode. The `watch_iterations` query prints iteration number, timestamp, symbols watched, valid activations, still watching, data issues, runtime, and regime.
+
+Safety boundaries:
+
+- Phase 40 is operational reliability and local persistence only.
+- It does not change strategy gates, weaken setup logic, create trades from invalid setups, add order execution, add private exchange API access, add withdrawals or transfers, or send live Telegram by default.
+
 ## Safety Boundaries
 
 - No secrets are committed. Use `.env` locally and `.env.example` for documentation.
@@ -1755,3 +1801,4 @@ Safety boundaries:
 - The Phase 37 lifecycle conversion analytics layer is read-only reporting only. It does not weaken setup rules, create trades from invalid states, place orders, call private APIs, send live Telegram messages by default, delete lifecycle records, invent market data, withdraw funds, or transfer funds.
 - The Phase 38 pullback intelligence layer is diagnostics and research only. It does not loosen pullback, fib, OB/FVG, RR, Trust Meter, risk, or lifecycle gates; create valid setups from failed pullbacks; place orders; call private APIs; send live Telegram by default; invent data; withdraw funds; or transfer funds.
 - The Phase 39 symbol health layer is scan ordering and timeout hygiene only. It does not weaken strategy gates, create trades from invalid setups, place orders, call private APIs, send live Telegram by default, invent data, withdraw funds, or transfer funds.
+- The Phase 40 watch shutdown and persistence layer is operational reliability only. It does not weaken strategy gates, create trades from invalid setups, place orders, call private APIs, send live Telegram by default, invent data, withdraw funds, or transfer funds.

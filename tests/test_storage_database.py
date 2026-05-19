@@ -209,6 +209,86 @@ def test_database_creation(tmp_path) -> None:
     assert {"scan_runs", "symbol_results", "setup_candidates", "replay_results"} <= tables
 
 
+def test_scan_run_migration_adds_watch_columns_without_destroying_rows(tmp_path) -> None:
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE scan_runs (
+                run_id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                universe TEXT NOT NULL,
+                symbols_scanned INTEGER NOT NULL,
+                symbols_json TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                timeframes_json TEXT NOT NULL,
+                market_regime TEXT NOT NULL,
+                regime_confidence INTEGER NOT NULL DEFAULT 0,
+                regime_compatibility_json TEXT NOT NULL DEFAULT '{}',
+                environment_notes_json TEXT NOT NULL DEFAULT '[]',
+                runtime_stats_json TEXT NOT NULL,
+                command_preset TEXT NOT NULL,
+                command_used TEXT NOT NULL,
+                total_valid_setups INTEGER NOT NULL,
+                near_misses INTEGER NOT NULL,
+                rejected INTEGER NOT NULL,
+                data_issues INTEGER NOT NULL,
+                data_issues_json TEXT NOT NULL,
+                raw_payload_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO scan_runs (
+                run_id, timestamp, exchange, universe, symbols_scanned, symbols_json,
+                strategy, timeframes_json, market_regime, runtime_stats_json,
+                command_preset, command_used, total_valid_setups, near_misses,
+                rejected, data_issues, data_issues_json, raw_payload_json
+            ) VALUES (
+                'legacy_run', '2026-05-18T00:00:00+00:00', 'binance', 'manual',
+                1, '["BTCUSDT"]', 'liquidity_grab_pullback', '{}', 'trend_expansion',
+                '{}', 'N/A', 'legacy', 0, 0, 1, 0, '[]', '{}'
+            )
+            """
+        )
+        connection.commit()
+
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(scan_runs)").fetchall()
+        }
+        row = connection.execute(
+            """
+            SELECT run_id, is_watch_iteration, symbols_requested, valid_activations
+            FROM scan_runs
+            WHERE run_id = 'legacy_run'
+            """
+        ).fetchone()
+
+    assert {
+        "is_watch_iteration",
+        "watch_iteration_number",
+        "started_at",
+        "completed_at",
+        "symbols_requested",
+        "symbols_queued",
+        "symbols_completed",
+        "valid_activations",
+        "still_watching",
+        "rejected_no_edge",
+        "runtime_sec",
+        "portfolio_summary_json",
+        "symbol_health_summary_json",
+    } <= columns
+    assert row == ("legacy_run", 0, 0, 0)
+
+
 def test_scan_run_insert(tmp_path) -> None:
     db_path = tmp_path / "candle_craft.db"
 
