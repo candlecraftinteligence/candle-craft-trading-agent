@@ -36,3 +36,6 @@ replay_exports/*.jsonl
 replay_exports/*.csv
 replay_exports/*.json
 !replay_exports/.gitkeep
+replay_reports/*.md
+replay_reports/*.json
+!replay_reports/.gitkeep
