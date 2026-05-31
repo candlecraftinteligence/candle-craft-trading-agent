@@ -556,8 +556,14 @@ class ScannerRunner:
                 stop_after_symbol = False
                 await _emit_progress(progress, f"Starting {symbol_config.symbol}...")
                 symbol_timeout = run_config.symbol_timeout_sec
+                symbol_limited_by_scan_deadline = False
                 if scan_deadline is not None:
-                    remaining_scan_seconds = max(scan_deadline - time.monotonic(), 0.001)
+                    remaining_scan_seconds = scan_deadline - time.monotonic()
+                    if remaining_scan_seconds <= 0:
+                        global_timeout_hit = True
+                        self.logger.warning("Full scan timeout reached before symbol=%s.", symbol_config.symbol)
+                        break
+                    symbol_limited_by_scan_deadline = remaining_scan_seconds < symbol_timeout
                     symbol_timeout = min(symbol_timeout, remaining_scan_seconds)
 
                 try:
@@ -567,8 +573,7 @@ class ScannerRunner:
                     )
                 except asyncio.TimeoutError:
                     elapsed = time.monotonic() - symbol_started
-                    scan_timeout_hit = scan_deadline is not None and time.monotonic() >= scan_deadline
-                    if scan_timeout_hit and symbol_timeout < run_config.symbol_timeout_sec:
+                    if symbol_limited_by_scan_deadline:
                         reason = f"full scan timeout exceeded after {_format_seconds(run_config.scan_timeout_sec)} seconds"
                         timeout_status: Literal["symbol_timeout", "global_timeout"] = "global_timeout"
                         global_timeout_hit = True
@@ -600,6 +605,10 @@ class ScannerRunner:
                     timeout_status=symbol_result.timeout_status,
                 )
                 results.append(symbol_result)
+                if scan_deadline is not None and time.monotonic() >= scan_deadline and not stop_after_symbol:
+                    global_timeout_hit = True
+                    stop_after_symbol = True
+                    self.logger.warning("Full scan timeout reached after symbol=%s.", symbol_config.symbol)
                 await _emit_progress(
                     progress,
                     f"Done {symbol_config.symbol} in {_format_seconds(symbol_elapsed)} seconds.",

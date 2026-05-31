@@ -408,7 +408,16 @@ def test_symbol_timeout_marks_symbol_scan_error_and_continues() -> None:
 
 
 def test_scan_timeout_stops_gracefully_with_partial_results() -> None:
-    client = FakeExchangeClient(
+    class AttemptRecordingClient(FakeExchangeClient):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.started_klines: list[tuple[str, str]] = []
+
+        async def get_klines(self, symbol: str, interval: str, limit: int) -> list[dict[str, Decimal | int]]:
+            self.started_klines.append((symbol, interval))
+            return await super().get_klines(symbol, interval, limit)
+
+    client = AttemptRecordingClient(
         {
             "BTCUSDT": _flat_candles(),
             "ETHUSDT": _flat_candles(),
@@ -430,6 +439,8 @@ def test_scan_timeout_stops_gracefully_with_partial_results() -> None:
     assert result.runtime_stats.global_timeout_hit is True
     assert result.runtime_stats.timeout_count == 1
     assert result.runtime_stats.skipped_symbols == 1
+    assert any(symbol == "BTCUSDT" for symbol, _interval in client.started_klines)
+    assert all(symbol != "ETHUSDT" for symbol, _interval in client.started_klines)
 
 
 def test_one_slow_symbol_does_not_stop_full_scan_runtime_stats() -> None:
