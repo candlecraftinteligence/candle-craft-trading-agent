@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, Phase 40 graceful watch shutdown with watch iteration persistence, Phase 41 wick-vs-close structural intelligence, Phase 42 dynamic RR and target intelligence, and Phase 43 local runtime and persistence hardening.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, Phase 40 graceful watch shutdown with watch iteration persistence, Phase 41 wick-vs-close structural intelligence, Phase 42 dynamic RR and target intelligence, Phase 43 local runtime and persistence hardening, and Phase 44A scan persistence integrity auditing.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -103,7 +103,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, the Phase 39 symbol health layer, the Phase 40 watch persistence and shutdown layer, the Phase 41 wick-vs-close structural intelligence layer, the Phase 42 target intelligence layer, and the Phase 43 local runtime diagnostics. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, the Phase 39 symbol health layer, the Phase 40 watch persistence and shutdown layer, the Phase 41 wick-vs-close structural intelligence layer, the Phase 42 target intelligence layer, the Phase 43 local runtime diagnostics, and the Phase 44A scan persistence audit. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 43 - Local Runtime & Persistence Hardening
 
@@ -124,6 +124,34 @@ The check validates Python 3.11+, virtual environment detection, project-local p
 Docker readiness warnings are local environment diagnostics. Docker Desktop being stopped, unavailable, or permission-denied does not mean the trading system failed and does not block non-Docker diagnostics.
 
 Generated scan JSON files such as `scan_runs/*.json` and `scan_output.json` are local artifacts and should not be staged or committed. If a generated scan artifact is already tracked, restore or untrack it separately rather than mixing its generated diff into a feature phase.
+
+## Phase 44A - Scan Persistence Integrity Audit
+
+Phase 44A adds a deterministic, read-only audit layer for local scan persistence artifacts. It inspects scanner run JSON, watch-state-like JSON, and performance-memory-like JSON for internal consistency, readable structure, basic schema stability, and later lifecycle replay readiness. It does not execute replay, call exchanges, send Telegram messages, place orders, alter lifecycle transitions, or change scanner, setup, scoring, regime, risk, portfolio, or alert behavior.
+
+Run the audit with default local paths:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_scan_persistence.py
+```
+
+JSON mode:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_scan_persistence.py --json
+```
+
+Audit explicit artifacts:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_scan_persistence.py scan_output.json scan_runs\latest_scan.json
+```
+
+If no paths are provided, the script checks `scan_output.json` when present and all `scan_runs/*.json` files when present. It prints metadata, severity counts, inspected fields, and issue messages only; it does not print full artifact contents or secrets.
+
+Warnings mean the artifact is readable but incomplete, unusual, or not fully ready for research/lifecycle replay validation. Errors are reserved for unreadable or invalid JSON and similarly blocking structural problems. The CLI exits `0` when there are warnings but no errors, and exits `1` when any audited artifact has an error.
+
+Generated local artifacts such as `scan_output.json`, `scan_runs/latest_scan.json`, `scan_runs/watch_state.json`, and `scan_runs/performance_memory.json` remain ignored local data and should not be committed.
 
 ## Phase 2 Market Data
 
