@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, Phase 40 graceful watch shutdown with watch iteration persistence, Phase 41 wick-vs-close structural intelligence, Phase 42 dynamic RR and target intelligence, Phase 43 local runtime and persistence hardening, Phase 44A scan persistence integrity auditing, and Phase 44B lifecycle replay readiness auditing.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, Phase 40 graceful watch shutdown with watch iteration persistence, Phase 41 wick-vs-close structural intelligence, Phase 42 dynamic RR and target intelligence, Phase 43 local runtime and persistence hardening, Phase 44A scan persistence integrity auditing, Phase 44B lifecycle replay readiness auditing, and Phase 44C replay dataset export contract.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -182,6 +182,38 @@ If no paths are provided, the script checks `scan_output.json`, `scan_runs/lates
 Warnings mean the artifact is readable but has incomplete replay readiness, unknown statuses, suspicious transitions, missing identifiers, missing timestamps, missing invalidation/stop fields, or missing terminal outcome fields. Errors are reserved for malformed lifecycle structure that blocks the audit, invalid JSON, unreadable files, and `status_history` fields that are not JSON arrays. The CLI exits `0` when there are warnings but no errors, exits `1` when errors are found, and exits `1` in `--strict` mode when warnings or errors are found.
 
 The audit prepares local artifacts for future replay validation. It does not enforce a production state machine, execute trades, or loosen any existing setup gates.
+
+## Phase 44C - Replay Dataset Export Contract
+
+Phase 44C adds a deterministic, read-only replay dataset export layer. It converts existing local scanner, watch-state, lifecycle, and performance-memory JSON artifacts into normalized replay dataset rows for future historical validation and research analytics.
+
+This is research/export-only. It does not execute replay, create signals, place trades, call exchanges, send Telegram messages, change setup gates, mutate lifecycle state, alter scanner results, update performance memory, or invent missing market data. Missing values are exported as `N/A`, empty lists, `false`, or zero as appropriate, and incomplete replay readiness is reported as warnings.
+
+Run a dry-run export summary with default local artifacts:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_replay_dataset.py --dry-run
+```
+
+JSON summary mode:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_replay_dataset.py --json-summary
+```
+
+Export explicit scanner output as JSONL:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_replay_dataset.py --input scan_runs\latest_scan.json --output replay_exports\latest_replay_dataset.jsonl --format jsonl
+```
+
+Export explicit scanner output as CSV:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_replay_dataset.py --input scan_runs\latest_scan.json --output replay_exports\latest_replay_dataset.csv --format csv
+```
+
+Generated `replay_exports/*.jsonl`, `replay_exports/*.csv`, and `replay_exports/*.json` files are local research artifacts and should not be committed.
 
 ## Phase 2 Market Data
 
