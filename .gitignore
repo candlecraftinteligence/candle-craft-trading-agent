@@ -39,3 +39,5 @@ replay_exports/*.json
 replay_reports/*.md
 replay_reports/*.json
 !replay_reports/.gitkeep
+replay_validation/*.json
+!replay_validation/.gitkeep
