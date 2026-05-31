@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, Phase 40 graceful watch shutdown with watch iteration persistence, Phase 41 wick-vs-close structural intelligence, Phase 42 dynamic RR and target intelligence, Phase 43 local runtime and persistence hardening, Phase 44A scan persistence integrity auditing, Phase 44B lifecycle replay readiness auditing, Phase 44C replay dataset export contract, Phase 44D replay dataset quality metrics, and Phase 44E replay dataset coverage reporting.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, Phase 40 graceful watch shutdown with watch iteration persistence, Phase 41 wick-vs-close structural intelligence, Phase 42 dynamic RR and target intelligence, Phase 43 local runtime and persistence hardening, Phase 44A scan persistence integrity auditing, Phase 44B lifecycle replay readiness auditing, Phase 44C replay dataset export contract, Phase 44D replay dataset quality metrics, Phase 44E replay dataset coverage reporting, and Phase 44F replay failure taxonomy reporting.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -103,7 +103,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, the Phase 39 symbol health layer, the Phase 40 watch persistence and shutdown layer, the Phase 41 wick-vs-close structural intelligence layer, the Phase 42 target intelligence layer, the Phase 43 local runtime diagnostics, the Phase 44A scan persistence audit, the Phase 44B lifecycle replay readiness audit, the Phase 44C replay dataset export contract, the Phase 44D replay dataset quality metrics, and the Phase 44E replay dataset coverage report. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, the Phase 39 symbol health layer, the Phase 40 watch persistence and shutdown layer, the Phase 41 wick-vs-close structural intelligence layer, the Phase 42 target intelligence layer, the Phase 43 local runtime diagnostics, the Phase 44A scan persistence audit, the Phase 44B lifecycle replay readiness audit, the Phase 44C replay dataset export contract, the Phase 44D replay dataset quality metrics, the Phase 44E replay dataset coverage report, and the Phase 44F replay failure taxonomy report. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 43 - Local Runtime & Persistence Hardening
 
@@ -280,6 +280,38 @@ Analyze an exported JSONL replay dataset:
 ```
 
 The report does not execute replay, create signals, place trades, call exchanges, send Telegram messages, mutate artifacts, update scanner results, change lifecycle states, write performance memory, alter database records, or change setup gates. Missing values remain `N/A`, unreliable values remain `Unverified`, and market data, outcomes, profitability, and near-miss status are never invented.
+
+## Phase 44F - Replay Failure Taxonomy Report
+
+Phase 44F adds deterministic, read-only failure taxonomy reporting over Phase 44C replay dataset rows and Phase 44E coverage dimensions. It groups rejected, no-setup, invalidated, stopped/SL, scan-error, and replay-readiness-gap rows by explicit evidence such as `first_failed_gate`, rejection reasons, status, lifecycle/setup buckets, symbol, exchange, timeframe, strategy mode, direction, grade, artifact type, and source.
+
+This is audit/research-only. The failure taxonomy is rejection/failure research, not profitability, not setup confidence, and not a signal-quality score. Rejected and no-setup rows are valid research rows because they explain what the scanner rejected; they are not treated as system errors merely because no trade idea was created.
+
+Run failure taxonomy reporting with default local artifacts:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\analyze_replay_failure_taxonomy.py
+```
+
+JSON mode:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\analyze_replay_failure_taxonomy.py --json
+```
+
+Strict mode:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\analyze_replay_failure_taxonomy.py --strict
+```
+
+Analyze an exported JSONL replay dataset:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\analyze_replay_failure_taxonomy.py --input replay_exports\latest_replay_dataset.jsonl --input-format jsonl --json
+```
+
+The report does not execute replay, create signals, place trades, call exchanges, send Telegram messages, mutate artifacts, update scanner results, change lifecycle states, write performance memory, alter database records, or change setup gates. It does not infer hidden reasons, calculate fake profitability, or invent market data; missing values remain `N/A` and unreliable values remain `Unverified`.
 
 ## Phase 2 Market Data
 
@@ -2112,3 +2144,4 @@ Safety boundaries:
 - The Phase 44C replay dataset export contract is read-only research export only. It does not execute replay, create signals, place trades, call exchanges, send Telegram messages, alter setup gates, mutate lifecycle state, update performance memory, invent market data, withdraw funds, or transfer funds.
 - The Phase 44D replay dataset quality metrics layer is read-only audit/research only. It scores data and replay-readiness quality only; it does not calculate profitability, create signals, place trades, call exchanges, send Telegram messages, mutate artifacts, alter gates, invent market data, withdraw funds, or transfer funds.
 - The Phase 44E replay dataset coverage report is read-only audit/research only. It reports data coverage only; it does not calculate profitability, infer outcomes, create signals, place trades, call exchanges, send Telegram messages, mutate artifacts, alter gates, invent market data, withdraw funds, or transfer funds.
+- The Phase 44F replay failure taxonomy report is read-only audit/research only. It groups explicit rejection and failure evidence only; it does not calculate profitability, infer hidden reasons, create signals, place trades, call exchanges, send Telegram messages, mutate artifacts, alter gates, invent market data, withdraw funds, or transfer funds.
