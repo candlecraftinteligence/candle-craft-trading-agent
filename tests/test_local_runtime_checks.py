@@ -15,6 +15,7 @@ from app.core.local_runtime_checks import (
     collect_local_diagnostics,
     diagnostics_to_dicts,
     find_generated_artifacts,
+    has_hard_blockers,
     mask_database_url,
 )
 
@@ -119,6 +120,20 @@ def test_generated_artifact_detection_finds_scan_json_files(tmp_path: Path) -> N
     assert "scan_runs/watch_state.json" in artifacts
     assert "scan_output.json" in artifacts
     assert diagnostic.status == "warning"
+    assert "local ignored files" in diagnostic.message
+
+
+def test_generated_artifact_warning_is_serializable_and_non_blocking(tmp_path: Path) -> None:
+    scan_runs = tmp_path / "scan_runs"
+    scan_runs.mkdir()
+    (scan_runs / "latest_scan.json").write_text("{}", encoding="utf-8")
+
+    diagnostic = check_generated_artifact_hygiene(tmp_path)
+    payload = json.dumps(diagnostic.to_dict())
+
+    assert diagnostic.status == "warning"
+    assert has_hard_blockers([diagnostic]) is False
+    assert "scan_runs/latest_scan.json" in payload
 
 
 def test_json_diagnostics_are_serializable_and_secret_safe(tmp_path: Path) -> None:

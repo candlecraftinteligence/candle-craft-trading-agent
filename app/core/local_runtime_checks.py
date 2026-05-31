@@ -394,7 +394,7 @@ def check_generated_artifact_hygiene(project_root: Path) -> RuntimeDiagnostic:
     return RuntimeDiagnostic(
         name="generated_artifacts",
         status="warning",
-        message="Generated scan JSON artifacts are present locally; do not stage or commit them.",
+        message="Generated scan JSON artifacts are present as local ignored files; keep them out of commits.",
         details={"artifact_count": len(artifacts), "artifacts": list(artifacts[:20])},
     )
 
