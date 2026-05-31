@@ -8,6 +8,7 @@ from app.analytics.replay_research_report import (
     REPLAY_RESEARCH_REPORT_SCHEMA_VERSION,
     build_replay_research_report_from_artifacts,
     build_replay_research_report_from_rows,
+    default_replay_research_artifact_inputs,
     default_replay_research_artifact_paths,
     format_replay_research_report_markdown,
     replay_research_report_to_dict,
@@ -79,6 +80,28 @@ def test_default_artifact_path_resolver_returns_expected_candidates_without_exis
         tmp_path / "scan_runs" / "watch_state.json",
         tmp_path / "scan_runs" / "performance_memory.json",
     ]
+
+
+def test_default_artifact_input_resolver_skips_missing_defaults_with_warnings(tmp_path) -> None:
+    path = tmp_path / "scan_output.json"
+    path.write_text(json.dumps(_scanner_payload()), encoding="utf-8")
+
+    paths, warnings, errors = default_replay_research_artifact_inputs(tmp_path)
+
+    assert paths == [path]
+    assert errors == ()
+    assert len(warnings) == 3
+    assert all("missing_default_artifact" in warning for warning in warnings)
+
+
+def test_default_artifact_input_resolver_errors_when_no_valid_inputs_remain(tmp_path) -> None:
+    paths, warnings, errors = default_replay_research_artifact_inputs(tmp_path)
+
+    assert paths == []
+    assert len(warnings) == 4
+    assert errors == (
+        "no_valid_artifact_inputs: no default replay artifact inputs remained after skipping missing local ignored artifacts.",
+    )
 
 
 def test_build_report_from_minimal_rows_produces_summary_with_no_errors() -> None:
@@ -212,6 +235,20 @@ def test_cli_json_emits_valid_json(tmp_path, capsys) -> None:
     assert exit_code == 0
     assert payload["schema_version"] == REPLAY_RESEARCH_REPORT_SCHEMA_VERSION
     assert payload["summary"]["total_rows"] == 1
+
+
+def test_cli_default_json_skips_missing_defaults_without_error(tmp_path, monkeypatch, capsys) -> None:
+    path = tmp_path / "scan_output.json"
+    path.write_text(json.dumps(_scanner_payload()), encoding="utf-8")
+    monkeypatch.setattr(generate_replay_research_report, "PROJECT_ROOT", tmp_path)
+
+    exit_code = generate_replay_research_report.main(["--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["summary"]["artifact_count"] == 1
+    assert payload["summary"]["error_count"] == 0
+    assert any("missing_default_artifact" in warning for warning in payload["warnings"])
 
 
 def test_cli_markdown_emits_markdown_text(tmp_path, capsys) -> None:

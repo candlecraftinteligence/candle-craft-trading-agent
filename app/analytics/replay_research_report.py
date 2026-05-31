@@ -104,10 +104,34 @@ def default_replay_research_artifact_paths(project_root: Path | None = None) -> 
     ]
 
 
+def default_replay_research_artifact_inputs(
+    project_root: Path | None = None,
+) -> tuple[list[Path], tuple[str, ...], tuple[str, ...]]:
+    paths = default_replay_research_artifact_paths(project_root)
+    existing_paths: list[Path] = []
+    warnings: list[str] = []
+
+    for path in paths:
+        if path.exists():
+            existing_paths.append(path)
+        else:
+            warnings.append(f"{path}: missing_default_artifact: skipped missing local ignored replay artifact.")
+
+    errors: tuple[str, ...] = ()
+    if not existing_paths:
+        errors = (
+            "no_valid_artifact_inputs: no default replay artifact inputs remained after skipping missing local ignored artifacts.",
+        )
+
+    return existing_paths, tuple(warnings), errors
+
+
 def build_replay_research_report_from_artifacts(
     paths: list[Path],
     source: str = "local_artifacts",
     top_n: int = 10,
+    preflight_warnings: Sequence[str] = (),
+    preflight_errors: Sequence[str] = (),
 ) -> ReplayResearchReportResult:
     normalized_paths = [Path(path) for path in paths]
     export_result = export_replay_dataset_from_files(normalized_paths)
@@ -117,10 +141,16 @@ def build_replay_research_report_from_artifacts(
         artifact_inputs=tuple(_redact_text(str(path)) for path in normalized_paths),
         artifact_count=len(normalized_paths),
         top_n=top_n,
-        extra_warnings=_artifact_warning_messages(export_result.warnings),
-        extra_warning_count=len(export_result.warnings),
-        extra_errors=tuple(_redact_text(message) for message in export_result.errors),
-        extra_error_count=len(export_result.errors),
+        extra_warnings=(
+            *tuple(_redact_text(message) for message in preflight_warnings),
+            *_artifact_warning_messages(export_result.warnings),
+        ),
+        extra_warning_count=len(preflight_warnings) + len(export_result.warnings),
+        extra_errors=(
+            *tuple(_redact_text(message) for message in preflight_errors),
+            *tuple(_redact_text(message) for message in export_result.errors),
+        ),
+        extra_error_count=len(preflight_errors) + len(export_result.errors),
     )
 
 
@@ -595,6 +625,7 @@ __all__ = [
     "ReplayResearchReportSummary",
     "build_replay_research_report_from_artifacts",
     "build_replay_research_report_from_rows",
+    "default_replay_research_artifact_inputs",
     "default_replay_research_artifact_paths",
     "format_replay_research_report_markdown",
     "replay_research_report_to_dict",

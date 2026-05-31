@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.analytics.replay_research_report import (  # noqa: E402
     build_replay_research_report_from_artifacts,
-    default_replay_research_artifact_paths,
+    default_replay_research_artifact_inputs,
     format_replay_research_report_markdown,
     replay_research_report_to_dict,
 )
@@ -33,11 +33,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--top-n", type=int, default=10, help="Number of top buckets to include.")
     args = parser.parse_args(argv)
 
-    paths = list(args.inputs) if args.inputs else default_replay_research_artifact_paths(PROJECT_ROOT)
+    preflight_warnings: tuple[str, ...] = ()
+    preflight_errors: tuple[str, ...] = ()
+    if args.inputs:
+        paths = list(args.inputs)
+    else:
+        paths, preflight_warnings, preflight_errors = default_replay_research_artifact_inputs(PROJECT_ROOT)
     result = build_replay_research_report_from_artifacts(
         paths,
         source="local_artifacts" if not args.inputs else "artifacts",
         top_n=args.top_n,
+        preflight_warnings=preflight_warnings,
+        preflight_errors=preflight_errors,
     )
 
     output_format = "json" if args.json else "markdown"
