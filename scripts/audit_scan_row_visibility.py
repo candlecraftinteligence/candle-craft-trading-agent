@@ -10,11 +10,8 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SCAN_PATHS = (
-    PROJECT_ROOT / "scan_runs" / "nightly_latest_scan.json",
-    PROJECT_ROOT / "scan_runs" / "latest_scan.json",
-    PROJECT_ROOT / "scan_output.json",
-)
+SCAN_RUN_MANIFEST_NAME = Path("scan_runs") / "scan_run_manifest.jsonl"
+STALE_RUN_ID_WARNING = "Audited file run_id does not match latest manifest run_id; this file may be stale."
 
 ACTIVE_LIFECYCLE_STATES = {"CONFIRMED", "EXECUTING", "TRIGGERED"}
 FAILED_DISPLAY_STATUSES = {"no_setup", "rejected", "rejected_by_scoring", "near_miss"}
@@ -60,26 +57,117 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Print machine-readable audit output.")
     args = parser.parse_args(argv)
 
-    path = args.path or _default_scan_path()
-    if path is None:
-        raise SystemExit("No saved scan JSON found. Pass a path explicitly.")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    source = _resolve_audit_source(args.path)
+    payload = json.loads(source.audited_path.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
-        raise SystemExit(f"Saved scan JSON must be an object: {path}")
+        raise SystemExit(f"Saved scan JSON must be an object: {source.audited_path}")
     result = audit_scan_row_visibility(payload)
+    result.update(_source_fields(source, result["run_id"]))
     if args.json:
         _safe_print(json.dumps(result, indent=2, sort_keys=True))
         return 0
+    if result["warning"] != "N/A":
+        _safe_print(f"WARNING: {result['warning']}")
     for key, value in result.items():
         _safe_print(f"{key}: {json.dumps(value, sort_keys=True) if isinstance(value, dict) else value}")
     return 0
 
 
-def _default_scan_path() -> Path | None:
-    for path in DEFAULT_SCAN_PATHS:
-        if path.exists():
-            return path
-    return None
+class AuditSource:
+    def __init__(
+        self,
+        *,
+        audited_path: Path,
+        manifest_run_id: str = "N/A",
+        manifest_latest_scan_path: str = "N/A",
+        warning: str = "N/A",
+    ) -> None:
+        self.audited_path = audited_path
+        self.manifest_run_id = manifest_run_id
+        self.manifest_latest_scan_path = manifest_latest_scan_path
+        self.warning = warning
+
+
+def _resolve_audit_source(path_arg: Path | None) -> AuditSource:
+    manifest_row = _latest_manifest_row()
+    if path_arg is None:
+        if manifest_row is None:
+            raise SystemExit(
+                f"No scan path was provided and no manifest rows were found in {_manifest_path()}. "
+                "Run a scan that writes scan_runs/scan_run_manifest.jsonl or pass a saved scan JSON path."
+            )
+        latest_scan_path = _text(manifest_row.get("latest_scan_path"))
+        if latest_scan_path == "N/A":
+            raise SystemExit(
+                "Latest manifest row has no latest_scan_path. "
+                "Run a validation scan with --save-run scan_runs/latest_scan.json or pass a saved scan JSON path."
+            )
+        path = _resolve_project_path(latest_scan_path)
+        if not path.exists():
+            raise SystemExit(f"Manifest latest_scan_path does not exist: {path}")
+        return AuditSource(
+            audited_path=path,
+            manifest_run_id=_text(manifest_row.get("run_id")),
+            manifest_latest_scan_path=latest_scan_path,
+        )
+
+    path = path_arg
+    if not path.is_absolute():
+        path = _resolve_project_path(str(path))
+    if not path.exists():
+        raise SystemExit(f"Saved scan JSON not found: {path}")
+    manifest_run_id = _text(manifest_row.get("run_id")) if manifest_row is not None else "N/A"
+    manifest_latest_scan_path = _text(manifest_row.get("latest_scan_path")) if manifest_row is not None else "N/A"
+    return AuditSource(
+        audited_path=path,
+        manifest_run_id=manifest_run_id,
+        manifest_latest_scan_path=manifest_latest_scan_path,
+    )
+
+
+def _source_fields(source: AuditSource, audited_file_run_id: Any) -> dict[str, Any]:
+    audited_run_id = _text(audited_file_run_id)
+    run_ids_match = source.manifest_run_id != "N/A" and source.manifest_run_id == audited_run_id
+    warning = source.warning
+    if source.manifest_run_id != "N/A" and audited_run_id != "N/A" and not run_ids_match:
+        warning = STALE_RUN_ID_WARNING
+    return {
+        "manifest_run_id": source.manifest_run_id,
+        "audited_path": str(source.audited_path),
+        "audited_file_run_id": audited_run_id,
+        "run_ids_match": run_ids_match,
+        "manifest_latest_scan_path": source.manifest_latest_scan_path,
+        "warning": warning,
+    }
+
+
+def _latest_manifest_row() -> Mapping[str, Any] | None:
+    path = _manifest_path()
+    if not path.exists():
+        return None
+    latest: Mapping[str, Any] | None = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, Mapping):
+            latest = payload
+    return latest
+
+
+def _manifest_path() -> Path:
+    return PROJECT_ROOT / SCAN_RUN_MANIFEST_NAME
+
+
+def _resolve_project_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
 
 
 def _result_rows(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:

@@ -530,8 +530,10 @@ Each scan loop appends a compact JSONL row to `scan_runs/scan_run_manifest.jsonl
 Audit top-level row visibility for saved scans:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\audit_scan_row_visibility.py scan_runs\nightly_latest_scan.json
+.\.venv\Scripts\python.exe scripts\audit_scan_row_visibility.py
 ```
+
+For manual validation scans, let the audit resolve the canonical latest output from `scan_runs/scan_run_manifest.jsonl` -> `latest_scan_path`. Do not hardcode `scan_runs/nightly_latest_scan.json` unless you are specifically auditing that historical/nightly artifact.
 
 Audit local alert artifacts:
 
