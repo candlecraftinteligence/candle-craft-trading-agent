@@ -17,6 +17,18 @@ TelegramAdminDeliveryStatus = Literal[
     "failed",
 ]
 
+SAFE_TELEGRAM_RESULT_KEYS = (
+    "status",
+    "part_number",
+    "total_parts",
+    "http_status",
+    "rate_limited",
+    "error",
+    "message_id",
+    "chat_id",
+    "sent_at",
+)
+
 
 @dataclass(frozen=True)
 class TelegramAdminConfig:
@@ -134,7 +146,7 @@ class TelegramAdminClient:
             return TelegramAdminDelivery(
                 status="failed",
                 detail="Telegram admin report failed safely; scanner persistence remains intact.",
-                error_message=_sanitize_error(type(exc).__name__, self._config),
+                error_message=_sanitize_error(exc, self._config),
             )
 
         sanitized_results = tuple(_sanitize_result(result, self._config) for result in raw_results)
@@ -163,7 +175,7 @@ def _clean_optional(value: Any) -> str | None:
 
 
 def _sanitize_result(result: Mapping[str, Any], config: TelegramAdminConfig) -> dict[str, Any]:
-    sanitized = dict(result)
+    sanitized = {key: result[key] for key in SAFE_TELEGRAM_RESULT_KEYS if key in result}
     if "error" in sanitized:
         sanitized["error"] = _sanitize_error(sanitized.get("error"), config)
     return sanitized

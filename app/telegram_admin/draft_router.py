@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
 from app.telegram_admin.client import (
     TelegramAdminClient,
     TelegramAdminConfig,
+    TelegramAdminDelivery,
     TelegramAdminDeliveryStatus,
     TelegramAdminTransport,
 )
@@ -51,6 +53,7 @@ ADMIN_DRAFT_DELIVERY_STATUSES: tuple[str, ...] = (
     "failed",
 )
 DEFAULT_ADMIN_DRAFTS_DIR = Path("scan_runs") / "admin_drafts"
+logger = logging.getLogger(__name__)
 
 
 class AdminDraftRecord(BaseModel):
@@ -62,6 +65,7 @@ class AdminDraftRecord(BaseModel):
     message_preview: str
     source_row_summary: dict[str, Any] = Field(default_factory=dict)
     delivery_status: TelegramAdminDeliveryStatus
+    telegram_metadata: dict[str, Any] = Field(default_factory=dict)
     error_message: str = NA
     dedupe_key: str
 
@@ -101,13 +105,31 @@ async def route_admin_scan_report(
     telegram_config = config or TelegramAdminConfig.from_settings(settings)
     admin_client = client or TelegramAdminClient(telegram_config, transport=transport)
     ranked = _ranked(result, ranked_results)
-    report = format_admin_scan_report(result, ranked_results=ranked, manifest_row=manifest_row)
-    delivery = await admin_client.send_admin_report(report)
+    run_id = _run_id(result, manifest_row)
+    draft_path = admin_draft_path_for_run(run_id, drafts_dir=drafts_dir)
+    report = format_admin_scan_report(
+        result,
+        ranked_results=ranked,
+        manifest_row=manifest_row,
+        draft_artifact_path=draft_path,
+    )
+    delivery = _duplicate_sent_admin_delivery(
+        draft_path,
+        run_id=run_id,
+        config=telegram_config,
+    )
+    if delivery is None:
+        delivery = await admin_client.send_admin_report(report)
+    if delivery.warning != NA:
+        logger.warning(delivery.warning)
+
+    telegram_metadata = _telegram_metadata(delivery.telegram_results)
     drafts = build_admin_drafts(
         result,
         ranked_results=ranked,
         manifest_row=manifest_row,
         delivery_status=delivery.status,
+        telegram_metadata=telegram_metadata,
         error_message=delivery.error_message,
         report=report,
     )
@@ -144,6 +166,7 @@ def build_admin_drafts(
     ranked_results: Sequence[RankedSymbolDisplay] | None = None,
     manifest_row: Mapping[str, Any] | None = None,
     delivery_status: TelegramAdminDeliveryStatus,
+    telegram_metadata: Mapping[str, Any] | None = None,
     error_message: str = NA,
     report: str | None = None,
     created_at: str | None = None,
@@ -160,6 +183,7 @@ def build_admin_drafts(
             summary=_scan_health_summary(result, manifest_row=manifest_row, timestamp=manifest_timestamp),
             message_preview=_preview(report or format_admin_scan_report(result, ranked_results=ranked_results, manifest_row=manifest_row)),
             delivery_status=delivery_status,
+            telegram_metadata=telegram_metadata,
             error_message=error_message,
         )
     ]
@@ -177,6 +201,7 @@ def build_admin_drafts(
                     summary=summary,
                     message_preview=_symbol_preview(draft_type, summary),
                     delivery_status=delivery_status,
+                    telegram_metadata=telegram_metadata,
                     error_message=error_message,
                 )
             )
@@ -190,9 +215,14 @@ def persist_admin_drafts(
     drafts_dir: Path = DEFAULT_ADMIN_DRAFTS_DIR,
 ) -> AdminDraftPersistenceResult:
     run_id = drafts[0].run_id if drafts else "unknown_run"
-    path = drafts_dir / f"{_safe_filename(run_id)}.jsonl"
-    existing_keys = _existing_dedupe_keys(path)
-    new_records = [draft for draft in drafts if draft.dedupe_key not in existing_keys]
+    path = admin_draft_path_for_run(run_id, drafts_dir=drafts_dir)
+    existing_records = _existing_draft_index(path)
+    new_records = [
+        draft
+        for draft in drafts
+        if draft.dedupe_key not in existing_records
+        or _should_append_delivery_update(existing_records[draft.dedupe_key], draft)
+    ]
 
     path.parent.mkdir(parents=True, exist_ok=True)
     if new_records:
@@ -208,11 +238,16 @@ def persist_admin_drafts(
     )
 
 
+def admin_draft_path_for_run(run_id: str, *, drafts_dir: Path = DEFAULT_ADMIN_DRAFTS_DIR) -> Path:
+    return drafts_dir / f"{_safe_filename(run_id)}.jsonl"
+
+
 def format_admin_scan_report(
     result: ScannerRunResult,
     *,
     ranked_results: Sequence[RankedSymbolDisplay] | None = None,
     manifest_row: Mapping[str, Any] | None = None,
+    draft_artifact_path: Path | str | None = None,
     max_rows_per_section: int = 6,
 ) -> str:
     ranked = _ranked(result, ranked_results)
@@ -245,6 +280,7 @@ def format_admin_scan_report(
         f"Trade ideas: {counts['trade_ideas']}",
         f"Journals: {counts['journals']}",
         f"Runtime: {_runtime_seconds(result, manifest_row)}s",
+        f"Draft artifact: {_display(draft_artifact_path)}",
         "",
         "Valid Setups",
         *_valid_setup_lines(valid, max_rows=max_rows_per_section),
@@ -259,6 +295,7 @@ def format_admin_scan_report(
         *_lifecycle_degraded_lines(lifecycle_degraded, max_rows=max_rows_per_section),
         "",
         "No valid setup = no trade.",
+        "Admin-only. No public/VIP send.",
         "Admin review only.",
         "No execution behavior enabled.",
     ]
@@ -325,6 +362,7 @@ def _draft_record(
     message_preview: str,
     delivery_status: TelegramAdminDeliveryStatus,
     error_message: str,
+    telegram_metadata: Mapping[str, Any] | None = None,
 ) -> AdminDraftRecord:
     dedupe_key = _dedupe_key(
         run_id=run_id,
@@ -342,6 +380,7 @@ def _draft_record(
         message_preview=message_preview,
         source_row_summary=dict(summary),
         delivery_status=delivery_status,
+        telegram_metadata=dict(telegram_metadata or {}),
         error_message=_display(error_message),
         dedupe_key=dedupe_key,
     )
@@ -550,10 +589,10 @@ def _dedupe_records(records: Sequence[AdminDraftRecord]) -> tuple[AdminDraftReco
     return tuple(output)
 
 
-def _existing_dedupe_keys(path: Path) -> set[str]:
+def _existing_draft_index(path: Path) -> dict[str, dict[str, Any]]:
     if not path.exists():
-        return set()
-    keys: set[str] = set()
+        return {}
+    records: dict[str, dict[str, Any]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
@@ -564,8 +603,86 @@ def _existing_dedupe_keys(path: Path) -> set[str]:
         if isinstance(payload, Mapping):
             key = _display(payload.get("dedupe_key"))
             if key != NA:
-                keys.add(key)
-    return keys
+                records[key] = dict(payload)
+    return records
+
+
+def _should_append_delivery_update(existing: Mapping[str, Any], draft: AdminDraftRecord) -> bool:
+    existing_status = _display(existing.get("delivery_status"))
+    if existing_status == draft.delivery_status:
+        return False
+    return draft.delivery_status in {"sent_admin", "failed"}
+
+
+def _duplicate_sent_admin_delivery(
+    draft_path: Path,
+    *,
+    run_id: str,
+    config: TelegramAdminConfig,
+) -> TelegramAdminDelivery | None:
+    if not _live_duplicate_guard_enabled(config, run_id):
+        return None
+    if not draft_path.exists():
+        return None
+    for line in draft_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        if _display(payload.get("run_id")) != run_id:
+            continue
+        if _display(payload.get("delivery_status")) != "sent_admin":
+            continue
+        metadata = payload.get("telegram_metadata")
+        telegram_results = _telegram_results_from_metadata(metadata if isinstance(metadata, Mapping) else {})
+        return TelegramAdminDelivery(
+            status="sent_admin",
+            detail="Telegram admin report already sent for this run_id; duplicate live send skipped.",
+            telegram_results=telegram_results,
+        )
+    return None
+
+
+def _live_duplicate_guard_enabled(config: TelegramAdminConfig, run_id: str) -> bool:
+    return config.admin_enabled and not config.dry_run and config.has_admin_credentials and run_id != NA
+
+
+def _telegram_metadata(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    messages: list[dict[str, Any]] = []
+    for result in results:
+        message_metadata = {
+            key: value
+            for key in ("message_id", "chat_id", "sent_at")
+            if (value := result.get(key)) not in (None, "", NA)
+        }
+        if message_metadata:
+            messages.append(message_metadata)
+
+    if not messages:
+        return {}
+
+    metadata: dict[str, Any] = {"messages": messages}
+    if len(messages) == 1:
+        metadata.update(messages[0])
+    return metadata
+
+
+def _telegram_results_from_metadata(metadata: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    messages = metadata.get("messages")
+    if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)):
+        results = tuple(dict(item) for item in messages if isinstance(item, Mapping))
+        if results:
+            return results
+    result = {
+        key: value
+        for key in ("message_id", "chat_id", "sent_at")
+        if (value := metadata.get(key)) not in (None, "", NA)
+    }
+    return (result,) if result else ()
 
 
 def _dedupe_key(
@@ -751,6 +868,7 @@ __all__ = [
     "AdminDraftRecord",
     "AdminDraftRoutingResult",
     "AdminDraftType",
+    "admin_draft_path_for_run",
     "build_admin_drafts",
     "format_admin_scan_report",
     "format_blocked_report",

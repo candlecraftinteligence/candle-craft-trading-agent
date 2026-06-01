@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from decimal import Decimal
+
+import pytest
 
 from app.analytics.setup_quality import validate_setup_quality
 from app.analytics.target_intelligence import TargetFailureType, TargetIntelligenceResult, TargetQualityGrade
@@ -24,7 +27,35 @@ class FakeAdminTransport:
 
     async def send_message(self, *, bot_token: str, chat_id: str, message: str):
         self.calls.append({"bot_token": bot_token, "chat_id": chat_id, "message": message})
-        return ({"status": "sent", "part_number": 1, "total_parts": 1, "error": None},)
+        return (
+            {
+                "status": "sent",
+                "part_number": 1,
+                "total_parts": 1,
+                "error": None,
+                "message_id": 321,
+                "chat_id": chat_id,
+                "sent_at": "2026-06-01T12:00:01Z",
+                "bot_token": bot_token,
+                "authorization": f"Bearer {bot_token}",
+            },
+        )
+
+
+class FailedAdminTransport:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, str]] = []
+
+    async def send_message(self, *, bot_token: str, chat_id: str, message: str):
+        self.calls.append({"bot_token": bot_token, "chat_id": chat_id, "message": message})
+        return (
+            {
+                "status": "failed",
+                "part_number": 1,
+                "total_parts": 1,
+                "error": f"Telegram rejected {bot_token} for {chat_id}",
+            },
+        )
 
 
 def _config(symbols: tuple[str, ...]) -> ScannerRunConfig:
@@ -236,6 +267,44 @@ def test_missing_credentials_do_not_crash_and_skip_send(tmp_path) -> None:
     assert routed.draft_path.exists()
 
 
+@pytest.mark.parametrize(
+    ("bot_token", "admin_chat_id"),
+    (
+        (None, "admin-chat"),
+        ("secret-token", None),
+    ),
+)
+def test_missing_each_admin_credential_skips_without_leaking_secrets(
+    tmp_path,
+    caplog,
+    bot_token,
+    admin_chat_id,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="app.telegram_admin.draft_router")
+    transport = FakeAdminTransport()
+    result = _run_result((_near_result(),))
+
+    routed = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=_manifest(),
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token=bot_token,
+                admin_chat_id=admin_chat_id,
+            ),
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+
+    assert routed.delivery_status == "skipped_missing_credentials"
+    assert transport.calls == []
+    assert routed.error_message == "missing_telegram_admin_credentials"
+    assert "secret-token" not in caplog.text
+
+
 def test_dry_run_mode_persists_local_drafts_without_network(tmp_path) -> None:
     transport = FakeAdminTransport()
     result = _run_result((_valid_result(),))
@@ -282,6 +351,158 @@ def test_enabled_admin_mode_sends_one_admin_report_and_ignores_public_vip(tmp_pa
     assert transport.calls[0]["chat_id"] == "admin-chat"
     assert "public-channel" not in transport.calls[0]["message"]
     assert "vip-channel" not in transport.calls[0]["message"]
+    assert "Admin-only. No public/VIP send." in transport.calls[0]["message"]
+    assert "Draft artifact:" in transport.calls[0]["message"]
+
+
+def test_live_send_success_records_safe_telegram_metadata(tmp_path) -> None:
+    transport = FakeAdminTransport()
+    result = _run_result((_valid_result(),))
+
+    routed = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=_manifest(),
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+
+    assert routed.delivery_status == "sent_admin"
+    records = _read_jsonl(routed.draft_path)
+    assert {record["delivery_status"] for record in records} == {"sent_admin"}
+    metadata = records[0]["telegram_metadata"]
+    assert metadata["message_id"] == 321
+    assert metadata["chat_id"] == "admin-chat"
+    assert metadata["sent_at"] == "2026-06-01T12:00:01Z"
+    serialized = json.dumps(records)
+    assert "secret-token" not in serialized
+    assert "authorization" not in serialized
+
+
+def test_live_send_failure_is_non_fatal_and_redacts_secrets(tmp_path, caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="app.telegram_admin.draft_router")
+    transport = FailedAdminTransport()
+    result = _run_result((_valid_result(),))
+
+    routed = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=_manifest(),
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+
+    assert routed.delivery_status == "failed"
+    assert "[REDACTED]" in routed.error_message
+    assert "secret-token" not in routed.error_message
+    assert "admin-chat" not in routed.error_message
+    records = _read_jsonl(routed.draft_path)
+    assert {record["delivery_status"] for record in records} == {"failed"}
+    assert "secret-token" not in caplog.text
+    assert "admin-chat" not in caplog.text
+
+
+def test_live_send_is_not_duplicated_for_same_run_id(tmp_path) -> None:
+    transport = FakeAdminTransport()
+    result = _run_result((_valid_result(),), run_id="run-duplicate")
+    config = TelegramAdminConfig(
+        admin_enabled=True,
+        dry_run=False,
+        bot_token="secret-token",
+        admin_chat_id="admin-chat",
+    )
+
+    first = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=_manifest("run-duplicate"),
+            config=config,
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+    second = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=_manifest("run-duplicate"),
+            config=config,
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+
+    assert first.delivery_status == "sent_admin"
+    assert second.delivery_status == "sent_admin"
+    assert "duplicate live send skipped" in second.delivery_detail
+    assert len(transport.calls) == 1
+    assert second.drafts_created == 0
+
+
+def test_live_send_after_dry_run_updates_drafts_then_dedupes(tmp_path) -> None:
+    transport = FakeAdminTransport()
+    result = _run_result((_valid_result(),), run_id="run-dry-to-live")
+    manifest = _manifest("run-dry-to-live")
+
+    dry = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=manifest,
+            config=TelegramAdminConfig(admin_enabled=True, dry_run=True),
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+    live = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=manifest,
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+    duplicate = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=manifest,
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+
+    assert dry.delivery_status == "dry_run"
+    assert live.delivery_status == "sent_admin"
+    assert duplicate.delivery_status == "sent_admin"
+    assert len(transport.calls) == 1
+    assert live.drafts_created == dry.drafts_created
+    assert duplicate.drafts_created == 0
+    records = _read_jsonl(dry.draft_path)
+    assert {record["delivery_status"] for record in records} == {"dry_run", "sent_admin"}
 
 
 def test_admin_report_includes_target_blocked_lifecycle_and_no_trade_footer() -> None:
@@ -305,6 +526,7 @@ def test_admin_report_includes_target_blocked_lifecycle_and_no_trade_footer() ->
     assert "Lifecycle Degraded" in report
     assert "STALEUSDT | TRIGGERED" in report
     assert "No valid setup = no trade." in report
+    assert "Admin-only. No public/VIP send." in report
     assert "No execution behavior enabled." in report
 
 

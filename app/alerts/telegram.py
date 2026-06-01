@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -101,6 +102,7 @@ async def send_telegram_messages(
                     "http_status": response.status_code,
                     "rate_limited": False,
                     "error": None,
+                    **_success_metadata(body),
                 }
             )
     finally:
@@ -140,6 +142,37 @@ def _malformed_body_error(body: Any) -> str:
         if isinstance(description, str) and description.strip():
             return f"Telegram response did not confirm success: {description.strip()}"
     return "Malformed Telegram response."
+
+
+def _success_metadata(body: Mapping[str, Any]) -> dict[str, Any]:
+    result = body.get("result")
+    if not isinstance(result, Mapping):
+        return {}
+
+    metadata: dict[str, Any] = {}
+    message_id = result.get("message_id")
+    if message_id is not None:
+        metadata["message_id"] = message_id
+
+    chat = result.get("chat")
+    if isinstance(chat, Mapping):
+        chat_id = chat.get("id")
+        if chat_id is not None:
+            metadata["chat_id"] = chat_id
+
+    sent_at = _telegram_sent_at(result.get("date"))
+    if sent_at is not None:
+        metadata["sent_at"] = sent_at
+
+    return metadata
+
+
+def _telegram_sent_at(value: Any) -> str | None:
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError):
+        return None
+    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat().replace("+00:00", "Z")
 
 
 __all__ = [
