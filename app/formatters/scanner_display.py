@@ -2064,13 +2064,14 @@ def _lifecycle_integrity_fields(symbol_result: ScannerSymbolResult, display: Sym
             "current_scan_gate_valid": True,
         }
     state = _state_value(lifecycle.current_state)
-    degraded_display = display.display_status in {"no_setup"} or (
+    degraded_display = display.display_status in {"no_setup", "near_miss"} or (
         symbol_result.status
         in {
             ScannerPipelineStatus.REJECTED_BY_SCORING,
             ScannerPipelineStatus.REJECTED_BY_TECHNICAL,
             ScannerPipelineStatus.REJECTED_BY_RISK,
             ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,
+            ScannerPipelineStatus.REJECTED_BY_REGIME,
         }
     )
     degraded_stage = display.failed_stage in {"pullback", "structure", "ob_fvg", "rr", "scoring", "target_integrity"}

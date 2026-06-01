@@ -10,12 +10,14 @@ from app.analytics.edge_analytics import EdgeAnalyticsRecord, condition_key_from
 from app.backtesting import ReplayStats, ReplaySummary, ReplaySymbolResult
 from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.setup_quality import SetupQualityState, validate_setup_quality
+from app.analytics.target_intelligence import TargetFailureType, TargetIntelligenceResult, TargetQualityGrade
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, display_fields, filter_ranked_results, rank_scan_results
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
 from app.storage.models import ScanHistorySummary
+from scripts import audit_scan_row_visibility
 from scripts import run_scan
 
 
@@ -262,6 +264,12 @@ def _no_setup_rank_result(symbol: str = "NOSETUPUSDT") -> ScannerSymbolResult:
 
 
 def _target_integrity_rank_result(symbol: str = "TARGETUSDT") -> ScannerSymbolResult:
+    target_intelligence = TargetIntelligenceResult(
+        target_quality_grade=TargetQualityGrade.REJECT,
+        target_failure_type=TargetFailureType.RR_BELOW_MINIMUM,
+        rr_compression_reason="Clean target path is too compressed.",
+        next_target_condition="Wait for target expansion above opposing structure.",
+    )
     return ScannerSymbolResult(
         symbol=symbol,
         status=ScannerPipelineStatus.SCANNED_NO_SETUP,
@@ -281,9 +289,11 @@ def _target_integrity_rank_result(symbol: str = "TARGETUSDT") -> ScannerSymbolRe
                 "gates_failed": ("target_integrity",),
                 "target_integrity_status": "blocked",
                 "target_integrity_reason": "Clean target path is too compressed.",
+                "target_intelligence": target_intelligence.model_dump(mode="json"),
             }
         },
         rejected_strategy_modes=("swing",),
+        target_intelligence=target_intelligence,
     )
 
 
@@ -305,6 +315,32 @@ def _lifecycle_record(
         readiness_score=90,
         quality_score=88,
         action_label="Trade candidate",
+    )
+
+
+def _run_result_for(
+    results: tuple[ScannerSymbolResult, ...],
+    *,
+    run_id: str = "run-test",
+) -> ScannerRunResult:
+    return ScannerRunResult(
+        config=ScannerRunConfig.model_validate(
+            {
+                "symbols": [result.symbol for result in results],
+                "exchange": "binance",
+                "account_equity": Decimal("10000"),
+                "risk_per_trade_pct": Decimal("1"),
+            }
+        ),
+        results=results,
+        scanned_symbols=len(results),
+        failed_symbols=0,
+        trade_ideas_created=sum(1 for result in results if result.trade_idea is not None),
+        dry_run_alerts_created=sum(
+            1 for result in results if ScannerPipelineStatus.ALERT_DRY_RUN_CREATED in result.status_history
+        ),
+        journal_entries_created=sum(1 for result in results if result.journal_entry is not None),
+        resume_metadata={"run_id": run_id, "scan_run_id": run_id},
     )
 
 
@@ -597,22 +633,7 @@ def test_scan_run_manifest_appends_one_compact_row_per_scan_loop(tmp_path, monke
 
 
 def test_scan_run_manifest_counts_target_integrity_blocks() -> None:
-    result = ScannerRunResult(
-        config=ScannerRunConfig.model_validate(
-            {
-                "symbols": ["TARGETUSDT"],
-                "exchange": "binance",
-                "account_equity": Decimal("10000"),
-                "risk_per_trade_pct": Decimal("1"),
-            }
-        ),
-        results=(_target_integrity_rank_result(),),
-        scanned_symbols=1,
-        failed_symbols=0,
-        trade_ideas_created=0,
-        dry_run_alerts_created=0,
-        journal_entries_created=0,
-    )
+    result = _run_result_for((_target_integrity_rank_result(),), run_id="run-target")
     watchlist = run_scan.WatchlistResolution(
         symbols=("TARGETUSDT",),
         source_label="manual",
@@ -633,6 +654,63 @@ def test_scan_run_manifest_counts_target_integrity_blocks() -> None:
     assert row["trade_ideas_created"] == 0
     assert row["alerts_created"] == 0
     assert row["journal_entries_created"] == 0
+
+
+def test_manifest_target_integrity_count_matches_saved_output_evidence(tmp_path) -> None:
+    output_path = tmp_path / "latest_scan.json"
+    manifest_path = tmp_path / "scan_run_manifest.jsonl"
+    history_path = tmp_path / "nightly_scan_history.json"
+    result = _run_result_for((_target_integrity_rank_result(),), run_id="run-target")
+    ranked = rank_scan_results(result.results)
+    watchlist = run_scan.WatchlistResolution(
+        symbols=("TARGETUSDT",),
+        source_label="manual",
+        universe=run_scan.manual_symbol_universe(("TARGETUSDT",), requested_size=1),
+    )
+
+    run_scan._write_run_json(output_path, result, ranked_results=ranked)
+    manifest_row = run_scan._append_scan_run_manifest(
+        result,
+        watchlist=watchlist,
+        ranked_results=ranked,
+        manifest_path=manifest_path,
+        nightly_history_path=history_path,
+        run_id="run-target",
+        latest_scan_path=output_path,
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    row = payload["results"][0]
+    assert payload["run_id"] == manifest_row["run_id"] == "run-target"
+    assert manifest_row["latest_scan_path"] == str(output_path)
+    assert manifest_row["alerts_blocked_by_target_integrity"] == 1
+    assert row["failed_stage"] == "target_integrity"
+    assert row["display_bucket"] == "near_miss"
+    assert row["action_label"] == "Wait for target expansion"
+    assert "Clean target path is too compressed" in row["short_reason"]
+    assert row["target_intelligence"]["target_quality_grade"] == "Reject"
+    assert row["next_trigger_needed"] == "Wait for target expansion above opposing structure."
+
+
+def test_scan_row_visibility_audit_reports_requested_counts() -> None:
+    stale_result = _near_miss_rank_result("STALEUSDT", failed_gate="rr_below_minimum").model_copy(
+        update={"lifecycle_state": _lifecycle_record("STALEUSDT", SetupLifecycleState.TRIGGERED)}
+    )
+    target_result = _target_integrity_rank_result()
+    result = _run_result_for((stale_result, target_result), run_id="run-audit")
+    payload = run_scan._json_payload(result, ranked_results=rank_scan_results(result.results))
+
+    audit = audit_scan_row_visibility.audit_scan_row_visibility(payload)
+
+    assert audit["total_rows"] == 2
+    assert audit["run_id"] == "run-audit"
+    assert audit["top_level_failed_stage_target_integrity"] == 1
+    assert audit["active_failed_with_lifecycle_integrity"] == 1
+    assert audit["active_failed_missing_lifecycle_integrity"] == 0
+    assert audit["failed_stage_counts"]["target_integrity"] == 1
+    assert audit["failed_stage_counts"]["rr"] == 1
+    assert audit["display_status_counts"]["near_miss"] == 2
+    assert audit["lifecycle_state_counts"]["TRIGGERED"] == 1
 
 
 def test_store_scan_prints_run_id_and_database(tmp_path, monkeypatch, capsys) -> None:
@@ -1024,6 +1102,61 @@ def test_lifecycle_integrity_marks_active_state_stale_when_current_scan_degrades
     assert fields["lifecycle_integrity_status"] == "STALE_OR_DEGRADED"
     assert fields["current_scan_gate_valid"] is False
     assert "current gates are not valid" in fields["lifecycle_integrity_warning"]
+
+
+def test_json_payload_persists_lifecycle_integrity_on_top_level_row() -> None:
+    stale_result = _near_miss_rank_result("STALEUSDT", failed_gate="no_ob_or_fvg_zone").model_copy(
+        update={"lifecycle_state": _lifecycle_record("STALEUSDT", SetupLifecycleState.EXECUTING)}
+    )
+    result = _run_result_for((stale_result,))
+
+    payload = run_scan._json_payload(result, ranked_results=rank_scan_results(result.results))
+    row = payload["results"][0]
+
+    assert payload["run_id"] == "run-test"
+    assert row["display_status"] == "near_miss"
+    assert row["failed_stage"] == "ob_fvg"
+    assert row["lifecycle_current_state"] == "EXECUTING"
+    assert row["lifecycle_integrity_status"] == "STALE_OR_DEGRADED"
+    assert row["current_scan_gate_valid"] is False
+    assert "current gates are not valid" in row["lifecycle_integrity_warning"]
+
+
+def test_active_clean_valid_setup_is_not_marked_stale_or_degraded() -> None:
+    valid_result = _valid_rank_result("VALIDUSDT").model_copy(
+        update={"lifecycle_state": _lifecycle_record("VALIDUSDT", SetupLifecycleState.CONFIRMED)}
+    )
+    result = _run_result_for((valid_result,))
+
+    payload = run_scan._json_payload(result, ranked_results=rank_scan_results(result.results))
+    row = payload["results"][0]
+
+    assert row["display_status"] == "valid_setup"
+    assert row["lifecycle_current_state"] == "CONFIRMED"
+    assert row["lifecycle_integrity_status"] == "OK"
+    assert row["current_scan_gate_valid"] is True
+
+
+def test_nested_diagnostic_target_reject_does_not_make_row_target_blocked() -> None:
+    diagnostic_reject = _no_setup_rank_result("DIAGUSDT")
+    diagnostics = dict(diagnostic_reject.strategy_diagnostics)
+    diagnostics["challenge"] = {
+        **diagnostics["challenge"],
+        "target_intelligence": {
+            "target_quality_grade": "Reject",
+            "target_failure_type": "DATA_INCOMPLETE",
+            "rr_compression_reason": "Entry, stop, or direction is N/A; target RR cannot be evaluated.",
+        },
+    }
+    diagnostic_reject = diagnostic_reject.model_copy(update={"strategy_diagnostics": diagnostics})
+
+    display = build_symbol_display(diagnostic_reject)
+    fields = display_fields(diagnostic_reject)
+
+    assert display.failed_stage != "target_integrity"
+    assert fields["failed_stage"] != "target_integrity"
+    assert fields["display_bucket"] == "no_setup"
+    assert fields["action_label"] != "Wait for target expansion"
 
 
 def test_ranking_uses_setup_quality_priority_and_score() -> None:

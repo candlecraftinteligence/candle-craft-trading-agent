@@ -527,6 +527,12 @@ Target-integrity hardening blocks trade idea, alert, and journal creation when t
 
 Each scan loop appends a compact JSONL row to `scan_runs/scan_run_manifest.jsonl` and refreshes `scan_runs/nightly_scan_history.json` with actual loop summaries. `scan_runs/watch_state.json` is retained for compatibility only and is written with a deprecation marker; DB-backed lifecycle state plus scan run manifests are the audit source of truth.
 
+Audit top-level row visibility for saved scans:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_scan_row_visibility.py scan_runs\nightly_latest_scan.json
+```
+
 Audit local alert artifacts:
 
 ```powershell

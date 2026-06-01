@@ -702,7 +702,12 @@ async def main(argv: Sequence[str] | None = None) -> None:
         if symbols_to_scan
         else config
     )
-    resume_metadata = _resume_metadata(args, watchlist.symbols, resume_state, symbols_to_scan, watchlist.universe)
+    scan_run_id = uuid4().hex
+    resume_metadata = {
+        **_resume_metadata(args, watchlist.symbols, resume_state, symbols_to_scan, watchlist.universe),
+        "run_id": scan_run_id,
+        "scan_run_id": scan_run_id,
+    }
 
     async def after_symbol(symbol_result: ScannerSymbolResult, completed: int, total: int) -> None:
         latest_results_by_symbol[symbol_result.symbol] = symbol_result
@@ -810,7 +815,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             min_confidence=args.min_memory_confidence,
         )
 
-    lifecycle_scan_run_id = uuid4().hex if args.store_scan and _lifecycle_enabled(args) else None
+    lifecycle_scan_run_id = scan_run_id if args.store_scan and _lifecycle_enabled(args) else None
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=lifecycle_scan_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
 
@@ -891,7 +896,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 continued_watch_symbols=continued_watch_symbols,
             ),
         )
-    stored_scan_run_id = lifecycle_scan_run_id
+    stored_scan_run_id = scan_run_id
     if args.store_scan:
         raw_payload = _json_payload(
             result,
@@ -909,7 +914,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 command_preset=args.command_preset,
                 command_used=_command_used(argv),
                 raw_payload=raw_payload,
-                run_id=lifecycle_scan_run_id,
+                run_id=stored_scan_run_id,
             )
         except StorageError as exc:
             raise SystemExit(str(exc)) from exc
@@ -923,6 +928,8 @@ async def main(argv: Sequence[str] | None = None) -> None:
         manifest_path=SCAN_RUN_MANIFEST_PATH,
         nightly_history_path=NIGHTLY_SCAN_HISTORY_PATH,
         run_id=stored_scan_run_id,
+        output_scan_path=args.output_json,
+        latest_scan_path=args.save_run,
     )
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
@@ -1533,6 +1540,8 @@ def _append_scan_run_manifest(
     nightly_history_path: Path,
     run_id: str | None = None,
     watch_iteration: int | None = None,
+    output_scan_path: Path | None = None,
+    latest_scan_path: Path | None = None,
 ) -> dict[str, Any]:
     row = _scan_run_manifest_row(
         result,
@@ -1540,6 +1549,8 @@ def _append_scan_run_manifest(
         ranked_results=ranked_results,
         run_id=run_id,
         watch_iteration=watch_iteration,
+        output_scan_path=output_scan_path,
+        latest_scan_path=latest_scan_path,
     )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     with manifest_path.open("a", encoding="utf-8") as handle:
@@ -1556,6 +1567,8 @@ def _scan_run_manifest_row(
     ranked_results: Sequence[Any] | None,
     run_id: str | None = None,
     watch_iteration: int | None = None,
+    output_scan_path: Path | None = None,
+    latest_scan_path: Path | None = None,
 ) -> dict[str, Any]:
     ranked = tuple(ranked_results) if ranked_results is not None else rank_scan_results(result.results)
     bucket_counts = Counter(item.display.display_bucket for item in ranked)
@@ -1597,18 +1610,29 @@ def _scan_run_manifest_row(
     }
     if watch_iteration is not None:
         row["watch_iteration"] = watch_iteration
+    if output_scan_path is not None:
+        row["output_scan_path"] = str(output_scan_path)
+    if latest_scan_path is not None:
+        row["latest_scan_path"] = str(latest_scan_path)
     return row
 
 
 def _manifest_run_id(result: ScannerRunResult, explicit_run_id: str | None) -> str:
     if explicit_run_id:
         return explicit_run_id
+    existing = _result_run_id(result)
+    if existing != NA:
+        return existing
+    return uuid4().hex
+
+
+def _result_run_id(result: ScannerRunResult) -> str:
     metadata = result.resume_metadata if isinstance(result.resume_metadata, Mapping) else {}
     for key in ("scan_run_id", "run_id", "storage_run_id"):
         value = _display(metadata.get(key))
         if value != NA:
             return value
-    return uuid4().hex
+    return NA
 
 
 def _json_scalar(value: Any) -> Any:
@@ -2094,6 +2118,8 @@ async def _run_watch_mode(
                 manifest_path=SCAN_RUN_MANIFEST_PATH,
                 nightly_history_path=NIGHTLY_SCAN_HISTORY_PATH,
                 run_id=stored_manifest_run_id,
+                output_scan_path=args.output_json,
+                latest_scan_path=args.save_run,
                 watch_iteration=summary.iteration,
             )
             print("")
@@ -2132,8 +2158,11 @@ async def _run_watch_scan_iteration(
         else config
     )
     resume_state = ResumeState(results_by_symbol={}, skipped_symbols=(), loaded_symbols=())
+    scan_run_id = uuid4().hex
     resume_metadata = {
         **_resume_metadata(args, watchlist.symbols, resume_state, queued_symbols, watchlist.universe),
+        "run_id": scan_run_id,
+        "scan_run_id": scan_run_id,
         "watch_mode": True,
         "watch_iteration": iteration,
     }
@@ -2201,7 +2230,7 @@ async def _run_watch_scan_iteration(
             runtime_stats=None,
             market_regime=None,
         )
-    storage_run_id = uuid4().hex if args.store_scan else None
+    storage_run_id = scan_run_id
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=storage_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
@@ -2675,6 +2704,9 @@ def _json_payload(
     portfolio_selection: PortfolioSelectionResult | None = None,
 ) -> dict[str, object]:
     payload = result.model_dump(mode="json")
+    run_id = _result_run_id(result)
+    if run_id != NA:
+        payload["run_id"] = run_id
     universe = result.resume_metadata.get("universe") if isinstance(result.resume_metadata, Mapping) else None
     if isinstance(universe, Mapping):
         payload["universe"] = dict(universe)
