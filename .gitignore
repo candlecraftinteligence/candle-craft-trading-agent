@@ -33,6 +33,7 @@ scan_output.json
 scan_runs/*.json
 scan_runs/*.jsonl
 scan_runs/admin_drafts/
+scan_runs/admin_commands/
 !scan_runs/.gitkeep
 replay_exports/*.jsonl
 replay_exports/*.csv
