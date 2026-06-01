@@ -12,7 +12,8 @@ from app.analytics.derivatives_enrichment import DerivativesEnrichmentResult
 from app.analytics.setup_quality import SetupQualityState, validate_setup_quality
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileResult
 from app.data.dtos import NA
-from app.formatters.scanner_display import build_symbol_display, filter_ranked_results, rank_scan_results
+from app.formatters.scanner_display import build_symbol_display, display_fields, filter_ranked_results, rank_scan_results
+from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
 from app.storage.models import ScanHistorySummary
 from scripts import run_scan
@@ -257,6 +258,53 @@ def _no_setup_rank_result(symbol: str = "NOSETUPUSDT") -> ScannerSymbolResult:
             }
         },
         rejected_strategy_modes=("challenge",),
+    )
+
+
+def _target_integrity_rank_result(symbol: str = "TARGETUSDT") -> ScannerSymbolResult:
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        rejection_reason="Clean target path is too compressed.",
+        rejection_stage="target_integrity",
+        technical_score=78,
+        derivatives_score=82,
+        strategy_diagnostics={
+            "swing": {
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "valid",
+                "rr_to_tp2": Decimal("3.1"),
+                "first_failed_gate": "target_integrity",
+                "gates_passed": ("sweep", "bos_choch", "pullback_zone", "rr"),
+                "gates_failed": ("target_integrity",),
+                "target_integrity_status": "blocked",
+                "target_integrity_reason": "Clean target path is too compressed.",
+            }
+        },
+        rejected_strategy_modes=("swing",),
+    )
+
+
+def _lifecycle_record(
+    symbol: str,
+    state: SetupLifecycleState = SetupLifecycleState.CONFIRMED,
+) -> SetupLifecycleRecord:
+    return SetupLifecycleRecord(
+        lifecycle_id=f"{symbol.lower()}-swing",
+        symbol=symbol,
+        mode="swing",
+        direction="long",
+        current_state=state,
+        previous_state=SetupLifecycleState.TRIGGERED,
+        first_seen_at="2026-06-01T00:00:00+00:00",
+        last_seen_at="2026-06-01T00:05:00+00:00",
+        last_transition_at="2026-06-01T00:05:00+00:00",
+        failed_gate=NA,
+        readiness_score=90,
+        quality_score=88,
+        action_label="Trade candidate",
     )
 
 
@@ -510,6 +558,81 @@ def test_no_storage_when_store_scan_flag_absent(tmp_path, monkeypatch, capsys) -
 
     captured = capsys.readouterr()
     assert "Stored scan run:" not in captured.out
+
+
+def test_scan_run_manifest_appends_one_compact_row_per_scan_loop(tmp_path, monkeypatch, capsys) -> None:
+    manifest_path = tmp_path / "scan_runs" / "scan_run_manifest.jsonl"
+    history_path = tmp_path / "scan_runs" / "nightly_scan_history.json"
+    monkeypatch.setattr(run_scan, "ScannerRunner", FakeScannerRunner)
+    monkeypatch.setattr(run_scan, "SCAN_RUN_MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(run_scan, "NIGHTLY_SCAN_HISTORY_PATH", history_path)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--database-path", str(tmp_path / "history.db")]))
+
+    _ = capsys.readouterr()
+    lines = [line for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["run_id"]
+    assert row["universe_mode"] == "manual"
+    assert row["universe_label"] == "Manual symbols"
+    assert row["symbols_scanned"] == 1
+    assert row["valid_setup_count"] == 0
+    assert row["near_miss_count"] == 0
+    assert row["rejected_count"] == 1
+    assert row["failed_symbol_count"] == 0
+    assert row["timeout_count"] == 0
+    assert row["failed_stage_counts"] == {"structure": 1}
+    assert row["lifecycle_state_counts"] == {}
+    assert row["alerts_created"] == 0
+    assert row["alerts_blocked_by_target_integrity"] == 0
+    assert row["journal_entries_created"] == 0
+    assert row["trade_ideas_created"] == 0
+    assert isinstance(row["runtime_seconds"], float)
+    assert isinstance(row["average_seconds_per_symbol"], float)
+
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    assert history["schema_version"] == "nightly_scan_history_v1"
+    assert history["runs"] == [row]
+
+
+def test_scan_run_manifest_counts_target_integrity_blocks() -> None:
+    result = ScannerRunResult(
+        config=ScannerRunConfig.model_validate(
+            {
+                "symbols": ["TARGETUSDT"],
+                "exchange": "binance",
+                "account_equity": Decimal("10000"),
+                "risk_per_trade_pct": Decimal("1"),
+            }
+        ),
+        results=(_target_integrity_rank_result(),),
+        scanned_symbols=1,
+        failed_symbols=0,
+        trade_ideas_created=0,
+        dry_run_alerts_created=0,
+        journal_entries_created=0,
+    )
+    watchlist = run_scan.WatchlistResolution(
+        symbols=("TARGETUSDT",),
+        source_label="manual",
+        universe=run_scan.manual_symbol_universe(("TARGETUSDT",), requested_size=1),
+    )
+
+    row = run_scan._scan_run_manifest_row(
+        result,
+        watchlist=watchlist,
+        ranked_results=rank_scan_results(result.results),
+        run_id="run-target",
+    )
+
+    assert row["run_id"] == "run-target"
+    assert row["near_miss_count"] == 1
+    assert row["failed_stage_counts"] == {"target_integrity": 1}
+    assert row["alerts_blocked_by_target_integrity"] == 1
+    assert row["trade_ideas_created"] == 0
+    assert row["alerts_created"] == 0
+    assert row["journal_entries_created"] == 0
 
 
 def test_store_scan_prints_run_id_and_database(tmp_path, monkeypatch, capsys) -> None:
@@ -876,6 +999,31 @@ def test_near_miss_ranks_above_no_setup() -> None:
     assert [item.symbol_result.symbol for item in ranked] == ["NEARUSDT", "NOSETUPUSDT"]
     assert ranked[0].display.display_bucket == "near_miss"
     assert ranked[1].display.display_bucket == "no_setup"
+
+
+def test_active_lifecycle_no_setup_cannot_outrank_watch_candidate() -> None:
+    active_no_setup = _no_setup_rank_result("ACTIVEUSDT").model_copy(
+        update={"lifecycle_state": _lifecycle_record("ACTIVEUSDT")}
+    )
+
+    ranked = rank_scan_results((active_no_setup, _near_miss_rank_result("NEARUSDT"), _valid_rank_result("VALIDUSDT")))
+
+    assert [item.display.display_bucket for item in ranked] == ["valid", "near_miss", "no_setup"]
+    assert [item.symbol_result.symbol for item in ranked] == ["VALIDUSDT", "NEARUSDT", "ACTIVEUSDT"]
+
+
+def test_lifecycle_integrity_marks_active_state_stale_when_current_scan_degrades() -> None:
+    stale_result = _near_miss_rank_result("STALEUSDT", failed_gate="rr_below_minimum").model_copy(
+        update={"lifecycle_state": _lifecycle_record("STALEUSDT", SetupLifecycleState.TRIGGERED)}
+    )
+
+    fields = display_fields(stale_result)
+
+    assert fields["lifecycle_current_state"] == "TRIGGERED"
+    assert fields["failed_stage"] == "rr"
+    assert fields["lifecycle_integrity_status"] == "STALE_OR_DEGRADED"
+    assert fields["current_scan_gate_valid"] is False
+    assert "current gates are not valid" in fields["lifecycle_integrity_warning"]
 
 
 def test_ranking_uses_setup_quality_priority_and_score() -> None:

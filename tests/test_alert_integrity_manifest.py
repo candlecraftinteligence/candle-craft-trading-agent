@@ -211,6 +211,21 @@ def test_cli_json_emits_alert_integrity_summary(tmp_path, capsys) -> None:
     assert payload["summary"]["manifest_count"] == 1
 
 
+def test_default_alert_manifest_artifacts_exclude_deprecated_watch_state(tmp_path) -> None:
+    project_root = tmp_path
+    scan_runs = project_root / "scan_runs"
+    scan_runs.mkdir()
+    latest_scan = scan_runs / "latest_scan.json"
+    watch_state = scan_runs / "watch_state.json"
+    latest_scan.write_text("{}", encoding="utf-8")
+    watch_state.write_text("{}", encoding="utf-8")
+
+    paths = alert_integrity_cli.default_artifact_paths(project_root)
+
+    assert latest_scan in paths
+    assert watch_state not in paths
+
+
 def test_audit_does_not_require_network_calls(monkeypatch) -> None:
     def fail_network(*args, **kwargs):
         raise AssertionError("alert integrity audit must not call network transports")

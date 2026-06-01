@@ -89,6 +89,12 @@ class WatchSymbolState(BaseModel):
 class WatchState(BaseModel):
     updated_at: str = NA
     symbols: dict[str, WatchSymbolState] = Field(default_factory=dict)
+    deprecated: bool = True
+    source_of_truth: str = "db_lifecycle_state"
+    deprecation_note: str = (
+        "watch_state.json is retained for compatibility only; DB-backed lifecycle state and scan run manifests are "
+        "the source of truth for audits."
+    )
 
     model_config = ConfigDict(frozen=True)
 

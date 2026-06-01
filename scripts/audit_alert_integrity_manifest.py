@@ -29,7 +29,7 @@ def default_artifact_paths(project_root: Path = PROJECT_ROOT) -> tuple[Path, ...
 
     scan_runs_dir = project_root / "scan_runs"
     if scan_runs_dir.exists():
-        candidates.extend(sorted(scan_runs_dir.glob("*.json")))
+        candidates.extend(path for path in sorted(scan_runs_dir.glob("*.json")) if path.name != "watch_state.json")
 
     unique: list[Path] = []
     seen: set[Path] = set()

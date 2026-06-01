@@ -151,7 +151,7 @@ If no paths are provided, the script checks `scan_output.json` when present and 
 
 Warnings mean the artifact is readable but incomplete, unusual, or not fully ready for research/lifecycle replay validation. Errors are reserved for unreadable or invalid JSON and similarly blocking structural problems. The CLI exits `0` when there are warnings but no errors, and exits `1` when any audited artifact has an error.
 
-Generated local artifacts such as `scan_output.json`, `scan_runs/latest_scan.json`, `scan_runs/watch_state.json`, and `scan_runs/performance_memory.json` remain ignored local data and should not be committed.
+Generated local artifacts such as `scan_output.json`, `scan_runs/latest_scan.json`, `scan_runs/watch_state.json`, `scan_runs/performance_memory.json`, `scan_runs/scan_run_manifest.jsonl`, and `scan_runs/nightly_scan_history.json` remain ignored local data and should not be committed.
 
 ## Phase 44B - Lifecycle Replay Readiness Audit
 
@@ -523,6 +523,10 @@ Alert integrity manifest hardening adds deterministic metadata to formatted aler
 
 This is alert safety/audit metadata only. It does not create signals, place orders, call exchanges, send Telegram messages, weaken setup gates, infer market data, withdraw funds, or transfer funds. Existing alert creation still depends on the scanner and trade-idea gates; rejected and no-setup results remain non-alertable.
 
+Target-integrity hardening blocks trade idea, alert, and journal creation when target intelligence rejects the setup, when the target failure type is a blocking integrity failure, or when TP labels are not monotonic by absolute reward distance. These blocked rows display as near-miss/watch candidates with `failed_stage=target_integrity` and `Wait for target expansion`; they do not increase valid signal count.
+
+Each scan loop appends a compact JSONL row to `scan_runs/scan_run_manifest.jsonl` and refreshes `scan_runs/nightly_scan_history.json` with actual loop summaries. `scan_runs/watch_state.json` is retained for compatibility only and is written with a deprecation marker; DB-backed lifecycle state plus scan run manifests are the audit source of truth.
+
 Audit local alert artifacts:
 
 ```powershell
@@ -548,6 +552,8 @@ Audit an explicit saved scan:
 ```
 
 Legacy alert results without `integrity_manifest` are reported as warnings. Tampered message hashes, invalid manifests, alerts attached to rejected/no-setup records, and alert records without trade-idea context are reported as blockers. Watch activation messages now include invalidation and risk warning text alongside entry, stop, targets, RR, quality, and reason.
+
+Default alert-integrity artifact discovery skips deprecated `scan_runs/watch_state.json`; pass explicit paths when a legacy watch-state artifact must be inspected.
 
 ## Phase 2 Market Data
 
@@ -1506,7 +1512,7 @@ Safety boundaries:
 
 Phase 29 adds Alert Watch Mode around the existing scanner. Near-misses are still not trades. Watch mode repeatedly re-scans a watchlist and only activates an alert when the current scan produces a real trade idea and the setup quality layer marks it `HIGH_QUALITY_TRADE` or `VALID_BUT_LOWER_QUALITY`.
 
-Watch mode state is stored in `scan_runs/watch_state.json` and tracks each symbol's last status, failed gate, readiness score, readiness label, last seen time, whether an activation alert was already generated, activation count, and history.
+Watch mode state is stored in `scan_runs/watch_state.json` for compatibility and tracks each symbol's last status, failed gate, readiness score, readiness label, last seen time, whether an activation alert was already generated, activation count, and history. New writes mark this file deprecated; DB-backed lifecycle state and scan run manifests are the source of truth for audits.
 
 Key flags:
 
@@ -2389,3 +2395,4 @@ Safety boundaries:
 - The Phase 45E outcome event capture infrastructure is local JSONL research capture only. It validates and appends supplied outcome event records without calculating PnL, win rate, expectancy, edge, or profitability; it does not create signals, place or simulate trades, call exchanges, send Telegram messages, mutate scanner or lifecycle artifacts, change setup gates, infer outcomes, infer exit prices, invent candles, invent market data, withdraw funds, or transfer funds.
 - The Phase 45F outcome event lifecycle integration layer is audit-only mapping infrastructure. It maps lifecycle statuses to draft outcome event payload previews and can append only when explicitly requested; it does not calculate PnL, win rate, expectancy, edge, or profitability, create signals, place or simulate trades, call exchanges, send Telegram messages, mutate scanner or lifecycle artifacts, change setup gates, infer outcomes, infer exit prices, invent candles, invent market data, withdraw funds, or transfer funds.
 - The alert integrity manifest layer is alert safety/audit metadata only. It does not create signals, place orders, call exchanges, send Telegram messages, weaken setup gates, infer market data, store Telegram credentials, withdraw funds, or transfer funds.
+- The target-integrity and scan-run manifest hardening layer blocks weak target paths and records loop summaries only. It does not lower scoring, RR, risk, setup, lifecycle, or alert thresholds, create extra signals, place orders, call private exchange APIs, send live Telegram messages, withdraw funds, or transfer funds.

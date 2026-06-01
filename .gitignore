@@ -31,6 +31,7 @@ postgres_data/
 
 scan_output.json
 scan_runs/*.json
+scan_runs/*.jsonl
 !scan_runs/.gitkeep
 replay_exports/*.jsonl
 replay_exports/*.csv
