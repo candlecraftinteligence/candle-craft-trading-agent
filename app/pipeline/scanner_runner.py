@@ -44,7 +44,12 @@ from app.analytics.setup_quality import (
     default_setup_quality_result,
     validate_setup_quality,
 )
-from app.analytics.target_intelligence import TargetIntelligenceResult, build_target_intelligence
+from app.analytics.target_intelligence import (
+    TargetFailureType,
+    TargetIntelligenceResult,
+    TargetQualityGrade,
+    build_target_intelligence,
+)
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
@@ -84,6 +89,15 @@ SAFE_REPLAY_CANDLE_LIMIT_MAX = 500
 FAST_CANDLE_LIMIT = 220
 FAST_REPLAY_CANDLES = 240
 FAST_OPTIONAL_REQUEST_TIMEOUT_SEC = 0.5
+TARGET_INTEGRITY_FAILED_GATE = "target_integrity"
+INVALID_TP_SEQUENCE_WARNING = "Invalid TP sequence: target labels are not monotonic by reward distance."
+TARGET_INTEGRITY_BLOCKING_FAILURE_TYPES = {
+    TargetFailureType.TARGET_INSIDE_CHOP.value,
+    TargetFailureType.OPPOSING_STRUCTURE_BLOCK.value,
+    TargetFailureType.DATA_INCOMPLETE.value,
+    "RR_COMPRESSED",
+    "NO_CLEAN_TARGET_PATH",
+}
 
 
 class ScannerPipelineStatus(str, Enum):
@@ -481,6 +495,15 @@ class _StrategyExecution(BaseModel):
     selected_setup: LiquidityGrabSetup | None = None
     pullback_intelligence: PullbackIntelligenceResult | None = None
     target_intelligence: TargetIntelligenceResult | None = None
+
+    model_config = ConfigDict(frozen=True)
+
+
+class _TargetIntegrityDecision(BaseModel):
+    blocked: bool = False
+    reason: str = NA
+    warning: str = NA
+    strategy_execution: _StrategyExecution | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -902,6 +925,27 @@ class ScannerRunner:
                 risk_decision=risk_decision,
                 score_result=score_result,
                 strategy_execution=strategy_execution,
+            )
+
+        target_integrity = _target_integrity_decision(strategy_execution, candidate)
+        if target_integrity.blocked:
+            return self._symbol_result(
+                symbol=symbol,
+                status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+                status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+                candles=candles,
+                current_price=current_price,
+                optional_data=optional_data,
+                missing_data=base_missing,
+                unverified_data=base_unverified,
+                rejection_reason=target_integrity.reason,
+                technical_result=technical,
+                derivatives_result=derivatives,
+                derivatives_enrichment=derivatives_enrichment,
+                risk_decision=risk_decision,
+                score_result=score_result,
+                strategy_execution=target_integrity.strategy_execution or strategy_execution,
+                rejection_stage_override=TARGET_INTEGRITY_FAILED_GATE,
             )
 
         trade_idea = self.trade_idea_agent.create(
@@ -1802,6 +1846,9 @@ def _near_miss_intelligence_for_result(
 
 
 def _representative_strategy_diagnostics(strategy_execution: _StrategyExecution) -> Mapping[str, Any]:
+    for diagnostics in strategy_execution.strategy_diagnostics.values():
+        if isinstance(diagnostics, Mapping) and _strategy_failed_gate(diagnostics) == TARGET_INTEGRITY_FAILED_GATE:
+            return diagnostics
     for mode in strategy_execution.valid_strategy_modes:
         diagnostics = strategy_execution.strategy_diagnostics.get(mode)
         if isinstance(diagnostics, Mapping):
@@ -1868,6 +1915,118 @@ def _representative_target_intelligence(
             if isinstance(payload, Mapping):
                 return TargetIntelligenceResult.model_validate(payload)
     return None
+
+
+def _target_integrity_decision(
+    strategy_execution: _StrategyExecution,
+    candidate: _CandidateSetup,
+) -> _TargetIntegrityDecision:
+    reasons: list[str] = []
+    warnings: list[str] = []
+    target_intelligence = strategy_execution.target_intelligence
+
+    if target_intelligence is not None:
+        target_grade = _enum_text(target_intelligence.target_quality_grade)
+        failure_type = _enum_text(target_intelligence.target_failure_type)
+        if target_grade == TargetQualityGrade.REJECT.value:
+            reasons.append(_target_block_reason(target_intelligence))
+        elif failure_type in TARGET_INTEGRITY_BLOCKING_FAILURE_TYPES:
+            reasons.append(_target_block_reason(target_intelligence))
+
+    if not _tp_sequence_valid(
+        direction=candidate.direction,
+        entry=candidate.entry_price,
+        take_profit_targets=candidate.take_profit_targets,
+    ):
+        reasons.append(INVALID_TP_SEQUENCE_WARNING)
+        warnings.append(INVALID_TP_SEQUENCE_WARNING)
+
+    if not reasons:
+        return _TargetIntegrityDecision()
+
+    reason = _unique_strings(reasons)[0]
+    warning = _unique_strings(warnings)[0] if warnings else reason
+    return _TargetIntegrityDecision(
+        blocked=True,
+        reason=reason,
+        warning=warning,
+        strategy_execution=_strategy_execution_with_target_integrity_block(
+            strategy_execution,
+            reason=reason,
+            warning=warning,
+        ),
+    )
+
+
+def _strategy_execution_with_target_integrity_block(
+    strategy_execution: _StrategyExecution,
+    *,
+    reason: str,
+    warning: str,
+) -> _StrategyExecution:
+    diagnostics = dict(strategy_execution.strategy_diagnostics)
+    target_modes = (
+        strategy_execution.valid_strategy_modes
+        or strategy_execution.rejected_strategy_modes
+        or tuple(diagnostics)
+        or ("swing",)
+    )
+    for mode in target_modes:
+        raw = diagnostics.get(mode)
+        mode_diagnostics = dict(raw) if isinstance(raw, Mapping) else {}
+        mode_diagnostics["first_failed_gate"] = TARGET_INTEGRITY_FAILED_GATE
+        mode_diagnostics["target_integrity_status"] = "blocked"
+        mode_diagnostics["target_integrity_reason"] = reason
+        mode_diagnostics["target_integrity_warning"] = warning
+        mode_diagnostics["pullback_zone_status"] = _first_non_na(mode_diagnostics.get("pullback_zone_status"), "valid")
+        gates_passed = _sequence_from_diagnostics(mode_diagnostics.get("gates_passed"))
+        if not gates_passed:
+            gates_passed = ("sweep", "bos_choch", "pullback_zone")
+        mode_diagnostics["gates_passed"] = gates_passed
+        gates_failed = _sequence_from_diagnostics(mode_diagnostics.get("gates_failed"))
+        mode_diagnostics["gates_failed"] = _unique_strings((*gates_failed, TARGET_INTEGRITY_FAILED_GATE))
+        warnings = _sequence_from_diagnostics(mode_diagnostics.get("warnings"))
+        mode_diagnostics["warnings"] = _unique_strings((*warnings, warning))
+        diagnostics[mode] = mode_diagnostics
+
+    return strategy_execution.model_copy(
+        update={
+            "strategy_diagnostics": diagnostics,
+            "valid_strategy_modes": (),
+            "rejected_strategy_modes": _unique_strings((*target_modes, *strategy_execution.rejected_strategy_modes)),
+        }
+    )
+
+
+def _target_block_reason(target_intelligence: TargetIntelligenceResult) -> str:
+    for value in (
+        target_intelligence.rr_compression_reason,
+        target_intelligence.next_target_condition,
+        _enum_text(target_intelligence.target_failure_type),
+    ):
+        text = _display_decimal_or_text(value)
+        if text != NA:
+            return text
+    return "Target integrity guard blocked alert creation because target quality is reject."
+
+
+def _tp_sequence_valid(
+    *,
+    direction: Literal["long", "short"],
+    entry: Decimal,
+    take_profit_targets: Sequence[Decimal],
+) -> bool:
+    rewards: list[Decimal] = []
+    for target in take_profit_targets:
+        reward = abs(_decimal_from(target, "take_profit_target") - entry)
+        if reward <= 0:
+            return False
+        rewards.append(reward)
+    return all(left < right for left, right in zip(rewards, rewards[1:]))
+
+
+def _enum_text(value: Any) -> str:
+    return _display_decimal_or_text(getattr(value, "value", value))
 
 
 def _strategy_failed_gate(diagnostics: Mapping[str, Any]) -> str:

@@ -4,10 +4,15 @@ import asyncio
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 from app.agents.alert_agent import AlertAgent
 from app.analytics.setup_quality import SetupQualityState
+from app.analytics.target_intelligence import TargetFailureType, TargetIntelligenceResult, TargetQualityGrade
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE
 from app.data.dtos import NA
+from app.formatters.scanner_display import build_symbol_display, display_fields
+from app.pipeline import scanner_runner as scanner_runner_module
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunner
 
 
@@ -227,6 +232,45 @@ class SpyAlertAgent(AlertAgent):
         return await super().send(payload)
 
 
+def _clean_target_intelligence() -> TargetIntelligenceResult:
+    return TargetIntelligenceResult(
+        tp1_candidate=Decimal("112"),
+        tp2_candidate=Decimal("125"),
+        tp3_candidate=Decimal("140"),
+        nearest_opposing_liquidity=Decimal("125"),
+        target_distance=Decimal("28"),
+        clean_path_distance=Decimal("28"),
+        rr_to_tp1=Decimal("2.8"),
+        rr_to_tp2=Decimal("3.5"),
+        rr_to_tp3=Decimal("4.2"),
+        target_quality_grade=TargetQualityGrade.A,
+        target_failure_type=NA,
+        target_confidence=88,
+        next_target_condition=NA,
+    )
+
+
+@pytest.fixture(autouse=True)
+def clean_target_intelligence_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(
+        scanner_runner_module,
+        "build_target_intelligence",
+        lambda *args, **kwargs: _clean_target_intelligence(),
+    )
+
+
+def _scan_with_target_intelligence(monkeypatch, target_intelligence: TargetIntelligenceResult):
+    monkeypatch.setattr(
+        scanner_runner_module,
+        "build_target_intelligence",
+        lambda *args, **kwargs: target_intelligence,
+    )
+    alert_agent = SpyAlertAgent()
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    result = run(ScannerRunner(exchange_client=client, alert_agent=alert_agent).run(_config(["BTCUSDT"])))
+    return result, alert_agent
+
+
 def _config(symbols: list[str], **overrides: object) -> ScannerRunConfig:
     data: dict[str, object] = {
         "symbols": symbols,
@@ -261,6 +305,116 @@ def test_scanner_handles_one_valid_mocked_symbol() -> None:
     assert symbol_result.setup_quality.quality_score >= 85
     assert symbol_result.setup_quality.action_label == "Trade candidate"
     assert result.trade_ideas_created == 1
+
+
+def test_target_quality_reject_blocks_trade_idea_alert_and_journal(monkeypatch) -> None:
+    target_intelligence = TargetIntelligenceResult(
+        target_quality_grade=TargetQualityGrade.REJECT,
+        target_failure_type=TargetFailureType.RR_BELOW_MINIMUM,
+        rr_compression_reason="Clean target path is too compressed for the required RR.",
+        next_target_condition="Wait until TP2 expands beyond opposing structure.",
+    )
+
+    result, alert_agent = _scan_with_target_intelligence(monkeypatch, target_intelligence)
+
+    symbol_result = result.results[0]
+    assert symbol_result.status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert symbol_result.status_history == (ScannerPipelineStatus.SCANNED_NO_SETUP,)
+    assert symbol_result.rejection_stage == "target_integrity"
+    assert symbol_result.trade_idea is None
+    assert symbol_result.alert_result is None
+    assert symbol_result.journal_entry is None
+    assert result.trade_ideas_created == 0
+    assert result.dry_run_alerts_created == 0
+    assert result.journal_entries_created == 0
+    assert alert_agent.calls == []
+
+    display = build_symbol_display(symbol_result)
+    fields = display_fields(symbol_result)
+    assert display.display_bucket == "near_miss"
+    assert display.failed_stage == "target_integrity"
+    assert display.action_label == "Wait for target expansion"
+    assert fields["target_quality_grade"] == "Reject"
+    assert fields["next_trigger_needed"] == "Wait until TP2 expands beyond opposing structure."
+
+
+def test_blocking_target_failure_type_blocks_even_without_reject_grade(monkeypatch) -> None:
+    target_intelligence = TargetIntelligenceResult(
+        target_quality_grade=TargetQualityGrade.B,
+        target_failure_type=TargetFailureType.TARGET_INSIDE_CHOP,
+        rr_compression_reason="TP1 sits inside chop.",
+        next_target_condition="Wait for target expansion above the chop range.",
+    )
+
+    result, alert_agent = _scan_with_target_intelligence(monkeypatch, target_intelligence)
+
+    symbol_result = result.results[0]
+    assert symbol_result.status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert symbol_result.rejection_stage == "target_integrity"
+    assert symbol_result.trade_idea is None
+    assert symbol_result.alert_result is None
+    assert symbol_result.journal_entry is None
+    assert alert_agent.calls == []
+    assert build_symbol_display(symbol_result).action_label == "Wait for target expansion"
+
+
+def test_invalid_tp_sequence_blocks_before_alert(monkeypatch) -> None:
+    monkeypatch.setattr(scanner_runner_module, "_tp_sequence_valid", lambda **kwargs: False)
+
+    result, alert_agent = _scan_with_target_intelligence(
+        monkeypatch,
+        TargetIntelligenceResult(
+            target_quality_grade=TargetQualityGrade.A,
+            target_failure_type=NA,
+            rr_compression_reason=NA,
+            next_target_condition=NA,
+        ),
+    )
+
+    symbol_result = result.results[0]
+    assert symbol_result.status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert symbol_result.rejection_stage == "target_integrity"
+    assert symbol_result.rejection_reason == scanner_runner_module.INVALID_TP_SEQUENCE_WARNING
+    assert symbol_result.trade_idea is None
+    assert symbol_result.alert_result is None
+    assert symbol_result.journal_entry is None
+    assert alert_agent.calls == []
+    assert build_symbol_display(symbol_result).short_reason == scanner_runner_module.INVALID_TP_SEQUENCE_WARNING
+
+
+def test_tp_sequence_uses_absolute_reward_distance() -> None:
+    assert scanner_runner_module._tp_sequence_valid(
+        direction="long",
+        entry=Decimal("100"),
+        take_profit_targets=(Decimal("105"), Decimal("110"), Decimal("120")),
+    )
+    assert scanner_runner_module._tp_sequence_valid(
+        direction="short",
+        entry=Decimal("100"),
+        take_profit_targets=(Decimal("95"), Decimal("90"), Decimal("80")),
+    )
+    assert not scanner_runner_module._tp_sequence_valid(
+        direction="short",
+        entry=Decimal("100"),
+        take_profit_targets=(Decimal("90"), Decimal("95"), Decimal("80")),
+    )
+    assert not scanner_runner_module._tp_sequence_valid(
+        direction="long",
+        entry=Decimal("100"),
+        take_profit_targets=(Decimal("100"), Decimal("110"), Decimal("120")),
+    )
+
+
+def test_future_target_failure_type_literals_are_parseable() -> None:
+    compressed = TargetIntelligenceResult.model_validate(
+        {"target_quality_grade": "B", "target_failure_type": "RR_COMPRESSED"}
+    )
+    no_clean_path = TargetIntelligenceResult.model_validate(
+        {"target_quality_grade": "C", "target_failure_type": "NO_CLEAN_TARGET_PATH"}
+    )
+
+    assert compressed.target_failure_type == "RR_COMPRESSED"
+    assert no_clean_path.target_failure_type == "NO_CLEAN_TARGET_PATH"
 
 
 def test_scanner_handles_no_setup() -> None:

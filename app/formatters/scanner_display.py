@@ -110,7 +110,7 @@ LATE_FAILURE_GATES = (
     PULLBACK_FAIL_GATES
     | RR_FAIL_GATES
     | FINAL_CONFLUENCE_FAIL_GATES
-    | {"missing_displacement_impulse", "missing_stop"}
+    | {"missing_displacement_impulse", "missing_stop", "target_integrity"}
 )
 STAGE_ORDER = {
     "data": 0,
@@ -120,7 +120,8 @@ STAGE_ORDER = {
     "ob_fvg": 4,
     "rr": 5,
     "final": 6,
-    "valid": 7,
+    "target_integrity": 7,
+    "valid": 8,
 }
 QUALITY_STATE_ORDER = {
     SetupQualityState.HIGH_QUALITY_TRADE: 0,
@@ -241,6 +242,7 @@ def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | No
     diagnostics = representative_strategy_diagnostics(symbol_result)
     pullback_intelligence = _pullback_intelligence(symbol_result, diagnostics)
     target_intelligence = _target_intelligence(symbol_result, diagnostics)
+    lifecycle_integrity = _lifecycle_integrity_fields(symbol_result, display)
     return {
         "display_rank": display_rank,
         "display_bucket": display.display_bucket,
@@ -266,6 +268,7 @@ def display_fields(symbol_result: ScannerSymbolResult, *, display_rank: int | No
         "lifecycle_previous_state": _state_value(symbol_result.lifecycle_state.previous_state)
         if symbol_result.lifecycle_state is not None
         else NA,
+        **lifecycle_integrity,
         "near_miss_intelligence": display.near_miss_intelligence.model_dump(mode="json")
         if display.near_miss_intelligence is not None
         else None,
@@ -660,6 +663,10 @@ def _numbered_condition_lines(conditions: Sequence[str]) -> list[str]:
 
 
 def representative_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> Mapping[str, Any]:
+    if symbol_result.rejection_stage == "target_integrity":
+        for diagnostics in symbol_result.strategy_diagnostics.values():
+            if isinstance(diagnostics, Mapping) and _diagnostics_failed_gate(diagnostics) == "target_integrity":
+                return diagnostics
     for mode in symbol_result.valid_strategy_modes:
         diagnostics = symbol_result.strategy_diagnostics.get(mode)
         if isinstance(diagnostics, Mapping):
@@ -676,6 +683,16 @@ def representative_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> M
         if isinstance(diagnostics, Mapping):
             return diagnostics
     return {}
+
+
+def _diagnostics_failed_gate(diagnostics: Mapping[str, Any]) -> str:
+    failed_gate = _display(diagnostics.get("first_failed_gate"))
+    if failed_gate != NA:
+        return failed_gate
+    gates_failed = _sequence_values(diagnostics.get("gates_failed"))
+    if gates_failed:
+        return gates_failed[0]
+    return NA
 
 
 def _display_status(
@@ -700,6 +717,8 @@ def _near_miss_eligible(
     failed_gate: str,
     progress_items: tuple[ProgressItem, ...],
 ) -> bool:
+    if failed_gate == "target_integrity":
+        return True
     if not _core_checks_passed(progress_items):
         return False
     if failed_gate == NA or failed_gate in EARLY_CORE_GATES:
@@ -836,6 +855,10 @@ def _short_reason(
         return "scan_error"
 
     failed_gate = _failed_gate(symbol_result, diagnostics)
+    if failed_gate == "target_integrity":
+        reason = _target_integrity_reason(symbol_result, diagnostics)
+        if reason != NA:
+            return reason
     if failed_gate in ("missing_confirmation_structure_shift", "missing_confirmation_candles"):
         reason = _display(diagnostics.get("confirmation_bos_choch_reason"))
         if reason != NA:
@@ -1046,6 +1069,8 @@ def _action_label(
     display_bucket: DisplayBucket,
     intelligence: NearMissIntelligence | None = None,
 ) -> str:
+    if _target_integrity_blocked(symbol_result, representative_strategy_diagnostics(symbol_result)):
+        return "Wait for target expansion"
     quality = symbol_result.setup_quality
     if _quality_evaluated(quality):
         return quality.action_label
@@ -1241,6 +1266,11 @@ def _next_trigger_needed(
 ) -> str:
     if readiness_label == "DATA ISSUE" or display_status in ("data_issue", "scan_error"):
         return "Avoid: data unreliable"
+    if failed_gate == "target_integrity":
+        intelligence = _target_intelligence(symbol_result, diagnostics)
+        if intelligence is not None and _display(intelligence.next_target_condition) != NA:
+            return _display(intelligence.next_target_condition)
+        return "Wait for target expansion"
     if _severe_derivatives_conflict(symbol_result, diagnostics, failed_gate):
         return "Avoid: derivatives conflict"
     if readiness_label == "VALID SETUP":
@@ -1287,23 +1317,26 @@ def _readiness_summary_lines(display: SymbolDisplay) -> tuple[str, ...]:
     )
 
 
-def _ranking_priority(item: RankedSymbolDisplay) -> tuple[int, int, int, int, int, int]:
+def _ranking_priority(item: RankedSymbolDisplay) -> tuple[int, int, int, int, int, int, int]:
     quality = item.symbol_result.setup_quality
     readiness_order = READINESS_LABEL_ORDER[item.display.readiness_label]
+    bucket_order = BUCKET_ORDER[item.display.display_bucket]
     if _quality_evaluated(quality):
         return (
+            bucket_order,
             readiness_order,
             -item.display.readiness_score,
             QUALITY_STATE_ORDER[quality.quality_state],
             -quality.quality_score,
-            BUCKET_ORDER[item.display.display_bucket],
             -item.display.display_priority_score,
+            0,
         )
     return (
+        bucket_order,
         readiness_order,
         -item.display.readiness_score,
-        BUCKET_ORDER[item.display.display_bucket],
         -item.display.display_priority_score,
+        0,
         0,
         0,
     )
@@ -1810,6 +1843,8 @@ def _stage_name(failed_gate: str, display_status: DisplayStatus) -> str:
         return "pullback"
     if failed_gate in RR_FAIL_GATES:
         return "rr"
+    if failed_gate == "target_integrity":
+        return "target_integrity"
     if failed_gate in FINAL_CONFLUENCE_FAIL_GATES:
         return "final"
     return "data" if failed_gate == NA else "pullback"
@@ -1980,6 +2015,80 @@ def _state_value(value: object) -> str:
     if value is None:
         return NA
     return _display(getattr(value, "value", value))
+
+
+def _target_integrity_blocked(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> bool:
+    if _failed_gate(symbol_result, diagnostics) == "target_integrity":
+        return True
+    return _display(diagnostics.get("target_integrity_status")).lower() == "blocked"
+
+
+def _target_integrity_reason(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> str:
+    for value in (
+        diagnostics.get("target_integrity_reason"),
+        diagnostics.get("target_integrity_warning"),
+        _target_rr_reason(symbol_result, diagnostics),
+    ):
+        text = _display(value)
+        if text != NA:
+            return text
+    return "Target integrity guard blocked alert creation."
+
+
+def _target_rr_reason(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> str:
+    intelligence = _target_intelligence(symbol_result, diagnostics)
+    if intelligence is None:
+        return NA
+    for value in (intelligence.rr_compression_reason, intelligence.next_target_condition):
+        text = _display(value)
+        if text != NA:
+            return text
+    return NA
+
+
+def _lifecycle_integrity_fields(symbol_result: ScannerSymbolResult, display: SymbolDisplay) -> dict[str, Any]:
+    lifecycle = symbol_result.lifecycle_state
+    if lifecycle is None:
+        return {
+            "lifecycle_integrity_status": NA,
+            "lifecycle_integrity_warning": NA,
+            "current_scan_gate_valid": True,
+        }
+    state = _state_value(lifecycle.current_state)
+    degraded_display = display.display_status in {"no_setup", "near_miss"} or (
+        symbol_result.status
+        in {
+            ScannerPipelineStatus.REJECTED_BY_SCORING,
+            ScannerPipelineStatus.REJECTED_BY_TECHNICAL,
+            ScannerPipelineStatus.REJECTED_BY_RISK,
+            ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,
+            ScannerPipelineStatus.REJECTED_BY_REGIME,
+        }
+    )
+    degraded_stage = display.failed_stage in {"pullback", "structure", "ob_fvg", "rr", "scoring", "target_integrity"}
+    if state in {"CONFIRMED", "EXECUTING", "TRIGGERED"} and (degraded_display or degraded_stage):
+        return {
+            "lifecycle_integrity_status": "STALE_OR_DEGRADED",
+            "lifecycle_integrity_warning": (
+                f"Lifecycle state {state} conflicts with current scan status "
+                f"{display.display_status} at stage {display.failed_stage}; current gates are not valid."
+            ),
+            "current_scan_gate_valid": False,
+        }
+    return {
+        "lifecycle_integrity_status": "OK",
+        "lifecycle_integrity_warning": NA,
+        "current_scan_gate_valid": True,
+    }
 
 
 def _first_regime_warning(symbol_result: ScannerSymbolResult) -> str:

@@ -1,6 +1,6 @@
 # Candle Craft Trading Agent
 
-Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, Phase 40 graceful watch shutdown with watch iteration persistence, Phase 41 wick-vs-close structural intelligence, Phase 42 dynamic RR and target intelligence, Phase 43 local runtime and persistence hardening, Phase 44A scan persistence integrity auditing, Phase 44B lifecycle replay readiness auditing, Phase 44C replay dataset export contract, Phase 44D replay dataset quality metrics, Phase 44E replay dataset coverage reporting, Phase 44F replay failure taxonomy reporting, Phase 44G replay research report packaging, Phase 45A historical replay validation scaffolding, Phase 45B historical replay event sequence validation, and Phase 45C replay outcome field readiness auditing.
+Phase 1 foundation for a crypto trading intelligence system, with Phase 2 public market-data clients, Phase 3 technical structure analysis, Phase 4 derivatives/orderflow context analysis, Phase 5 risk-management validation, Phase 6 opportunity scoring, Phase 7 structured trade ideas, Phase 8 dry-run-first alert formatting, Phase 9 in-memory journal tracking, Phase 10 scanner-runner orchestration, Phase 11 liquidity-grab pullback strategy analysis, Phase 12 scanner strategy integration, Phase 12.1 multi-timeframe scanner context, Phase 12.2 confirmation timeframe diagnostics, Phase 13 candle-estimated Volume Profile / POC context, Phase 14 refined OB/FVG plus fib pullback-zone validation, Phase 15 public derivatives enrichment, Phase 15.2 multi-timeframe confirmation-to-pullback integration, Phase 16 Telegram-ready scanner formatting, Phase 17 premium scanner display output, Phase 18 scanner result ranking, Phase 19 watchlist presets, Phase 20 batch-scan reliability, Phase 21 public symbol universes, Phase 22 near-miss intelligence, Phase 23 setup quality validation, Phase 24 historical replay validation, Phase 28 portfolio selection, Phase 29 alert watch mode, Phase 31 adaptive market regime filtering, Phase 32 performance memory, Phase 33 structured scan history storage, Phase 34 research analytics queries, Phase 35 regime intelligence and environment filtering, Phase 36 setup lifecycle state progression, Phase 37 lifecycle conversion analytics, Phase 38 pullback structure intelligence, Phase 39 adaptive symbol prioritization, Phase 40 graceful watch shutdown with watch iteration persistence, Phase 41 wick-vs-close structural intelligence, Phase 42 dynamic RR and target intelligence, Phase 43 local runtime and persistence hardening, Phase 44A scan persistence integrity auditing, Phase 44B lifecycle replay readiness auditing, Phase 44C replay dataset export contract, Phase 44D replay dataset quality metrics, Phase 44E replay dataset coverage reporting, Phase 44F replay failure taxonomy reporting, Phase 44G replay research report packaging, Phase 45A historical replay validation scaffolding, Phase 45B historical replay event sequence validation, Phase 45C replay outcome field readiness auditing, Phase 45D outcome capture contract validation, Phase 45E outcome event capture infrastructure, Phase 45F outcome event lifecycle integration, and alert integrity manifest hardening.
 
 This project is intentionally not an auto-trading bot. It does not place orders, does not expose exchange trading endpoints, and does not include withdrawal or transfer functionality. The initial scope is a modular backend foundation for market data, technical features, catalysts, trade ideas, alerts, manual or paper trade records, journal entries, and backtest metadata.
 
@@ -103,7 +103,7 @@ alembic upgrade head
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, the Phase 39 symbol health layer, the Phase 40 watch persistence and shutdown layer, the Phase 41 wick-vs-close structural intelligence layer, the Phase 42 target intelligence layer, the Phase 43 local runtime diagnostics, the Phase 44A scan persistence audit, the Phase 44B lifecycle replay readiness audit, the Phase 44C replay dataset export contract, the Phase 44D replay dataset quality metrics, the Phase 44E replay dataset coverage report, the Phase 44F replay failure taxonomy report, the Phase 44G replay research report pack, the Phase 45A historical replay validation scaffold, the Phase 45B historical replay event sequence validator, and the Phase 45C replay outcome field readiness contract. Tests do not call live exchange APIs or live Telegram APIs.
+The tests cover settings loading, the FastAPI health endpoint, model metadata imports, mocked public market-data client responses, deterministic analysis agents, risk validation, opportunity scoring, structured trade idea generation, mocked alert delivery behavior, in-memory journal tracking, the Phase 10 scanner runner, the Phase 11 liquidity-grab pullback engine, the Phase 12 scanner strategy integration, the Phase 12.1 synthetic 2D timeframe model, the Phase 13 candle-estimated volume profile, the Phase 14 pullback-zone engine, the Phase 15 derivatives enrichment layer, the Phase 15.2 confirmation-to-pullback integration, the Phase 16 Telegram-ready formatter, the Phase 17 premium scanner display formatter, the Phase 18 scanner result ranking layer, the Phase 19 watchlist preset resolver, the Phase 20 cache/resume reliability layer, the Phase 21 symbol universe layer, the Phase 22 near-miss intelligence layer, the Phase 23 setup quality layer, the Phase 24 historical replay layer, the Phase 28 portfolio selection layer, the Phase 29 alert watch mode, the Phase 31 market regime filter, the Phase 32 performance memory layer, the Phase 33 scan history database, the Phase 34 research query layer, the Phase 35 regime intelligence layer, the Phase 36 lifecycle engine, the Phase 38 pullback intelligence layer, the Phase 39 symbol health layer, the Phase 40 watch persistence and shutdown layer, the Phase 41 wick-vs-close structural intelligence layer, the Phase 42 target intelligence layer, the Phase 43 local runtime diagnostics, the Phase 44A scan persistence audit, the Phase 44B lifecycle replay readiness audit, the Phase 44C replay dataset export contract, the Phase 44D replay dataset quality metrics, the Phase 44E replay dataset coverage report, the Phase 44F replay failure taxonomy report, the Phase 44G replay research report pack, the Phase 45A historical replay validation scaffold, the Phase 45B historical replay event sequence validator, the Phase 45C replay outcome field readiness contract, the Phase 45D outcome capture contract, the Phase 45E outcome event capture infrastructure, the Phase 45F outcome lifecycle integration layer, and alert integrity manifest hardening. Tests do not call live exchange APIs or live Telegram APIs.
 
 ## Phase 43 - Local Runtime & Persistence Hardening
 
@@ -151,7 +151,7 @@ If no paths are provided, the script checks `scan_output.json` when present and 
 
 Warnings mean the artifact is readable but incomplete, unusual, or not fully ready for research/lifecycle replay validation. Errors are reserved for unreadable or invalid JSON and similarly blocking structural problems. The CLI exits `0` when there are warnings but no errors, and exits `1` when any audited artifact has an error.
 
-Generated local artifacts such as `scan_output.json`, `scan_runs/latest_scan.json`, `scan_runs/watch_state.json`, and `scan_runs/performance_memory.json` remain ignored local data and should not be committed.
+Generated local artifacts such as `scan_output.json`, `scan_runs/latest_scan.json`, `scan_runs/watch_state.json`, `scan_runs/performance_memory.json`, `scan_runs/scan_run_manifest.jsonl`, and `scan_runs/nightly_scan_history.json` remain ignored local data and should not be committed.
 
 ## Phase 44B - Lifecycle Replay Readiness Audit
 
@@ -430,6 +430,138 @@ Write a local JSON outcome readiness result:
 Rejected and no-setup rows remain valid negative examples for replay datasets. They are not treated as trade outcome-ready rows, but they preserve explicit rejection evidence such as `rejection_reason` or `first_failed_gate` for later audit coverage.
 
 Generated `replay_validation/*.json` files are local generated validation artifacts and should not be committed.
+
+## Phase 45D - Outcome Capture Contract
+
+Phase 45D adds a deterministic, read-only outcome capture contract for future replay and performance validation. It defines outcome record fields, record representation, validation rules, readiness summary counts, and the local `replay_validation/*.json` destination where future systems may write outcome validation summaries.
+
+This is record/validation-only. It does not calculate PnL, win rate, expectancy, edge, or profitability. It does not create signals, place trades, simulate orders, call exchanges, send Telegram messages, mutate scanner or lifecycle artifacts, change setup gates, infer missing outcomes, infer exit prices, infer missing candles, or invent market data.
+
+Run the default outcome capture validation summary:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\validate_outcome_capture_contract.py
+```
+
+Print the validation result as JSON:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\validate_outcome_capture_contract.py --json
+```
+
+Write a local JSON outcome capture validation summary:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\validate_outcome_capture_contract.py --json --output replay_validation\latest_outcome_capture_contract.json
+```
+
+Rejected, no-setup, and scan-error rows remain valid negative examples. They do not require exit price or `result_r`, and they preserve explicit rejection/no-setup context where available for later audit coverage.
+
+Generated `replay_validation/*.json` files are local generated validation artifacts and should not be committed.
+
+## Phase 45E - Outcome Event Capture Infrastructure
+
+Phase 45E adds deterministic, file-backed outcome event capture for future local research. It builds and validates single outcome event records, appends valid-enough records to local JSONL files, reads JSONL back for audit, and summarizes supplied outcome statuses, terminal reasons, symbols, strategy modes, warnings, blockers, and read errors.
+
+This is local research capture only. It does not calculate PnL, win rate, expectancy, edge, or profitability. It does not create signals, place trades, simulate orders, call exchanges, send Telegram messages, mutate scanner or lifecycle artifacts, change setup gates, infer missing outcomes, infer exit prices, infer missing candles, or invent market data.
+
+Dry-run one event payload:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\capture_outcome_event.py --input-json path\to\event.json --dry-run
+```
+
+Append one event to the local JSONL capture file:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\capture_outcome_event.py --input-json path\to\event.json --output replay_validation\outcome_events.jsonl
+```
+
+Summarize the default local outcome event JSONL:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\summarize_outcome_events.py
+```
+
+Print the outcome event summary as JSON:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\summarize_outcome_events.py --json
+```
+
+The default `replay_validation/outcome_events.jsonl` path is local generated research data and should not be committed. Invalid JSONL lines are reported as read errors while valid lines continue to be summarized.
+
+## Phase 45F - Outcome Event Lifecycle Integration
+
+Phase 45F adds deterministic, audit-only lifecycle-to-outcome integration. It maps replay/lifecycle candidate status fields such as `TP_HIT`, `SL_HIT`, `WATCH`, `REJECTED`, `scanned_no_setup`, and `scan_error` into outcome-event draft payload previews and summarizes which candidates are eligible for future local outcome capture.
+
+This is mapping and audit infrastructure only. It does not calculate PnL, win rate, expectancy, edge, or profitability. It does not create signals, place or simulate trades, call exchanges, send Telegram messages, mutate scanner or lifecycle artifacts, change setup gates, infer outcomes, infer exit prices, infer missing candles, or invent market data.
+
+Run the default lifecycle integration audit:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_outcome_lifecycle_integration.py
+```
+
+Print the lifecycle integration audit as JSON:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_outcome_lifecycle_integration.py --json
+```
+
+Append eligible draft outcome events only when explicitly requested:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_outcome_lifecycle_integration.py --append-eligible --events-output replay_validation\outcome_events.jsonl
+```
+
+Default mode never appends outcome events. Appending requires explicit `--append-eligible`, and blocked draft payloads are skipped unless `--allow-blockers` is also supplied for local research. Generated outcome event JSONL such as `replay_validation/outcome_events.jsonl` is local research data and should not be committed.
+
+## Alert Integrity Manifest Hardening
+
+Alert integrity manifest hardening adds deterministic metadata to formatted alert results and watch activation alerts. The manifest records safe hashes, required trade-idea field presence, message part counts, delivery mode, deduplication key presence, and risk/invalidation checks without copying Telegram credentials or mutating scanner behavior.
+
+This is alert safety/audit metadata only. It does not create signals, place orders, call exchanges, send Telegram messages, weaken setup gates, infer market data, withdraw funds, or transfer funds. Existing alert creation still depends on the scanner and trade-idea gates; rejected and no-setup results remain non-alertable.
+
+Target-integrity hardening blocks trade idea, alert, and journal creation when target intelligence rejects the setup, when the target failure type is a blocking integrity failure, or when TP labels are not monotonic by absolute reward distance. These blocked rows display as near-miss/watch candidates with `failed_stage=target_integrity` and `Wait for target expansion`; they do not increase valid signal count.
+
+Each scan loop appends a compact JSONL row to `scan_runs/scan_run_manifest.jsonl` and refreshes `scan_runs/nightly_scan_history.json` with actual loop summaries. `scan_runs/watch_state.json` is retained for compatibility only and is written with a deprecation marker; DB-backed lifecycle state plus scan run manifests are the audit source of truth.
+
+Audit top-level row visibility for saved scans:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_scan_row_visibility.py
+```
+
+For manual validation scans, let the audit resolve the canonical latest output from `scan_runs/scan_run_manifest.jsonl` -> `latest_scan_path`. Do not hardcode `scan_runs/nightly_latest_scan.json` unless you are specifically auditing that historical/nightly artifact.
+
+Audit local alert artifacts:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_alert_integrity_manifest.py
+```
+
+JSON mode:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_alert_integrity_manifest.py --json
+```
+
+Strict mode:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_alert_integrity_manifest.py --strict
+```
+
+Audit an explicit saved scan:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_alert_integrity_manifest.py --input scan_runs\latest_scan.json --json
+```
+
+Legacy alert results without `integrity_manifest` are reported as warnings. Tampered message hashes, invalid manifests, alerts attached to rejected/no-setup records, and alert records without trade-idea context are reported as blockers. Watch activation messages now include invalidation and risk warning text alongside entry, stop, targets, RR, quality, and reason.
+
+Default alert-integrity artifact discovery skips deprecated `scan_runs/watch_state.json`; pass explicit paths when a legacy watch-state artifact must be inspected.
 
 ## Phase 2 Market Data
 
@@ -1388,7 +1520,7 @@ Safety boundaries:
 
 Phase 29 adds Alert Watch Mode around the existing scanner. Near-misses are still not trades. Watch mode repeatedly re-scans a watchlist and only activates an alert when the current scan produces a real trade idea and the setup quality layer marks it `HIGH_QUALITY_TRADE` or `VALID_BUT_LOWER_QUALITY`.
 
-Watch mode state is stored in `scan_runs/watch_state.json` and tracks each symbol's last status, failed gate, readiness score, readiness label, last seen time, whether an activation alert was already generated, activation count, and history.
+Watch mode state is stored in `scan_runs/watch_state.json` for compatibility and tracks each symbol's last status, failed gate, readiness score, readiness label, last seen time, whether an activation alert was already generated, activation count, and history. New writes mark this file deprecated; DB-backed lifecycle state and scan run manifests are the source of truth for audits.
 
 Key flags:
 
@@ -2267,3 +2399,8 @@ Safety boundaries:
 - The Phase 45A historical replay validation scaffold is plan-only readiness reporting. It does not run historical PnL, execute replay outcome scoring, create signals, place trades, call exchanges, send Telegram messages, mutate lifecycle state, alter scanner behavior, weaken setup gates, infer outcomes, calculate profitability or expectancy, invent market data, withdraw funds, or transfer funds.
 - The Phase 45B historical replay event sequence validator is read-only timeline consistency auditing. It does not run historical PnL, calculate win rate, claim expectancy, create signals, place trades, call exchanges, send Telegram messages, mutate artifacts, change lifecycle state, alter scanner behavior, weaken setup gates, infer hidden lifecycle transitions, invent market data, withdraw funds, or transfer funds.
 - The Phase 45C replay outcome field readiness contract is read-only field auditing. It defines required outcome-readiness fields only; it does not calculate PnL, win rate, expectancy, edge, or profitability, create signals, place trades, call exchanges, send Telegram messages, mutate artifacts, change lifecycle state, alter scanner behavior, weaken setup gates, infer outcomes, invent market data, withdraw funds, or transfer funds.
+- The Phase 45D outcome capture contract is read-only record validation. It defines future outcome record fields, validation, and summary reporting only; it does not calculate PnL, win rate, expectancy, edge, or profitability, create signals, place or simulate trades, call exchanges, send Telegram messages, mutate scanner or lifecycle artifacts, change setup gates, infer outcomes, infer exit prices, invent candles, invent market data, withdraw funds, or transfer funds.
+- The Phase 45E outcome event capture infrastructure is local JSONL research capture only. It validates and appends supplied outcome event records without calculating PnL, win rate, expectancy, edge, or profitability; it does not create signals, place or simulate trades, call exchanges, send Telegram messages, mutate scanner or lifecycle artifacts, change setup gates, infer outcomes, infer exit prices, invent candles, invent market data, withdraw funds, or transfer funds.
+- The Phase 45F outcome event lifecycle integration layer is audit-only mapping infrastructure. It maps lifecycle statuses to draft outcome event payload previews and can append only when explicitly requested; it does not calculate PnL, win rate, expectancy, edge, or profitability, create signals, place or simulate trades, call exchanges, send Telegram messages, mutate scanner or lifecycle artifacts, change setup gates, infer outcomes, infer exit prices, invent candles, invent market data, withdraw funds, or transfer funds.
+- The alert integrity manifest layer is alert safety/audit metadata only. It does not create signals, place orders, call exchanges, send Telegram messages, weaken setup gates, infer market data, store Telegram credentials, withdraw funds, or transfer funds.
+- The target-integrity and scan-run manifest hardening layer blocks weak target paths and records loop summaries only. It does not lower scoring, RR, risk, setup, lifecycle, or alert thresholds, create extra signals, place orders, call private exchange APIs, send live Telegram messages, withdraw funds, or transfer funds.

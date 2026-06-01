@@ -167,7 +167,7 @@ class TargetIntelligenceResult(BaseModel):
     rr_to_tp2: MaybeDecimal = NA
     rr_to_tp3: MaybeDecimal = NA
     target_quality_grade: TargetQualityGrade = TargetQualityGrade.REJECT
-    target_failure_type: TargetFailureType | Literal["N/A"] = NA
+    target_failure_type: TargetFailureType | Literal["N/A", "RR_COMPRESSED", "NO_CLEAN_TARGET_PATH"] = NA
     rr_compression_reason: str = NA
     target_confidence: MaybeInt = NA
     next_target_condition: str = NA
