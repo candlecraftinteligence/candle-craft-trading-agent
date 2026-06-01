@@ -6,6 +6,7 @@ import inspect
 import json
 import sys
 import time
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -141,6 +142,7 @@ from app.watch_mode import (  # noqa: E402
     WatchIterationSummary,
     WatchModeError,
     append_watch_output,
+    build_watch_activation_alert_manifest,
     build_watch_iteration_summary,
     deliver_watch_activation_alert,
     format_watch_activation_alert,
@@ -160,6 +162,8 @@ DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 LATEST_RUN_PATH = DEFAULT_LATEST_RUN_PATH
 WATCH_STATE_PATH = DEFAULT_WATCH_STATE_PATH
 PERFORMANCE_MEMORY_PATH = PROJECT_ROOT / "scan_runs" / "performance_memory.json"
+SCAN_RUN_MANIFEST_PATH = PROJECT_ROOT / "scan_runs" / "scan_run_manifest.jsonl"
+NIGHTLY_SCAN_HISTORY_PATH = PROJECT_ROOT / "scan_runs" / "nightly_scan_history.json"
 
 
 @dataclass(frozen=True)
@@ -698,7 +702,12 @@ async def main(argv: Sequence[str] | None = None) -> None:
         if symbols_to_scan
         else config
     )
-    resume_metadata = _resume_metadata(args, watchlist.symbols, resume_state, symbols_to_scan, watchlist.universe)
+    scan_run_id = uuid4().hex
+    resume_metadata = {
+        **_resume_metadata(args, watchlist.symbols, resume_state, symbols_to_scan, watchlist.universe),
+        "run_id": scan_run_id,
+        "scan_run_id": scan_run_id,
+    }
 
     async def after_symbol(symbol_result: ScannerSymbolResult, completed: int, total: int) -> None:
         latest_results_by_symbol[symbol_result.symbol] = symbol_result
@@ -806,7 +815,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             min_confidence=args.min_memory_confidence,
         )
 
-    lifecycle_scan_run_id = uuid4().hex if args.store_scan and _lifecycle_enabled(args) else None
+    lifecycle_scan_run_id = scan_run_id if args.store_scan and _lifecycle_enabled(args) else None
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=lifecycle_scan_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
 
@@ -835,7 +844,6 @@ async def main(argv: Sequence[str] | None = None) -> None:
         min_rr=args.min_rr,
         replay_warnings=replay_warnings,
     )
-
     if args.output_json is not None:
         _write_run_json(
             args.output_json,
@@ -888,6 +896,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 continued_watch_symbols=continued_watch_symbols,
             ),
         )
+    stored_scan_run_id = scan_run_id
     if args.store_scan:
         raw_payload = _json_payload(
             result,
@@ -896,7 +905,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             portfolio_selection=portfolio_selection,
         )
         try:
-            run_id = store_scan_result(
+            stored_scan_run_id = store_scan_result(
                 args.database_path,
                 result,
                 ranked_results=ranked_results,
@@ -905,13 +914,23 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 command_preset=args.command_preset,
                 command_used=_command_used(argv),
                 raw_payload=raw_payload,
-                run_id=lifecycle_scan_run_id,
+                run_id=stored_scan_run_id,
             )
         except StorageError as exc:
             raise SystemExit(str(exc)) from exc
-        print(f"Stored scan run: {run_id}")
+        print(f"Stored scan run: {stored_scan_run_id}")
         print(f"Database: {args.database_path}")
         print("")
+    _append_scan_run_manifest(
+        result,
+        watchlist=watchlist,
+        ranked_results=ranked_results,
+        manifest_path=SCAN_RUN_MANIFEST_PATH,
+        nightly_history_path=NIGHTLY_SCAN_HISTORY_PATH,
+        run_id=stored_scan_run_id,
+        output_scan_path=args.output_json,
+        latest_scan_path=args.save_run,
+    )
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
     if args.show_regime_details:
@@ -1512,6 +1531,141 @@ def _write_export_json(
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _append_scan_run_manifest(
+    result: ScannerRunResult,
+    *,
+    watchlist: WatchlistResolution,
+    ranked_results: Sequence[Any] | None,
+    manifest_path: Path,
+    nightly_history_path: Path,
+    run_id: str | None = None,
+    watch_iteration: int | None = None,
+    output_scan_path: Path | None = None,
+    latest_scan_path: Path | None = None,
+) -> dict[str, Any]:
+    row = _scan_run_manifest_row(
+        result,
+        watchlist=watchlist,
+        ranked_results=ranked_results,
+        run_id=run_id,
+        watch_iteration=watch_iteration,
+        output_scan_path=output_scan_path,
+        latest_scan_path=latest_scan_path,
+    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False))
+        handle.write("\n")
+    _write_nightly_scan_history(nightly_history_path, row)
+    return row
+
+
+def _scan_run_manifest_row(
+    result: ScannerRunResult,
+    *,
+    watchlist: WatchlistResolution,
+    ranked_results: Sequence[Any] | None,
+    run_id: str | None = None,
+    watch_iteration: int | None = None,
+    output_scan_path: Path | None = None,
+    latest_scan_path: Path | None = None,
+) -> dict[str, Any]:
+    ranked = tuple(ranked_results) if ranked_results is not None else rank_scan_results(result.results)
+    bucket_counts = Counter(item.display.display_bucket for item in ranked)
+    failed_stage_counts = Counter(
+        item.display.failed_stage for item in ranked if _display(item.display.failed_stage) != NA
+    )
+    lifecycle_state_counts = Counter(
+        result.lifecycle_state.current_state.value
+        for result in (item.symbol_result for item in ranked)
+        if result.lifecycle_state is not None
+    )
+    target_integrity_blocks = sum(
+        1
+        for item in ranked
+        if item.display.failed_stage == "target_integrity" and item.symbol_result.alert_result is None
+    )
+    runtime = result.runtime_stats
+    row: dict[str, Any] = {
+        "run_id": _manifest_run_id(result, run_id),
+        "timestamp": _watch_iteration_timestamp(),
+        "universe_mode": _display(getattr(watchlist.universe, "mode", NA)),
+        "universe_label": _display(getattr(watchlist.universe, "label", watchlist.source_label)),
+        "symbols_scanned": result.scanned_symbols,
+        "valid_setup_count": bucket_counts.get("valid", 0),
+        "near_miss_count": bucket_counts.get("near_miss", 0),
+        "rejected_count": bucket_counts.get("no_setup", 0),
+        "failed_symbol_count": result.failed_symbols,
+        "timeout_count": runtime.timeout_count,
+        "failed_stage_counts": dict(sorted(failed_stage_counts.items())),
+        "lifecycle_state_counts": dict(sorted(lifecycle_state_counts.items())),
+        "alerts_created": result.dry_run_alerts_created,
+        "alerts_blocked_by_target_integrity": target_integrity_blocks,
+        "journal_entries_created": result.journal_entries_created,
+        "trade_ideas_created": result.trade_ideas_created,
+        "market_regime": _display(getattr(result.market_regime.state, "value", result.market_regime.state)),
+        "regime_confidence": _json_scalar(result.market_regime.confidence_score),
+        "runtime_seconds": runtime.total_runtime_seconds,
+        "average_seconds_per_symbol": runtime.average_seconds_per_symbol,
+    }
+    if watch_iteration is not None:
+        row["watch_iteration"] = watch_iteration
+    if output_scan_path is not None:
+        row["output_scan_path"] = str(output_scan_path)
+    if latest_scan_path is not None:
+        row["latest_scan_path"] = str(latest_scan_path)
+    return row
+
+
+def _manifest_run_id(result: ScannerRunResult, explicit_run_id: str | None) -> str:
+    if explicit_run_id:
+        return explicit_run_id
+    existing = _result_run_id(result)
+    if existing != NA:
+        return existing
+    return uuid4().hex
+
+
+def _result_run_id(result: ScannerRunResult) -> str:
+    metadata = result.resume_metadata if isinstance(result.resume_metadata, Mapping) else {}
+    for key in ("scan_run_id", "run_id", "storage_run_id"):
+        value = _display(metadata.get(key))
+        if value != NA:
+            return value
+    return NA
+
+
+def _json_scalar(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return _display(value)
+    if hasattr(value, "value"):
+        return getattr(value, "value")
+    if value is None:
+        return NA
+    return value
+
+
+def _write_nightly_scan_history(path: Path, row: Mapping[str, Any], *, max_runs: int = 200) -> None:
+    previous_runs: list[Mapping[str, Any]] = []
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, Mapping) and isinstance(payload.get("runs"), list):
+            previous_runs = [item for item in payload["runs"] if isinstance(item, Mapping)]
+        elif isinstance(payload, list):
+            previous_runs = [item for item in payload if isinstance(item, Mapping)]
+    runs = [*previous_runs, dict(row)][-max_runs:]
+    payload = {
+        "schema_version": "nightly_scan_history_v1",
+        "updated_at": row.get("timestamp", _watch_iteration_timestamp()),
+        "runs": runs,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8")
+
+
 def _write_text_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text.rstrip() + "\n", encoding="utf-8")
@@ -1903,6 +2057,12 @@ async def _run_watch_mode(
                         message=message,
                         delivery_status=delivery.status,
                         delivery_detail=delivery.detail,
+                        integrity_manifest=build_watch_activation_alert_manifest(
+                            symbol_result,
+                            message=message,
+                            delivery_status=delivery.status,
+                            live=args.telegram_live_alerts,
+                        ),
                     )
                     activations.append(activation)
                     if not args.telegram_live_alerts:
@@ -1937,8 +2097,9 @@ async def _run_watch_mode(
             if args.watch_output_file is not None:
                 append_watch_output(args.watch_output_file, summary)
             print(format_watch_iteration_summary(summary))
+            stored_manifest_run_id = execution.storage_run_id
             if args.store_scan:
-                run_id = _store_watch_iteration_scan_run(
+                stored_manifest_run_id = _store_watch_iteration_scan_run(
                     args,
                     execution=execution,
                     summary=summary,
@@ -1949,7 +2110,18 @@ async def _run_watch_mode(
                 )
                 stored_scan_runs += 1
                 print(f"Stored watch iteration: {summary.iteration}")
-                print(f"Run ID: {run_id}")
+                print(f"Run ID: {stored_manifest_run_id}")
+            _append_scan_run_manifest(
+                execution.result,
+                watchlist=watchlist,
+                ranked_results=execution.ranked_results,
+                manifest_path=SCAN_RUN_MANIFEST_PATH,
+                nightly_history_path=NIGHTLY_SCAN_HISTORY_PATH,
+                run_id=stored_manifest_run_id,
+                output_scan_path=args.output_json,
+                latest_scan_path=args.save_run,
+                watch_iteration=summary.iteration,
+            )
             print("")
             completed_iterations = iteration
 
@@ -1986,8 +2158,11 @@ async def _run_watch_scan_iteration(
         else config
     )
     resume_state = ResumeState(results_by_symbol={}, skipped_symbols=(), loaded_symbols=())
+    scan_run_id = uuid4().hex
     resume_metadata = {
         **_resume_metadata(args, watchlist.symbols, resume_state, queued_symbols, watchlist.universe),
+        "run_id": scan_run_id,
+        "scan_run_id": scan_run_id,
         "watch_mode": True,
         "watch_iteration": iteration,
     }
@@ -2055,7 +2230,7 @@ async def _run_watch_scan_iteration(
             runtime_stats=None,
             market_regime=None,
         )
-    storage_run_id = uuid4().hex if args.store_scan else None
+    storage_run_id = scan_run_id
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=storage_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
@@ -2529,6 +2704,9 @@ def _json_payload(
     portfolio_selection: PortfolioSelectionResult | None = None,
 ) -> dict[str, object]:
     payload = result.model_dump(mode="json")
+    run_id = _result_run_id(result)
+    if run_id != NA:
+        payload["run_id"] = run_id
     universe = result.resume_metadata.get("universe") if isinstance(result.resume_metadata, Mapping) else None
     if isinstance(universe, Mapping):
         payload["universe"] = dict(universe)

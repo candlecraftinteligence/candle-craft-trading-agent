@@ -510,3 +510,14 @@ def test_watch_state_update_behavior() -> None:
         SetupQualityState.HIGH_QUALITY_TRADE.value,
         SetupQualityState.VALID_BUT_LOWER_QUALITY.value,
     }
+
+
+def test_watch_state_persists_deprecation_marker(tmp_path) -> None:
+    state_path = tmp_path / "watch_state.json"
+
+    save_watch_state(state_path, WatchState())
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["deprecated"] is True
+    assert payload["source_of_truth"] == "db_lifecycle_state"
+    assert "retained for compatibility" in payload["deprecation_note"]

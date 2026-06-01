@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from app.alerts.integrity_manifest import AlertIntegrityManifest, build_alert_integrity_manifest
 from app.alerts.telegram import TELEGRAM_API_BASE_URL, send_telegram_messages
 from app.alerts.templates import TELEGRAM_MAX_MESSAGE_LENGTH, format_trade_alert, split_message
 
@@ -59,6 +60,7 @@ class AlertResult(BaseModel):
     delivery_results: tuple[AlertDeliveryResult, ...]
     deduplication_key: str | None = None
     deduplication_marked: bool = False
+    integrity_manifest: AlertIntegrityManifest | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -118,6 +120,12 @@ class AlertAgent:
                 delivery_results=(delivery,),
                 deduplication_key=alert_input.deduplication_key,
                 deduplication_marked=deduplication_marked,
+                integrity_manifest=_integrity_manifest(
+                    alert_input=alert_input,
+                    formatted_message=formatted_message,
+                    message_parts=message_parts,
+                    status=AlertStatus.DRY_RUN,
+                ),
             )
 
         if alert_input.channel == AlertChannel.TELEGRAM:
@@ -145,6 +153,12 @@ class AlertAgent:
                 delivery_results=(delivery,),
                 deduplication_key=alert_input.deduplication_key,
                 deduplication_marked=deduplication_marked,
+                integrity_manifest=_integrity_manifest(
+                    alert_input=alert_input,
+                    formatted_message=formatted_message,
+                    message_parts=message_parts,
+                    status=AlertStatus.SENT,
+                ),
             )
 
         delivery = AlertDeliveryResult(
@@ -163,6 +177,12 @@ class AlertAgent:
             delivery_results=(delivery,),
             deduplication_key=alert_input.deduplication_key,
             deduplication_marked=deduplication_marked,
+            integrity_manifest=_integrity_manifest(
+                alert_input=alert_input,
+                formatted_message=formatted_message,
+                message_parts=message_parts,
+                status=AlertStatus.FAILED,
+            ),
         )
 
     async def analyze(
@@ -236,6 +256,12 @@ class AlertAgent:
             delivery_results=delivery_results,
             deduplication_key=alert_input.deduplication_key,
             deduplication_marked=deduplication_marked,
+            integrity_manifest=_integrity_manifest(
+                alert_input=alert_input,
+                formatted_message=formatted_message,
+                message_parts=message_parts,
+                status=status,
+            ),
         )
 
     def _failed_result(
@@ -264,6 +290,12 @@ class AlertAgent:
             delivery_results=(delivery,),
             deduplication_key=alert_input.deduplication_key,
             deduplication_marked=deduplication_marked,
+            integrity_manifest=_integrity_manifest(
+                alert_input=alert_input,
+                formatted_message=formatted_message,
+                message_parts=message_parts,
+                status=AlertStatus.FAILED,
+            ),
         )
 
 
@@ -296,6 +328,24 @@ def _delivery_detail(raw_result: Mapping[str, Any]) -> str:
         return f"Telegram message part {part_number} of {total_parts} sent."
     error = raw_result.get("error")
     return str(error) if error else "Telegram delivery failed."
+
+
+def _integrity_manifest(
+    *,
+    alert_input: AlertInput,
+    formatted_message: str,
+    message_parts: tuple[str, ...],
+    status: AlertStatus,
+) -> AlertIntegrityManifest:
+    return build_alert_integrity_manifest(
+        trade_idea=alert_input.trade_idea,
+        formatted_message=formatted_message,
+        message_parts=message_parts,
+        channel=alert_input.channel,
+        status=status,
+        dry_run=alert_input.dry_run,
+        deduplication_key=alert_input.deduplication_key,
+    )
 
 
 __all__ = [

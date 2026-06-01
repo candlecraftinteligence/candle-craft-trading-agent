@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.alerts.integrity_manifest import AlertIntegrityManifest, build_alert_integrity_manifest
 from app.alerts.telegram import send_telegram_messages
 from app.analytics.portfolio_selection import PortfolioSelectionResult, selected_symbols
 from app.analytics.setup_quality import SetupQualityState
@@ -88,6 +89,12 @@ class WatchSymbolState(BaseModel):
 class WatchState(BaseModel):
     updated_at: str = NA
     symbols: dict[str, WatchSymbolState] = Field(default_factory=dict)
+    deprecated: bool = True
+    source_of_truth: str = "db_lifecycle_state"
+    deprecation_note: str = (
+        "watch_state.json is retained for compatibility only; DB-backed lifecycle state and scan run manifests are "
+        "the source of truth for audits."
+    )
 
     model_config = ConfigDict(frozen=True)
 
@@ -98,6 +105,7 @@ class WatchActivation(BaseModel):
     message: str
     delivery_status: Literal["dry_run", "sent", "failed"]
     delivery_detail: str
+    integrity_manifest: AlertIntegrityManifest | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -373,10 +381,33 @@ def format_watch_activation_alert(symbol_result: ScannerSymbolResult) -> str:
             f"TP2: {_take_profit_text(trade_idea, 2)}",
             f"RR: {_display(getattr(trade_idea, 'best_rr', NA))}",
             f"Quality: {quality_text}",
+            f"Invalidation: {_display(getattr(trade_idea, 'invalidation', NA))}",
             f"Reason: {_short_reason(getattr(trade_idea, 'reason_for_trade', NA))}",
+            f"Risk warning: {_display(getattr(trade_idea, 'risk_warning', NA))}",
             "",
             "Candle Craft | Signal. Structure. Execution.",
         )
+    )
+
+
+def build_watch_activation_alert_manifest(
+    symbol_result: ScannerSymbolResult,
+    *,
+    message: str,
+    delivery_status: Literal["dry_run", "sent", "failed"],
+    live: bool,
+) -> AlertIntegrityManifest:
+    trade_idea = symbol_result.trade_idea
+    if trade_idea is None:
+        raise WatchModeError("cannot build activation alert manifest without a trade idea")
+    return build_alert_integrity_manifest(
+        trade_idea=trade_idea,
+        formatted_message=message,
+        message_parts=(message,),
+        channel="telegram",
+        status=delivery_status,
+        dry_run=not live,
+        deduplication_key=f"watch-activation-{symbol_result.symbol}-{_activation_mode(symbol_result)}",
     )
 
 
@@ -630,6 +661,7 @@ __all__ = [
     "WatchState",
     "WatchSymbolState",
     "append_watch_output",
+    "build_watch_activation_alert_manifest",
     "build_watch_iteration_summary",
     "current_result_is_valid_activation",
     "deliver_watch_activation_alert",
