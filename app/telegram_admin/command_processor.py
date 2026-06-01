@@ -1,0 +1,516 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from hashlib import sha256
+from pathlib import Path
+from typing import Any, Protocol
+
+import httpx
+
+from app.alerts.telegram import DEFAULT_TELEGRAM_TIMEOUT, TELEGRAM_API_BASE_URL, send_telegram_messages
+from app.data.dtos import NA
+from app.telegram_admin.client import TelegramAdminConfig
+from app.telegram_admin.commands import AdminCommandResponse, TelegramAdminCommandService, normalize_admin_command
+
+DEFAULT_ADMIN_COMMANDS_DIR = Path("scan_runs") / "admin_commands"
+DEFAULT_ADMIN_COMMAND_STATE_PATH = DEFAULT_ADMIN_COMMANDS_DIR / "state.json"
+DEFAULT_ADMIN_COMMAND_AUDIT_PATH = DEFAULT_ADMIN_COMMANDS_DIR / "commands.jsonl"
+DEFAULT_GET_UPDATES_TIMEOUT_SECONDS = 0
+DEFAULT_COMMAND_LIMIT = 10
+
+ADMIN_COMMAND_DELIVERY_STATUSES: tuple[str, ...] = (
+    "dry_run",
+    "sent_admin",
+    "skipped_disabled",
+    "skipped_missing_credentials",
+    "ignored_unauthorized",
+    "failed",
+)
+
+
+class TelegramAdminCommandTransport(Protocol):
+    async def get_updates(
+        self,
+        *,
+        bot_token: str,
+        offset: int | None,
+        limit: int,
+        timeout: int,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Read Telegram updates for the admin bot."""
+
+    async def send_message(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message: str,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Send one admin command response through Telegram."""
+
+
+class HttpxTelegramAdminCommandTransport:
+    def __init__(
+        self,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+        api_base_url: str = TELEGRAM_API_BASE_URL,
+        timeout: float = DEFAULT_TELEGRAM_TIMEOUT,
+    ) -> None:
+        self._http_client = http_client
+        self._api_base_url = api_base_url
+        self._timeout = timeout
+
+    async def get_updates(
+        self,
+        *,
+        bot_token: str,
+        offset: int | None,
+        limit: int,
+        timeout: int,
+    ) -> tuple[Mapping[str, Any], ...]:
+        params: dict[str, Any] = {"limit": limit, "timeout": timeout}
+        if offset is not None:
+            params["offset"] = offset
+        endpoint = f"{self._api_base_url.rstrip('/')}/bot{bot_token}/getUpdates"
+        if self._http_client is not None:
+            response = await self._http_client.get(endpoint, params=params, timeout=self._timeout)
+            return _updates_from_response(response)
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(endpoint, params=params)
+            return _updates_from_response(response)
+
+    async def send_message(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message: str,
+    ) -> tuple[Mapping[str, Any], ...]:
+        return await send_telegram_messages(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            message=message,
+            http_client=self._http_client,
+            api_base_url=self._api_base_url,
+            timeout=self._timeout,
+        )
+
+
+@dataclass(frozen=True)
+class AdminCommandProcessingResult:
+    delivery_status: str
+    updates_seen: int
+    processed_count: int
+    sent_count: int
+    audit_path: Path
+    state_path: Path
+    previews: tuple[str, ...] = ()
+    error_message: str = NA
+
+    @property
+    def failed(self) -> bool:
+        return self.delivery_status == "failed"
+
+
+@dataclass(frozen=True)
+class _ProcessedUpdate:
+    delivery_status: str
+    sent: bool = False
+    preview: str = NA
+    error_message: str = NA
+
+
+async def process_telegram_admin_commands(
+    *,
+    config: TelegramAdminConfig,
+    command_service: TelegramAdminCommandService,
+    transport: TelegramAdminCommandTransport | None = None,
+    state_path: Path | str = DEFAULT_ADMIN_COMMAND_STATE_PATH,
+    audit_path: Path | str = DEFAULT_ADMIN_COMMAND_AUDIT_PATH,
+    limit: int = DEFAULT_COMMAND_LIMIT,
+    dry_run: bool = False,
+    show_preview: bool = False,
+    updates: Sequence[Mapping[str, Any]] | None = None,
+    get_updates_timeout: int = DEFAULT_GET_UPDATES_TIMEOUT_SECONDS,
+) -> AdminCommandProcessingResult:
+    effective_config = replace(config, dry_run=True) if dry_run else config
+    state = Path(state_path)
+    audit = Path(audit_path)
+    latest_processed_update_id = _load_latest_processed_update_id(state)
+    safe_limit = max(1, int(limit))
+    admin_transport = transport or HttpxTelegramAdminCommandTransport(timeout=effective_config.timeout)
+
+    if updates is None:
+        skipped = _network_skip_status(effective_config)
+        if skipped is not None:
+            return AdminCommandProcessingResult(
+                delivery_status=skipped,
+                updates_seen=0,
+                processed_count=0,
+                sent_count=0,
+                audit_path=audit,
+                state_path=state,
+                previews=_preview_tuple(show_preview, skipped),
+            )
+        try:
+            updates = await admin_transport.get_updates(
+                bot_token=effective_config.bot_token or "",
+                offset=latest_processed_update_id + 1 if latest_processed_update_id is not None else None,
+                limit=safe_limit,
+                timeout=get_updates_timeout,
+            )
+        except Exception as exc:
+            return AdminCommandProcessingResult(
+                delivery_status="failed",
+                updates_seen=0,
+                processed_count=0,
+                sent_count=0,
+                audit_path=audit,
+                state_path=state,
+                error_message=_sanitize_error(exc, effective_config),
+            )
+
+    selected_updates = tuple(_limited_new_updates(updates, latest_processed_update_id, safe_limit))
+    processed: list[_ProcessedUpdate] = []
+    for update in selected_updates:
+        result = await _process_update(
+            update,
+            config=effective_config,
+            command_service=command_service,
+            transport=admin_transport,
+            state_path=state,
+            audit_path=audit,
+        )
+        processed.append(result)
+
+    if not processed:
+        return AdminCommandProcessingResult(
+            delivery_status="dry_run" if effective_config.dry_run else "sent_admin",
+            updates_seen=len(tuple(updates)),
+            processed_count=0,
+            sent_count=0,
+            audit_path=audit,
+            state_path=state,
+            previews=_preview_tuple(show_preview, "No new admin command updates."),
+        )
+
+    failed = next((item for item in processed if item.delivery_status == "failed"), None)
+    status = failed.delivery_status if failed is not None else processed[-1].delivery_status
+    return AdminCommandProcessingResult(
+        delivery_status=status,
+        updates_seen=len(tuple(updates)),
+        processed_count=len(processed),
+        sent_count=sum(1 for item in processed if item.sent),
+        audit_path=audit,
+        state_path=state,
+        previews=tuple(item.preview for item in processed if show_preview and item.preview != NA),
+        error_message=failed.error_message if failed is not None else NA,
+    )
+
+
+async def _process_update(
+    update: Mapping[str, Any],
+    *,
+    config: TelegramAdminConfig,
+    command_service: TelegramAdminCommandService,
+    transport: TelegramAdminCommandTransport,
+    state_path: Path,
+    audit_path: Path,
+) -> _ProcessedUpdate:
+    update_id = _update_id(update)
+    message = _message_payload(update)
+    chat_id = _chat_id(message)
+    command = normalize_admin_command(_message_text(message))
+    is_admin = _chat_matches_admin(chat_id, config.admin_chat_id)
+
+    if update_id is None:
+        return _ProcessedUpdate("ignored_unauthorized", preview="Ignored update without update_id.")
+
+    if not is_admin:
+        _append_audit_record(
+            audit_path,
+            update_id=update_id,
+            command=command or NA,
+            chat_id=chat_id,
+            is_admin=False,
+            response_type="unauthorized",
+            delivery_status="ignored_unauthorized",
+            response_preview="Unauthorized update ignored.",
+            run_id=NA,
+        )
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("ignored_unauthorized", preview="Unauthorized update ignored.")
+
+    response = command_service.response_for(command)
+    skipped = _skip_status(config)
+    if skipped is not None:
+        _append_command_audit(audit_path, update_id, chat_id, response, skipped)
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate(skipped, preview=_preview(response.text))
+    if config.dry_run:
+        _append_command_audit(audit_path, update_id, chat_id, response, "dry_run")
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("dry_run", preview=_preview(response.text))
+
+    try:
+        raw_results = await transport.send_message(
+            bot_token=config.bot_token or "",
+            chat_id=config.admin_chat_id or "",
+            message=response.text,
+        )
+    except Exception as exc:
+        error = _sanitize_error(exc, config)
+        _append_command_audit(audit_path, update_id, chat_id, response, "failed", error_message=error)
+        return _ProcessedUpdate("failed", preview=_preview(response.text), error_message=error)
+
+    sanitized_results = tuple(_sanitize_result(item, config) for item in raw_results)
+    sent = bool(sanitized_results) and all(item.get("status") == "sent" for item in sanitized_results)
+    if sent:
+        _append_command_audit(audit_path, update_id, chat_id, response, "sent_admin")
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("sent_admin", sent=True, preview=_preview(response.text))
+
+    error = _first_result_error(sanitized_results)
+    _append_command_audit(audit_path, update_id, chat_id, response, "failed", error_message=error)
+    return _ProcessedUpdate("failed", preview=_preview(response.text), error_message=error)
+
+
+def _skip_status(config: TelegramAdminConfig) -> str | None:
+    if not config.admin_enabled:
+        return "skipped_disabled"
+    if config.dry_run:
+        return None
+    if not config.has_admin_credentials:
+        return "skipped_missing_credentials"
+    return None
+
+
+def _network_skip_status(config: TelegramAdminConfig) -> str | None:
+    if not config.admin_enabled:
+        return "skipped_disabled"
+    if config.dry_run:
+        return "dry_run"
+    if not config.has_admin_credentials:
+        return "skipped_missing_credentials"
+    return None
+
+
+def _updates_from_response(response: httpx.Response) -> tuple[Mapping[str, Any], ...]:
+    if response.status_code == 429:
+        raise RuntimeError("Telegram getUpdates was rate limited.")
+    if response.status_code >= 400:
+        raise RuntimeError(f"Telegram getUpdates returned HTTP {response.status_code}.")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Malformed Telegram getUpdates response.") from exc
+    if not isinstance(payload, Mapping) or payload.get("ok") is not True:
+        description = payload.get("description") if isinstance(payload, Mapping) else None
+        raise RuntimeError(f"Telegram getUpdates failed: {_display(description)}")
+    results = payload.get("result")
+    if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
+        return ()
+    return tuple(item for item in results if isinstance(item, Mapping))
+
+
+def _limited_new_updates(
+    updates: Sequence[Mapping[str, Any]],
+    latest_processed_update_id: int | None,
+    limit: int,
+) -> tuple[Mapping[str, Any], ...]:
+    output: list[Mapping[str, Any]] = []
+    for update in sorted(updates, key=lambda item: _update_id(item) if _update_id(item) is not None else -1):
+        update_id = _update_id(update)
+        if update_id is None:
+            continue
+        if latest_processed_update_id is not None and update_id <= latest_processed_update_id:
+            continue
+        output.append(update)
+        if len(output) >= limit:
+            break
+    return tuple(output)
+
+
+def _append_command_audit(
+    audit_path: Path,
+    update_id: int,
+    chat_id: str,
+    response: AdminCommandResponse,
+    delivery_status: str,
+    *,
+    error_message: str = NA,
+) -> None:
+    _append_audit_record(
+        audit_path,
+        update_id=update_id,
+        command=response.command,
+        chat_id=chat_id,
+        is_admin=True,
+        response_type=response.response_type,
+        delivery_status=delivery_status,
+        response_preview=_preview(response.text),
+        run_id=response.run_id,
+        error_message=error_message,
+    )
+
+
+def _append_audit_record(
+    audit_path: Path,
+    *,
+    update_id: int,
+    command: str,
+    chat_id: str,
+    is_admin: bool,
+    response_type: str,
+    delivery_status: str,
+    response_preview: str,
+    run_id: str = NA,
+    error_message: str = NA,
+) -> None:
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "created_at": _now_utc_iso(),
+        "update_id": update_id,
+        "command": _display(command),
+        "chat_id_hash": _chat_id_hash(chat_id),
+        "is_admin": is_admin,
+        "response_type": response_type,
+        "delivery_status": delivery_status,
+        "error_message": _display(error_message),
+        "run_id": _display(run_id),
+        "response_preview": _display(response_preview),
+    }
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True, ensure_ascii=False))
+        handle.write("\n")
+
+
+def _load_latest_processed_update_id(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    value = payload.get("latest_processed_update_id")
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_latest_processed_update_id(path: Path, update_id: int) -> None:
+    current = _load_latest_processed_update_id(path)
+    if current is not None and current >= update_id:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"latest_processed_update_id": update_id, "updated_at": _now_utc_iso()}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _message_payload(update: Mapping[str, Any]) -> Mapping[str, Any]:
+    for key in ("message", "edited_message", "channel_post"):
+        value = update.get(key)
+        if isinstance(value, Mapping):
+            return value
+    return {}
+
+
+def _update_id(update: Mapping[str, Any]) -> int | None:
+    try:
+        return int(str(update.get("update_id")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _chat_id(message: Mapping[str, Any]) -> str:
+    chat = message.get("chat")
+    if isinstance(chat, Mapping):
+        return _display(chat.get("id"))
+    return NA
+
+
+def _message_text(message: Mapping[str, Any]) -> str:
+    return _display(message.get("text"))
+
+
+def _chat_matches_admin(chat_id: str, admin_chat_id: str | None) -> bool:
+    if not admin_chat_id:
+        return False
+    return _display(chat_id) == str(admin_chat_id).strip()
+
+
+def _chat_id_hash(chat_id: str) -> str:
+    text = _display(chat_id)
+    if text == NA:
+        return NA
+    return sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _sanitize_result(result: Mapping[str, Any], config: TelegramAdminConfig) -> dict[str, Any]:
+    sanitized = {key: result[key] for key in ("status", "http_status", "rate_limited", "error") if key in result}
+    if "error" in sanitized:
+        sanitized["error"] = _sanitize_error(sanitized.get("error"), config)
+    return sanitized
+
+
+def _sanitize_error(value: Any, config: TelegramAdminConfig) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return NA
+    for secret in (config.bot_token, config.admin_chat_id, config.public_channel_id, config.vip_channel_id):
+        if secret:
+            text = text.replace(str(secret), "[REDACTED]")
+    return text
+
+
+def _first_result_error(results: Sequence[Mapping[str, Any]]) -> str:
+    for result in results:
+        error = _display(result.get("error"))
+        if error != NA:
+            return error
+    return "telegram_admin_command_delivery_failed"
+
+
+def _preview_tuple(show_preview: bool, text: str) -> tuple[str, ...]:
+    return (_preview(text),) if show_preview else ()
+
+
+def _preview(text: str, max_length: int = 700) -> str:
+    compact = " ".join(str(text).split())
+    if not compact:
+        return NA
+    if len(compact) <= max_length:
+        return compact
+    return f"{compact[: max_length - 3].rstrip()}..."
+
+
+def _display(value: Any) -> str:
+    if value is None or value == "":
+        return NA
+    if value == NA:
+        return NA
+    return str(value)
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+__all__ = [
+    "ADMIN_COMMAND_DELIVERY_STATUSES",
+    "DEFAULT_ADMIN_COMMAND_AUDIT_PATH",
+    "DEFAULT_ADMIN_COMMAND_STATE_PATH",
+    "DEFAULT_ADMIN_COMMANDS_DIR",
+    "DEFAULT_COMMAND_LIMIT",
+    "AdminCommandProcessingResult",
+    "HttpxTelegramAdminCommandTransport",
+    "TelegramAdminCommandTransport",
+    "process_telegram_admin_commands",
+]
