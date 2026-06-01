@@ -141,6 +141,7 @@ from app.watch_mode import (  # noqa: E402
     WatchIterationSummary,
     WatchModeError,
     append_watch_output,
+    build_watch_activation_alert_manifest,
     build_watch_iteration_summary,
     deliver_watch_activation_alert,
     format_watch_activation_alert,
@@ -1903,6 +1904,12 @@ async def _run_watch_mode(
                         message=message,
                         delivery_status=delivery.status,
                         delivery_detail=delivery.detail,
+                        integrity_manifest=build_watch_activation_alert_manifest(
+                            symbol_result,
+                            message=message,
+                            delivery_status=delivery.status,
+                            live=args.telegram_live_alerts,
+                        ),
                     )
                     activations.append(activation)
                     if not args.telegram_live_alerts:
