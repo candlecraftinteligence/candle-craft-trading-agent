@@ -79,6 +79,7 @@ from app.formatters.scanner_display import (  # noqa: E402
     representative_strategy_diagnostics,
 )
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
+from app.telegram_admin import route_admin_scan_report  # noqa: E402
 from app.lifecycle.service import (  # noqa: E402
     SetupLifecycleService,
     apply_lifecycle_to_run_result,
@@ -164,6 +165,7 @@ WATCH_STATE_PATH = DEFAULT_WATCH_STATE_PATH
 PERFORMANCE_MEMORY_PATH = PROJECT_ROOT / "scan_runs" / "performance_memory.json"
 SCAN_RUN_MANIFEST_PATH = PROJECT_ROOT / "scan_runs" / "scan_run_manifest.jsonl"
 NIGHTLY_SCAN_HISTORY_PATH = PROJECT_ROOT / "scan_runs" / "nightly_scan_history.json"
+ADMIN_DRAFTS_DIR = PROJECT_ROOT / "scan_runs" / "admin_drafts"
 
 
 @dataclass(frozen=True)
@@ -921,7 +923,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         print(f"Stored scan run: {stored_scan_run_id}")
         print(f"Database: {args.database_path}")
         print("")
-    _append_scan_run_manifest(
+    manifest_row = _append_scan_run_manifest(
         result,
         watchlist=watchlist,
         ranked_results=ranked_results,
@@ -930,6 +932,11 @@ async def main(argv: Sequence[str] | None = None) -> None:
         run_id=stored_scan_run_id,
         output_scan_path=args.output_json,
         latest_scan_path=args.save_run,
+    )
+    await _route_admin_report(
+        result,
+        ranked_results=ranked_results,
+        manifest_row=manifest_row,
     )
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
@@ -1617,6 +1624,35 @@ def _scan_run_manifest_row(
     return row
 
 
+async def _route_admin_report(
+    result: ScannerRunResult,
+    *,
+    ranked_results: Sequence[Any],
+    manifest_row: Mapping[str, Any],
+) -> None:
+    try:
+        route_result = await route_admin_scan_report(
+            result,
+            ranked_results=ranked_results,
+            manifest_row=manifest_row,
+            settings=Settings(),
+            drafts_dir=ADMIN_DRAFTS_DIR,
+        )
+    except Exception as exc:
+        print(f"Warning: Telegram admin reporting failed safely: {type(exc).__name__}")
+        return
+
+    path_text = route_result.draft_path.as_posix() if route_result.draft_path is not None else "N/A"
+    print(
+        "Telegram admin drafts: "
+        f"{route_result.delivery_status}; "
+        f"{route_result.drafts_created} new, {route_result.drafts_skipped_duplicate} duplicate; "
+        f"path {path_text}"
+    )
+    if route_result.warning != NA:
+        print(f"Warning: {route_result.warning}")
+
+
 def _manifest_run_id(result: ScannerRunResult, explicit_run_id: str | None) -> str:
     if explicit_run_id:
         return explicit_run_id
@@ -2111,7 +2147,7 @@ async def _run_watch_mode(
                 stored_scan_runs += 1
                 print(f"Stored watch iteration: {summary.iteration}")
                 print(f"Run ID: {stored_manifest_run_id}")
-            _append_scan_run_manifest(
+            manifest_row = _append_scan_run_manifest(
                 execution.result,
                 watchlist=watchlist,
                 ranked_results=execution.ranked_results,
@@ -2121,6 +2157,11 @@ async def _run_watch_mode(
                 output_scan_path=args.output_json,
                 latest_scan_path=args.save_run,
                 watch_iteration=summary.iteration,
+            )
+            await _route_admin_report(
+                execution.result,
+                ranked_results=execution.ranked_results,
+                manifest_row=manifest_row,
             )
             print("")
             completed_iterations = iteration

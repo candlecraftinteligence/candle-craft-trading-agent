@@ -10,6 +10,8 @@ def test_default_settings_are_safe() -> None:
     assert settings.environment == "local"
     assert settings.log_level == "INFO"
     assert settings.database_url.startswith("postgresql+psycopg://")
+    assert settings.telegram_admin_enabled is False
+    assert settings.telegram_dry_run is True
 
 
 def test_log_level_is_normalized() -> None:
