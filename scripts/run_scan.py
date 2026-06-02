@@ -1832,10 +1832,7 @@ def _telegram_manual_signal_settings() -> Settings:
 
 
 def _telegram_manual_signals_enabled(args: argparse.Namespace) -> bool:
-    requested = getattr(args, "telegram_manual_signals", None)
-    if requested is not None:
-        return bool(requested)
-    return bool(_telegram_manual_signal_settings().telegram_signals_enabled)
+    return bool(getattr(args, "telegram_manual_signals", False))
 
 
 async def _deliver_telegram_manual_signals_if_enabled(
@@ -1851,6 +1848,8 @@ async def _deliver_telegram_manual_signals_if_enabled(
         await TelegramLifecycleDeliveryService(
             database_path=args.database_path,
             settings=settings,
+            min_rr=args.min_rr,
+            min_score_for_idea=Decimal(args.min_score_for_idea),
         ).deliver_for_run(result, scan_run_id=scan_run_id)
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc

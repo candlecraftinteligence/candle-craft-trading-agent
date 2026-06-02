@@ -133,9 +133,15 @@ class TelegramAlertAttemptRecord:
     telegram_status: str
     message_hash: str
     scan_run_id: str | None = None
+    attempted_alert_type: str = "N/A"
     setup_quality_score: str = "N/A"
     rr_planned: str = "N/A"
+    min_rr: str = "N/A"
+    opportunity_score: str = "N/A"
+    min_score_for_idea: str = "N/A"
+    technical_score: str = "N/A"
     price_level: str = "N/A"
+    blocked_reason: str = "N/A"
     error_message: str = "N/A"
     id: int | None = None
 

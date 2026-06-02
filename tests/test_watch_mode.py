@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -474,6 +475,7 @@ def test_live_telegram_requires_env_vars(monkeypatch, tmp_path) -> None:
     save_watch_state(state_path, _prior_state())
     monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
     monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
+    monkeypatch.setattr(run_scan, "Settings", lambda: SimpleNamespace(telegram_bot_token=None, telegram_chat_id=None))
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -53,6 +54,7 @@ class TelegramSignalMessage:
     structure_reason: Any = NA
     confirmation_needed: Any = NA
     invalidation_reason: Any = NA
+    confluence: Any = NA
     htf_bias: Any = NA
     ob_fvg_status: Any = NA
     volume_status: Any = NA
@@ -106,7 +108,7 @@ def format_watchlist_alert(message: TelegramSignalMessage) -> str:
         f"TP3: {_display(message.tp3)}",
         "",
         "Planned RR:",
-        f"{_display(message.planned_rr)}R",
+        _rr_with_unit(message.planned_rr),
         "",
         "Structure:",
         _display(message.structure_reason),
@@ -147,16 +149,13 @@ def format_signal_confirmed_alert(message: TelegramSignalMessage) -> str:
         f"TP3: {_display(message.tp3)}",
         "",
         "Planned RR:",
-        f"{_display(message.planned_rr)}R",
+        _rr_with_unit(message.planned_rr),
         "",
         "Structure:",
         _display(message.structure_reason),
         "",
         "Confluence:",
-        f"{BULLET} HTF Bias: {_display(message.htf_bias)}",
-        f"{BULLET} OB/FVG: {_display(message.ob_fvg_status)}",
-        f"{BULLET} Volume: {_display(message.volume_status)}",
-        f"{BULLET} OI/Funding/CVD: {_display(message.derivatives_status)}",
+        _display(message.confluence),
         "",
         "Invalidation:",
         _display(message.invalidation_reason),
@@ -380,15 +379,37 @@ def _join(*lines: str) -> str:
 def _display(value: Any) -> str:
     if value is None or value == "" or value == NA:
         return NA
+    if isinstance(value, Mapping):
+        return NA
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return NA
     if hasattr(value, "value") and not isinstance(value, (str, int, float, bool, Decimal)):
         value = value.value
     if isinstance(value, Decimal):
         text = format(value, "f")
         return text.rstrip("0").rstrip(".") if "." in text else text
     if isinstance(value, bool):
-        return "true" if value else "false"
+        return NA
     text = " ".join(str(value).split())
     return text if text else NA
+
+
+def _rr_display(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return text
+    rounded = number.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    output = format(rounded, "f")
+    return output.rstrip("0").rstrip(".") if "." in output else output
+
+
+def _rr_with_unit(value: Any) -> str:
+    text = _rr_display(value)
+    return NA if text == NA else f"{text}R"
 
 
 __all__ = [

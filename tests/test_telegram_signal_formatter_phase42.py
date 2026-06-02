@@ -27,6 +27,12 @@ def _message(**overrides: object) -> TelegramSignalMessage:
         "structure_reason": "Sweep and reclaim into valid pullback.",
         "confirmation_needed": "5m BOS/CHoCH.",
         "invalidation_reason": "Invalid if price accepts below 95.",
+        "confluence": (
+            "Structure is confirmed by a clean LTF BOS/CHoCH. "
+            "Price is reacting from a valid OB reaction. Volume is candle-estimated. "
+            "Derivatives are neutral: funding is normal while open interest is falling, "
+            "so follow-through still needs structure to hold."
+        ),
         "htf_bias": "bullish",
         "ob_fvg_status": "OB valid",
         "volume_status": "POC aligned",
@@ -60,8 +66,8 @@ def test_signal_confirmed_formatter_includes_required_fields() -> None:
     assert "CANDLE CRAFT SIGNAL CONFIRMED" in text
     assert "Status:\nCONFIRMED" in text
     assert "Entry Zone:\n100 \u2013 102" in text
-    assert "\u2022 HTF Bias: bullish" in text
-    assert "\u2022 OI/Funding/CVD: Funding normal / OI rising" in text
+    assert "Confluence:\nStructure is confirmed by a clean LTF BOS/CHoCH." in text
+    assert "funding is normal while open interest is falling" in text
     assert "System:\nAlert only. Trade managed manually by Adam." in text
 
 
@@ -94,9 +100,48 @@ def test_public_formatter_omits_setup_type_and_manual_execution_status_suffix() 
 def test_unavailable_fields_render_as_na() -> None:
     text = format_telegram_signal_message(
         TelegramAlertType.SIGNAL_CONFIRMED,
-        _message(tp3=None, ob_fvg_status="", derivatives_status=NA),
+        _message(tp3=None, planned_rr=None, ob_fvg_status="", derivatives_status=NA),
     )
 
     assert "TP3: N/A" in text
-    assert "\u2022 OB/FVG: N/A" in text
-    assert "\u2022 OI/Funding/CVD: N/A" in text
+    assert "Planned RR:\nN/A" in text
+    assert "N/AR" not in text
+    assert "Confluence:" in text
+
+
+def test_confluence_formatter_does_not_dump_raw_internal_data() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        _message(confluence="Derivatives context is N/A.", planned_rr=Decimal("3.20000000")),
+    )
+
+    assert "Confluence:\nDerivatives context is N/A." in text
+    for forbidden in ("Decimal(", "{", "}", "true", "false", "funding_rate:", "open_interest:"):
+        assert forbidden not in text
+
+
+def test_planned_rr_is_rounded_cleanly() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        _message(planned_rr=Decimal("3.23456789")),
+    )
+
+    assert "Planned RR:\n3.2R" in text
+    assert "3.23456789R" not in text
+
+
+def test_invalidation_section_does_not_contain_rejection_text() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        _message(
+            invalidation_reason=(
+                "Signal invalidates if price closes below 95 and accepts below the entry reclaim zone, "
+                "confirming that the bullish continuation structure has failed."
+            )
+        ),
+    )
+
+    invalidation = text.split("Invalidation:\n", 1)[1].split("\n\nSignal ID:", 1)[0]
+    assert "Technical score" not in invalidation
+    assert "Opportunity score" not in invalidation
+    assert invalidation.endswith(".")

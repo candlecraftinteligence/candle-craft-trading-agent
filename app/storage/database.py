@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class StorageError(RuntimeError):
@@ -190,9 +190,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 telegram_status TEXT NOT NULL,
                 message_hash TEXT NOT NULL,
                 scan_run_id TEXT,
+                attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
                 setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
                 rr_planned TEXT NOT NULL DEFAULT 'N/A',
+                min_rr TEXT NOT NULL DEFAULT 'N/A',
+                opportunity_score TEXT NOT NULL DEFAULT 'N/A',
+                min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+                technical_score TEXT NOT NULL DEFAULT 'N/A',
                 price_level TEXT NOT NULL DEFAULT 'N/A',
+                blocked_reason TEXT NOT NULL DEFAULT 'N/A',
                 error_message TEXT NOT NULL DEFAULT 'N/A',
                 UNIQUE(signal_id, alert_type)
             );
@@ -255,9 +261,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "setup_lifecycle_records", "archived_at", "TEXT")
         _ensure_column(connection, "setup_lifecycle_events", "scan_run_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "scan_run_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "attempted_alert_type", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "setup_quality_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "rr_planned", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "min_rr", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "opportunity_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "min_score_for_idea", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "technical_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "price_level", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "blocked_reason", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "error_message", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_health", "last_priority_rank", "INTEGER")
