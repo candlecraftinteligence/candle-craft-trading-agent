@@ -44,6 +44,7 @@ class TelegramSignalMessage:
     symbol: Any = NA
     direction: Any = NA
     signal_id: Any = NA
+    watch_zone: Any = NA
     entry_low: Any = NA
     entry_high: Any = NA
     stop_loss: Any = NA
@@ -51,9 +52,12 @@ class TelegramSignalMessage:
     tp2: Any = NA
     tp3: Any = NA
     planned_rr: Any = NA
+    current_context: Any = NA
+    needs_next: tuple[Any, ...] = ()
     structure_reason: Any = NA
     confirmation_needed: Any = NA
     invalidation_reason: Any = NA
+    watchlist_invalidation_reason: Any = NA
     confluence: Any = NA
     htf_bias: Any = NA
     ob_fvg_status: Any = NA
@@ -97,27 +101,24 @@ def format_watchlist_alert(message: TelegramSignalMessage) -> str:
         "WATCHLIST",
         "",
         "Watch Zone:",
-        _entry_range(message),
+        _watch_zone(message),
         "",
-        "Stop Loss:",
-        _display(message.stop_loss),
+        "Current Context:",
+        _display(message.current_context),
         "",
-        "Potential Targets:",
+        "Needs Next:",
+        *_needs_next_lines(message.needs_next),
+        "",
+        "Potential Plan:",
+        f"Entry: {_entry_range(message)}",
+        f"SL: {_display(message.stop_loss)}",
         f"TP1: {_display(message.tp1)}",
         f"TP2: {_display(message.tp2)}",
         f"TP3: {_display(message.tp3)}",
-        "",
-        "Planned RR:",
-        _rr_with_unit(message.planned_rr),
-        "",
-        "Structure:",
-        _display(message.structure_reason),
-        "",
-        "Confirmation Needed:",
-        _display(message.confirmation_needed),
+        f"Planned RR: {_rr_with_unit(message.planned_rr)}",
         "",
         "Invalidation:",
-        _display(message.invalidation_reason),
+        _first_display(message.watchlist_invalidation_reason, message.invalidation_reason),
         "",
         "Signal ID:",
         _display(message.signal_id),
@@ -370,6 +371,33 @@ def format_expired_update(message: TelegramSignalMessage) -> str:
 
 def _entry_range(message: TelegramSignalMessage) -> str:
     return f"{_display(message.entry_low)} {RANGE_DASH} {_display(message.entry_high)}"
+
+
+def _watch_zone(message: TelegramSignalMessage) -> str:
+    watch_zone = _display(message.watch_zone)
+    return watch_zone if watch_zone != NA else _entry_range(message)
+
+
+def _needs_next_lines(values: Sequence[Any]) -> tuple[str, ...]:
+    lines: list[str] = []
+    if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
+        for value in values:
+            text = _display(value)
+            if text != NA:
+                lines.append(text)
+            if len(lines) == 3:
+                break
+    if not lines:
+        lines.append("N/A \u2014 waiting for the next lifecycle update from the core engine.")
+    return tuple(f"{index}. {line}" for index, line in enumerate(lines, start=1))
+
+
+def _first_display(*values: Any) -> str:
+    for value in values:
+        text = _display(value)
+        if text != NA:
+            return text
+    return NA
 
 
 def _join(*lines: str) -> str:

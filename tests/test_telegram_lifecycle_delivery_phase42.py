@@ -12,6 +12,7 @@ from app.alerts.telegram_lifecycle import (
     TelegramAlertType,
     TelegramEligibilityContext,
     TelegramLifecycleDeliveryService,
+    _signal_id,
     telegram_alert_decision_for_symbol,
     telegram_signal_message_from_symbol,
 )
@@ -248,7 +249,7 @@ def test_confirmed_and_watchlist_lifecycle_states_are_eligible() -> None:
     assert watchlist.alert_type == "WATCHLIST"
 
 
-def test_near_miss_rejected_and_unchanged_states_are_not_eligible() -> None:
+def test_watchlist_near_miss_routes_to_watchlist_not_confirmed() -> None:
     rejected = telegram_alert_decision_for_symbol(_symbol(SetupLifecycleState.REJECTED))
     no_setup = telegram_alert_decision_for_symbol(
         _symbol(
@@ -274,19 +275,113 @@ def test_near_miss_rejected_and_unchanged_states_are_not_eligible() -> None:
     assert rejected.reason == "lifecycle_state_not_eligible"
     assert no_setup.eligible is False
     assert "core_status_blocked:scanned_no_setup" in no_setup.reason
-    assert near_miss.eligible is False
-    assert "setup_quality_not_confirmed:watchlist_near_miss" in near_miss.reason
+    assert near_miss.eligible is True
+    assert near_miss.alert_type == TelegramAlertType.WATCHLIST
     assert unchanged.eligible is False
     assert unchanged.reason == "unchanged_lifecycle_state"
 
 
-def test_weak_watch_state_missing_required_fields_is_not_eligible() -> None:
+def test_watchlist_alert_allows_na_rr_when_setup_is_not_fully_formed() -> None:
     weak = telegram_alert_decision_for_symbol(
         _symbol(SetupLifecycleState.STALKING, diagnostics=_diagnostics(rr_to_tp2=NA))
     )
 
-    assert weak.eligible is False
-    assert weak.reason.startswith("missing_required_fields")
+    assert weak.eligible is True
+    assert weak.alert_type == TelegramAlertType.WATCHLIST
+    assert weak.message is not None
+    assert weak.message.planned_rr == NA
+
+
+def test_no_ob_fvg_watchlist_near_miss_sends_watchlist_not_confirmed() -> None:
+    diagnostics = _diagnostics(
+        entry_low=NA,
+        entry_high=NA,
+        stop=NA,
+        tp1=NA,
+        tp2=NA,
+        tp3=NA,
+        rr_to_tp2=NA,
+        first_failed_gate="no_ob_or_fvg_zone",
+        gates_passed=("sweep", "bos_choch"),
+        gates_failed=("no_ob_or_fvg_zone",),
+        execution_sweep_status="passed",
+        confirmation_structure_shift_status="passed",
+        pullback_failure_reason="No valid OB or FVG was found inside the 5m displacement impulse.",
+        next_required_conditions=(
+            "A valid OB or FVG must be found inside the displacement impulse.",
+            "The OB/FVG zone must overlap the preferred fib pullback zone.",
+            "RR and final quality gates must still pass after a valid zone is found.",
+        ),
+        mode="scalp",
+    )
+
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.REJECTED,
+            status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+            rejection_reason="No valid Liquidity-Grab Pullback setup.",
+            rejection_reasons=("No valid Liquidity-Grab Pullback setup.",),
+            diagnostics=diagnostics,
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+        )
+    )
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.message is not None
+    text = format_telegram_signal_message(decision.alert_type, decision.message)
+    assert "CANDLE CRAFT WATCHLIST" in text
+    assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
+    assert "Price has produced a clean sweep and LTF BOS/CHoCH" in text
+    assert "no valid OB/FVG pullback zone" in text
+    assert "A valid OB or FVG must be found inside the displacement impulse." in text
+    assert "Planned RR: N/A" in text
+    assert "Watchlist invalidates if" in text
+    assert "\nInvalid if price" not in text
+    assert "System:\nWatchlist only. No active signal yet." in text
+
+
+def test_action_watchlist_only_sends_watchlist_not_confirmed() -> None:
+    quality = _setup_quality(SetupQualityState.REJECTED_NO_EDGE, quality_score=41).model_copy(
+        update={"action_label": "Watchlist only"}
+    )
+
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.REJECTED,
+            status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+            rejection_reason="No valid Liquidity-Grab Pullback setup.",
+            diagnostics=_diagnostics(first_failed_gate="no_ob_or_fvg_zone", rr_to_tp2=NA),
+            setup_quality=quality,
+        )
+    )
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+
+
+def test_fallback_signal_id_is_stable_for_same_watchlist_candidate() -> None:
+    diagnostics = _diagnostics(
+        entry_low=NA,
+        entry_high=NA,
+        stop=NA,
+        tp1=NA,
+        tp2=NA,
+        tp3=NA,
+        rr_to_tp2=NA,
+        first_failed_gate="no_ob_or_fvg_zone",
+        pullback_failure_reason="No valid OB or FVG was found inside the 5m displacement impulse.",
+        mode="scalp",
+        sweep_level=Decimal("0.16406"),
+    )
+    first = _symbol(
+        SetupLifecycleState.REJECTED,
+        diagnostics=diagnostics,
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+    ).model_copy(update={"lifecycle_state": None, "lifecycle_transition": None, "current_price": Decimal("0.17000")})
+    repeated = first.model_copy(update={"current_price": Decimal("0.17123")})
+
+    assert _signal_id(first) == _signal_id(repeated)
 
 
 def test_updates_require_prior_active_telegram_alert() -> None:
@@ -337,6 +432,102 @@ def test_duplicate_confirmed_signal_is_not_sent_twice(tmp_path: Path) -> None:
     assert len(attempts) == 1
     assert attempts[0].alert_type == "SIGNAL_CONFIRMED"
     assert attempts[0].scan_run_id == "run-001"
+
+
+def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+        min_rr=Decimal("3"),
+        min_score_for_idea=Decimal("80"),
+    )
+
+    watchlist = run(
+        service.deliver_for_run(
+            _run_result(_symbol(SetupLifecycleState.WATCHLISTED, signal_id="sig-life")),
+            scan_run_id="run-watch",
+        )
+    )
+    confirmed = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.CONFIRMED,
+                    previous=SetupLifecycleState.TRIGGERED,
+                    signal_id="sig-life",
+                )
+            ),
+            scan_run_id="run-confirm",
+        )
+    )
+    duplicate_confirmed = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.CONFIRMED,
+                    previous=SetupLifecycleState.TRIGGERED,
+                    signal_id="sig-life",
+                )
+            ),
+            scan_run_id="run-confirm",
+        )
+    )
+
+    assert watchlist.sent == 1
+    assert confirmed.sent == 1
+    assert duplicate_confirmed.duplicate == 1
+    assert "CANDLE CRAFT WATCHLIST" in sender.messages[0]
+    assert "CANDLE CRAFT SIGNAL CONFIRMED" in sender.messages[1]
+
+
+def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+
+    watchlist = run(
+        service.deliver_for_run(
+            _run_result(_symbol(SetupLifecycleState.WATCHLISTED, signal_id="sig-invalidates")),
+            scan_run_id="run-watch",
+        )
+    )
+    invalidated = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.INVALIDATED,
+                    previous=SetupLifecycleState.WATCHLISTED,
+                    signal_id="sig-invalidates",
+                )
+            ),
+            scan_run_id="run-invalid",
+        )
+    )
+    duplicate_invalidated = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.INVALIDATED,
+                    previous=SetupLifecycleState.WATCHLISTED,
+                    signal_id="sig-invalidates",
+                )
+            ),
+            scan_run_id="run-invalid",
+        )
+    )
+
+    assert watchlist.sent == 1
+    assert invalidated.sent == 1
+    assert duplicate_invalidated.duplicate == 1
+    assert "CANDLE CRAFT WATCHLIST" in sender.messages[0]
+    assert "CANDLE CRAFT INVALIDATION" in sender.messages[1]
 
 
 def test_missing_telegram_credentials_skip_safely_and_persist_attempt(tmp_path: Path) -> None:

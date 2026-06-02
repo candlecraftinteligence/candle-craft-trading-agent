@@ -62,6 +62,16 @@ WATCHLIST_BLOCKED_QUALITY_STATE_KEYS = {
     "data_issue",
     "rejected_no_edge",
 }
+WATCHLIST_HARD_STATUS_BLOCKERS = {
+    "scan_error",
+    "failed",
+}
+WATCHLIST_ACTION_KEYS = {
+    "watchlist_only",
+}
+WATCHLIST_LIFECYCLE_ACTION_KEYS = {
+    "watchlist",
+}
 INVALIDATION_REJECTION_FRAGMENTS = (
     "technical score",
     "opportunity score",
@@ -451,6 +461,7 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
         symbol=symbol_result.symbol,
         direction=direction,
         signal_id=_signal_id(symbol_result),
+        watch_zone=_watch_zone_text(symbol_result, diagnostics),
         entry_low=_first_non_na(
             _field(setup, "entry_low"),
             diagnostics.get("entry_low"),
@@ -479,6 +490,8 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
             diagnostics.get("rr_to_tp2"),
             getattr(trade_idea, "best_rr", NA) if trade_idea is not None else NA,
         ),
+        current_context=_watchlist_context_sentence(symbol_result, diagnostics),
+        needs_next=_watchlist_needs_next(symbol_result, diagnostics),
         structure_reason=_first_non_na(
             getattr(trade_idea, "reason_for_trade", NA) if trade_idea is not None else NA,
             diagnostics.get("structure_reason"),
@@ -517,7 +530,19 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
                 getattr(trade_idea, "invalidation", NA) if trade_idea is not None else NA,
                 _field(setup, "invalidation"),
                 diagnostics.get("invalidation"),
+                _near_miss_invalidation_hint(symbol_result, diagnostics),
                 getattr(lifecycle, "invalidation_reason", NA),
+            ),
+        ),
+        watchlist_invalidation_reason=_watchlist_invalidation_sentence(
+            symbol_result,
+            diagnostics,
+            direction=direction,
+            stop_loss=_first_non_na(
+                _field(setup, "stop"),
+                diagnostics.get("stop"),
+                _level_field(getattr(trade_idea, "stop_loss", None), "price"),
+                diagnostics.get("stop_loss"),
             ),
         ),
         confluence=_human_confluence_sentence(symbol_result, diagnostics),
@@ -541,6 +566,174 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
     )
 
 
+def _watch_zone_text(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    return _first_non_na(
+        diagnostics.get("watch_zone"),
+        diagnostics.get("entry_zone"),
+        diagnostics.get("pullback_zone"),
+        diagnostics.get("preferred_fib_pullback_zone"),
+        diagnostics.get("fib_pullback_zone"),
+    )
+
+
+def _watchlist_context_sentence(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    failed_gate = _watch_failed_gate(symbol_result, diagnostics)
+    reason = _watch_reason(symbol_result, diagnostics)
+    structure = _watch_structure_context(symbol_result, diagnostics)
+    rr_missing = _decimal_or_none(
+        _first_non_na(diagnostics.get("rr_to_tp2"), diagnostics.get("planned_rr"))
+    ) is None
+
+    if failed_gate == "no_ob_or_fvg_zone":
+        sentence = (
+            f"{structure}, but the setup is not confirmed yet because no valid OB/FVG pullback zone "
+            "was found inside the displacement impulse."
+        )
+    elif "fib" in failed_gate:
+        sentence = f"{structure}, but fib alignment still needs confirmation before the setup can activate."
+    elif failed_gate in {"missing_rr", "missing_target", "rr_below_minimum", "challenge_rr_below_3", "rr_too_low"}:
+        sentence = f"{structure}, but final RR still needs validation before the setup can activate."
+    elif reason != NA:
+        sentence = f"{structure}, but the setup is not confirmed yet because {_lower_first(_clean_watch_text(reason))}"
+    else:
+        sentence = f"{structure}, but the setup is not confirmed yet."
+
+    if not sentence.endswith((".", "!", "?")):
+        sentence = f"{sentence}."
+    if rr_missing and "RR still needs validation" not in sentence:
+        sentence = f"{sentence} Final RR still needs validation after the entry zone forms."
+    return sentence
+
+
+def _watchlist_needs_next(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> tuple[str, ...]:
+    intelligence = _near_miss_intelligence(symbol_result, diagnostics)
+    candidates = (
+        _field(intelligence, "next_required_conditions"),
+        diagnostics.get("needs_next"),
+        diagnostics.get("next_required_conditions"),
+        diagnostics.get("next_conditions"),
+        diagnostics.get("next_condition"),
+        diagnostics.get("next_trigger_needed"),
+    )
+    lines: list[str] = []
+    for candidate in candidates:
+        for value in _sequence_or_single(candidate):
+            text = _clean_watch_text(value)
+            if text != NA and text not in lines:
+                lines.append(text)
+            if len(lines) == 3:
+                return tuple(lines)
+    return ("N/A \u2014 waiting for the next lifecycle update from the core engine.",)
+
+
+def _watchlist_invalidation_sentence(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    *,
+    direction: Any,
+    stop_loss: Any,
+) -> str:
+    stop = _text(stop_loss)
+    side = _status_key(direction)
+    if stop != NA:
+        side_word = "below" if side == "long" else "above" if side == "short" else "through"
+        return (
+            f"Watchlist invalidates if price accepts {side_word} {stop} or the sweep/BOS/CHoCH "
+            "structure fails before a valid OB/FVG pullback forms."
+        )
+
+    raw = _clean_public_sentence(
+        _first_non_na(
+            _near_miss_invalidation_hint(symbol_result, diagnostics),
+            diagnostics.get("watchlist_invalidation"),
+            diagnostics.get("invalidation_hint"),
+            getattr(symbol_result.lifecycle_state, "invalidation_reason", NA),
+        )
+    )
+    if raw != NA:
+        return _as_watchlist_invalidation(raw)
+    return (
+        "Watchlist invalidates if the sweep/BOS/CHoCH context fails, expires, or price breaks "
+        "the structure that created the watchlist candidate."
+    )
+
+
+def _as_watchlist_invalidation(value: Any) -> str:
+    text = _clean_watch_text(value)
+    if text == NA:
+        return NA
+    key = text.lower()
+    if key.startswith("watchlist invalidates"):
+        return text
+    if key.startswith("invalidated if"):
+        return "Watchlist invalidates if" + text[len("Invalidated if") :]
+    if key.startswith("invalidates if"):
+        return "Watchlist invalidates if" + text[len("Invalidates if") :]
+    if key.startswith("invalid if"):
+        return "Watchlist invalidates if" + text[len("Invalid if") :]
+    if key.startswith("signal invalidates if"):
+        return "Watchlist invalidates if" + text[len("Signal invalidates if") :]
+    return text
+
+
+def _watch_structure_context(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    gates_passed = {_status_key(value) for value in _sequence_or_single(diagnostics.get("gates_passed"))}
+    sweep = (
+        bool(symbol_result.sweep_detected)
+        or _status_key(diagnostics.get("execution_sweep_status")) == "passed"
+        or "sweep" in gates_passed
+    )
+    confirmation = (
+        bool(symbol_result.bos_detected or symbol_result.choch_detected)
+        or _status_key(diagnostics.get("confirmation_structure_shift_status")) == "passed"
+        or "bos_choch" in gates_passed
+    )
+    if sweep and confirmation:
+        return "Price has produced a clean sweep and LTF BOS/CHoCH"
+    if sweep:
+        return "Price has produced a sweep, while LTF BOS/CHoCH still needs confirmation"
+    if confirmation:
+        return "LTF structure has shifted, while the sweep context still needs confirmation"
+    return "Core structure is still developing"
+
+
+def _watch_failed_gate(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    intelligence = _near_miss_intelligence(symbol_result, diagnostics)
+    return _status_key(
+        _first_non_na(
+            _field(intelligence, "primary_failed_gate"),
+            diagnostics.get("first_failed_gate"),
+            getattr(symbol_result.lifecycle_state, "failed_gate", NA),
+            symbol_result.rejection_stage,
+        )
+    )
+
+
+def _watch_reason(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    intelligence = _near_miss_intelligence(symbol_result, diagnostics)
+    return _first_non_na(
+        _field(intelligence, "short_reason"),
+        diagnostics.get("pullback_failure_reason"),
+        diagnostics.get("ob_fvg_diagnostics"),
+        diagnostics.get("fib_diagnostics"),
+        diagnostics.get("rr_diagnostics"),
+        symbol_result.rejection_reason,
+    )
+
+
+def _near_miss_invalidation_hint(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    intelligence = _near_miss_intelligence(symbol_result, diagnostics)
+    return _first_non_na(_field(intelligence, "invalidation_hint"), diagnostics.get("invalidation_hint"))
+
+
+def _near_miss_intelligence(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Any:
+    intelligence = symbol_result.near_miss_intelligence
+    if intelligence is not None:
+        return intelligence
+    payload = diagnostics.get("near_miss_intelligence")
+    return payload if isinstance(payload, Mapping) else None
+
+
 def _alert_type_for_transition(
     symbol_result: ScannerSymbolResult,
     transition: SetupTransitionResult,
@@ -549,6 +742,8 @@ def _alert_type_for_transition(
     if state in WATCH_ALERT_STATES:
         return TelegramAlertType.WATCHLIST
     if state in SIGNAL_ALERT_STATES:
+        if _explicit_watchlist_candidate(symbol_result):
+            return TelegramAlertType.WATCHLIST
         return TelegramAlertType.SIGNAL_CONFIRMED
     if state == SetupLifecycleState.MANAGING:
         return TelegramAlertType.LIMIT_HIT
@@ -560,6 +755,8 @@ def _alert_type_for_transition(
         return TelegramAlertType.INVALIDATED
     if state == SetupLifecycleState.EXPIRED:
         return TelegramAlertType.EXPIRED
+    if _explicit_watchlist_candidate(symbol_result):
+        return TelegramAlertType.WATCHLIST
     return None
 
 
@@ -591,7 +788,7 @@ def _missing_required_fields(alert_type: TelegramAlertType, message: TelegramSig
         ("symbol", message.symbol),
         ("direction", message.direction),
     ]
-    if alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}:
+    if alert_type in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}:
         required.extend(
             [
                 ("entry_low", message.entry_low),
@@ -600,7 +797,14 @@ def _missing_required_fields(alert_type: TelegramAlertType, message: TelegramSig
                 ("planned_rr", message.planned_rr),
             ]
         )
-    if alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.INVALIDATED}:
+    if alert_type == TelegramAlertType.WATCHLIST:
+        required.append(
+            (
+                "invalidation_reason",
+                _first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason),
+            )
+        )
+    elif alert_type in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.INVALIDATED}:
         required.append(("invalidation_reason", message.invalidation_reason))
     if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
         required.extend((("tp1", message.tp1), ("tp2", message.tp2), ("tp3", message.tp3)))
@@ -623,13 +827,16 @@ def _defensive_delivery_blockers(
 ) -> tuple[str, ...]:
     if alert_type == TelegramAlertType.WATCHLIST:
         blockers: list[str] = []
-        blockers.extend(_core_status_blockers(symbol_result))
+        explicit_watchlist = _explicit_watchlist_candidate(symbol_result)
+        blockers.extend(_watchlist_status_blockers(symbol_result, explicit_watchlist=explicit_watchlist))
         quality_state = _setup_quality_state_key(symbol_result)
-        if quality_state in WATCHLIST_BLOCKED_QUALITY_STATE_KEYS:
+        if quality_state == "data_issue":
             blockers.append(f"setup_quality_blocked:{quality_state}")
-        if _text(symbol_result.rejection_reason) != NA:
+        elif quality_state in WATCHLIST_BLOCKED_QUALITY_STATE_KEYS and not explicit_watchlist:
+            blockers.append(f"setup_quality_blocked:{quality_state}")
+        if _text(symbol_result.rejection_reason) != NA and not explicit_watchlist:
             blockers.append("rejection_reason_present")
-        if any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
+        if any(_text(reason) != NA for reason in symbol_result.rejection_reasons) and not explicit_watchlist:
             blockers.append("rejection_reasons_present")
         return tuple(dict.fromkeys(blockers))
 
@@ -695,6 +902,20 @@ def _core_status_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]
     return tuple(dict.fromkeys(blockers))
 
 
+def _watchlist_status_blockers(
+    symbol_result: ScannerSymbolResult,
+    *,
+    explicit_watchlist: bool,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    for status_key in _status_keys(symbol_result):
+        if status_key in WATCHLIST_HARD_STATUS_BLOCKERS:
+            blockers.append(f"core_status_blocked:{status_key}")
+        elif not explicit_watchlist and status_key in CONFIRMED_REJECTED_STATUS_KEYS:
+            blockers.append(f"core_status_blocked:{status_key}")
+    return tuple(dict.fromkeys(blockers))
+
+
 def _status_keys(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
     values: list[Any] = [getattr(symbol_result.status, "value", symbol_result.status)]
     values.extend(getattr(status, "value", status) for status in symbol_result.status_history)
@@ -704,6 +925,33 @@ def _status_keys(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
 def _setup_quality_state_key(symbol_result: ScannerSymbolResult) -> str:
     quality_state = getattr(symbol_result.setup_quality, "quality_state", NA)
     return _status_key(getattr(quality_state, "value", quality_state))
+
+
+def _explicit_watchlist_candidate(symbol_result: ScannerSymbolResult) -> bool:
+    diagnostics = _representative_diagnostics(symbol_result)
+    lifecycle = symbol_result.lifecycle_state
+    intelligence = _near_miss_intelligence(symbol_result, diagnostics)
+    quality_state = _setup_quality_state_key(symbol_result)
+    if quality_state == "watchlist_near_miss":
+        return True
+
+    action_values = (
+        getattr(symbol_result.setup_quality, "action_label", NA),
+        getattr(lifecycle, "action_label", NA) if lifecycle is not None else NA,
+        _field(intelligence, "action_label"),
+        _field(intelligence, "watchlist_status"),
+        diagnostics.get("action_label"),
+        diagnostics.get("watchlist_status"),
+    )
+    if any(_status_key(value) in WATCHLIST_ACTION_KEYS for value in action_values):
+        return True
+
+    pullback_payload = diagnostics.get("pullback_intelligence")
+    lifecycle_action = _first_non_na(
+        _field(_field(pullback_payload, "projection"), "lifecycle_action"),
+        diagnostics.get("lifecycle_action"),
+    )
+    return _status_key(lifecycle_action) in WATCHLIST_LIFECYCLE_ACTION_KEYS
 
 
 def _persist_blocked_decision(decision: TelegramAlertDecision) -> bool:
@@ -828,6 +1076,7 @@ def _signal_id(symbol_result: ScannerSymbolResult) -> str:
     )
     mode = _first_non_na(
         symbol_result.valid_strategy_modes[0] if symbol_result.valid_strategy_modes else NA,
+        symbol_result.rejected_strategy_modes[0] if symbol_result.rejected_strategy_modes else NA,
         getattr(lifecycle, "mode", NA),
         diagnostics.get("mode"),
     )
@@ -835,6 +1084,12 @@ def _signal_id(symbol_result: ScannerSymbolResult) -> str:
         symbol_result.symbol,
         direction,
         mode,
+        _first_non_na(
+            diagnostics.get("initial_sweep_level"),
+            diagnostics.get("sweep_level"),
+            diagnostics.get("swing_level"),
+            diagnostics.get("ltf_swing_level"),
+        ),
         _first_non_na(_field(setup, "entry_low"), diagnostics.get("entry_low"), _level_field(getattr(trade_idea, "entry_zone", None), "low")),
         _first_non_na(_field(setup, "entry_high"), diagnostics.get("entry_high"), _level_field(getattr(trade_idea, "entry_zone", None), "high")),
         _first_non_na(_field(setup, "stop"), diagnostics.get("stop"), _level_field(getattr(trade_idea, "stop_loss", None), "price")),
@@ -842,6 +1097,13 @@ def _signal_id(symbol_result: ScannerSymbolResult) -> str:
         _first_non_na(_field(setup, "tp2"), diagnostics.get("tp2"), _take_profit(trade_idea, 2)),
         _first_non_na(_field(setup, "tp3"), diagnostics.get("tp3"), _take_profit(trade_idea, 3)),
         _first_non_na(getattr(trade_idea, "invalidation", NA) if trade_idea is not None else NA, _field(setup, "invalidation"), diagnostics.get("invalidation")),
+        _watch_failed_gate(symbol_result, diagnostics),
+        _watch_reason(symbol_result, diagnostics),
+        _first_non_na(
+            diagnostics.get("lifecycle_source_timestamp"),
+            diagnostics.get("setup_source_timestamp"),
+            diagnostics.get("signal_source_timestamp"),
+        ),
     )
     digest = hashlib.sha256("|".join(_text(part) for part in stable_parts).encode("utf-8")).hexdigest()[:20]
     return f"{symbol_result.symbol}-{digest}"
@@ -1141,6 +1403,30 @@ def _first_non_na(*values: Any) -> Any:
         if _text(value) != NA:
             return value
     return NA
+
+
+def _sequence_or_single(value: Any) -> tuple[Any, ...]:
+    if value is None or value == NA:
+        return ()
+    if isinstance(value, Mapping):
+        return ()
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return tuple(value)
+    return (value,)
+
+
+def _clean_watch_text(value: Any) -> str:
+    text = _text(value)
+    if text == NA:
+        return NA
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _lower_first(value: Any) -> str:
+    text = _clean_watch_text(value)
+    if text == NA:
+        return NA
+    return text[:1].lower() + text[1:]
 
 
 def _record_from_row(row: sqlite3.Row) -> TelegramAlertAttemptRecord:

@@ -56,7 +56,9 @@ def test_watchlist_formatter_includes_required_fields() -> None:
     assert "CANDLE CRAFT WATCHLIST" in text
     assert "Status:\nWATCHLIST" in text
     assert "Watch Zone:\n100 \u2013 102" in text
-    assert "Confirmation Needed:\n5m BOS/CHoCH." in text
+    assert "Current Context:\n" in text
+    assert "Needs Next:\n1. N/A \u2014 waiting for the next lifecycle update from the core engine." in text
+    assert "Potential Plan:\nEntry: 100 \u2013 102" in text
     assert "System:\nWatchlist only. No active signal yet." in text
 
 
@@ -107,6 +109,41 @@ def test_unavailable_fields_render_as_na() -> None:
     assert "Planned RR:\nN/A" in text
     assert "N/AR" not in text
     assert "Confluence:" in text
+
+
+def test_watchlist_formatter_allows_incomplete_plan_fields() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(
+            entry_low=NA,
+            entry_high=NA,
+            stop_loss=NA,
+            tp1=NA,
+            tp2=NA,
+            tp3=NA,
+            planned_rr=NA,
+            current_context=(
+                "Price has produced a clean sweep and LTF BOS/CHoCH, but the setup is not confirmed yet "
+                "because no valid OB/FVG pullback zone was found inside the displacement impulse."
+            ),
+            needs_next=(
+                "A valid OB or FVG must be found inside the displacement impulse.",
+                "The OB/FVG zone must overlap the preferred fib pullback zone.",
+                "RR and final quality gates must still pass after a valid zone is found.",
+            ),
+            watchlist_invalidation_reason=(
+                "Watchlist invalidates if the sweep/BOS/CHoCH context fails, expires, or price breaks "
+                "the structure that created the watchlist candidate."
+            ),
+        ),
+    )
+
+    assert "Entry: N/A \u2013 N/A" in text
+    assert "SL: N/A" in text
+    assert "Planned RR: N/A" in text
+    assert "System:\nWatchlist only. No active signal yet." in text
+    for forbidden in ("Setup Type", "Signal confirmed", "Decimal(", "{", "}", "True", "False"):
+        assert forbidden not in text
 
 
 def test_confluence_formatter_does_not_dump_raw_internal_data() -> None:
