@@ -118,6 +118,24 @@ def _diagnostics(**overrides: object) -> dict[str, object]:
     return data
 
 
+def _public_ready_watchlist_diagnostics(**overrides: object) -> dict[str, object]:
+    data = _diagnostics(
+        first_failed_gate="no_ob_or_fvg_zone",
+        gates_passed=("sweep", "bos_choch"),
+        gates_failed=("no_ob_or_fvg_zone",),
+        execution_sweep_status="passed",
+        confirmation_structure_shift_status="passed",
+        pullback_failure_reason="No valid OB or FVG was found inside the 5m displacement impulse.",
+        next_required_conditions=(
+            "A valid OB/FVG zone must form inside the displacement impulse.",
+            "The OB/FVG zone must overlap the preferred fib pullback zone.",
+            "RR and final quality gates must pass before confirmation.",
+        ),
+    )
+    data.update(overrides)
+    return data
+
+
 def _trade_idea(**overrides: object):
     data: dict[str, object] = {
         "symbol": "BTCUSDT",
@@ -217,6 +235,14 @@ def _run_result(symbol_result: ScannerSymbolResult) -> ScannerRunResult:
     )
 
 
+def _with_lifecycle_direction(symbol_result: ScannerSymbolResult, direction: str) -> ScannerSymbolResult:
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_transition is not None
+    record = symbol_result.lifecycle_state.model_copy(update={"direction": direction})
+    transition = symbol_result.lifecycle_transition.model_copy(update={"record": record})
+    return symbol_result.model_copy(update={"lifecycle_state": record, "lifecycle_transition": transition})
+
+
 def _seed_prior_active_alert(db_path: Path, *, signal_id: str) -> None:
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         repository.insert_attempt(
@@ -241,7 +267,9 @@ def test_confirmed_and_watchlist_lifecycle_states_are_eligible() -> None:
         _symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
-    watchlist = telegram_alert_decision_for_symbol(_symbol(SetupLifecycleState.WATCHLISTED))
+    watchlist = telegram_alert_decision_for_symbol(
+        _symbol(SetupLifecycleState.WATCHLISTED, diagnostics=_public_ready_watchlist_diagnostics())
+    )
 
     assert confirmed.eligible is True
     assert confirmed.alert_type == "SIGNAL_CONFIRMED"
@@ -263,6 +291,7 @@ def test_watchlist_near_miss_routes_to_watchlist_not_confirmed() -> None:
         _symbol(
             SetupLifecycleState.CONFIRMED,
             previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_public_ready_watchlist_diagnostics(),
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=72),
         ),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
@@ -283,7 +312,7 @@ def test_watchlist_near_miss_routes_to_watchlist_not_confirmed() -> None:
 
 def test_watchlist_alert_allows_na_rr_when_setup_is_not_fully_formed() -> None:
     weak = telegram_alert_decision_for_symbol(
-        _symbol(SetupLifecycleState.STALKING, diagnostics=_diagnostics(rr_to_tp2=NA))
+        _symbol(SetupLifecycleState.STALKING, diagnostics=_public_ready_watchlist_diagnostics(rr_to_tp2=NA))
     )
 
     assert weak.eligible is True
@@ -292,7 +321,7 @@ def test_watchlist_alert_allows_na_rr_when_setup_is_not_fully_formed() -> None:
     assert weak.message.planned_rr == NA
 
 
-def test_no_ob_fvg_watchlist_near_miss_sends_watchlist_not_confirmed() -> None:
+def test_no_ob_fvg_watchlist_near_miss_without_plan_is_blocked() -> None:
     diagnostics = _diagnostics(
         entry_low=NA,
         entry_high=NA,
@@ -326,19 +355,149 @@ def test_no_ob_fvg_watchlist_near_miss_sends_watchlist_not_confirmed() -> None:
         )
     )
 
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "watchlist_missing_trackable_plan:all_plan_fields_na" in decision.reason
+
+
+def test_watchlist_with_na_direction_is_blocked() -> None:
+    symbol = _with_lifecycle_direction(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(bias=NA, direction=NA),
+        ),
+        NA,
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "watchlist_not_public_ready:missing_public_fields=direction" in decision.reason
+
+
+def test_btc_bnb_style_na_heavy_watchlists_are_blocked() -> None:
+    diagnostics = _public_ready_watchlist_diagnostics(
+        entry_low=NA,
+        entry_high=NA,
+        stop=NA,
+        tp1=NA,
+        tp2=NA,
+        tp3=NA,
+        rr_to_tp2=NA,
+    )
+
+    for symbol_name in ("BTCUSDT", "BNBUSDT"):
+        symbol = _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            signal_id=f"{symbol_name.lower()}-na-watch",
+            diagnostics=diagnostics,
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+        ).model_copy(update={"symbol": symbol_name})
+
+        decision = telegram_alert_decision_for_symbol(symbol)
+
+        assert decision.eligible is False
+        assert decision.alert_type == TelegramAlertType.WATCHLIST
+        assert "watchlist_missing_trackable_plan:all_plan_fields_na" in decision.reason
+
+
+def test_action_watchlist_only_with_all_plan_fields_na_is_blocked() -> None:
+    quality = _setup_quality(SetupQualityState.REJECTED_NO_EDGE, quality_score=41).model_copy(
+        update={"action_label": "Watchlist only"}
+    )
+
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.REJECTED,
+            status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+            rejection_reason="No valid Liquidity-Grab Pullback setup.",
+            diagnostics=_public_ready_watchlist_diagnostics(
+                entry_low=NA,
+                entry_high=NA,
+                stop=NA,
+                tp1=NA,
+                tp2=NA,
+                tp3=NA,
+                rr_to_tp2=NA,
+            ),
+            setup_quality=quality,
+        )
+    )
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "watchlist_missing_trackable_plan:all_plan_fields_na" in decision.reason
+
+
+def test_hype_style_public_ready_watchlist_sends_watchlist_not_confirmed() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            signal_id="hype-watch",
+            diagnostics=_public_ready_watchlist_diagnostics(
+                entry_low=Decimal("71.407944"),
+                entry_high=Decimal("71.675"),
+                stop=Decimal("70.77363571"),
+                tp1=Decimal("72.2"),
+                tp2=Decimal("73.1"),
+                tp3=Decimal("74.4"),
+                rr_to_tp2=Decimal("2.9"),
+            ),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=72),
+        ).model_copy(update={"symbol": "HYPEUSDT"})
+    )
+
     assert decision.eligible is True
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert decision.message is not None
     text = format_telegram_signal_message(decision.alert_type, decision.message)
     assert "CANDLE CRAFT WATCHLIST" in text
+    assert "HYPEUSDT | long" in text
     assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
-    assert "Price has produced a clean sweep and LTF BOS/CHoCH" in text
-    assert "no valid OB/FVG pullback zone" in text
-    assert "A valid OB or FVG must be found inside the displacement impulse." in text
-    assert "Planned RR: N/A" in text
+    assert "Watch Zone:\n71.407944 \u2013 71.675" in text
+    assert "Planned RR: 2.9R" in text
+    assert "final RR" in text or "Final RR" in text
     assert "Watchlist invalidates if" in text
-    assert "\nInvalid if price" not in text
     assert "System:\nWatchlist only. No active signal yet." in text
+
+
+def test_watchlist_context_avoids_awkward_raw_confirmation_wording() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.STALKING,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="missing_confirmation_structure_shift",
+                confirmation_bos_choch_reason="bullish BOS/CHoCH confirmed by candle close above a previous LTF swing high.",
+            ),
+        )
+    )
+
+    assert decision.eligible is True
+    assert decision.message is not None
+    text = format_telegram_signal_message(decision.alert_type, decision.message)
+    context = text.split("Current Context:\n", 1)[1].split("\n\nNeeds Next:", 1)[0]
+    assert "because bullish BOS/CHoCH confirmed" not in context
+    assert "fresh LTF BOS/CHoCH confirmation is still required" in context
+
+
+def test_rr_below_min_watchlist_never_routes_to_signal_confirmed() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_public_ready_watchlist_diagnostics(rr_to_tp2=Decimal("2.9")),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=72),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.message is not None
+    text = format_telegram_signal_message(decision.alert_type, decision.message)
+    assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
+    assert "Final RR" in text
 
 
 def test_action_watchlist_only_sends_watchlist_not_confirmed() -> None:
@@ -447,7 +606,13 @@ def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> N
 
     watchlist = run(
         service.deliver_for_run(
-            _run_result(_symbol(SetupLifecycleState.WATCHLISTED, signal_id="sig-life")),
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.WATCHLISTED,
+                    signal_id="sig-life",
+                    diagnostics=_public_ready_watchlist_diagnostics(),
+                )
+            ),
             scan_run_id="run-watch",
         )
     )
@@ -494,7 +659,13 @@ def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> Non
 
     watchlist = run(
         service.deliver_for_run(
-            _run_result(_symbol(SetupLifecycleState.WATCHLISTED, signal_id="sig-invalidates")),
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.WATCHLISTED,
+                    signal_id="sig-invalidates",
+                    diagnostics=_public_ready_watchlist_diagnostics(),
+                )
+            ),
             scan_run_id="run-watch",
         )
     )
@@ -552,6 +723,77 @@ def test_missing_telegram_credentials_skip_safely_and_persist_attempt(tmp_path: 
             "SELECT telegram_status, error_message FROM telegram_alert_attempts"
         ).fetchone()
     assert row == ("skipped", "missing_telegram_credentials")
+
+
+def test_blocked_incomplete_watchlist_persists_without_telegram_send(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="blocked-watch",
+        diagnostics=_public_ready_watchlist_diagnostics(
+            entry_low=NA,
+            entry_high=NA,
+            stop=NA,
+            tp1=NA,
+            tp2=NA,
+            tp3=NA,
+            rr_to_tp2=NA,
+        ),
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-blocked"))
+
+    assert summary.blocked == 1
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT telegram_status, attempted_alert_type, blocked_reason, scan_run_id
+            FROM telegram_alert_attempts
+            """
+        ).fetchone()
+    assert row[0] == "blocked"
+    assert row[1] == TelegramAlertType.WATCHLIST.value
+    assert "watchlist_missing_trackable_plan" in row[2]
+    assert row[3] == "run-blocked"
+
+
+def test_blocked_incomplete_watchlist_does_not_spam(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="blocked-watch",
+        diagnostics=_public_ready_watchlist_diagnostics(
+            entry_low=NA,
+            entry_high=NA,
+            stop=NA,
+            tp1=NA,
+            tp2=NA,
+            tp3=NA,
+            rr_to_tp2=NA,
+        ),
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+    )
+
+    first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-blocked"))
+    second = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-blocked"))
+
+    assert first.blocked == 1
+    assert second.duplicate == 1
+    assert sender.messages == []
 
 
 def test_confirmed_alert_is_blocked_when_planned_rr_is_below_min_rr() -> None:
@@ -754,7 +996,11 @@ def test_each_alert_type_is_not_sent_twice(tmp_path: Path) -> None:
     cases = (
         (
             TelegramAlertType.WATCHLIST,
-            _symbol(SetupLifecycleState.WATCHLISTED, signal_id="sig-watchlist"),
+            _symbol(
+                SetupLifecycleState.WATCHLISTED,
+                signal_id="sig-watchlist",
+                diagnostics=_public_ready_watchlist_diagnostics(),
+            ),
             False,
         ),
         (

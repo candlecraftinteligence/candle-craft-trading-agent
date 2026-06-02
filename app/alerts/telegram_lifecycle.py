@@ -72,6 +72,30 @@ WATCHLIST_ACTION_KEYS = {
 WATCHLIST_LIFECYCLE_ACTION_KEYS = {
     "watchlist",
 }
+WATCHLIST_STALE_OR_INCOMPLETE_GATES = {
+    "entry_window_expired",
+    "missing_displacement_impulse",
+    "no_displacement_candle",
+    "missing_stop",
+    "pullback_too_deep",
+    "pullback_beyond_786",
+    "body_acceptance_failure",
+    "structural_breakdown",
+}
+WATCHLIST_OB_FVG_GATES = {
+    "no_ob_or_fvg_zone",
+    "challenge_limit_entry_missing",
+}
+WATCHLIST_RR_GATES = {
+    "missing_rr",
+    "missing_target",
+    "rr_below_minimum",
+    "challenge_rr_below_3",
+    "rr_too_low",
+}
+WATCHLIST_CONFIRMATION_GATES = {
+    "missing_confirmation_structure_shift",
+}
 INVALIDATION_REJECTION_FRAGMENTS = (
     "technical score",
     "opportunity score",
@@ -580,21 +604,36 @@ def _watchlist_context_sentence(symbol_result: ScannerSymbolResult, diagnostics:
     failed_gate = _watch_failed_gate(symbol_result, diagnostics)
     reason = _watch_reason(symbol_result, diagnostics)
     structure = _watch_structure_context(symbol_result, diagnostics)
-    rr_missing = _decimal_or_none(
-        _first_non_na(diagnostics.get("rr_to_tp2"), diagnostics.get("planned_rr"))
-    ) is None
+    planned_rr = _decimal_or_none(_first_non_na(diagnostics.get("rr_to_tp2"), diagnostics.get("planned_rr")))
+    rr_missing = planned_rr is None
+    rr_below_default = planned_rr is not None and planned_rr < DEFAULT_CONFIRMED_MIN_RR
 
-    if failed_gate == "no_ob_or_fvg_zone":
+    if failed_gate in WATCHLIST_STALE_OR_INCOMPLETE_GATES:
         sentence = (
-            f"{structure}, but the setup is not confirmed yet because no valid OB/FVG pullback zone "
-            "was found inside the displacement impulse."
+            "The earlier structure is no longer clean enough for confirmation. "
+            "A fresh liquidity sweep and new BOS/CHoCH are required before this candidate can become valid."
+        )
+    elif failed_gate in WATCHLIST_CONFIRMATION_GATES:
+        sentence = (
+            "Price has swept liquidity, but a fresh LTF BOS/CHoCH confirmation is still required "
+            "before this candidate can become valid."
+        )
+    elif failed_gate in WATCHLIST_OB_FVG_GATES:
+        sentence = (
+            f"{structure}, but the setup is still waiting for a valid OB/FVG pullback zone "
+            "before it can become a confirmed signal."
         )
     elif "fib" in failed_gate:
         sentence = f"{structure}, but fib alignment still needs confirmation before the setup can activate."
-    elif failed_gate in {"missing_rr", "missing_target", "rr_below_minimum", "challenge_rr_below_3", "rr_too_low"}:
+    elif failed_gate in WATCHLIST_RR_GATES or rr_below_default:
         sentence = f"{structure}, but final RR still needs validation before the setup can activate."
+    elif _watchlist_has_public_plan_levels(diagnostics):
+        sentence = (
+            "Price has produced a trackable pullback map, but the setup remains watchlist-only until "
+            "final RR, structure, and quality gates confirm."
+        )
     elif reason != NA:
-        sentence = f"{structure}, but the setup is not confirmed yet because {_lower_first(_clean_watch_text(reason))}"
+        sentence = f"{structure}, but the setup is not confirmed yet. {_clean_watch_text(reason)}"
     else:
         sentence = f"{structure}, but the setup is not confirmed yet."
 
@@ -602,11 +641,34 @@ def _watchlist_context_sentence(symbol_result: ScannerSymbolResult, diagnostics:
         sentence = f"{sentence}."
     if rr_missing and "RR still needs validation" not in sentence:
         sentence = f"{sentence} Final RR still needs validation after the entry zone forms."
+    elif rr_below_default and "RR" not in sentence:
+        sentence = f"{sentence} Final RR must improve to the configured minimum before confirmation."
     return sentence
 
 
 def _watchlist_needs_next(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> tuple[str, ...]:
     intelligence = _near_miss_intelligence(symbol_result, diagnostics)
+    failed_gate = _watch_failed_gate(symbol_result, diagnostics)
+    if failed_gate in WATCHLIST_STALE_OR_INCOMPLETE_GATES:
+        return (
+            "Wait for a fresh liquidity sweep.",
+            "Require a new BOS/CHoCH before confirmation.",
+            "Build a new pullback map with valid OB/FVG and RR.",
+        )
+    if failed_gate in WATCHLIST_CONFIRMATION_GATES:
+        return (
+            "Wait for a 5m BOS/CHoCH close beyond the required LTF swing.",
+            "Keep the sweep context intact before confirmation.",
+            "Only reassess pullback, OB/FVG, fib, RR, and risk after confirmation.",
+        )
+    if failed_gate in WATCHLIST_OB_FVG_GATES:
+        lines = [
+            "A valid OB/FVG zone must form inside the displacement impulse.",
+            "The OB/FVG zone must overlap the preferred fib pullback zone.",
+            "RR and final quality gates must pass before confirmation.",
+        ]
+        return tuple(_append_rr_requirement(lines, diagnostics))
+
     candidates = (
         _field(intelligence, "next_required_conditions"),
         diagnostics.get("needs_next"),
@@ -622,8 +684,33 @@ def _watchlist_needs_next(symbol_result: ScannerSymbolResult, diagnostics: Mappi
             if text != NA and text not in lines:
                 lines.append(text)
             if len(lines) == 3:
-                return tuple(lines)
+                return tuple(_append_rr_requirement(lines, diagnostics))
+    if lines:
+        return tuple(_append_rr_requirement(lines, diagnostics))
     return ("N/A \u2014 waiting for the next lifecycle update from the core engine.",)
+
+
+def _watchlist_has_public_plan_levels(diagnostics: Mapping[str, Any]) -> bool:
+    return (
+        _numeric_pair_values(diagnostics.get("entry_low"), diagnostics.get("entry_high"))
+        or _decimal_or_none(diagnostics.get("stop")) is not None
+        or _decimal_or_none(diagnostics.get("stop_loss")) is not None
+    )
+
+
+def _append_rr_requirement(lines: Sequence[str], diagnostics: Mapping[str, Any]) -> tuple[str, ...]:
+    output = [line for line in lines if _text(line) != NA]
+    planned_rr = _decimal_or_none(_first_non_na(diagnostics.get("rr_to_tp2"), diagnostics.get("planned_rr")))
+    if planned_rr is None or planned_rr >= DEFAULT_CONFIRMED_MIN_RR:
+        return tuple(output[:3])
+    requirement = "Final RR must improve to at least the configured minimum before confirmation."
+    if any("rr" in line.lower() for line in output):
+        return tuple(output[:3])
+    if len(output) >= 3:
+        output[2] = requirement
+    else:
+        output.append(requirement)
+    return tuple(output[:3])
 
 
 def _watchlist_invalidation_sentence(
@@ -689,7 +776,7 @@ def _watch_structure_context(symbol_result: ScannerSymbolResult, diagnostics: Ma
         or "bos_choch" in gates_passed
     )
     if sweep and confirmation:
-        return "Price has produced a clean sweep and LTF BOS/CHoCH"
+        return "Price has swept liquidity and confirmed a LTF BOS/CHoCH"
     if sweep:
         return "Price has produced a sweep, while LTF BOS/CHoCH still needs confirmation"
     if confirmation:
@@ -838,6 +925,7 @@ def _defensive_delivery_blockers(
             blockers.append("rejection_reason_present")
         if any(_text(reason) != NA for reason in symbol_result.rejection_reasons) and not explicit_watchlist:
             blockers.append("rejection_reasons_present")
+        blockers.extend(_watchlist_public_readiness_blockers(symbol_result, message, context))
         return tuple(dict.fromkeys(blockers))
 
     if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
@@ -916,6 +1004,164 @@ def _watchlist_status_blockers(
     return tuple(dict.fromkeys(blockers))
 
 
+def _watchlist_public_readiness_blockers(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+    context: TelegramEligibilityContext,
+) -> tuple[str, ...]:
+    missing: list[str] = []
+    if _text(message.symbol) == NA:
+        missing.append("symbol")
+    if _status_key(message.direction) not in {"long", "short"}:
+        missing.append("direction")
+    if _text(message.signal_id) == NA:
+        missing.append("signal_id")
+
+    if missing:
+        return (f"watchlist_not_public_ready:missing_public_fields={','.join(missing)}",)
+
+    blockers: list[str] = []
+    missing_public = _watchlist_missing_public_sections(message)
+    if missing_public:
+        blockers.append(f"watchlist_not_public_ready:missing_public_fields={','.join(missing_public)}")
+
+    if _watchlist_plan_all_na(message):
+        blockers.append("watchlist_missing_trackable_plan:all_plan_fields_na")
+    elif not _watchlist_has_tracking_anchor(symbol_result, message):
+        blockers.append("watchlist_not_public_ready:no_useful_tracking_anchor")
+
+    if _watchlist_is_mostly_na(message):
+        blockers.append("watchlist_not_public_ready:mostly_na_message")
+
+    planned_rr = _decimal_or_none(message.planned_rr)
+    if planned_rr is not None and planned_rr < context.min_rr and not _watchlist_rr_warning_present(message):
+        blockers.append("watchlist_not_public_ready:rr_warning_missing")
+
+    return tuple(dict.fromkeys(blockers))
+
+
+def _watchlist_missing_public_sections(message: TelegramSignalMessage) -> tuple[str, ...]:
+    missing: list[str] = []
+    context = _text(message.current_context)
+    if context == NA or _looks_raw_or_generic_context(context):
+        missing.append("current_context")
+    needs_next = _usable_needs_next(message.needs_next)
+    if not needs_next:
+        missing.append("needs_next")
+    invalidation = _text(_first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason))
+    if invalidation == NA or _looks_like_rejection_reason(invalidation):
+        missing.append("invalidation")
+    return tuple(missing)
+
+
+def _watchlist_has_tracking_anchor(symbol_result: ScannerSymbolResult, message: TelegramSignalMessage) -> bool:
+    if _numeric_pair_text(message.watch_zone):
+        return True
+    if _numeric_pair_values(message.entry_low, message.entry_high):
+        return True
+    if _decimal_or_none(message.stop_loss) is not None and _usable_needs_next(message.needs_next):
+        return True
+
+    diagnostics = _representative_diagnostics(symbol_result)
+    trackable_level = _first_non_na(
+        diagnostics.get("initial_sweep_level"),
+        diagnostics.get("sweep_level"),
+        diagnostics.get("swing_level"),
+        diagnostics.get("ltf_swing_level"),
+        diagnostics.get("price_level"),
+    )
+    return _decimal_or_none(trackable_level) is not None and _has_structural_tracking_context(message.current_context)
+
+
+def _watchlist_plan_all_na(message: TelegramSignalMessage) -> bool:
+    return (
+        _text(message.entry_low) == NA
+        and _text(message.entry_high) == NA
+        and _text(message.stop_loss) == NA
+        and _text(message.tp1) == NA
+        and _text(message.tp2) == NA
+        and _text(message.tp3) == NA
+        and _text(message.planned_rr) == NA
+    )
+
+
+def _watchlist_is_mostly_na(message: TelegramSignalMessage) -> bool:
+    fields = (
+        message.watch_zone,
+        message.entry_low,
+        message.entry_high,
+        message.stop_loss,
+        message.tp1,
+        message.tp2,
+        message.tp3,
+        message.planned_rr,
+    )
+    na_count = sum(1 for value in fields if _text(value) == NA)
+    return na_count >= 7
+
+
+def _usable_needs_next(values: Sequence[Any]) -> tuple[str, ...]:
+    usable: list[str] = []
+    for value in values:
+        text = _text(value)
+        if text == NA:
+            continue
+        key = text.lower()
+        if "waiting for the next lifecycle update" in key:
+            continue
+        if _looks_like_rejection_reason(text):
+            continue
+        usable.append(text)
+    return tuple(usable)
+
+
+def _watchlist_rr_warning_present(message: TelegramSignalMessage) -> bool:
+    haystack = " ".join(
+        text
+        for text in (
+            _text(message.current_context),
+            " ".join(_text(value) for value in message.needs_next if _text(value) != NA),
+        )
+        if text != NA
+    ).lower()
+    return "rr" in haystack and ("before confirmation" in haystack or "must" in haystack)
+
+
+def _looks_raw_or_generic_context(value: Any) -> bool:
+    text = _text(value)
+    if text == NA:
+        return True
+    lowered = text.lower()
+    return (
+        text in {"Core structure is still developing.", "N/A"}
+        or "{" in text
+        or "}" in text
+        or "decimal(" in lowered
+        or lowered in {"true", "false"}
+    )
+
+
+def _has_structural_tracking_context(value: Any) -> bool:
+    text = _text(value).lower()
+    if text == NA.lower():
+        return False
+    return any(token in text for token in ("sweep", "bos", "choch", "structure", "pullback", "ob/fvg"))
+
+
+def _numeric_pair_values(low: Any, high: Any) -> bool:
+    return _decimal_or_none(low) is not None and _decimal_or_none(high) is not None
+
+
+def _numeric_pair_text(value: Any) -> bool:
+    text = _text(value)
+    if text == NA:
+        return False
+    parts = text.replace("\u2013", "-").split("-")
+    if len(parts) != 2:
+        return False
+    return _decimal_or_none(parts[0].strip()) is not None and _decimal_or_none(parts[1].strip()) is not None
+
+
 def _status_keys(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
     values: list[Any] = [getattr(symbol_result.status, "value", symbol_result.status)]
     values.extend(getattr(status, "value", status) for status in symbol_result.status_history)
@@ -955,7 +1201,9 @@ def _explicit_watchlist_candidate(symbol_result: ScannerSymbolResult) -> bool:
 
 
 def _persist_blocked_decision(decision: TelegramAlertDecision) -> bool:
-    return decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and decision.reason.startswith("blocked:")
+    return decision.alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED} and decision.reason.startswith(
+        "blocked:"
+    )
 
 
 def _persist_blocked_attempt(
@@ -1015,10 +1263,16 @@ def _persist_blocked_attempt(
         signal_id=signal_id,
         alert_type=decision.alert_type.value,
         status="blocked" if inserted else "duplicate",
-        detail="Telegram confirmed alert blocked by defensive eligibility guard.",
+        detail=_blocked_delivery_detail(decision.alert_type),
         message_hash=message_hash,
         error_message=decision.reason,
     )
+
+
+def _blocked_delivery_detail(alert_type: TelegramAlertType) -> str:
+    if alert_type == TelegramAlertType.WATCHLIST:
+        return "Telegram watchlist alert blocked by public readiness guard."
+    return "Telegram confirmed alert blocked by defensive eligibility guard."
 
 
 def _blocked_alert_type(alert_type: TelegramAlertType, reason: str) -> str:
