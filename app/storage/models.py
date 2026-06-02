@@ -121,6 +121,26 @@ class ReplayResultRecord:
 
 
 @dataclass(frozen=True)
+class TelegramAlertAttemptRecord:
+    signal_id: str
+    symbol: str
+    direction: str
+    previous_state: str
+    new_state: str
+    alert_type: str
+    lifecycle_state: str
+    sent_at: str
+    telegram_status: str
+    message_hash: str
+    scan_run_id: str | None = None
+    setup_quality_score: str = "N/A"
+    rr_planned: str = "N/A"
+    price_level: str = "N/A"
+    error_message: str = "N/A"
+    id: int | None = None
+
+
+@dataclass(frozen=True)
 class ScanHistorySummary:
     run_id: str
     timestamp: str

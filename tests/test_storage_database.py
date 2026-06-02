@@ -206,7 +206,7 @@ def test_database_creation(tmp_path) -> None:
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
 
-    assert {"scan_runs", "symbol_results", "setup_candidates", "replay_results"} <= tables
+    assert {"scan_runs", "symbol_results", "setup_candidates", "replay_results", "telegram_alert_attempts"} <= tables
 
 
 def test_scan_run_migration_adds_watch_columns_without_destroying_rows(tmp_path) -> None:

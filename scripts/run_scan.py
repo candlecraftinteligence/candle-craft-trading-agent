@@ -65,6 +65,7 @@ from app.command_center import (  # noqa: E402
     format_watchlist_export,
 )
 from app.core.config import Settings  # noqa: E402
+from app.alerts.telegram_lifecycle import TelegramLifecycleDeliveryService  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
     DisplayBucket,
@@ -366,6 +367,10 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--min-memory-confidence": "min_memory_confidence",
         "--store-scan": "store_scan",
         "--database-path": "database_path",
+        "--telegram-manual-signals": "telegram_manual_signals",
+        "--telegram-signals": "telegram_manual_signals",
+        "--no-telegram-manual-signals": "telegram_manual_signals",
+        "--no-telegram-signals": "telegram_manual_signals",
         "--lifecycle": "lifecycle",
         "--disable-lifecycle": "lifecycle",
         "--show-lifecycle": "show_lifecycle",
@@ -516,6 +521,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--save-run", nargs="?", const=Path("scan_runs/latest_scan.json"), type=Path)
     parser.add_argument("--store-scan", action="store_true")
     parser.add_argument("--database-path", type=Path, default=DEFAULT_DATABASE_PATH)
+    parser.add_argument(
+        "--telegram-manual-signals",
+        "--telegram-signals",
+        dest="telegram_manual_signals",
+        action="store_true",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-telegram-manual-signals",
+        "--no-telegram-signals",
+        dest="telegram_manual_signals",
+        action="store_false",
+    )
     parser.add_argument("--lifecycle", dest="lifecycle", action="store_true", default=None)
     parser.add_argument("--disable-lifecycle", dest="lifecycle", action="store_false")
     parser.add_argument("--show-lifecycle", action="store_true")
@@ -817,8 +835,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
             min_confidence=args.min_memory_confidence,
         )
 
-    lifecycle_scan_run_id = scan_run_id if args.store_scan and _lifecycle_enabled(args) else None
+    lifecycle_scan_run_id = scan_run_id if _lifecycle_scan_run_id_enabled(args) else None
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=lifecycle_scan_run_id)
+    await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
 
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
@@ -1776,7 +1795,11 @@ def _handle_research_command(args: argparse.Namespace) -> None:
 def _lifecycle_enabled(args: argparse.Namespace) -> bool:
     if args.lifecycle is not None:
         return bool(args.lifecycle)
-    return bool(args.watch or args.store_scan or args.show_lifecycle)
+    return bool(args.watch or args.store_scan or args.show_lifecycle or _telegram_manual_signals_enabled(args))
+
+
+def _lifecycle_scan_run_id_enabled(args: argparse.Namespace) -> bool:
+    return bool(_lifecycle_enabled(args) and (args.store_scan or _telegram_manual_signals_enabled(args)))
 
 
 def _reset_lifecycle_state(args: argparse.Namespace) -> None:
@@ -1797,6 +1820,38 @@ def _apply_lifecycle_if_enabled(
         return result
     try:
         return apply_lifecycle_to_run_result(result, database_path=args.database_path, scan_run_id=scan_run_id)
+    except StorageError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _telegram_manual_signal_settings() -> Settings:
+    try:
+        return Settings()
+    except Exception as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _telegram_manual_signals_enabled(args: argparse.Namespace) -> bool:
+    requested = getattr(args, "telegram_manual_signals", None)
+    if requested is not None:
+        return bool(requested)
+    return bool(_telegram_manual_signal_settings().telegram_signals_enabled)
+
+
+async def _deliver_telegram_manual_signals_if_enabled(
+    args: argparse.Namespace,
+    result: ScannerRunResult,
+    *,
+    scan_run_id: str | None,
+) -> None:
+    if not _telegram_manual_signals_enabled(args):
+        return
+    settings = _telegram_manual_signal_settings()
+    try:
+        await TelegramLifecycleDeliveryService(
+            database_path=args.database_path,
+            settings=settings,
+        ).deliver_for_run(result, scan_run_id=scan_run_id)
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -2273,6 +2328,7 @@ async def _run_watch_scan_iteration(
         )
     storage_run_id = scan_run_id
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=storage_run_id)
+    await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=storage_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None
