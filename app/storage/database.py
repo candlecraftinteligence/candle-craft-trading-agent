@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class StorageError(RuntimeError):
@@ -200,6 +200,11 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 price_level TEXT NOT NULL DEFAULT 'N/A',
                 blocked_reason TEXT NOT NULL DEFAULT 'N/A',
                 error_message TEXT NOT NULL DEFAULT 'N/A',
+                first_seen_at TEXT NOT NULL DEFAULT 'N/A',
+                last_seen_at TEXT NOT NULL DEFAULT 'N/A',
+                seen_count INTEGER NOT NULL DEFAULT 1,
+                last_scan_run_id TEXT,
+                last_error_message TEXT NOT NULL DEFAULT 'N/A',
                 UNIQUE(signal_id, alert_type)
             );
 
@@ -271,6 +276,11 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "price_level", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "blocked_reason", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "error_message", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "first_seen_at", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "last_seen_at", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "seen_count", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(connection, "telegram_alert_attempts", "last_scan_run_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "last_error_message", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_health", "last_priority_rank", "INTEGER")
         _ensure_column(connection, "symbol_health", "last_prioritized_at", "TEXT")

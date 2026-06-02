@@ -143,6 +143,11 @@ class TelegramAlertAttemptRecord:
     price_level: str = "N/A"
     blocked_reason: str = "N/A"
     error_message: str = "N/A"
+    first_seen_at: str = "N/A"
+    last_seen_at: str = "N/A"
+    seen_count: int = 1
+    last_scan_run_id: str | None = None
+    last_error_message: str = "N/A"
     id: int | None = None
 
 

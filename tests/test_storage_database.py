@@ -289,6 +289,77 @@ def test_scan_run_migration_adds_watch_columns_without_destroying_rows(tmp_path)
     assert row == ("legacy_run", 0, 0, 0)
 
 
+def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -> None:
+    db_path = tmp_path / "legacy_telegram.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE telegram_alert_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                previous_state TEXT NOT NULL DEFAULT 'N/A',
+                new_state TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                telegram_status TEXT NOT NULL,
+                message_hash TEXT NOT NULL,
+                scan_run_id TEXT,
+                attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
+                setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                rr_planned TEXT NOT NULL DEFAULT 'N/A',
+                min_rr TEXT NOT NULL DEFAULT 'N/A',
+                opportunity_score TEXT NOT NULL DEFAULT 'N/A',
+                min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+                technical_score TEXT NOT NULL DEFAULT 'N/A',
+                price_level TEXT NOT NULL DEFAULT 'N/A',
+                blocked_reason TEXT NOT NULL DEFAULT 'N/A',
+                error_message TEXT NOT NULL DEFAULT 'N/A',
+                UNIQUE(signal_id, alert_type)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO telegram_alert_attempts (
+                signal_id, symbol, direction, new_state, alert_type,
+                lifecycle_state, sent_at, telegram_status, message_hash
+            ) VALUES (
+                'sig-legacy', 'BTCUSDT', 'long', 'WATCHLISTED', 'WATCHLIST_BLOCKED_abc',
+                'WATCHLISTED', '2026-06-02T00:00:00+00:00', 'blocked', 'hash'
+            )
+            """
+        )
+        connection.commit()
+
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(telegram_alert_attempts)").fetchall()
+        }
+        row = connection.execute(
+            """
+            SELECT seen_count, first_seen_at, last_seen_at, last_scan_run_id, last_error_message
+            FROM telegram_alert_attempts
+            WHERE signal_id = 'sig-legacy'
+            """
+        ).fetchone()
+
+    assert {
+        "first_seen_at",
+        "last_seen_at",
+        "seen_count",
+        "last_scan_run_id",
+        "last_error_message",
+    } <= columns
+    assert row == (1, "N/A", "N/A", None, "N/A")
+
+
 def test_scan_run_insert(tmp_path) -> None:
     db_path = tmp_path / "candle_craft.db"
 

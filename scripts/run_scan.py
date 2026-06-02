@@ -65,7 +65,10 @@ from app.command_center import (  # noqa: E402
     format_watchlist_export,
 )
 from app.core.config import Settings  # noqa: E402
-from app.alerts.telegram_lifecycle import TelegramLifecycleDeliveryService  # noqa: E402
+from app.alerts.telegram_lifecycle import (  # noqa: E402
+    TelegramLifecycleDeliveryService,
+    TelegramLifecycleDeliverySummary,
+)
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
     DisplayBucket,
@@ -1835,6 +1838,30 @@ def _telegram_manual_signals_enabled(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "telegram_manual_signals", False))
 
 
+def _telegram_manual_lifecycle_status_label(args: argparse.Namespace) -> str:
+    if not _telegram_manual_signals_enabled(args):
+        return "disabled"
+    try:
+        settings = Settings()
+    except Exception:
+        return "blocked by settings"
+    if not settings.local_manual_mode:
+        return "disabled (LOCAL_MANUAL_MODE=false)"
+    if settings.telegram_signals_enabled:
+        return "enabled"
+    return "enabled (sending disabled)"
+
+
+def _telegram_admin_draft_status_label() -> str:
+    try:
+        settings = Settings()
+    except Exception:
+        return "blocked by settings"
+    if not settings.telegram_admin_enabled:
+        return "disabled/dry-run" if settings.telegram_dry_run else "disabled"
+    return "dry-run" if settings.telegram_dry_run else "enabled"
+
+
 async def _deliver_telegram_manual_signals_if_enabled(
     args: argparse.Namespace,
     result: ScannerRunResult,
@@ -1845,7 +1872,7 @@ async def _deliver_telegram_manual_signals_if_enabled(
         return
     settings = _telegram_manual_signal_settings()
     try:
-        await TelegramLifecycleDeliveryService(
+        summary = await TelegramLifecycleDeliveryService(
             database_path=args.database_path,
             settings=settings,
             min_rr=args.min_rr,
@@ -1853,6 +1880,16 @@ async def _deliver_telegram_manual_signals_if_enabled(
         ).deliver_for_run(result, scan_run_id=scan_run_id)
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc
+    _print_telegram_manual_lifecycle_summary(summary)
+
+
+def _print_telegram_manual_lifecycle_summary(summary: TelegramLifecycleDeliverySummary) -> None:
+    print("Telegram manual lifecycle summary:")
+    print(f"- sent: {summary.sent}")
+    print(f"- duplicates skipped: {summary.duplicate}")
+    print(f"- blocked: {summary.blocked}")
+    print(f"- blocked repeats compacted: {summary.blocked_repeat}")
+    print(f"- failed: {summary.failed}")
 
 
 def _watchlist_with_lifecycle_priority(
@@ -2100,7 +2137,9 @@ async def _run_watch_mode(
     print(f"Watchlist: {watchlist.source_label}")
     print(f"Symbols queued: {len(watchlist.symbols)}")
     print("Watch mode: enabled")
-    print(f"Telegram alerts: {'live' if args.telegram_live_alerts else 'dry-run'}")
+    print(f"Telegram manual lifecycle alerts: {_telegram_manual_lifecycle_status_label(args)}")
+    print(f"Telegram admin drafts: {_telegram_admin_draft_status_label()}")
+    print(f"Legacy scanner alerts: {'live' if args.telegram_live_alerts else 'dry-run'}")
     for warning in _startup_warnings(args, effective_candle_limit):
         print(f"Warning: {warning}")
     print("")

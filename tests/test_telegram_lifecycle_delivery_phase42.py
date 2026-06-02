@@ -591,6 +591,7 @@ def test_duplicate_confirmed_signal_is_not_sent_twice(tmp_path: Path) -> None:
     assert len(attempts) == 1
     assert attempts[0].alert_type == "SIGNAL_CONFIRMED"
     assert attempts[0].scan_run_id == "run-001"
+    assert attempts[0].seen_count == 1
 
 
 def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> None:
@@ -716,13 +717,20 @@ def test_missing_telegram_credentials_skip_safely_and_persist_attempt(tmp_path: 
             scan_run_id="run-001",
         )
     )
+    repeated = run(
+        service.deliver_for_run(
+            _run_result(_symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED)),
+            scan_run_id="run-002",
+        )
+    )
 
     assert summary.skipped == 1
+    assert repeated.duplicate == 1
     with sqlite3.connect(db_path) as connection:
-        row = connection.execute(
-            "SELECT telegram_status, error_message FROM telegram_alert_attempts"
-        ).fetchone()
-    assert row == ("skipped", "missing_telegram_credentials")
+        rows = connection.execute(
+            "SELECT telegram_status, error_message, seen_count, scan_run_id, last_scan_run_id FROM telegram_alert_attempts"
+        ).fetchall()
+    assert rows == [("skipped", "missing_telegram_credentials", 2, "run-001", "run-002")]
 
 
 def test_blocked_incomplete_watchlist_persists_without_telegram_send(tmp_path: Path) -> None:
@@ -765,7 +773,18 @@ def test_blocked_incomplete_watchlist_persists_without_telegram_send(tmp_path: P
     assert row[3] == "run-blocked"
 
 
-def test_blocked_incomplete_watchlist_does_not_spam(tmp_path: Path) -> None:
+def test_blocked_incomplete_watchlist_does_not_spam(tmp_path: Path, monkeypatch) -> None:
+    timestamps = iter(
+        (
+            "2026-06-02T00:00:00+00:00",
+            "2026-06-02T00:00:01+00:00",
+            "2026-06-02T00:00:02+00:00",
+            "2026-06-02T00:00:03+00:00",
+            "2026-06-02T00:00:04+00:00",
+            "2026-06-02T00:00:05+00:00",
+        )
+    )
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(timestamps))
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -789,11 +808,216 @@ def test_blocked_incomplete_watchlist_does_not_spam(tmp_path: Path) -> None:
     )
 
     first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-blocked"))
-    second = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-blocked"))
+    second = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-blocked-repeat"))
 
     assert first.blocked == 1
-    assert second.duplicate == 1
+    assert second.blocked_repeat == 1
     assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT seen_count, first_seen_at, last_seen_at, scan_run_id, last_scan_run_id, last_error_message
+            FROM telegram_alert_attempts
+            """
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == 2
+    assert rows[0][1] != NA
+    assert rows[0][2] != NA
+    assert rows[0][1] != rows[0][2]
+    assert rows[0][3] == "run-blocked"
+    assert rows[0][4] == "run-blocked-repeat"
+    assert "watchlist_missing_trackable_plan" in rows[0][5]
+
+
+def test_blocked_watchlist_different_reason_creates_separate_audit_record(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    missing_plan = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="blocked-watch",
+        diagnostics=_public_ready_watchlist_diagnostics(
+            entry_low=NA,
+            entry_high=NA,
+            stop=NA,
+            tp1=NA,
+            tp2=NA,
+            tp3=NA,
+            rr_to_tp2=NA,
+        ),
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+    )
+    missing_direction = _with_lifecycle_direction(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            signal_id="blocked-watch",
+            diagnostics=_public_ready_watchlist_diagnostics(bias=NA, direction=NA),
+        ),
+        NA,
+    )
+
+    first = run(service.deliver_for_run(_run_result(missing_plan), scan_run_id="run-plan"))
+    second = run(service.deliver_for_run(_run_result(missing_direction), scan_run_id="run-direction"))
+
+    assert first.blocked == 1
+    assert second.blocked == 1
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT blocked_reason, seen_count FROM telegram_alert_attempts ORDER BY id"
+        ).fetchall()
+    assert len(rows) == 2
+    assert "watchlist_missing_trackable_plan" in rows[0][0]
+    assert "watchlist_not_public_ready:missing_public_fields=direction" in rows[1][0]
+    assert rows[0][1] == 1
+    assert rows[1][1] == 1
+
+
+def test_blocked_watchlist_different_signal_id_creates_separate_audit_record(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    diagnostics = _public_ready_watchlist_diagnostics(
+        entry_low=NA,
+        entry_high=NA,
+        stop=NA,
+        tp1=NA,
+        tp2=NA,
+        tp3=NA,
+        rr_to_tp2=NA,
+    )
+
+    first = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.WATCHLISTED,
+                    signal_id="blocked-watch-one",
+                    diagnostics=diagnostics,
+                    setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+                )
+            ),
+            scan_run_id="run-one",
+        )
+    )
+    second = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.WATCHLISTED,
+                    signal_id="blocked-watch-two",
+                    diagnostics=diagnostics,
+                    setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+                )
+            ),
+            scan_run_id="run-two",
+        )
+    )
+
+    assert first.blocked == 1
+    assert second.blocked == 1
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT signal_id, seen_count FROM telegram_alert_attempts").fetchall()
+    assert {row[0] for row in rows} == {"blocked-watch-one", "blocked-watch-two"}
+    assert {row[1] for row in rows} == {1}
+
+
+def test_blocked_different_alert_type_creates_separate_audit_record(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+        min_rr=Decimal("3"),
+        min_score_for_idea=Decimal("80"),
+    )
+    watchlist = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="blocked-mixed",
+        diagnostics=_public_ready_watchlist_diagnostics(
+            entry_low=NA,
+            entry_high=NA,
+            stop=NA,
+            tp1=NA,
+            tp2=NA,
+            tp3=NA,
+            rr_to_tp2=NA,
+        ),
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+    )
+    confirmed = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        signal_id="blocked-mixed",
+        diagnostics=_diagnostics(rr_to_tp2=Decimal("2.79")),
+        trade_idea=_trade_idea(best_rr=Decimal("2.79")),
+    )
+
+    watch_summary = run(service.deliver_for_run(_run_result(watchlist), scan_run_id="run-watch"))
+    confirmed_summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-confirmed"))
+
+    assert watch_summary.blocked == 1
+    assert confirmed_summary.blocked == 1
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT attempted_alert_type, telegram_status, seen_count FROM telegram_alert_attempts ORDER BY id"
+        ).fetchall()
+    assert rows == [
+        (TelegramAlertType.WATCHLIST.value, "blocked", 1),
+        (TelegramAlertType.SIGNAL_CONFIRMED.value, "blocked", 1),
+    ]
+
+
+def test_sent_watchlist_and_blocked_watchlist_remain_separate_audit_records(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    sent_watchlist = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="watch-separate",
+        diagnostics=_public_ready_watchlist_diagnostics(),
+    )
+    blocked_watchlist = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="watch-separate",
+        diagnostics=_public_ready_watchlist_diagnostics(
+            entry_low=NA,
+            entry_high=NA,
+            stop=NA,
+            tp1=NA,
+            tp2=NA,
+            tp3=NA,
+            rr_to_tp2=NA,
+        ),
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+    )
+
+    sent = run(service.deliver_for_run(_run_result(sent_watchlist), scan_run_id="run-sent"))
+    blocked = run(service.deliver_for_run(_run_result(blocked_watchlist), scan_run_id="run-blocked"))
+
+    assert sent.sent == 1
+    assert blocked.blocked == 1
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT attempted_alert_type, telegram_status, seen_count FROM telegram_alert_attempts ORDER BY id"
+        ).fetchall()
+    assert rows == [
+        (TelegramAlertType.WATCHLIST.value, "sent", 1),
+        (TelegramAlertType.WATCHLIST.value, "blocked", 1),
+    ]
 
 
 def test_confirmed_alert_is_blocked_when_planned_rr_is_below_min_rr() -> None:

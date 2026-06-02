@@ -279,7 +279,9 @@ def test_dry_run_default_does_not_call_telegram(tmp_path, monkeypatch, capsys) -
     )
 
     captured = capsys.readouterr()
-    assert "Telegram alerts: dry-run" in captured.out
+    assert "Telegram manual lifecycle alerts: disabled" in captured.out
+    assert "Telegram admin drafts: disabled/dry-run" in captured.out
+    assert "Legacy scanner alerts: dry-run" in captured.out
     assert "Candle Craft Setup Activated" in captured.out
 
 

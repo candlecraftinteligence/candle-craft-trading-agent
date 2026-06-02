@@ -151,6 +151,7 @@ class TelegramLifecycleDeliverySummary:
     skipped: int = 0
     failed: int = 0
     blocked: int = 0
+    blocked_repeat: int = 0
     duplicate: int = 0
     ineligible: int = 0
     deliveries: tuple[TelegramLifecycleDelivery, ...] = ()
@@ -184,6 +185,22 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         ).fetchone()
         return row is not None
 
+    def get_attempt(
+        self,
+        *,
+        signal_id: str,
+        alert_type: TelegramAlertType | str,
+    ) -> TelegramAlertAttemptRecord | None:
+        row = self._connection.execute(
+            """
+            SELECT * FROM telegram_alert_attempts
+            WHERE signal_id = ? AND alert_type = ?
+            LIMIT 1
+            """,
+            (_identity(signal_id), _alert_type_text(alert_type)),
+        ).fetchone()
+        return _record_from_row(row) if row is not None else None
+
     def has_prior_active_alert(self, *, signal_id: str) -> bool:
         placeholders = ",".join("?" for _ in PRIOR_ACTIVE_ALERT_TYPES)
         row = self._connection.execute(
@@ -199,6 +216,19 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         return row is not None
 
     def insert_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
+        first_seen_at = _text(record.first_seen_at)
+        if first_seen_at == NA:
+            first_seen_at = _text(record.sent_at)
+        if first_seen_at == NA:
+            first_seen_at = now_utc_iso()
+        last_seen_at = _text(record.last_seen_at)
+        if last_seen_at == NA:
+            last_seen_at = _text(record.sent_at)
+        if last_seen_at == NA:
+            last_seen_at = now_utc_iso()
+        last_error_message = _text(record.last_error_message)
+        if last_error_message == NA:
+            last_error_message = _text(record.error_message)
         try:
             self._connection.execute(
                 """
@@ -207,8 +237,10 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     alert_type, lifecycle_state, sent_at, telegram_status,
                     message_hash, scan_run_id, attempted_alert_type, setup_quality_score,
                     rr_planned, min_rr, opportunity_score, min_score_for_idea,
-                    technical_score, price_level, blocked_reason, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    technical_score, price_level, blocked_reason, error_message,
+                    first_seen_at, last_seen_at, seen_count, last_scan_run_id,
+                    last_error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _identity(record.signal_id),
@@ -232,11 +264,100 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     _text(record.price_level),
                     _text(record.blocked_reason),
                     _text(record.error_message),
+                    first_seen_at,
+                    last_seen_at,
+                    int(record.seen_count) if record.seen_count >= 1 else 1,
+                    record.last_scan_run_id or record.scan_run_id,
+                    last_error_message,
                 ),
             )
         except sqlite3.IntegrityError:
             return False
         return True
+
+    def compact_repeated_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
+        status = _text(record.telegram_status)
+        if status not in {"blocked", "skipped"}:
+            return False
+        now = _text(record.last_seen_at if _text(record.last_seen_at) != NA else now_utc_iso())
+        cursor = self._connection.execute(
+            """
+            UPDATE telegram_alert_attempts
+            SET
+                first_seen_at = CASE
+                    WHEN first_seen_at IS NULL OR first_seen_at = 'N/A'
+                        THEN COALESCE(NULLIF(sent_at, 'N/A'), ?)
+                    ELSE first_seen_at
+                END,
+                last_seen_at = ?,
+                seen_count = CASE
+                    WHEN seen_count IS NULL OR seen_count < 1 THEN 2
+                    ELSE seen_count + 1
+                END,
+                last_scan_run_id = ?,
+                last_error_message = ?
+            WHERE signal_id = ?
+              AND alert_type = ?
+              AND telegram_status = ?
+              AND blocked_reason = ?
+              AND error_message = ?
+            """,
+            (
+                now,
+                now,
+                record.last_scan_run_id,
+                _text(record.last_error_message),
+                _identity(record.signal_id),
+                _text(record.alert_type),
+                status,
+                _text(record.blocked_reason),
+                _text(record.error_message),
+            ),
+        )
+        return cursor.rowcount > 0
+
+    def compact_existing_attempt(
+        self,
+        *,
+        signal_id: str,
+        alert_type: TelegramAlertType | str,
+        scan_run_id: str | None = None,
+    ) -> TelegramAlertAttemptRecord | None:
+        existing = self.get_attempt(signal_id=signal_id, alert_type=alert_type)
+        if existing is None or existing.telegram_status not in {"blocked", "skipped"}:
+            return existing
+        now = now_utc_iso()
+        record = TelegramAlertAttemptRecord(
+            signal_id=existing.signal_id,
+            symbol=existing.symbol,
+            direction=existing.direction,
+            previous_state=existing.previous_state,
+            new_state=existing.new_state,
+            alert_type=existing.alert_type,
+            lifecycle_state=existing.lifecycle_state,
+            sent_at=existing.sent_at,
+            telegram_status=existing.telegram_status,
+            message_hash=existing.message_hash,
+            scan_run_id=existing.scan_run_id,
+            attempted_alert_type=existing.attempted_alert_type,
+            setup_quality_score=existing.setup_quality_score,
+            rr_planned=existing.rr_planned,
+            min_rr=existing.min_rr,
+            opportunity_score=existing.opportunity_score,
+            min_score_for_idea=existing.min_score_for_idea,
+            technical_score=existing.technical_score,
+            price_level=existing.price_level,
+            blocked_reason=existing.blocked_reason,
+            error_message=existing.error_message,
+            first_seen_at=existing.first_seen_at,
+            last_seen_at=now,
+            seen_count=existing.seen_count,
+            last_scan_run_id=scan_run_id,
+            last_error_message=existing.error_message,
+            id=existing.id,
+        )
+        self.compact_repeated_attempt(record)
+        return existing
 
     def list_attempts(self, *, signal_id: str | None = None) -> tuple[TelegramAlertAttemptRecord, ...]:
         params: list[Any] = []
@@ -292,6 +413,7 @@ class TelegramLifecycleDeliveryService:
         skipped = 0
         failed = 0
         blocked = 0
+        blocked_repeat = 0
 
         with SQLiteTelegramAlertAttemptRepository(self.database_path) as repository:
             min_score_for_idea = self.min_score_for_idea
@@ -321,15 +443,18 @@ class TelegramLifecycleDeliveryService:
                     failed += 1
                 elif delivery.status == "blocked":
                     blocked += 1
+                elif delivery.status == "blocked_repeat":
+                    blocked_repeat += 1
                 else:
                     skipped += 1
 
         return TelegramLifecycleDeliverySummary(
-            attempted=sent + skipped + failed + blocked,
+            attempted=sent + skipped + failed + blocked + blocked_repeat,
             sent=sent,
             skipped=skipped,
             failed=failed,
             blocked=blocked,
+            blocked_repeat=blocked_repeat,
             duplicate=duplicate,
             ineligible=ineligible,
             deliveries=tuple(deliveries),
@@ -363,6 +488,11 @@ class TelegramLifecycleDeliveryService:
 
         signal_id = _signal_id(symbol_result)
         if repository.has_attempt(signal_id=signal_id, alert_type=decision.alert_type):
+            repository.compact_existing_attempt(
+                signal_id=signal_id,
+                alert_type=decision.alert_type,
+                scan_run_id=scan_run_id,
+            )
             return TelegramLifecycleDelivery(
                 symbol=symbol_result.symbol,
                 signal_id=signal_id,
@@ -1218,19 +1348,10 @@ def _persist_blocked_attempt(
     assert decision.message is not None
     signal_id = _signal_id(symbol_result)
     blocked_alert_type = _blocked_alert_type(decision.alert_type, decision.reason)
-    if repository.has_attempt(signal_id=signal_id, alert_type=blocked_alert_type):
-        return TelegramLifecycleDelivery(
-            symbol=symbol_result.symbol,
-            signal_id=signal_id,
-            alert_type=decision.alert_type.value,
-            status="duplicate",
-            detail="Duplicate blocked Telegram alert attempt prevented.",
-            error_message=decision.reason,
-        )
-
     transition = decision.lifecycle_transition
     previous_state = transition.from_state.value if transition and transition.from_state else NA
     new_state = transition.to_state.value if transition else _lifecycle_state_text(symbol_result)
+    seen_at = now_utc_iso()
     message_hash = hashlib.sha256(
         f"{signal_id}|{decision.alert_type.value}|{decision.reason}".encode("utf-8")
     ).hexdigest()
@@ -1242,7 +1363,7 @@ def _persist_blocked_attempt(
         new_state=new_state,
         alert_type=blocked_alert_type,
         lifecycle_state=_lifecycle_state_text(symbol_result),
-        sent_at=now_utc_iso(),
+        sent_at=seen_at,
         telegram_status="blocked",
         message_hash=message_hash,
         scan_run_id=scan_run_id or _transition_scan_run_id(transition),
@@ -1256,13 +1377,34 @@ def _persist_blocked_attempt(
         price_level=_price_level_for_alert(decision.alert_type, decision.message),
         blocked_reason=decision.reason,
         error_message=decision.reason,
+        first_seen_at=seen_at,
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        last_error_message=decision.reason,
     )
     inserted = repository.insert_attempt(record)
+    if not inserted:
+        compacted = repository.compact_repeated_attempt(record)
+        status = "blocked_repeat" if compacted else "duplicate"
+        detail = (
+            "Repeated blocked Telegram alert attempt compacted."
+            if compacted
+            else "Duplicate blocked Telegram alert attempt prevented."
+        )
+        return TelegramLifecycleDelivery(
+            symbol=symbol_result.symbol,
+            signal_id=signal_id,
+            alert_type=decision.alert_type.value,
+            status=status,
+            detail=detail,
+            message_hash=message_hash,
+            error_message=decision.reason,
+        )
     return TelegramLifecycleDelivery(
         symbol=symbol_result.symbol,
         signal_id=signal_id,
         alert_type=decision.alert_type.value,
-        status="blocked" if inserted else "duplicate",
+        status="blocked",
         detail=_blocked_delivery_detail(decision.alert_type),
         message_hash=message_hash,
         error_message=decision.reason,
@@ -1707,6 +1849,11 @@ def _record_from_row(row: sqlite3.Row) -> TelegramAlertAttemptRecord:
         price_level=row["price_level"],
         blocked_reason=row["blocked_reason"],
         error_message=row["error_message"],
+        first_seen_at=row["first_seen_at"],
+        last_seen_at=row["last_seen_at"],
+        seen_count=int(row["seen_count"]),
+        last_scan_run_id=row["last_scan_run_id"],
+        last_error_message=row["last_error_message"],
     )
 
 
