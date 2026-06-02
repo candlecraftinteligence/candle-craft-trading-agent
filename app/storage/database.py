@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class StorageError(RuntimeError):
@@ -199,6 +199,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 technical_score TEXT NOT NULL DEFAULT 'N/A',
                 price_level TEXT NOT NULL DEFAULT 'N/A',
                 blocked_reason TEXT NOT NULL DEFAULT 'N/A',
+                invalid_target_fields TEXT NOT NULL DEFAULT 'N/A',
                 error_message TEXT NOT NULL DEFAULT 'N/A',
                 first_seen_at TEXT NOT NULL DEFAULT 'N/A',
                 last_seen_at TEXT NOT NULL DEFAULT 'N/A',
@@ -275,6 +276,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "technical_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "price_level", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "blocked_reason", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "invalid_target_fields", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "error_message", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "first_seen_at", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "last_seen_at", "TEXT NOT NULL DEFAULT 'N/A'")

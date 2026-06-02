@@ -243,6 +243,13 @@ def _with_lifecycle_direction(symbol_result: ScannerSymbolResult, direction: str
     return symbol_result.model_copy(update={"lifecycle_state": record, "lifecycle_transition": transition})
 
 
+def _assert_target_integrity_blocked(decision, *fields: str) -> None:
+    assert decision.eligible is False
+    assert "target_integrity_failed" in decision.reason
+    for field in fields:
+        assert field in decision.reason
+
+
 def _seed_prior_active_alert(db_path: Path, *, signal_id: str) -> None:
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         repository.insert_attempt(
@@ -455,8 +462,13 @@ def test_hype_style_public_ready_watchlist_sends_watchlist_not_confirmed() -> No
     assert "CANDLE CRAFT WATCHLIST" in text
     assert "HYPEUSDT | long" in text
     assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
-    assert "Watch Zone:\n71.407944 \u2013 71.675" in text
-    assert "Planned RR: 2.9R" in text
+    assert "Watch Zone:\n71.41 \u2013 71.68" in text
+    assert "Potential Targets:" in text
+    assert "TP2: 73.1" in text
+    assert "Planned RR: 2.9R \u2014 watchlist only, final RR must improve to \u22653R before confirmation." in text
+    assert "71.407944" not in text
+    assert "70.77" in text
+    assert "70.77363571" not in text
     assert "final RR" in text or "Final RR" in text
     assert "Watchlist invalidates if" in text
     assert "System:\nWatchlist only. No active signal yet." in text
@@ -773,6 +785,39 @@ def test_blocked_incomplete_watchlist_persists_without_telegram_send(tmp_path: P
     assert row[3] == "run-blocked"
 
 
+def test_blocked_target_integrity_persists_invalid_target_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="blocked-targets",
+        diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("99")),
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=72),
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-targets"))
+
+    assert summary.blocked == 1
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT telegram_status, attempted_alert_type, blocked_reason, invalid_target_fields, scan_run_id
+            FROM telegram_alert_attempts
+            """
+        ).fetchone()
+    assert row[0] == "blocked"
+    assert row[1] == TelegramAlertType.WATCHLIST.value
+    assert "target_integrity_failed" in row[2]
+    assert "tp1" in row[3]
+    assert row[4] == "run-targets"
+
+
 def test_blocked_incomplete_watchlist_does_not_spam(tmp_path: Path, monkeypatch) -> None:
     timestamps = iter(
         (
@@ -1033,6 +1078,164 @@ def test_confirmed_alert_is_blocked_when_planned_rr_is_below_min_rr() -> None:
 
     assert decision.eligible is False
     assert "planned_rr_below_min" in decision.reason
+
+
+def test_long_confirmed_blocks_when_stop_is_above_entry() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(stop=Decimal("103")),
+            trade_idea=_trade_idea(stop_loss=Decimal("103")),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    _assert_target_integrity_blocked(decision, "stop_loss")
+
+
+def test_long_confirmed_blocks_when_any_target_is_below_entry() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(tp2=Decimal("99")),
+            trade_idea=_trade_idea(take_profit_targets=(Decimal("110"), Decimal("99"), Decimal("120"))),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    _assert_target_integrity_blocked(decision, "tp2")
+
+
+def test_long_confirmed_blocks_when_targets_are_not_in_ascending_order() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(tp1=Decimal("112"), tp2=Decimal("111"), tp3=Decimal("120")),
+            trade_idea=_trade_idea(take_profit_targets=(Decimal("112"), Decimal("111"), Decimal("120"))),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    _assert_target_integrity_blocked(decision, "tp_order")
+
+
+def test_short_confirmed_blocks_when_stop_is_below_entry() -> None:
+    symbol = _with_lifecycle_direction(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(
+                bias="short",
+                direction="short",
+                stop=Decimal("95"),
+                tp1=Decimal("90"),
+                tp2=Decimal("85"),
+                tp3=Decimal("80"),
+            ),
+            trade_idea=_trade_idea(
+                direction="short",
+                stop_loss=Decimal("95"),
+                take_profit_targets=(Decimal("90"), Decimal("85"), Decimal("80")),
+            ),
+        ),
+        "short",
+    )
+
+    decision = telegram_alert_decision_for_symbol(
+        symbol,
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    _assert_target_integrity_blocked(decision, "stop_loss")
+
+
+def test_short_confirmed_blocks_when_any_target_is_above_entry() -> None:
+    symbol = _with_lifecycle_direction(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(
+                bias="short",
+                direction="short",
+                stop=Decimal("105"),
+                tp1=Decimal("90"),
+                tp2=Decimal("85"),
+                tp3=Decimal("103"),
+            ),
+            trade_idea=_trade_idea(
+                direction="short",
+                stop_loss=Decimal("105"),
+                take_profit_targets=(Decimal("90"), Decimal("85"), Decimal("103")),
+            ),
+        ),
+        "short",
+    )
+
+    decision = telegram_alert_decision_for_symbol(
+        symbol,
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    _assert_target_integrity_blocked(decision, "tp3")
+
+
+def test_short_confirmed_blocks_when_targets_are_not_in_descending_order() -> None:
+    symbol = _with_lifecycle_direction(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(
+                bias="short",
+                direction="short",
+                stop=Decimal("105"),
+                tp1=Decimal("90"),
+                tp2=Decimal("91"),
+                tp3=Decimal("80"),
+            ),
+            trade_idea=_trade_idea(
+                direction="short",
+                stop_loss=Decimal("105"),
+                take_profit_targets=(Decimal("90"), Decimal("91"), Decimal("80")),
+            ),
+        ),
+        "short",
+    )
+
+    decision = telegram_alert_decision_for_symbol(
+        symbol,
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    _assert_target_integrity_blocked(decision, "tp_order")
+
+
+def test_watchlist_blocks_wrong_side_targets() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("99")),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=72),
+        )
+    )
+
+    _assert_target_integrity_blocked(decision, "tp1")
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+
+
+def test_watchlist_blocks_non_monotonic_targets() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("110"), tp2=Decimal("109"), tp3=Decimal("120")),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=72),
+        )
+    )
+
+    _assert_target_integrity_blocked(decision, "tp_order")
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
 
 
 def test_confirmed_alert_is_blocked_when_opportunity_score_below_minimum() -> None:

@@ -8,6 +8,8 @@ from app.formatters.telegram_signal_formatter import (
     HEADER_PREFIX,
     TelegramAlertType,
     TelegramSignalMessage,
+    format_telegram_price,
+    format_telegram_rr,
     format_telegram_signal_message,
 )
 
@@ -59,6 +61,7 @@ def test_watchlist_formatter_includes_required_fields() -> None:
     assert "Current Context:\n" in text
     assert "Needs Next:\n1. N/A \u2014 waiting for the next lifecycle update from the core engine." in text
     assert "Potential Plan:\nEntry: 100 \u2013 102" in text
+    assert "Potential Targets:\nTP1: 110\nTP2: 115\nTP3: 120" in text
     assert "System:\nWatchlist only. No active signal yet." in text
 
 
@@ -165,6 +168,74 @@ def test_planned_rr_is_rounded_cleanly() -> None:
 
     assert "Planned RR:\n3.2R" in text
     assert "3.23456789R" not in text
+
+
+def test_price_display_formats_clean_public_values() -> None:
+    assert format_telegram_price(Decimal("73.252056")) == "73.25"
+    assert format_telegram_price(Decimal("109.99894")) == "110"
+    assert format_telegram_price(Decimal("0.0457434")) == "0.04574"
+    assert format_telegram_price(Decimal("0.16737736")) == "0.16738"
+    assert format_telegram_price(Decimal("70000.123456")) == "70000.12"
+    assert "E" not in format_telegram_price(Decimal("0.000000123456")).upper()
+    assert format_telegram_price(NA) == NA
+    assert format_telegram_price({"price": "73.25"}) == NA
+
+
+def test_rr_display_formats_clean_public_values() -> None:
+    assert format_telegram_rr(Decimal("2.91918017")) == "2.9R"
+    assert format_telegram_rr(Decimal("3.000000")) == "3R"
+    assert format_telegram_rr(Decimal("3.246")) == "3.2R"
+    assert format_telegram_rr(NA) == NA
+    assert format_telegram_rr("not numeric") == NA
+
+
+def test_watchlist_formats_clean_targets_and_below_min_rr_warning() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(
+            entry_low=Decimal("71.407944"),
+            entry_high=Decimal("71.675"),
+            stop_loss=Decimal("70.77363571"),
+            tp1=Decimal("72.95123"),
+            tp2=Decimal("73.252056"),
+            tp3=Decimal("73.8167"),
+            planned_rr=Decimal("2.91918017"),
+            min_rr=Decimal("3"),
+        ),
+    )
+
+    assert "Watch Zone:\n71.41 \u2013 71.68" in text
+    assert "Entry: 71.41 \u2013 71.68" in text
+    assert "SL: 70.77" in text
+    assert "Potential Targets:\nTP1: 72.95\nTP2: 73.25\nTP3: 73.82" in text
+    assert "Planned RR: 2.9R \u2014 watchlist only, final RR must improve to \u22653R before confirmation." in text
+    assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
+    assert "73.252056" not in text
+
+
+def test_watchlist_formats_na_rr_validation_warning_when_trackable() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(planned_rr=NA),
+    )
+
+    assert "Planned RR: N/A \u2014 final RR must validate before confirmation." in text
+
+
+def test_confirmed_formats_clean_targets_and_rr() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        _message(
+            tp1=Decimal("72.95123"),
+            tp2=Decimal("73.252056"),
+            tp3=Decimal("73.8167"),
+            planned_rr=Decimal("3.246"),
+        ),
+    )
+
+    assert "Take Profits:\nTP1: 72.95\nTP2: 73.25\nTP3: 73.82" in text
+    assert "Planned RR:\n3.2R" in text
+    assert "73.252056" not in text
 
 
 def test_invalidation_section_does_not_contain_rejection_text() -> None:

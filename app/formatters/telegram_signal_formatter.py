@@ -12,6 +12,9 @@ HEADER_PREFIX = "\U0001F43A\U0001F7E0"
 FOOTER = "\U0001F43A Candle Craft | Signal. Structure. Execution."
 BULLET = "\u2022"
 RANGE_DASH = "\u2013"
+EM_DASH = "\u2014"
+GREATER_EQUAL = "\u2265"
+DEFAULT_MIN_RR_DISPLAY = Decimal("3")
 
 
 class TelegramAlertType(str, Enum):
@@ -64,6 +67,7 @@ class TelegramSignalMessage:
     volume_status: Any = NA
     derivatives_status: Any = NA
     price_level: Any = NA
+    min_rr: Any = NA
 
 
 def format_telegram_signal_message(
@@ -111,11 +115,12 @@ def format_watchlist_alert(message: TelegramSignalMessage) -> str:
         "",
         "Potential Plan:",
         f"Entry: {_entry_range(message)}",
-        f"SL: {_display(message.stop_loss)}",
-        f"TP1: {_display(message.tp1)}",
-        f"TP2: {_display(message.tp2)}",
-        f"TP3: {_display(message.tp3)}",
-        f"Planned RR: {_rr_with_unit(message.planned_rr)}",
+        f"SL: {_price_display(message.stop_loss)}",
+        "Potential Targets:",
+        f"TP1: {_price_display(message.tp1)}",
+        f"TP2: {_price_display(message.tp2)}",
+        f"TP3: {_price_display(message.tp3)}",
+        _watchlist_planned_rr_line(message),
         "",
         "Invalidation:",
         _first_display(message.watchlist_invalidation_reason, message.invalidation_reason),
@@ -142,12 +147,12 @@ def format_signal_confirmed_alert(message: TelegramSignalMessage) -> str:
         _entry_range(message),
         "",
         "Stop Loss:",
-        _display(message.stop_loss),
+        _price_display(message.stop_loss),
         "",
         "Take Profits:",
-        f"TP1: {_display(message.tp1)}",
-        f"TP2: {_display(message.tp2)}",
-        f"TP3: {_display(message.tp3)}",
+        f"TP1: {_price_display(message.tp1)}",
+        f"TP2: {_price_display(message.tp2)}",
+        f"TP3: {_price_display(message.tp3)}",
         "",
         "Planned RR:",
         _rr_with_unit(message.planned_rr),
@@ -192,12 +197,12 @@ def format_limit_hit_update(message: TelegramSignalMessage) -> str:
         "Setup remains valid while price respects the entry structure and invalidation level.",
         "",
         "Risk Level:",
-        f"SL: {_display(message.stop_loss)}",
+        f"SL: {_price_display(message.stop_loss)}",
         "",
         "Targets:",
-        f"TP1: {_display(message.tp1)}",
-        f"TP2: {_display(message.tp2)}",
-        f"TP3: {_display(message.tp3)}",
+        f"TP1: {_price_display(message.tp1)}",
+        f"TP2: {_price_display(message.tp2)}",
+        f"TP3: {_price_display(message.tp3)}",
         "",
         "System:",
         "Price alert only. No order was placed by the system.",
@@ -221,14 +226,14 @@ def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
         "First target reached.",
         "",
         "Price Level:",
-        _display(message.tp1),
+        _price_display(message.tp1),
         "",
         "Current State:",
         "Setup remains active while structure holds.",
         "",
         "Next Targets:",
-        f"TP2: {_display(message.tp2)}",
-        f"TP3: {_display(message.tp3)}",
+        f"TP2: {_price_display(message.tp2)}",
+        f"TP3: {_price_display(message.tp3)}",
         "",
         "Research:",
         "Outcome saved for performance analysis.",
@@ -252,13 +257,13 @@ def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
         "Second target reached.",
         "",
         "Price Level:",
-        _display(message.tp2),
+        _price_display(message.tp2),
         "",
         "Current State:",
         "Final target remains active while structure holds.",
         "",
         "Next Target:",
-        f"TP3: {_display(message.tp3)}",
+        f"TP3: {_price_display(message.tp3)}",
         "",
         "Research:",
         "Outcome saved for performance analysis.",
@@ -282,7 +287,7 @@ def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
         "Final target reached.",
         "",
         "Price Level:",
-        _display(message.tp3),
+        _price_display(message.tp3),
         "",
         "Lifecycle:",
         "Signal completed.",
@@ -309,7 +314,7 @@ def format_sl_hit_update(message: TelegramSignalMessage) -> str:
         "Stop level reached.",
         "",
         "Price Level:",
-        _display(message.stop_loss),
+        _price_display(message.stop_loss),
         "",
         "Lifecycle:",
         "Signal closed.",
@@ -370,11 +375,11 @@ def format_expired_update(message: TelegramSignalMessage) -> str:
 
 
 def _entry_range(message: TelegramSignalMessage) -> str:
-    return f"{_display(message.entry_low)} {RANGE_DASH} {_display(message.entry_high)}"
+    return f"{_price_display(message.entry_low)} {RANGE_DASH} {_price_display(message.entry_high)}"
 
 
 def _watch_zone(message: TelegramSignalMessage) -> str:
-    watch_zone = _display(message.watch_zone)
+    watch_zone = _price_range_text(message.watch_zone)
     return watch_zone if watch_zone != NA else _entry_range(message)
 
 
@@ -422,14 +427,113 @@ def _display(value: Any) -> str:
     return text if text else NA
 
 
-def _rr_display(value: Any) -> str:
+def format_telegram_price(value: Any) -> str:
+    return _price_display(value)
+
+
+def format_telegram_rr(value: Any) -> str:
+    return _rr_with_unit(value)
+
+
+def _price_display(value: Any) -> str:
+    number = _decimal_value(value)
+    if number is None:
+        return NA
+    places = _price_decimal_places(number)
+    quantum = Decimal(1).scaleb(-places)
+    rounded = number.quantize(quantum, rounding=ROUND_HALF_UP)
+    output = format(rounded, "f")
+    return output.rstrip("0").rstrip(".") if "." in output else output
+
+
+def _price_decimal_places(value: Decimal) -> int:
+    magnitude = abs(value)
+    if magnitude >= Decimal("1000"):
+        return 2
+    if magnitude >= Decimal("100"):
+        return 2
+    if magnitude >= Decimal("10"):
+        return 2
+    if magnitude >= Decimal("1"):
+        return 4
+    if magnitude >= Decimal("0.1"):
+        return 5
+    if magnitude >= Decimal("0.01"):
+        return 5
+    return 8
+
+
+def _price_range_text(value: Any) -> str:
     text = _display(value)
     if text == NA:
         return NA
+    normalized = text.replace(RANGE_DASH, "-").replace(EM_DASH, "-")
+    parts = [part.strip() for part in normalized.split("-")]
+    if len(parts) != 2:
+        return NA
+    low = _price_display(parts[0])
+    high = _price_display(parts[1])
+    if low == NA or high == NA:
+        return NA
+    return f"{low} {RANGE_DASH} {high}"
+
+
+def _decimal_value(value: Any) -> Decimal | None:
+    if value is None or value == "" or value == NA:
+        return None
+    if isinstance(value, Mapping):
+        return None
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return None
+    if hasattr(value, "value") and not isinstance(value, (str, int, float, bool, Decimal)):
+        value = value.value
+    if isinstance(value, bool):
+        return None
     try:
-        number = Decimal(text)
+        number = value if isinstance(value, Decimal) else Decimal(str(value).strip())
     except (InvalidOperation, ValueError):
-        return text
+        return None
+    return number if number.is_finite() else None
+
+
+def _watchlist_planned_rr_line(message: TelegramSignalMessage) -> str:
+    rr = _rr_with_unit(message.planned_rr)
+    if rr == NA:
+        if _watchlist_has_trackable_price_level(message):
+            return f"Planned RR: {NA} {EM_DASH} final RR must validate before confirmation."
+        return f"Planned RR: {NA}"
+
+    planned_rr = _decimal_value(message.planned_rr)
+    min_rr_value = _decimal_value(message.min_rr) or DEFAULT_MIN_RR_DISPLAY
+    min_rr = _rr_display(min_rr_value)
+    if planned_rr is not None and min_rr_value is not None and planned_rr < min_rr_value:
+        return (
+            f"Planned RR: {rr} {EM_DASH} watchlist only, final RR must improve "
+            f"to {GREATER_EQUAL}{min_rr}R before confirmation."
+        )
+    return f"Planned RR: {rr}"
+
+
+def _watchlist_has_trackable_price_level(message: TelegramSignalMessage) -> bool:
+    if _price_range_text(message.watch_zone) != NA:
+        return True
+    return any(
+        _price_display(value) != NA
+        for value in (
+            message.entry_low,
+            message.entry_high,
+            message.stop_loss,
+            message.tp1,
+            message.tp2,
+            message.tp3,
+        )
+    )
+
+
+def _rr_display(value: Any) -> str:
+    number = _decimal_value(value)
+    if number is None:
+        return NA
     rounded = number.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
     output = format(rounded, "f")
     return output.rstrip("0").rstrip(".") if "." in output else output
@@ -452,6 +556,8 @@ __all__ = [
     "format_signal_confirmed_alert",
     "format_sl_hit_update",
     "format_telegram_signal_message",
+    "format_telegram_price",
+    "format_telegram_rr",
     "format_tp1_hit_update",
     "format_tp2_hit_update",
     "format_tp3_hit_update",

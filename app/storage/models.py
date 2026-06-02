@@ -142,6 +142,7 @@ class TelegramAlertAttemptRecord:
     technical_score: str = "N/A"
     price_level: str = "N/A"
     blocked_reason: str = "N/A"
+    invalid_target_fields: str = "N/A"
     error_message: str = "N/A"
     first_seen_at: str = "N/A"
     last_seen_at: str = "N/A"

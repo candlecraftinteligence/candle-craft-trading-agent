@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
     TelegramAlertType,
     TelegramSignalMessage,
+    format_telegram_price,
     format_telegram_signal_message,
 )
 from app.lifecycle.models import SetupLifecycleState, SetupTransitionResult
@@ -238,9 +239,9 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     message_hash, scan_run_id, attempted_alert_type, setup_quality_score,
                     rr_planned, min_rr, opportunity_score, min_score_for_idea,
                     technical_score, price_level, blocked_reason, error_message,
-                    first_seen_at, last_seen_at, seen_count, last_scan_run_id,
+                    invalid_target_fields, first_seen_at, last_seen_at, seen_count, last_scan_run_id,
                     last_error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _identity(record.signal_id),
@@ -264,6 +265,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     _text(record.price_level),
                     _text(record.blocked_reason),
                     _text(record.error_message),
+                    _text(record.invalid_target_fields),
                     first_seen_at,
                     last_seen_at,
                     int(record.seen_count) if record.seen_count >= 1 else 1,
@@ -348,6 +350,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             technical_score=existing.technical_score,
             price_level=existing.price_level,
             blocked_reason=existing.blocked_reason,
+            invalid_target_fields=existing.invalid_target_fields,
             error_message=existing.error_message,
             first_seen_at=existing.first_seen_at,
             last_seen_at=now,
@@ -528,6 +531,7 @@ class TelegramLifecycleDeliveryService:
             technical_score=_technical_score_text(symbol_result),
             price_level=_price_level_for_alert(decision.alert_type, decision.message),
             blocked_reason=NA,
+            invalid_target_fields=NA,
             error_message=send_result.error_message,
         )
         inserted = repository.insert_attempt(record)
@@ -576,8 +580,8 @@ def telegram_alert_decision_for_symbol(
     if _requires_prior_active_alert(alert_type) and not previously_active_sent:
         return TelegramAlertDecision(False, "missing_prior_active_telegram_alert", lifecycle_transition=transition)
 
-    message = telegram_signal_message_from_symbol(symbol_result)
     context = eligibility_context or TelegramEligibilityContext()
+    message = replace(telegram_signal_message_from_symbol(symbol_result), min_rr=context.min_rr)
     blockers = _defensive_delivery_blockers(symbol_result, alert_type, message, context)
     if blockers:
         return TelegramAlertDecision(
@@ -850,7 +854,7 @@ def _watchlist_invalidation_sentence(
     direction: Any,
     stop_loss: Any,
 ) -> str:
-    stop = _text(stop_loss)
+    stop = format_telegram_price(stop_loss)
     side = _status_key(direction)
     if stop != NA:
         side_word = "below" if side == "long" else "above" if side == "short" else "through"
@@ -1056,6 +1060,7 @@ def _defensive_delivery_blockers(
         if any(_text(reason) != NA for reason in symbol_result.rejection_reasons) and not explicit_watchlist:
             blockers.append("rejection_reasons_present")
         blockers.extend(_watchlist_public_readiness_blockers(symbol_result, message, context))
+        blockers.extend(_target_integrity_blockers(symbol_result, alert_type, message))
         return tuple(dict.fromkeys(blockers))
 
     if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
@@ -1109,7 +1114,95 @@ def _defensive_delivery_blockers(
     if _looks_like_rejection_reason(raw_invalidation) or _looks_like_rejection_reason(message.invalidation_reason):
         blockers.append("invalidation_contains_rejection_reason")
 
+    blockers.extend(_target_integrity_blockers(symbol_result, alert_type, message))
+
     return tuple(dict.fromkeys(blockers))
+
+
+def _target_integrity_blockers(
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage,
+) -> tuple[str, ...]:
+    if alert_type not in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED}:
+        return ()
+    side = _status_key(message.direction)
+    if side not in {"long", "short"}:
+        return ()
+
+    confirmed = alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+    entry_reference = _entry_reference(symbol_result, message)
+    stop_loss = _decimal_or_none(message.stop_loss)
+    targets = (
+        ("tp1", _decimal_or_none(message.tp1)),
+        ("tp2", _decimal_or_none(message.tp2)),
+        ("tp3", _decimal_or_none(message.tp3)),
+    )
+    invalid_fields: list[str] = []
+
+    if confirmed and entry_reference is None:
+        invalid_fields.append("entry_reference")
+    if confirmed and stop_loss is None:
+        invalid_fields.append("stop_loss")
+    if confirmed:
+        invalid_fields.extend(name for name, value in targets if value is None)
+
+    if entry_reference is not None:
+        if stop_loss is not None:
+            if side == "long" and stop_loss >= entry_reference:
+                invalid_fields.append("stop_loss")
+            elif side == "short" and stop_loss <= entry_reference:
+                invalid_fields.append("stop_loss")
+        for name, target in targets:
+            if target is None:
+                continue
+            if side == "long" and target <= entry_reference:
+                invalid_fields.append(name)
+            elif side == "short" and target >= entry_reference:
+                invalid_fields.append(name)
+
+    numeric_targets = tuple((name, value) for name, value in targets if value is not None)
+    if len(numeric_targets) >= 2:
+        for (_, left), (_, right) in zip(numeric_targets, numeric_targets[1:]):
+            if side == "long" and left >= right:
+                invalid_fields.append("tp_order")
+                break
+            if side == "short" and left <= right:
+                invalid_fields.append("tp_order")
+                break
+
+    invalid = tuple(dict.fromkeys(invalid_fields))
+    if not invalid:
+        return ()
+    return (f"target_integrity_failed:invalid_target_fields={','.join(invalid)}",)
+
+
+def _entry_reference(symbol_result: ScannerSymbolResult, message: TelegramSignalMessage) -> Decimal | None:
+    entry_pair = _decimal_pair_values(message.entry_low, message.entry_high)
+    if entry_pair is not None:
+        low, high = entry_pair
+        return (low + high) / Decimal("2")
+
+    watch_pair = _decimal_pair_text(message.watch_zone)
+    if watch_pair is not None:
+        low, high = watch_pair
+        return (low + high) / Decimal("2")
+
+    diagnostics = _representative_diagnostics(symbol_result)
+    setup = _selected_setup(symbol_result, diagnostics)
+    trade_idea = symbol_result.trade_idea
+    return _first_decimal(
+        _field(setup, "entry"),
+        _field(setup, "planned_entry"),
+        _field(setup, "current_planned_entry"),
+        diagnostics.get("entry"),
+        diagnostics.get("entry_price"),
+        diagnostics.get("planned_entry"),
+        diagnostics.get("current_planned_entry"),
+        diagnostics.get("limit_entry"),
+        diagnostics.get("limit_price"),
+        _level_field(getattr(trade_idea, "entry_zone", None), "price"),
+    )
 
 
 def _core_status_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
@@ -1205,13 +1298,13 @@ def _watchlist_has_tracking_anchor(symbol_result: ScannerSymbolResult, message: 
 
 def _watchlist_plan_all_na(message: TelegramSignalMessage) -> bool:
     return (
-        _text(message.entry_low) == NA
-        and _text(message.entry_high) == NA
-        and _text(message.stop_loss) == NA
-        and _text(message.tp1) == NA
-        and _text(message.tp2) == NA
-        and _text(message.tp3) == NA
-        and _text(message.planned_rr) == NA
+        _decimal_or_none(message.entry_low) is None
+        and _decimal_or_none(message.entry_high) is None
+        and _decimal_or_none(message.stop_loss) is None
+        and _decimal_or_none(message.tp1) is None
+        and _decimal_or_none(message.tp2) is None
+        and _decimal_or_none(message.tp3) is None
+        and _decimal_or_none(message.planned_rr) is None
     )
 
 
@@ -1226,7 +1319,14 @@ def _watchlist_is_mostly_na(message: TelegramSignalMessage) -> bool:
         message.tp3,
         message.planned_rr,
     )
-    na_count = sum(1 for value in fields if _text(value) == NA)
+    na_count = 0
+    for index, value in enumerate(fields):
+        if index == 0:
+            missing = _decimal_pair_text(value) is None
+        else:
+            missing = _decimal_or_none(value) is None
+        if missing:
+            na_count += 1
     return na_count >= 7
 
 
@@ -1282,14 +1382,30 @@ def _numeric_pair_values(low: Any, high: Any) -> bool:
     return _decimal_or_none(low) is not None and _decimal_or_none(high) is not None
 
 
+def _decimal_pair_values(low: Any, high: Any) -> tuple[Decimal, Decimal] | None:
+    low_value = _decimal_or_none(low)
+    high_value = _decimal_or_none(high)
+    if low_value is None or high_value is None:
+        return None
+    return low_value, high_value
+
+
 def _numeric_pair_text(value: Any) -> bool:
+    return _decimal_pair_text(value) is not None
+
+
+def _decimal_pair_text(value: Any) -> tuple[Decimal, Decimal] | None:
     text = _text(value)
     if text == NA:
-        return False
-    parts = text.replace("\u2013", "-").split("-")
+        return None
+    parts = text.replace("\u2013", "-").replace("\u2014", "-").split("-")
     if len(parts) != 2:
-        return False
-    return _decimal_or_none(parts[0].strip()) is not None and _decimal_or_none(parts[1].strip()) is not None
+        return None
+    low = _decimal_or_none(parts[0].strip())
+    high = _decimal_or_none(parts[1].strip())
+    if low is None or high is None:
+        return None
+    return low, high
 
 
 def _status_keys(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
@@ -1336,6 +1452,15 @@ def _persist_blocked_decision(decision: TelegramAlertDecision) -> bool:
     )
 
 
+def _invalid_target_fields_from_reason(reason: str) -> str:
+    marker = "invalid_target_fields="
+    text = _text(reason)
+    if marker not in text:
+        return NA
+    fields = text.split(marker, 1)[1].split(";", 1)[0].strip()
+    return fields if fields else NA
+
+
 def _persist_blocked_attempt(
     repository: SQLiteTelegramAlertAttemptRepository,
     symbol_result: ScannerSymbolResult,
@@ -1376,6 +1501,7 @@ def _persist_blocked_attempt(
         technical_score=_technical_score_text(symbol_result),
         price_level=_price_level_for_alert(decision.alert_type, decision.message),
         blocked_reason=decision.reason,
+        invalid_target_fields=_invalid_target_fields_from_reason(decision.reason),
         error_message=decision.reason,
         first_seen_at=seen_at,
         last_seen_at=seen_at,
@@ -1580,7 +1706,7 @@ def _public_invalidation_sentence(
     raw_invalidation: Any,
 ) -> str:
     side = _status_key(direction)
-    stop = _text(stop_loss)
+    stop = format_telegram_price(stop_loss)
     if stop == NA:
         raw = _clean_public_sentence(raw_invalidation)
         return raw if raw != NA and not _looks_like_rejection_reason(raw) else NA
@@ -1725,8 +1851,8 @@ def _first_context_value(*candidates: tuple[Any, tuple[str, ...]]) -> Any:
 
 
 def _entry_zone_text(entry_low: Any, entry_high: Any) -> str:
-    low = _text(entry_low)
-    high = _text(entry_high)
+    low = format_telegram_price(entry_low)
+    high = format_telegram_price(entry_high)
     if low == NA and high == NA:
         return NA
     if low == high or high == NA:
@@ -1848,6 +1974,7 @@ def _record_from_row(row: sqlite3.Row) -> TelegramAlertAttemptRecord:
         technical_score=row["technical_score"],
         price_level=row["price_level"],
         blocked_reason=row["blocked_reason"],
+        invalid_target_fields=row["invalid_target_fields"],
         error_message=row["error_message"],
         first_seen_at=row["first_seen_at"],
         last_seen_at=row["last_seen_at"],
