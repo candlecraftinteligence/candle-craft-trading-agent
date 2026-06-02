@@ -6,16 +6,19 @@ from decimal import Decimal
 from pathlib import Path
 
 from app.agents.trade_idea import create_trade_idea
+from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
     SQLiteTelegramAlertAttemptRepository,
     TelegramAlertType,
     TelegramEligibilityContext,
     TelegramLifecycleDeliveryService,
     telegram_alert_decision_for_symbol,
+    telegram_signal_message_from_symbol,
 )
 from app.alerts.telegram_sender import TelegramSendResult, TelegramSender
 from app.core.config import Settings
 from app.data.dtos import NA
+from app.formatters.telegram_signal_formatter import format_telegram_signal_message
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
 from app.storage.models import TelegramAlertAttemptRecord
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
@@ -141,6 +144,29 @@ def _trade_idea(**overrides: object):
     return create_trade_idea(data)
 
 
+def _setup_quality(
+    quality_state: SetupQualityState = SetupQualityState.HIGH_QUALITY_TRADE,
+    *,
+    quality_score: int = 88,
+) -> SetupQualityResult:
+    grade = SetupQualityGrade.A if quality_state != SetupQualityState.REJECTED_NO_EDGE else SetupQualityGrade.REJECT
+    return SetupQualityResult(
+        quality_state=quality_state,
+        quality_grade=grade,
+        quality_score=quality_score,
+        tradeability_score=quality_score,
+        profitability_edge_score=quality_score,
+        execution_risk_score=max(0, 100 - quality_score),
+        strongest_factors=("structure",),
+        weakest_factors=(),
+        decision_reason="Synthetic Phase 42B setup quality.",
+        action_label="Valid setup" if quality_state in {
+            SetupQualityState.HIGH_QUALITY_TRADE,
+            SetupQualityState.VALID_BUT_LOWER_QUALITY,
+        } else "Watch or reject",
+    )
+
+
 def _symbol(
     state: SetupLifecycleState,
     *,
@@ -153,6 +179,7 @@ def _symbol(
     rejection_reason: str | None = None,
     rejection_reasons: tuple[str, ...] = (),
     technical_score: object = Decimal("70"),
+    setup_quality: SetupQualityResult | None = None,
 ) -> ScannerSymbolResult:
     transition = _transition(state, previous=previous, transitioned=transitioned, signal_id=signal_id)
     if trade_idea == NA and state in {SetupLifecycleState.CONFIRMED, SetupLifecycleState.EXECUTING, SetupLifecycleState.MANAGING}:
@@ -171,6 +198,7 @@ def _symbol(
         rejected_strategy_modes=("swing",) if state == SetupLifecycleState.REJECTED else (),
         strategy_diagnostics={"swing": diagnostics or _diagnostics()},
         trade_idea=None if trade_idea == NA else trade_idea,
+        setup_quality=setup_quality or _setup_quality(),
         lifecycle_state=transition.record,
         lifecycle_transition=transition,
     )
@@ -222,12 +250,32 @@ def test_confirmed_and_watchlist_lifecycle_states_are_eligible() -> None:
 
 def test_near_miss_rejected_and_unchanged_states_are_not_eligible() -> None:
     rejected = telegram_alert_decision_for_symbol(_symbol(SetupLifecycleState.REJECTED))
+    no_setup = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+    near_miss = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=72),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
     unchanged = telegram_alert_decision_for_symbol(
         _symbol(SetupLifecycleState.CONFIRMED, transitioned=False)
     )
 
     assert rejected.eligible is False
     assert rejected.reason == "lifecycle_state_not_eligible"
+    assert no_setup.eligible is False
+    assert "core_status_blocked:scanned_no_setup" in no_setup.reason
+    assert near_miss.eligible is False
+    assert "setup_quality_not_confirmed:watchlist_near_miss" in near_miss.reason
     assert unchanged.eligible is False
     assert unchanged.reason == "unchanged_lifecycle_state"
 
@@ -402,6 +450,75 @@ def test_confirmed_alert_is_blocked_when_invalidation_is_rejection_text() -> Non
 
     assert decision.eligible is False
     assert "invalidation_contains_rejection_reason" in decision.reason
+
+
+def test_allousdt_style_contradictory_confirmed_alert_is_blocked() -> None:
+    rejection_text = "Technical score is below 50.; Opportunity score 79.00000000 is below scanner minimum 80."
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.79181174"), invalidation=rejection_text),
+            trade_idea=_trade_idea(
+                best_rr=Decimal("2.79181174"),
+                opportunity_score=Decimal("79"),
+                invalidation=rejection_text,
+            ),
+            technical_score=Decimal("49"),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is False
+    assert "planned_rr_below_min:2.79181174<3" in decision.reason
+    assert "opportunity_score_below_min:79<80" in decision.reason
+    assert "technical_score_below_min:49<50" in decision.reason
+    assert "invalidation_contains_rejection_reason" in decision.reason
+
+
+def test_no_setup_lifecycle_watchlist_does_not_send_watchlist_alert() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+            rejection_reason="No valid Liquidity-Grab Pullback setup.",
+            setup_quality=_setup_quality(SetupQualityState.REJECTED_NO_EDGE, quality_score=40),
+        )
+    )
+
+    assert decision.eligible is False
+    assert "core_status_blocked:scanned_no_setup" in decision.reason
+    assert "setup_quality_blocked:rejected_no_edge" in decision.reason
+    assert "rejection_reason_present" in decision.reason
+
+
+def test_confluence_from_raw_derivatives_context_is_public_text() -> None:
+    symbol_result = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        diagnostics=_diagnostics(
+            funding_context={
+                "funding_rate": Decimal("0.00010000"),
+                "funding_status": "normal",
+                "funding_extreme": False,
+            },
+            oi_context={
+                "open_interest": Decimal("123456.789"),
+                "oi_direction": "falling",
+            },
+            derivatives_supports_trade=True,
+            volume_profile_source="estimated_from_candles",
+        ),
+    )
+
+    message = telegram_signal_message_from_symbol(symbol_result)
+    text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, message)
+
+    assert "Confluence:" in text
+    assert "funding is normal while open interest is falling" in text
+    assert "Volume is candle-estimated." in text
+    for forbidden in ("Decimal(", "{", "}", "true", "false", "funding_rate:", "open_interest:"):
+        assert forbidden not in text
 
 
 def test_blocked_confirmed_alert_persists_safe_research_metadata(tmp_path: Path) -> None:

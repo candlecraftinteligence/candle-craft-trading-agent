@@ -54,6 +54,14 @@ CONFIRMED_REJECTED_STATUS_KEYS = {
     "no_setup",
     "rejected",
 }
+CONFIRMED_ALLOWED_QUALITY_STATE_KEYS = {
+    "high_quality_trade",
+    "valid_but_lower_quality",
+}
+WATCHLIST_BLOCKED_QUALITY_STATE_KEYS = {
+    "data_issue",
+    "rejected_no_edge",
+}
 INVALIDATION_REJECTION_FRAGMENTS = (
     "technical score",
     "opportunity score",
@@ -613,13 +621,27 @@ def _defensive_delivery_blockers(
     message: TelegramSignalMessage,
     context: TelegramEligibilityContext,
 ) -> tuple[str, ...]:
+    if alert_type == TelegramAlertType.WATCHLIST:
+        blockers: list[str] = []
+        blockers.extend(_core_status_blockers(symbol_result))
+        quality_state = _setup_quality_state_key(symbol_result)
+        if quality_state in WATCHLIST_BLOCKED_QUALITY_STATE_KEYS:
+            blockers.append(f"setup_quality_blocked:{quality_state}")
+        if _text(symbol_result.rejection_reason) != NA:
+            blockers.append("rejection_reason_present")
+        if any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
+            blockers.append("rejection_reasons_present")
+        return tuple(dict.fromkeys(blockers))
+
     if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
         return ()
 
     blockers: list[str] = []
-    status_key = _status_key(getattr(symbol_result.status, "value", symbol_result.status))
-    if status_key in CONFIRMED_REJECTED_STATUS_KEYS:
-        blockers.append(f"core_status_blocked:{status_key}")
+    blockers.extend(_core_status_blockers(symbol_result))
+
+    quality_state = _setup_quality_state_key(symbol_result)
+    if quality_state not in CONFIRMED_ALLOWED_QUALITY_STATE_KEYS:
+        blockers.append(f"setup_quality_not_confirmed:{quality_state or 'missing'}")
 
     if symbol_result.trade_idea is None:
         blockers.append("trade_idea_missing")
@@ -663,6 +685,25 @@ def _defensive_delivery_blockers(
         blockers.append("invalidation_contains_rejection_reason")
 
     return tuple(dict.fromkeys(blockers))
+
+
+def _core_status_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    blockers: list[str] = []
+    for status_key in _status_keys(symbol_result):
+        if status_key in CONFIRMED_REJECTED_STATUS_KEYS:
+            blockers.append(f"core_status_blocked:{status_key}")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _status_keys(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    values: list[Any] = [getattr(symbol_result.status, "value", symbol_result.status)]
+    values.extend(getattr(status, "value", status) for status in symbol_result.status_history)
+    return tuple(dict.fromkeys(_status_key(value) for value in values if _status_key(value)))
+
+
+def _setup_quality_state_key(symbol_result: ScannerSymbolResult) -> str:
+    quality_state = getattr(symbol_result.setup_quality, "quality_state", NA)
+    return _status_key(getattr(quality_state, "value", quality_state))
 
 
 def _persist_blocked_decision(decision: TelegramAlertDecision) -> bool:
@@ -939,8 +980,16 @@ def _volume_confluence_text(symbol_result: ScannerSymbolResult, diagnostics: Map
 
 
 def _derivatives_confluence_text(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
-    funding = _funding_phrase(_first_non_na(diagnostics.get("funding_context"), symbol_result.funding_status))
-    oi = _oi_phrase(_first_non_na(diagnostics.get("oi_context"), symbol_result.oi_direction))
+    funding_source = _first_context_value(
+        (diagnostics.get("funding_context"), ("funding_status", "status", "direction", "funding_direction", "severity")),
+        (symbol_result.funding_status, ()),
+    )
+    oi_source = _first_context_value(
+        (diagnostics.get("oi_context"), ("oi_direction", "direction", "open_interest_direction", "trend")),
+        (symbol_result.oi_direction, ()),
+    )
+    funding = _funding_phrase(funding_source)
+    oi = _oi_phrase(oi_source)
     if funding == NA and oi == NA:
         return "Derivatives context is N/A."
     if funding != NA and oi != NA:
@@ -966,6 +1015,7 @@ def _derivatives_status(symbol_result: ScannerSymbolResult, diagnostics: Mapping
 
 
 def _funding_phrase(value: Any) -> str:
+    value = _context_value(value, "funding_status", "status", "direction", "funding_direction", "severity")
     key = _status_key(value)
     if key in {"", "na", "n_a"}:
         return NA
@@ -983,6 +1033,7 @@ def _funding_phrase(value: Any) -> str:
 
 
 def _oi_phrase(value: Any) -> str:
+    value = _context_value(value, "oi_direction", "direction", "open_interest_direction", "trend")
     key = _status_key(value)
     if key in {"", "na", "n_a"}:
         return NA
@@ -993,6 +1044,26 @@ def _oi_phrase(value: Any) -> str:
     if key in {"flat", "neutral", "stable"}:
         return "open interest is stable"
     return f"open interest is {_plain_label(key)}"
+
+
+def _context_value(value: Any, *keys: str) -> Any:
+    if hasattr(value, "model_dump") and not isinstance(value, Mapping):
+        value = value.model_dump()
+    if not isinstance(value, Mapping):
+        return value
+    for key in keys:
+        candidate = value.get(key, NA)
+        if _text(candidate) != NA:
+            return candidate
+    return NA
+
+
+def _first_context_value(*candidates: tuple[Any, tuple[str, ...]]) -> Any:
+    for value, keys in candidates:
+        candidate = _context_value(value, *keys)
+        if _text(candidate) != NA:
+            return candidate
+    return NA
 
 
 def _entry_zone_text(entry_low: Any, entry_high: Any) -> str:
@@ -1150,13 +1221,17 @@ def _symbol(value: Any) -> str:
 def _text(value: Any) -> str:
     if value is None or value == "" or value == NA:
         return NA
+    if isinstance(value, Mapping):
+        return NA
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return NA
     if hasattr(value, "value") and not isinstance(value, (str, int, float, bool, Decimal)):
         value = value.value
     if isinstance(value, Decimal):
         text = format(value, "f")
         return text.rstrip("0").rstrip(".") if "." in text else text
     if isinstance(value, bool):
-        return "true" if value else "false"
+        return NA
     text = " ".join(str(value).split())
     return text if text else NA
 
