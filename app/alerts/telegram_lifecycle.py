@@ -40,6 +40,11 @@ PRIOR_ACTIVE_ALERT_TYPES = {
     TelegramAlertType.WATCHLIST.value,
     TelegramAlertType.SIGNAL_CONFIRMED.value,
 }
+TERMINAL_UPDATE_ALERT_TYPES = {
+    TelegramAlertType.INVALIDATED,
+    TelegramAlertType.EXPIRED,
+    TelegramAlertType.NO_LONGER_TRACKING,
+}
 DEFAULT_CONFIRMED_MIN_RR = Decimal("3")
 DEFAULT_MIN_TECHNICAL_SCORE = Decimal("50")
 CONFIRMED_REJECTED_STATUS_KEYS = {
@@ -203,16 +208,53 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         return _record_from_row(row) if row is not None else None
 
     def has_prior_active_alert(self, *, signal_id: str) -> bool:
-        placeholders = ",".join("?" for _ in PRIOR_ACTIVE_ALERT_TYPES)
+        return self.get_prior_active_alert(signal_ids=(signal_id,)) is not None
+
+    def get_prior_active_alert(
+        self,
+        *,
+        signal_ids: Sequence[str],
+        symbol: str | None = None,
+        direction: str | None = None,
+    ) -> TelegramAlertAttemptRecord | None:
+        candidates = tuple(dict.fromkeys(_identity(signal_id) for signal_id in signal_ids if _identity(signal_id) != NA))
+        if candidates:
+            placeholders = ",".join("?" for _ in candidates)
+            type_placeholders = ",".join("?" for _ in PRIOR_ACTIVE_ALERT_TYPES)
+            rows = self._connection.execute(
+                f"""
+                SELECT * FROM telegram_alert_attempts
+                WHERE signal_id IN ({placeholders})
+                  AND alert_type IN ({type_placeholders})
+                  AND telegram_status = 'sent'
+                ORDER BY id ASC
+                """,
+                (*candidates, *sorted(PRIOR_ACTIVE_ALERT_TYPES)),
+            ).fetchall()
+            records = tuple(_record_from_row(row) for row in rows)
+            if records:
+                return _preferred_prior_active_record(records, candidates)
+        return None
+
+    def has_sent_terminal_outcome(self, *, signal_id: str) -> bool:
+        terminal_alert_types = {
+            TelegramAlertType.INVALIDATED.value,
+            TelegramAlertType.EXPIRED.value,
+            TelegramAlertType.TP1_HIT.value,
+            TelegramAlertType.TP2_HIT.value,
+            TelegramAlertType.TP3_HIT.value,
+            TelegramAlertType.SL_HIT.value,
+        }
+        placeholders = ",".join("?" for _ in terminal_alert_types)
         row = self._connection.execute(
             f"""
             SELECT 1 FROM telegram_alert_attempts
             WHERE signal_id = ?
               AND alert_type IN ({placeholders})
-              AND telegram_status IN ('sent', 'skipped')
+              AND telegram_status = 'sent'
             LIMIT 1
             """,
-            (_identity(signal_id), *sorted(PRIOR_ACTIVE_ALERT_TYPES)),
+            (_identity(signal_id), *sorted(terminal_alert_types)),
         ).fetchone()
         return row is not None
 
@@ -471,11 +513,10 @@ class TelegramLifecycleDeliveryService:
         scan_run_id: str | None = None,
         eligibility_context: TelegramEligibilityContext | None = None,
     ) -> TelegramLifecycleDelivery | None:
+        prior_active_alert = _prior_active_alert_for_symbol(repository, symbol_result)
         decision = telegram_alert_decision_for_symbol(
             symbol_result,
-            previously_active_sent=repository.has_prior_active_alert(
-                signal_id=_signal_id(symbol_result),
-            ),
+            previously_active_sent=prior_active_alert is not None,
             eligibility_context=eligibility_context,
         )
         if not decision.eligible or decision.alert_type is None or decision.message is None:
@@ -490,6 +531,22 @@ class TelegramLifecycleDeliveryService:
             return None
 
         signal_id = _signal_id(symbol_result)
+        message = decision.message
+        if decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES and prior_active_alert is not None:
+            signal_id = prior_active_alert.signal_id
+            message = replace(message, signal_id=signal_id)
+            if (
+                decision.alert_type == TelegramAlertType.NO_LONGER_TRACKING
+                and repository.has_sent_terminal_outcome(signal_id=signal_id)
+            ):
+                return TelegramLifecycleDelivery(
+                    symbol=symbol_result.symbol,
+                    signal_id=signal_id,
+                    alert_type=decision.alert_type.value,
+                    status="duplicate",
+                    detail="Prior terminal Telegram lifecycle update already sent.",
+                )
+
         if repository.has_attempt(signal_id=signal_id, alert_type=decision.alert_type):
             repository.compact_existing_attempt(
                 signal_id=signal_id,
@@ -504,7 +561,7 @@ class TelegramLifecycleDeliveryService:
                 detail="Duplicate Telegram alert prevented.",
             )
 
-        message_text = format_telegram_signal_message(decision.alert_type, decision.message)
+        message_text = format_telegram_signal_message(decision.alert_type, message)
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
         send_result = await self.sender.send_text(message_text)
         transition = decision.lifecycle_transition
@@ -513,7 +570,7 @@ class TelegramLifecycleDeliveryService:
         record = TelegramAlertAttemptRecord(
             signal_id=signal_id,
             symbol=symbol_result.symbol,
-            direction=decision.message.direction,
+            direction=message.direction,
             previous_state=previous_state,
             new_state=new_state,
             alert_type=decision.alert_type.value,
@@ -524,12 +581,12 @@ class TelegramLifecycleDeliveryService:
             scan_run_id=scan_run_id or _transition_scan_run_id(transition),
             attempted_alert_type=decision.alert_type.value,
             setup_quality_score=_quality_score(symbol_result),
-            rr_planned=_text(decision.message.planned_rr),
+            rr_planned=_text(message.planned_rr),
             min_rr=_text((eligibility_context or TelegramEligibilityContext()).min_rr),
             opportunity_score=_opportunity_score_text(symbol_result),
             min_score_for_idea=_text((eligibility_context or TelegramEligibilityContext()).min_score_for_idea),
             technical_score=_technical_score_text(symbol_result),
-            price_level=_price_level_for_alert(decision.alert_type, decision.message),
+            price_level=_price_level_for_alert(decision.alert_type, message),
             blocked_reason=NA,
             invalid_target_fields=NA,
             error_message=send_result.error_message,
@@ -577,11 +634,23 @@ def telegram_alert_decision_for_symbol(
     alert_type = _alert_type_for_transition(symbol_result, transition)
     if alert_type is None:
         return TelegramAlertDecision(False, "lifecycle_state_not_eligible", lifecycle_transition=transition)
-    if _requires_prior_active_alert(alert_type) and not previously_active_sent:
-        return TelegramAlertDecision(False, "missing_prior_active_telegram_alert", lifecycle_transition=transition)
 
     context = eligibility_context or TelegramEligibilityContext()
-    message = replace(telegram_signal_message_from_symbol(symbol_result), min_rr=context.min_rr)
+    message = _telegram_signal_message_for_alert(symbol_result, alert_type, context)
+    if _requires_prior_active_alert(alert_type) and not previously_active_sent:
+        reason = (
+            "terminal_update_identity_not_matched"
+            if alert_type in TERMINAL_UPDATE_ALERT_TYPES
+            else "missing_prior_active_telegram_alert"
+        )
+        return TelegramAlertDecision(
+            False,
+            reason,
+            alert_type=alert_type if alert_type in TERMINAL_UPDATE_ALERT_TYPES else None,
+            message=message if alert_type in TERMINAL_UPDATE_ALERT_TYPES else None,
+            lifecycle_transition=transition,
+        )
+
     blockers = _defensive_delivery_blockers(symbol_result, alert_type, message, context)
     if blockers:
         return TelegramAlertDecision(
@@ -722,6 +791,17 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
             symbol_result.latest_close,
         ),
     )
+
+
+def _telegram_signal_message_for_alert(
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+    context: TelegramEligibilityContext,
+) -> TelegramSignalMessage:
+    message = replace(telegram_signal_message_from_symbol(symbol_result), min_rr=context.min_rr)
+    if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
+        return replace(message, invalidation_reason=_terminal_update_reason(symbol_result, alert_type))
+    return message
 
 
 def _watch_zone_text(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
@@ -976,6 +1056,8 @@ def _alert_type_for_transition(
         return TelegramAlertType.INVALIDATED
     if state == SetupLifecycleState.EXPIRED:
         return TelegramAlertType.EXPIRED
+    if state == SetupLifecycleState.COOLDOWN:
+        return TelegramAlertType.NO_LONGER_TRACKING
     if _explicit_watchlist_candidate(symbol_result):
         return TelegramAlertType.WATCHLIST
     return None
@@ -1003,6 +1085,140 @@ def _requires_prior_active_alert(alert_type: TelegramAlertType) -> bool:
     return alert_type not in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED}
 
 
+def _terminal_transition_blockers(
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+) -> tuple[str, ...]:
+    transition = symbol_result.lifecycle_transition
+    if transition is None:
+        return ("missing_lifecycle_transition",)
+    previous = _previous_transition_state(symbol_result)
+    if previous is None:
+        return ("terminal_transition_missing_previous_state",)
+
+    if alert_type == TelegramAlertType.INVALIDATED:
+        allowed = WATCH_ALERT_STATES | SIGNAL_ALERT_STATES | {SetupLifecycleState.MANAGING}
+    elif alert_type == TelegramAlertType.EXPIRED:
+        allowed = WATCH_ALERT_STATES | SIGNAL_ALERT_STATES | {SetupLifecycleState.MANAGING}
+    elif alert_type == TelegramAlertType.NO_LONGER_TRACKING:
+        allowed = WATCH_ALERT_STATES | {SetupLifecycleState.INVALIDATED, SetupLifecycleState.EXPIRED}
+    else:
+        allowed = set()
+
+    if previous not in allowed:
+        return (f"terminal_transition_not_meaningful:{previous.value}->{transition.to_state.value}",)
+    return ()
+
+
+def _previous_transition_state(symbol_result: ScannerSymbolResult) -> SetupLifecycleState | None:
+    transition = symbol_result.lifecycle_transition
+    if transition is not None and transition.from_state is not None:
+        return transition.from_state
+    lifecycle = symbol_result.lifecycle_state
+    if lifecycle is not None:
+        return lifecycle.previous_state
+    return None
+
+
+def _terminal_update_reason(
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+) -> str:
+    raw_reason = _terminal_raw_reason(symbol_result, alert_type)
+    cleaned = _clean_terminal_reason(raw_reason)
+    if alert_type == TelegramAlertType.INVALIDATED:
+        if cleaned != NA:
+            return _terminal_sentence("Watchlist invalidated because", cleaned)
+        return "Watchlist is no longer valid according to the lifecycle engine."
+    if alert_type == TelegramAlertType.EXPIRED:
+        if cleaned != NA and _status_key(cleaned) != "setup_expired_before_completion":
+            return _terminal_sentence("Watchlist expired because", cleaned)
+        return "Watchlist expired because it did not confirm within the valid tracking window."
+    if alert_type == TelegramAlertType.NO_LONGER_TRACKING:
+        if cleaned != NA and "cooldown" not in cleaned.lower():
+            return _terminal_sentence("Watchlist removed because", cleaned)
+        return "Watchlist removed because the setup entered cooldown before confirmation."
+    return "Watchlist is no longer valid according to the lifecycle engine."
+
+
+def _terminal_raw_reason(symbol_result: ScannerSymbolResult, alert_type: TelegramAlertType) -> Any:
+    diagnostics = _representative_diagnostics(symbol_result)
+    transition = symbol_result.lifecycle_transition
+    lifecycle = symbol_result.lifecycle_state
+    if alert_type == TelegramAlertType.EXPIRED:
+        return _first_non_na(
+            diagnostics.get("terminal_reason"),
+            diagnostics.get("expired_reason"),
+            getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA,
+            diagnostics.get("first_failed_gate"),
+            diagnostics.get("failed_gate"),
+        )
+    if alert_type == TelegramAlertType.NO_LONGER_TRACKING:
+        return _first_non_na(
+            diagnostics.get("terminal_reason"),
+            diagnostics.get("cooldown_reason"),
+            getattr(lifecycle, "action_label", NA) if lifecycle is not None else NA,
+            getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA,
+            diagnostics.get("first_failed_gate"),
+            diagnostics.get("failed_gate"),
+        )
+    return _first_non_na(
+        getattr(lifecycle, "invalidation_reason", NA) if lifecycle is not None else NA,
+        getattr(transition, "notes", NA) if transition is not None else NA,
+        getattr(getattr(transition, "reason", None), "value", NA) if transition is not None else NA,
+        getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA,
+        getattr(lifecycle, "action_label", NA) if lifecycle is not None else NA,
+        diagnostics.get("terminal_reason"),
+        diagnostics.get("invalidation_reason"),
+        diagnostics.get("pullback_failure_reason"),
+        diagnostics.get("first_failed_gate"),
+        diagnostics.get("failed_gate"),
+    )
+
+
+def _clean_terminal_reason(value: Any) -> str:
+    text = _text(value)
+    if text == NA:
+        return NA
+    key = _status_key(text.rstrip(".!?"))
+    mapped = {
+        "setup_invalidated_by_current_structure_or_failed_gate": "the sweep/BOS/CHoCH structure failed before confirmation",
+        "setup_expired_before_completion": "it did not confirm within the valid tracking window",
+        "lifecycle_moved_into_cooldown": "the setup entered cooldown before confirmation",
+        "entry_window_expired": "it did not confirm within the valid tracking window",
+        "pullback_too_deep": "price accepted beyond the planned invalidation structure",
+        "pullback_beyond_786": "price accepted beyond the planned invalidation structure",
+        "body_acceptance_failure": "price accepted beyond the planned invalidation structure",
+        "structural_breakdown": "the sweep/BOS/CHoCH structure failed before confirmation",
+        "no_displacement_candle": "the required displacement structure failed before confirmation",
+        "missing_displacement_impulse": "the required displacement structure failed before confirmation",
+    }.get(key)
+    if mapped is not None:
+        return mapped
+    lowered = text.lower()
+    if (
+        _looks_like_rejection_reason(text)
+        or "decimal(" in lowered
+        or "{" in text
+        or "}" in text
+        or lowered in {"true", "false"}
+    ):
+        return NA
+    if key.startswith("invalid_if") or key.startswith("invalidates_if") or key.startswith("signal_invalidates_if"):
+        return "price accepted beyond the planned invalidation structure"
+    return _plain_label(text) if "_" in text and len(text.split()) == 1 else text
+
+
+def _terminal_sentence(prefix: str, reason: str) -> str:
+    cleaned = _clean_watch_text(reason)
+    if cleaned == NA:
+        return "Watchlist is no longer valid according to the lifecycle engine."
+    lower = cleaned.lower()
+    if lower.startswith(("watchlist ", "signal ", "setup ")):
+        return cleaned
+    return f"{prefix} {cleaned[:1].lower()}{cleaned[1:]}"
+
+
 def _missing_required_fields(alert_type: TelegramAlertType, message: TelegramSignalMessage) -> tuple[str, ...]:
     required: list[tuple[str, Any]] = [
         ("signal_id", message.signal_id),
@@ -1025,7 +1241,12 @@ def _missing_required_fields(alert_type: TelegramAlertType, message: TelegramSig
                 _first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason),
             )
         )
-    elif alert_type in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.INVALIDATED}:
+    elif alert_type in {
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        TelegramAlertType.INVALIDATED,
+        TelegramAlertType.EXPIRED,
+        TelegramAlertType.NO_LONGER_TRACKING,
+    }:
         required.append(("invalidation_reason", message.invalidation_reason))
     if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
         required.extend((("tp1", message.tp1), ("tp2", message.tp2), ("tp3", message.tp3)))
@@ -1061,6 +1282,13 @@ def _defensive_delivery_blockers(
             blockers.append("rejection_reasons_present")
         blockers.extend(_watchlist_public_readiness_blockers(symbol_result, message, context))
         blockers.extend(_target_integrity_blockers(symbol_result, alert_type, message))
+        return tuple(dict.fromkeys(blockers))
+
+    if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
+        blockers = list(_terminal_transition_blockers(symbol_result, alert_type))
+        missing = _missing_required_fields(alert_type, message)
+        if missing:
+            blockers.append(f"missing_required_fields:{','.join(missing)}")
         return tuple(dict.fromkeys(blockers))
 
     if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
@@ -1447,6 +1675,8 @@ def _explicit_watchlist_candidate(symbol_result: ScannerSymbolResult) -> bool:
 
 
 def _persist_blocked_decision(decision: TelegramAlertDecision) -> bool:
+    if decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES:
+        return decision.reason == "terminal_update_identity_not_matched" or decision.reason.startswith("blocked:")
     return decision.alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED} and decision.reason.startswith(
         "blocked:"
     )
@@ -1540,6 +1770,8 @@ def _persist_blocked_attempt(
 def _blocked_delivery_detail(alert_type: TelegramAlertType) -> str:
     if alert_type == TelegramAlertType.WATCHLIST:
         return "Telegram watchlist alert blocked by public readiness guard."
+    if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
+        return "Telegram terminal lifecycle update blocked by public alert identity guard."
     return "Telegram confirmed alert blocked by defensive eligibility guard."
 
 
@@ -1582,10 +1814,59 @@ def _representative_diagnostics(symbol_result: ScannerSymbolResult) -> Mapping[s
     return {}
 
 
+def _prior_active_alert_for_symbol(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    symbol_result: ScannerSymbolResult,
+) -> TelegramAlertAttemptRecord | None:
+    message = telegram_signal_message_from_symbol(symbol_result)
+    return repository.get_prior_active_alert(
+        signal_ids=_signal_id_candidates(symbol_result),
+        symbol=symbol_result.symbol,
+        direction=message.direction,
+    )
+
+
+def _preferred_prior_active_record(
+    records: Sequence[TelegramAlertAttemptRecord],
+    signal_id_priority: Sequence[str],
+) -> TelegramAlertAttemptRecord:
+    priority = {signal_id: index for index, signal_id in enumerate(signal_id_priority)}
+    alert_priority = {
+        TelegramAlertType.WATCHLIST.value: 0,
+        TelegramAlertType.SIGNAL_CONFIRMED.value: 1,
+    }
+    return sorted(
+        records,
+        key=lambda record: (
+            priority.get(record.signal_id, len(priority)),
+            alert_priority.get(record.alert_type, len(alert_priority)),
+            record.id or 0,
+        ),
+    )[0]
+
+
+def _signal_id_candidates(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    lifecycle_id = _lifecycle_signal_id(symbol_result)
+    fallback_id = _fallback_signal_id(symbol_result)
+    return tuple(dict.fromkeys(value for value in (lifecycle_id, fallback_id) if _text(value) != NA))
+
+
 def _signal_id(symbol_result: ScannerSymbolResult) -> str:
+    lifecycle_id = _lifecycle_signal_id(symbol_result)
+    if lifecycle_id != NA:
+        return lifecycle_id
+    return _fallback_signal_id(symbol_result)
+
+
+def _lifecycle_signal_id(symbol_result: ScannerSymbolResult) -> str:
     lifecycle = symbol_result.lifecycle_state
     if lifecycle is not None and _text(lifecycle.lifecycle_id) != NA:
         return lifecycle.lifecycle_id
+    return NA
+
+
+def _fallback_signal_id(symbol_result: ScannerSymbolResult) -> str:
+    lifecycle = symbol_result.lifecycle_state
     diagnostics = _representative_diagnostics(symbol_result)
     setup = _selected_setup(symbol_result, diagnostics)
     trade_idea = symbol_result.trade_idea

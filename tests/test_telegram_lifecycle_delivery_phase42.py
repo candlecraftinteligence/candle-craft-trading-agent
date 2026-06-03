@@ -19,7 +19,7 @@ from app.alerts.telegram_lifecycle import (
 from app.alerts.telegram_sender import TelegramSendResult, TelegramSender
 from app.core.config import Settings
 from app.data.dtos import NA
-from app.formatters.telegram_signal_formatter import format_telegram_signal_message
+from app.formatters.telegram_signal_formatter import FOOTER, HEADER_PREFIX, format_telegram_signal_message
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
 from app.storage.models import TelegramAlertAttemptRecord
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
@@ -250,7 +250,13 @@ def _assert_target_integrity_blocked(decision, *fields: str) -> None:
         assert field in decision.reason
 
 
-def _seed_prior_active_alert(db_path: Path, *, signal_id: str) -> None:
+def _seed_prior_active_alert(
+    db_path: Path,
+    *,
+    signal_id: str,
+    alert_type: TelegramAlertType = TelegramAlertType.SIGNAL_CONFIRMED,
+    status: str = "sent",
+) -> None:
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         repository.insert_attempt(
             TelegramAlertAttemptRecord(
@@ -258,13 +264,13 @@ def _seed_prior_active_alert(db_path: Path, *, signal_id: str) -> None:
                 symbol="BTCUSDT",
                 direction="long",
                 previous_state=NA,
-                new_state="CONFIRMED",
-                alert_type=TelegramAlertType.SIGNAL_CONFIRMED.value,
-                lifecycle_state="CONFIRMED",
+                new_state="WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
+                alert_type=alert_type.value,
+                lifecycle_state="WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
                 sent_at="2026-06-02T00:00:00+00:00",
-                telegram_status="sent",
+                telegram_status=status,
                 message_hash=f"{signal_id}-active",
-                attempted_alert_type=TelegramAlertType.SIGNAL_CONFIRMED.value,
+                attempted_alert_type=alert_type.value,
             )
         )
 
@@ -564,6 +570,14 @@ def test_updates_require_prior_active_telegram_alert() -> None:
         _symbol(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.CONFIRMED),
         previously_active_sent=True,
     )
+    expired_with_prior = telegram_alert_decision_for_symbol(
+        _symbol(SetupLifecycleState.EXPIRED, previous=SetupLifecycleState.STALKING),
+        previously_active_sent=True,
+    )
+    cooldown_with_prior = telegram_alert_decision_for_symbol(
+        _symbol(SetupLifecycleState.COOLDOWN, previous=SetupLifecycleState.TRIGGERED),
+        previously_active_sent=True,
+    )
     tp2 = telegram_alert_decision_for_symbol(
         _symbol(
             SetupLifecycleState.TP_HIT,
@@ -575,9 +589,13 @@ def test_updates_require_prior_active_telegram_alert() -> None:
     )
 
     assert invalidated_without_prior.eligible is False
-    assert invalidated_without_prior.reason == "missing_prior_active_telegram_alert"
+    assert invalidated_without_prior.reason == "terminal_update_identity_not_matched"
     assert invalidated_with_prior.eligible is True
     assert invalidated_with_prior.alert_type == "INVALIDATED"
+    assert expired_with_prior.eligible is True
+    assert expired_with_prior.alert_type == "EXPIRED"
+    assert cooldown_with_prior.eligible is True
+    assert cooldown_with_prior.alert_type == "NO_LONGER_TRACKING"
     assert tp2.eligible is True
     assert tp2.alert_type == "TP2_HIT"
 
@@ -712,6 +730,286 @@ def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> Non
     assert duplicate_invalidated.duplicate == 1
     assert "CANDLE CRAFT WATCHLIST" in sender.messages[0]
     assert "CANDLE CRAFT INVALIDATION" in sender.messages[1]
+    assert sender.messages[1].startswith(HEADER_PREFIX)
+    assert sender.messages[1].endswith(FOOTER)
+    assert "Status:\nINVALIDATED" in sender.messages[1]
+    assert "Signal ID:\nsig-invalidates" in sender.messages[1]
+    assert "System:\nWatchlist removed from active tracking." in sender.messages[1]
+    assert "Setup Type" not in sender.messages[1]
+    assert "Decimal(" not in sender.messages[1]
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT alert_type, telegram_status, previous_state, new_state
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+    assert rows == [
+        (TelegramAlertType.WATCHLIST.value, "sent", NA, "WATCHLISTED"),
+        (TelegramAlertType.INVALIDATED.value, "sent", "WATCHLISTED", "INVALIDATED"),
+    ]
+
+
+def test_watchlist_to_expired_sends_expired_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+
+    watchlist = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.WATCHLISTED,
+                    signal_id="sig-expires",
+                    diagnostics=_public_ready_watchlist_diagnostics(),
+                )
+            ),
+            scan_run_id="run-watch",
+        )
+    )
+    expired = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.EXPIRED,
+                    previous=SetupLifecycleState.STALKING,
+                    signal_id="sig-expires",
+                )
+            ),
+            scan_run_id="run-expired",
+        )
+    )
+    duplicate_expired = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.EXPIRED,
+                    previous=SetupLifecycleState.STALKING,
+                    signal_id="sig-expires",
+                )
+            ),
+            scan_run_id="run-expired",
+        )
+    )
+
+    assert watchlist.sent == 1
+    assert expired.sent == 1
+    assert duplicate_expired.duplicate == 1
+    assert len(sender.messages) == 2
+    assert "Status:\nEXPIRED" in sender.messages[1]
+    assert "Signal ID:\nsig-expires" in sender.messages[1]
+    assert "Watchlist expired because it did not confirm within the valid tracking window." in sender.messages[1]
+    assert "System:\nWatchlist expired. No active signal." in sender.messages[1]
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
+    assert rows == [
+        (TelegramAlertType.WATCHLIST.value, "sent"),
+        (TelegramAlertType.EXPIRED.value, "sent"),
+    ]
+
+
+def test_watchlist_to_cooldown_sends_no_longer_tracking_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+
+    watchlist = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.WATCHLISTED,
+                    signal_id="sig-cooldown",
+                    diagnostics=_public_ready_watchlist_diagnostics(),
+                )
+            ),
+            scan_run_id="run-watch",
+        )
+    )
+    cooldown = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.COOLDOWN,
+                    previous=SetupLifecycleState.TRIGGERED,
+                    signal_id="sig-cooldown",
+                )
+            ),
+            scan_run_id="run-cooldown",
+        )
+    )
+    duplicate_cooldown = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.COOLDOWN,
+                    previous=SetupLifecycleState.TRIGGERED,
+                    signal_id="sig-cooldown",
+                )
+            ),
+            scan_run_id="run-cooldown",
+        )
+    )
+
+    assert watchlist.sent == 1
+    assert cooldown.sent == 1
+    assert duplicate_cooldown.duplicate == 1
+    assert len(sender.messages) == 2
+    assert "Status:\nNO LONGER TRACKING" in sender.messages[1]
+    assert "Signal ID:\nsig-cooldown" in sender.messages[1]
+    assert "Watchlist removed because the setup entered cooldown before confirmation." in sender.messages[1]
+    assert "System:\nWatchlist removed from active tracking." in sender.messages[1]
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
+    assert rows == [
+        (TelegramAlertType.WATCHLIST.value, "sent"),
+        (TelegramAlertType.NO_LONGER_TRACKING.value, "sent"),
+    ]
+
+
+def test_blocked_watchlist_to_invalidated_does_not_send_terminal_update(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    blocked_watchlist = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="blocked-terminal",
+        diagnostics=_public_ready_watchlist_diagnostics(
+            entry_low=NA,
+            entry_high=NA,
+            stop=NA,
+            tp1=NA,
+            tp2=NA,
+            tp3=NA,
+            rr_to_tp2=NA,
+        ),
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
+    )
+    invalidated = _symbol(
+        SetupLifecycleState.INVALIDATED,
+        previous=SetupLifecycleState.WATCHLISTED,
+        signal_id="blocked-terminal",
+    )
+
+    blocked = run(service.deliver_for_run(_run_result(blocked_watchlist), scan_run_id="run-blocked"))
+    terminal = run(service.deliver_for_run(_run_result(invalidated), scan_run_id="run-invalid"))
+
+    assert blocked.blocked == 1
+    assert terminal.blocked == 1
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT attempted_alert_type, telegram_status, blocked_reason
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+    assert rows[0][0] == TelegramAlertType.WATCHLIST.value
+    assert rows[0][1] == "blocked"
+    assert "watchlist_missing_trackable_plan" in rows[0][2]
+    assert rows[1][0] == TelegramAlertType.INVALIDATED.value
+    assert rows[1][1] == "blocked"
+    assert rows[1][2] == "terminal_update_identity_not_matched"
+
+
+def test_skipped_watchlist_to_invalidated_does_not_count_as_public_prior(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="skipped-terminal",
+        alert_type=TelegramAlertType.WATCHLIST,
+        status="skipped",
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+
+    terminal = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.INVALIDATED,
+                    previous=SetupLifecycleState.WATCHLISTED,
+                    signal_id="skipped-terminal",
+                )
+            ),
+            scan_run_id="run-invalid",
+        )
+    )
+
+    assert terminal.blocked == 1
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT attempted_alert_type, telegram_status, blocked_reason FROM telegram_alert_attempts ORDER BY id"
+        ).fetchall()
+    assert rows == [
+        (TelegramAlertType.WATCHLIST.value, "skipped", NA),
+        (TelegramAlertType.INVALIDATED.value, "blocked", "terminal_update_identity_not_matched"),
+    ]
+
+
+def test_terminal_update_uses_original_fallback_signal_id_when_lifecycle_id_differs(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    diagnostics = _public_ready_watchlist_diagnostics()
+    fallback_source = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="old-life",
+        diagnostics=diagnostics,
+    ).model_copy(update={"lifecycle_state": None, "lifecycle_transition": None})
+    original_signal_id = _signal_id(fallback_source)
+    _seed_prior_active_alert(
+        db_path,
+        signal_id=original_signal_id,
+        alert_type=TelegramAlertType.WATCHLIST,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+
+    terminal = run(
+        service.deliver_for_run(
+            _run_result(
+                _symbol(
+                    SetupLifecycleState.INVALIDATED,
+                    previous=SetupLifecycleState.TRIGGERED,
+                    signal_id="new-life",
+                    diagnostics=diagnostics,
+                )
+            ),
+            scan_run_id="run-invalid",
+        )
+    )
+
+    assert terminal.sent == 1
+    assert len(sender.messages) == 1
+    assert f"Signal ID:\n{original_signal_id}" in sender.messages[0]
+    assert "Signal ID:\nnew-life" not in sender.messages[0]
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT signal_id, alert_type FROM telegram_alert_attempts ORDER BY id").fetchall()
+    assert rows == [
+        (original_signal_id, TelegramAlertType.WATCHLIST.value),
+        (original_signal_id, TelegramAlertType.INVALIDATED.value),
+    ]
 
 
 def test_missing_telegram_credentials_skip_safely_and_persist_attempt(tmp_path: Path) -> None:
@@ -1478,6 +1776,11 @@ def test_each_alert_type_is_not_sent_twice(tmp_path: Path) -> None:
         (
             TelegramAlertType.INVALIDATED,
             _symbol(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.CONFIRMED, signal_id="sig-invalidated"),
+            True,
+        ),
+        (
+            TelegramAlertType.NO_LONGER_TRACKING,
+            _symbol(SetupLifecycleState.COOLDOWN, previous=SetupLifecycleState.TRIGGERED, signal_id="sig-cooldown"),
             True,
         ),
     )

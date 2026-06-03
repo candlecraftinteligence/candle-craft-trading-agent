@@ -83,8 +83,9 @@ def test_lifecycle_update_formatters_include_required_fields() -> None:
         TelegramAlertType.TP2_HIT: ("Status:\nTP2 HIT", "Second target reached."),
         TelegramAlertType.TP3_HIT: ("Status:\nTP3 HIT", "Final target reached."),
         TelegramAlertType.SL_HIT: ("Status:\nSL HIT", "Stop level reached."),
-        TelegramAlertType.INVALIDATED: ("Status:\nINVALIDATED", "Setup removed from active signal tracking."),
-        TelegramAlertType.EXPIRED: ("Status:\nEXPIRED", "Setup did not confirm within the valid lifecycle window."),
+        TelegramAlertType.INVALIDATED: ("Status:\nINVALIDATED", "Watchlist removed from active tracking."),
+        TelegramAlertType.EXPIRED: ("Status:\nEXPIRED", "Watchlist expired. No active signal."),
+        TelegramAlertType.NO_LONGER_TRACKING: ("Status:\nNO LONGER TRACKING", "Watchlist removed from active tracking."),
     }
 
     for alert_type, required in expected.items():
@@ -92,6 +93,24 @@ def test_lifecycle_update_formatters_include_required_fields() -> None:
         for snippet in required:
             assert snippet in text
         assert "Signal ID:\nsig-001" in text
+
+
+def test_terminal_update_formatters_are_short_and_clean() -> None:
+    for alert_type in (
+        TelegramAlertType.INVALIDATED,
+        TelegramAlertType.EXPIRED,
+        TelegramAlertType.NO_LONGER_TRACKING,
+    ):
+        text = format_telegram_signal_message(alert_type, _message())
+
+        assert text.startswith(HEADER_PREFIX)
+        assert text.endswith(FOOTER)
+        assert "Reason:\nInvalid if price accepts below 95." in text
+        assert "Setup Type" not in text
+        assert "manual execution only" not in text
+        assert "Decimal(" not in text
+        assert "Lifecycle:" not in text
+        assert "Research:" not in text
 
 
 def test_public_formatter_omits_setup_type_and_manual_execution_status_suffix() -> None:

@@ -27,6 +27,7 @@ class TelegramAlertType(str, Enum):
     SL_HIT = "SL_HIT"
     INVALIDATED = "INVALIDATED"
     EXPIRED = "EXPIRED"
+    NO_LONGER_TRACKING = "NO_LONGER_TRACKING"
 
 
 PUBLIC_STATUS_BY_ALERT_TYPE = {
@@ -39,6 +40,7 @@ PUBLIC_STATUS_BY_ALERT_TYPE = {
     TelegramAlertType.SL_HIT: "SL HIT",
     TelegramAlertType.INVALIDATED: "INVALIDATED",
     TelegramAlertType.EXPIRED: "EXPIRED",
+    TelegramAlertType.NO_LONGER_TRACKING: "NO LONGER TRACKING",
 }
 
 
@@ -93,6 +95,8 @@ def format_telegram_signal_message(
         return format_invalidated_update(message)
     if normalized == TelegramAlertType.EXPIRED:
         return format_expired_update(message)
+    if normalized == TelegramAlertType.NO_LONGER_TRACKING:
+        return format_no_longer_tracking_update(message)
     raise ValueError(f"Unsupported Telegram alert type: {alert_type}")
 
 
@@ -340,11 +344,8 @@ def format_invalidated_update(message: TelegramSignalMessage) -> str:
         "Reason:",
         _display(message.invalidation_reason),
         "",
-        "Lifecycle:",
-        "Setup removed from active signal tracking.",
-        "",
-        "Research:",
-        "Invalidation saved for lifecycle and expectancy analysis.",
+        "System:",
+        "Watchlist removed from active tracking.",
         "",
         FOOTER,
     )
@@ -362,13 +363,31 @@ def format_expired_update(message: TelegramSignalMessage) -> str:
         _display(message.signal_id),
         "",
         "Reason:",
-        "Setup did not confirm within the valid lifecycle window.",
+        _display(message.invalidation_reason),
         "",
-        "Lifecycle:",
-        "Setup removed from active tracking.",
+        "System:",
+        "Watchlist expired. No active signal.",
         "",
-        "Research:",
-        "Expiration saved for lifecycle and expectancy analysis.",
+        FOOTER,
+    )
+
+
+def format_no_longer_tracking_update(message: TelegramSignalMessage) -> str:
+    return _join(
+        f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
+        f"{_display(message.symbol)} | {_display(message.direction)}",
+        "",
+        "Status:",
+        "NO LONGER TRACKING",
+        "",
+        "Signal ID:",
+        _display(message.signal_id),
+        "",
+        "Reason:",
+        _display(message.invalidation_reason),
+        "",
+        "System:",
+        "Watchlist removed from active tracking.",
         "",
         FOOTER,
     )
@@ -553,6 +572,7 @@ __all__ = [
     "format_expired_update",
     "format_invalidated_update",
     "format_limit_hit_update",
+    "format_no_longer_tracking_update",
     "format_signal_confirmed_alert",
     "format_sl_hit_update",
     "format_telegram_signal_message",
