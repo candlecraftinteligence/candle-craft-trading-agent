@@ -28,10 +28,12 @@ class FakeCommandTransport:
         updates: tuple[Mapping[str, Any], ...] = (),
         *,
         fail_send_with: str | None = None,
+        fail_photo_send_with: str | None = None,
         fail_get: bool = False,
     ) -> None:
         self.updates = updates
         self.fail_send_with = fail_send_with
+        self.fail_photo_send_with = fail_photo_send_with
         self.fail_get = fail_get
         self.get_calls: list[dict[str, Any]] = []
         self.send_calls: list[dict[str, Any]] = []
@@ -60,6 +62,8 @@ class FakeCommandTransport:
                 "photo_url": photo_url,
             }
         )
+        if photo_url is not None and self.fail_photo_send_with is not None:
+            return ({"status": "failed", "error": self.fail_photo_send_with},)
         if self.fail_send_with is not None:
             return ({"status": "failed", "error": self.fail_send_with},)
         return ({"status": "sent", "message_id": 101, "chat_id": chat_id},)
@@ -270,6 +274,32 @@ def _assert_no_execution_buttons(reply_markup: Mapping[str, Any] | None) -> None
         assert not any(word in label.lower() for word in forbidden)
 
 
+def _expected_public_start_text() -> str:
+    return "\n".join(
+        (
+            f"{SCREEN_HEADER} Candle Craft Intelligence",
+            "",
+            "Your AI-powered signal engine is online.",
+            "",
+            "Welcome to the Moon Trip signal desk.",
+            "",
+            (
+                "Candle Craft filters crypto futures for clean structure, liquidity sweeps, confirmations, "
+                "and high-quality setups."
+            ),
+            "",
+            "No random signals.",
+            "No market chasing.",
+            "Only filtered opportunities when the structure is clean.",
+            "",
+            "━━━━━━━━━━━━━━━━━━",
+            "Use the buttons below to enter the signal desk.",
+            "",
+            SCREEN_FOOTER,
+        )
+    )
+
+
 def _assert_public_screen_safe(text: str) -> None:
     forbidden = (
         "System Desk",
@@ -289,6 +319,7 @@ def _assert_public_screen_safe(text: str) -> None:
         "manual test universe",
         "raw chat",
         "admin-only",
+        "admin desk",
     )
     lowered = text.lower()
     for phrase in forbidden:
@@ -401,7 +432,7 @@ def test_long_run_ids_are_shortened_in_telegram_ui(tmp_path) -> None:
     assert long_run_id not in status.text
     assert long_run_id not in public_lastscan.text
     assert "Run: 1234567890ab" in status.text
-    assert "Last run: 1234567890ab" in public_lastscan.text
+    assert "Last scan: 2026-06-01T12:00:00+00:00" in public_lastscan.text
 
 
 def test_status_loads_latest_manifest_and_formats_core_counts(tmp_path) -> None:
@@ -623,14 +654,26 @@ def test_public_start_response_uses_public_copy_and_optional_logo(tmp_path) -> N
     _assert_public_menu_only(response.reply_markup)
     _assert_no_execution_buttons(response.reply_markup)
     assert response.text.startswith(f"{SCREEN_HEADER} Candle Craft Intelligence")
-    assert "Welcome to the Candle Craft signal desk." in response.text
-    assert "📡 Last Scan" in response.text
-    assert "🔥 Active Signals" in response.text
-    assert "👁 Watchlist Signals" in response.text
+    assert response.text == _expected_public_start_text()
+    assert "Welcome to the Moon Trip signal desk" in response.text
+    assert "No random signals." in response.text
+    assert "Use the buttons below to enter the signal desk." in response.text
     assert "System Desk" not in response.text
     assert "Integrity Desk" not in response.text
     assert "Configuration Desk" not in response.text
     assert response.photo_url == "https://cdn.example.test/candle-logo.png"
+
+
+def test_public_start_works_when_logo_url_is_missing(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+
+    response = service.public_response_for("/start", public_config=TelegramAdminConfig())
+
+    _assert_shell_screen(response.text)
+    _assert_public_screen_safe(response.text)
+    _assert_public_menu_only(response.reply_markup)
+    assert response.text == _expected_public_start_text()
+    assert response.photo_url is None
 
 
 def test_public_menu_has_only_public_buttons_and_no_logo_when_missing(tmp_path) -> None:
@@ -643,6 +686,7 @@ def test_public_menu_has_only_public_buttons_and_no_logo_when_missing(tmp_path) 
     _assert_public_menu_only(response.reply_markup)
     _assert_no_execution_buttons(response.reply_markup)
     assert "Your market-structure command center." not in response.text
+    assert response.text == _expected_public_start_text()
     assert "System Desk" not in response.text
     assert "Integrity Desk" not in response.text
     assert "Configuration Desk" not in response.text
@@ -658,11 +702,13 @@ def test_public_lastscan_shows_summary_without_admin_internals(tmp_path) -> None
     _assert_public_screen_safe(response.text)
     _assert_public_menu_only(response.reply_markup)
     assert response.text.startswith(f"{SCREEN_HEADER} Last Scan")
-    assert "Last run: run-46c" in response.text
+    assert "Latest Candle Craft market intelligence." in response.text
+    assert "Last scan: 2026-06-01T12:00:00+00:00" in response.text
     assert "Symbols scanned: 4" in response.text
     assert "Confirmed setups: 1" in response.text
     assert "Watchlist setups: 1" in response.text
     assert "Market regime: Mixed" in response.text
+    assert "The engine only promotes setups that pass the filters." in response.text
     assert "ALERTUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
 
@@ -677,6 +723,8 @@ def test_public_active_signals_only_include_confirmed_signal_rows(tmp_path) -> N
     _assert_public_menu_only(response.reply_markup)
     assert response.text.startswith(f"{SCREEN_HEADER} Active Signals")
     assert "Confirmed Candle Craft setups." in response.text
+    assert "Filtered by the signal engine." in response.text
+    assert "Manual execution only." not in response.text
     assert "Symbol: ALERTUSDT" in response.text
     assert "Direction: Long" in response.text
     assert "Entry: 100 - 102" in response.text
@@ -719,6 +767,22 @@ def test_public_watchlist_signals_are_clearly_conditional(tmp_path) -> None:
     assert "Status: Monitoring" in response.text
     assert "Waiting for: Stronger confirmation" in response.text
     assert "Invalidation: N/A" in response.text
+    assert "No confirmation = no signal." in response.text
+    assert "ALERTUSDT" not in response.text
+    assert "TARGETUSDT" not in response.text
+    assert "REJECTUSDT" not in response.text
+
+
+def test_public_watchlist_empty_state_uses_filtering_copy(tmp_path) -> None:
+    service = _write_artifacts(tmp_path, rows=[_alert_row(), _blocked_row(), _rejected_row()])
+
+    response = service.public_response_for("/watchlist")
+
+    _assert_shell_screen(response.text)
+    _assert_public_screen_safe(response.text)
+    assert "No watchlist signals right now." in response.text
+    assert "The engine is filtering." in response.text
+    assert "No confirmation = no signal." in response.text
     assert "ALERTUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
     assert "REJECTUSDT" not in response.text
@@ -738,6 +802,29 @@ def test_public_social_and_donate_missing_links_use_configured_empty_states(tmp_
     assert "X / Twitter:\nN/A" in social.text
     assert "Telegram:\nN/A" in social.text
     assert "Donation link:\nNot configured yet" in donate.text
+    assert "Only trust official Candle Craft links." in social.text
+    assert "The signal desk stays focused on quality." in donate.text
+
+
+def test_public_social_and_donate_render_configured_links(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    config = TelegramAdminConfig.from_settings(
+        Settings(
+            candle_craft_public_logo_url="https://cdn.example.test/logo.png",
+            candle_craft_x_url="https://x.example.test/candlecraft",
+            candle_craft_telegram_url="https://t.me/example_candlecraft",
+            candle_craft_donate_url="https://donate.example.test/candlecraft",
+        )
+    )
+
+    social = service.public_response_for("/social", public_config=config)
+    donate = service.public_response_for("/donate", public_config=config)
+
+    _assert_shell_screen(social.text)
+    _assert_shell_screen(donate.text)
+    assert "https://x.example.test/candlecraft" in social.text
+    assert "https://t.me/example_candlecraft" in social.text
+    assert "https://donate.example.test/candlecraft" in donate.text
 
 
 def test_public_links_and_logo_load_from_settings_and_render(tmp_path) -> None:
@@ -752,13 +839,30 @@ def test_public_links_and_logo_load_from_settings_and_render(tmp_path) -> None:
     )
 
     start = service.public_response_for("/start", public_config=config)
-    social = service.public_response_for("/social", public_config=config)
-    donate = service.public_response_for("/donate", public_config=config)
 
     assert start.photo_url == "https://cdn.example.test/logo.png"
-    assert "https://x.example.test/candlecraft" in social.text
-    assert "https://t.me/example_candlecraft" in social.text
-    assert "https://donate.example.test/candlecraft" in donate.text
+    assert start.text == _expected_public_start_text()
+
+
+def test_public_help_uses_button_guidance_instead_of_slash_command_wording(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+
+    response = service.public_response_for("/help")
+
+    _assert_shell_screen(response.text)
+    _assert_public_screen_safe(response.text)
+    assert "How to use the Candle Craft signal desk." in response.text
+    assert "📡 Last Scan\nLatest market intelligence." in response.text
+    assert "🔥 Active Signals\nConfirmed setups only." in response.text
+    assert "👁 Watchlist Signals\nConditional setups waiting for confirmation." in response.text
+    assert "🌐 Social\nOfficial Candle Craft links." in response.text
+    assert "🧡 Donate\nOptional support for development." in response.text
+    assert "No financial advice." in response.text
+    assert "No guaranteed outcomes." in response.text
+    assert "Risk management is always your responsibility." in response.text
+    assert "/lastscan" not in response.text
+    assert "/signals" not in response.text
+    assert "/watchlist" not in response.text
 
 
 def test_command_menu_cleanup_calls_telegram_safely_and_does_not_print_token(capsys) -> None:
@@ -835,8 +939,9 @@ def test_public_admin_reserved_response_does_not_expose_admin_data(tmp_path) -> 
         _assert_public_menu_only(response.reply_markup)
         _assert_no_execution_buttons(response.reply_markup)
         assert response.text.startswith(f"{SCREEN_HEADER} Candle Craft Intelligence")
-        assert "This command is reserved for the admin desk." in response.text
-        assert "Use /menu to open the public signal menu." in response.text
+        assert "That signal desk view is not available here." in response.text
+        assert "Use the buttons below to enter the signal desk." in response.text
+        assert "admin" not in response.text.lower()
         assert "System Desk" not in response.text
         assert "Integrity Desk" not in response.text
         assert "Configuration Desk" not in response.text
@@ -876,7 +981,8 @@ def test_public_start_and_menu_updates_route_to_public_ui(tmp_path) -> None:
     assert transport.send_calls[1]["photo_url"] is None
     for call in transport.send_calls:
         assert call["chat_id"] == "public-chat"
-        assert "Welcome to the Candle Craft signal desk." in call["message"]
+        assert "Your AI-powered signal engine is online." in call["message"]
+        assert "Welcome to the Moon Trip signal desk" in call["message"]
         assert "System Desk" not in call["message"]
         assert "Integrity Desk" not in call["message"]
         assert "Configuration Desk" not in call["message"]
@@ -889,6 +995,41 @@ def test_public_start_and_menu_updates_route_to_public_ui(tmp_path) -> None:
     serialized = json.dumps(records)
     assert "public-chat" not in serialized
     assert "secret-token" not in serialized
+
+
+def test_public_start_falls_back_to_text_when_logo_send_is_unavailable(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    audit_path = tmp_path / "audit.jsonl"
+    transport = FakeCommandTransport(fail_photo_send_with="sendPhoto unavailable for secret-token public-chat")
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_logo_url="https://cdn.example.test/candle-logo.png",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=audit_path,
+            state_path=tmp_path / "state.json",
+            updates=(_update(22, "public-chat", "/start"),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == 1
+    assert len(transport.send_calls) == 2
+    assert transport.send_calls[0]["photo_url"] == "https://cdn.example.test/candle-logo.png"
+    assert transport.send_calls[1]["photo_url"] is None
+    assert transport.send_calls[1]["message"] == _expected_public_start_text()
+    records = _read_jsonl(audit_path)
+    assert records[0]["delivery_status"] == "sent_public"
+    serialized = json.dumps(records)
+    assert "secret-token" not in serialized
+    assert "public-chat" not in serialized
 
 
 def test_public_user_cannot_access_admin_only_commands(tmp_path) -> None:
@@ -919,8 +1060,9 @@ def test_public_user_cannot_access_admin_only_commands(tmp_path) -> None:
     assert result.sent_count == 3
     assert len(transport.send_calls) == 3
     for call in transport.send_calls:
-        assert "This command is reserved for the admin desk." in call["message"]
-        assert "Use /menu to open the public signal menu." in call["message"]
+        assert "That signal desk view is not available here." in call["message"]
+        assert "Use the buttons below to enter the signal desk." in call["message"]
+        assert "admin" not in call["message"].lower()
         assert "System Desk" not in call["message"]
         assert "Integrity Desk" not in call["message"]
         assert "Configuration Desk" not in call["message"]
@@ -1109,8 +1251,9 @@ def test_public_and_vip_channel_ids_receive_public_reserved_screen(tmp_path) -> 
     assert len(transport.send_calls) == 2
     assert [call["chat_id"] for call in transport.send_calls] == ["public-channel", "vip-channel"]
     for call in transport.send_calls:
-        assert "This command is reserved for the admin desk." in call["message"]
-        assert "Use /menu to open the public signal menu." in call["message"]
+        assert "That signal desk view is not available here." in call["message"]
+        assert "Use the buttons below to enter the signal desk." in call["message"]
+        assert "admin" not in call["message"].lower()
         assert "System Desk" not in call["message"]
         assert "Integrity Desk" not in call["message"]
         assert "Configuration Desk" not in call["message"]

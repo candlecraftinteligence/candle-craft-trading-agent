@@ -328,12 +328,11 @@ async def _process_public_update(
         return _ProcessedUpdate("dry_run", preview=_preview(response.text))
 
     try:
-        raw_results = await transport.send_message(
-            bot_token=config.bot_token or "",
+        raw_results = await _send_public_command_response(
+            config=config,
             chat_id=chat_id,
-            message=response.text,
-            reply_markup=response.reply_markup,
-            photo_url=response.photo_url,
+            response=response,
+            transport=transport,
         )
     except Exception as exc:
         error = _sanitize_error(exc, config, extra_secrets=(chat_id,))
@@ -350,6 +349,47 @@ async def _process_public_update(
     error = _first_result_error(sanitized_results)
     _append_public_command_audit(audit_path, update_id, chat_id, response, "failed", error_message=error)
     return _ProcessedUpdate("failed", preview=_preview(response.text), error_message=error)
+
+
+async def _send_public_command_response(
+    *,
+    config: TelegramAdminConfig,
+    chat_id: str,
+    response: AdminCommandResponse,
+    transport: TelegramAdminCommandTransport,
+) -> tuple[Mapping[str, Any], ...]:
+    if response.photo_url is None:
+        return await transport.send_message(
+            bot_token=config.bot_token or "",
+            chat_id=chat_id,
+            message=response.text,
+            reply_markup=response.reply_markup,
+            photo_url=None,
+        )
+
+    try:
+        photo_results = await transport.send_message(
+            bot_token=config.bot_token or "",
+            chat_id=chat_id,
+            message=response.text,
+            reply_markup=response.reply_markup,
+            photo_url=response.photo_url,
+        )
+    except Exception:
+        photo_results = ()
+    if _raw_results_sent(photo_results):
+        return photo_results
+    return await transport.send_message(
+        bot_token=config.bot_token or "",
+        chat_id=chat_id,
+        message=response.text,
+        reply_markup=response.reply_markup,
+        photo_url=None,
+    )
+
+
+def _raw_results_sent(results: Sequence[Mapping[str, Any]]) -> bool:
+    return bool(results) and all(result.get("status") == "sent" for result in results)
 
 
 def _skip_status(config: TelegramAdminConfig) -> str | None:

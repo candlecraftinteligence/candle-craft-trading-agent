@@ -473,10 +473,10 @@ class TelegramAdminCommandService:
             text = _screen(
                 "Last Scan",
                 (
-                    "Latest Candle Craft market scan.",
+                    "Latest Candle Craft market intelligence.",
                     "",
                     SCREEN_DIVIDER,
-                    "Last run: N/A",
+                    "Last scan: N/A",
                     "Symbols scanned: N/A",
                     "Confirmed setups: N/A",
                     "Watchlist setups: N/A",
@@ -491,10 +491,10 @@ class TelegramAdminCommandService:
         text = _screen(
             "Last Scan",
             (
-                "Latest Candle Craft market scan.",
+                "Latest Candle Craft market intelligence.",
                 "",
                 SCREEN_DIVIDER,
-                f"Last run: {_run_text(artifacts.manifest_row.get('run_id'))}",
+                f"Last scan: {_display(artifacts.manifest_row.get('timestamp'))}",
                 f"Symbols scanned: {_display(artifacts.manifest_row.get('symbols_scanned'))}",
                 f"Confirmed setups: {_display(artifacts.manifest_row.get('valid_setup_count'))}",
                 f"Watchlist setups: {_display(artifacts.manifest_row.get('near_miss_count'))}",
@@ -517,7 +517,7 @@ class TelegramAdminCommandService:
         signal_rows = _public_active_signal_rows(rows)
         lines: list[str] = [
             "Confirmed Candle Craft setups.",
-            "Manual execution only.",
+            "Filtered by the signal engine.",
             "",
             SCREEN_DIVIDER,
         ]
@@ -560,6 +560,7 @@ class TelegramAdminCommandService:
                 )
             )
         lines.append(SCREEN_DIVIDER)
+        lines.extend(("", "No confirmation = no signal."))
         return _public_response(
             "/watchlist",
             "public_watchlist",
@@ -756,35 +757,21 @@ def format_public_menu_response() -> str:
     return _screen(
         "Candle Craft Intelligence",
         (
-            "Welcome to the Candle Craft signal desk.",
+            "Your AI-powered signal engine is online.",
             "",
-            "We track market structure, liquidity sweeps,",
-            "confirmations, and watchlist setups.",
-            "Manual execution only.",
+            "Welcome to the Moon Trip signal desk.",
+            "",
+            (
+                "Candle Craft filters crypto futures for clean structure, liquidity sweeps, confirmations, "
+                "and high-quality setups."
+            ),
+            "",
+            "No random signals.",
+            "No market chasing.",
+            "Only filtered opportunities when the structure is clean.",
             "",
             SCREEN_DIVIDER,
-            "📡 Last Scan",
-            "Latest market scan summary.",
-            "",
-            "🔥 Active Signals",
-            "Confirmed setups currently active.",
-            "",
-            "👁 Watchlist Signals",
-            "Conditional setups waiting for confirmation.",
-            "",
-            "🌐 Social",
-            "Official Candle Craft links.",
-            "",
-            "❓ Help",
-            "How to read the bot.",
-            "",
-            "🧡 Donate",
-            "Support Candle Craft development.",
-            SCREEN_DIVIDER,
-            "",
-            "No execution buttons.",
-            "No forced trades.",
-            "Quality over quantity.",
+            "Use the buttons below to enter the signal desk.",
         ),
     )
 
@@ -793,9 +780,9 @@ def format_public_admin_reserved_response() -> str:
     return _screen(
         "Candle Craft Intelligence",
         (
-            "This command is reserved for the admin desk.",
+            "That signal desk view is not available here.",
             "",
-            "Use /menu to open the public signal menu.",
+            "Use the buttons below to enter the signal desk.",
         ),
     )
 
@@ -831,7 +818,7 @@ def format_public_donate_response(config: Any | None) -> str:
             SCREEN_DIVIDER,
             "",
             "Support is optional.",
-            "Signals remain manual review only.",
+            "The signal desk stays focused on quality.",
         ),
     )
 
@@ -840,33 +827,29 @@ def format_public_help_response() -> str:
     return _screen(
         "Help",
         (
-            "How to use the Candle Craft signal bot.",
+            "How to use the Candle Craft signal desk.",
             "",
             SCREEN_DIVIDER,
-            "/menu",
-            "Open the public signal menu.",
+            "📡 Last Scan",
+            "Latest market intelligence.",
             "",
-            "/lastscan",
-            "View latest scan summary.",
+            "🔥 Active Signals",
+            "Confirmed setups only.",
             "",
-            "/signals",
-            "View active confirmed signals.",
+            "👁 Watchlist Signals",
+            "Conditional setups waiting for confirmation.",
             "",
-            "/watchlist",
-            "View conditional watchlist setups.",
+            "🌐 Social",
+            "Official Candle Craft links.",
             "",
-            "/social",
-            "View official Candle Craft links.",
-            "",
-            "/donate",
-            "Support Candle Craft development.",
+            "🧡 Donate",
+            "Optional support for development.",
             SCREEN_DIVIDER,
             "",
             "Important:",
             "No financial advice.",
-            "No execution buttons.",
             "No guaranteed outcomes.",
-            "Manual risk management only.",
+            "Risk management is always your responsibility.",
         ),
     )
 
