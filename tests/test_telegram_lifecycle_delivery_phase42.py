@@ -243,6 +243,14 @@ def _with_lifecycle_direction(symbol_result: ScannerSymbolResult, direction: str
     return symbol_result.model_copy(update={"lifecycle_state": record, "lifecycle_transition": transition})
 
 
+def _with_lifecycle_fields(symbol_result: ScannerSymbolResult, **updates: object) -> ScannerSymbolResult:
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_transition is not None
+    record = symbol_result.lifecycle_state.model_copy(update=updates)
+    transition = symbol_result.lifecycle_transition.model_copy(update={"record": record})
+    return symbol_result.model_copy(update={"lifecycle_state": record, "lifecycle_transition": transition})
+
+
 def _assert_target_integrity_blocked(decision, *fields: str) -> None:
     assert decision.eligible is False
     assert "target_integrity_failed" in decision.reason
@@ -679,6 +687,173 @@ def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> N
     assert duplicate_confirmed.duplicate == 1
     assert "CANDLE CRAFT WATCHLIST" in sender.messages[0]
     assert "CANDLE CRAFT SIGNAL CONFIRMED" in sender.messages[1]
+
+
+def test_watchlist_to_confirmed_with_regime_failed_gate_sends_no_longer_tracking(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="sig-regime-watch",
+        alert_type=TelegramAlertType.WATCHLIST,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+        min_rr=Decimal("3"),
+        min_score_for_idea=Decimal("80"),
+    )
+    confirmed = _with_lifecycle_fields(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            signal_id="sig-regime-watch",
+        ),
+        failed_gate="regime_compatibility",
+        invalidation_reason="Setup rejected by regime weakness: penalty 15; scalp compatibility Weak.",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime"))
+    duplicate = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime-repeat"))
+
+    assert summary.sent == 1
+    assert duplicate.duplicate == 1
+    assert len(sender.messages) == 1
+    assert "CANDLE CRAFT SIGNAL CONFIRMED" not in sender.messages[0]
+    assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
+    assert "Signal ID:\nsig-regime-watch" in sender.messages[0]
+    assert "Watchlist removed because regime compatibility failed before confirmation." in sender.messages[0]
+    assert "penalty 15" not in sender.messages[0]
+    assert "scalp compatibility Weak" not in sender.messages[0]
+    assert sender.messages[0].startswith(HEADER_PREFIX)
+    assert sender.messages[0].endswith(FOOTER)
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
+    assert rows == [
+        (TelegramAlertType.WATCHLIST.value, "sent"),
+        (TelegramAlertType.NO_LONGER_TRACKING.value, "sent"),
+    ]
+
+
+def test_mstr_style_confirmed_regime_rejection_sends_no_longer_tracking(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="mstr-watch",
+        alert_type=TelegramAlertType.WATCHLIST,
+        symbol="MSTRUSDT",
+        direction="long",
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+        min_rr=Decimal("3"),
+        min_score_for_idea=Decimal("80"),
+    )
+    confirmed = _with_lifecycle_fields(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=None,
+            signal_id="mstr-terminal-life",
+            diagnostics=_diagnostics(
+                bias="long",
+                direction="long",
+                reason="Setup rejected by regime weakness: penalty 15; scalp compatibility Weak.",
+            ),
+        ).model_copy(update={"symbol": "MSTRUSDT"}),
+        failed_gate="regime_compatibility",
+        invalidation_reason="Wait for cleaner regime. Setup rejected by regime weakness: penalty 15.",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-mstr"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "MSTRUSDT | long" in sender.messages[0]
+    assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
+    assert "Signal ID:\nmstr-watch" in sender.messages[0]
+    assert "Watchlist removed because regime compatibility failed before confirmation." in sender.messages[0]
+    assert "SIGNAL CONFIRMED" not in sender.messages[0]
+    assert "penalty 15" not in sender.messages[0]
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT signal_id, alert_type, direction FROM telegram_alert_attempts ORDER BY id").fetchall()
+    assert rows == [
+        ("mstr-watch", TelegramAlertType.WATCHLIST.value, "long"),
+        ("mstr-watch", TelegramAlertType.NO_LONGER_TRACKING.value, "long"),
+    ]
+
+
+def test_watchlist_to_confirmed_with_rr_guard_failure_sends_no_longer_tracking(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="sig-low-rr-watch",
+        alert_type=TelegramAlertType.WATCHLIST,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+        min_rr=Decimal("3"),
+        min_score_for_idea=Decimal("80"),
+    )
+    confirmed = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        signal_id="sig-low-rr-watch",
+        diagnostics=_diagnostics(rr_to_tp2=Decimal("2.79")),
+        trade_idea=_trade_idea(best_rr=Decimal("2.79")),
+    )
+
+    summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-low-rr"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
+    assert "Watchlist removed because final RR requirements were not met before confirmation." in sender.messages[0]
+    assert "SIGNAL CONFIRMED" not in sender.messages[0]
+
+
+def test_watchlist_to_confirmed_with_structural_failure_sends_invalidation(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="sig-structure-watch",
+        alert_type=TelegramAlertType.WATCHLIST,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    confirmed = _with_lifecycle_fields(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            signal_id="sig-structure-watch",
+        ),
+        failed_gate="structural_breakdown",
+        invalidation_reason="Structure broke before confirmation.",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-structure"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "CANDLE CRAFT INVALIDATION" in sender.messages[0]
+    assert "Status:\nINVALIDATED" in sender.messages[0]
+    assert "Signal ID:\nsig-structure-watch" in sender.messages[0]
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
+    assert rows == [
+        (TelegramAlertType.WATCHLIST.value, "sent"),
+        (TelegramAlertType.INVALIDATED.value, "sent"),
+    ]
 
 
 def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> None:

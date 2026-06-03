@@ -297,6 +297,35 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         ).fetchall()
         return _unique_prior_public_records(tuple(_record_from_row(row) for row in rows))
 
+    def list_prior_public_alerts(
+        self,
+        *,
+        symbol: str,
+        direction: str | None = None,
+    ) -> tuple[TelegramAlertAttemptRecord, ...]:
+        normalized_symbol = _symbol(symbol)
+        if normalized_symbol == NA:
+            return ()
+        params: list[Any] = [normalized_symbol, *sorted(PRIOR_ACTIVE_ALERT_TYPES)]
+        direction_clause = ""
+        normalized_direction = _text(direction)
+        if normalized_direction != NA:
+            direction_clause = "AND direction = ?"
+            params.append(normalized_direction)
+        type_placeholders = ",".join("?" for _ in PRIOR_ACTIVE_ALERT_TYPES)
+        rows = self._connection.execute(
+            f"""
+            SELECT * FROM telegram_alert_attempts
+            WHERE symbol = ?
+              AND alert_type IN ({type_placeholders})
+              AND telegram_status = 'sent'
+              {direction_clause}
+            ORDER BY id ASC
+            """,
+            params,
+        ).fetchall()
+        return _unique_prior_public_records(tuple(_record_from_row(row) for row in rows))
+
     def has_prior_public_alert_for_symbol(self, *, symbol: str) -> bool:
         type_placeholders = ",".join("?" for _ in PRIOR_ACTIVE_ALERT_TYPES)
         row = self._connection.execute(
@@ -588,6 +617,13 @@ class TelegramLifecycleDeliveryService:
         terminal_bridge = (
             _terminal_identity_bridge(repository, symbol_result, alert_type_hint)
             if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES
+            else _terminal_identity_bridge(
+                repository,
+                symbol_result,
+                alert_type_hint,
+                watchlist_only=True,
+            )
+            if alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED
             else TerminalIdentityBridge()
         )
         prior_active_alert = terminal_bridge.prior_alert
@@ -630,6 +666,9 @@ class TelegramLifecycleDeliveryService:
                     status="duplicate",
                     detail="Prior terminal Telegram lifecycle update already sent.",
                 )
+        elif decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and prior_active_alert is not None:
+            signal_id = prior_active_alert.signal_id
+            message = _message_with_prior_public_identity(message, prior_active_alert)
 
         if repository.has_attempt(signal_id=signal_id, alert_type=decision.alert_type):
             repository.compact_existing_attempt(
@@ -740,6 +779,17 @@ def telegram_alert_decision_for_symbol(
 
     blockers = _defensive_delivery_blockers(symbol_result, alert_type, message, context)
     if blockers:
+        failed_confirmation = _failed_confirmation_terminal_decision(
+            symbol_result,
+            alert_type=alert_type,
+            message=message,
+            blockers=blockers,
+            lifecycle_transition=transition,
+            prior_public_alert=prior_public_alert,
+            terminal_identity_failure_reason=terminal_identity_failure_reason,
+        )
+        if failed_confirmation is not None:
+            return failed_confirmation
         return TelegramAlertDecision(
             False,
             "blocked:" + "; ".join(blockers),
@@ -1207,6 +1257,164 @@ def _previous_transition_state(symbol_result: ScannerSymbolResult) -> SetupLifec
     return None
 
 
+def _failed_confirmation_terminal_decision(
+    symbol_result: ScannerSymbolResult,
+    *,
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage,
+    blockers: Sequence[str],
+    lifecycle_transition: SetupTransitionResult | None,
+    prior_public_alert: TelegramAlertAttemptRecord | None,
+    terminal_identity_failure_reason: str | None,
+) -> TelegramAlertDecision | None:
+    if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
+        return None
+    if not _failed_confirmation_evidence(symbol_result, blockers):
+        return None
+
+    terminal_alert_type = (
+        TelegramAlertType.INVALIDATED
+        if _failed_confirmation_is_structural_invalidation(symbol_result, blockers)
+        else TelegramAlertType.NO_LONGER_TRACKING
+    )
+    failed_message = replace(
+        message,
+        invalidation_reason=_failed_confirmation_reason(symbol_result, blockers, terminal_alert_type),
+    )
+    if prior_public_alert is not None and prior_public_alert.alert_type == TelegramAlertType.WATCHLIST.value:
+        return TelegramAlertDecision(
+            True,
+            "eligible_failed_confirmation_update",
+            alert_type=terminal_alert_type,
+            message=_message_with_prior_public_identity(failed_message, prior_public_alert),
+            lifecycle_transition=lifecycle_transition,
+        )
+
+    if terminal_identity_failure_reason in {
+        "terminal_update_identity_ambiguous",
+        "terminal_update_identity_not_matched",
+    }:
+        return TelegramAlertDecision(
+            False,
+            terminal_identity_failure_reason,
+            alert_type=terminal_alert_type,
+            message=failed_message,
+            lifecycle_transition=lifecycle_transition,
+        )
+    return None
+
+
+def _failed_confirmation_core_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    blockers: list[str] = []
+    lifecycle = symbol_result.lifecycle_state
+    failed_gate = _status_key(getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA)
+    if failed_gate:
+        blockers.append(f"failed_confirmation_gate:{failed_gate}")
+
+    text = _failed_confirmation_haystack(symbol_result)
+    text_key = _status_key(text)
+    if "rejected_by_regime" in text_key or "regime_compatibility" in text_key or "regime_weakness" in text_key:
+        blockers.append("failed_confirmation_text:regime_compatibility")
+    if "technical_score_below" in text_key or "low_technical" in text_key:
+        blockers.append("failed_confirmation_text:technical_quality")
+    if "opportunity_score_below" in text_key or "score_below" in text_key:
+        blockers.append("failed_confirmation_text:final_score")
+    if "rr_below" in text_key or "risk_reward_below" in text_key or "below_minimum" in text_key:
+        blockers.append("failed_confirmation_text:final_rr")
+    if "quality_gate_failed" in text_key:
+        blockers.append("failed_confirmation_text:quality_gate")
+    if "setup_rejected" in text_key or "not_public_ready" in text_key:
+        blockers.append("failed_confirmation_text:setup_rejected")
+
+    action_label = _status_key(getattr(lifecycle, "action_label", NA) if lifecycle is not None else NA)
+    if action_label and any(token in action_label for token in ("reject", "wait", "no_trade", "removed")):
+        blockers.append(f"failed_confirmation_action:{action_label}")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _failed_confirmation_evidence(
+    symbol_result: ScannerSymbolResult,
+    blockers: Sequence[str],
+) -> bool:
+    if any(str(blocker).startswith("failed_confirmation_") for blocker in blockers):
+        return True
+    if _text(getattr(symbol_result.lifecycle_state, "failed_gate", NA)) != NA:
+        return True
+    return bool(blockers)
+
+
+def _failed_confirmation_is_structural_invalidation(
+    symbol_result: ScannerSymbolResult,
+    blockers: Sequence[str],
+) -> bool:
+    haystack = " ".join(
+        (
+            _failed_confirmation_haystack(symbol_result),
+            " ".join(str(blocker) for blocker in blockers),
+        )
+    )
+    key = _status_key(haystack)
+    return any(
+        token in key
+        for token in (
+            "structural_breakdown",
+            "body_acceptance_failure",
+            "pullback_too_deep",
+            "pullback_beyond_786",
+            "structure_failed",
+            "structure_broke",
+        )
+    )
+
+
+def _failed_confirmation_reason(
+    symbol_result: ScannerSymbolResult,
+    blockers: Sequence[str],
+    alert_type: TelegramAlertType,
+) -> str:
+    if alert_type == TelegramAlertType.INVALIDATED:
+        return "Watchlist invalidated because the sweep/BOS/CHoCH structure failed before confirmation."
+
+    haystack = " ".join((_failed_confirmation_haystack(symbol_result), " ".join(str(blocker) for blocker in blockers)))
+    key = _status_key(haystack)
+    if "regime_compatibility" in key or "regime_weakness" in key or "rejected_by_regime" in key:
+        return "Watchlist removed because regime compatibility failed before confirmation."
+    if "rr_below" in key or "low_rr" in key or "risk_reward_below" in key:
+        return "Watchlist removed because final RR requirements were not met before confirmation."
+    if "target_integrity" in key:
+        return "Watchlist removed because final RR requirements were not met before confirmation."
+    if "technical" in key:
+        return "Watchlist removed because technical quality failed before confirmation."
+    if "opportunity" in key or "scoring" in key or "score_below" in key:
+        return "Watchlist removed because final score requirements were not met before confirmation."
+    if "quality_gate" in key or "setup_quality" in key:
+        return "Watchlist removed because the setup failed final quality gates before confirmation."
+    if "rejected" in key or "not_public_ready" in key:
+        return "Watchlist removed because the scanner rejected the setup before it became a confirmed signal."
+    return "Watchlist removed because the setup failed final confirmation gates."
+
+
+def _failed_confirmation_haystack(symbol_result: ScannerSymbolResult) -> str:
+    diagnostics = _representative_diagnostics(symbol_result)
+    lifecycle = symbol_result.lifecycle_state
+    transition = symbol_result.lifecycle_transition
+    parts = [
+        getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA,
+        getattr(lifecycle, "invalidation_reason", NA) if lifecycle is not None else NA,
+        getattr(lifecycle, "action_label", NA) if lifecycle is not None else NA,
+        getattr(transition, "notes", NA) if transition is not None else NA,
+        symbol_result.rejection_reason,
+        *symbol_result.rejection_reasons,
+        diagnostics.get("reason"),
+        diagnostics.get("invalidation_reason"),
+        diagnostics.get("regime_reason"),
+        diagnostics.get("regime_diagnostics"),
+        diagnostics.get("first_failed_gate"),
+        diagnostics.get("failed_gate"),
+    ]
+    return " ".join(_text(part) for part in parts if _text(part) != NA)
+
+
 def _terminal_update_reason(
     symbol_result: ScannerSymbolResult,
     alert_type: TelegramAlertType,
@@ -1383,6 +1591,7 @@ def _defensive_delivery_blockers(
 
     blockers: list[str] = []
     blockers.extend(_core_status_blockers(symbol_result))
+    blockers.extend(_failed_confirmation_core_blockers(symbol_result))
 
     quality_state = _setup_quality_state_key(symbol_result)
     if quality_state not in CONFIRMED_ALLOWED_QUALITY_STATE_KEYS:
@@ -1905,19 +2114,32 @@ def _terminal_identity_bridge(
     repository: SQLiteTelegramAlertAttemptRepository,
     symbol_result: ScannerSymbolResult,
     alert_type: TelegramAlertType | None,
+    *,
+    watchlist_only: bool = False,
 ) -> TerminalIdentityBridge:
-    if alert_type not in TERMINAL_UPDATE_ALERT_TYPES:
+    if alert_type not in TERMINAL_UPDATE_ALERT_TYPES and not watchlist_only:
         return TerminalIdentityBridge(blocked_reason="terminal_update_not_terminal_state")
 
     message = telegram_signal_message_from_symbol(symbol_result)
     exact = repository.get_prior_public_alert(
         signal_ids=_signal_id_candidates(symbol_result),
     )
-    if exact is not None:
+    if exact is not None and (not watchlist_only or exact.alert_type == TelegramAlertType.WATCHLIST.value):
         return TerminalIdentityBridge(prior_alert=exact)
 
     active = repository.list_active_prior_public_alerts(symbol=symbol_result.symbol)
+    if watchlist_only:
+        active = tuple(record for record in active if record.alert_type == TelegramAlertType.WATCHLIST.value)
     if not active:
+        inactive = repository.list_prior_public_alerts(symbol=symbol_result.symbol)
+        if watchlist_only:
+            inactive = tuple(
+                record for record in inactive if record.alert_type == TelegramAlertType.WATCHLIST.value
+            )
+        if len(inactive) == 1:
+            return TerminalIdentityBridge(prior_alert=inactive[0])
+        if len(inactive) > 1:
+            return TerminalIdentityBridge(blocked_reason="terminal_update_identity_ambiguous")
         reason = (
             "terminal_update_not_public_tracked"
             if repository.has_prior_public_alert_for_symbol(symbol=symbol_result.symbol)
