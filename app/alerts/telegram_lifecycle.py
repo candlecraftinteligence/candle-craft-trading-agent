@@ -45,6 +45,21 @@ TERMINAL_UPDATE_ALERT_TYPES = {
     TelegramAlertType.EXPIRED,
     TelegramAlertType.NO_LONGER_TRACKING,
 }
+TERMINAL_COMPLETION_ALERT_TYPES = {
+    TelegramAlertType.INVALIDATED.value,
+    TelegramAlertType.EXPIRED.value,
+    TelegramAlertType.NO_LONGER_TRACKING.value,
+    "COOLDOWN",
+    TelegramAlertType.SL_HIT.value,
+    TelegramAlertType.TP3_HIT.value,
+}
+TERMINAL_IDENTITY_BLOCK_REASONS = {
+    "terminal_update_no_prior_public_alert",
+    "terminal_update_identity_ambiguous",
+    "terminal_update_identity_not_matched",
+    "terminal_update_not_public_tracked",
+    "terminal_update_not_terminal_state",
+}
 DEFAULT_CONFIRMED_MIN_RR = Decimal("3")
 DEFAULT_MIN_TECHNICAL_SCORE = Decimal("50")
 CONFIRMED_REJECTED_STATUS_KEYS = {
@@ -163,6 +178,12 @@ class TelegramLifecycleDeliverySummary:
     deliveries: tuple[TelegramLifecycleDelivery, ...] = ()
 
 
+@dataclass(frozen=True)
+class TerminalIdentityBridge:
+    prior_alert: TelegramAlertAttemptRecord | None = None
+    blocked_reason: str | None = None
+
+
 class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegramAlertAttemptRepository"]):
     def __init__(self, database_path: Path | str = DEFAULT_DATABASE_PATH) -> None:
         self.database_path = Path(database_path)
@@ -208,9 +229,9 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         return _record_from_row(row) if row is not None else None
 
     def has_prior_active_alert(self, *, signal_id: str) -> bool:
-        return self.get_prior_active_alert(signal_ids=(signal_id,)) is not None
+        return self.get_prior_public_alert(signal_ids=(signal_id,)) is not None
 
-    def get_prior_active_alert(
+    def get_prior_public_alert(
         self,
         *,
         signal_ids: Sequence[str],
@@ -236,16 +257,62 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 return _preferred_prior_active_record(records, candidates)
         return None
 
+    def list_active_prior_public_alerts(
+        self,
+        *,
+        symbol: str,
+        direction: str | None = None,
+    ) -> tuple[TelegramAlertAttemptRecord, ...]:
+        normalized_symbol = _symbol(symbol)
+        if normalized_symbol == NA:
+            return ()
+        params: list[Any] = [
+            normalized_symbol,
+            *sorted(PRIOR_ACTIVE_ALERT_TYPES),
+            *sorted(TERMINAL_COMPLETION_ALERT_TYPES),
+        ]
+        direction_clause = ""
+        normalized_direction = _text(direction)
+        if normalized_direction != NA:
+            direction_clause = "AND prior.direction = ?"
+            params.append(normalized_direction)
+        type_placeholders = ",".join("?" for _ in PRIOR_ACTIVE_ALERT_TYPES)
+        terminal_placeholders = ",".join("?" for _ in TERMINAL_COMPLETION_ALERT_TYPES)
+        rows = self._connection.execute(
+            f"""
+            SELECT prior.* FROM telegram_alert_attempts AS prior
+            WHERE prior.symbol = ?
+              AND prior.alert_type IN ({type_placeholders})
+              AND prior.telegram_status = 'sent'
+              AND NOT EXISTS (
+                  SELECT 1 FROM telegram_alert_attempts AS terminal
+                  WHERE terminal.signal_id = prior.signal_id
+                    AND terminal.alert_type IN ({terminal_placeholders})
+                    AND terminal.telegram_status = 'sent'
+              )
+              {direction_clause}
+            ORDER BY prior.id ASC
+            """,
+            params,
+        ).fetchall()
+        return _unique_prior_public_records(tuple(_record_from_row(row) for row in rows))
+
+    def has_prior_public_alert_for_symbol(self, *, symbol: str) -> bool:
+        type_placeholders = ",".join("?" for _ in PRIOR_ACTIVE_ALERT_TYPES)
+        row = self._connection.execute(
+            f"""
+            SELECT 1 FROM telegram_alert_attempts
+            WHERE symbol = ?
+              AND alert_type IN ({type_placeholders})
+              AND telegram_status = 'sent'
+            LIMIT 1
+            """,
+            (_symbol(symbol), *sorted(PRIOR_ACTIVE_ALERT_TYPES)),
+        ).fetchone()
+        return row is not None
+
     def has_sent_terminal_outcome(self, *, signal_id: str) -> bool:
-        terminal_alert_types = {
-            TelegramAlertType.INVALIDATED.value,
-            TelegramAlertType.EXPIRED.value,
-            TelegramAlertType.TP1_HIT.value,
-            TelegramAlertType.TP2_HIT.value,
-            TelegramAlertType.TP3_HIT.value,
-            TelegramAlertType.SL_HIT.value,
-        }
-        placeholders = ",".join("?" for _ in terminal_alert_types)
+        placeholders = ",".join("?" for _ in TERMINAL_COMPLETION_ALERT_TYPES)
         row = self._connection.execute(
             f"""
             SELECT 1 FROM telegram_alert_attempts
@@ -254,7 +321,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
               AND telegram_status = 'sent'
             LIMIT 1
             """,
-            (_identity(signal_id), *sorted(terminal_alert_types)),
+            (_identity(signal_id), *sorted(TERMINAL_COMPLETION_ALERT_TYPES)),
         ).fetchone()
         return row is not None
 
@@ -513,11 +580,28 @@ class TelegramLifecycleDeliveryService:
         scan_run_id: str | None = None,
         eligibility_context: TelegramEligibilityContext | None = None,
     ) -> TelegramLifecycleDelivery | None:
-        prior_active_alert = _prior_active_alert_for_symbol(repository, symbol_result)
+        alert_type_hint = (
+            _alert_type_for_transition(symbol_result, symbol_result.lifecycle_transition)
+            if symbol_result.lifecycle_transition
+            else None
+        )
+        terminal_bridge = (
+            _terminal_identity_bridge(repository, symbol_result, alert_type_hint)
+            if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES
+            else TerminalIdentityBridge()
+        )
+        prior_active_alert = terminal_bridge.prior_alert
+        previously_active_sent = (
+            prior_active_alert is not None
+            if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES
+            else repository.has_prior_active_alert(signal_id=_signal_id(symbol_result))
+        )
         decision = telegram_alert_decision_for_symbol(
             symbol_result,
-            previously_active_sent=prior_active_alert is not None,
+            previously_active_sent=previously_active_sent,
             eligibility_context=eligibility_context,
+            terminal_identity_failure_reason=terminal_bridge.blocked_reason,
+            prior_public_alert=prior_active_alert,
         )
         if not decision.eligible or decision.alert_type is None or decision.message is None:
             if decision.alert_type is not None and decision.message is not None and _persist_blocked_decision(decision):
@@ -534,10 +618,10 @@ class TelegramLifecycleDeliveryService:
         message = decision.message
         if decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES and prior_active_alert is not None:
             signal_id = prior_active_alert.signal_id
-            message = replace(message, signal_id=signal_id)
-            if (
-                decision.alert_type == TelegramAlertType.NO_LONGER_TRACKING
-                and repository.has_sent_terminal_outcome(signal_id=signal_id)
+            message = _message_with_prior_public_identity(message, prior_active_alert)
+            if repository.has_sent_terminal_outcome(signal_id=signal_id) and not repository.has_attempt(
+                signal_id=signal_id,
+                alert_type=decision.alert_type,
             ):
                 return TelegramLifecycleDelivery(
                     symbol=symbol_result.symbol,
@@ -625,6 +709,8 @@ def telegram_alert_decision_for_symbol(
     *,
     previously_active_sent: bool = False,
     eligibility_context: TelegramEligibilityContext | None = None,
+    terminal_identity_failure_reason: str | None = None,
+    prior_public_alert: TelegramAlertAttemptRecord | None = None,
 ) -> TelegramAlertDecision:
     transition = symbol_result.lifecycle_transition
     if transition is None:
@@ -637,12 +723,13 @@ def telegram_alert_decision_for_symbol(
 
     context = eligibility_context or TelegramEligibilityContext()
     message = _telegram_signal_message_for_alert(symbol_result, alert_type, context)
+    if alert_type in TERMINAL_UPDATE_ALERT_TYPES and prior_public_alert is not None:
+        message = _message_with_prior_public_identity(message, prior_public_alert)
     if _requires_prior_active_alert(alert_type) and not previously_active_sent:
-        reason = (
-            "terminal_update_identity_not_matched"
-            if alert_type in TERMINAL_UPDATE_ALERT_TYPES
-            else "missing_prior_active_telegram_alert"
-        )
+        if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
+            reason = terminal_identity_failure_reason or "terminal_update_no_prior_public_alert"
+        else:
+            reason = "missing_prior_active_telegram_alert"
         return TelegramAlertDecision(
             False,
             reason,
@@ -1676,7 +1763,7 @@ def _explicit_watchlist_candidate(symbol_result: ScannerSymbolResult) -> bool:
 
 def _persist_blocked_decision(decision: TelegramAlertDecision) -> bool:
     if decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES:
-        return decision.reason == "terminal_update_identity_not_matched" or decision.reason.startswith("blocked:")
+        return decision.reason in TERMINAL_IDENTITY_BLOCK_REASONS or decision.reason.startswith("blocked:")
     return decision.alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED} and decision.reason.startswith(
         "blocked:"
     )
@@ -1814,15 +1901,55 @@ def _representative_diagnostics(symbol_result: ScannerSymbolResult) -> Mapping[s
     return {}
 
 
-def _prior_active_alert_for_symbol(
+def _terminal_identity_bridge(
     repository: SQLiteTelegramAlertAttemptRepository,
     symbol_result: ScannerSymbolResult,
-) -> TelegramAlertAttemptRecord | None:
+    alert_type: TelegramAlertType | None,
+) -> TerminalIdentityBridge:
+    if alert_type not in TERMINAL_UPDATE_ALERT_TYPES:
+        return TerminalIdentityBridge(blocked_reason="terminal_update_not_terminal_state")
+
     message = telegram_signal_message_from_symbol(symbol_result)
-    return repository.get_prior_active_alert(
+    exact = repository.get_prior_public_alert(
         signal_ids=_signal_id_candidates(symbol_result),
-        symbol=symbol_result.symbol,
-        direction=message.direction,
+    )
+    if exact is not None:
+        return TerminalIdentityBridge(prior_alert=exact)
+
+    active = repository.list_active_prior_public_alerts(symbol=symbol_result.symbol)
+    if not active:
+        reason = (
+            "terminal_update_not_public_tracked"
+            if repository.has_prior_public_alert_for_symbol(symbol=symbol_result.symbol)
+            else "terminal_update_no_prior_public_alert"
+        )
+        return TerminalIdentityBridge(blocked_reason=reason)
+
+    terminal_direction = _status_key(message.direction)
+    if terminal_direction in {"long", "short"}:
+        direction_matches = tuple(
+            record for record in active if _status_key(record.direction) == terminal_direction
+        )
+        if len(direction_matches) == 1:
+            return TerminalIdentityBridge(prior_alert=direction_matches[0])
+        if len(direction_matches) > 1:
+            return TerminalIdentityBridge(blocked_reason="terminal_update_identity_ambiguous")
+        return TerminalIdentityBridge(blocked_reason="terminal_update_identity_not_matched")
+
+    if len(active) == 1:
+        return TerminalIdentityBridge(prior_alert=active[0])
+    return TerminalIdentityBridge(blocked_reason="terminal_update_identity_ambiguous")
+
+
+def _message_with_prior_public_identity(
+    message: TelegramSignalMessage,
+    prior_alert: TelegramAlertAttemptRecord,
+) -> TelegramSignalMessage:
+    return replace(
+        message,
+        signal_id=prior_alert.signal_id,
+        symbol=prior_alert.symbol,
+        direction=prior_alert.direction,
     )
 
 
@@ -1843,6 +1970,19 @@ def _preferred_prior_active_record(
             record.id or 0,
         ),
     )[0]
+
+
+def _unique_prior_public_records(
+    records: Sequence[TelegramAlertAttemptRecord],
+) -> tuple[TelegramAlertAttemptRecord, ...]:
+    grouped: dict[str, list[TelegramAlertAttemptRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.signal_id, []).append(record)
+    preferred = [
+        _preferred_prior_active_record(tuple(group), (signal_id,))
+        for signal_id, group in grouped.items()
+    ]
+    return tuple(sorted(preferred, key=lambda record: record.id or 0))
 
 
 def _signal_id_candidates(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:

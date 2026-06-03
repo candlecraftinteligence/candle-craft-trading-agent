@@ -256,13 +256,15 @@ def _seed_prior_active_alert(
     signal_id: str,
     alert_type: TelegramAlertType = TelegramAlertType.SIGNAL_CONFIRMED,
     status: str = "sent",
+    symbol: str = "BTCUSDT",
+    direction: str = "long",
 ) -> None:
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         repository.insert_attempt(
             TelegramAlertAttemptRecord(
                 signal_id=signal_id,
-                symbol="BTCUSDT",
-                direction="long",
+                symbol=symbol,
+                direction=direction,
                 previous_state=NA,
                 new_state="WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
                 alert_type=alert_type.value,
@@ -589,7 +591,7 @@ def test_updates_require_prior_active_telegram_alert() -> None:
     )
 
     assert invalidated_without_prior.eligible is False
-    assert invalidated_without_prior.reason == "terminal_update_identity_not_matched"
+    assert invalidated_without_prior.reason == "terminal_update_no_prior_public_alert"
     assert invalidated_with_prior.eligible is True
     assert invalidated_with_prior.alert_type == "INVALIDATED"
     assert expired_with_prior.eligible is True
@@ -922,7 +924,7 @@ def test_blocked_watchlist_to_invalidated_does_not_send_terminal_update(tmp_path
     assert "watchlist_missing_trackable_plan" in rows[0][2]
     assert rows[1][0] == TelegramAlertType.INVALIDATED.value
     assert rows[1][1] == "blocked"
-    assert rows[1][2] == "terminal_update_identity_not_matched"
+    assert rows[1][2] == "terminal_update_no_prior_public_alert"
 
 
 def test_skipped_watchlist_to_invalidated_does_not_count_as_public_prior(tmp_path: Path) -> None:
@@ -961,7 +963,7 @@ def test_skipped_watchlist_to_invalidated_does_not_count_as_public_prior(tmp_pat
         ).fetchall()
     assert rows == [
         (TelegramAlertType.WATCHLIST.value, "skipped", NA),
-        (TelegramAlertType.INVALIDATED.value, "blocked", "terminal_update_identity_not_matched"),
+        (TelegramAlertType.INVALIDATED.value, "blocked", "terminal_update_no_prior_public_alert"),
     ]
 
 
@@ -1009,6 +1011,137 @@ def test_terminal_update_uses_original_fallback_signal_id_when_lifecycle_id_diff
     assert rows == [
         (original_signal_id, TelegramAlertType.WATCHLIST.value),
         (original_signal_id, TelegramAlertType.INVALIDATED.value),
+    ]
+
+
+def test_terminal_update_symbol_fallback_matches_single_active_watchlist_with_original_direction(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="original-symbol-watch",
+        alert_type=TelegramAlertType.WATCHLIST,
+        symbol="BTCUSDT",
+        direction="short",
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    terminal = _with_lifecycle_direction(
+        _symbol(
+            SetupLifecycleState.INVALIDATED,
+            previous=SetupLifecycleState.WATCHLISTED,
+            signal_id="terminal-symbol-life",
+            diagnostics=_public_ready_watchlist_diagnostics(bias=NA, direction=NA),
+        ),
+        NA,
+    )
+
+    summary = run(service.deliver_for_run(_run_result(terminal), scan_run_id="run-invalid"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "BTCUSDT | short" in sender.messages[0]
+    assert "Signal ID:\noriginal-symbol-watch" in sender.messages[0]
+    assert "terminal-symbol-life" not in sender.messages[0]
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT signal_id, alert_type, direction FROM telegram_alert_attempts ORDER BY id"
+        ).fetchall()
+    assert rows == [
+        ("original-symbol-watch", TelegramAlertType.WATCHLIST.value, "short"),
+        ("original-symbol-watch", TelegramAlertType.INVALIDATED.value, "short"),
+    ]
+
+
+def test_terminal_update_symbol_fallback_blocks_ambiguous_active_watchlists(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="ambiguous-long-watch",
+        alert_type=TelegramAlertType.WATCHLIST,
+        symbol="BTCUSDT",
+        direction="long",
+    )
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="ambiguous-short-watch",
+        alert_type=TelegramAlertType.WATCHLIST,
+        symbol="BTCUSDT",
+        direction="short",
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    terminal = _with_lifecycle_direction(
+        _symbol(
+            SetupLifecycleState.INVALIDATED,
+            previous=SetupLifecycleState.WATCHLISTED,
+            signal_id="terminal-ambiguous-life",
+            diagnostics=_public_ready_watchlist_diagnostics(bias=NA, direction=NA),
+        ),
+        NA,
+    )
+
+    summary = run(service.deliver_for_run(_run_result(terminal), scan_run_id="run-invalid"))
+
+    assert summary.blocked == 1
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT attempted_alert_type, telegram_status, blocked_reason
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+    assert rows[-1] == (
+        TelegramAlertType.INVALIDATED.value,
+        "blocked",
+        "terminal_update_identity_ambiguous",
+    )
+
+
+def test_repeated_unmatched_terminal_update_compacts_seen_count(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    terminal = _symbol(
+        SetupLifecycleState.INVALIDATED,
+        previous=SetupLifecycleState.WATCHLISTED,
+        signal_id="terminal-no-prior-repeat",
+    )
+
+    first = run(service.deliver_for_run(_run_result(terminal), scan_run_id="run-invalid-1"))
+    second = run(service.deliver_for_run(_run_result(terminal), scan_run_id="run-invalid-2"))
+
+    assert first.blocked == 1
+    assert second.blocked_repeat == 1
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT attempted_alert_type, telegram_status, blocked_reason, seen_count, last_scan_run_id
+            FROM telegram_alert_attempts
+            """
+        ).fetchall()
+    assert rows == [
+        (
+            TelegramAlertType.INVALIDATED.value,
+            "blocked",
+            "terminal_update_no_prior_public_alert",
+            2,
+            "run-invalid-2",
+        )
     ]
 
 
