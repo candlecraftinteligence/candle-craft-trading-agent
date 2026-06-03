@@ -45,6 +45,10 @@ from app.telegram_admin.draft_router import (
     persist_admin_drafts,
     route_admin_scan_report,
 )
+from app.telegram_admin.native_menu import (
+    TelegramNativeCommandMenuCleanupResult,
+    clear_telegram_native_command_menu,
+)
 
 __all__ = [
     "ADMIN_COMMANDS",
@@ -65,8 +69,10 @@ __all__ = [
     "TelegramAdminConfig",
     "TelegramAdminDelivery",
     "TelegramAdminTransport",
+    "TelegramNativeCommandMenuCleanupResult",
     "admin_draft_path_for_run",
     "build_admin_drafts",
+    "clear_telegram_native_command_menu",
     "format_admin_scan_report",
     "format_blocked_report",
     "format_help_response",

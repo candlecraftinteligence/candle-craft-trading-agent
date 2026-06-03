@@ -30,7 +30,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--force-live",
         action="store_true",
-        help="Send live only when TELEGRAM_ADMIN_ENABLED=true and TELEGRAM_DRY_RUN=false.",
+        help="Send live only when TELEGRAM_ADMIN_REPORTS_ENABLED=true and TELEGRAM_DRY_RUN=false.",
     )
     parser.add_argument("--show-preview", action="store_true")
     return parser.parse_args(argv)
@@ -75,13 +75,14 @@ def main(
     if args.show_preview:
         print(f"message_preview={_preview(message)}")
 
-    print(f"admin_enabled={_bool_text(config.admin_enabled)}")
+    print(f"admin_reports_enabled={_bool_text(config.admin_report_enabled)}")
+    print(f"legacy_admin_enabled={_bool_text(config.admin_enabled)}")
     print(f"dry_run={_bool_text(config.dry_run)}")
     print(f"admin_chat_id_present={_bool_text(bool(config.admin_chat_id))}")
     print(f"bot_token_present={_bool_text(bool(config.bot_token))}")
     print(f"delivery_status={delivery.status}")
 
-    real_delivery_attempted = config.admin_enabled and not config.dry_run and config.has_admin_credentials
+    real_delivery_attempted = config.admin_report_enabled and not config.dry_run and config.has_admin_credentials
     if delivery.status == "failed" and real_delivery_attempted:
         return 1
     return 0
@@ -93,7 +94,7 @@ def _effective_config(
     dry_run: bool,
     force_live: bool,
 ) -> TelegramAdminConfig:
-    live_allowed_by_config = config.admin_enabled and not config.dry_run
+    live_allowed_by_config = config.admin_report_enabled and not config.dry_run
     effective_dry_run = True
     if force_live and live_allowed_by_config:
         effective_dry_run = False

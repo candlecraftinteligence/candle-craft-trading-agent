@@ -648,7 +648,7 @@ def _duplicate_sent_admin_delivery(
 
 
 def _live_duplicate_guard_enabled(config: TelegramAdminConfig, run_id: str) -> bool:
-    return config.admin_enabled and not config.dry_run and config.has_admin_credentials and run_id != NA
+    return config.admin_report_enabled and not config.dry_run and config.has_admin_credentials and run_id != NA
 
 
 def _telegram_metadata(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

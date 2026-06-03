@@ -72,7 +72,7 @@ def main(
 
     real_processing_failure = (
         result.failed
-        and config.admin_enabled
+        and config.command_ui_enabled
         and not config.dry_run
         and not args.dry_run
         and config.has_admin_credentials

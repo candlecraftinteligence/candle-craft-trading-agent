@@ -35,6 +35,8 @@ class FakeAdminTransport:
 def _settings(
     *,
     admin_enabled: bool = True,
+    admin_reports_enabled: bool | None = None,
+    commands_enabled: bool | None = None,
     dry_run: bool = False,
     bot_token: str | None = "secret-token",
     admin_chat_id: str | None = "admin-chat",
@@ -42,6 +44,8 @@ def _settings(
     return Settings(
         _env_file=None,
         telegram_admin_enabled=admin_enabled,
+        telegram_admin_reports_enabled=admin_reports_enabled,
+        telegram_commands_enabled=commands_enabled,
         telegram_dry_run=dry_run,
         telegram_bot_token=bot_token,
         telegram_admin_chat_id=admin_chat_id,
@@ -60,7 +64,8 @@ def test_smoke_script_defaults_to_dry_run_and_does_not_call_network(capsys) -> N
     captured = capsys.readouterr()
     assert exit_code == 0
     assert transport.calls == []
-    assert "admin_enabled=true" in captured.out
+    assert "admin_reports_enabled=true" in captured.out
+    assert "legacy_admin_enabled=true" in captured.out
     assert "dry_run=true" in captured.out
     assert "delivery_status=dry_run" in captured.out
     assert "secret-token" not in captured.out
@@ -78,7 +83,8 @@ def test_smoke_script_skipped_disabled_exits_zero(capsys) -> None:
     captured = capsys.readouterr()
     assert exit_code == 0
     assert transport.calls == []
-    assert "admin_enabled=false" in captured.out
+    assert "admin_reports_enabled=false" in captured.out
+    assert "legacy_admin_enabled=false" in captured.out
     assert "delivery_status=skipped_disabled" in captured.out
 
 
@@ -98,6 +104,23 @@ def test_smoke_script_force_live_uses_fake_admin_transport(capsys) -> None:
     assert transport.calls[0]["message"] == "Candle Craft admin delivery test"
     assert "dry_run=false" in captured.out
     assert "delivery_status=sent_admin" in captured.out
+    assert "secret-token" not in captured.out
+
+
+def test_smoke_script_force_live_respects_admin_reports_flag(capsys) -> None:
+    transport = FakeAdminTransport()
+
+    exit_code = test_telegram_admin_delivery.main(
+        ["--message", "Candle Craft admin delivery test", "--force-live"],
+        settings=_settings(admin_enabled=True, admin_reports_enabled=False, dry_run=False),
+        transport=transport,
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert transport.calls == []
+    assert "admin_reports_enabled=false" in captured.out
+    assert "delivery_status=skipped_disabled" in captured.out
     assert "secret-token" not in captured.out
 
 

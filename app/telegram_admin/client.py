@@ -33,6 +33,8 @@ SAFE_TELEGRAM_RESULT_KEYS = (
 @dataclass(frozen=True)
 class TelegramAdminConfig:
     admin_enabled: bool = False
+    commands_enabled: bool | None = None
+    admin_reports_enabled: bool | None = None
     dry_run: bool = True
     bot_token: str | None = None
     admin_chat_id: str | None = None
@@ -46,8 +48,17 @@ class TelegramAdminConfig:
 
     @classmethod
     def from_settings(cls, settings: Any) -> TelegramAdminConfig:
+        legacy_admin_enabled = bool(getattr(settings, "telegram_admin_enabled", False))
         return cls(
-            admin_enabled=bool(getattr(settings, "telegram_admin_enabled", False)),
+            admin_enabled=legacy_admin_enabled,
+            commands_enabled=_enabled_with_legacy_fallback(
+                getattr(settings, "telegram_commands_enabled", None),
+                legacy_admin_enabled,
+            ),
+            admin_reports_enabled=_enabled_with_legacy_fallback(
+                getattr(settings, "telegram_admin_reports_enabled", None),
+                legacy_admin_enabled,
+            ),
             dry_run=bool(getattr(settings, "telegram_dry_run", True)),
             bot_token=_clean_optional(getattr(settings, "telegram_bot_token", None)),
             admin_chat_id=_clean_optional(getattr(settings, "telegram_admin_chat_id", None)),
@@ -62,6 +73,14 @@ class TelegramAdminConfig:
     @property
     def has_admin_credentials(self) -> bool:
         return bool(self.bot_token and self.admin_chat_id)
+
+    @property
+    def command_ui_enabled(self) -> bool:
+        return self.admin_enabled if self.commands_enabled is None else bool(self.commands_enabled)
+
+    @property
+    def admin_report_enabled(self) -> bool:
+        return self.admin_enabled if self.admin_reports_enabled is None else bool(self.admin_reports_enabled)
 
 
 @dataclass(frozen=True)
@@ -124,10 +143,10 @@ class TelegramAdminClient:
         self._transport = transport or HttpxTelegramAdminTransport(timeout=config.timeout)
 
     async def send_admin_report(self, message: str) -> TelegramAdminDelivery:
-        if not self._config.admin_enabled:
+        if not self._config.admin_report_enabled:
             return TelegramAdminDelivery(
                 status="skipped_disabled",
-                detail="Telegram admin reporting is disabled; local draft artifact persisted.",
+                detail="Telegram admin scan reports are disabled; local draft artifact persisted.",
             )
         if self._config.dry_run:
             return TelegramAdminDelivery(
@@ -180,6 +199,12 @@ def _clean_optional(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _enabled_with_legacy_fallback(value: Any, fallback: bool) -> bool:
+    if value is None:
+        return fallback
+    return bool(value)
 
 
 def _sanitize_result(result: Mapping[str, Any], config: TelegramAdminConfig) -> dict[str, Any]:

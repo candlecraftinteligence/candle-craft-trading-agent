@@ -246,6 +246,66 @@ def test_disabled_admin_persists_local_drafts_without_network(tmp_path) -> None:
     assert {record["delivery_status"] for record in records} == {"skipped_disabled"}
 
 
+def test_admin_report_sending_is_skipped_when_reports_flag_disabled(tmp_path) -> None:
+    transport = FakeAdminTransport()
+    result = _run_result((_valid_result(),))
+
+    routed = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=_manifest(),
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                commands_enabled=True,
+                admin_reports_enabled=False,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+
+    assert routed.delivery_status == "skipped_disabled"
+    assert "admin scan reports are disabled" in routed.delivery_detail
+    assert transport.calls == []
+    assert routed.draft_path is not None
+    records = _read_jsonl(routed.draft_path)
+    assert {record["delivery_status"] for record in records} == {"skipped_disabled"}
+    serialized = json.dumps(records)
+    assert "secret-token" not in serialized
+
+
+def test_command_only_ui_testing_does_not_send_scan_report(tmp_path) -> None:
+    transport = FakeAdminTransport()
+    result = _run_result((_valid_result(),))
+    command_only_config = TelegramAdminConfig(
+        admin_enabled=False,
+        commands_enabled=True,
+        admin_reports_enabled=False,
+        dry_run=False,
+        bot_token="secret-token",
+        admin_chat_id="admin-chat",
+    )
+
+    routed = asyncio.run(
+        route_admin_scan_report(
+            result,
+            manifest_row=_manifest(),
+            config=command_only_config,
+            transport=transport,
+            drafts_dir=tmp_path,
+        )
+    )
+
+    assert command_only_config.command_ui_enabled is True
+    assert command_only_config.admin_report_enabled is False
+    assert routed.delivery_status == "skipped_disabled"
+    assert transport.calls == []
+    assert routed.drafts_created > 0
+
+
 def test_missing_credentials_do_not_crash_and_skip_send(tmp_path) -> None:
     transport = FakeAdminTransport()
     result = _run_result((_near_result(),))

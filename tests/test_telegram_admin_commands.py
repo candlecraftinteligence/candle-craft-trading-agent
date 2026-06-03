@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from app.alerts.integrity_manifest import build_alert_integrity_manifest
 from app.core.config import Settings
 from app.telegram_admin import TelegramAdminCommandService, TelegramAdminConfig, process_telegram_admin_commands
@@ -16,6 +18,7 @@ from app.telegram_admin.commands import (
     SCREEN_HEADER,
     normalize_admin_command,
 )
+from scripts import clear_telegram_native_command_menu as clear_menu_script
 from scripts import process_telegram_admin_commands as process_script
 
 
@@ -239,11 +242,25 @@ def _keyboard_labels(reply_markup: Mapping[str, Any] | None) -> list[str]:
 
 
 def _assert_public_menu_only(reply_markup: Mapping[str, Any] | None) -> None:
+    assert reply_markup is not None
+    assert "keyboard" in reply_markup
+    assert "inline_keyboard" not in reply_markup
+    assert reply_markup["is_persistent"] is True
     labels = _keyboard_labels(reply_markup)
     expected = [label for row in PUBLIC_MENU_BUTTON_ROWS for label in row]
     assert labels == expected
     admin_labels = {label for row in ADMIN_MENU_BUTTON_ROWS for label in row}
     assert admin_labels.isdisjoint(labels)
+
+
+def _assert_admin_menu_only(reply_markup: Mapping[str, Any] | None) -> None:
+    assert reply_markup is not None
+    assert "keyboard" in reply_markup
+    assert "inline_keyboard" not in reply_markup
+    assert reply_markup["is_persistent"] is True
+    labels = _keyboard_labels(reply_markup)
+    expected = [label for row in ADMIN_MENU_BUTTON_ROWS for label in row]
+    assert labels == expected
 
 
 def _assert_no_execution_buttons(reply_markup: Mapping[str, Any] | None) -> None:
@@ -302,7 +319,8 @@ def test_start_response_contains_admin_desk_welcome_and_command_list(tmp_path) -
     for row in ADMIN_MENU_BUTTON_ROWS:
         for label in row:
             assert label.split(maxsplit=1)[0] in response.text
-    assert response.reply_markup is not None
+    _assert_admin_menu_only(response.reply_markup)
+    _assert_no_execution_buttons(response.reply_markup)
     assert response.reply_markup["keyboard"][0][0]["text"] == "📊 Status"
     assert "No execution buttons" in response.text
     assert "Your market-structure command center." in response.text
@@ -337,6 +355,53 @@ def test_menu_button_labels_normalize_to_commands() -> None:
     assert normalize_admin_command("🌐 Social") == "/social"
     assert normalize_admin_command("❓ Help") == "/help"
     assert normalize_admin_command("🧡 Donate") == "/donate"
+
+
+def test_persistent_reply_keyboards_are_not_inline_buttons(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+
+    admin = service.response_for("/menu")
+    public = service.public_response_for("/menu")
+
+    _assert_admin_menu_only(admin.reply_markup)
+    _assert_public_menu_only(public.reply_markup)
+    _assert_no_execution_buttons(admin.reply_markup)
+    _assert_no_execution_buttons(public.reply_markup)
+
+
+def test_empty_states_use_premium_copy_without_developer_wording(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+
+    watchlists = service.response_for("/watchlists")
+    responses = (
+        service.response_for("/status"),
+        service.response_for("/alerts"),
+        watchlists,
+        service.response_for("/integrity"),
+    )
+
+    combined = "\n".join(response.text for response in responses)
+    assert "No lifecycle alerts available right now." in combined
+    assert "No active watchlist setups right now." in combined
+    assert "No safety summary available yet." in combined
+    assert "Preset lists:" not in watchlists.text
+    assert "Data status: Unverified" not in combined
+    assert "The latest scan record is not available" not in combined
+    assert "manifest" not in combined.lower()
+    assert "payload" not in combined.lower()
+
+
+def test_long_run_ids_are_shortened_in_telegram_ui(tmp_path) -> None:
+    long_run_id = "1234567890abcdef1234567890abcdef"
+    service = _write_artifacts(tmp_path, rows=[_alert_row()], run_id=long_run_id)
+
+    status = service.response_for("/status")
+    public_lastscan = service.public_response_for("/lastscan")
+
+    assert long_run_id not in status.text
+    assert long_run_id not in public_lastscan.text
+    assert "Run: 1234567890ab" in status.text
+    assert "Last run: 1234567890ab" in public_lastscan.text
 
 
 def test_status_loads_latest_manifest_and_formats_core_counts(tmp_path) -> None:
@@ -515,7 +580,8 @@ def test_config_screen_redacts_secrets_and_raw_chat_ids(tmp_path) -> None:
     assert response.text.startswith(f"{SCREEN_HEADER} Configuration Desk")
     assert "Manual mode: Active" in response.text
     assert "Execution: Disabled" in response.text
-    assert "Telegram alerts: Enabled" in response.text
+    assert "Command UI: Enabled" in response.text
+    assert "Admin reports: Enabled" in response.text
     assert "Test mode: Inactive" in response.text
     assert "Bot token: Hidden" in response.text
     assert "Chat ID: Hidden" in response.text
@@ -523,6 +589,25 @@ def test_config_screen_redacts_secrets_and_raw_chat_ids(tmp_path) -> None:
     assert "123456789" not in response.text
     assert "public-channel" not in response.text
     assert "vip-channel" not in response.text
+
+
+def test_telegram_admin_config_splits_command_ui_from_admin_reports() -> None:
+    config = TelegramAdminConfig.from_settings(
+        Settings(
+            _env_file=None,
+            telegram_admin_enabled=True,
+            telegram_commands_enabled=True,
+            telegram_admin_reports_enabled=False,
+            telegram_dry_run=False,
+            telegram_bot_token="secret-token",
+            telegram_admin_chat_id="admin-chat",
+        )
+    )
+
+    assert config.admin_enabled is True
+    assert config.command_ui_enabled is True
+    assert config.admin_report_enabled is False
+    assert config.dry_run is False
 
 
 def test_public_start_response_uses_public_copy_and_optional_logo(tmp_path) -> None:
@@ -674,6 +759,58 @@ def test_public_links_and_logo_load_from_settings_and_render(tmp_path) -> None:
     assert "https://x.example.test/candlecraft" in social.text
     assert "https://t.me/example_candlecraft" in social.text
     assert "https://donate.example.test/candlecraft" in donate.text
+
+
+def test_command_menu_cleanup_calls_telegram_safely_and_does_not_print_token(capsys) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    try:
+        exit_code = clear_menu_script.main(
+            [],
+            settings=Settings(telegram_bot_token="secret-token"),
+            http_client=client,
+        )
+    finally:
+        asyncio.run(client.aclose())
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "native_command_menu_status=cleared" in output
+    assert "delete_commands_status=cleared" in output
+    assert "menu_button_status=default" in output
+    assert "secret-token" not in output
+    assert [request.url.path for request in requests] == [
+        "/botsecret-token/deleteMyCommands",
+        "/botsecret-token/setChatMenuButton",
+    ]
+    assert json.loads(requests[0].content.decode("utf-8")) == {}
+    assert json.loads(requests[1].content.decode("utf-8")) == {"menu_button": {"type": "default"}}
+
+
+def test_command_menu_cleanup_redacts_token_on_telegram_error(capsys) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": False, "description": "Bad token secret-token"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    try:
+        exit_code = clear_menu_script.main(
+            [],
+            settings=Settings(telegram_bot_token="secret-token"),
+            http_client=client,
+        )
+    finally:
+        asyncio.run(client.aclose())
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "native_command_menu_status=failed" in output
+    assert "[REDACTED]" in output
+    assert "secret-token" not in output
 
 
 def test_every_public_screen_has_brand_header_footer_and_no_execution_buttons(tmp_path) -> None:
@@ -909,6 +1046,39 @@ def test_enabled_admin_command_uses_fake_client_and_sends_exactly_one_reply(tmp_
     assert transport.send_calls[0]["reply_markup"]["keyboard"][0][0]["text"] == "📊 Status"
 
 
+def test_command_processor_works_when_admin_reports_are_disabled(tmp_path) -> None:
+    service = _write_artifacts(tmp_path, rows=[_valid_row()])
+    transport = FakeCommandTransport(updates=(_update(33, "admin-chat", "/status"),))
+    config = TelegramAdminConfig(
+        admin_enabled=False,
+        commands_enabled=True,
+        admin_reports_enabled=False,
+        dry_run=False,
+        bot_token="secret-token",
+        admin_chat_id="admin-chat",
+    )
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=config,
+            command_service=service,
+            transport=transport,
+            state_path=tmp_path / "state.json",
+            audit_path=tmp_path / "audit.jsonl",
+        )
+    )
+
+    assert config.command_ui_enabled is True
+    assert config.admin_report_enabled is False
+    assert result.delivery_status == "sent_admin"
+    assert len(transport.get_calls) == 1
+    assert len(transport.send_calls) == 1
+    assert transport.send_calls[0]["chat_id"] == "admin-chat"
+    assert "System Desk" in transport.send_calls[0]["message"]
+    serialized = json.dumps(_read_jsonl(tmp_path / "audit.jsonl"))
+    assert "secret-token" not in serialized
+
+
 def test_public_and_vip_channel_ids_receive_public_reserved_screen(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_valid_row()])
     transport = FakeCommandTransport()
@@ -1040,7 +1210,12 @@ def test_script_dry_run_disabled_skips_network_and_prints_preview(tmp_path, caps
             "--audit-path",
             str(tmp_path / "audit.jsonl"),
         ],
-        settings=Settings(telegram_admin_enabled=False, telegram_dry_run=True),
+        settings=Settings(
+            telegram_admin_enabled=False,
+            telegram_commands_enabled=False,
+            telegram_admin_reports_enabled=False,
+            telegram_dry_run=True,
+        ),
         transport=transport,
     )
 
@@ -1051,3 +1226,32 @@ def test_script_dry_run_disabled_skips_network_and_prints_preview(tmp_path, caps
     assert "preview_1=skipped_disabled" in output
     assert transport.get_calls == []
     assert transport.send_calls == []
+
+
+def test_command_ui_runs_when_legacy_admin_flag_is_disabled(tmp_path) -> None:
+    service = _write_artifacts(tmp_path, rows=[_valid_row()])
+    transport = FakeCommandTransport(updates=(_update(41, "admin-chat", "/status"),))
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig.from_settings(
+                Settings(
+                    telegram_admin_enabled=False,
+                    telegram_commands_enabled=True,
+                    telegram_admin_reports_enabled=False,
+                    telegram_dry_run=False,
+                    telegram_bot_token="secret-token",
+                    telegram_admin_chat_id="admin-chat",
+                )
+            ),
+            command_service=service,
+            transport=transport,
+            state_path=tmp_path / "state.json",
+            audit_path=tmp_path / "audit.jsonl",
+        )
+    )
+
+    assert result.delivery_status == "sent_admin"
+    assert len(transport.get_calls) == 1
+    assert len(transport.send_calls) == 1
+    assert "System Desk" in transport.send_calls[0]["message"]
