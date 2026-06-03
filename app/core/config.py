@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     telegram_public_channel_id: str | None = None
     telegram_vip_channel_id: str | None = None
     telegram_signals_enabled: bool = False
+    candle_craft_public_logo_url: str | None = None
+    candle_craft_x_url: str | None = None
+    candle_craft_telegram_url: str | None = None
+    candle_craft_donate_url: str | None = None
     local_manual_mode: bool = True
     order_execution_enabled: bool = False
 

@@ -11,6 +11,7 @@ from typing import Any, Protocol
 import httpx
 
 from app.alerts.telegram import DEFAULT_TELEGRAM_TIMEOUT, TELEGRAM_API_BASE_URL, send_telegram_messages
+from app.alerts.templates import TELEGRAM_MAX_MESSAGE_LENGTH, split_message
 from app.data.dtos import NA
 from app.telegram_admin.client import TelegramAdminConfig
 from app.telegram_admin.commands import AdminCommandResponse, TelegramAdminCommandService, normalize_admin_command
@@ -24,6 +25,7 @@ DEFAULT_COMMAND_LIMIT = 10
 ADMIN_COMMAND_DELIVERY_STATUSES: tuple[str, ...] = (
     "dry_run",
     "sent_admin",
+    "sent_public",
     "skipped_disabled",
     "skipped_missing_credentials",
     "ignored_unauthorized",
@@ -48,6 +50,8 @@ class TelegramAdminCommandTransport(Protocol):
         bot_token: str,
         chat_id: str,
         message: str,
+        reply_markup: Mapping[str, Any] | None = None,
+        photo_url: str | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
         """Send one admin command response through Telegram."""
 
@@ -89,7 +93,30 @@ class HttpxTelegramAdminCommandTransport:
         bot_token: str,
         chat_id: str,
         message: str,
+        reply_markup: Mapping[str, Any] | None = None,
+        photo_url: str | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
+        if photo_url is not None:
+            return await _send_admin_photo_with_reply_markup(
+                bot_token=bot_token,
+                chat_id=chat_id,
+                message=message,
+                photo_url=photo_url,
+                reply_markup=reply_markup,
+                http_client=self._http_client,
+                api_base_url=self._api_base_url,
+                timeout=self._timeout,
+            )
+        if reply_markup is not None:
+            return await _send_admin_messages_with_reply_markup(
+                bot_token=bot_token,
+                chat_id=chat_id,
+                message=message,
+                reply_markup=reply_markup,
+                http_client=self._http_client,
+                api_base_url=self._api_base_url,
+                timeout=self._timeout,
+            )
         return await send_telegram_messages(
             bot_token=bot_token,
             chat_id=chat_id,
@@ -231,21 +258,18 @@ async def _process_update(
         return _ProcessedUpdate("ignored_unauthorized", preview="Ignored update without update_id.")
 
     if not is_admin:
-        _append_audit_record(
-            audit_path,
-            update_id=update_id,
-            command=command or NA,
-            chat_id=chat_id,
-            is_admin=False,
-            response_type="unauthorized",
-            delivery_status="ignored_unauthorized",
-            response_preview="Unauthorized update ignored.",
-            run_id=NA,
+        return await _process_public_update(
+            update_id,
+            command,
+            chat_id,
+            config=config,
+            command_service=command_service,
+            transport=transport,
+            state_path=state_path,
+            audit_path=audit_path,
         )
-        _save_latest_processed_update_id(state_path, update_id)
-        return _ProcessedUpdate("ignored_unauthorized", preview="Unauthorized update ignored.")
 
-    response = command_service.response_for(command)
+    response = command_service.response_for(command, admin_config=config)
     skipped = _skip_status(config)
     if skipped is not None:
         _append_command_audit(audit_path, update_id, chat_id, response, skipped)
@@ -261,6 +285,8 @@ async def _process_update(
             bot_token=config.bot_token or "",
             chat_id=config.admin_chat_id or "",
             message=response.text,
+            reply_markup=response.reply_markup,
+            photo_url=response.photo_url,
         )
     except Exception as exc:
         error = _sanitize_error(exc, config)
@@ -279,6 +305,53 @@ async def _process_update(
     return _ProcessedUpdate("failed", preview=_preview(response.text), error_message=error)
 
 
+async def _process_public_update(
+    update_id: int,
+    command: str,
+    chat_id: str,
+    *,
+    config: TelegramAdminConfig,
+    command_service: TelegramAdminCommandService,
+    transport: TelegramAdminCommandTransport,
+    state_path: Path,
+    audit_path: Path,
+) -> _ProcessedUpdate:
+    response = command_service.public_response_for(command, public_config=config)
+    skipped = _public_skip_status(config, chat_id)
+    if skipped is not None:
+        _append_public_command_audit(audit_path, update_id, chat_id, response, skipped)
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate(skipped, preview=_preview(response.text))
+    if config.dry_run:
+        _append_public_command_audit(audit_path, update_id, chat_id, response, "dry_run")
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("dry_run", preview=_preview(response.text))
+
+    try:
+        raw_results = await transport.send_message(
+            bot_token=config.bot_token or "",
+            chat_id=chat_id,
+            message=response.text,
+            reply_markup=response.reply_markup,
+            photo_url=response.photo_url,
+        )
+    except Exception as exc:
+        error = _sanitize_error(exc, config, extra_secrets=(chat_id,))
+        _append_public_command_audit(audit_path, update_id, chat_id, response, "failed", error_message=error)
+        return _ProcessedUpdate("failed", preview=_preview(response.text), error_message=error)
+
+    sanitized_results = tuple(_sanitize_result(item, config, extra_secrets=(chat_id,)) for item in raw_results)
+    sent = bool(sanitized_results) and all(item.get("status") == "sent" for item in sanitized_results)
+    if sent:
+        _append_public_command_audit(audit_path, update_id, chat_id, response, "sent_public")
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("sent_public", sent=True, preview=_preview(response.text))
+
+    error = _first_result_error(sanitized_results)
+    _append_public_command_audit(audit_path, update_id, chat_id, response, "failed", error_message=error)
+    return _ProcessedUpdate("failed", preview=_preview(response.text), error_message=error)
+
+
 def _skip_status(config: TelegramAdminConfig) -> str | None:
     if not config.admin_enabled:
         return "skipped_disabled"
@@ -289,12 +362,24 @@ def _skip_status(config: TelegramAdminConfig) -> str | None:
     return None
 
 
+def _public_skip_status(config: TelegramAdminConfig, chat_id: str) -> str | None:
+    if not config.admin_enabled:
+        return "skipped_disabled"
+    if _display(chat_id) == NA:
+        return "ignored_unauthorized"
+    if config.dry_run:
+        return None
+    if not config.bot_token:
+        return "skipped_missing_credentials"
+    return None
+
+
 def _network_skip_status(config: TelegramAdminConfig) -> str | None:
     if not config.admin_enabled:
         return "skipped_disabled"
     if config.dry_run:
         return "dry_run"
-    if not config.has_admin_credentials:
+    if not config.bot_token:
         return "skipped_missing_credentials"
     return None
 
@@ -315,6 +400,279 @@ def _updates_from_response(response: httpx.Response) -> tuple[Mapping[str, Any],
     if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
         return ()
     return tuple(item for item in results if isinstance(item, Mapping))
+
+
+async def _send_admin_photo_with_reply_markup(
+    *,
+    bot_token: str,
+    chat_id: str,
+    message: str,
+    photo_url: str,
+    reply_markup: Mapping[str, Any] | None,
+    http_client: httpx.AsyncClient | None,
+    api_base_url: str,
+    timeout: float,
+) -> tuple[Mapping[str, Any], ...]:
+    close_client = http_client is None
+    client = http_client or httpx.AsyncClient(base_url=api_base_url, timeout=timeout)
+    chunks = split_message(message, 1024)
+    first_chunk = chunks[0] if chunks else message
+    url = f"/bot{bot_token}/sendPhoto"
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "photo": photo_url,
+        "caption": first_chunk,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = dict(reply_markup)
+
+    results: list[Mapping[str, Any]] = []
+    try:
+        try:
+            response = await client.post(url, json=payload)
+        except httpx.TimeoutException:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=len(chunks) or 1,
+                    error="Telegram public welcome image request timed out.",
+                ),
+            )
+        except httpx.HTTPError as exc:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=len(chunks) or 1,
+                    error=f"Telegram public welcome image request failed: {exc}",
+                ),
+            )
+
+        if response.status_code != 200:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=len(chunks) or 1,
+                    error=_telegram_send_http_error(response),
+                    http_status=response.status_code,
+                    rate_limited=response.status_code == 429,
+                ),
+            )
+
+        try:
+            body = response.json()
+        except ValueError:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=len(chunks) or 1,
+                    error="Telegram public welcome image response could not be read.",
+                    http_status=response.status_code,
+                ),
+            )
+
+        if not isinstance(body, Mapping) or body.get("ok") is not True:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=len(chunks) or 1,
+                    error=_telegram_malformed_body_error(body),
+                    http_status=response.status_code,
+                ),
+            )
+
+        results.append(
+            {
+                "status": "sent",
+                "part_number": 1,
+                "total_parts": len(chunks) or 1,
+                "http_status": response.status_code,
+                "rate_limited": False,
+                "error": None,
+                **_telegram_success_metadata(body),
+            }
+        )
+    finally:
+        if close_client:
+            await client.aclose()
+
+    if len(chunks) > 1:
+        rest = "\n".join(chunks[1:])
+        if rest:
+            results.extend(
+                await _send_admin_messages_with_reply_markup(
+                    bot_token=bot_token,
+                    chat_id=chat_id,
+                    message=rest,
+                    reply_markup=reply_markup or {},
+                    http_client=http_client,
+                    api_base_url=api_base_url,
+                    timeout=timeout,
+                )
+            )
+    return tuple(results)
+
+
+async def _send_admin_messages_with_reply_markup(
+    *,
+    bot_token: str,
+    chat_id: str,
+    message: str,
+    reply_markup: Mapping[str, Any],
+    http_client: httpx.AsyncClient | None,
+    api_base_url: str,
+    timeout: float,
+    max_message_length: int = TELEGRAM_MAX_MESSAGE_LENGTH,
+) -> tuple[Mapping[str, Any], ...]:
+    chunks = split_message(message, max_message_length)
+    close_client = http_client is None
+    client = http_client or httpx.AsyncClient(base_url=api_base_url, timeout=timeout)
+    url = f"/bot{bot_token}/sendMessage"
+    results: list[Mapping[str, Any]] = []
+
+    try:
+        for part_number, chunk in enumerate(chunks, start=1):
+            payload: dict[str, Any] = {
+                "chat_id": chat_id,
+                "text": chunk,
+                "disable_web_page_preview": True,
+                "reply_markup": dict(reply_markup),
+            }
+            try:
+                response = await client.post(url, json=payload)
+            except httpx.TimeoutException:
+                results.append(
+                    _admin_send_failure(
+                        part_number=part_number,
+                        total_parts=len(chunks),
+                        error="Telegram admin command request timed out.",
+                    )
+                )
+                break
+            except httpx.HTTPError as exc:
+                results.append(
+                    _admin_send_failure(
+                        part_number=part_number,
+                        total_parts=len(chunks),
+                        error=f"Telegram admin command request failed: {exc}",
+                    )
+                )
+                break
+
+            if response.status_code != 200:
+                results.append(
+                    _admin_send_failure(
+                        part_number=part_number,
+                        total_parts=len(chunks),
+                        error=_telegram_send_http_error(response),
+                        http_status=response.status_code,
+                        rate_limited=response.status_code == 429,
+                    )
+                )
+                break
+
+            try:
+                body = response.json()
+            except ValueError:
+                results.append(
+                    _admin_send_failure(
+                        part_number=part_number,
+                        total_parts=len(chunks),
+                        error="Malformed Telegram admin command response.",
+                        http_status=response.status_code,
+                    )
+                )
+                break
+
+            if not isinstance(body, Mapping) or body.get("ok") is not True:
+                results.append(
+                    _admin_send_failure(
+                        part_number=part_number,
+                        total_parts=len(chunks),
+                        error=_telegram_malformed_body_error(body),
+                        http_status=response.status_code,
+                    )
+                )
+                break
+
+            results.append(
+                {
+                    "status": "sent",
+                    "part_number": part_number,
+                    "total_parts": len(chunks),
+                    "http_status": response.status_code,
+                    "rate_limited": False,
+                    "error": None,
+                    **_telegram_success_metadata(body),
+                }
+            )
+    finally:
+        if close_client:
+            await client.aclose()
+
+    return tuple(results)
+
+
+def _admin_send_failure(
+    *,
+    part_number: int,
+    total_parts: int,
+    error: str,
+    http_status: int | None = None,
+    rate_limited: bool = False,
+) -> Mapping[str, Any]:
+    return {
+        "status": "failed",
+        "part_number": part_number,
+        "total_parts": total_parts,
+        "http_status": http_status,
+        "rate_limited": rate_limited,
+        "error": error,
+    }
+
+
+def _telegram_send_http_error(response: httpx.Response) -> str:
+    if response.status_code == 429:
+        return "Telegram rate limited the admin command request."
+    return f"Telegram returned HTTP {response.status_code}."
+
+
+def _telegram_malformed_body_error(body: Any) -> str:
+    if isinstance(body, Mapping):
+        description = body.get("description")
+        if isinstance(description, str) and description.strip():
+            return f"Telegram response did not confirm success: {description.strip()}"
+    return "Malformed Telegram response."
+
+
+def _telegram_success_metadata(body: Mapping[str, Any]) -> dict[str, Any]:
+    result = body.get("result")
+    if not isinstance(result, Mapping):
+        return {}
+
+    metadata: dict[str, Any] = {}
+    message_id = result.get("message_id")
+    if message_id is not None:
+        metadata["message_id"] = message_id
+
+    chat = result.get("chat")
+    if isinstance(chat, Mapping):
+        chat_id = chat.get("id")
+        if chat_id is not None:
+            metadata["chat_id"] = chat_id
+
+    sent_at = _telegram_sent_at(result.get("date"))
+    if sent_at is not None:
+        metadata["sent_at"] = sent_at
+
+    return metadata
+
+
+def _telegram_sent_at(value: Any) -> str | None:
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError):
+        return None
+    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat().replace("+00:00", "Z")
 
 
 def _limited_new_updates(
@@ -350,6 +708,29 @@ def _append_command_audit(
         command=response.command,
         chat_id=chat_id,
         is_admin=True,
+        response_type=response.response_type,
+        delivery_status=delivery_status,
+        response_preview=_preview(response.text),
+        run_id=response.run_id,
+        error_message=error_message,
+    )
+
+
+def _append_public_command_audit(
+    audit_path: Path,
+    update_id: int,
+    chat_id: str,
+    response: AdminCommandResponse,
+    delivery_status: str,
+    *,
+    error_message: str = NA,
+) -> None:
+    _append_audit_record(
+        audit_path,
+        update_id=update_id,
+        command=response.command,
+        chat_id=chat_id,
+        is_admin=False,
         response_type=response.response_type,
         delivery_status=delivery_status,
         response_preview=_preview(response.text),
@@ -453,18 +834,34 @@ def _chat_id_hash(chat_id: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _sanitize_result(result: Mapping[str, Any], config: TelegramAdminConfig) -> dict[str, Any]:
+def _sanitize_result(
+    result: Mapping[str, Any],
+    config: TelegramAdminConfig,
+    *,
+    extra_secrets: Sequence[str] = (),
+) -> dict[str, Any]:
     sanitized = {key: result[key] for key in ("status", "http_status", "rate_limited", "error") if key in result}
     if "error" in sanitized:
-        sanitized["error"] = _sanitize_error(sanitized.get("error"), config)
+        sanitized["error"] = _sanitize_error(sanitized.get("error"), config, extra_secrets=extra_secrets)
     return sanitized
 
 
-def _sanitize_error(value: Any, config: TelegramAdminConfig) -> str:
+def _sanitize_error(
+    value: Any,
+    config: TelegramAdminConfig,
+    *,
+    extra_secrets: Sequence[str] = (),
+) -> str:
     text = str(value or "").strip()
     if not text:
         return NA
-    for secret in (config.bot_token, config.admin_chat_id, config.public_channel_id, config.vip_channel_id):
+    for secret in (
+        config.bot_token,
+        config.admin_chat_id,
+        config.public_channel_id,
+        config.vip_channel_id,
+        *extra_secrets,
+    ):
         if secret:
             text = text.replace(str(secret), "[REDACTED]")
     return text

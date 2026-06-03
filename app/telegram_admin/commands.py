@@ -6,9 +6,78 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.alerts.integrity_manifest import audit_alert_integrity_artifact
 from app.data.dtos import NA
+from app.watchlists.presets import presets_with_counts
 
-ADMIN_COMMANDS: tuple[str, ...] = ("/start", "/help", "/status", "/lastscan", "/near", "/blocked")
+SCREEN_HEADER = "🐺🟠"
+SCREEN_FOOTER = "Candle Craft | Signal. Structure. Execution."
+SCREEN_DIVIDER = "━━━━━━━━━━━━━━━━━━"
+UNVERIFIED = "Unverified"
+ADMIN_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
+    ("📊 Status", "🚨 Alerts"),
+    ("👁 Watchlists", "🧾 Integrity"),
+    ("⚙️ Config", "❓ Guide"),
+)
+ADMIN_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
+    "📊 status": "/status",
+    "🚨 alerts": "/alerts",
+    "👁 watchlists": "/watchlists",
+    "🧾 integrity": "/integrity",
+    "⚙️ config": "/config",
+    "❓ guide": "/guide",
+}
+PUBLIC_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
+    ("📡 Last Scan", "🔥 Active Signals"),
+    ("👁 Watchlist Signals", "🌐 Social"),
+    ("❓ Help", "🧡 Donate"),
+)
+PUBLIC_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
+    "📡 last scan": "/lastscan",
+    "🔥 active signals": "/signals",
+    "👁 watchlist signals": "/watchlist",
+    "🌐 social": "/social",
+    "❓ help": "/help",
+    "🧡 donate": "/donate",
+}
+ADMIN_COMMANDS: tuple[str, ...] = (
+    "/start",
+    "/menu",
+    "/status",
+    "/alerts",
+    "/watchlists",
+    "/integrity",
+    "/config",
+    "/guide",
+    "/help",
+    "/lastscan",
+    "/near",
+    "/blocked",
+    "/audit",
+)
+PUBLIC_COMMANDS: tuple[str, ...] = (
+    "/start",
+    "/menu",
+    "/lastscan",
+    "/signals",
+    "/watchlist",
+    "/social",
+    "/help",
+    "/donate",
+)
+PUBLIC_ADMIN_RESERVED_COMMANDS: frozenset[str] = frozenset(
+    {
+        "/status",
+        "/alerts",
+        "/watchlists",
+        "/audit",
+        "/integrity",
+        "/config",
+        "/near",
+        "/blocked",
+        "/guide",
+    }
+)
 DEFAULT_SCAN_RUN_MANIFEST_PATH = Path("scan_runs") / "scan_run_manifest.jsonl"
 DEFAULT_ADMIN_COMMAND_ROW_LIMIT = 5
 
@@ -19,6 +88,8 @@ class AdminCommandResponse:
     response_type: str
     text: str
     run_id: str = NA
+    reply_markup: Mapping[str, Any] | None = None
+    photo_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -46,31 +117,69 @@ class TelegramAdminCommandService:
     def manifest_path(self) -> Path:
         return self._manifest_path
 
-    def response_for(self, command: str) -> AdminCommandResponse:
+    def response_for(self, command: str, *, admin_config: Any | None = None) -> AdminCommandResponse:
         normalized = normalize_admin_command(command)
         if normalized == "/start":
-            return AdminCommandResponse(normalized, "start", format_start_response())
-        if normalized == "/help":
-            return AdminCommandResponse(normalized, "help", format_help_response())
+            return _admin_response(normalized, "start", format_start_response())
+        if normalized == "/menu":
+            return _admin_response(normalized, "menu", format_menu_response())
+        if normalized in {"/help", "/guide"}:
+            return _admin_response(normalized, "guide", format_help_response())
         if normalized == "/status":
             return self._status_response()
+        if normalized == "/alerts":
+            return self._alerts_response()
+        if normalized == "/watchlists":
+            return self._watchlists_response()
+        if normalized in {"/integrity", "/audit"}:
+            return self._integrity_response(normalized)
+        if normalized == "/config":
+            return self._config_response(admin_config=admin_config)
         if normalized == "/lastscan":
             return self._lastscan_response()
         if normalized == "/near":
             return self._near_response()
         if normalized == "/blocked":
             return self._blocked_response()
-        return AdminCommandResponse(
+        return _admin_response(
             command=normalized,
             response_type="unknown",
-            text="\n".join(
+            text=_screen(
+                "Command Guide",
                 (
                     "Unknown admin command.",
-                    "Use /help for available commands.",
-                    "Admin-only. No public/VIP posting. No execution enabled.",
-                )
+                    "Use /menu or /help for the command guide.",
+                    SCREEN_DIVIDER,
+                    "No execution.",
+                    "Manual review only.",
+                ),
             ),
         )
+
+    def public_response_for(self, command: str, *, public_config: Any | None = None) -> AdminCommandResponse:
+        normalized = normalize_admin_command(command)
+        if normalized in {"/start", "/menu"}:
+            return _public_response(
+                normalized,
+                "public_menu",
+                format_public_menu_response(),
+                photo_url=_public_logo_url(public_config) if normalized == "/start" else None,
+            )
+        if normalized == "/lastscan":
+            return self._public_lastscan_response()
+        if normalized == "/signals":
+            return self._public_signals_response()
+        if normalized == "/watchlist":
+            return self._public_watchlist_response()
+        if normalized == "/social":
+            return _public_response(normalized, "public_social", format_public_social_response(public_config))
+        if normalized == "/donate":
+            return _public_response(normalized, "public_donate", format_public_donate_response(public_config))
+        if normalized == "/help":
+            return _public_response(normalized, "public_help", format_public_help_response())
+        if normalized in PUBLIC_ADMIN_RESERVED_COMMANDS:
+            return _public_response(normalized, "public_admin_reserved", format_public_admin_reserved_response())
+        return _public_response(normalized, "public_menu", format_public_menu_response())
 
     def latest_manifest_row(self) -> Mapping[str, Any] | None:
         return load_latest_manifest_row(self._manifest_path)
@@ -97,36 +206,376 @@ class TelegramAdminCommandService:
         manifest_row = self.latest_manifest_row()
         run_id = _display(manifest_row.get("run_id")) if manifest_row is not None else NA
         if manifest_row is None:
-            lines = [
-                "Candle Craft Admin Status",
-                "Admin-only.",
-                f"Latest manifest: N/A ({self._manifest_path})",
-                "No scan manifest rows found.",
-                "Telegram mode: admin-only command scaffold. No public/VIP posting. No execution enabled.",
-            ]
-            return AdminCommandResponse("/status", "status", "\n".join(lines), run_id=NA)
+            text = _screen(
+                "System Desk",
+                (
+                    "Candle Craft engine status.",
+                    "Manual execution only.",
+                    "",
+                SCREEN_DIVIDER,
+                "Mode: Manual-only",
+                "Execution: Disabled",
+                "Quality gates: Protected",
+                "Duplicate protection: Active",
+                "Safety audit: Active",
+                "",
+                "Latest scan:",
+                "Run: N/A",
+                f"Data status: {UNVERIFIED}",
+                "The latest scan record is not available.",
+                    SCREEN_DIVIDER,
+                    "",
+                    "The engine is filtering for quality.",
+                    "No weak setups are promoted.",
+                ),
+            )
+            return _admin_response("/status", "status", text, run_id=NA)
 
-        lines = [
-            "Candle Craft Admin Status",
-            "Admin-only.",
-            f"Latest run_id: {_display(manifest_row.get('run_id'))}",
-            f"Timestamp: {_display(manifest_row.get('timestamp'))}",
-            f"Universe: {_universe_text(manifest_row)}",
-            f"Market regime: {_display(manifest_row.get('market_regime'))}",
-            f"Regime confidence: {_display(manifest_row.get('regime_confidence'))}",
-            f"Symbols scanned: {_display(manifest_row.get('symbols_scanned'))}",
-            f"Valid setups: {_display(manifest_row.get('valid_setup_count'))}",
-            f"Near misses: {_display(manifest_row.get('near_miss_count'))}",
-            f"Rejected: {_display(manifest_row.get('rejected_count'))}",
-            f"Target-integrity blocked: {_display(manifest_row.get('alerts_blocked_by_target_integrity'))}",
-            f"Alerts created: {_display(manifest_row.get('alerts_created'))}",
-            f"Trade ideas created: {_display(manifest_row.get('trade_ideas_created'))}",
-            f"Journal entries created: {_display(manifest_row.get('journal_entries_created'))}",
-            f"Runtime seconds: {_display(manifest_row.get('runtime_seconds'))}",
-            f"Latest scan path: {_display(manifest_row.get('latest_scan_path'))}",
-            "Telegram mode: admin-only command scaffold. No public/VIP posting. No execution enabled.",
+        text = _screen(
+            "System Desk",
+            (
+                "Candle Craft engine status.",
+                "Manual execution only.",
+                "",
+                SCREEN_DIVIDER,
+                "Mode: Manual-only",
+                "Execution: Disabled",
+                "Quality gates: Protected",
+                "Duplicate protection: Active",
+                "Safety audit: Active",
+                "",
+                "Latest scan:",
+                f"Run: {_display(manifest_row.get('run_id'))}",
+                f"Symbol list: {_symbol_list_text(manifest_row)}",
+                f"Market regime: {_title_text(manifest_row.get('market_regime'))}",
+                f"Regime confidence: {_display(manifest_row.get('regime_confidence'))}",
+                f"Symbols scanned: {_display(manifest_row.get('symbols_scanned'))}",
+                f"Confirmed setups: {_display(manifest_row.get('valid_setup_count'))}",
+                f"Watch candidates: {_display(manifest_row.get('near_miss_count'))}",
+                f"Alerts created: {_display(manifest_row.get('alerts_created'))}",
+                SCREEN_DIVIDER,
+                "",
+                "The engine is filtering for quality.",
+                "Weak setups stay rejected.",
+            ),
+        )
+        return _admin_response("/status", "status", text, run_id=run_id)
+
+    def _alerts_response(self) -> AdminCommandResponse:
+        artifacts = self.latest_scan_artifacts()
+        if artifacts.manifest_row is None:
+            return _missing_scan_response(
+                "/alerts",
+                "alerts",
+                f"No scan manifest rows found at {self._manifest_path}.",
+                title="Alert Desk",
+            )
+        run_id = _display(artifacts.manifest_row.get("run_id"))
+        if artifacts.scan_payload is None:
+            return _missing_scan_response(
+                "/alerts",
+                "alerts",
+                f"Latest scan file unavailable: {_display(artifacts.scan_path)}.",
+                run_id=run_id,
+                title="Alert Desk",
+            )
+
+        rows = _result_rows(artifacts.scan_payload)
+        alert_rows = _alert_rows(rows)
+        text = _screen(
+            "Alert Desk",
+            (
+                "Latest lifecycle alerts from Candle Craft.",
+                "Manual execution only.",
+                "",
+                SCREEN_DIVIDER,
+                f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+                f"Alerts created: {_first_text(artifacts.manifest_row.get('alerts_created'), len(alert_rows))}",
+                f"Trade ideas detected: {_first_text(artifacts.manifest_row.get('trade_ideas_created'), _valid_count(rows))}",
+                "",
+                "Latest alert:",
+                *_alert_lines(alert_rows, max_rows=self._max_rows),
+                "",
+                "Risk note:",
+                "Manual review only. No execution controls.",
+                SCREEN_DIVIDER,
+            ),
+        )
+        return _admin_response(
+            "/alerts",
+            "alerts",
+            text,
+            run_id=_first_text(artifacts.manifest_row.get("run_id"), artifacts.scan_payload.get("run_id")),
+        )
+
+    def _watchlists_response(self) -> AdminCommandResponse:
+        artifacts = self.latest_scan_artifacts()
+        preset_lines = _watchlist_preset_lines()
+        if artifacts.manifest_row is None:
+            text = _screen(
+                "Watchlist Desk",
+                (
+                    "Setups currently monitored by the engine.",
+                    "Watchlist does not mean confirmed signal.",
+                    "",
+                    SCREEN_DIVIDER,
+                    "Run: N/A",
+                    f"Data status: {UNVERIFIED}",
+                    "The latest scan record is not available.",
+                    "",
+                    "Preset lists:",
+                    *preset_lines,
+                    SCREEN_DIVIDER,
+                    "",
+                    "The engine is filtering.",
+                    "No forced trades.",
+                ),
+            )
+            return _admin_response("/watchlists", "watchlists", text, run_id=NA)
+        run_id = _display(artifacts.manifest_row.get("run_id"))
+        if artifacts.scan_payload is None:
+            text = _screen(
+                "Watchlist Desk",
+                (
+                    "Setups currently monitored by the engine.",
+                    "Watchlist does not mean confirmed signal.",
+                    "",
+                    SCREEN_DIVIDER,
+                    f"Run: {run_id}",
+                    f"Data status: {UNVERIFIED}",
+                    "The latest scan record is not available.",
+                    "",
+                    "Preset lists:",
+                    *preset_lines,
+                    SCREEN_DIVIDER,
+                    "",
+                    "The engine is filtering.",
+                    "No forced trades.",
+                ),
+            )
+            return _admin_response("/watchlists", "watchlists", text, run_id=run_id)
+
+        rows = _result_rows(artifacts.scan_payload)
+        watch_rows = _watchlist_rows(rows)
+        text = _screen(
+            "Watchlist Desk",
+            (
+                "Setups currently monitored by the engine.",
+                "Watchlist does not mean confirmed signal.",
+                "",
+                SCREEN_DIVIDER,
+                f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+                f"Watch candidates: {len(watch_rows)}",
+                "",
+                *_watchlist_lines(watch_rows, max_rows=self._max_rows),
+                "",
+                "Preset lists:",
+                *preset_lines,
+                SCREEN_DIVIDER,
+                "",
+                "The engine is filtering.",
+                "No forced trades.",
+            ),
+        )
+        return _admin_response(
+            "/watchlists",
+            "watchlists",
+            text,
+            run_id=_first_text(artifacts.manifest_row.get("run_id"), artifacts.scan_payload.get("run_id")),
+        )
+
+    def _integrity_response(self, command: str) -> AdminCommandResponse:
+        artifacts = self.latest_scan_artifacts()
+        if artifacts.manifest_row is None:
+            return _missing_scan_response(
+                command,
+                "integrity",
+                f"No scan manifest rows found at {self._manifest_path}.",
+                title="Integrity Desk",
+            )
+        run_id = _display(artifacts.manifest_row.get("run_id"))
+        if artifacts.scan_payload is None:
+            return _missing_scan_response(
+                command,
+                "integrity",
+                f"Latest scan file unavailable: {_display(artifacts.scan_path)}.",
+                run_id=run_id,
+                title="Integrity Desk",
+            )
+        try:
+            audit = audit_alert_integrity_artifact(
+                artifacts.scan_payload,
+                source=_display(artifacts.scan_path),
+            )
+        except Exception as exc:
+            text = _screen(
+                "Integrity Desk",
+                (
+                    "Alert safety and duplicate-control overview.",
+                    "",
+                    SCREEN_DIVIDER,
+                    f"Run: {run_id}",
+                    f"Safety status: {UNVERIFIED}",
+                    "Safety review could not be completed.",
+                    f"Review note: {type(exc).__name__}",
+                    SCREEN_DIVIDER,
+                ),
+            )
+            return _admin_response(command, "integrity", text, run_id=run_id)
+
+        summary = audit.summary
+        integrity_status = "Clean" if summary.is_valid else "Review required"
+        text = _screen(
+            "Integrity Desk",
+            (
+                "Alert safety and duplicate-control overview.",
+                "",
+                SCREEN_DIVIDER,
+                f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+                f"Safety status: {integrity_status}",
+                f"Alerts reviewed: {summary.alert_count}",
+                f"Duplicates blocked: {_first_text(artifacts.manifest_row.get('duplicate_alerts_blocked'), 0)}",
+                f"Invalid alerts: {summary.invalid_alerts}",
+                f"Missing safety data: {summary.missing_manifest_count}",
+                "",
+                "Findings:",
+                *_integrity_issue_lines(audit.issues, max_rows=self._max_rows),
+                "",
+                "Rejected or incomplete setups are not alertable.",
+                SCREEN_DIVIDER,
+            ),
+        )
+        return _admin_response(
+            command,
+            "integrity",
+            text,
+            run_id=_first_text(artifacts.manifest_row.get("run_id"), artifacts.scan_payload.get("run_id")),
+        )
+
+    def _config_response(self, *, admin_config: Any | None) -> AdminCommandResponse:
+        text = _screen(
+            "Configuration Desk",
+            (
+                "Read-only system configuration.",
+                "No settings can be changed from Telegram.",
+                "",
+                SCREEN_DIVIDER,
+                "Manual mode: Active",
+                "Execution: Disabled",
+                f"Telegram alerts: {_enabled_disabled_na(admin_config, 'admin_enabled')}",
+                f"Test mode: {_active_inactive_na(admin_config, 'dry_run')}",
+                "Quality gates: Protected",
+                "Signal filters: Protected",
+                "",
+                "Sensitive data:",
+                f"Bot token: {_hidden_status(admin_config, 'bot_token')}",
+                f"Chat ID: {_hidden_status(admin_config, 'admin_chat_id')}",
+                SCREEN_DIVIDER,
+                "",
+                "This panel is informational only.",
+            ),
+        )
+        return _admin_response("/config", "config", text)
+
+    def _public_lastscan_response(self) -> AdminCommandResponse:
+        artifacts = self.latest_scan_artifacts()
+        if artifacts.manifest_row is None:
+            text = _screen(
+                "Last Scan",
+                (
+                    "Latest Candle Craft market scan.",
+                    "",
+                    SCREEN_DIVIDER,
+                    "Last run: N/A",
+                    "Symbols scanned: N/A",
+                    "Confirmed setups: N/A",
+                    "Watchlist setups: N/A",
+                    "Market regime: N/A",
+                    SCREEN_DIVIDER,
+                    "",
+                    "The engine only promotes setups that pass the filters.",
+                ),
+            )
+            return _public_response("/lastscan", "public_lastscan", text)
+
+        text = _screen(
+            "Last Scan",
+            (
+                "Latest Candle Craft market scan.",
+                "",
+                SCREEN_DIVIDER,
+                f"Last run: {_display(artifacts.manifest_row.get('run_id'))}",
+                f"Symbols scanned: {_display(artifacts.manifest_row.get('symbols_scanned'))}",
+                f"Confirmed setups: {_display(artifacts.manifest_row.get('valid_setup_count'))}",
+                f"Watchlist setups: {_display(artifacts.manifest_row.get('near_miss_count'))}",
+                f"Market regime: {_title_text(artifacts.manifest_row.get('market_regime'))}",
+                SCREEN_DIVIDER,
+                "",
+                "The engine only promotes setups that pass the filters.",
+            ),
+        )
+        return _public_response(
+            "/lastscan",
+            "public_lastscan",
+            text,
+            run_id=_display(artifacts.manifest_row.get("run_id")),
+        )
+
+    def _public_signals_response(self) -> AdminCommandResponse:
+        artifacts = self.latest_scan_artifacts()
+        rows = _public_artifact_rows(artifacts)
+        signal_rows = _public_active_signal_rows(rows)
+        lines: list[str] = [
+            "Confirmed Candle Craft setups.",
+            "Manual execution only.",
+            "",
+            SCREEN_DIVIDER,
         ]
-        return AdminCommandResponse("/status", "status", "\n".join(lines), run_id=run_id)
+        if signal_rows:
+            lines.extend(_public_signal_lines(signal_rows, max_rows=self._max_rows))
+        else:
+            lines.extend(
+                (
+                    "No active confirmed signals right now.",
+                    "",
+                    "The engine is waiting for clean structure.",
+                )
+            )
+        lines.append(SCREEN_DIVIDER)
+        return _public_response(
+            "/signals",
+            "public_signals",
+            _screen("Active Signals", lines),
+            run_id=_public_run_id(artifacts),
+        )
+
+    def _public_watchlist_response(self) -> AdminCommandResponse:
+        artifacts = self.latest_scan_artifacts()
+        rows = _public_artifact_rows(artifacts)
+        watch_rows = _public_watchlist_rows(rows)
+        lines: list[str] = [
+            "Conditional setups being monitored.",
+            "Watchlist does not mean confirmed signal.",
+            "",
+            SCREEN_DIVIDER,
+        ]
+        if watch_rows:
+            lines.extend(_public_watchlist_lines(watch_rows, max_rows=self._max_rows))
+        else:
+            lines.extend(
+                (
+                    "No watchlist signals right now.",
+                    "",
+                    "The engine is filtering.",
+                )
+            )
+        lines.append(SCREEN_DIVIDER)
+        return _public_response(
+            "/watchlist",
+            "public_watchlist",
+            _screen("Watchlist Signals", lines),
+            run_id=_public_run_id(artifacts),
+        )
 
     def _lastscan_response(self) -> AdminCommandResponse:
         artifacts = self.latest_scan_artifacts()
@@ -135,6 +584,7 @@ class TelegramAdminCommandService:
                 "/lastscan",
                 "lastscan",
                 f"No scan manifest rows found at {self._manifest_path}.",
+                title="Latest Scan",
             )
         if artifacts.scan_payload is None:
             return _missing_scan_response(
@@ -142,6 +592,7 @@ class TelegramAdminCommandService:
                 "lastscan",
                 f"Latest scan file unavailable: {_display(artifacts.scan_path)}.",
                 run_id=_display(artifacts.manifest_row.get("run_id")),
+                title="Latest Scan",
             )
 
         payload = artifacts.scan_payload
@@ -150,52 +601,69 @@ class TelegramAdminCommandService:
         valid_rows = _valid_rows(rows)
         near_rows = _near_rows(rows)
         summary_rows = valid_rows if valid_rows else near_rows
-        section_title = "Top Valid Setups" if valid_rows else "Top Near Misses"
-        lines = [
-            "Candle Craft Latest Scan",
-            "Admin-only.",
+        section_title = "Top Confirmed Setups" if valid_rows else "Top Watch Candidates"
+        lines = (
+            "Latest scan summary.",
+            "Manual execution only.",
+            "",
+            SCREEN_DIVIDER,
             f"Run: {_first_text(manifest_row.get('run_id'), payload.get('run_id'))}",
             f"Timestamp: {_display(manifest_row.get('timestamp'))}",
-            f"Universe: {_universe_text(manifest_row, payload)}",
-            f"Regime: {_first_text(manifest_row.get('market_regime'), _nested_value(payload, 'market_regime', 'state'))}",
+            f"Symbol list: {_symbol_list_text(manifest_row, payload)}",
+            f"Market regime: {_title_text(_first_text(manifest_row.get('market_regime'), _nested_value(payload, 'market_regime', 'state')))}",
             f"Symbols scanned: {_first_text(manifest_row.get('symbols_scanned'), payload.get('scanned_symbols'), len(rows))}",
-            f"Valid setups: {_first_text(manifest_row.get('valid_setup_count'), len(valid_rows))}",
-            f"Near misses: {_first_text(manifest_row.get('near_miss_count'), len(near_rows))}",
+            f"Confirmed setups: {_first_text(manifest_row.get('valid_setup_count'), len(valid_rows))}",
+            f"Watch candidates: {_first_text(manifest_row.get('near_miss_count'), len(near_rows))}",
             f"Rejected: {_first_text(manifest_row.get('rejected_count'), _rejected_count(rows))}",
+            "",
             section_title,
             *_setup_lines(summary_rows, max_rows=self._max_rows),
-            "No execution enabled.",
-        ]
-        return AdminCommandResponse(
+            SCREEN_DIVIDER,
+            "",
+            "No setup is promoted without confirmation.",
+        )
+        return _admin_response(
             "/lastscan",
             "lastscan",
-            "\n".join(lines),
+            _screen("Latest Scan", lines),
             run_id=_first_text(manifest_row.get("run_id"), payload.get("run_id")),
         )
 
     def _near_response(self) -> AdminCommandResponse:
         artifacts = self.latest_scan_artifacts()
         if artifacts.manifest_row is None:
-            return _missing_scan_response("/near", "near", f"No scan manifest rows found at {self._manifest_path}.")
+            return _missing_scan_response(
+                "/near",
+                "near",
+                f"No scan manifest rows found at {self._manifest_path}.",
+                title="Watch Candidates",
+            )
         if artifacts.scan_payload is None:
             return _missing_scan_response(
                 "/near",
                 "near",
                 f"Latest scan file unavailable: {_display(artifacts.scan_path)}.",
                 run_id=_display(artifacts.manifest_row.get("run_id")),
+                title="Watch Candidates",
             )
         rows = _near_rows(_result_rows(artifacts.scan_payload))
-        lines = [
-            "Candle Craft Near Misses",
-            "Admin-only.",
+        lines = (
+            "Watch candidates are monitored, not promoted.",
+            "Manual execution only.",
+            "",
+            SCREEN_DIVIDER,
             f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+            "",
             *_near_lines(rows, max_rows=self._max_rows),
-            "No execution enabled.",
-        ]
-        return AdminCommandResponse(
+            SCREEN_DIVIDER,
+            "",
+            "The engine is filtering.",
+            "No forced trades.",
+        )
+        return _admin_response(
             "/near",
             "near",
-            "\n".join(lines),
+            _screen("Watch Candidates", lines),
             run_id=_first_text(artifacts.manifest_row.get("run_id"), artifacts.scan_payload.get("run_id")),
         )
 
@@ -206,6 +674,7 @@ class TelegramAdminCommandService:
                 "/blocked",
                 "blocked",
                 f"No scan manifest rows found at {self._manifest_path}.",
+                title="Integrity Desk",
             )
         if artifacts.scan_payload is None:
             return _missing_scan_response(
@@ -213,29 +682,35 @@ class TelegramAdminCommandService:
                 "blocked",
                 f"Latest scan file unavailable: {_display(artifacts.scan_path)}.",
                 run_id=_display(artifacts.manifest_row.get("run_id")),
+                title="Integrity Desk",
             )
         rows = _blocked_rows(_result_rows(artifacts.scan_payload))
         if not rows:
-            text = "\n".join(
+            text = _screen(
+                "Integrity Desk",
                 (
-                    "Candle Craft Target-Integrity Blocks",
-                    "Admin-only.",
+                    "Safety checks for skipped alerts.",
+                    "",
+                    SCREEN_DIVIDER,
                     f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
-                    "No target-integrity blocks in latest scan.",
-                    "No execution enabled.",
-                )
+                    "No safety blocks in the latest scan.",
+                    SCREEN_DIVIDER,
+                ),
             )
         else:
-            text = "\n".join(
+            text = _screen(
+                "Integrity Desk",
                 (
-                    "Candle Craft Target-Integrity Blocks",
-                    "Admin-only.",
+                    "Safety checks for skipped alerts.",
+                    "",
+                    SCREEN_DIVIDER,
                     f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+                    "",
                     *_blocked_lines(rows, max_rows=self._max_rows),
-                    "No execution enabled.",
-                )
+                    SCREEN_DIVIDER,
+                ),
             )
-        return AdminCommandResponse(
+        return _admin_response(
             "/blocked",
             "blocked",
             text,
@@ -250,29 +725,197 @@ class TelegramAdminCommandService:
 
 
 def format_start_response() -> str:
-    return "\n".join(
+    return _screen(
+        "Candle Craft Intelligence",
         (
-            "Welcome to the Candle Craft Intelligence admin desk.",
-            "Admin-only private bot chat.",
-            _command_list_text(),
-            "No public/VIP posting. No execution enabled.",
-        )
+            "Your market-structure command center.",
+            "Manual execution. Quality gates protected.",
+            "",
+            SCREEN_DIVIDER,
+            "📊 System Desk",
+            "Engine health, scan status, and safety mode.",
+            "",
+            "🚨 Alert Desk",
+            "Latest lifecycle alerts from the intelligence engine.",
+            "",
+            "👁 Watchlist Desk",
+            "Setups being monitored or waiting for confirmation.",
+            "",
+            "🧾 Integrity Desk",
+            "Duplicate control, skipped alerts, and safety checks.",
+            "",
+            "⚙️ Configuration",
+            "Read-only bot and alert settings.",
+            "",
+            "❓ Command Guide",
+            "Available commands and safety rules.",
+            SCREEN_DIVIDER,
+            "",
+            "No execution buttons.",
+            "No forced trades.",
+            "Quality over quantity.",
+        ),
+    )
+
+
+def format_menu_response() -> str:
+    return format_start_response()
+
+
+def format_public_menu_response() -> str:
+    return _screen(
+        "Candle Craft Intelligence",
+        (
+            "Welcome to the Candle Craft signal desk.",
+            "",
+            "We track market structure, liquidity sweeps,",
+            "confirmations, and watchlist setups.",
+            "Manual execution only.",
+            "",
+            SCREEN_DIVIDER,
+            "📡 Last Scan",
+            "Latest market scan summary.",
+            "",
+            "🔥 Active Signals",
+            "Confirmed setups currently active.",
+            "",
+            "👁 Watchlist Signals",
+            "Conditional setups waiting for confirmation.",
+            "",
+            "🌐 Social",
+            "Official Candle Craft links.",
+            "",
+            "❓ Help",
+            "How to read the bot.",
+            "",
+            "🧡 Donate",
+            "Support Candle Craft development.",
+            SCREEN_DIVIDER,
+            "",
+            "No execution buttons.",
+            "No forced trades.",
+            "Quality over quantity.",
+        ),
+    )
+
+
+def format_public_admin_reserved_response() -> str:
+    return _screen(
+        "Candle Craft Intelligence",
+        (
+            "This command is reserved for the admin desk.",
+            "",
+            "Use /menu to open the public signal menu.",
+        ),
+    )
+
+
+def format_public_social_response(config: Any | None) -> str:
+    return _screen(
+        "Social",
+        (
+            "Official Candle Craft links.",
+            "",
+            SCREEN_DIVIDER,
+            "X / Twitter:",
+            _public_url(config, "x_url", fallback=NA),
+            "",
+            "Telegram:",
+            _public_url(config, "telegram_url", fallback=NA),
+            SCREEN_DIVIDER,
+            "",
+            "Only trust official Candle Craft links.",
+        ),
+    )
+
+
+def format_public_donate_response(config: Any | None) -> str:
+    return _screen(
+        "Donate",
+        (
+            "Support Candle Craft development.",
+            "",
+            SCREEN_DIVIDER,
+            "Donation link:",
+            _public_url(config, "donate_url", fallback="Not configured yet"),
+            SCREEN_DIVIDER,
+            "",
+            "Support is optional.",
+            "Signals remain manual review only.",
+        ),
+    )
+
+
+def format_public_help_response() -> str:
+    return _screen(
+        "Help",
+        (
+            "How to use the Candle Craft signal bot.",
+            "",
+            SCREEN_DIVIDER,
+            "/menu",
+            "Open the public signal menu.",
+            "",
+            "/lastscan",
+            "View latest scan summary.",
+            "",
+            "/signals",
+            "View active confirmed signals.",
+            "",
+            "/watchlist",
+            "View conditional watchlist setups.",
+            "",
+            "/social",
+            "View official Candle Craft links.",
+            "",
+            "/donate",
+            "Support Candle Craft development.",
+            SCREEN_DIVIDER,
+            "",
+            "Important:",
+            "No financial advice.",
+            "No execution buttons.",
+            "No guaranteed outcomes.",
+            "Manual risk management only.",
+        ),
     )
 
 
 def format_help_response() -> str:
-    return "\n".join(
+    return _screen(
+        "Command Guide",
         (
-            "Candle Craft Admin Help",
-            "Commands:",
-            "/start - welcome and command list",
-            "/help - command list and safety notes",
-            "/status - latest scan metadata",
-            "/lastscan - compact latest scan summary",
-            "/near - top near misses",
-            "/blocked - target-integrity blocked rows",
-            "Admin-only. No public/VIP posting, subscriptions, payments, or Mini App. No execution enabled.",
-        )
+            "Available Candle Craft commands.",
+            "",
+            SCREEN_DIVIDER,
+            "/menu",
+            "Open the main command center.",
+            "",
+            "/status",
+            "View system health and scan state.",
+            "",
+            "/alerts",
+            "View latest lifecycle alerts.",
+            "",
+            "/watchlists",
+            "View active monitored setups.",
+            "",
+            "/audit",
+            "View safety and duplicate checks.",
+            "",
+            "/config",
+            "View read-only configuration.",
+            "",
+            "/help",
+            "Show this guide.",
+            SCREEN_DIVIDER,
+            "",
+            "Safety rules:",
+            "No execution.",
+            "No forced trades.",
+            "No weak setup promotion.",
+            "Manual review only.",
+        ),
     )
 
 
@@ -280,6 +923,12 @@ def normalize_admin_command(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    mapped = ADMIN_MENU_BUTTON_COMMANDS.get(text.lower())
+    if mapped is not None:
+        return mapped
+    mapped = PUBLIC_MENU_BUTTON_COMMANDS.get(text.lower())
+    if mapped is not None:
+        return mapped
     token = text.split()[0].split("@", 1)[0].lower()
     return token
 
@@ -301,19 +950,89 @@ def load_latest_manifest_row(path: Path) -> Mapping[str, Any] | None:
     return latest
 
 
-def _missing_scan_response(command: str, response_type: str, reason: str, *, run_id: str = NA) -> AdminCommandResponse:
+def admin_menu_reply_markup() -> Mapping[str, Any]:
+    return {
+        "keyboard": [[{"text": label} for label in row] for row in ADMIN_MENU_BUTTON_ROWS],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "is_persistent": True,
+        "input_field_placeholder": "Candle Craft command",
+    }
+
+
+def public_menu_reply_markup() -> Mapping[str, Any]:
+    return {
+        "keyboard": [[{"text": label} for label in row] for row in PUBLIC_MENU_BUTTON_ROWS],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "is_persistent": True,
+        "input_field_placeholder": "Candle Craft public command",
+    }
+
+
+def _admin_response(
+    command: str,
+    response_type: str,
+    text: str,
+    *,
+    run_id: str = NA,
+) -> AdminCommandResponse:
     return AdminCommandResponse(
+        command=command,
+        response_type=response_type,
+        text=text,
+        run_id=run_id,
+        reply_markup=admin_menu_reply_markup(),
+    )
+
+
+def _public_response(
+    command: str,
+    response_type: str,
+    text: str,
+    *,
+    run_id: str = NA,
+    photo_url: str | None = None,
+) -> AdminCommandResponse:
+    return AdminCommandResponse(
+        command=command,
+        response_type=response_type,
+        text=text,
+        run_id=run_id,
+        reply_markup=public_menu_reply_markup(),
+        photo_url=photo_url,
+    )
+
+
+def _screen(title: str, lines: Sequence[str]) -> str:
+    body = [f"{SCREEN_HEADER} {title}", ""]
+    body.extend(lines)
+    body.extend(("", SCREEN_FOOTER))
+    return "\n".join(body)
+
+
+def _missing_scan_response(
+    command: str,
+    response_type: str,
+    reason: str,
+    *,
+    run_id: str = NA,
+    title: str = "Latest Scan",
+) -> AdminCommandResponse:
+    return _admin_response(
         command,
         response_type,
-        "\n".join(
+        _screen(
+            title,
             (
-                "Candle Craft Latest Scan",
-                "Admin-only.",
+                "Manual execution only.",
+                "",
+                SCREEN_DIVIDER,
                 f"Run: {run_id}",
-                reason,
-                "No scan data returned.",
-                "No execution enabled.",
-            )
+                f"Data status: {UNVERIFIED}",
+                "The latest scan record is not available.",
+                SCREEN_DIVIDER,
+            ),
         ),
         run_id=run_id,
     )
@@ -364,49 +1083,218 @@ def _rank_value(row: Mapping[str, Any]) -> int:
 def _setup_lines(rows: Sequence[Mapping[str, Any]], *, max_rows: int) -> list[str]:
     if not rows:
         return ["- None"]
-    lines = [
-        (
-            f"- {_display(row.get('symbol'))} | side {_row_side(row)} | grade {_row_grade(row)} | "
-            f"score {_row_score(row)} | {_row_short_reason(row)} | next {_row_next_trigger(row)}"
+    lines: list[str] = []
+    for row in rows[:max_rows]:
+        if lines:
+            lines.append("")
+        lines.extend(
+            (
+                _display(row.get("symbol")),
+                f"Direction: {_title_text(_row_side(row))}",
+                f"Grade: {_row_grade(row)}",
+                f"Score: {_row_score(row)}",
+                f"Status: {_setup_status_text(row)}",
+                f"Reason: {_row_short_reason(row)}",
+                f"Next step: {_next_step_text(_row_next_trigger(row))}",
+            )
         )
-        for row in rows[:max_rows]
-    ]
     return _with_omitted(lines, total=len(rows), max_rows=max_rows)
 
 
 def _near_lines(rows: Sequence[Mapping[str, Any]], *, max_rows: int) -> list[str]:
     if not rows:
-        return ["- No near misses in latest scan."]
-    lines = [
-        (
-            f"- {_display(row.get('symbol'))} | side {_row_side(row)} | grade {_row_grade(row)} | "
-            f"score {_row_score(row)} | failed_stage {_row_failed_stage(row)} | "
-            f"{_row_short_reason(row)} | next {_row_next_trigger(row)} | "
-            f"lifecycle {_display(row.get('lifecycle_integrity_status'))}"
+        return ["No watch candidates in the latest scan."]
+    lines: list[str] = []
+    for row in rows[:max_rows]:
+        if lines:
+            lines.append("")
+        lines.extend(
+            (
+                _display(row.get("symbol")),
+                f"Direction: {_title_text(_row_side(row))}",
+                f"Grade: {_row_grade(row)}",
+                f"Score: {_row_score(row)}",
+                "Status: Monitoring",
+                f"Next step: {_next_step_text(_row_next_trigger(row))}",
+            )
         )
-        for row in rows[:max_rows]
-    ]
     return _with_omitted(lines, total=len(rows), max_rows=max_rows)
 
 
 def _blocked_lines(rows: Sequence[Mapping[str, Any]], *, max_rows: int) -> list[str]:
-    lines = [
-        (
-            f"- {_display(row.get('symbol'))} | side {_row_side(row)} | "
-            f"failure {_target_failure_type(row)} | reason {_target_reason(row)} | "
-            f"short {_row_short_reason(row)} | next {_row_next_trigger(row)} | "
-            f"state {_display(row.get('lifecycle_current_state'))} | "
-            f"lifecycle {_display(row.get('lifecycle_integrity_status'))}"
+    lines: list[str] = []
+    for row in rows[:max_rows]:
+        if lines:
+            lines.append("")
+        lines.extend(
+            (
+                _display(row.get("symbol")),
+                f"Direction: {_title_text(_row_side(row))}",
+                f"Safety check: {_safety_reason_text(row)}",
+                f"Next step: {_next_step_text(_row_next_trigger(row))}",
+                f"Status: {_lifecycle_text(row)}",
+            )
         )
-        for row in rows[:max_rows]
-    ]
     return _with_omitted(lines, total=len(rows), max_rows=max_rows)
+
+
+def _alert_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    return _ranked_rows(row for row in rows if _has_alert_record(row))
+
+
+def _has_alert_record(row: Mapping[str, Any]) -> bool:
+    alert_result = row.get("alert_result")
+    if isinstance(alert_result, Mapping):
+        return True
+    history = _status_history(row.get("status_history"))
+    return "alert_dry_run_created" in history or _display(row.get("status")) == "alert_dry_run_created"
+
+
+def _alert_lines(rows: Sequence[Mapping[str, Any]], *, max_rows: int) -> list[str]:
+    if not rows:
+        return ["None"]
+    lines: list[str] = []
+    for row in rows[:max_rows]:
+        if lines:
+            lines.append("")
+        lines.extend(
+            (
+                f"Symbol: {_display(row.get('symbol'))}",
+                f"Direction: {_title_text(_row_side(row))}",
+                f"Grade: {_row_grade(row)}",
+                f"Score: {_row_score(row)}",
+                f"Delivery: {_delivery_text(_alert_delivery_status(row))}",
+                f"Safety check: {_integrity_text(_alert_integrity_status(row))}",
+            )
+        )
+    return _with_omitted(lines, total=len(rows), max_rows=max_rows)
+
+
+def _public_artifact_rows(artifacts: LatestScanArtifacts) -> tuple[Mapping[str, Any], ...]:
+    if artifacts.scan_payload is None:
+        return ()
+    return _result_rows(artifacts.scan_payload)
+
+
+def _public_run_id(artifacts: LatestScanArtifacts) -> str:
+    if artifacts.manifest_row is None:
+        return NA
+    if artifacts.scan_payload is None:
+        return _display(artifacts.manifest_row.get("run_id"))
+    return _first_text(artifacts.manifest_row.get("run_id"), artifacts.scan_payload.get("run_id"))
+
+
+def _public_active_signal_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    return _ranked_rows(
+        row
+        for row in rows
+        if not _is_target_integrity_blocked(row)
+        and (_display_status(row) == "valid_setup" or _display(row.get("display_bucket")) == "valid")
+    )
+
+
+def _public_watchlist_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    return _near_rows(rows)
+
+
+def _public_signal_lines(rows: Sequence[Mapping[str, Any]], *, max_rows: int) -> list[str]:
+    lines: list[str] = []
+    for row in rows[:max_rows]:
+        if lines:
+            lines.append("")
+        lines.extend(
+            (
+                f"Symbol: {_display(row.get('symbol'))}",
+                f"Direction: {_title_text(_row_side(row))}",
+                f"Grade: {_row_grade(row)}",
+                f"Entry: {_entry_text(row)}",
+                f"Stop: {_stop_text(row)}",
+                f"Targets: {_targets_text(row)}",
+                f"Status: {_setup_status_text(row)}",
+                f"Updated: {_updated_text(row)}",
+            )
+        )
+    return _with_omitted(lines, total=len(rows), max_rows=max_rows)
+
+
+def _public_watchlist_lines(rows: Sequence[Mapping[str, Any]], *, max_rows: int) -> list[str]:
+    lines: list[str] = []
+    for row in rows[:max_rows]:
+        if lines:
+            lines.append("")
+        lines.extend(
+            (
+                f"Symbol: {_display(row.get('symbol'))}",
+                f"Direction: {_title_text(_row_side(row))}",
+                f"Grade: {_row_grade(row)}",
+                "Status: Monitoring",
+                f"Waiting for: {_watch_waiting_for_text(row)}",
+                f"Invalidation: {_invalidation_text(row)}",
+            )
+        )
+    return _with_omitted(lines, total=len(rows), max_rows=max_rows)
+
+
+def _watchlist_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    return _ranked_rows(
+        row
+        for row in rows
+        if not _is_target_integrity_blocked(row)
+        and (
+            _display_status(row) == "near_miss"
+            or _display(row.get("display_bucket")) == "near_miss"
+            or _display(row.get("lifecycle_current_state")).upper() in {"WATCHLISTED", "STALKING", "TRIGGERED"}
+        )
+    )
+
+
+def _watchlist_lines(rows: Sequence[Mapping[str, Any]], *, max_rows: int) -> list[str]:
+    if not rows:
+        return ["None"]
+    lines: list[str] = []
+    for row in rows[:max_rows]:
+        if lines:
+            lines.append("")
+        lines.extend(
+            (
+                f"Symbol: {_display(row.get('symbol'))}",
+                f"Direction: {_title_text(_row_side(row))}",
+                f"Grade: {_row_grade(row)}",
+                f"Score: {_row_score(row)}",
+                "Status: Monitoring",
+                f"Next step: {_next_step_text(_row_next_trigger(row))}",
+            )
+        )
+    return _with_omitted(lines, total=len(rows), max_rows=max_rows)
+
+
+def _watchlist_preset_lines() -> list[str]:
+    return [f"{_preset_name_text(name)}: {count} symbols" for name, count in presets_with_counts()]
+
+
+def _integrity_issue_lines(issues: Sequence[Any], *, max_rows: int) -> list[str]:
+    visible = [
+        issue
+        for issue in issues
+        if _display(getattr(issue, "severity", NA)) in {"warning", "blocker", "error"}
+    ]
+    if not visible:
+        return ["None"]
+    lines = [
+        f"{_title_text(getattr(issue, 'severity', NA))}: {_finding_text(getattr(issue, 'code', NA))}"
+        for issue in visible[:max_rows]
+    ]
+    return _with_omitted(lines, total=len(visible), max_rows=max_rows)
 
 
 def _with_omitted(lines: list[str], *, total: int, max_rows: int) -> list[str]:
     if total > max_rows:
-        lines.append(f"- {total - max_rows} more omitted")
+        lines.append(f"{total - max_rows} more not shown.")
     return lines
+
+
+def _valid_count(rows: Sequence[Mapping[str, Any]]) -> int:
+    return len(_valid_rows(rows))
 
 
 def _rejected_count(rows: Sequence[Mapping[str, Any]]) -> int:
@@ -480,6 +1368,160 @@ def _row_next_trigger(row: Mapping[str, Any]) -> str:
     )
 
 
+def _alert_delivery_status(row: Mapping[str, Any]) -> str:
+    alert = row.get("alert_result")
+    if isinstance(alert, Mapping):
+        return _first_text(alert.get("status"), alert.get("delivery_status"))
+    return _first_text(row.get("alert_status"), row.get("status"))
+
+
+def _alert_integrity_status(row: Mapping[str, Any]) -> str:
+    alert = row.get("alert_result")
+    if not isinstance(alert, Mapping):
+        return UNVERIFIED
+    manifest = alert.get("integrity_manifest")
+    if not isinstance(manifest, Mapping):
+        return UNVERIFIED
+    is_valid = manifest.get("is_valid")
+    if is_valid is True:
+        return "valid"
+    if is_valid is False:
+        return "review"
+    return UNVERIFIED
+
+
+def _alert_invalidation(row: Mapping[str, Any]) -> str:
+    return _short_text(
+        _first_text(
+            _nested_value(row, "trade_idea", "invalidation"),
+            _nested_value(row, "alert_result", "invalidation"),
+            row.get("invalidation"),
+        )
+    )
+
+
+def _alert_risk_warning(row: Mapping[str, Any]) -> str:
+    return _short_text(
+        _first_text(
+            _nested_value(row, "trade_idea", "risk_warning"),
+            _nested_value(row, "alert_result", "risk_warning"),
+            row.get("risk_warning"),
+        )
+    )
+
+
+def _entry_text(row: Mapping[str, Any]) -> str:
+    trade_idea = row.get("trade_idea")
+    if isinstance(trade_idea, Mapping):
+        zone = _level_text(trade_idea.get("entry_zone"))
+        if zone != NA:
+            return zone
+        low = _display(trade_idea.get("entry_low"))
+        high = _display(trade_idea.get("entry_high"))
+        if low != NA and high != NA:
+            return low if low == high else f"{low} - {high}"
+        if low != NA:
+            return low
+        if high != NA:
+            return high
+    return _first_text(_level_text(row.get("entry_zone")), row.get("entry"), row.get("entry_price"))
+
+
+def _stop_text(row: Mapping[str, Any]) -> str:
+    return _first_text(
+        _level_text(_nested_value(row, "trade_idea", "stop_loss")),
+        _level_text(row.get("stop_loss")),
+        row.get("stop"),
+    )
+
+
+def _targets_text(row: Mapping[str, Any]) -> str:
+    trade_idea = row.get("trade_idea")
+    if isinstance(trade_idea, Mapping):
+        text = _target_sequence_text(trade_idea.get("take_profits"))
+        if text != NA:
+            return text
+        text = _target_sequence_text(trade_idea.get("take_profit_targets"))
+        if text != NA:
+            return text
+    for key in ("take_profits", "take_profit_targets", "targets"):
+        text = _target_sequence_text(row.get(key))
+        if text != NA:
+            return text
+    return _first_text(row.get("tp1"), row.get("target"))
+
+
+def _updated_text(row: Mapping[str, Any]) -> str:
+    return _first_text(row.get("updated_at"), row.get("timestamp"), row.get("last_seen_at"))
+
+
+def _watch_waiting_for_text(row: Mapping[str, Any]) -> str:
+    text = _next_step_text(_row_next_trigger(row))
+    if text != NA:
+        lowered = text.lower()
+        if lowered.startswith("waiting for "):
+            value = text[12:].strip().rstrip(".")
+            return value[:1].upper() + value[1:] if value else NA
+        return text
+    return _row_short_reason(row)
+
+
+def _invalidation_text(row: Mapping[str, Any]) -> str:
+    return _first_text(
+        _nested_value(row, "trade_idea", "invalidation"),
+        row.get("invalidation"),
+        row.get("cancel_condition"),
+        _diagnostic_value(row, "watchlist_invalidation"),
+    )
+
+
+def _level_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        price = _display(value.get("price"))
+        low = _display(value.get("low"))
+        high = _display(value.get("high"))
+        if price != NA:
+            return price
+        if low != NA and high != NA:
+            return low if low == high else f"{low} - {high}"
+        if low != NA:
+            return low
+        if high != NA:
+            return high
+    return _display(value)
+
+
+def _target_sequence_text(value: Any) -> str:
+    if isinstance(value, str):
+        return _display(value)
+    if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray, Mapping)):
+        return NA
+    targets: list[str] = []
+    for item in value:
+        text = _level_text(item)
+        if text != NA:
+            targets.append(text)
+    return ", ".join(targets) if targets else NA
+
+
+def _status_history(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (_status_key(value),)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, Mapping)):
+        return tuple(_status_key(item) for item in value if _status_key(item))
+    return ()
+
+
+def _status_key(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return ""
+    key = text.strip().replace("-", "_").replace(" ", "_").lower()
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key.strip("_")
+
+
 def _target_failure_type(row: Mapping[str, Any]) -> str:
     return _first_text(
         row.get("target_integrity_failure_type"),
@@ -498,6 +1540,37 @@ def _target_reason(row: Mapping[str, Any]) -> str:
         _nested_value(row, "target_intelligence", "next_target_condition"),
         _diagnostic_value(row, "target_integrity_reason"),
     )
+
+
+def _safety_reason_text(row: Mapping[str, Any]) -> str:
+    reason = _target_reason(row)
+    if reason != NA:
+        return reason
+    failure = _target_failure_type(row)
+    if failure != NA:
+        return _finding_text(failure)
+    return "Safety check did not pass."
+
+
+def _setup_status_text(row: Mapping[str, Any]) -> str:
+    status = _display_status(row)
+    if status == "valid_setup" or _display(row.get("display_bucket")) == "valid":
+        return "Confirmed setup"
+    if status == "near_miss" or _display(row.get("display_bucket")) == "near_miss":
+        return "Monitoring"
+    return _title_text(status)
+
+
+def _lifecycle_text(row: Mapping[str, Any]) -> str:
+    state = _title_text(row.get("lifecycle_current_state"))
+    if state != NA:
+        return state
+    integrity = _display(row.get("lifecycle_integrity_status"))
+    if integrity == "STALE_OR_DEGRADED":
+        return "Review needed"
+    if integrity != NA:
+        return _title_text(integrity)
+    return NA
 
 
 def _diagnostic_value(row: Mapping[str, Any], key: str) -> Any:
@@ -541,6 +1614,27 @@ def _universe_text(*sources: Mapping[str, Any]) -> str:
     return NA
 
 
+def _market_universe_text(*sources: Mapping[str, Any]) -> str:
+    text = _universe_text(*sources)
+    if text == NA:
+        return NA
+    cleaned = text.replace("_", " ").replace("-", " ")
+    cleaned = cleaned.replace(" (manual)", "").replace("(manual)", "")
+    cleaned = cleaned.replace("universe", "list").replace("Universe", "List")
+    return _title_text(cleaned)
+
+
+def _symbol_list_text(*sources: Mapping[str, Any]) -> str:
+    for source in sources:
+        mode = _first_text(source.get("universe_mode"), _nested_value(source, "universe", "mode"))
+        if _status_key(mode) == "manual":
+            return "Manual"
+    text = _market_universe_text(*sources)
+    if _status_key(text) == "manual_test_list":
+        return "Manual symbol list"
+    return text
+
+
 def _nested_value(source: Mapping[str, Any], key: str, nested_key: str) -> Any:
     value = source.get(key)
     if isinstance(value, Mapping):
@@ -556,6 +1650,156 @@ def _first_text(*values: Any) -> str:
     return NA
 
 
+def _title_text(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    normalized = text.replace("_", " ").replace("-", " ").strip()
+    if not normalized:
+        return NA
+    words = []
+    for word in normalized.split():
+        if word.upper() in {"N/A", "NA"}:
+            words.append("N/A")
+        elif word.isupper() and len(word) <= 5:
+            words.append(word[:1] + word[1:].lower())
+        else:
+            words.append(word[:1].upper() + word[1:].lower())
+    return " ".join(words)
+
+
+def _delivery_text(value: Any) -> str:
+    key = _status_key(value)
+    if key == "dry_run":
+        return "Test mode"
+    if key in {"sent", "sent_admin"}:
+        return "Sent"
+    if key.startswith("skipped"):
+        return "Skipped"
+    if key == "failed":
+        return "Failed"
+    return _title_text(value)
+
+
+def _integrity_text(value: Any) -> str:
+    key = _status_key(value)
+    if key == "valid":
+        return "Passed"
+    if key == "review":
+        return "Review needed"
+    if key == _status_key(UNVERIFIED):
+        return UNVERIFIED
+    return _title_text(value)
+
+
+def _next_step_text(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    lowered = text.lower()
+    if "trust" in lowered:
+        return "Waiting for stronger confirmation"
+    if lowered.startswith("wait for "):
+        return "Waiting for " + text[9:].strip().rstrip(".")
+    if lowered.startswith("wait "):
+        return "Waiting " + text[5:].strip().rstrip(".")
+    return text
+
+
+def _preset_name_text(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    custom = {
+        "l1_l2": "L1 / L2",
+        "sol_ecosystem": "Sol ecosystem",
+        "meme_high_liquidity": "High-liquidity meme",
+        "large_caps": "Large caps",
+    }
+    return custom.get(text, _title_text(text))
+
+
+def _finding_text(value: Any) -> str:
+    key = _status_key(value)
+    if key == "missing_integrity_manifest":
+        return "Missing safety data"
+    if key == "manifest_message_sha256_mismatch":
+        return "Message safety check mismatch"
+    if key == "manifest_payload_sha256_mismatch":
+        return "Alert safety check mismatch"
+    if key == "rr_below_minimum":
+        return "Reward/risk below minimum"
+    if key == "target_integrity":
+        return "Target safety check"
+    return _title_text(value)
+
+
+def _enabled_disabled_na(config: Any | None, name: str) -> str:
+    if config is None:
+        return NA
+    value = getattr(config, name, None)
+    if isinstance(value, bool):
+        return "Enabled" if value else "Disabled"
+    return NA
+
+
+def _active_inactive_na(config: Any | None, name: str) -> str:
+    if config is None:
+        return NA
+    value = getattr(config, name, None)
+    if isinstance(value, bool):
+        return "Active" if value else "Inactive"
+    return NA
+
+
+def _hidden_status(config: Any | None, name: str) -> str:
+    if config is None:
+        return NA
+    return "Hidden" if _display(getattr(config, name, None)) != NA else "N/A"
+
+
+def _public_url(config: Any | None, name: str, *, fallback: str) -> str:
+    if config is None:
+        return fallback
+    return _first_text(getattr(config, name, NA), fallback)
+
+
+def _public_logo_url(config: Any | None) -> str | None:
+    if config is None:
+        return None
+    text = _display(getattr(config, "public_logo_url", NA))
+    return None if text == NA else text
+
+
+def _config_bool(config: Any | None, name: str) -> str:
+    if config is None:
+        return UNVERIFIED
+    value = getattr(config, name, None)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return UNVERIFIED
+
+
+def _config_presence(config: Any | None, name: str) -> str:
+    if config is None:
+        return UNVERIFIED
+    value = getattr(config, name, None)
+    return "configured" if _display(value) != NA else "not configured"
+
+
+def _config_value(config: Any | None, name: str) -> str:
+    if config is None:
+        return UNVERIFIED
+    return _display(getattr(config, name, NA))
+
+
+def _short_text(value: Any, max_length: int = 120) -> str:
+    text = " ".join(_display(value).split())
+    if len(text) <= max_length:
+        return text
+    return f"{text[: max_length - 3].rstrip()}..."
+
+
 def _display(value: Any) -> str:
     if value is None or value == "":
         return NA
@@ -569,13 +1813,28 @@ def _display(value: Any) -> str:
 
 __all__ = [
     "ADMIN_COMMANDS",
+    "ADMIN_MENU_BUTTON_ROWS",
+    "PUBLIC_ADMIN_RESERVED_COMMANDS",
+    "PUBLIC_COMMANDS",
+    "PUBLIC_MENU_BUTTON_ROWS",
     "DEFAULT_ADMIN_COMMAND_ROW_LIMIT",
     "DEFAULT_SCAN_RUN_MANIFEST_PATH",
+    "SCREEN_DIVIDER",
+    "SCREEN_FOOTER",
+    "SCREEN_HEADER",
     "AdminCommandResponse",
     "LatestScanArtifacts",
     "TelegramAdminCommandService",
+    "admin_menu_reply_markup",
     "format_help_response",
+    "format_menu_response",
+    "format_public_admin_reserved_response",
+    "format_public_donate_response",
+    "format_public_help_response",
+    "format_public_menu_response",
+    "format_public_social_response",
     "format_start_response",
     "load_latest_manifest_row",
     "normalize_admin_command",
+    "public_menu_reply_markup",
 ]

@@ -38,6 +38,10 @@ class TelegramAdminConfig:
     admin_chat_id: str | None = None
     public_channel_id: str | None = None
     vip_channel_id: str | None = None
+    public_logo_url: str | None = None
+    x_url: str | None = None
+    telegram_url: str | None = None
+    donate_url: str | None = None
     timeout: float = DEFAULT_TELEGRAM_TIMEOUT
 
     @classmethod
@@ -49,6 +53,10 @@ class TelegramAdminConfig:
             admin_chat_id=_clean_optional(getattr(settings, "telegram_admin_chat_id", None)),
             public_channel_id=_clean_optional(getattr(settings, "telegram_public_channel_id", None)),
             vip_channel_id=_clean_optional(getattr(settings, "telegram_vip_channel_id", None)),
+            public_logo_url=_clean_optional(getattr(settings, "candle_craft_public_logo_url", None)),
+            x_url=_clean_optional(getattr(settings, "candle_craft_x_url", None)),
+            telegram_url=_clean_optional(getattr(settings, "candle_craft_telegram_url", None)),
+            donate_url=_clean_optional(getattr(settings, "candle_craft_donate_url", None)),
         )
 
     @property
@@ -185,7 +193,7 @@ def _sanitize_error(value: Any, config: TelegramAdminConfig) -> str:
     text = str(value or "").strip()
     if not text:
         return NA
-    for secret in (config.bot_token, config.admin_chat_id):
+    for secret in (config.bot_token, config.admin_chat_id, config.public_channel_id, config.vip_channel_id):
         if secret:
             text = text.replace(secret, "[REDACTED]")
     return text
