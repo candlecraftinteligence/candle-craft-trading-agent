@@ -303,6 +303,31 @@ def _seed_prior_active_alert(
         )
 
 
+def _telegram_attempt_rows(db_path: Path) -> list[tuple[str, str, str]]:
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT signal_id, alert_type, telegram_status
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+
+
+def _assert_transition_message_clean(message: str, *, signal_id: str, status: str) -> None:
+    assert message.startswith(HEADER_PREFIX)
+    assert message.endswith(FOOTER)
+    assert f"Status:\n{status}" in message
+    assert f"Signal ID:\n{signal_id}" in message
+    assert "Setup Type" not in message
+    assert "Decimal(" not in message
+    assert "{" not in message
+    assert "}" not in message
+    assert "\nTrue\n" not in message
+    assert "\nFalse\n" not in message
+    assert len([line for line in message.splitlines() if line.strip()]) <= 32
+
+
 def test_confirmed_and_watchlist_lifecycle_states_are_eligible() -> None:
     confirmed = telegram_alert_decision_for_symbol(
         _symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED),
@@ -705,6 +730,172 @@ def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> N
     assert duplicate_confirmed.duplicate == 1
     assert "CANDLE CRAFT WATCHLIST" in sender.messages[0]
     assert "CANDLE CRAFT SIGNAL CONFIRMED" in sender.messages[1]
+
+
+def test_phase42k_watchlist_transition_matrix_preserves_original_id_rows_and_dedupes(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        (
+            "confirmed",
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            "CONFIRMED",
+            lambda signal_id: _symbol(
+                SetupLifecycleState.CONFIRMED,
+                previous=SetupLifecycleState.TRIGGERED,
+                signal_id=signal_id,
+            ),
+        ),
+        (
+            "invalidated",
+            TelegramAlertType.INVALIDATED,
+            "INVALIDATED",
+            lambda signal_id: _symbol(
+                SetupLifecycleState.INVALIDATED,
+                previous=SetupLifecycleState.WATCHLISTED,
+                signal_id=signal_id,
+            ),
+        ),
+        (
+            "expired",
+            TelegramAlertType.EXPIRED,
+            "EXPIRED",
+            lambda signal_id: _symbol(
+                SetupLifecycleState.EXPIRED,
+                previous=SetupLifecycleState.STALKING,
+                signal_id=signal_id,
+            ),
+        ),
+        (
+            "no-longer-tracking",
+            TelegramAlertType.NO_LONGER_TRACKING,
+            "NO LONGER TRACKING",
+            lambda signal_id: _with_lifecycle_fields(
+                _symbol(
+                    SetupLifecycleState.CONFIRMED,
+                    previous=SetupLifecycleState.TRIGGERED,
+                    signal_id=signal_id,
+                ),
+                failed_gate="regime_compatibility",
+                invalidation_reason="Setup rejected by regime weakness.",
+            ),
+        ),
+    )
+    for name, expected_alert_type, expected_status, make_transition in cases:
+        db_path = tmp_path / f"{name}.db"
+        signal_id = f"phase42k-{name}"
+        sender = FakeSender()
+        service = TelegramLifecycleDeliveryService(
+            database_path=db_path,
+            settings=Settings(_env_file=None),
+            sender=sender,
+            min_rr=Decimal("3"),
+            min_score_for_idea=Decimal("80"),
+        )
+
+        watchlist = run(
+            service.deliver_for_run(
+                _run_result(
+                    _symbol(
+                        SetupLifecycleState.WATCHLISTED,
+                        signal_id=signal_id,
+                        diagnostics=_public_ready_watchlist_diagnostics(),
+                    )
+                ),
+                scan_run_id=f"phase42k-watch-{name}",
+            )
+        )
+        transition_symbol = make_transition(signal_id)
+        transitioned = run(
+            service.deliver_for_run(
+                _run_result(transition_symbol),
+                scan_run_id=f"phase42k-transition-{name}",
+            )
+        )
+        duplicate = run(
+            service.deliver_for_run(
+                _run_result(transition_symbol),
+                scan_run_id=f"phase42k-transition-repeat-{name}",
+            )
+        )
+
+        assert watchlist.sent == 1
+        assert transitioned.sent == 1
+        assert duplicate.duplicate == 1
+        assert len(sender.messages) == 2
+        assert "CANDLE CRAFT WATCHLIST" in sender.messages[0]
+        assert "CANDLE CRAFT WATCHLIST" not in sender.messages[1]
+        if expected_alert_type == TelegramAlertType.NO_LONGER_TRACKING:
+            assert "CANDLE CRAFT SIGNAL CONFIRMED" not in sender.messages[1]
+        _assert_transition_message_clean(sender.messages[1], signal_id=signal_id, status=expected_status)
+        assert _telegram_attempt_rows(db_path) == [
+            (signal_id, TelegramAlertType.WATCHLIST.value, "sent"),
+            (signal_id, expected_alert_type.value, "sent"),
+        ]
+
+
+def test_phase42k_reconciles_failed_confirmation_gate_variants_to_no_longer_tracking(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        ("target_integrity", "Watchlist removed because final RR or target quality failed before confirmation."),
+        ("rr_below_min", "Watchlist removed because final RR or target quality failed before confirmation."),
+    )
+    for failed_gate, expected_reason in cases:
+        db_path = tmp_path / f"{failed_gate}.db"
+        signal_id = f"phase42k-{failed_gate}"
+        _seed_prior_active_alert(
+            db_path,
+            signal_id=signal_id,
+            alert_type=TelegramAlertType.WATCHLIST,
+            symbol="AAVEUSDT",
+            direction="long",
+        )
+        _store_lifecycle_record(
+            db_path,
+            SetupLifecycleRecord(
+                lifecycle_id=signal_id,
+                symbol="AAVEUSDT",
+                mode="scalp",
+                direction="long",
+                current_state=SetupLifecycleState.CONFIRMED,
+                previous_state=SetupLifecycleState.TRIGGERED,
+                first_seen_at="2026-06-03T00:00:00+00:00",
+                last_seen_at="2026-06-03T00:05:00+00:00",
+                last_transition_at="2026-06-03T00:00:00+00:00",
+                failed_gate=failed_gate,
+                invalidation_reason="Setup rejected because RR below the configured minimum.",
+            ),
+        )
+        sender = FakeSender()
+        service = TelegramLifecycleDeliveryService(
+            database_path=db_path,
+            settings=Settings(_env_file=None),
+            sender=sender,
+            min_rr=Decimal("3"),
+            min_score_for_idea=Decimal("80"),
+        )
+
+        summary = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42k-{failed_gate}"))
+        repeated = run(
+            service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42k-repeat-{failed_gate}")
+        )
+
+        assert summary.sent == 1
+        assert repeated.sent == 0
+        assert repeated.duplicate == 0
+        assert len(sender.messages) == 1
+        _assert_transition_message_clean(
+            sender.messages[0],
+            signal_id=signal_id,
+            status="NO LONGER TRACKING",
+        )
+        assert expected_reason in sender.messages[0]
+        assert "CANDLE CRAFT SIGNAL CONFIRMED" not in sender.messages[0]
+        assert _telegram_attempt_rows(db_path) == [
+            (signal_id, TelegramAlertType.WATCHLIST.value, "sent"),
+            (signal_id, TelegramAlertType.NO_LONGER_TRACKING.value, "sent"),
+        ]
 
 
 def test_watchlist_to_confirmed_with_regime_failed_gate_sends_no_longer_tracking(tmp_path: Path) -> None:
