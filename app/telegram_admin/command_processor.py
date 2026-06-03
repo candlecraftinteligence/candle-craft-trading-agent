@@ -353,7 +353,7 @@ async def _process_public_update(
 
 
 def _skip_status(config: TelegramAdminConfig) -> str | None:
-    if not config.admin_enabled:
+    if not config.command_ui_enabled:
         return "skipped_disabled"
     if config.dry_run:
         return None
@@ -363,7 +363,7 @@ def _skip_status(config: TelegramAdminConfig) -> str | None:
 
 
 def _public_skip_status(config: TelegramAdminConfig, chat_id: str) -> str | None:
-    if not config.admin_enabled:
+    if not config.command_ui_enabled:
         return "skipped_disabled"
     if _display(chat_id) == NA:
         return "ignored_unauthorized"
@@ -375,7 +375,7 @@ def _public_skip_status(config: TelegramAdminConfig, chat_id: str) -> str | None
 
 
 def _network_skip_status(config: TelegramAdminConfig) -> str | None:
-    if not config.admin_enabled:
+    if not config.command_ui_enabled:
         return "skipped_disabled"
     if config.dry_run:
         return "dry_run"

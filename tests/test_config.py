@@ -13,6 +13,8 @@ def test_default_settings_are_safe() -> None:
     assert settings.log_level == "INFO"
     assert settings.database_url.startswith("postgresql+psycopg://")
     assert settings.telegram_admin_enabled is False
+    assert settings.telegram_commands_enabled is None
+    assert settings.telegram_admin_reports_enabled is None
     assert settings.telegram_dry_run is True
     assert settings.telegram_signals_enabled is False
     assert settings.local_manual_mode is True

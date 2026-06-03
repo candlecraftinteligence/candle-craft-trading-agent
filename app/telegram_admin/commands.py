@@ -221,8 +221,7 @@ class TelegramAdminCommandService:
                 "",
                 "Latest scan:",
                 "Run: N/A",
-                f"Data status: {UNVERIFIED}",
-                "The latest scan record is not available.",
+                "No recent scan summary available yet.",
                     SCREEN_DIVIDER,
                     "",
                     "The engine is filtering for quality.",
@@ -245,7 +244,7 @@ class TelegramAdminCommandService:
                 "Safety audit: Active",
                 "",
                 "Latest scan:",
-                f"Run: {_display(manifest_row.get('run_id'))}",
+                f"Run: {_run_text(manifest_row.get('run_id'))}",
                 f"Symbol list: {_symbol_list_text(manifest_row)}",
                 f"Market regime: {_title_text(manifest_row.get('market_regime'))}",
                 f"Regime confidence: {_display(manifest_row.get('regime_confidence'))}",
@@ -289,12 +288,12 @@ class TelegramAdminCommandService:
                 "Manual execution only.",
                 "",
                 SCREEN_DIVIDER,
-                f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+                f"Run: {_run_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
                 f"Alerts created: {_first_text(artifacts.manifest_row.get('alerts_created'), len(alert_rows))}",
                 f"Trade ideas detected: {_first_text(artifacts.manifest_row.get('trade_ideas_created'), _valid_count(rows))}",
                 "",
-                "Latest alert:",
-                *_alert_lines(alert_rows, max_rows=self._max_rows),
+                *(() if alert_rows else ("No lifecycle alerts available right now.",)),
+                *(("Latest alert:", *_alert_lines(alert_rows, max_rows=self._max_rows)) if alert_rows else ()),
                 "",
                 "Risk note:",
                 "Manual review only. No execution controls.",
@@ -320,11 +319,7 @@ class TelegramAdminCommandService:
                     "",
                     SCREEN_DIVIDER,
                     "Run: N/A",
-                    f"Data status: {UNVERIFIED}",
-                    "The latest scan record is not available.",
-                    "",
-                    "Preset lists:",
-                    *preset_lines,
+                    "No active watchlist setups right now.",
                     SCREEN_DIVIDER,
                     "",
                     "The engine is filtering.",
@@ -341,12 +336,8 @@ class TelegramAdminCommandService:
                     "Watchlist does not mean confirmed signal.",
                     "",
                     SCREEN_DIVIDER,
-                    f"Run: {run_id}",
-                    f"Data status: {UNVERIFIED}",
-                    "The latest scan record is not available.",
-                    "",
-                    "Preset lists:",
-                    *preset_lines,
+                    f"Run: {_run_text(run_id)}",
+                    "No active watchlist setups right now.",
                     SCREEN_DIVIDER,
                     "",
                     "The engine is filtering.",
@@ -364,7 +355,7 @@ class TelegramAdminCommandService:
                 "Watchlist does not mean confirmed signal.",
                 "",
                 SCREEN_DIVIDER,
-                f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+                f"Run: {_run_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
                 f"Watch candidates: {len(watch_rows)}",
                 "",
                 *_watchlist_lines(watch_rows, max_rows=self._max_rows),
@@ -414,10 +405,8 @@ class TelegramAdminCommandService:
                     "Alert safety and duplicate-control overview.",
                     "",
                     SCREEN_DIVIDER,
-                    f"Run: {run_id}",
-                    f"Safety status: {UNVERIFIED}",
-                    "Safety review could not be completed.",
-                    f"Review note: {type(exc).__name__}",
+                    f"Run: {_run_text(run_id)}",
+                    "No safety summary available yet.",
                     SCREEN_DIVIDER,
                 ),
             )
@@ -431,7 +420,7 @@ class TelegramAdminCommandService:
                 "Alert safety and duplicate-control overview.",
                 "",
                 SCREEN_DIVIDER,
-                f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+                f"Run: {_run_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
                 f"Safety status: {integrity_status}",
                 f"Alerts reviewed: {summary.alert_count}",
                 f"Duplicates blocked: {_first_text(artifacts.manifest_row.get('duplicate_alerts_blocked'), 0)}",
@@ -462,7 +451,8 @@ class TelegramAdminCommandService:
                 SCREEN_DIVIDER,
                 "Manual mode: Active",
                 "Execution: Disabled",
-                f"Telegram alerts: {_enabled_disabled_na(admin_config, 'admin_enabled')}",
+                f"Command UI: {_enabled_disabled_na(admin_config, 'command_ui_enabled')}",
+                f"Admin reports: {_enabled_disabled_na(admin_config, 'admin_report_enabled')}",
                 f"Test mode: {_active_inactive_na(admin_config, 'dry_run')}",
                 "Quality gates: Protected",
                 "Signal filters: Protected",
@@ -504,7 +494,7 @@ class TelegramAdminCommandService:
                 "Latest Candle Craft market scan.",
                 "",
                 SCREEN_DIVIDER,
-                f"Last run: {_display(artifacts.manifest_row.get('run_id'))}",
+                f"Last run: {_run_text(artifacts.manifest_row.get('run_id'))}",
                 f"Symbols scanned: {_display(artifacts.manifest_row.get('symbols_scanned'))}",
                 f"Confirmed setups: {_display(artifacts.manifest_row.get('valid_setup_count'))}",
                 f"Watchlist setups: {_display(artifacts.manifest_row.get('near_miss_count'))}",
@@ -607,7 +597,7 @@ class TelegramAdminCommandService:
             "Manual execution only.",
             "",
             SCREEN_DIVIDER,
-            f"Run: {_first_text(manifest_row.get('run_id'), payload.get('run_id'))}",
+            f"Run: {_run_text(manifest_row.get('run_id'), payload.get('run_id'))}",
             f"Timestamp: {_display(manifest_row.get('timestamp'))}",
             f"Symbol list: {_symbol_list_text(manifest_row, payload)}",
             f"Market regime: {_title_text(_first_text(manifest_row.get('market_regime'), _nested_value(payload, 'market_regime', 'state')))}",
@@ -652,7 +642,7 @@ class TelegramAdminCommandService:
             "Manual execution only.",
             "",
             SCREEN_DIVIDER,
-            f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+            f"Run: {_run_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
             "",
             *_near_lines(rows, max_rows=self._max_rows),
             SCREEN_DIVIDER,
@@ -692,7 +682,7 @@ class TelegramAdminCommandService:
                     "Safety checks for skipped alerts.",
                     "",
                     SCREEN_DIVIDER,
-                    f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+                    f"Run: {_run_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
                     "No safety blocks in the latest scan.",
                     SCREEN_DIVIDER,
                 ),
@@ -704,7 +694,7 @@ class TelegramAdminCommandService:
                     "Safety checks for skipped alerts.",
                     "",
                     SCREEN_DIVIDER,
-                    f"Run: {_first_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
+                    f"Run: {_run_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
                     "",
                     *_blocked_lines(rows, max_rows=self._max_rows),
                     SCREEN_DIVIDER,
@@ -1028,9 +1018,8 @@ def _missing_scan_response(
                 "Manual execution only.",
                 "",
                 SCREEN_DIVIDER,
-                f"Run: {run_id}",
-                f"Data status: {UNVERIFIED}",
-                "The latest scan record is not available.",
+                f"Run: {_run_text(run_id)}",
+                _empty_state_text(response_type),
                 SCREEN_DIVIDER,
             ),
         ),
@@ -1040,6 +1029,27 @@ def _missing_scan_response(
 
 def _command_list_text() -> str:
     return "Available commands: " + ", ".join(ADMIN_COMMANDS)
+
+
+def _empty_state_text(response_type: str) -> str:
+    if response_type == "alerts":
+        return "No lifecycle alerts available right now."
+    if response_type in {"watchlists", "near"}:
+        return "No active watchlist setups right now."
+    if response_type in {"integrity", "blocked"}:
+        return "No safety summary available yet."
+    return "No recent scan summary available yet."
+
+
+def _run_text(*values: Any) -> str:
+    return _short_run_id(_first_text(*values))
+
+
+def _short_run_id(value: Any, max_length: int = 12) -> str:
+    text = _display(value)
+    if text == NA or len(text) <= max_length:
+        return text
+    return text[:max_length]
 
 
 def _result_rows(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:

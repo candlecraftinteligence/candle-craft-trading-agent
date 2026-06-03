@@ -1984,6 +1984,15 @@ def test_telegram_admin_draft_label_reports_disabled_dry_run(monkeypatch) -> Non
     assert run_scan._telegram_admin_draft_status_label() == "disabled/dry-run"
 
 
+def test_telegram_admin_draft_label_uses_admin_reports_flag(monkeypatch) -> None:
+    monkeypatch.setenv("TELEGRAM_ADMIN_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_ADMIN_REPORTS_ENABLED", "false")
+    monkeypatch.setenv("TELEGRAM_DRY_RUN", "false")
+    monkeypatch.setenv("ORDER_EXECUTION_ENABLED", "false")
+
+    assert run_scan._telegram_admin_draft_status_label() == "disabled"
+
+
 def test_telegram_manual_lifecycle_summary_output(capsys) -> None:
     run_scan._print_telegram_manual_lifecycle_summary(
         run_scan.TelegramLifecycleDeliverySummary(

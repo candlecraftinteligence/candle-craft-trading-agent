@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://candle@localhost:5432/candle_craft"
     sql_echo: bool = False
     telegram_admin_enabled: bool = False
+    telegram_commands_enabled: bool | None = None
+    telegram_admin_reports_enabled: bool | None = None
     telegram_dry_run: bool = True
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None

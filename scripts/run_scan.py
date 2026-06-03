@@ -83,7 +83,7 @@ from app.formatters.scanner_display import (  # noqa: E402
     representative_strategy_diagnostics,
 )
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
-from app.telegram_admin import route_admin_scan_report  # noqa: E402
+from app.telegram_admin import TelegramAdminConfig, route_admin_scan_report  # noqa: E402
 from app.lifecycle.service import (  # noqa: E402
     SetupLifecycleService,
     apply_lifecycle_to_run_result,
@@ -1854,12 +1854,12 @@ def _telegram_manual_lifecycle_status_label(args: argparse.Namespace) -> str:
 
 def _telegram_admin_draft_status_label() -> str:
     try:
-        settings = Settings()
+        config = TelegramAdminConfig.from_settings(Settings())
     except Exception:
         return "blocked by settings"
-    if not settings.telegram_admin_enabled:
-        return "disabled/dry-run" if settings.telegram_dry_run else "disabled"
-    return "dry-run" if settings.telegram_dry_run else "enabled"
+    if not config.admin_report_enabled:
+        return "disabled/dry-run" if config.dry_run else "disabled"
+    return "dry-run" if config.dry_run else "enabled"
 
 
 async def _deliver_telegram_manual_signals_if_enabled(

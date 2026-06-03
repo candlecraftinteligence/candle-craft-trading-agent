@@ -252,6 +252,8 @@ def test_no_alert_for_rejected() -> None:
 
 
 def test_dry_run_default_does_not_call_telegram(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("TELEGRAM_ADMIN_ENABLED", "false")
+    monkeypatch.setenv("TELEGRAM_DRY_RUN", "true")
     state_path = tmp_path / "watch_state.json"
     save_watch_state(state_path, _prior_state())
     monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
