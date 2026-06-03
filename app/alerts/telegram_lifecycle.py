@@ -19,9 +19,10 @@ from app.formatters.telegram_signal_formatter import (
     format_telegram_price,
     format_telegram_signal_message,
 )
-from app.lifecycle.models import SetupLifecycleState, SetupTransitionResult
+from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
+from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import now_utc_iso
-from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
+from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
 from app.storage.models import TelegramAlertAttemptRecord
 
@@ -53,6 +54,9 @@ TERMINAL_COMPLETION_ALERT_TYPES = {
     TelegramAlertType.SL_HIT.value,
     TelegramAlertType.TP3_HIT.value,
 }
+SENT_WATCHLIST_RECONCILIATION_ATTEMPT = "SENT_WATCHLIST_RECONCILIATION"
+SENT_WATCHLIST_RECONCILIATION_NO_MATCH = "sent_watchlist_reconciliation_no_lifecycle_match"
+SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguous"
 TERMINAL_IDENTITY_BLOCK_REASONS = {
     "terminal_update_no_prior_public_alert",
     "terminal_update_identity_ambiguous",
@@ -182,6 +186,19 @@ class TelegramLifecycleDeliverySummary:
 class TerminalIdentityBridge:
     prior_alert: TelegramAlertAttemptRecord | None = None
     blocked_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class SentWatchlistLifecycleMatch:
+    record: SetupLifecycleRecord | None = None
+    blocked_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class SentWatchlistReconciliationOutcome:
+    alert_type: TelegramAlertType
+    message: TelegramSignalMessage
+    symbol_result: ScannerSymbolResult
 
 
 class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegramAlertAttemptRepository"]):
@@ -353,6 +370,25 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             (_identity(signal_id), *sorted(TERMINAL_COMPLETION_ALERT_TYPES)),
         ).fetchone()
         return row is not None
+
+    def list_sent_watchlist_alerts(self) -> tuple[TelegramAlertAttemptRecord, ...]:
+        terminal_placeholders = ",".join("?" for _ in TERMINAL_COMPLETION_ALERT_TYPES)
+        rows = self._connection.execute(
+            f"""
+            SELECT watch.* FROM telegram_alert_attempts AS watch
+            WHERE watch.alert_type = ?
+              AND watch.telegram_status = 'sent'
+              AND NOT EXISTS (
+                  SELECT 1 FROM telegram_alert_attempts AS terminal
+                  WHERE terminal.signal_id = watch.signal_id
+                    AND terminal.alert_type IN ({terminal_placeholders})
+                    AND terminal.telegram_status = 'sent'
+              )
+            ORDER BY watch.id ASC
+            """,
+            (TelegramAlertType.WATCHLIST.value, *sorted(TERMINAL_COMPLETION_ALERT_TYPES)),
+        ).fetchall()
+        return tuple(_record_from_row(row) for row in rows)
 
     def insert_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
         first_seen_at = _text(record.first_seen_at)
@@ -555,39 +591,62 @@ class TelegramLifecycleDeliveryService:
         failed = 0
         blocked = 0
         blocked_repeat = 0
+        current_run_attempts: set[tuple[str, str]] = set()
+        current_run_identity_blocked_symbols: set[str] = set()
+
+        def record_delivery(delivery: TelegramLifecycleDelivery) -> None:
+            nonlocal duplicate, sent, skipped, failed, blocked, blocked_repeat
+            deliveries.append(delivery)
+            if delivery.status in {"sent", "failed", "duplicate"}:
+                current_run_attempts.add((delivery.signal_id, delivery.alert_type))
+            if delivery.status in {"blocked", "blocked_repeat"} and delivery.error_message in TERMINAL_IDENTITY_BLOCK_REASONS:
+                current_run_identity_blocked_symbols.add(_symbol(delivery.symbol))
+            if delivery.status == "duplicate":
+                duplicate += 1
+            elif delivery.status == "sent":
+                sent += 1
+            elif delivery.status == "failed":
+                failed += 1
+            elif delivery.status == "blocked":
+                blocked += 1
+            elif delivery.status == "blocked_repeat":
+                blocked_repeat += 1
+            else:
+                skipped += 1
 
         with SQLiteTelegramAlertAttemptRepository(self.database_path) as repository:
-            min_score_for_idea = self.min_score_for_idea
-            if min_score_for_idea is None:
-                min_score_for_idea = _decimal_or_none(result.config.min_score_for_idea)
-            eligibility_context = TelegramEligibilityContext(
-                min_rr=self.min_rr,
-                min_score_for_idea=min_score_for_idea,
-                min_technical_score=self.min_technical_score,
-            )
-            for symbol_result in result.results:
-                delivery = await self.deliver_for_symbol(
-                    symbol_result,
+            with SQLiteSetupLifecycleRepository(self.database_path) as lifecycle_repository:
+                prior_sent_watchlists = repository.list_sent_watchlist_alerts()
+                min_score_for_idea = self.min_score_for_idea
+                if min_score_for_idea is None:
+                    min_score_for_idea = _decimal_or_none(result.config.min_score_for_idea)
+                eligibility_context = TelegramEligibilityContext(
+                    min_rr=self.min_rr,
+                    min_score_for_idea=min_score_for_idea,
+                    min_technical_score=self.min_technical_score,
+                )
+                for symbol_result in result.results:
+                    delivery = await self.deliver_for_symbol(
+                        symbol_result,
+                        repository=repository,
+                        scan_run_id=scan_run_id,
+                        eligibility_context=eligibility_context,
+                    )
+                    if delivery is None:
+                        ineligible += 1
+                        continue
+                    record_delivery(delivery)
+                for delivery in await self.reconcile_sent_watchlists(
                     repository=repository,
+                    lifecycle_repository=lifecycle_repository,
+                    sent_watchlists=prior_sent_watchlists,
+                    current_results=result.results,
                     scan_run_id=scan_run_id,
                     eligibility_context=eligibility_context,
-                )
-                if delivery is None:
-                    ineligible += 1
-                    continue
-                deliveries.append(delivery)
-                if delivery.status == "duplicate":
-                    duplicate += 1
-                elif delivery.status == "sent":
-                    sent += 1
-                elif delivery.status == "failed":
-                    failed += 1
-                elif delivery.status == "blocked":
-                    blocked += 1
-                elif delivery.status == "blocked_repeat":
-                    blocked_repeat += 1
-                else:
-                    skipped += 1
+                    current_run_attempts=frozenset(current_run_attempts),
+                    current_run_identity_blocked_symbols=frozenset(current_run_identity_blocked_symbols),
+                ):
+                    record_delivery(delivery)
 
         return TelegramLifecycleDeliverySummary(
             attempted=sent + skipped + failed + blocked + blocked_repeat,
@@ -736,6 +795,171 @@ class TelegramLifecycleDeliveryService:
             symbol=symbol_result.symbol,
             signal_id=signal_id,
             alert_type=decision.alert_type.value,
+            status=send_result.status,
+            detail=send_result.detail,
+            message_hash=message_hash,
+            error_message=send_result.error_message,
+        )
+
+    async def reconcile_sent_watchlists(
+        self,
+        *,
+        repository: SQLiteTelegramAlertAttemptRepository,
+        lifecycle_repository: SQLiteSetupLifecycleRepository,
+        sent_watchlists: Sequence[TelegramAlertAttemptRecord],
+        current_results: Sequence[ScannerSymbolResult],
+        scan_run_id: str | None,
+        eligibility_context: TelegramEligibilityContext,
+        current_run_attempts: frozenset[tuple[str, str]],
+        current_run_identity_blocked_symbols: frozenset[str],
+    ) -> tuple[TelegramLifecycleDelivery, ...]:
+        deliveries: list[TelegramLifecycleDelivery] = []
+        snapshot_watchlists_by_symbol = _sent_watchlist_snapshot_by_symbol(sent_watchlists)
+        for prior_alert in sent_watchlists:
+            if prior_alert.alert_type != TelegramAlertType.WATCHLIST.value or prior_alert.telegram_status != "sent":
+                continue
+            if _symbol(prior_alert.symbol) in current_run_identity_blocked_symbols:
+                continue
+            if repository.has_sent_terminal_outcome(signal_id=prior_alert.signal_id):
+                continue
+
+            match = _match_sent_watchlist_lifecycle(
+                prior_alert,
+                lifecycle_repository=lifecycle_repository,
+                current_results=current_results,
+                snapshot_watchlists_by_symbol=snapshot_watchlists_by_symbol,
+            )
+            if match.blocked_reason is not None:
+                deliveries.append(
+                    _persist_sent_watchlist_reconciliation_block(
+                        repository,
+                        prior_alert,
+                        reason=match.blocked_reason,
+                        scan_run_id=scan_run_id,
+                    )
+                )
+                continue
+            if match.record is None:
+                continue
+
+            current_result = _current_result_for_lifecycle_record(match.record, prior_alert, current_results)
+            outcome = _sent_watchlist_reconciliation_outcome(
+                prior_alert,
+                match.record,
+                current_result=current_result,
+                eligibility_context=eligibility_context,
+            )
+            if outcome is None:
+                continue
+
+            signal_id = prior_alert.signal_id
+            alert_type_text = outcome.alert_type.value
+            if (signal_id, alert_type_text) in current_run_attempts and repository.has_attempt(
+                signal_id=signal_id,
+                alert_type=outcome.alert_type,
+            ):
+                continue
+            if outcome.alert_type in TERMINAL_UPDATE_ALERT_TYPES and repository.has_sent_terminal_outcome(
+                signal_id=signal_id
+            ) and not repository.has_attempt(signal_id=signal_id, alert_type=outcome.alert_type):
+                deliveries.append(
+                    TelegramLifecycleDelivery(
+                        symbol=prior_alert.symbol,
+                        signal_id=signal_id,
+                        alert_type=alert_type_text,
+                        status="duplicate",
+                        detail="Prior terminal Telegram lifecycle update already sent.",
+                    )
+                )
+                continue
+            if repository.has_attempt(signal_id=signal_id, alert_type=outcome.alert_type):
+                repository.compact_existing_attempt(
+                    signal_id=signal_id,
+                    alert_type=outcome.alert_type,
+                    scan_run_id=scan_run_id,
+                )
+                deliveries.append(
+                    TelegramLifecycleDelivery(
+                        symbol=prior_alert.symbol,
+                        signal_id=signal_id,
+                        alert_type=alert_type_text,
+                        status="duplicate",
+                        detail="Duplicate Telegram alert prevented.",
+                    )
+                )
+                continue
+
+            deliveries.append(
+                await self._send_reconciliation_update(
+                    repository,
+                    prior_alert=prior_alert,
+                    outcome=outcome,
+                    scan_run_id=scan_run_id,
+                    eligibility_context=eligibility_context,
+                )
+            )
+        return tuple(deliveries)
+
+    async def _send_reconciliation_update(
+        self,
+        repository: SQLiteTelegramAlertAttemptRepository,
+        *,
+        prior_alert: TelegramAlertAttemptRecord,
+        outcome: SentWatchlistReconciliationOutcome,
+        scan_run_id: str | None,
+        eligibility_context: TelegramEligibilityContext,
+    ) -> TelegramLifecycleDelivery:
+        message_text = format_telegram_signal_message(outcome.alert_type, outcome.message)
+        message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
+        send_result = await self.sender.send_text(message_text)
+        transition = outcome.symbol_result.lifecycle_transition
+        previous_state = transition.from_state.value if transition and transition.from_state else NA
+        new_state = transition.to_state.value if transition else _lifecycle_state_text(outcome.symbol_result)
+        record = TelegramAlertAttemptRecord(
+            signal_id=prior_alert.signal_id,
+            symbol=_symbol(outcome.message.symbol),
+            direction=_text(outcome.message.direction),
+            previous_state=previous_state,
+            new_state=new_state,
+            alert_type=outcome.alert_type.value,
+            lifecycle_state=_lifecycle_state_text(outcome.symbol_result),
+            sent_at=now_utc_iso(),
+            telegram_status=send_result.status,
+            message_hash=message_hash,
+            scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+            attempted_alert_type=outcome.alert_type.value,
+            setup_quality_score=_quality_score(outcome.symbol_result),
+            rr_planned=_text(outcome.message.planned_rr),
+            min_rr=_text(eligibility_context.min_rr),
+            opportunity_score=_opportunity_score_text(outcome.symbol_result),
+            min_score_for_idea=_text(eligibility_context.min_score_for_idea),
+            technical_score=_technical_score_text(outcome.symbol_result),
+            price_level=_price_level_for_alert(outcome.alert_type, outcome.message),
+            blocked_reason=NA,
+            invalid_target_fields=NA,
+            error_message=send_result.error_message,
+        )
+        inserted = repository.insert_attempt(record)
+        if not inserted:
+            return TelegramLifecycleDelivery(
+                symbol=prior_alert.symbol,
+                signal_id=prior_alert.signal_id,
+                alert_type=outcome.alert_type.value,
+                status="duplicate",
+                detail="Duplicate Telegram alert prevented.",
+                message_hash=message_hash,
+            )
+        logger.info(
+            "Telegram sent-watchlist reconciliation persisted: symbol=%s alert_type=%s status=%s message_hash=%s",
+            prior_alert.symbol,
+            outcome.alert_type.value,
+            send_result.status,
+            message_hash,
+        )
+        return TelegramLifecycleDelivery(
+            symbol=prior_alert.symbol,
+            signal_id=prior_alert.signal_id,
+            alert_type=outcome.alert_type.value,
             status=send_result.status,
             detail=send_result.detail,
             message_hash=message_hash,
@@ -1378,19 +1602,19 @@ def _failed_confirmation_reason(
     haystack = " ".join((_failed_confirmation_haystack(symbol_result), " ".join(str(blocker) for blocker in blockers)))
     key = _status_key(haystack)
     if "regime_compatibility" in key or "regime_weakness" in key or "rejected_by_regime" in key:
-        return "Watchlist removed because regime compatibility failed before confirmation."
+        return "Watchlist removed because market conditions failed before confirmation."
     if "rr_below" in key or "low_rr" in key or "risk_reward_below" in key:
-        return "Watchlist removed because final RR requirements were not met before confirmation."
+        return "Watchlist removed because final RR or target quality failed before confirmation."
     if "target_integrity" in key:
-        return "Watchlist removed because final RR requirements were not met before confirmation."
+        return "Watchlist removed because final RR or target quality failed before confirmation."
     if "technical" in key:
         return "Watchlist removed because technical quality failed before confirmation."
     if "opportunity" in key or "scoring" in key or "score_below" in key:
         return "Watchlist removed because final score requirements were not met before confirmation."
     if "quality_gate" in key or "setup_quality" in key:
-        return "Watchlist removed because the setup failed final quality gates before confirmation."
+        return "Watchlist removed because the setup failed final confirmation gates."
     if "rejected" in key or "not_public_ready" in key:
-        return "Watchlist removed because the scanner rejected the setup before it became a confirmed signal."
+        return "Watchlist removed because the setup failed final confirmation gates."
     return "Watchlist removed because the setup failed final confirmation gates."
 
 
@@ -2061,6 +2285,405 @@ def _persist_blocked_attempt(
         message_hash=message_hash,
         error_message=decision.reason,
     )
+
+
+def _persist_sent_watchlist_reconciliation_block(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    prior_alert: TelegramAlertAttemptRecord,
+    *,
+    reason: str,
+    scan_run_id: str | None,
+) -> TelegramLifecycleDelivery:
+    seen_at = now_utc_iso()
+    blocked_alert_type = _blocked_alert_type(TelegramAlertType.NO_LONGER_TRACKING, reason)
+    message_hash = hashlib.sha256(
+        f"{prior_alert.signal_id}|{SENT_WATCHLIST_RECONCILIATION_ATTEMPT}|{reason}".encode("utf-8")
+    ).hexdigest()
+    record = TelegramAlertAttemptRecord(
+        signal_id=prior_alert.signal_id,
+        symbol=prior_alert.symbol,
+        direction=prior_alert.direction,
+        previous_state=NA,
+        new_state=NA,
+        alert_type=blocked_alert_type,
+        lifecycle_state=NA,
+        sent_at=seen_at,
+        telegram_status="blocked",
+        message_hash=message_hash,
+        scan_run_id=scan_run_id,
+        attempted_alert_type=SENT_WATCHLIST_RECONCILIATION_ATTEMPT,
+        setup_quality_score=NA,
+        rr_planned=NA,
+        min_rr=NA,
+        opportunity_score=NA,
+        min_score_for_idea=NA,
+        technical_score=NA,
+        price_level=NA,
+        blocked_reason=reason,
+        invalid_target_fields=NA,
+        error_message=reason,
+        first_seen_at=seen_at,
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id,
+        last_error_message=reason,
+    )
+    inserted = repository.insert_attempt(record)
+    if not inserted:
+        compacted = repository.compact_repeated_attempt(record)
+        status = "blocked_repeat" if compacted else "duplicate"
+        detail = (
+            "Repeated sent-watchlist reconciliation block compacted."
+            if compacted
+            else "Duplicate sent-watchlist reconciliation block prevented."
+        )
+        return TelegramLifecycleDelivery(
+            symbol=prior_alert.symbol,
+            signal_id=prior_alert.signal_id,
+            alert_type=SENT_WATCHLIST_RECONCILIATION_ATTEMPT,
+            status=status,
+            detail=detail,
+            message_hash=message_hash,
+            error_message=reason,
+        )
+    return TelegramLifecycleDelivery(
+        symbol=prior_alert.symbol,
+        signal_id=prior_alert.signal_id,
+        alert_type=SENT_WATCHLIST_RECONCILIATION_ATTEMPT,
+        status="blocked",
+        detail="Sent watchlist reconciliation blocked by lifecycle identity guard.",
+        message_hash=message_hash,
+        error_message=reason,
+    )
+
+
+def _match_sent_watchlist_lifecycle(
+    prior_alert: TelegramAlertAttemptRecord,
+    *,
+    lifecycle_repository: SQLiteSetupLifecycleRepository,
+    current_results: Sequence[ScannerSymbolResult],
+    snapshot_watchlists_by_symbol: Mapping[str, tuple[TelegramAlertAttemptRecord, ...]],
+) -> SentWatchlistLifecycleMatch:
+    exact = lifecycle_repository.get_record_by_lifecycle_id(prior_alert.signal_id)
+    if exact is not None:
+        return SentWatchlistLifecycleMatch(record=exact)
+
+    current_exact = _current_lifecycle_records_for_signal_id(prior_alert.signal_id, current_results)
+    if len(current_exact) == 1:
+        return SentWatchlistLifecycleMatch(record=current_exact[0])
+    if len(current_exact) > 1:
+        return SentWatchlistLifecycleMatch(blocked_reason=SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS)
+
+    active_watchlists = snapshot_watchlists_by_symbol.get(_symbol(prior_alert.symbol), ())
+    if len(active_watchlists) != 1:
+        reason = (
+            SENT_WATCHLIST_RECONCILIATION_NO_MATCH
+            if not active_watchlists
+            else SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS
+        )
+        return SentWatchlistLifecycleMatch(blocked_reason=reason)
+    if active_watchlists[0].signal_id != prior_alert.signal_id:
+        return SentWatchlistLifecycleMatch(blocked_reason=SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS)
+
+    fallback_records = _fallback_lifecycle_records_for_prior_alert(lifecycle_repository, prior_alert)
+    if len(fallback_records) == 1:
+        return SentWatchlistLifecycleMatch(record=fallback_records[0])
+    if len(fallback_records) > 1:
+        return SentWatchlistLifecycleMatch(blocked_reason=SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS)
+    return SentWatchlistLifecycleMatch(blocked_reason=SENT_WATCHLIST_RECONCILIATION_NO_MATCH)
+
+
+def _sent_watchlist_snapshot_by_symbol(
+    sent_watchlists: Sequence[TelegramAlertAttemptRecord],
+) -> dict[str, tuple[TelegramAlertAttemptRecord, ...]]:
+    grouped: dict[str, list[TelegramAlertAttemptRecord]] = {}
+    for prior_alert in sent_watchlists:
+        if prior_alert.alert_type != TelegramAlertType.WATCHLIST.value or prior_alert.telegram_status != "sent":
+            continue
+        grouped.setdefault(_symbol(prior_alert.symbol), []).append(prior_alert)
+    return {symbol: tuple(records) for symbol, records in grouped.items()}
+
+
+def _current_lifecycle_records_for_signal_id(
+    signal_id: str,
+    current_results: Sequence[ScannerSymbolResult],
+) -> tuple[SetupLifecycleRecord, ...]:
+    normalized = _identity(signal_id)
+    if normalized == NA:
+        return ()
+    records: list[SetupLifecycleRecord] = []
+    for symbol_result in current_results:
+        lifecycle = symbol_result.lifecycle_state
+        if lifecycle is None:
+            continue
+        candidates = _signal_id_candidates(symbol_result)
+        if normalized in candidates or lifecycle.lifecycle_id == normalized:
+            records.append(lifecycle)
+    unique: dict[str, SetupLifecycleRecord] = {}
+    for record in records:
+        unique.setdefault(record.lifecycle_id, record)
+    return tuple(unique.values())
+
+
+def _fallback_lifecycle_records_for_prior_alert(
+    lifecycle_repository: SQLiteSetupLifecycleRepository,
+    prior_alert: TelegramAlertAttemptRecord,
+) -> tuple[SetupLifecycleRecord, ...]:
+    records = lifecycle_repository.list_records_for_symbol(symbol=prior_alert.symbol)
+    direction = _status_key(prior_alert.direction)
+    if direction not in {"long", "short"}:
+        return records
+    matched = tuple(
+        record
+        for record in records
+        if _status_key(record.direction) in {direction, ""}
+    )
+    return matched
+
+
+def _current_result_for_lifecycle_record(
+    record: SetupLifecycleRecord,
+    prior_alert: TelegramAlertAttemptRecord,
+    current_results: Sequence[ScannerSymbolResult],
+) -> ScannerSymbolResult | None:
+    exact_matches = tuple(
+        symbol_result
+        for symbol_result in current_results
+        if symbol_result.lifecycle_state is not None
+        and (
+            symbol_result.lifecycle_state.lifecycle_id == record.lifecycle_id
+            or record.lifecycle_id in _signal_id_candidates(symbol_result)
+            or prior_alert.signal_id in _signal_id_candidates(symbol_result)
+        )
+    )
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        return None
+
+    symbol_matches = [
+        symbol_result
+        for symbol_result in current_results
+        if _symbol(symbol_result.symbol) == _symbol(record.symbol)
+    ]
+    prior_direction = _status_key(prior_alert.direction)
+    if prior_direction in {"long", "short"}:
+        symbol_matches = [
+            symbol_result
+            for symbol_result in symbol_matches
+            if _status_key(telegram_signal_message_from_symbol(symbol_result).direction) in {prior_direction, ""}
+        ]
+    return symbol_matches[0] if len(symbol_matches) == 1 else None
+
+
+def _sent_watchlist_reconciliation_outcome(
+    prior_alert: TelegramAlertAttemptRecord,
+    record: SetupLifecycleRecord,
+    *,
+    current_result: ScannerSymbolResult | None,
+    eligibility_context: TelegramEligibilityContext,
+) -> SentWatchlistReconciliationOutcome | None:
+    state_key = _lifecycle_record_state_key(record)
+    symbol_result = _reconciliation_symbol_result(record, prior_alert, current_result=current_result)
+    terminal_alert_type = _terminal_alert_type_for_lifecycle_state(state_key)
+    if terminal_alert_type is not None:
+        message = _message_with_prior_public_identity(
+            _telegram_signal_message_for_alert(symbol_result, terminal_alert_type, eligibility_context),
+            prior_alert,
+        )
+        return SentWatchlistReconciliationOutcome(
+            alert_type=terminal_alert_type,
+            message=message,
+            symbol_result=symbol_result,
+        )
+
+    failed_blockers = _lifecycle_failed_confirmation_blockers(
+        symbol_result,
+        confirmed_state=state_key == "confirmed",
+    )
+    if state_key == "confirmed":
+        if failed_blockers:
+            return _failed_confirmed_reconciliation_outcome(
+                prior_alert,
+                symbol_result,
+                blockers=failed_blockers,
+                eligibility_context=eligibility_context,
+            )
+        if current_result is None:
+            return None
+        return _confirmed_reconciliation_outcome(
+            prior_alert,
+            symbol_result,
+            eligibility_context=eligibility_context,
+        )
+
+    if state_key in {"watchlist", "watchlisted", "stalking", "triggered", "rejected"} and failed_blockers:
+        return _failed_confirmed_reconciliation_outcome(
+            prior_alert,
+            symbol_result,
+            blockers=failed_blockers,
+            eligibility_context=eligibility_context,
+        )
+    return None
+
+
+def _confirmed_reconciliation_outcome(
+    prior_alert: TelegramAlertAttemptRecord,
+    symbol_result: ScannerSymbolResult,
+    *,
+    eligibility_context: TelegramEligibilityContext,
+) -> SentWatchlistReconciliationOutcome:
+    confirmed_message = replace(
+        telegram_signal_message_from_symbol(symbol_result),
+        min_rr=eligibility_context.min_rr,
+    )
+    blockers = _defensive_delivery_blockers(
+        symbol_result,
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        confirmed_message,
+        eligibility_context,
+    )
+    if blockers:
+        return _failed_confirmed_reconciliation_outcome(
+            prior_alert,
+            symbol_result,
+            blockers=blockers,
+            eligibility_context=eligibility_context,
+        )
+    message = _message_with_prior_public_identity(confirmed_message, prior_alert)
+    return SentWatchlistReconciliationOutcome(
+        alert_type=TelegramAlertType.SIGNAL_CONFIRMED,
+        message=message,
+        symbol_result=symbol_result,
+    )
+
+
+def _failed_confirmed_reconciliation_outcome(
+    prior_alert: TelegramAlertAttemptRecord,
+    symbol_result: ScannerSymbolResult,
+    *,
+    blockers: Sequence[str],
+    eligibility_context: TelegramEligibilityContext,
+) -> SentWatchlistReconciliationOutcome:
+    message = replace(
+        telegram_signal_message_from_symbol(symbol_result),
+        min_rr=eligibility_context.min_rr,
+        invalidation_reason=_failed_confirmation_reason(
+            symbol_result,
+            blockers,
+            TelegramAlertType.NO_LONGER_TRACKING,
+        ),
+    )
+    return SentWatchlistReconciliationOutcome(
+        alert_type=TelegramAlertType.NO_LONGER_TRACKING,
+        message=_message_with_prior_public_identity(message, prior_alert),
+        symbol_result=symbol_result,
+    )
+
+
+def _reconciliation_symbol_result(
+    record: SetupLifecycleRecord,
+    prior_alert: TelegramAlertAttemptRecord,
+    *,
+    current_result: ScannerSymbolResult | None,
+) -> ScannerSymbolResult:
+    transition = _reconciliation_transition(record)
+    if current_result is not None:
+        return current_result.model_copy(
+            update={
+                "symbol": record.symbol,
+                "lifecycle_state": record,
+                "lifecycle_transition": transition,
+            }
+        )
+
+    direction = _first_non_na(record.direction, prior_alert.direction)
+    mode = _first_non_na(record.mode, NA)
+    diagnostics = {
+        "mode": mode,
+        "direction": direction,
+        "bias": direction,
+        "failed_gate": record.failed_gate,
+        "first_failed_gate": record.failed_gate,
+        "action_label": record.action_label,
+        "invalidation_reason": record.invalidation_reason,
+        "reason": record.invalidation_reason,
+        "regime_reason": record.invalidation_reason,
+    }
+    strategy_diagnostics = {mode: diagnostics} if mode != NA else {"lifecycle": diagnostics}
+    return ScannerSymbolResult(
+        symbol=record.symbol,
+        status=ScannerPipelineStatus.IDEA_CREATED,
+        status_history=(ScannerPipelineStatus.IDEA_CREATED,),
+        strategy_diagnostics=strategy_diagnostics,
+        valid_strategy_modes=(mode,) if mode != NA else (),
+        technical_score=record.quality_score if record.quality_score else NA,
+        lifecycle_state=record,
+        lifecycle_transition=transition,
+    )
+
+
+def _reconciliation_transition(record: SetupLifecycleRecord) -> SetupTransitionResult:
+    return SetupTransitionResult(
+        lifecycle_id=record.lifecycle_id,
+        symbol=record.symbol,
+        from_state=record.previous_state,
+        to_state=record.current_state,
+        reason=SetupTransitionReason.NO_CHANGE,
+        transitioned=True,
+        record=record,
+    )
+
+
+def _terminal_alert_type_for_lifecycle_state(state_key: str) -> TelegramAlertType | None:
+    if state_key == "invalidated":
+        return TelegramAlertType.INVALIDATED
+    if state_key == "expired":
+        return TelegramAlertType.EXPIRED
+    if state_key in {
+        "cooldown",
+        "cooled_down",
+        "no_longer_tracking",
+        "removed",
+        "cancelled",
+        "canceled",
+    }:
+        return TelegramAlertType.NO_LONGER_TRACKING
+    return None
+
+
+def _lifecycle_failed_confirmation_blockers(
+    symbol_result: ScannerSymbolResult,
+    *,
+    confirmed_state: bool,
+) -> tuple[str, ...]:
+    blockers = _failed_confirmation_core_blockers(symbol_result)
+    if confirmed_state:
+        return blockers
+
+    terminal_gate_keys = (
+        "regime_compatibility",
+        "target_integrity",
+        "rr_below_min",
+        "low_rr",
+        "technical",
+        "technical_score",
+        "scoring",
+        "opportunity_score",
+        "quality_gate",
+        "setup_rejected",
+    )
+    filtered: list[str] = []
+    for blocker in blockers:
+        key = _status_key(blocker)
+        if key.startswith(("failed_confirmation_text", "failed_confirmation_action")):
+            filtered.append(blocker)
+        elif key.startswith("failed_confirmation_gate") and any(token in key for token in terminal_gate_keys):
+            filtered.append(blocker)
+    return tuple(dict.fromkeys(filtered))
+
+
+def _lifecycle_record_state_key(record: SetupLifecycleRecord) -> str:
+    return _status_key(record.current_state.value)
 
 
 def _blocked_delivery_detail(alert_type: TelegramAlertType) -> str:
