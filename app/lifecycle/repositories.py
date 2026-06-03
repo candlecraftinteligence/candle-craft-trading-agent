@@ -43,6 +43,45 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         ).fetchone()
         return _record_from_row(row) if row is not None else None
 
+    def get_record_by_lifecycle_id(self, lifecycle_id: str) -> SetupLifecycleRecord | None:
+        normalized = _lifecycle_id_text(lifecycle_id)
+        if normalized == NA:
+            return None
+        row = self._connection.execute(
+            """
+            SELECT * FROM setup_lifecycle_records
+            WHERE lifecycle_id = ?
+            """,
+            (normalized,),
+        ).fetchone()
+        return _record_from_row(row) if row is not None else None
+
+    def list_records_for_symbol(
+        self,
+        *,
+        symbol: str,
+        direction: str | None = None,
+    ) -> tuple[SetupLifecycleRecord, ...]:
+        normalized_symbol = _symbol(symbol)
+        if normalized_symbol == NA:
+            return ()
+        params: list[Any] = [normalized_symbol]
+        direction_clause = ""
+        normalized_direction = _identity_text(direction)
+        if normalized_direction != NA:
+            direction_clause = "AND direction = ?"
+            params.append(normalized_direction)
+        rows = self._connection.execute(
+            f"""
+            SELECT * FROM setup_lifecycle_records
+            WHERE symbol = ?
+              {direction_clause}
+            ORDER BY last_seen_at DESC, lifecycle_id ASC
+            """,
+            params,
+        ).fetchall()
+        return tuple(_record_from_row(row) for row in rows)
+
     def get_records_for_symbols(self, symbols: Sequence[str]) -> tuple[SetupLifecycleRecord, ...]:
         normalized = tuple(dict.fromkeys(_symbol(symbol) for symbol in symbols if _symbol(symbol) != NA))
         if not normalized:
@@ -241,6 +280,13 @@ def _identity_text(value: str | None) -> str:
     if value is None:
         return NA
     text = str(value).strip().lower()
+    return text if text else NA
+
+
+def _lifecycle_id_text(value: str | None) -> str:
+    if value is None:
+        return NA
+    text = str(value).strip()
     return text if text else NA
 
 

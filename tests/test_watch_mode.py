@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -278,7 +279,9 @@ def test_dry_run_default_does_not_call_telegram(tmp_path, monkeypatch, capsys) -
     )
 
     captured = capsys.readouterr()
-    assert "Telegram alerts: dry-run" in captured.out
+    assert "Telegram manual lifecycle alerts: disabled" in captured.out
+    assert "Telegram admin drafts: disabled/dry-run" in captured.out
+    assert "Legacy scanner alerts: dry-run" in captured.out
     assert "Candle Craft Setup Activated" in captured.out
 
 
@@ -474,6 +477,7 @@ def test_live_telegram_requires_env_vars(monkeypatch, tmp_path) -> None:
     save_watch_state(state_path, _prior_state())
     monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
     monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
+    monkeypatch.setattr(run_scan, "Settings", lambda: SimpleNamespace(telegram_bot_token=None, telegram_chat_id=None))
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
 

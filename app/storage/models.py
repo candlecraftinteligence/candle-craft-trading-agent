@@ -121,6 +121,38 @@ class ReplayResultRecord:
 
 
 @dataclass(frozen=True)
+class TelegramAlertAttemptRecord:
+    signal_id: str
+    symbol: str
+    direction: str
+    previous_state: str
+    new_state: str
+    alert_type: str
+    lifecycle_state: str
+    sent_at: str
+    telegram_status: str
+    message_hash: str
+    scan_run_id: str | None = None
+    attempted_alert_type: str = "N/A"
+    setup_quality_score: str = "N/A"
+    rr_planned: str = "N/A"
+    min_rr: str = "N/A"
+    opportunity_score: str = "N/A"
+    min_score_for_idea: str = "N/A"
+    technical_score: str = "N/A"
+    price_level: str = "N/A"
+    blocked_reason: str = "N/A"
+    invalid_target_fields: str = "N/A"
+    error_message: str = "N/A"
+    first_seen_at: str = "N/A"
+    last_seen_at: str = "N/A"
+    seen_count: int = 1
+    last_scan_run_id: str | None = None
+    last_error_message: str = "N/A"
+    id: int | None = None
+
+
+@dataclass(frozen=True)
 class ScanHistorySummary:
     run_id: str
     timestamp: str

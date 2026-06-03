@@ -13,6 +13,7 @@ from app.alerts.integrity_manifest import (
     build_alert_integrity_manifest,
 )
 from app.alerts.telegram import send_telegram_messages
+from app.alerts.telegram_sender import TelegramSender, TelegramSendResult
 from app.alerts.templates import CANDLE_CRAFT_SIGNATURE, format_trade_alert, split_message
 
 __all__ = [
@@ -24,6 +25,8 @@ __all__ = [
     "AlertIntegrityIssue",
     "AlertIntegrityManifest",
     "CANDLE_CRAFT_SIGNATURE",
+    "TelegramSender",
+    "TelegramSendResult",
     "alert_integrity_audit_to_dict",
     "audit_alert_integrity_artifact",
     "audit_alert_integrity_file",

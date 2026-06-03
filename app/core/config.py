@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     telegram_admin_chat_id: str | None = None
     telegram_public_channel_id: str | None = None
     telegram_vip_channel_id: str | None = None
+    telegram_signals_enabled: bool = False
+    local_manual_mode: bool = True
+    order_execution_enabled: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -32,6 +35,12 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_log_level(cls, value: str) -> str:
         return str(value).upper()
+
+    @model_validator(mode="after")
+    def enforce_manual_only_phase(self) -> Settings:
+        if self.order_execution_enabled:
+            raise ValueError("ORDER_EXECUTION_ENABLED must remain false for manual Telegram signal delivery mode.")
+        return self
 
 
 @lru_cache

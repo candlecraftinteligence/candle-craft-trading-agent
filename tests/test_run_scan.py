@@ -1962,3 +1962,43 @@ def test_diagnostics_level_overrides_verbose(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "BTCUSDT — REJECTED_NO_EDGE" in captured.out
     assert "Strategy diagnostics:" not in captured.out
+
+
+def test_telegram_manual_lifecycle_label_does_not_say_dry_run_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("TELEGRAM_SIGNALS_ENABLED", "true")
+    monkeypatch.setenv("LOCAL_MANUAL_MODE", "true")
+    monkeypatch.setenv("ORDER_EXECUTION_ENABLED", "false")
+    args = run_scan.parse_args(["--symbols", "BTCUSDT", "--telegram-manual-signals"])
+
+    label = run_scan._telegram_manual_lifecycle_status_label(args)
+
+    assert label == "enabled"
+    assert "dry-run" not in label
+
+
+def test_telegram_admin_draft_label_reports_disabled_dry_run(monkeypatch) -> None:
+    monkeypatch.setenv("TELEGRAM_ADMIN_ENABLED", "false")
+    monkeypatch.setenv("TELEGRAM_DRY_RUN", "true")
+    monkeypatch.setenv("ORDER_EXECUTION_ENABLED", "false")
+
+    assert run_scan._telegram_admin_draft_status_label() == "disabled/dry-run"
+
+
+def test_telegram_manual_lifecycle_summary_output(capsys) -> None:
+    run_scan._print_telegram_manual_lifecycle_summary(
+        run_scan.TelegramLifecycleDeliverySummary(
+            sent=1,
+            duplicate=2,
+            blocked=3,
+            blocked_repeat=4,
+            failed=5,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert "Telegram manual lifecycle summary:" in captured.out
+    assert "- sent: 1" in captured.out
+    assert "- duplicates skipped: 2" in captured.out
+    assert "- blocked: 3" in captured.out
+    assert "- blocked repeats compacted: 4" in captured.out
+    assert "- failed: 5" in captured.out

@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 9
 
 
 class StorageError(RuntimeError):
@@ -177,6 +177,43 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS ix_lifecycle_events_symbol_timestamp
                 ON setup_lifecycle_events(symbol, timestamp);
 
+            CREATE TABLE IF NOT EXISTS telegram_alert_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                previous_state TEXT NOT NULL DEFAULT 'N/A',
+                new_state TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                telegram_status TEXT NOT NULL,
+                message_hash TEXT NOT NULL,
+                scan_run_id TEXT,
+                attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
+                setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                rr_planned TEXT NOT NULL DEFAULT 'N/A',
+                min_rr TEXT NOT NULL DEFAULT 'N/A',
+                opportunity_score TEXT NOT NULL DEFAULT 'N/A',
+                min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+                technical_score TEXT NOT NULL DEFAULT 'N/A',
+                price_level TEXT NOT NULL DEFAULT 'N/A',
+                blocked_reason TEXT NOT NULL DEFAULT 'N/A',
+                invalid_target_fields TEXT NOT NULL DEFAULT 'N/A',
+                error_message TEXT NOT NULL DEFAULT 'N/A',
+                first_seen_at TEXT NOT NULL DEFAULT 'N/A',
+                last_seen_at TEXT NOT NULL DEFAULT 'N/A',
+                seen_count INTEGER NOT NULL DEFAULT 1,
+                last_scan_run_id TEXT,
+                last_error_message TEXT NOT NULL DEFAULT 'N/A',
+                UNIQUE(signal_id, alert_type)
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_signal
+                ON telegram_alert_attempts(signal_id, alert_type);
+            CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_scan_run
+                ON telegram_alert_attempts(scan_run_id);
+
             CREATE TABLE IF NOT EXISTS symbol_health (
                 symbol TEXT PRIMARY KEY,
                 successful_scans INTEGER NOT NULL DEFAULT 0,
@@ -229,6 +266,23 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "setup_lifecycle_records", "cooldown_until", "TEXT")
         _ensure_column(connection, "setup_lifecycle_records", "archived_at", "TEXT")
         _ensure_column(connection, "setup_lifecycle_events", "scan_run_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "scan_run_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "attempted_alert_type", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "setup_quality_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "rr_planned", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "min_rr", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "opportunity_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "min_score_for_idea", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "technical_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "price_level", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "blocked_reason", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "invalid_target_fields", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "error_message", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "first_seen_at", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "last_seen_at", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "seen_count", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(connection, "telegram_alert_attempts", "last_scan_run_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "last_error_message", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_health", "last_priority_rank", "INTEGER")
         _ensure_column(connection, "symbol_health", "last_prioritized_at", "TEXT")
