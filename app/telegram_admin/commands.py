@@ -89,6 +89,7 @@ class AdminCommandResponse:
     text: str
     run_id: str = NA
     reply_markup: Mapping[str, Any] | None = None
+    photo_path: Path | None = None
     photo_url: str | None = None
 
 
@@ -159,11 +160,17 @@ class TelegramAdminCommandService:
     def public_response_for(self, command: str, *, public_config: Any | None = None) -> AdminCommandResponse:
         normalized = normalize_admin_command(command)
         if normalized in {"/start", "/menu"}:
+            photo_path = _public_logo_path(public_config, self._project_root) if normalized == "/start" else None
             return _public_response(
                 normalized,
                 "public_menu",
                 format_public_menu_response(),
-                photo_url=_public_logo_url(public_config) if normalized == "/start" else None,
+                photo_path=photo_path,
+                photo_url=(
+                    _public_logo_url(public_config)
+                    if normalized == "/start" and photo_path is None
+                    else None
+                ),
             )
         if normalized == "/lastscan":
             return self._public_lastscan_response()
@@ -965,6 +972,7 @@ def _public_response(
     text: str,
     *,
     run_id: str = NA,
+    photo_path: Path | None = None,
     photo_url: str | None = None,
 ) -> AdminCommandResponse:
     return AdminCommandResponse(
@@ -973,6 +981,7 @@ def _public_response(
         text=text,
         run_id=run_id,
         reply_markup=public_menu_reply_markup(),
+        photo_path=photo_path,
         photo_url=photo_url,
     )
 
@@ -1755,6 +1764,21 @@ def _public_url(config: Any | None, name: str, *, fallback: str) -> str:
     if config is None:
         return fallback
     return _first_text(getattr(config, name, NA), fallback)
+
+
+def _public_logo_path(config: Any | None, project_root: Path) -> Path | None:
+    if config is None:
+        return None
+    text = _display(getattr(config, "public_logo_path", NA))
+    if text == NA:
+        return None
+    path = Path(text)
+    candidate = path if path.is_absolute() else project_root / path
+    try:
+        resolved = candidate.resolve(strict=False)
+        return resolved if resolved.is_file() else None
+    except (OSError, ValueError):
+        return None
 
 
 def _public_logo_url(config: Any | None) -> str | None:

@@ -10,7 +10,12 @@ import httpx
 
 from app.alerts.integrity_manifest import build_alert_integrity_manifest
 from app.core.config import Settings
-from app.telegram_admin import TelegramAdminCommandService, TelegramAdminConfig, process_telegram_admin_commands
+from app.telegram_admin import (
+    HttpxTelegramAdminCommandTransport,
+    TelegramAdminCommandService,
+    TelegramAdminConfig,
+    process_telegram_admin_commands,
+)
 from app.telegram_admin.commands import (
     ADMIN_MENU_BUTTON_ROWS,
     PUBLIC_MENU_BUTTON_ROWS,
@@ -51,6 +56,7 @@ class FakeCommandTransport:
         chat_id: str,
         message: str,
         reply_markup=None,
+        photo_path=None,
         photo_url=None,
     ):
         self.send_calls.append(
@@ -59,10 +65,11 @@ class FakeCommandTransport:
                 "chat_id": chat_id,
                 "message": message,
                 "reply_markup": reply_markup,
+                "photo_path": photo_path,
                 "photo_url": photo_url,
             }
         )
-        if photo_url is not None and self.fail_photo_send_with is not None:
+        if (photo_path is not None or photo_url is not None) and self.fail_photo_send_with is not None:
             return ({"status": "failed", "error": self.fail_photo_send_with},)
         if self.fail_send_with is not None:
             return ({"status": "failed", "error": self.fail_send_with},)
@@ -222,6 +229,13 @@ def _update(update_id: int, chat_id: str, text: str) -> dict[str, Any]:
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _write_local_logo(project_root: Path) -> Path:
+    logo_path = project_root / "assets" / "telegram" / "welcome.png"
+    logo_path.parent.mkdir(parents=True, exist_ok=True)
+    logo_path.write_bytes(b"fake-png-bytes")
+    return logo_path.resolve()
 
 
 def _assert_shell_screen(text: str) -> None:
@@ -661,6 +675,43 @@ def test_public_start_response_uses_public_copy_and_optional_logo(tmp_path) -> N
     assert "System Desk" not in response.text
     assert "Integrity Desk" not in response.text
     assert "Configuration Desk" not in response.text
+    assert response.photo_path is None
+    assert response.photo_url == "https://cdn.example.test/candle-logo.png"
+
+
+def test_public_start_uses_local_logo_path_when_it_exists(tmp_path) -> None:
+    logo_path = _write_local_logo(tmp_path)
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    config = TelegramAdminConfig.from_settings(
+        Settings(
+            _env_file=None,
+            candle_craft_public_logo_path=str(Path("assets") / "telegram" / "welcome.png"),
+            candle_craft_public_logo_url="https://cdn.example.test/candle-logo.png",
+        )
+    )
+
+    response = service.public_response_for("/start", public_config=config)
+
+    _assert_shell_screen(response.text)
+    _assert_public_menu_only(response.reply_markup)
+    assert response.text == _expected_public_start_text()
+    assert response.photo_path == logo_path
+    assert response.photo_url is None
+
+
+def test_public_start_falls_back_to_url_when_local_logo_path_is_missing(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    config = TelegramAdminConfig.from_settings(
+        Settings(
+            _env_file=None,
+            candle_craft_public_logo_path=str(Path("assets") / "telegram" / "missing.png"),
+            candle_craft_public_logo_url="https://cdn.example.test/candle-logo.png",
+        )
+    )
+
+    response = service.public_response_for("/start", public_config=config)
+
+    assert response.photo_path is None
     assert response.photo_url == "https://cdn.example.test/candle-logo.png"
 
 
@@ -673,6 +724,23 @@ def test_public_start_works_when_logo_url_is_missing(tmp_path) -> None:
     _assert_public_screen_safe(response.text)
     _assert_public_menu_only(response.reply_markup)
     assert response.text == _expected_public_start_text()
+    assert response.photo_path is None
+    assert response.photo_url is None
+
+
+def test_public_start_ignores_invalid_local_logo_path_without_crashing(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+
+    response = service.public_response_for(
+        "/start",
+        public_config=TelegramAdminConfig(public_logo_path="bad\0path"),
+    )
+
+    _assert_shell_screen(response.text)
+    _assert_public_screen_safe(response.text)
+    _assert_public_menu_only(response.reply_markup)
+    assert response.text == _expected_public_start_text()
+    assert response.photo_path is None
     assert response.photo_url is None
 
 
@@ -690,6 +758,7 @@ def test_public_menu_has_only_public_buttons_and_no_logo_when_missing(tmp_path) 
     assert "System Desk" not in response.text
     assert "Integrity Desk" not in response.text
     assert "Configuration Desk" not in response.text
+    assert response.photo_path is None
     assert response.photo_url is None
 
 
@@ -840,6 +909,7 @@ def test_public_links_and_logo_load_from_settings_and_render(tmp_path) -> None:
 
     start = service.public_response_for("/start", public_config=config)
 
+    assert start.photo_path is None
     assert start.photo_url == "https://cdn.example.test/logo.png"
     assert start.text == _expected_public_start_text()
 
@@ -917,6 +987,37 @@ def test_command_menu_cleanup_redacts_token_on_telegram_error(capsys) -> None:
     assert "secret-token" not in output
 
 
+def test_httpx_command_transport_uploads_local_public_logo_as_photo(tmp_path) -> None:
+    logo_path = _write_local_logo(tmp_path)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 202, "date": 1}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    transport = HttpxTelegramAdminCommandTransport(http_client=client, api_base_url="https://telegram.test")
+    try:
+        results = asyncio.run(
+            transport.send_message(
+                bot_token="secret-token",
+                chat_id="public-chat",
+                message=_expected_public_start_text(),
+                reply_markup={"keyboard": [[{"text": "📡 Last Scan"}]], "is_persistent": True},
+                photo_path=logo_path,
+            )
+        )
+    finally:
+        asyncio.run(client.aclose())
+
+    assert results[0]["status"] == "sent"
+    assert requests[0].url.path == "/botsecret-token/sendPhoto"
+    body = requests[0].content
+    assert b'name="photo"; filename="welcome.png"' in body
+    assert b"name=\"caption\"" in body
+    assert b"name=\"reply_markup\"" in body
+
+
 def test_every_public_screen_has_brand_header_footer_and_no_execution_buttons(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_alert_row(), _near_row()])
     config = TelegramAdminConfig()
@@ -977,7 +1078,9 @@ def test_public_start_and_menu_updates_route_to_public_ui(tmp_path) -> None:
     assert result.delivery_status == "sent_public"
     assert result.sent_count == 2
     assert len(transport.send_calls) == 2
+    assert transport.send_calls[0]["photo_path"] is None
     assert transport.send_calls[0]["photo_url"] == "https://cdn.example.test/candle-logo.png"
+    assert transport.send_calls[1]["photo_path"] is None
     assert transport.send_calls[1]["photo_url"] is None
     for call in transport.send_calls:
         assert call["chat_id"] == "public-chat"
@@ -995,6 +1098,83 @@ def test_public_start_and_menu_updates_route_to_public_ui(tmp_path) -> None:
     serialized = json.dumps(records)
     assert "public-chat" not in serialized
     assert "secret-token" not in serialized
+
+
+def test_public_start_sends_local_logo_path_when_configured_file_exists(tmp_path) -> None:
+    logo_path = _write_local_logo(tmp_path)
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    audit_path = tmp_path / "audit.jsonl"
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_logo_path=str(Path("assets") / "telegram" / "welcome.png"),
+                public_logo_url="https://cdn.example.test/candle-logo.png",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=audit_path,
+            state_path=tmp_path / "state.json",
+            updates=(_update(23, "public-chat", "/start"),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == 1
+    assert len(transport.send_calls) == 1
+    assert transport.send_calls[0]["photo_path"] == logo_path
+    assert transport.send_calls[0]["photo_url"] is None
+    assert transport.send_calls[0]["message"] == _expected_public_start_text()
+    _assert_public_menu_only(transport.send_calls[0]["reply_markup"])
+    records = _read_jsonl(audit_path)
+    assert records[0]["delivery_status"] == "sent_public"
+    serialized = json.dumps(records)
+    assert "secret-token" not in serialized
+    assert "public-chat" not in serialized
+
+
+def test_public_start_falls_back_to_text_when_local_logo_send_fails(tmp_path) -> None:
+    logo_path = _write_local_logo(tmp_path)
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    audit_path = tmp_path / "audit.jsonl"
+    transport = FakeCommandTransport(fail_photo_send_with="sendPhoto unavailable for secret-token public-chat")
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_logo_path=str(Path("assets") / "telegram" / "welcome.png"),
+                public_logo_url="https://cdn.example.test/candle-logo.png",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=audit_path,
+            state_path=tmp_path / "state.json",
+            updates=(_update(24, "public-chat", "/start"),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == 1
+    assert len(transport.send_calls) == 2
+    assert transport.send_calls[0]["photo_path"] == logo_path
+    assert transport.send_calls[0]["photo_url"] is None
+    assert transport.send_calls[1]["photo_path"] is None
+    assert transport.send_calls[1]["photo_url"] is None
+    assert transport.send_calls[1]["message"] == _expected_public_start_text()
+    records = _read_jsonl(audit_path)
+    assert records[0]["delivery_status"] == "sent_public"
+    serialized = json.dumps(records)
+    assert "secret-token" not in serialized
+    assert "public-chat" not in serialized
 
 
 def test_public_start_falls_back_to_text_when_logo_send_is_unavailable(tmp_path) -> None:
@@ -1022,7 +1202,9 @@ def test_public_start_falls_back_to_text_when_logo_send_is_unavailable(tmp_path)
     assert result.delivery_status == "sent_public"
     assert result.sent_count == 1
     assert len(transport.send_calls) == 2
+    assert transport.send_calls[0]["photo_path"] is None
     assert transport.send_calls[0]["photo_url"] == "https://cdn.example.test/candle-logo.png"
+    assert transport.send_calls[1]["photo_path"] is None
     assert transport.send_calls[1]["photo_url"] is None
     assert transport.send_calls[1]["message"] == _expected_public_start_text()
     records = _read_jsonl(audit_path)
