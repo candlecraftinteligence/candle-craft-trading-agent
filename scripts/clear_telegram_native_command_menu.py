@@ -19,7 +19,7 @@ from app.telegram_admin.native_menu import clear_telegram_native_command_menu  #
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Clear Telegram native slash commands while keeping Candle Craft reply keyboards."
+        description="Clear Telegram native slash commands while leaving Candle Craft chat controls untouched."
     )
     parser.add_argument("--dry-run", action="store_true", help="Validate config without calling Telegram.")
     return parser.parse_args(argv)
