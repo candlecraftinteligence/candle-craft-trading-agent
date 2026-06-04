@@ -54,6 +54,12 @@ TERMINAL_COMPLETION_ALERT_TYPES = {
     TelegramAlertType.SL_HIT.value,
     TelegramAlertType.TP3_HIT.value,
 }
+WATCHLIST_OUTCOME_TERMINAL_ALERT_TYPES = {
+    TelegramAlertType.TP3_HIT,
+    TelegramAlertType.SL_HIT,
+}
+WATCHLIST_OUTCOME_TRACKING_ATTEMPT = "WATCHLIST_OUTCOME_TRACKING"
+WATCHLIST_TERMINAL_SUPPRESSION_ATTEMPT = "WATCHLIST_TERMINAL_SUPPRESSION"
 SENT_WATCHLIST_RECONCILIATION_ATTEMPT = "SENT_WATCHLIST_RECONCILIATION"
 SENT_WATCHLIST_RECONCILIATION_NO_MATCH = "sent_watchlist_reconciliation_no_lifecycle_match"
 SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguous"
@@ -202,6 +208,13 @@ class SentWatchlistReconciliationOutcome:
     alert_type: TelegramAlertType
     message: TelegramSignalMessage
     symbol_result: ScannerSymbolResult
+
+
+@dataclass(frozen=True)
+class WatchlistCandleSnapshot:
+    high: Decimal
+    low: Decimal
+    identity: str = NA
 
 
 class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegramAlertAttemptRepository"]):
@@ -580,6 +593,14 @@ class TelegramLifecycleDeliveryService:
         self.min_score_for_idea = _decimal_or_none(min_score_for_idea)
         self.min_technical_score = _decimal_or_default(min_technical_score, DEFAULT_MIN_TECHNICAL_SCORE)
 
+    @property
+    def watchlist_outcome_tracking_enabled(self) -> bool:
+        return bool(getattr(self.settings, "telegram_watchlist_outcome_tracking_enabled", True))
+
+    @property
+    def public_watchlist_terminal_updates_enabled(self) -> bool:
+        return bool(getattr(self.settings, "telegram_public_watchlist_terminal_updates_enabled", False))
+
     async def deliver_for_run(
         self,
         result: ScannerRunResult,
@@ -600,7 +621,7 @@ class TelegramLifecycleDeliveryService:
         def record_delivery(delivery: TelegramLifecycleDelivery) -> None:
             nonlocal duplicate, sent, skipped, failed, blocked, blocked_repeat
             deliveries.append(delivery)
-            if delivery.status in {"sent", "failed", "duplicate"}:
+            if delivery.status in {"sent", "failed", "duplicate", "blocked", "blocked_repeat", "skipped"}:
                 current_run_attempts.add((delivery.signal_id, delivery.alert_type))
             if delivery.status in {"blocked", "blocked_repeat"} and delivery.error_message in TERMINAL_IDENTITY_BLOCK_REASONS:
                 current_run_identity_blocked_symbols.add(_symbol(delivery.symbol))
@@ -722,6 +743,21 @@ class TelegramLifecycleDeliveryService:
         )
         if decision is None:
             return None
+        if (
+            decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES
+            and prior_active_alert is not None
+            and prior_active_alert.alert_type == TelegramAlertType.WATCHLIST.value
+            and not self.public_watchlist_terminal_updates_enabled
+        ):
+            return _persist_suppressed_watchlist_terminal_update(
+                repository,
+                prior_alert=prior_active_alert,
+                symbol_result=symbol_result,
+                alert_type=decision.alert_type,
+                message=decision.message,
+                scan_run_id=scan_run_id,
+                eligibility_context=eligibility_context or TelegramEligibilityContext(),
+            )
 
         signal_id = _signal_id(symbol_result)
         message = decision.message
@@ -842,6 +878,24 @@ class TelegramLifecycleDeliveryService:
                 scan_run_id=scan_run_id,
             ):
                 continue
+            if (prior_alert.signal_id, TelegramAlertType.WATCHLIST.value) in current_run_attempts:
+                continue
+
+            current_result_for_prior = _current_result_for_prior_watchlist(prior_alert, current_results)
+            if self.watchlist_outcome_tracking_enabled and current_result_for_prior is not None:
+                outcome_delivery = await self._send_watchlist_outcome_update(
+                    repository,
+                    prior_alert=prior_alert,
+                    current_result=current_result_for_prior,
+                    scan_run_id=scan_run_id,
+                    eligibility_context=eligibility_context,
+                )
+                if outcome_delivery is not None:
+                    deliveries.append(outcome_delivery)
+                    if outcome_delivery.alert_type in {
+                        alert_type.value for alert_type in WATCHLIST_OUTCOME_TERMINAL_ALERT_TYPES
+                    }:
+                        continue
 
             match = _match_sent_watchlist_lifecycle(
                 prior_alert,
@@ -863,6 +917,8 @@ class TelegramLifecycleDeliveryService:
                 continue
 
             current_result = _current_result_for_lifecycle_record(match.record, prior_alert, current_results)
+            if current_result is None:
+                current_result = current_result_for_prior
             outcome = _sent_watchlist_reconciliation_outcome(
                 prior_alert,
                 match.record,
@@ -880,6 +936,23 @@ class TelegramLifecycleDeliveryService:
                 eligibility_context=eligibility_context,
             )
             if outcome is None:
+                continue
+            if (
+                outcome.alert_type in TERMINAL_UPDATE_ALERT_TYPES
+                and prior_alert.alert_type == TelegramAlertType.WATCHLIST.value
+                and not self.public_watchlist_terminal_updates_enabled
+            ):
+                deliveries.append(
+                    _persist_suppressed_watchlist_terminal_update(
+                        repository,
+                        prior_alert=prior_alert,
+                        symbol_result=outcome.symbol_result,
+                        alert_type=outcome.alert_type,
+                        message=outcome.message,
+                        scan_run_id=scan_run_id,
+                        eligibility_context=eligibility_context,
+                    )
+                )
                 continue
 
             signal_id = prior_alert.signal_id
@@ -929,6 +1002,99 @@ class TelegramLifecycleDeliveryService:
                 )
             )
         return tuple(deliveries)
+
+    async def _send_watchlist_outcome_update(
+        self,
+        repository: SQLiteTelegramAlertAttemptRepository,
+        *,
+        prior_alert: TelegramAlertAttemptRecord,
+        current_result: ScannerSymbolResult,
+        scan_run_id: str | None,
+        eligibility_context: TelegramEligibilityContext,
+    ) -> TelegramLifecycleDelivery | None:
+        outcome = _watchlist_outcome_for_current_result(
+            repository,
+            prior_alert=prior_alert,
+            current_result=current_result,
+            eligibility_context=eligibility_context,
+            scan_run_id=scan_run_id,
+        )
+        if outcome is None:
+            return None
+        if isinstance(outcome, TelegramLifecycleDelivery):
+            return outcome
+
+        alert_type, message = outcome
+        if repository.has_attempt(signal_id=prior_alert.signal_id, alert_type=alert_type):
+            repository.compact_existing_attempt(
+                signal_id=prior_alert.signal_id,
+                alert_type=alert_type,
+                scan_run_id=scan_run_id,
+            )
+            return TelegramLifecycleDelivery(
+                symbol=prior_alert.symbol,
+                signal_id=prior_alert.signal_id,
+                alert_type=alert_type.value,
+                status="duplicate",
+                detail="Duplicate Telegram watchlist outcome update prevented.",
+            )
+
+        message_text = format_telegram_signal_message(alert_type, message)
+        message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
+        send_result = await self.sender.send_text(message_text)
+        transition = current_result.lifecycle_transition
+        previous_state = transition.from_state.value if transition and transition.from_state else prior_alert.new_state
+        new_state = transition.to_state.value if transition else _lifecycle_state_text(current_result)
+        record = TelegramAlertAttemptRecord(
+            signal_id=prior_alert.signal_id,
+            symbol=_symbol(message.symbol),
+            direction=_text(message.direction),
+            previous_state=previous_state,
+            new_state=new_state,
+            alert_type=alert_type.value,
+            lifecycle_state=_lifecycle_state_text(current_result),
+            sent_at=now_utc_iso(),
+            telegram_status=send_result.status,
+            message_hash=message_hash,
+            scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+            attempted_alert_type=alert_type.value,
+            setup_quality_score=_quality_score(current_result),
+            rr_planned=_text(message.planned_rr),
+            min_rr=_text(eligibility_context.min_rr),
+            opportunity_score=_opportunity_score_text(current_result),
+            min_score_for_idea=_text(eligibility_context.min_score_for_idea),
+            technical_score=_technical_score_text(current_result),
+            price_level=_price_level_for_alert(alert_type, message),
+            blocked_reason=NA,
+            invalid_target_fields=NA,
+            error_message=send_result.error_message,
+        )
+        inserted = repository.insert_attempt(record)
+        if not inserted:
+            return TelegramLifecycleDelivery(
+                symbol=prior_alert.symbol,
+                signal_id=prior_alert.signal_id,
+                alert_type=alert_type.value,
+                status="duplicate",
+                detail="Duplicate Telegram watchlist outcome update prevented.",
+                message_hash=message_hash,
+            )
+        logger.info(
+            "Telegram watchlist outcome persisted: symbol=%s alert_type=%s status=%s message_hash=%s",
+            prior_alert.symbol,
+            alert_type.value,
+            send_result.status,
+            message_hash,
+        )
+        return TelegramLifecycleDelivery(
+            symbol=prior_alert.symbol,
+            signal_id=prior_alert.signal_id,
+            alert_type=alert_type.value,
+            status=send_result.status,
+            detail=send_result.detail,
+            message_hash=message_hash,
+            error_message=send_result.error_message,
+        )
 
     async def _send_reconciliation_update(
         self,
@@ -1254,25 +1420,29 @@ def _watchlist_context_sentence(symbol_result: ScannerSymbolResult, diagnostics:
 def _watchlist_needs_next(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> tuple[str, ...]:
     intelligence = _near_miss_intelligence(symbol_result, diagnostics)
     failed_gate = _watch_failed_gate(symbol_result, diagnostics)
+    direction = _first_non_na(
+        diagnostics.get("bias"),
+        diagnostics.get("direction"),
+        getattr(symbol_result.lifecycle_state, "direction", NA) if symbol_result.lifecycle_state is not None else NA,
+    )
     if failed_gate in WATCHLIST_STALE_OR_INCOMPLETE_GATES:
         return (
-            "Wait for a fresh liquidity sweep.",
-            "Require a new BOS/CHoCH before confirmation.",
-            "Build a new pullback map with valid OB/FVG and RR.",
+            "A fresh BOS/CHoCH is needed if the current structure becomes stale.",
+            "Pullback must remain inside the planned zone.",
+            _directional_invalidation_condition(direction),
         )
     if failed_gate in WATCHLIST_CONFIRMATION_GATES:
         return (
-            "Wait for a 5m BOS/CHoCH close beyond the required LTF swing.",
-            "Keep the sweep context intact before confirmation.",
-            "Only reassess pullback, OB/FVG, fib, RR, and risk after confirmation.",
+            "Price must trade into the Limit Zone.",
+            "Structure must continue to respect the sweep/BOS/CHoCH context.",
+            _directional_invalidation_condition(direction),
         )
     if failed_gate in WATCHLIST_OB_FVG_GATES:
-        lines = [
+        return (
             "A valid OB/FVG zone must form inside the displacement impulse.",
-            "The OB/FVG zone must overlap the preferred fib pullback zone.",
-            "RR and final quality gates must pass before confirmation.",
-        ]
-        return tuple(_append_rr_requirement(lines, diagnostics))
+            "Price must react from the planned Limit Zone.",
+            _directional_invalidation_condition(direction),
+        )
 
     candidates = (
         _field(intelligence, "next_required_conditions"),
@@ -1286,13 +1456,74 @@ def _watchlist_needs_next(symbol_result: ScannerSymbolResult, diagnostics: Mappi
     for candidate in candidates:
         for value in _sequence_or_single(candidate):
             text = _clean_watch_text(value)
-            if text != NA and text not in lines:
+            if text != NA and _chart_only_watch_condition(text) and text not in lines:
                 lines.append(text)
             if len(lines) == 3:
-                return tuple(_append_rr_requirement(lines, diagnostics))
+                return tuple(lines)
     if lines:
-        return tuple(_append_rr_requirement(lines, diagnostics))
-    return ("N/A \u2014 waiting for the next lifecycle update from the core engine.",)
+        while len(lines) < 3:
+            fallback = _fallback_watchlist_needs_next(direction)[len(lines)]
+            if fallback not in lines:
+                lines.append(fallback)
+            else:
+                break
+        return tuple(lines[:3])
+    return _fallback_watchlist_needs_next(direction)
+
+
+def _fallback_watchlist_needs_next(direction: Any) -> tuple[str, str, str]:
+    side = _status_key(direction)
+    if side == "long":
+        return (
+            "Price must trade into the Limit Zone.",
+            "Limit Zone must hold as support after the pullback.",
+            "Bullish structure must remain valid above the invalidation level.",
+        )
+    if side == "short":
+        return (
+            "Price must trade into the Limit Zone.",
+            "Limit Zone must hold as resistance after the pullback.",
+            "Bearish structure must remain valid below the invalidation level.",
+        )
+    return (
+        "Price must interact with the Limit Zone.",
+        "Structure must remain valid.",
+        "Invalidation level must hold.",
+    )
+
+
+def _directional_invalidation_condition(direction: Any) -> str:
+    side = _status_key(direction)
+    if side == "long":
+        return "Price must not accept beyond the invalidation level."
+    if side == "short":
+        return "Price must not accept beyond the invalidation level."
+    return "Invalidation level must hold."
+
+
+def _chart_only_watch_condition(value: Any) -> bool:
+    text = _text(value).lower()
+    if text == NA.lower():
+        return False
+    tokens = text.replace("/", " ").replace("-", " ").replace(".", " ").replace(",", " ").split()
+    forbidden = (
+        "trust meter",
+        "risk/reward",
+        "risk reward",
+        "score",
+        "scoring",
+        "opportunity score",
+        "quality score",
+        "final confluence threshold",
+        "scanner threshold",
+        "grade",
+        "hard rejection",
+        "required threshold",
+        "quality gate",
+        "final quality",
+        "core engine",
+    )
+    return "rr" not in tokens and not any(fragment in text for fragment in forbidden)
 
 
 def _watchlist_has_public_plan_levels(diagnostics: Mapping[str, Any]) -> bool:
@@ -2119,11 +2350,17 @@ def _usable_needs_next(values: Sequence[Any]) -> tuple[str, ...]:
             continue
         if _looks_like_rejection_reason(text):
             continue
+        if not _chart_only_watch_condition(text):
+            continue
         usable.append(text)
     return tuple(usable)
 
 
 def _watchlist_rr_warning_present(message: TelegramSignalMessage) -> bool:
+    planned_rr = _decimal_or_none(message.planned_rr)
+    min_rr = _decimal_or_none(message.min_rr) or DEFAULT_CONFIRMED_MIN_RR
+    if planned_rr is not None and planned_rr < min_rr:
+        return True
     haystack = " ".join(
         text
         for text in (
@@ -2384,6 +2621,257 @@ def _persist_sent_watchlist_reconciliation_block(
         message_hash=message_hash,
         error_message=reason,
     )
+
+
+def _persist_watchlist_outcome_audit(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    prior_alert: TelegramAlertAttemptRecord,
+    *,
+    reason: str,
+    scan_run_id: str | None,
+    symbol_result: ScannerSymbolResult | None = None,
+    message: TelegramSignalMessage | None = None,
+    price_level: str = NA,
+) -> None:
+    seen_at = now_utc_iso()
+    alert_type = _watchlist_outcome_audit_alert_type(reason)
+    transition = symbol_result.lifecycle_transition if symbol_result is not None else None
+    previous_state = transition.from_state.value if transition and transition.from_state else NA
+    new_state = transition.to_state.value if transition else _lifecycle_state_text(symbol_result) if symbol_result else NA
+    message_hash = hashlib.sha256(
+        f"{prior_alert.signal_id}|{WATCHLIST_OUTCOME_TRACKING_ATTEMPT}|{reason}".encode("utf-8")
+    ).hexdigest()
+    record = TelegramAlertAttemptRecord(
+        signal_id=prior_alert.signal_id,
+        symbol=prior_alert.symbol,
+        direction=prior_alert.direction,
+        previous_state=previous_state,
+        new_state=new_state,
+        alert_type=alert_type,
+        lifecycle_state=_lifecycle_state_text(symbol_result) if symbol_result is not None else NA,
+        sent_at=seen_at,
+        telegram_status="skipped",
+        message_hash=message_hash,
+        scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        attempted_alert_type=WATCHLIST_OUTCOME_TRACKING_ATTEMPT,
+        setup_quality_score=_quality_score(symbol_result) if symbol_result is not None else NA,
+        rr_planned=_text(message.planned_rr) if message is not None else NA,
+        min_rr=_text(message.min_rr) if message is not None else NA,
+        opportunity_score=_opportunity_score_text(symbol_result) if symbol_result is not None else NA,
+        min_score_for_idea=NA,
+        technical_score=_technical_score_text(symbol_result) if symbol_result is not None else NA,
+        price_level=price_level,
+        blocked_reason=reason,
+        invalid_target_fields=NA,
+        error_message=reason,
+        first_seen_at=seen_at,
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        last_error_message=reason,
+    )
+    if not repository.insert_attempt(record):
+        repository.compact_repeated_attempt(record)
+
+
+def _persist_suppressed_watchlist_terminal_update(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    prior_alert: TelegramAlertAttemptRecord,
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage | None,
+    scan_run_id: str | None,
+    eligibility_context: TelegramEligibilityContext,
+) -> TelegramLifecycleDelivery:
+    seen_at = now_utc_iso()
+    reason = "public_watchlist_terminal_updates_disabled"
+    skipped_alert_type = _watchlist_terminal_suppression_alert_type(alert_type)
+    transition = symbol_result.lifecycle_transition
+    previous_state = transition.from_state.value if transition and transition.from_state else NA
+    new_state = transition.to_state.value if transition else _lifecycle_state_text(symbol_result)
+    message_hash = hashlib.sha256(
+        f"{prior_alert.signal_id}|{WATCHLIST_TERMINAL_SUPPRESSION_ATTEMPT}|{alert_type.value}".encode("utf-8")
+    ).hexdigest()
+    record = TelegramAlertAttemptRecord(
+        signal_id=prior_alert.signal_id,
+        symbol=prior_alert.symbol,
+        direction=prior_alert.direction,
+        previous_state=previous_state,
+        new_state=new_state,
+        alert_type=skipped_alert_type,
+        lifecycle_state=_lifecycle_state_text(symbol_result),
+        sent_at=seen_at,
+        telegram_status="skipped",
+        message_hash=message_hash,
+        scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        attempted_alert_type=alert_type.value,
+        setup_quality_score=_quality_score(symbol_result),
+        rr_planned=_text(message.planned_rr) if message is not None else NA,
+        min_rr=_text(eligibility_context.min_rr),
+        opportunity_score=_opportunity_score_text(symbol_result),
+        min_score_for_idea=_text(eligibility_context.min_score_for_idea),
+        technical_score=_technical_score_text(symbol_result),
+        price_level=_price_level_for_alert(alert_type, message) if message is not None else NA,
+        blocked_reason=reason,
+        invalid_target_fields=NA,
+        error_message=reason,
+        first_seen_at=seen_at,
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        last_error_message=reason,
+    )
+    inserted = repository.insert_attempt(record)
+    status = "skipped"
+    detail = "Public watchlist terminal update suppressed by configuration."
+    if not inserted:
+        compacted = repository.compact_repeated_attempt(record)
+        status = "blocked_repeat" if compacted else "duplicate"
+        detail = (
+            "Repeated suppressed watchlist terminal update compacted."
+            if compacted
+            else "Duplicate suppressed watchlist terminal update prevented."
+        )
+    return TelegramLifecycleDelivery(
+        symbol=prior_alert.symbol,
+        signal_id=prior_alert.signal_id,
+        alert_type=alert_type.value,
+        status=status,
+        detail=detail,
+        message_hash=message_hash,
+        error_message=reason,
+    )
+
+
+def _watchlist_outcome_for_current_result(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    prior_alert: TelegramAlertAttemptRecord,
+    current_result: ScannerSymbolResult,
+    eligibility_context: TelegramEligibilityContext,
+    scan_run_id: str | None,
+) -> tuple[TelegramAlertType, TelegramSignalMessage] | None:
+    if prior_alert.alert_type != TelegramAlertType.WATCHLIST.value or prior_alert.telegram_status != "sent":
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason="outcome_tracking_no_prior_public_watchlist",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+        )
+        return None
+    if repository.has_sent_terminal_outcome(signal_id=prior_alert.signal_id):
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason="outcome_tracking_already_closed",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+        )
+        return None
+
+    message = _message_with_prior_public_identity(
+        replace(
+            telegram_signal_message_from_symbol(current_result),
+            min_rr=eligibility_context.min_rr,
+            watchlist_outcome=True,
+        ),
+        prior_alert,
+    )
+    side = _status_key(message.direction)
+    limit_zone = _limit_zone_values(message)
+    if side not in {"long", "short"} or limit_zone is None:
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason="outcome_tracking_missing_entry",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+            message=message,
+        )
+        return None
+
+    candle = _watchlist_candle_snapshot(current_result)
+    if candle is None:
+        return None
+
+    stop_loss = _valid_watchlist_stop(message, limit_zone)
+    if stop_loss is None:
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason="outcome_tracking_missing_stop",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+            message=message,
+        )
+
+    targets, missing_targets = _valid_watchlist_targets(message, limit_zone)
+    if missing_targets:
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason="outcome_tracking_missing_targets",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+            message=message,
+        )
+
+    if not repository.has_attempt(signal_id=prior_alert.signal_id, alert_type=TelegramAlertType.LIMIT_HIT):
+        if not _candle_touches_zone(candle, limit_zone):
+            _persist_watchlist_outcome_audit(
+                repository,
+                prior_alert,
+                reason="outcome_tracking_not_limit_hit_yet",
+                scan_run_id=scan_run_id,
+                symbol_result=current_result,
+                message=message,
+                price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
+            )
+            return None
+        if _same_candle_touches_post_limit_outcome(candle, side=side, stop_loss=stop_loss, targets=targets):
+            _persist_watchlist_outcome_audit(
+                repository,
+                prior_alert,
+                reason="outcome_tracking_same_candle_ambiguous",
+                scan_run_id=scan_run_id,
+                symbol_result=current_result,
+                message=message,
+                price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
+            )
+        return TelegramAlertType.LIMIT_HIT, message
+
+    if repository.has_attempt(signal_id=prior_alert.signal_id, alert_type=TelegramAlertType.SL_HIT) or repository.has_attempt(
+        signal_id=prior_alert.signal_id,
+        alert_type=TelegramAlertType.TP3_HIT,
+    ):
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason="outcome_tracking_already_closed",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+            message=message,
+        )
+        return None
+
+    sl_hit = stop_loss is not None and _stop_touched(candle, side=side, stop_loss=stop_loss)
+    next_tp = _next_touched_watchlist_tp(repository, prior_alert.signal_id, candle, side=side, targets=targets)
+    if sl_hit and next_tp is not None:
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason="outcome_tracking_same_candle_ambiguous",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+            message=message,
+            price_level=_price_level_for_alert(next_tp, message),
+        )
+        return None
+    if sl_hit:
+        return TelegramAlertType.SL_HIT, message
+    if next_tp is not None:
+        return next_tp, message
+    return None
 
 
 def _apply_soft_failed_confirmation_grace_to_decision(
@@ -2770,6 +3258,209 @@ def _sent_watchlist_snapshot_by_symbol(
     return {symbol: tuple(records) for symbol, records in grouped.items()}
 
 
+def _current_result_for_prior_watchlist(
+    prior_alert: TelegramAlertAttemptRecord,
+    current_results: Sequence[ScannerSymbolResult],
+) -> ScannerSymbolResult | None:
+    exact_matches = tuple(
+        symbol_result
+        for symbol_result in current_results
+        if prior_alert.signal_id in _signal_id_candidates(symbol_result)
+    )
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        return None
+
+    symbol_matches = [
+        symbol_result
+        for symbol_result in current_results
+        if _symbol(symbol_result.symbol) == _symbol(prior_alert.symbol)
+    ]
+    prior_direction = _status_key(prior_alert.direction)
+    if prior_direction in {"long", "short"}:
+        symbol_matches = [
+            symbol_result
+            for symbol_result in symbol_matches
+            if _status_key(telegram_signal_message_from_symbol(symbol_result).direction) in {prior_direction, ""}
+        ]
+    return symbol_matches[0] if len(symbol_matches) == 1 else None
+
+
+def _watchlist_candle_snapshot(symbol_result: ScannerSymbolResult) -> WatchlistCandleSnapshot | None:
+    diagnostics = _representative_diagnostics(symbol_result)
+    for key in ("current_candle", "latest_candle", "candle"):
+        snapshot = _candle_snapshot_from_value(diagnostics.get(key))
+        if snapshot is not None:
+            return snapshot
+
+    for high_key, low_key in (
+        ("candle_high", "candle_low"),
+        ("latest_high", "latest_low"),
+        ("current_high", "current_low"),
+        ("high", "low"),
+    ):
+        snapshot = _candle_snapshot_from_high_low(diagnostics.get(high_key), diagnostics.get(low_key))
+        if snapshot is not None:
+            return snapshot
+
+    snapshot = _candle_snapshot_from_high_low(
+        getattr(symbol_result, "latest_high", NA),
+        getattr(symbol_result, "latest_low", NA),
+    )
+    if snapshot is not None:
+        return snapshot
+
+    for key in ("candles_5m", "candles_15m", "candles_1h", "candles_4h", "candles_12h", "candles_2d", "candles"):
+        values = diagnostics.get(key)
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray, Mapping)) or not values:
+            continue
+        snapshot = _candle_snapshot_from_value(values[-1])
+        if snapshot is not None:
+            return snapshot
+    return None
+
+
+def _candle_snapshot_from_value(value: Any) -> WatchlistCandleSnapshot | None:
+    if isinstance(value, Mapping):
+        high = _decimal_or_none(value.get("high"))
+        low = _decimal_or_none(value.get("low"))
+        identity = _first_non_na(
+            value.get("timestamp"),
+            value.get("opened_at"),
+            value.get("open_time"),
+            value.get("time"),
+        )
+    else:
+        high = _decimal_or_none(getattr(value, "high", NA))
+        low = _decimal_or_none(getattr(value, "low", NA))
+        identity = _first_non_na(
+            getattr(value, "timestamp", NA),
+            getattr(value, "opened_at", NA),
+            getattr(value, "open_time", NA),
+            getattr(value, "time", NA),
+        )
+    if high is None or low is None:
+        return None
+    return WatchlistCandleSnapshot(high=max(high, low), low=min(high, low), identity=_text(identity))
+
+
+def _candle_snapshot_from_high_low(high: Any, low: Any) -> WatchlistCandleSnapshot | None:
+    high_value = _decimal_or_none(high)
+    low_value = _decimal_or_none(low)
+    if high_value is None or low_value is None:
+        return None
+    return WatchlistCandleSnapshot(high=max(high_value, low_value), low=min(high_value, low_value))
+
+
+def _limit_zone_values(message: TelegramSignalMessage) -> tuple[Decimal, Decimal] | None:
+    watch_pair = _decimal_pair_text(message.watch_zone)
+    if watch_pair is not None:
+        low, high = watch_pair
+        return min(low, high), max(low, high)
+
+    low = _decimal_or_none(message.entry_low)
+    high = _decimal_or_none(message.entry_high)
+    if low is not None and high is not None:
+        return min(low, high), max(low, high)
+    single = low if low is not None else high
+    if single is not None:
+        return single, single
+    return None
+
+
+def _candle_touches_zone(candle: WatchlistCandleSnapshot, zone: tuple[Decimal, Decimal]) -> bool:
+    low, high = zone
+    return candle.high >= low and candle.low <= high
+
+
+def _valid_watchlist_stop(message: TelegramSignalMessage, zone: tuple[Decimal, Decimal]) -> Decimal | None:
+    stop_loss = _decimal_or_none(message.stop_loss)
+    if stop_loss is None:
+        return None
+    side = _status_key(message.direction)
+    reference = (zone[0] + zone[1]) / Decimal("2")
+    if side == "long" and stop_loss >= reference:
+        return None
+    if side == "short" and stop_loss <= reference:
+        return None
+    return stop_loss
+
+
+def _valid_watchlist_targets(
+    message: TelegramSignalMessage,
+    zone: tuple[Decimal, Decimal],
+) -> tuple[tuple[TelegramAlertType, Decimal], bool]:
+    side = _status_key(message.direction)
+    reference = (zone[0] + zone[1]) / Decimal("2")
+    raw_targets = (
+        (TelegramAlertType.TP1_HIT, _decimal_or_none(message.tp1)),
+        (TelegramAlertType.TP2_HIT, _decimal_or_none(message.tp2)),
+        (TelegramAlertType.TP3_HIT, _decimal_or_none(message.tp3)),
+    )
+    present = tuple((alert_type, target) for alert_type, target in raw_targets if target is not None)
+    missing = len(present) != len(raw_targets)
+    if not present or side not in {"long", "short"}:
+        return (), True
+
+    invalid = False
+    for _alert_type, target in present:
+        if side == "long" and target <= reference:
+            invalid = True
+        if side == "short" and target >= reference:
+            invalid = True
+    for (_, left), (_, right) in zip(present, present[1:]):
+        if side == "long" and left >= right:
+            invalid = True
+        if side == "short" and left <= right:
+            invalid = True
+    return (() if invalid else present), missing or invalid
+
+
+def _same_candle_touches_post_limit_outcome(
+    candle: WatchlistCandleSnapshot,
+    *,
+    side: str,
+    stop_loss: Decimal | None,
+    targets: Sequence[tuple[TelegramAlertType, Decimal]],
+) -> bool:
+    if stop_loss is not None and _stop_touched(candle, side=side, stop_loss=stop_loss):
+        return True
+    return any(_target_touched(candle, side=side, target=target) for _alert_type, target in targets)
+
+
+def _stop_touched(candle: WatchlistCandleSnapshot, *, side: str, stop_loss: Decimal) -> bool:
+    if side == "long":
+        return candle.low <= stop_loss
+    if side == "short":
+        return candle.high >= stop_loss
+    return False
+
+
+def _target_touched(candle: WatchlistCandleSnapshot, *, side: str, target: Decimal) -> bool:
+    if side == "long":
+        return candle.high >= target
+    if side == "short":
+        return candle.low <= target
+    return False
+
+
+def _next_touched_watchlist_tp(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    signal_id: str,
+    candle: WatchlistCandleSnapshot,
+    *,
+    side: str,
+    targets: Sequence[tuple[TelegramAlertType, Decimal]],
+) -> TelegramAlertType | None:
+    for alert_type, target in targets:
+        if repository.has_attempt(signal_id=signal_id, alert_type=alert_type):
+            continue
+        if _target_touched(candle, side=side, target=target):
+            return alert_type
+    return None
+
+
 def _current_lifecycle_records_for_signal_id(
     signal_id: str,
     current_results: Sequence[ScannerSymbolResult],
@@ -3066,6 +3757,16 @@ def _blocked_alert_type(alert_type: TelegramAlertType, reason: str) -> str:
     return f"{alert_type.value}_BLOCKED_{digest}"
 
 
+def _watchlist_outcome_audit_alert_type(reason: str) -> str:
+    digest = hashlib.sha256(_status_key(reason).encode("utf-8")).hexdigest()[:12]
+    return f"{WATCHLIST_OUTCOME_TRACKING_ATTEMPT}_{digest}"
+
+
+def _watchlist_terminal_suppression_alert_type(alert_type: TelegramAlertType) -> str:
+    digest = hashlib.sha256(alert_type.value.encode("utf-8")).hexdigest()[:12]
+    return f"{WATCHLIST_TERMINAL_SUPPRESSION_ATTEMPT}_{digest}"
+
+
 def _selected_setup(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Any | None:
     mode = _first_non_na(
         symbol_result.valid_strategy_modes[0] if symbol_result.valid_strategy_modes else NA,
@@ -3317,6 +4018,10 @@ def _price_level_for_alert(alert_type: TelegramAlertType, message: TelegramSigna
     if alert_type == TelegramAlertType.SL_HIT:
         return _text(message.stop_loss)
     if alert_type == TelegramAlertType.LIMIT_HIT:
+        zone = _limit_zone_values(message)
+        if zone is not None:
+            low, high = zone
+            return f"{_text(low)}-{_text(high)}"
         return f"{_text(message.entry_low)}-{_text(message.entry_high)}"
     return _text(message.price_level)
 

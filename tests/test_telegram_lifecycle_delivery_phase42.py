@@ -17,7 +17,7 @@ from app.alerts.telegram_lifecycle import (
     telegram_signal_message_from_symbol,
 )
 from app.alerts.telegram_sender import TelegramSendResult, TelegramSender
-from app.core.config import Settings
+from app.core.config import Settings as AppSettings
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import FOOTER, HEADER_PREFIX, format_telegram_signal_message
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
@@ -38,6 +38,11 @@ class FakeSender:
     async def send_text(self, text: str) -> TelegramSendResult:
         self.messages.append(text)
         return TelegramSendResult(status=self.status, detail=f"{self.status}.")
+
+
+def Settings(*args, **kwargs):
+    kwargs.setdefault("telegram_public_watchlist_terminal_updates_enabled", True)
+    return AppSettings(*args, **kwargs)
 
 
 def _config() -> ScannerRunConfig:
@@ -326,6 +331,54 @@ def _soft_failed_confirmation_rows(db_path: Path) -> list[tuple[str, str, str, i
         ).fetchall()
 
 
+def _outcome_scan_symbol(
+    *,
+    signal_id: str = "outcome-watch",
+    direction: str = "long",
+    high: Decimal = Decimal("101"),
+    low: Decimal = Decimal("99"),
+    diagnostics: dict[str, object] | None = None,
+) -> ScannerSymbolResult:
+    payload = diagnostics or (
+        _public_ready_watchlist_diagnostics()
+        if direction == "long"
+        else _public_ready_watchlist_diagnostics(
+            bias="short",
+            direction="short",
+            entry_low=Decimal("100"),
+            entry_high=Decimal("102"),
+            stop=Decimal("105"),
+            tp1=Decimal("95"),
+            tp2=Decimal("90"),
+            tp3=Decimal("85"),
+            rr_to_tp2=Decimal("3"),
+        )
+    )
+    return _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id=signal_id,
+        diagnostics=payload,
+    ).model_copy(
+        update={
+            "lifecycle_state": None,
+            "lifecycle_transition": None,
+            "latest_high": high,
+            "latest_low": low,
+        }
+    )
+
+
+def _watchlist_outcome_rows(db_path: Path) -> list[tuple[str, str, str, str]]:
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT alert_type, telegram_status, attempted_alert_type, blocked_reason
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+
+
 def _assert_transition_message_clean(message: str, *, signal_id: str, status: str) -> None:
     assert message.startswith(HEADER_PREFIX)
     assert message.endswith(FOOTER)
@@ -533,7 +586,7 @@ def test_hype_style_public_ready_watchlist_sends_watchlist_not_confirmed() -> No
     assert "CANDLE CRAFT WATCHLIST" in text
     assert "HYPEUSDT | long" in text
     assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
-    assert "Watch Zone:\n71.41 \u2013 71.68" in text
+    assert "Limit Zone:\n71.41 \u2013 71.68" in text
     assert "Potential Targets:" in text
     assert "TP2: 73.1" in text
     assert "Planned RR: 2.9R \u2014 watchlist only, final RR must improve to \u22653R before confirmation." in text
@@ -2776,3 +2829,316 @@ def test_each_alert_type_is_not_sent_twice(tmp_path: Path) -> None:
         assert first.sent == 1, alert_type
         assert second.duplicate == 1, alert_type
         assert len(sender.messages) == 1, alert_type
+
+
+def test_sent_watchlist_limit_zone_touch_sends_limit_hit_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "limit-hit.db"
+    signal_id = "watch-limit-hit"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _outcome_scan_symbol(signal_id=signal_id, high=Decimal("101"), low=Decimal("99"))
+
+    first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="limit-1"))
+    second = run(service.deliver_for_run(_run_result(symbol), scan_run_id="limit-2"))
+
+    assert first.sent == 1
+    assert second.sent == 0
+    assert len(sender.messages) == 1
+    assert "Status:\nLIMIT ZONE HIT" in sender.messages[0]
+    assert "Price has reached the planned watchlist Limit Zone." in sender.messages[0]
+    assert "No order was placed by the system." in sender.messages[0]
+    rows = _watchlist_outcome_rows(db_path)
+    assert (TelegramAlertType.LIMIT_HIT.value, "sent", TelegramAlertType.LIMIT_HIT.value, NA) in rows
+
+
+def test_watchlist_does_not_send_tp_or_sl_before_limit_hit(tmp_path: Path) -> None:
+    db_path = tmp_path / "no-limit-no-outcome.db"
+    signal_id = "watch-no-limit"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _outcome_scan_symbol(signal_id=signal_id, high=Decimal("111"), low=Decimal("105"))
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="no-limit"))
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    rows = _watchlist_outcome_rows(db_path)
+    assert not any(row[0] in {TelegramAlertType.TP1_HIT.value, TelegramAlertType.SL_HIT.value} for row in rows)
+    assert any(row[3] == "outcome_tracking_not_limit_hit_yet" for row in rows)
+
+
+def test_watchlist_same_candle_entry_and_target_sends_only_limit_and_audits_ambiguity(tmp_path: Path) -> None:
+    db_path = tmp_path / "same-candle.db"
+    signal_id = "watch-same-candle"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _outcome_scan_symbol(signal_id=signal_id, high=Decimal("111"), low=Decimal("99"))
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="same-candle"))
+
+    assert summary.sent == 1
+    assert "Status:\nLIMIT ZONE HIT" in sender.messages[0]
+    rows = _watchlist_outcome_rows(db_path)
+    assert not any(row[0] == TelegramAlertType.TP1_HIT.value for row in rows)
+    assert any(row[3] == "outcome_tracking_same_candle_ambiguous" for row in rows)
+
+
+def test_long_watchlist_tracks_tp_sequence_after_limit_hit(tmp_path: Path) -> None:
+    db_path = tmp_path / "long-tps.db"
+    signal_id = "watch-long-tps"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+
+    run(service.deliver_for_run(_run_result(_outcome_scan_symbol(signal_id=signal_id)), scan_run_id="limit"))
+    tp1 = run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("110"), low=Decimal("103"))),
+            scan_run_id="tp1",
+        )
+    )
+    tp2 = run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("116"), low=Decimal("103"))),
+            scan_run_id="tp2",
+        )
+    )
+    tp3 = run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("121"), low=Decimal("103"))),
+            scan_run_id="tp3",
+        )
+    )
+    repeat = run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("121"), low=Decimal("103"))),
+            scan_run_id="tp3-repeat",
+        )
+    )
+
+    assert (tp1.sent, tp2.sent, tp3.sent, repeat.sent) == (1, 1, 1, 0)
+    assert "Status:\nTP1 HIT" in sender.messages[1]
+    assert "Status:\nTP2 HIT" in sender.messages[2]
+    assert "Status:\nTP3 HIT" in sender.messages[3]
+    assert "Watchlist outcome tracking completed." in sender.messages[3]
+    rows = [row[0] for row in _watchlist_outcome_rows(db_path)]
+    assert rows.count(TelegramAlertType.TP1_HIT.value) == 1
+    assert rows.count(TelegramAlertType.TP2_HIT.value) == 1
+    assert rows.count(TelegramAlertType.TP3_HIT.value) == 1
+
+
+def test_long_watchlist_tracks_sl_after_limit_hit_even_when_terminal_updates_disabled(tmp_path: Path) -> None:
+    db_path = tmp_path / "long-sl.db"
+    signal_id = "watch-long-sl"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+
+    run(service.deliver_for_run(_run_result(_outcome_scan_symbol(signal_id=signal_id)), scan_run_id="limit"))
+    sl = run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("101"), low=Decimal("94"))),
+            scan_run_id="sl",
+        )
+    )
+    repeat = run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("101"), low=Decimal("94"))),
+            scan_run_id="sl-repeat",
+        )
+    )
+
+    assert sl.sent == 1
+    assert repeat.sent == 0
+    assert "Status:\nSL HIT" in sender.messages[1]
+    assert "Watchlist outcome tracking closed." in sender.messages[1]
+
+
+def test_short_watchlist_tracks_tp_and_sl_rules_after_limit_hit(tmp_path: Path) -> None:
+    db_path = tmp_path / "short-tp.db"
+    tp_signal = "watch-short-tp"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id=tp_signal,
+        alert_type=TelegramAlertType.WATCHLIST,
+        direction="short",
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+
+    run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=tp_signal, direction="short", high=Decimal("101"), low=Decimal("99"))),
+            scan_run_id="short-limit-tp",
+        )
+    )
+    tp = run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=tp_signal, direction="short", high=Decimal("99"), low=Decimal("94"))),
+            scan_run_id="short-tp1",
+        )
+    )
+
+    sl_db_path = tmp_path / "short-sl.db"
+    sl_signal = "watch-short-sl"
+    _seed_prior_active_alert(
+        sl_db_path,
+        signal_id=sl_signal,
+        alert_type=TelegramAlertType.WATCHLIST,
+        direction="short",
+    )
+    sl_sender = FakeSender()
+    sl_service = TelegramLifecycleDeliveryService(
+        database_path=sl_db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sl_sender,
+    )
+    run(
+        sl_service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=sl_signal, direction="short", high=Decimal("101"), low=Decimal("99"))),
+            scan_run_id="short-limit-sl",
+        )
+    )
+    sl = run(
+        sl_service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=sl_signal, direction="short", high=Decimal("106"), low=Decimal("100"))),
+            scan_run_id="short-sl",
+        )
+    )
+
+    assert tp.sent == 1
+    assert sl.sent == 1
+    assert any("Status:\nTP1 HIT" in message and "watch-short-tp" in message for message in sender.messages)
+    assert any("Status:\nSL HIT" in message and "watch-short-sl" in message for message in sl_sender.messages)
+
+
+def test_missing_targets_do_not_break_limit_or_sl_tracking(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing-targets.db"
+    signal_id = "watch-missing-targets"
+    diagnostics = _public_ready_watchlist_diagnostics(tp1=NA, tp2=NA, tp3=NA)
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+
+    limit = run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=signal_id, diagnostics=diagnostics)),
+            scan_run_id="missing-targets-limit",
+        )
+    )
+    sl = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("101"),
+                    low=Decimal("94"),
+                    diagnostics=diagnostics,
+                )
+            ),
+            scan_run_id="missing-targets-sl",
+        )
+    )
+
+    assert limit.sent == 1
+    assert sl.sent == 1
+    rows = _watchlist_outcome_rows(db_path)
+    assert any(row[3] == "outcome_tracking_missing_targets" for row in rows)
+    assert not any(row[0] in {TelegramAlertType.TP1_HIT.value, TelegramAlertType.TP2_HIT.value} for row in rows)
+
+
+def test_missing_entry_blocks_watchlist_outcome_tracking_and_compacts(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing-entry.db"
+    signal_id = "watch-missing-entry"
+    diagnostics = _public_ready_watchlist_diagnostics(entry_low=NA, entry_high=NA, watch_zone=NA, entry_zone=NA)
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _outcome_scan_symbol(signal_id=signal_id, diagnostics=diagnostics)
+
+    first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="missing-entry-1"))
+    second = run(service.deliver_for_run(_run_result(symbol), scan_run_id="missing-entry-2"))
+
+    assert first.sent == 0
+    assert second.sent == 0
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT blocked_reason, seen_count
+            FROM telegram_alert_attempts
+            WHERE attempted_alert_type = 'WATCHLIST_OUTCOME_TRACKING'
+            """
+        ).fetchone()
+    assert row == ("outcome_tracking_missing_entry", 2)
+
+
+def test_watchlist_terminal_updates_are_suppressed_by_default_but_internal_record_remains(tmp_path: Path) -> None:
+    db_path = tmp_path / "terminal-suppressed.db"
+    signal_id = "watch-terminal-suppressed"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    terminal_symbol = _symbol(
+        SetupLifecycleState.INVALIDATED,
+        previous=SetupLifecycleState.WATCHLISTED,
+        signal_id=signal_id,
+    )
+    assert terminal_symbol.lifecycle_state is not None
+    _store_lifecycle_record(db_path, terminal_symbol.lifecycle_state)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+
+    summary = run(service.deliver_for_run(_run_result(terminal_symbol), scan_run_id="terminal-suppressed"))
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        attempt = connection.execute(
+            """
+            SELECT attempted_alert_type, telegram_status, blocked_reason
+            FROM telegram_alert_attempts
+            WHERE attempted_alert_type = 'INVALIDATED'
+            """
+        ).fetchone()
+    assert attempt == (TelegramAlertType.INVALIDATED.value, "skipped", "public_watchlist_terminal_updates_disabled")
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        record = repository.get_record_by_lifecycle_id(signal_id)
+    assert record is not None
+    assert record.current_state == SetupLifecycleState.INVALIDATED

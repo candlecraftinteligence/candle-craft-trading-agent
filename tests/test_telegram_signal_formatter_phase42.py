@@ -57,12 +57,45 @@ def test_watchlist_formatter_includes_required_fields() -> None:
 
     assert "CANDLE CRAFT WATCHLIST" in text
     assert "Status:\nWATCHLIST" in text
-    assert "Watch Zone:\n100 \u2013 102" in text
+    assert "Limit Zone:\n100 \u2013 102" in text
+    assert "Watch Zone:" not in text
     assert "Current Context:\n" in text
-    assert "Needs Next:\n1. N/A \u2014 waiting for the next lifecycle update from the core engine." in text
+    assert "Needs Next:\n1. Price must trade into the Limit Zone." in text
     assert "Potential Plan:\nEntry: 100 \u2013 102" in text
     assert "Potential Targets:\nTP1: 110\nTP2: 115\nTP3: 120" in text
     assert "System:\nWatchlist only. No active signal yet." in text
+
+
+def test_watchlist_needs_next_excludes_internal_scanner_language() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(
+            needs_next=(
+                "Trust Meter or final confluence must reach the required threshold.",
+                "RR and final quality gates must pass before confirmation.",
+                "Price must trade into the Limit Zone.",
+            ),
+            planned_rr=Decimal("2.9"),
+            min_rr=Decimal("3"),
+            watchlist_invalidation_reason="Watchlist invalidates if price accepts below 95.",
+        ),
+    )
+
+    needs_next = text.split("Needs Next:\n", 1)[1].split("\n\nPotential Plan:", 1)[0]
+    for forbidden in (
+        "Trust Meter",
+        "RR",
+        "risk/reward",
+        "score",
+        "scoring",
+        "opportunity score",
+        "final confluence threshold",
+        "hard rejection",
+    ):
+        assert forbidden.lower() not in needs_next.lower()
+    assert "Price must trade into the Limit Zone." in needs_next
+    assert "Planned RR: 2.9R \u2014 watchlist only, final RR must improve to \u22653R before confirmation." in text
+    assert "Watchlist invalidates if price accepts below 95." in text
 
 
 def test_signal_confirmed_formatter_includes_required_fields() -> None:
@@ -78,7 +111,7 @@ def test_signal_confirmed_formatter_includes_required_fields() -> None:
 
 def test_lifecycle_update_formatters_include_required_fields() -> None:
     expected = {
-        TelegramAlertType.LIMIT_HIT: ("Status:\nLIMIT HIT", "Price has reached the planned entry zone."),
+        TelegramAlertType.LIMIT_HIT: ("Status:\nLIMIT ZONE HIT", "Price has reached the planned entry zone."),
         TelegramAlertType.TP1_HIT: ("Status:\nTP1 HIT", "First target reached."),
         TelegramAlertType.TP2_HIT: ("Status:\nTP2 HIT", "Second target reached."),
         TelegramAlertType.TP3_HIT: ("Status:\nTP3 HIT", "Final target reached."),
@@ -93,6 +126,28 @@ def test_lifecycle_update_formatters_include_required_fields() -> None:
         for snippet in required:
             assert snippet in text
         assert "Signal ID:\nsig-001" in text
+
+
+def test_watchlist_outcome_update_formatters_use_phase50_wording() -> None:
+    cases = {
+        TelegramAlertType.LIMIT_HIT: ("Status:\nLIMIT ZONE HIT", "Price has reached the planned watchlist Limit Zone."),
+        TelegramAlertType.TP1_HIT: ("Status:\nTP1 HIT", "First target reached from the watchlist plan."),
+        TelegramAlertType.TP2_HIT: ("Status:\nTP2 HIT", "Second target reached from the watchlist plan."),
+        TelegramAlertType.TP3_HIT: ("Status:\nTP3 HIT", "Watchlist outcome tracking completed."),
+        TelegramAlertType.SL_HIT: ("Status:\nSL HIT", "Watchlist outcome tracking closed."),
+    }
+    for alert_type, snippets in cases.items():
+        text = format_telegram_signal_message(alert_type, _message(watchlist_outcome=True))
+
+        assert text.startswith(HEADER_PREFIX)
+        assert text.endswith(FOOTER)
+        assert "Signal ID:\nsig-001" in text
+        assert "Setup Type" not in text
+        assert "Decimal(" not in text
+        assert "{" not in text and "}" not in text
+        assert "automatic execution" not in text.lower()
+        for snippet in snippets:
+            assert snippet in text
 
 
 def test_terminal_update_formatters_are_short_and_clean() -> None:
@@ -223,7 +278,7 @@ def test_watchlist_formats_clean_targets_and_below_min_rr_warning() -> None:
         ),
     )
 
-    assert "Watch Zone:\n71.41 \u2013 71.68" in text
+    assert "Limit Zone:\n71.41 \u2013 71.68" in text
     assert "Entry: 71.41 \u2013 71.68" in text
     assert "SL: 70.77" in text
     assert "Potential Targets:\nTP1: 72.95\nTP2: 73.25\nTP3: 73.82" in text
