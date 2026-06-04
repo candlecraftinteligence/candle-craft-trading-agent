@@ -344,7 +344,8 @@ def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -
         }
         row = connection.execute(
             """
-            SELECT seen_count, first_seen_at, last_seen_at, last_scan_run_id, last_error_message, invalid_target_fields
+            SELECT seen_count, first_seen_at, last_seen_at, last_scan_run_id, last_error_message, invalid_target_fields,
+                   entry_low, entry_high, stop_loss, tp1, tp2, tp3
             FROM telegram_alert_attempts
             WHERE signal_id = 'sig-legacy'
             """
@@ -357,8 +358,14 @@ def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -
         "last_scan_run_id",
         "last_error_message",
         "invalid_target_fields",
+        "entry_low",
+        "entry_high",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "tp3",
     } <= columns
-    assert row == (1, "N/A", "N/A", None, "N/A", "N/A")
+    assert row == (1, "N/A", "N/A", None, "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A")
 
 
 def test_scan_run_insert(tmp_path) -> None:

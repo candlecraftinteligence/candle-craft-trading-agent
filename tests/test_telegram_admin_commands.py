@@ -592,8 +592,10 @@ def test_menu_button_labels_normalize_to_commands() -> None:
     assert normalize_admin_command("❓ Guide") == "/guide"
     assert normalize_admin_command("📡 Last Scan") == "/lastscan"
     assert normalize_admin_command("🔥 Active Signals") == "/signals"
-    assert normalize_admin_command("👁 Watchlist") == "/watchlist"
-    assert normalize_admin_command("👁 Watchlist Signals") == "/watchlist"
+    assert normalize_admin_command("👁 Watchlist") == "/watchlists"
+    assert normalize_admin_command("👁 Watchlists") == "/watchlists"
+    assert normalize_admin_command("👁 Watchlist Signals") == "/watchlists"
+    assert normalize_admin_command("Active Watchlists") == "/watchlists"
     assert normalize_admin_command("🌐 Social") == "/social"
     assert normalize_admin_command("❓ Help") == "/help"
     assert normalize_admin_command("🧡 Donate") == "/donate"
@@ -632,7 +634,7 @@ def test_empty_states_use_premium_copy_without_developer_wording(tmp_path) -> No
 
     combined = "\n".join(response.text for response in responses)
     assert "No lifecycle alerts available right now." in combined
-    assert "No active watchlist setups right now." in combined
+    assert "No local watchlist data found yet. Start the scanner first." in combined
     assert "No safety summary available yet." in combined
     assert "Preset lists:" not in watchlists.text
     assert "Data status: Unverified" not in combined
@@ -776,22 +778,18 @@ def test_alerts_screen_lists_latest_alert_records_with_integrity_and_risk(tmp_pa
     assert "}" not in response.text
 
 
-def test_watchlists_screen_lists_active_watch_candidates_and_presets(tmp_path) -> None:
+def test_watchlists_screen_uses_active_public_watchlist_store(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_near_row(), _blocked_row(), _valid_row()])
 
     response = service.response_for("/watchlists")
 
     _assert_shell_screen(response.text)
-    assert response.text.startswith(f"{SCREEN_HEADER} Watchlist Desk")
-    assert "Watch candidates: 1" in response.text
-    assert "Symbol: NEARUSDT" in response.text
-    assert "Direction: Short" in response.text
-    assert "Grade: B" in response.text
-    assert "Score: 62" in response.text
-    assert "Status: Monitoring" in response.text
+    assert response.text.startswith(f"{SCREEN_HEADER} ACTIVE WATCHLISTS")
+    assert "No local watchlist data found yet. Start the scanner first." in response.text
+    assert "Manual tracking only. No order execution." in response.text
+    assert "NEARUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
-    assert "Majors: 5 symbols" in response.text
-    assert "High-liquidity meme: 6 symbols" in response.text
+    assert "Preset lists:" not in response.text
 
 
 def test_integrity_screen_runs_read_only_audit_summary(tmp_path) -> None:
@@ -1069,39 +1067,31 @@ def test_public_active_signals_empty_state_excludes_watch_only_rows(tmp_path) ->
     assert "REJECTUSDT" not in response.text
 
 
-def test_public_watchlist_signals_are_clearly_conditional(tmp_path) -> None:
+def test_public_watchlists_use_active_public_watchlist_store(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_alert_row(), _near_row(), _blocked_row(), _rejected_row()])
 
-    response = service.public_response_for("/watchlist")
+    response = service.public_response_for("/watchlists")
 
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
     _assert_public_menu_only(response.reply_markup)
-    assert response.text.startswith(f"{SCREEN_HEADER} Watchlist Signals")
-    assert "Conditional setups being monitored." in response.text
-    assert "Watchlist does not mean confirmed signal." in response.text
-    assert "Symbol: NEARUSDT" in response.text
-    assert "Direction: Short" in response.text
-    assert "Grade: B" in response.text
-    assert "Status: Monitoring" in response.text
-    assert "Waiting for: Stronger confirmation" in response.text
-    assert "Invalidation: N/A" in response.text
-    assert "No confirmation = no signal." in response.text
+    assert response.text.startswith(f"{SCREEN_HEADER} ACTIVE WATCHLISTS")
+    assert "No local watchlist data found yet. Start the scanner first." in response.text
+    assert "Manual tracking only. No order execution." in response.text
     assert "ALERTUSDT" not in response.text
-    assert "TARGETUSDT" not in response.text
-    assert "REJECTUSDT" not in response.text
+    assert "NEARUSDT" not in response.text
+    assert "scan_runs" not in response.text
 
 
-def test_public_watchlist_empty_state_uses_filtering_copy(tmp_path) -> None:
+def test_public_watchlist_empty_state_uses_safe_local_data_copy(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_alert_row(), _blocked_row(), _rejected_row()])
 
     response = service.public_response_for("/watchlist")
 
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
-    assert "No watchlist signals right now." in response.text
-    assert "The engine is filtering." in response.text
-    assert "No confirmation = no signal." in response.text
+    assert "No local watchlist data found yet. Start the scanner first." in response.text
+    assert "Manual tracking only. No order execution." in response.text
     assert "ALERTUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
     assert "REJECTUSDT" not in response.text
@@ -1266,7 +1256,7 @@ def test_public_help_uses_button_guidance_instead_of_slash_command_wording(tmp_p
     assert "How to use the Candle Craft signal desk." in response.text
     assert "📡 Last Scan\nLatest market intelligence." in response.text
     assert "🔥 Active Signals\nConfirmed setups only." in response.text
-    assert "👁 Watchlist Signals\nConditional setups waiting for confirmation." in response.text
+    assert "👁 Watchlists\nActive public watchlist plans." in response.text
     assert "🌐 Social\nOfficial Candle Craft links." in response.text
     assert "🧡 Donate\nOptional support for development." in response.text
     assert "No financial advice." in response.text
@@ -1364,7 +1354,7 @@ def test_every_public_screen_has_brand_header_footer_and_no_execution_buttons(tm
     service = _write_artifacts(tmp_path, rows=[_alert_row(), _near_row()])
     config = TelegramAdminConfig()
 
-    for command in ("/start", "/menu", "/lastscan", "/signals", "/watchlist", "/social", "/help", "/donate"):
+    for command in ("/start", "/menu", "/lastscan", "/signals", "/watchlist", "/watchlists", "/social", "/help", "/donate"):
         response = service.public_response_for(command, public_config=config)
         _assert_shell_screen(response.text)
         assert response.text.startswith(f"{SCREEN_HEADER} ")
@@ -1391,7 +1381,19 @@ def test_public_admin_reserved_response_does_not_expose_admin_data(tmp_path) -> 
     assert "ALERTUSDT" not in status_response.text
     assert "run-46c" not in status_response.text
 
-    for command in ("/alerts", "/watchlists", "/audit", "/config"):
+    watchlists_response = service.public_response_for("/watchlists")
+    _assert_shell_screen(watchlists_response.text)
+    _assert_public_menu_only(watchlists_response.reply_markup)
+    _assert_no_execution_buttons(watchlists_response.reply_markup)
+    assert watchlists_response.text.startswith(f"{SCREEN_HEADER} ACTIVE WATCHLISTS")
+    assert "No local watchlist data found yet. Start the scanner first." in watchlists_response.text
+    assert "System Desk" not in watchlists_response.text
+    assert "Integrity Desk" not in watchlists_response.text
+    assert "Configuration Desk" not in watchlists_response.text
+    assert "ALERTUSDT" not in watchlists_response.text
+    assert "run-46c" not in watchlists_response.text
+
+    for command in ("/alerts", "/audit", "/config"):
         response = service.public_response_for(command)
         _assert_shell_screen(response.text)
         _assert_public_menu_only(response.reply_markup)
@@ -1715,7 +1717,7 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
     assert len(screen_calls) == len(PUBLIC_CALLBACK_COMMANDS)
     assert "Last Scan" in screen_calls[0]["message"]
     assert "Active Signals" in screen_calls[1]["message"]
-    assert "Watchlist Signals" in screen_calls[2]["message"]
+    assert "ACTIVE WATCHLISTS" in screen_calls[2]["message"]
     assert "Social" in screen_calls[3]["message"]
     assert "Help" in screen_calls[4]["message"]
     assert "Donate" in screen_calls[5]["message"]
@@ -1831,7 +1833,7 @@ def test_admin_callbacks_route_to_admin_screens(tmp_path) -> None:
     assert len(screen_calls) == len(ADMIN_CALLBACK_COMMANDS)
     assert "System Desk" in screen_calls[0]["message"]
     assert "Alert Desk" in screen_calls[1]["message"]
-    assert "Watchlist Desk" in screen_calls[2]["message"]
+    assert "ACTIVE WATCHLISTS" in screen_calls[2]["message"]
     assert "Integrity Desk" in screen_calls[3]["message"]
     assert "Configuration Desk" in screen_calls[4]["message"]
     assert "Command Guide" in screen_calls[5]["message"]

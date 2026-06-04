@@ -428,10 +428,11 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     alert_type, lifecycle_state, sent_at, telegram_status,
                     message_hash, scan_run_id, attempted_alert_type, setup_quality_score,
                     rr_planned, min_rr, opportunity_score, min_score_for_idea,
-                    technical_score, price_level, blocked_reason, error_message,
+                    technical_score, price_level, entry_low, entry_high, stop_loss,
+                    tp1, tp2, tp3, blocked_reason, error_message,
                     invalid_target_fields, first_seen_at, last_seen_at, seen_count, last_scan_run_id,
                     last_error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _identity(record.signal_id),
@@ -453,6 +454,12 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     _text(record.min_score_for_idea),
                     _text(record.technical_score),
                     _text(record.price_level),
+                    _text(record.entry_low),
+                    _text(record.entry_high),
+                    _text(record.stop_loss),
+                    _text(record.tp1),
+                    _text(record.tp2),
+                    _text(record.tp3),
                     _text(record.blocked_reason),
                     _text(record.error_message),
                     _text(record.invalid_target_fields),
@@ -539,6 +546,12 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             min_score_for_idea=existing.min_score_for_idea,
             technical_score=existing.technical_score,
             price_level=existing.price_level,
+            entry_low=existing.entry_low,
+            entry_high=existing.entry_high,
+            stop_loss=existing.stop_loss,
+            tp1=existing.tp1,
+            tp2=existing.tp2,
+            tp3=existing.tp3,
             blocked_reason=existing.blocked_reason,
             invalid_target_fields=existing.invalid_target_fields,
             error_message=existing.error_message,
@@ -819,6 +832,7 @@ class TelegramLifecycleDeliveryService:
             min_score_for_idea=_text((eligibility_context or TelegramEligibilityContext()).min_score_for_idea),
             technical_score=_technical_score_text(symbol_result),
             price_level=_price_level_for_alert(decision.alert_type, message),
+            **_message_level_metadata(message),
             blocked_reason=NA,
             invalid_target_fields=NA,
             error_message=send_result.error_message,
@@ -1065,6 +1079,7 @@ class TelegramLifecycleDeliveryService:
             min_score_for_idea=_text(eligibility_context.min_score_for_idea),
             technical_score=_technical_score_text(current_result),
             price_level=_price_level_for_alert(alert_type, message),
+            **_message_level_metadata(message),
             blocked_reason=NA,
             invalid_target_fields=NA,
             error_message=send_result.error_message,
@@ -1131,6 +1146,7 @@ class TelegramLifecycleDeliveryService:
             min_score_for_idea=_text(eligibility_context.min_score_for_idea),
             technical_score=_technical_score_text(outcome.symbol_result),
             price_level=_price_level_for_alert(outcome.alert_type, outcome.message),
+            **_message_level_metadata(outcome.message),
             blocked_reason=NA,
             invalid_target_fields=NA,
             error_message=send_result.error_message,
@@ -2517,6 +2533,7 @@ def _persist_blocked_attempt(
         min_score_for_idea=_text(eligibility_context.min_score_for_idea),
         technical_score=_technical_score_text(symbol_result),
         price_level=_price_level_for_alert(decision.alert_type, decision.message),
+        **_message_level_metadata(decision.message),
         blocked_reason=decision.reason,
         invalid_target_fields=_invalid_target_fields_from_reason(decision.reason),
         error_message=decision.reason,
@@ -2661,6 +2678,7 @@ def _persist_watchlist_outcome_audit(
         min_score_for_idea=NA,
         technical_score=_technical_score_text(symbol_result) if symbol_result is not None else NA,
         price_level=price_level,
+        **_message_level_metadata(message),
         blocked_reason=reason,
         invalid_target_fields=NA,
         error_message=reason,
@@ -2712,6 +2730,7 @@ def _persist_suppressed_watchlist_terminal_update(
         min_score_for_idea=_text(eligibility_context.min_score_for_idea),
         technical_score=_technical_score_text(symbol_result),
         price_level=_price_level_for_alert(alert_type, message) if message is not None else NA,
+        **_message_level_metadata(message),
         blocked_reason=reason,
         invalid_target_fields=NA,
         error_message=reason,
@@ -4009,6 +4028,12 @@ def _technical_score_text(symbol_result: ScannerSymbolResult) -> str:
 
 
 def _price_level_for_alert(alert_type: TelegramAlertType, message: TelegramSignalMessage) -> str:
+    if alert_type == TelegramAlertType.WATCHLIST:
+        zone = _limit_zone_values(message)
+        if zone is not None:
+            low, high = zone
+            return f"{format_telegram_price(low)}-{format_telegram_price(high)}"
+        return _entry_zone_text(message.entry_low, message.entry_high)
     if alert_type == TelegramAlertType.TP1_HIT:
         return _text(message.tp1)
     if alert_type == TelegramAlertType.TP2_HIT:
@@ -4024,6 +4049,19 @@ def _price_level_for_alert(alert_type: TelegramAlertType, message: TelegramSigna
             return f"{_text(low)}-{_text(high)}"
         return f"{_text(message.entry_low)}-{_text(message.entry_high)}"
     return _text(message.price_level)
+
+
+def _message_level_metadata(message: TelegramSignalMessage | None) -> dict[str, str]:
+    if message is None:
+        return {}
+    return {
+        "entry_low": format_telegram_price(message.entry_low),
+        "entry_high": format_telegram_price(message.entry_high),
+        "stop_loss": format_telegram_price(message.stop_loss),
+        "tp1": format_telegram_price(message.tp1),
+        "tp2": format_telegram_price(message.tp2),
+        "tp3": format_telegram_price(message.tp3),
+    }
 
 
 def _confirmation_needed(diagnostics: Mapping[str, Any]) -> str:
@@ -4311,6 +4349,12 @@ def _record_from_row(row: sqlite3.Row) -> TelegramAlertAttemptRecord:
         min_score_for_idea=row["min_score_for_idea"],
         technical_score=row["technical_score"],
         price_level=row["price_level"],
+        entry_low=row["entry_low"],
+        entry_high=row["entry_high"],
+        stop_loss=row["stop_loss"],
+        tp1=row["tp1"],
+        tp2=row["tp2"],
+        tp3=row["tp3"],
         blocked_reason=row["blocked_reason"],
         invalid_target_fields=row["invalid_target_fields"],
         error_message=row["error_message"],
