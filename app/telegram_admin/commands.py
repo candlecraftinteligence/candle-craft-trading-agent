@@ -65,9 +65,6 @@ PUBLIC_CALLBACK_COMMANDS: Mapping[str, str] = {
     "public:social": "/social",
     "public:help": "/help",
     "public:donate": "/donate",
-    "public:donate_usdt_ton": "/donate_usdt_ton",
-    "public:donate_ton": "/donate_ton",
-    "public:donate_btc": "/donate_btc",
     "public:menu": "/menu",
 }
 PUBLIC_MENU_BUTTON_CALLBACKS: Mapping[str, str] = {
@@ -224,25 +221,7 @@ class TelegramAdminCommandService:
                 normalized,
                 "public_donate",
                 format_public_donate_response(public_config),
-                reply_markup=public_donate_inline_markup(public_config),
-            )
-        if normalized == "/donate_usdt_ton":
-            return _public_response(
-                normalized,
-                "public_donate_usdt_ton",
-                format_public_donate_usdt_ton_address_response(public_config),
-            )
-        if normalized == "/donate_ton":
-            return _public_response(
-                normalized,
-                "public_donate_ton",
-                format_public_donate_ton_address_response(public_config),
-            )
-        if normalized == "/donate_btc":
-            return _public_response(
-                normalized,
-                "public_donate_btc",
-                format_public_donate_btc_address_response(public_config),
+                suppress_reply_markup=True,
             )
         if normalized == "/help":
             return _public_response(normalized, "public_help", format_public_help_response())
@@ -879,55 +858,30 @@ def format_public_donate_response(config: Any | None) -> str:
     return _screen(
         "Donate",
         (
-            "Support Candle Craft development.",
+            "Support Candle Craft development and help us grow the signal engine.",
             "",
             SCREEN_DIVIDER,
             "USDT on TON",
             "Network: TON",
-            f"Address: {_public_config_text(config, 'donate_usdt_ton_address', fallback=NA)}",
+            "Address:",
+            _public_config_text(config, "donate_usdt_ton_address", fallback=NA),
             "",
             "TON",
             "Network: TON",
-            f"Address: {_public_config_text(config, 'donate_ton_address', fallback=NA)}",
+            "Address:",
+            _public_config_text(config, "donate_ton_address", fallback=NA),
             "",
             "BTC",
             "Network: Bitcoin",
-            f"Address: {_public_config_text(config, 'donate_btc_address', fallback=NA)}",
+            "Address:",
+            _public_config_text(config, "donate_btc_address", fallback=NA),
             SCREEN_DIVIDER,
             "",
+            "Tap the address to copy it.",
+            "Use your wallet to donate.",
             "Always verify the network before sending.",
             "Support is optional.",
         ),
-    )
-
-
-def format_public_donate_usdt_ton_address_response(config: Any | None) -> str:
-    return _format_public_donate_address_response(
-        config,
-        title="USDT on TON",
-        address_name="donate_usdt_ton_address",
-        network="TON",
-        send_warning="Send only USDT on TON to this address.",
-    )
-
-
-def format_public_donate_ton_address_response(config: Any | None) -> str:
-    return _format_public_donate_address_response(
-        config,
-        title="TON",
-        address_name="donate_ton_address",
-        network="TON",
-        send_warning="Send only TON to this address.",
-    )
-
-
-def format_public_donate_btc_address_response(config: Any | None) -> str:
-    return _format_public_donate_address_response(
-        config,
-        title="BTC",
-        address_name="donate_btc_address",
-        network="Bitcoin",
-        send_warning="Send only BTC to this address.",
     )
 
 
@@ -1068,19 +1022,6 @@ def public_back_to_menu_inline_markup() -> Mapping[str, Any]:
     return {"inline_keyboard": [[{"text": "↩ Back to Menu", "callback_data": "public:menu"}]]}
 
 
-def public_donate_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
-    keyboard: list[list[dict[str, str]]] = [
-        [{"text": "USDT TON Address", "callback_data": "public:donate_usdt_ton"}],
-        [{"text": "TON Address", "callback_data": "public:donate_ton"}],
-        [{"text": "BTC Address", "callback_data": "public:donate_btc"}],
-    ]
-    donate_url = _public_config_text(config, "donate_url", fallback=NA)
-    if donate_url != NA:
-        keyboard.append([{"text": "Open Donation Page", "url": donate_url}])
-    keyboard.append([{"text": "↩ Back to Menu", "callback_data": "public:menu"}])
-    return {"inline_keyboard": keyboard}
-
-
 def reply_keyboard_remove_markup() -> Mapping[str, Any]:
     return {"remove_keyboard": True}
 
@@ -1119,13 +1060,18 @@ def _public_response(
     photo_path: Path | None = None,
     photo_url: str | None = None,
     reply_markup: Mapping[str, Any] | None = None,
+    suppress_reply_markup: bool = False,
 ) -> AdminCommandResponse:
     return AdminCommandResponse(
         command=command,
         response_type=response_type,
         text=text,
         run_id=run_id,
-        reply_markup=reply_markup or _public_reply_markup_for(command, response_type),
+        reply_markup=(
+            None
+            if suppress_reply_markup
+            else (reply_markup or _public_reply_markup_for(command, response_type))
+        ),
         photo_path=photo_path,
         photo_url=photo_url,
         cleanup_reply_keyboard=command in {"/start", "/menu"},
@@ -1930,29 +1876,6 @@ def _public_config_text(config: Any | None, name: str, *, fallback: str) -> str:
     return _first_text(getattr(config, name, NA), fallback)
 
 
-def _format_public_donate_address_response(
-    config: Any | None,
-    *,
-    title: str,
-    address_name: str,
-    network: str,
-    send_warning: str,
-) -> str:
-    address = _public_config_text(config, address_name, fallback=NA)
-    if address == NA:
-        return "Not configured yet."
-    return _screen(
-        title,
-        (
-            "Address:",
-            address,
-            "",
-            f"Network: {network}",
-            send_warning,
-        ),
-    )
-
-
 def _public_logo_path(config: Any | None, project_root: Path) -> Path | None:
     if config is None:
         return None
@@ -2041,9 +1964,6 @@ __all__ = [
     "format_menu_response",
     "format_public_admin_reserved_response",
     "format_public_donate_response",
-    "format_public_donate_btc_address_response",
-    "format_public_donate_ton_address_response",
-    "format_public_donate_usdt_ton_address_response",
     "format_public_help_response",
     "format_public_menu_response",
     "format_public_social_response",
@@ -2051,7 +1971,6 @@ __all__ = [
     "load_latest_manifest_row",
     "normalize_admin_command",
     "public_back_to_menu_inline_markup",
-    "public_donate_inline_markup",
     "public_menu_inline_markup",
     "public_menu_reply_markup",
     "reply_keyboard_remove_markup",
