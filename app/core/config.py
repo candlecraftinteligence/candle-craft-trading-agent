@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     candle_craft_public_logo_url: str | None = None
     candle_craft_x_url: str | None = None
     candle_craft_telegram_url: str | None = None
+    candle_craft_donate_usdt_ton_address: str | None = None
+    candle_craft_donate_ton_address: str | None = None
+    candle_craft_donate_btc_address: str | None = None
     candle_craft_donate_url: str | None = None
     local_manual_mode: bool = True
     order_execution_enabled: bool = False
