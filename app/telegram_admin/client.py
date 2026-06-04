@@ -44,6 +44,9 @@ class TelegramAdminConfig:
     public_logo_url: str | None = None
     x_url: str | None = None
     telegram_url: str | None = None
+    donate_usdt_ton_address: str | None = None
+    donate_ton_address: str | None = None
+    donate_btc_address: str | None = None
     donate_url: str | None = None
     timeout: float = DEFAULT_TELEGRAM_TIMEOUT
 
@@ -69,6 +72,11 @@ class TelegramAdminConfig:
             public_logo_url=_clean_optional(getattr(settings, "candle_craft_public_logo_url", None)),
             x_url=_clean_optional(getattr(settings, "candle_craft_x_url", None)),
             telegram_url=_clean_optional(getattr(settings, "candle_craft_telegram_url", None)),
+            donate_usdt_ton_address=_clean_optional(
+                getattr(settings, "candle_craft_donate_usdt_ton_address", None)
+            ),
+            donate_ton_address=_clean_optional(getattr(settings, "candle_craft_donate_ton_address", None)),
+            donate_btc_address=_clean_optional(getattr(settings, "candle_craft_donate_btc_address", None)),
             donate_url=_clean_optional(getattr(settings, "candle_craft_donate_url", None)),
         )
 
