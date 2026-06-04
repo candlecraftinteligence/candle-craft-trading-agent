@@ -115,7 +115,13 @@ def _sanitize_error(value: Any, config: TelegramAdminConfig) -> str:
     text = str(value or "").strip()
     if not text:
         return NA
-    for secret in (config.bot_token, config.admin_chat_id, config.public_channel_id, config.vip_channel_id):
+    for secret in (
+        config.bot_token,
+        config.admin_chat_id,
+        config.public_chat_id,
+        config.public_channel_id,
+        config.vip_channel_id,
+    ):
         if secret:
             text = text.replace(str(secret), "[REDACTED]")
     return text

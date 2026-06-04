@@ -69,6 +69,7 @@ from app.alerts.telegram_lifecycle import (  # noqa: E402
     TelegramLifecycleDeliveryService,
     TelegramLifecycleDeliverySummary,
 )
+from app.alerts.telegram_sender import resolve_public_signal_destination  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
     DisplayBucket,
@@ -1083,6 +1084,20 @@ def _startup_warnings(args: argparse.Namespace, effective_candle_limit: int) -> 
         )
     if args.replay and args.fast and min(args.replay_candles, SAFE_REPLAY_CANDLE_LIMIT_MAX) > FAST_REPLAY_CANDLES:
         warnings.append(f"Fast mode clamped replay candles to {FAST_REPLAY_CANDLES}.")
+    try:
+        settings = Settings()
+    except Exception:
+        settings = None
+    if settings is not None and bool(settings.telegram_commands_enabled):
+        warnings.append("Telegram commands enabled in config, but command listener must be run separately.")
+    if (
+        settings is not None
+        and _telegram_manual_signals_enabled(args)
+        and settings.telegram_signals_enabled
+    ):
+        destination = resolve_public_signal_destination(settings)
+        if destination.warning != NA:
+            warnings.append(destination.warning)
     return tuple(warnings)
 
 

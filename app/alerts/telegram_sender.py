@@ -13,6 +13,11 @@ from app.data.dtos import NA
 
 logger = logging.getLogger(__name__)
 
+PUBLIC_DESTINATION_MISSING_WARNING = "Public Telegram destination missing. Public lifecycle alerts will not be sent."
+PUBLIC_DESTINATION_FALLBACK_WARNING = (
+    "Public Telegram destination missing. Using TELEGRAM_CHAT_ID as local/manual fallback for public lifecycle alerts."
+)
+
 
 @dataclass(frozen=True)
 class TelegramSendResult:
@@ -24,6 +29,13 @@ class TelegramSendResult:
     @property
     def sent(self) -> bool:
         return self.status == "sent"
+
+
+@dataclass(frozen=True)
+class TelegramPublicDestination:
+    chat_id: str | None
+    source: str
+    warning: str = NA
 
 
 class TelegramSender:
@@ -55,9 +67,12 @@ class TelegramSender:
         api_base_url: str = TELEGRAM_API_BASE_URL,
         timeout: float = DEFAULT_TELEGRAM_TIMEOUT,
     ) -> TelegramSender:
+        destination = resolve_public_signal_destination(settings)
+        if destination.warning != NA and getattr(settings, "telegram_signals_enabled", False):
+            logger.warning(destination.warning)
         return cls(
             bot_token=settings.telegram_bot_token,
-            chat_id=settings.telegram_chat_id,
+            chat_id=destination.chat_id,
             signals_enabled=settings.telegram_signals_enabled,
             local_manual_mode=settings.local_manual_mode,
             http_client=http_client,
@@ -113,6 +128,26 @@ class TelegramSender:
         raise RuntimeError("send_message cannot be called from a running event loop; use send_text instead.")
 
 
+def resolve_public_signal_destination(settings: Settings) -> TelegramPublicDestination:
+    public_chat_id = _clean_optional(getattr(settings, "telegram_public_chat_id", None))
+    if public_chat_id:
+        return TelegramPublicDestination(chat_id=public_chat_id, source="TELEGRAM_PUBLIC_CHAT_ID")
+
+    public_channel_id = _clean_optional(getattr(settings, "telegram_public_channel_id", None))
+    if public_channel_id:
+        return TelegramPublicDestination(chat_id=public_channel_id, source="TELEGRAM_PUBLIC_CHANNEL_ID")
+
+    legacy_chat_id = _clean_optional(getattr(settings, "telegram_chat_id", None))
+    if legacy_chat_id and bool(getattr(settings, "local_manual_mode", True)):
+        return TelegramPublicDestination(
+            chat_id=legacy_chat_id,
+            source="TELEGRAM_CHAT_ID",
+            warning=PUBLIC_DESTINATION_FALLBACK_WARNING,
+        )
+
+    return TelegramPublicDestination(chat_id=None, source="missing", warning=PUBLIC_DESTINATION_MISSING_WARNING)
+
+
 def _clean_optional(value: str | None) -> str | None:
     if value is None:
         return None
@@ -129,6 +164,10 @@ def _first_error(results: tuple[dict[str, Any], ...]) -> str:
 
 
 __all__ = [
+    "PUBLIC_DESTINATION_FALLBACK_WARNING",
+    "PUBLIC_DESTINATION_MISSING_WARNING",
+    "TelegramPublicDestination",
     "TelegramSendResult",
     "TelegramSender",
+    "resolve_public_signal_destination",
 ]

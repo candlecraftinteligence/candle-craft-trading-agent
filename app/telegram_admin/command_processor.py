@@ -638,7 +638,7 @@ def _skip_status(config: TelegramAdminConfig) -> str | None:
 
 
 def _public_skip_status(config: TelegramAdminConfig, chat_id: str) -> str | None:
-    if not config.command_ui_enabled:
+    if not config.command_ui_enabled or not config.public_command_ui_enabled:
         return "skipped_disabled"
     if _display(chat_id) == NA:
         return "ignored_unauthorized"
@@ -1373,6 +1373,7 @@ def _sanitize_error(
     for secret in (
         config.bot_token,
         config.admin_chat_id,
+        config.public_chat_id,
         config.public_channel_id,
         config.vip_channel_id,
         *extra_secrets,

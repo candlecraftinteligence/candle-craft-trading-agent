@@ -1311,7 +1311,19 @@ def test_every_public_screen_has_brand_header_footer_and_no_execution_buttons(tm
 def test_public_admin_reserved_response_does_not_expose_admin_data(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_alert_row()])
 
-    for command in ("/status", "/alerts", "/watchlists", "/audit", "/config"):
+    status_response = service.public_response_for("/status")
+    _assert_shell_screen(status_response.text)
+    _assert_public_menu_only(status_response.reply_markup)
+    _assert_no_execution_buttons(status_response.reply_markup)
+    assert status_response.text.startswith(f"{SCREEN_HEADER} Status")
+    assert "Candle Craft public signal desk status." in status_response.text
+    assert "System Desk" not in status_response.text
+    assert "Integrity Desk" not in status_response.text
+    assert "Configuration Desk" not in status_response.text
+    assert "ALERTUSDT" not in status_response.text
+    assert "run-46c" not in status_response.text
+
+    for command in ("/alerts", "/watchlists", "/audit", "/config"):
         response = service.public_response_for(command)
         _assert_shell_screen(response.text)
         _assert_public_menu_only(response.reply_markup)
@@ -1534,7 +1546,16 @@ def test_public_user_cannot_access_admin_only_commands(tmp_path) -> None:
     assert result.delivery_status == "sent_public"
     assert result.sent_count == 3
     assert len(transport.send_calls) == 3
-    for call in transport.send_calls:
+    status_call = transport.send_calls[0]
+    assert "Candle Craft public signal desk status." in status_call["message"]
+    assert "System Desk" not in status_call["message"]
+    assert "Integrity Desk" not in status_call["message"]
+    assert "Configuration Desk" not in status_call["message"]
+    assert "ALERTUSDT" not in status_call["message"]
+    assert "run-46c" not in status_call["message"]
+    _assert_public_menu_only(status_call["reply_markup"])
+    _assert_no_execution_buttons(status_call["reply_markup"])
+    for call in transport.send_calls[1:]:
         assert "That signal desk view is not available here." in call["message"]
         assert "Use the buttons below to enter the signal desk." in call["message"]
         assert "admin" not in call["message"].lower()
@@ -1746,8 +1767,7 @@ def test_public_user_cannot_access_admin_callbacks(tmp_path) -> None:
     screen_calls = _screen_send_calls(transport)
     assert len(screen_calls) == len(ADMIN_CALLBACK_COMMANDS)
     for call in screen_calls:
-        assert "That signal desk view is not available here." in call["message"]
-        assert "Use the buttons below to enter the signal desk." in call["message"]
+        assert "Candle Craft public signal desk status." in call["message"]
         assert "admin" not in call["message"].lower()
         assert "System Desk" not in call["message"]
         assert "Integrity Desk" not in call["message"]
@@ -1942,7 +1962,17 @@ def test_public_and_vip_channel_ids_receive_public_reserved_screen(tmp_path) -> 
     assert result.delivery_status == "sent_public"
     assert len(transport.send_calls) == 2
     assert [call["chat_id"] for call in transport.send_calls] == ["public-channel", "vip-channel"]
-    for call in transport.send_calls:
+    status_call = transport.send_calls[0]
+    assert "Candle Craft public signal desk status." in status_call["message"]
+    assert "admin" not in status_call["message"].lower()
+    assert "System Desk" not in status_call["message"]
+    assert "Integrity Desk" not in status_call["message"]
+    assert "Configuration Desk" not in status_call["message"]
+    assert "VALIDUSDT" not in status_call["message"]
+    _assert_public_menu_only(status_call["reply_markup"])
+    _assert_no_execution_buttons(status_call["reply_markup"])
+
+    for call in transport.send_calls[1:]:
         assert "That signal desk view is not available here." in call["message"]
         assert "Use the buttons below to enter the signal desk." in call["message"]
         assert "admin" not in call["message"].lower()
