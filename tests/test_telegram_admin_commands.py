@@ -17,10 +17,15 @@ from app.telegram_admin import (
     process_telegram_admin_commands,
 )
 from app.telegram_admin.commands import (
+    ADMIN_CALLBACK_COMMANDS,
+    ADMIN_MENU_BUTTON_CALLBACKS,
     ADMIN_MENU_BUTTON_ROWS,
+    PUBLIC_CALLBACK_COMMANDS,
+    PUBLIC_MENU_BUTTON_CALLBACKS,
     PUBLIC_MENU_BUTTON_ROWS,
     SCREEN_FOOTER,
     SCREEN_HEADER,
+    command_for_callback_data,
     normalize_admin_command,
 )
 from scripts import clear_telegram_native_command_menu as clear_menu_script
@@ -42,6 +47,7 @@ class FakeCommandTransport:
         self.fail_get = fail_get
         self.get_calls: list[dict[str, Any]] = []
         self.send_calls: list[dict[str, Any]] = []
+        self.answer_callback_calls: list[dict[str, Any]] = []
 
     async def get_updates(self, *, bot_token: str, offset: int | None, limit: int, timeout: int):
         self.get_calls.append({"bot_token": bot_token, "offset": offset, "limit": limit, "timeout": timeout})
@@ -74,6 +80,18 @@ class FakeCommandTransport:
         if self.fail_send_with is not None:
             return ({"status": "failed", "error": self.fail_send_with},)
         return ({"status": "sent", "message_id": 101, "chat_id": chat_id},)
+
+    async def answer_callback_query(
+        self,
+        *,
+        bot_token: str,
+        callback_query_id: str,
+        text: str | None = None,
+    ):
+        self.answer_callback_calls.append(
+            {"bot_token": bot_token, "callback_query_id": callback_query_id, "text": text}
+        )
+        return {"status": "sent"}
 
 
 def _write_artifacts(
@@ -227,8 +245,36 @@ def _update(update_id: int, chat_id: str, text: str) -> dict[str, Any]:
     return {"update_id": update_id, "message": {"chat": {"id": chat_id}, "text": text}}
 
 
+def _callback_update(update_id: int, chat_id: str, callback_data: str) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"callback-{update_id}",
+            "from": {"id": chat_id},
+            "message": {"chat": {"id": chat_id}},
+            "data": callback_data,
+        },
+    }
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _cleanup_send_calls(transport: FakeCommandTransport) -> list[dict[str, Any]]:
+    return [
+        call
+        for call in transport.send_calls
+        if isinstance(call.get("reply_markup"), Mapping) and call["reply_markup"].get("remove_keyboard") is True
+    ]
+
+
+def _screen_send_calls(transport: FakeCommandTransport) -> list[dict[str, Any]]:
+    return [
+        call
+        for call in transport.send_calls
+        if not (isinstance(call.get("reply_markup"), Mapping) and call["reply_markup"].get("remove_keyboard") is True)
+    ]
 
 
 def _write_local_logo(project_root: Path) -> Path:
@@ -243,10 +289,10 @@ def _assert_shell_screen(text: str) -> None:
     assert text.endswith(SCREEN_FOOTER)
 
 
-def _keyboard_labels(reply_markup: Mapping[str, Any] | None) -> list[str]:
+def _button_labels(reply_markup: Mapping[str, Any] | None) -> list[str]:
     if reply_markup is None:
         return []
-    keyboard = reply_markup.get("keyboard")
+    keyboard = reply_markup.get("inline_keyboard")
     if not isinstance(keyboard, list):
         return []
     labels: list[str] = []
@@ -259,30 +305,73 @@ def _keyboard_labels(reply_markup: Mapping[str, Any] | None) -> list[str]:
     return labels
 
 
-def _assert_public_menu_only(reply_markup: Mapping[str, Any] | None) -> None:
+def _callback_data_values(reply_markup: Mapping[str, Any] | None) -> list[str]:
+    if reply_markup is None:
+        return []
+    keyboard = reply_markup.get("inline_keyboard")
+    if not isinstance(keyboard, list):
+        return []
+    values: list[str] = []
+    for row in keyboard:
+        if not isinstance(row, list):
+            continue
+        for item in row:
+            if isinstance(item, Mapping):
+                values.append(str(item.get("callback_data") or ""))
+    return values
+
+
+def _assert_inline_markup(reply_markup: Mapping[str, Any] | None) -> None:
     assert reply_markup is not None
-    assert "keyboard" in reply_markup
-    assert "inline_keyboard" not in reply_markup
-    assert reply_markup["is_persistent"] is True
-    labels = _keyboard_labels(reply_markup)
+    assert "inline_keyboard" in reply_markup
+    assert "keyboard" not in reply_markup
+    assert "is_persistent" not in reply_markup
+    assert "resize_keyboard" not in reply_markup
+    assert "one_time_keyboard" not in reply_markup
+
+
+def _assert_public_full_menu(reply_markup: Mapping[str, Any] | None) -> None:
+    _assert_inline_markup(reply_markup)
+    labels = _button_labels(reply_markup)
     expected = [label for row in PUBLIC_MENU_BUTTON_ROWS for label in row]
     assert labels == expected
+    assert _callback_data_values(reply_markup) == [PUBLIC_MENU_BUTTON_CALLBACKS[label] for label in expected]
+    admin_labels = {label for row in ADMIN_MENU_BUTTON_ROWS for label in row}
+    assert admin_labels.isdisjoint(labels)
+
+
+def _assert_admin_full_menu(reply_markup: Mapping[str, Any] | None) -> None:
+    _assert_inline_markup(reply_markup)
+    labels = _button_labels(reply_markup)
+    expected = [label for row in ADMIN_MENU_BUTTON_ROWS for label in row]
+    assert labels == expected
+    assert _callback_data_values(reply_markup) == [ADMIN_MENU_BUTTON_CALLBACKS[label] for label in expected]
+
+
+def _assert_public_menu_only(reply_markup: Mapping[str, Any] | None) -> None:
+    assert reply_markup is not None
+    _assert_inline_markup(reply_markup)
+    labels = _button_labels(reply_markup)
+    expected = [label for row in PUBLIC_MENU_BUTTON_ROWS for label in row]
+    assert labels == expected or labels == ["↩ Back to Menu"]
+    callbacks = _callback_data_values(reply_markup)
+    assert callbacks == [PUBLIC_MENU_BUTTON_CALLBACKS[label] for label in expected] or callbacks == ["public:menu"]
     admin_labels = {label for row in ADMIN_MENU_BUTTON_ROWS for label in row}
     assert admin_labels.isdisjoint(labels)
 
 
 def _assert_admin_menu_only(reply_markup: Mapping[str, Any] | None) -> None:
     assert reply_markup is not None
-    assert "keyboard" in reply_markup
-    assert "inline_keyboard" not in reply_markup
-    assert reply_markup["is_persistent"] is True
-    labels = _keyboard_labels(reply_markup)
+    _assert_inline_markup(reply_markup)
+    labels = _button_labels(reply_markup)
     expected = [label for row in ADMIN_MENU_BUTTON_ROWS for label in row]
-    assert labels == expected
+    assert labels == expected or labels == ["↩ Back to Menu"]
+    callbacks = _callback_data_values(reply_markup)
+    assert callbacks == [ADMIN_MENU_BUTTON_CALLBACKS[label] for label in expected] or callbacks == ["admin:menu"]
 
 
 def _assert_no_execution_buttons(reply_markup: Mapping[str, Any] | None) -> None:
-    labels = _keyboard_labels(reply_markup)
+    labels = _button_labels(reply_markup)
     forbidden = ("buy", "sell", "execute", "order", "withdraw", "transfer")
     for label in labels:
         assert not any(word in label.lower() for word in forbidden)
@@ -364,9 +453,10 @@ def test_start_response_contains_admin_desk_welcome_and_command_list(tmp_path) -
     for row in ADMIN_MENU_BUTTON_ROWS:
         for label in row:
             assert label.split(maxsplit=1)[0] in response.text
-    _assert_admin_menu_only(response.reply_markup)
+    _assert_admin_full_menu(response.reply_markup)
     _assert_no_execution_buttons(response.reply_markup)
-    assert response.reply_markup["keyboard"][0][0]["text"] == "📊 Status"
+    assert response.reply_markup["inline_keyboard"][0][0]["text"] == "📊 Status"
+    assert response.reply_markup["inline_keyboard"][0][0]["callback_data"] == "admin:status"
     assert "No execution buttons" in response.text
     assert "Your market-structure command center." in response.text
     assert "Manual execution. Quality gates protected." in response.text
@@ -402,14 +492,22 @@ def test_menu_button_labels_normalize_to_commands() -> None:
     assert normalize_admin_command("🧡 Donate") == "/donate"
 
 
-def test_persistent_reply_keyboards_are_not_inline_buttons(tmp_path) -> None:
+def test_inline_callback_data_maps_to_commands() -> None:
+    for callback_data, command in PUBLIC_CALLBACK_COMMANDS.items():
+        assert command_for_callback_data(callback_data) == ("public", command)
+    for callback_data, command in ADMIN_CALLBACK_COMMANDS.items():
+        assert command_for_callback_data(callback_data) == ("admin", command)
+    assert command_for_callback_data("admin:unknown") == ("", "")
+
+
+def test_menus_use_inline_keyboards_and_not_persistent_reply_keyboards(tmp_path) -> None:
     service = TelegramAdminCommandService(project_root=tmp_path)
 
     admin = service.response_for("/menu")
     public = service.public_response_for("/menu")
 
-    _assert_admin_menu_only(admin.reply_markup)
-    _assert_public_menu_only(public.reply_markup)
+    _assert_admin_full_menu(admin.reply_markup)
+    _assert_public_full_menu(public.reply_markup)
     _assert_no_execution_buttons(admin.reply_markup)
     _assert_no_execution_buttons(public.reply_markup)
 
@@ -693,7 +791,7 @@ def test_public_start_uses_local_logo_path_when_it_exists(tmp_path) -> None:
     response = service.public_response_for("/start", public_config=config)
 
     _assert_shell_screen(response.text)
-    _assert_public_menu_only(response.reply_markup)
+    _assert_public_full_menu(response.reply_markup)
     assert response.text == _expected_public_start_text()
     assert response.photo_path == logo_path
     assert response.photo_url is None
@@ -738,7 +836,7 @@ def test_public_start_ignores_invalid_local_logo_path_without_crashing(tmp_path)
 
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
-    _assert_public_menu_only(response.reply_markup)
+    _assert_public_full_menu(response.reply_markup)
     assert response.text == _expected_public_start_text()
     assert response.photo_path is None
     assert response.photo_url is None
@@ -751,7 +849,7 @@ def test_public_menu_has_only_public_buttons_and_no_logo_when_missing(tmp_path) 
 
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
-    _assert_public_menu_only(response.reply_markup)
+    _assert_public_full_menu(response.reply_markup)
     _assert_no_execution_buttons(response.reply_markup)
     assert "Your market-structure command center." not in response.text
     assert response.text == _expected_public_start_text()
@@ -1003,7 +1101,7 @@ def test_httpx_command_transport_uploads_local_public_logo_as_photo(tmp_path) ->
                 bot_token="secret-token",
                 chat_id="public-chat",
                 message=_expected_public_start_text(),
-                reply_markup={"keyboard": [[{"text": "📡 Last Scan"}]], "is_persistent": True},
+                reply_markup={"inline_keyboard": [[{"text": "📡 Last Scan", "callback_data": "public:lastscan"}]]},
                 photo_path=logo_path,
             )
         )
@@ -1077,12 +1175,16 @@ def test_public_start_and_menu_updates_route_to_public_ui(tmp_path) -> None:
 
     assert result.delivery_status == "sent_public"
     assert result.sent_count == 2
-    assert len(transport.send_calls) == 2
-    assert transport.send_calls[0]["photo_path"] is None
-    assert transport.send_calls[0]["photo_url"] == "https://cdn.example.test/candle-logo.png"
-    assert transport.send_calls[1]["photo_path"] is None
-    assert transport.send_calls[1]["photo_url"] is None
-    for call in transport.send_calls:
+    cleanup_calls = _cleanup_send_calls(transport)
+    screen_calls = _screen_send_calls(transport)
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0]["reply_markup"] == {"remove_keyboard": True}
+    assert len(screen_calls) == 2
+    assert screen_calls[0]["photo_path"] is None
+    assert screen_calls[0]["photo_url"] == "https://cdn.example.test/candle-logo.png"
+    assert screen_calls[1]["photo_path"] is None
+    assert screen_calls[1]["photo_url"] is None
+    for call in screen_calls:
         assert call["chat_id"] == "public-chat"
         assert "Your AI-powered signal engine is online." in call["message"]
         assert "Welcome to the Moon Trip signal desk" in call["message"]
@@ -1090,7 +1192,7 @@ def test_public_start_and_menu_updates_route_to_public_ui(tmp_path) -> None:
         assert "Integrity Desk" not in call["message"]
         assert "Configuration Desk" not in call["message"]
         _assert_public_screen_safe(call["message"])
-        _assert_public_menu_only(call["reply_markup"])
+        _assert_public_full_menu(call["reply_markup"])
         _assert_no_execution_buttons(call["reply_markup"])
     records = _read_jsonl(audit_path)
     assert [record["response_type"] for record in records] == ["public_menu", "public_menu"]
@@ -1126,11 +1228,15 @@ def test_public_start_sends_local_logo_path_when_configured_file_exists(tmp_path
 
     assert result.delivery_status == "sent_public"
     assert result.sent_count == 1
-    assert len(transport.send_calls) == 1
-    assert transport.send_calls[0]["photo_path"] == logo_path
-    assert transport.send_calls[0]["photo_url"] is None
-    assert transport.send_calls[0]["message"] == _expected_public_start_text()
-    _assert_public_menu_only(transport.send_calls[0]["reply_markup"])
+    cleanup_calls = _cleanup_send_calls(transport)
+    screen_calls = _screen_send_calls(transport)
+    assert len(cleanup_calls) == 1
+    assert cleanup_calls[0]["reply_markup"] == {"remove_keyboard": True}
+    assert len(screen_calls) == 1
+    assert screen_calls[0]["photo_path"] == logo_path
+    assert screen_calls[0]["photo_url"] is None
+    assert screen_calls[0]["message"] == _expected_public_start_text()
+    _assert_public_full_menu(screen_calls[0]["reply_markup"])
     records = _read_jsonl(audit_path)
     assert records[0]["delivery_status"] == "sent_public"
     serialized = json.dumps(records)
@@ -1164,12 +1270,16 @@ def test_public_start_falls_back_to_text_when_local_logo_send_fails(tmp_path) ->
 
     assert result.delivery_status == "sent_public"
     assert result.sent_count == 1
-    assert len(transport.send_calls) == 2
-    assert transport.send_calls[0]["photo_path"] == logo_path
-    assert transport.send_calls[0]["photo_url"] is None
-    assert transport.send_calls[1]["photo_path"] is None
-    assert transport.send_calls[1]["photo_url"] is None
-    assert transport.send_calls[1]["message"] == _expected_public_start_text()
+    cleanup_calls = _cleanup_send_calls(transport)
+    screen_calls = _screen_send_calls(transport)
+    assert len(cleanup_calls) == 1
+    assert len(screen_calls) == 2
+    assert screen_calls[0]["photo_path"] == logo_path
+    assert screen_calls[0]["photo_url"] is None
+    assert screen_calls[1]["photo_path"] is None
+    assert screen_calls[1]["photo_url"] is None
+    assert screen_calls[1]["message"] == _expected_public_start_text()
+    _assert_public_full_menu(screen_calls[1]["reply_markup"])
     records = _read_jsonl(audit_path)
     assert records[0]["delivery_status"] == "sent_public"
     serialized = json.dumps(records)
@@ -1201,12 +1311,16 @@ def test_public_start_falls_back_to_text_when_logo_send_is_unavailable(tmp_path)
 
     assert result.delivery_status == "sent_public"
     assert result.sent_count == 1
-    assert len(transport.send_calls) == 2
-    assert transport.send_calls[0]["photo_path"] is None
-    assert transport.send_calls[0]["photo_url"] == "https://cdn.example.test/candle-logo.png"
-    assert transport.send_calls[1]["photo_path"] is None
-    assert transport.send_calls[1]["photo_url"] is None
-    assert transport.send_calls[1]["message"] == _expected_public_start_text()
+    cleanup_calls = _cleanup_send_calls(transport)
+    screen_calls = _screen_send_calls(transport)
+    assert len(cleanup_calls) == 1
+    assert len(screen_calls) == 2
+    assert screen_calls[0]["photo_path"] is None
+    assert screen_calls[0]["photo_url"] == "https://cdn.example.test/candle-logo.png"
+    assert screen_calls[1]["photo_path"] is None
+    assert screen_calls[1]["photo_url"] is None
+    assert screen_calls[1]["message"] == _expected_public_start_text()
+    _assert_public_full_menu(screen_calls[1]["reply_markup"])
     records = _read_jsonl(audit_path)
     assert records[0]["delivery_status"] == "sent_public"
     serialized = json.dumps(records)
@@ -1252,6 +1366,161 @@ def test_public_user_cannot_access_admin_only_commands(tmp_path) -> None:
         assert "run-46c" not in call["message"]
         _assert_public_menu_only(call["reply_markup"])
         _assert_no_execution_buttons(call["reply_markup"])
+
+
+def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
+    service = _write_artifacts(tmp_path, rows=[_alert_row(), _near_row()])
+    transport = FakeCommandTransport()
+    updates = tuple(
+        _callback_update(update_id, "public-chat", callback_data)
+        for update_id, callback_data in enumerate(PUBLIC_CALLBACK_COMMANDS, start=40)
+    )
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=updates,
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == len(PUBLIC_CALLBACK_COMMANDS)
+    assert [call["callback_query_id"] for call in transport.answer_callback_calls] == [
+        f"callback-{update_id}" for update_id in range(40, 40 + len(PUBLIC_CALLBACK_COMMANDS))
+    ]
+    cleanup_calls = _cleanup_send_calls(transport)
+    screen_calls = _screen_send_calls(transport)
+    assert len(cleanup_calls) == 1
+    assert len(screen_calls) == len(PUBLIC_CALLBACK_COMMANDS)
+    assert "Last Scan" in screen_calls[0]["message"]
+    assert "Active Signals" in screen_calls[1]["message"]
+    assert "Watchlist Signals" in screen_calls[2]["message"]
+    assert "Social" in screen_calls[3]["message"]
+    assert "Help" in screen_calls[4]["message"]
+    assert "Donate" in screen_calls[5]["message"]
+    assert "Welcome to the Moon Trip signal desk" in screen_calls[6]["message"]
+    for call in screen_calls[:6]:
+        _assert_public_menu_only(call["reply_markup"])
+        assert _callback_data_values(call["reply_markup"]) == ["public:menu"]
+        _assert_public_screen_safe(call["message"])
+        assert "System Desk" not in call["message"]
+        assert "Integrity Desk" not in call["message"]
+    _assert_public_full_menu(screen_calls[6]["reply_markup"])
+    records = _read_jsonl(tmp_path / "audit.jsonl")
+    assert [record["command"] for record in records] == list(PUBLIC_CALLBACK_COMMANDS.values())
+    assert all(record["is_admin"] is False for record in records)
+    serialized = json.dumps(records)
+    assert "secret-token" not in serialized
+    assert "public-chat" not in serialized
+
+
+def test_admin_callbacks_route_to_admin_screens(tmp_path) -> None:
+    service = _write_artifacts(tmp_path, rows=[_alert_row(), _near_row()])
+    transport = FakeCommandTransport()
+    updates = tuple(
+        _callback_update(update_id, "admin-chat", callback_data)
+        for update_id, callback_data in enumerate(ADMIN_CALLBACK_COMMANDS, start=60)
+    )
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=updates,
+        )
+    )
+
+    assert result.delivery_status == "sent_admin"
+    assert result.sent_count == len(ADMIN_CALLBACK_COMMANDS)
+    assert [call["callback_query_id"] for call in transport.answer_callback_calls] == [
+        f"callback-{update_id}" for update_id in range(60, 60 + len(ADMIN_CALLBACK_COMMANDS))
+    ]
+    cleanup_calls = _cleanup_send_calls(transport)
+    screen_calls = _screen_send_calls(transport)
+    assert len(cleanup_calls) == 1
+    assert len(screen_calls) == len(ADMIN_CALLBACK_COMMANDS)
+    assert "System Desk" in screen_calls[0]["message"]
+    assert "Alert Desk" in screen_calls[1]["message"]
+    assert "Watchlist Desk" in screen_calls[2]["message"]
+    assert "Integrity Desk" in screen_calls[3]["message"]
+    assert "Configuration Desk" in screen_calls[4]["message"]
+    assert "Command Guide" in screen_calls[5]["message"]
+    assert "Candle Craft Intelligence" in screen_calls[6]["message"]
+    for call in screen_calls[:6]:
+        _assert_admin_menu_only(call["reply_markup"])
+        assert _callback_data_values(call["reply_markup"]) == ["admin:menu"]
+    _assert_admin_full_menu(screen_calls[6]["reply_markup"])
+    records = _read_jsonl(tmp_path / "audit.jsonl")
+    assert [record["command"] for record in records] == list(ADMIN_CALLBACK_COMMANDS.values())
+    assert all(record["is_admin"] is True for record in records)
+    serialized = json.dumps(records)
+    assert "secret-token" not in serialized
+    assert "admin-chat" not in serialized
+
+
+def test_public_user_cannot_access_admin_callbacks(tmp_path) -> None:
+    service = _write_artifacts(tmp_path, rows=[_alert_row()])
+    transport = FakeCommandTransport()
+    updates = tuple(
+        _callback_update(update_id, "public-chat", callback_data)
+        for update_id, callback_data in enumerate(ADMIN_CALLBACK_COMMANDS, start=80)
+    )
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=updates,
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == len(ADMIN_CALLBACK_COMMANDS)
+    assert len(transport.answer_callback_calls) == len(ADMIN_CALLBACK_COMMANDS)
+    assert _cleanup_send_calls(transport) == []
+    screen_calls = _screen_send_calls(transport)
+    assert len(screen_calls) == len(ADMIN_CALLBACK_COMMANDS)
+    for call in screen_calls:
+        assert "That signal desk view is not available here." in call["message"]
+        assert "Use the buttons below to enter the signal desk." in call["message"]
+        assert "admin" not in call["message"].lower()
+        assert "System Desk" not in call["message"]
+        assert "Integrity Desk" not in call["message"]
+        assert "Configuration Desk" not in call["message"]
+        assert "ALERTUSDT" not in call["message"]
+        _assert_public_menu_only(call["reply_markup"])
+        _assert_no_execution_buttons(call["reply_markup"])
+    records = _read_jsonl(tmp_path / "audit.jsonl")
+    assert all(record["command"] == "/status" for record in records)
+    assert all(record["is_admin"] is False for record in records)
+    serialized = json.dumps(records)
+    assert "secret-token" not in serialized
+    assert "public-chat" not in serialized
 
 
 def test_non_admin_chat_id_receives_public_lastscan_without_admin_data(tmp_path) -> None:
@@ -1367,7 +1636,8 @@ def test_enabled_admin_command_uses_fake_client_and_sends_exactly_one_reply(tmp_
     assert transport.send_calls[0]["chat_id"] == "admin-chat"
     assert "System Desk" in transport.send_calls[0]["message"]
     assert "Run: run-46c" in transport.send_calls[0]["message"]
-    assert transport.send_calls[0]["reply_markup"]["keyboard"][0][0]["text"] == "📊 Status"
+    assert transport.send_calls[0]["reply_markup"]["inline_keyboard"][0][0]["text"] == "↩ Back to Menu"
+    assert transport.send_calls[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "admin:menu"
 
 
 def test_command_processor_works_when_admin_reports_are_disabled(tmp_path) -> None:

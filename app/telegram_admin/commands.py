@@ -27,6 +27,23 @@ ADMIN_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
     "⚙️ config": "/config",
     "❓ guide": "/guide",
 }
+ADMIN_CALLBACK_COMMANDS: Mapping[str, str] = {
+    "admin:status": "/status",
+    "admin:alerts": "/alerts",
+    "admin:watchlists": "/watchlists",
+    "admin:integrity": "/integrity",
+    "admin:config": "/config",
+    "admin:guide": "/guide",
+    "admin:menu": "/menu",
+}
+ADMIN_MENU_BUTTON_CALLBACKS: Mapping[str, str] = {
+    "📊 Status": "admin:status",
+    "🚨 Alerts": "admin:alerts",
+    "👁 Watchlists": "admin:watchlists",
+    "🧾 Integrity": "admin:integrity",
+    "⚙️ Config": "admin:config",
+    "❓ Guide": "admin:guide",
+}
 PUBLIC_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
     ("📡 Last Scan", "🔥 Active Signals"),
     ("👁 Watchlist Signals", "🌐 Social"),
@@ -39,6 +56,23 @@ PUBLIC_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
     "🌐 social": "/social",
     "❓ help": "/help",
     "🧡 donate": "/donate",
+}
+PUBLIC_CALLBACK_COMMANDS: Mapping[str, str] = {
+    "public:lastscan": "/lastscan",
+    "public:signals": "/signals",
+    "public:watchlist": "/watchlist",
+    "public:social": "/social",
+    "public:help": "/help",
+    "public:donate": "/donate",
+    "public:menu": "/menu",
+}
+PUBLIC_MENU_BUTTON_CALLBACKS: Mapping[str, str] = {
+    "📡 Last Scan": "public:lastscan",
+    "🔥 Active Signals": "public:signals",
+    "👁 Watchlist Signals": "public:watchlist",
+    "🌐 Social": "public:social",
+    "❓ Help": "public:help",
+    "🧡 Donate": "public:donate",
 }
 ADMIN_COMMANDS: tuple[str, ...] = (
     "/start",
@@ -91,6 +125,7 @@ class AdminCommandResponse:
     reply_markup: Mapping[str, Any] | None = None
     photo_path: Path | None = None
     photo_url: str | None = None
+    cleanup_reply_keyboard: bool = False
 
 
 @dataclass(frozen=True)
@@ -913,6 +948,17 @@ def normalize_admin_command(value: str | None) -> str:
     return token
 
 
+def command_for_callback_data(value: str | None) -> tuple[str, str]:
+    text = str(value or "").strip().lower()
+    public_command = PUBLIC_CALLBACK_COMMANDS.get(text)
+    if public_command is not None:
+        return "public", public_command
+    admin_command = ADMIN_CALLBACK_COMMANDS.get(text)
+    if admin_command is not None:
+        return "admin", admin_command
+    return "", ""
+
+
 def load_latest_manifest_row(path: Path) -> Mapping[str, Any] | None:
     if not path.exists():
         return None
@@ -930,24 +976,42 @@ def load_latest_manifest_row(path: Path) -> Mapping[str, Any] | None:
     return latest
 
 
-def admin_menu_reply_markup() -> Mapping[str, Any]:
+def admin_menu_inline_markup() -> Mapping[str, Any]:
     return {
-        "keyboard": [[{"text": label} for label in row] for row in ADMIN_MENU_BUTTON_ROWS],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
-        "is_persistent": True,
-        "input_field_placeholder": "Candle Craft command",
+        "inline_keyboard": [
+            [{"text": label, "callback_data": ADMIN_MENU_BUTTON_CALLBACKS[label]} for label in row]
+            for row in ADMIN_MENU_BUTTON_ROWS
+        ],
     }
+
+
+def public_menu_inline_markup() -> Mapping[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": label, "callback_data": PUBLIC_MENU_BUTTON_CALLBACKS[label]} for label in row]
+            for row in PUBLIC_MENU_BUTTON_ROWS
+        ],
+    }
+
+
+def admin_back_to_menu_inline_markup() -> Mapping[str, Any]:
+    return {"inline_keyboard": [[{"text": "↩ Back to Menu", "callback_data": "admin:menu"}]]}
+
+
+def public_back_to_menu_inline_markup() -> Mapping[str, Any]:
+    return {"inline_keyboard": [[{"text": "↩ Back to Menu", "callback_data": "public:menu"}]]}
+
+
+def reply_keyboard_remove_markup() -> Mapping[str, Any]:
+    return {"remove_keyboard": True}
+
+
+def admin_menu_reply_markup() -> Mapping[str, Any]:
+    return admin_menu_inline_markup()
 
 
 def public_menu_reply_markup() -> Mapping[str, Any]:
-    return {
-        "keyboard": [[{"text": label} for label in row] for row in PUBLIC_MENU_BUTTON_ROWS],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
-        "is_persistent": True,
-        "input_field_placeholder": "Candle Craft public command",
-    }
+    return public_menu_inline_markup()
 
 
 def _admin_response(
@@ -962,7 +1026,8 @@ def _admin_response(
         response_type=response_type,
         text=text,
         run_id=run_id,
-        reply_markup=admin_menu_reply_markup(),
+        reply_markup=_admin_reply_markup_for(command, response_type),
+        cleanup_reply_keyboard=command in {"/start", "/menu"},
     )
 
 
@@ -980,10 +1045,23 @@ def _public_response(
         response_type=response_type,
         text=text,
         run_id=run_id,
-        reply_markup=public_menu_reply_markup(),
+        reply_markup=_public_reply_markup_for(command, response_type),
         photo_path=photo_path,
         photo_url=photo_url,
+        cleanup_reply_keyboard=command in {"/start", "/menu"},
     )
+
+
+def _admin_reply_markup_for(command: str, response_type: str) -> Mapping[str, Any]:
+    if command in {"/start", "/menu"} or response_type in {"start", "menu"}:
+        return admin_menu_inline_markup()
+    return admin_back_to_menu_inline_markup()
+
+
+def _public_reply_markup_for(command: str, response_type: str) -> Mapping[str, Any]:
+    if command in {"/start", "/menu"} or response_type == "public_menu":
+        return public_menu_inline_markup()
+    return public_back_to_menu_inline_markup()
 
 
 def _screen(title: str, lines: Sequence[str]) -> str:
@@ -1829,10 +1907,14 @@ def _display(value: Any) -> str:
 
 
 __all__ = [
+    "ADMIN_CALLBACK_COMMANDS",
     "ADMIN_COMMANDS",
+    "ADMIN_MENU_BUTTON_CALLBACKS",
     "ADMIN_MENU_BUTTON_ROWS",
     "PUBLIC_ADMIN_RESERVED_COMMANDS",
+    "PUBLIC_CALLBACK_COMMANDS",
     "PUBLIC_COMMANDS",
+    "PUBLIC_MENU_BUTTON_CALLBACKS",
     "PUBLIC_MENU_BUTTON_ROWS",
     "DEFAULT_ADMIN_COMMAND_ROW_LIMIT",
     "DEFAULT_SCAN_RUN_MANIFEST_PATH",
@@ -1842,7 +1924,10 @@ __all__ = [
     "AdminCommandResponse",
     "LatestScanArtifacts",
     "TelegramAdminCommandService",
+    "admin_back_to_menu_inline_markup",
+    "admin_menu_inline_markup",
     "admin_menu_reply_markup",
+    "command_for_callback_data",
     "format_help_response",
     "format_menu_response",
     "format_public_admin_reserved_response",
@@ -1853,5 +1938,8 @@ __all__ = [
     "format_start_response",
     "load_latest_manifest_row",
     "normalize_admin_command",
+    "public_back_to_menu_inline_markup",
+    "public_menu_inline_markup",
     "public_menu_reply_markup",
+    "reply_keyboard_remove_markup",
 ]

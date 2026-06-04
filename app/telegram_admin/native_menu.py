@@ -30,7 +30,7 @@ async def clear_telegram_native_command_menu(
     timeout: float = DEFAULT_TELEGRAM_TIMEOUT,
     dry_run: bool = False,
 ) -> TelegramNativeCommandMenuCleanupResult:
-    """Clear Telegram's slash-command menu while leaving reply keyboards intact."""
+    """Clear Telegram's slash-command menu while leaving chat controls untouched."""
 
     if not config.bot_token:
         return TelegramNativeCommandMenuCleanupResult(status="skipped_missing_credentials")

@@ -15,13 +15,21 @@ from app.alerts.telegram import DEFAULT_TELEGRAM_TIMEOUT, TELEGRAM_API_BASE_URL,
 from app.alerts.templates import TELEGRAM_MAX_MESSAGE_LENGTH, split_message
 from app.data.dtos import NA
 from app.telegram_admin.client import TelegramAdminConfig
-from app.telegram_admin.commands import AdminCommandResponse, TelegramAdminCommandService, normalize_admin_command
+from app.telegram_admin.commands import (
+    AdminCommandResponse,
+    TelegramAdminCommandService,
+    command_for_callback_data,
+    normalize_admin_command,
+    reply_keyboard_remove_markup,
+)
 
 DEFAULT_ADMIN_COMMANDS_DIR = Path("scan_runs") / "admin_commands"
 DEFAULT_ADMIN_COMMAND_STATE_PATH = DEFAULT_ADMIN_COMMANDS_DIR / "state.json"
 DEFAULT_ADMIN_COMMAND_AUDIT_PATH = DEFAULT_ADMIN_COMMANDS_DIR / "commands.jsonl"
 DEFAULT_GET_UPDATES_TIMEOUT_SECONDS = 0
 DEFAULT_COMMAND_LIMIT = 10
+REPLY_KEYBOARD_CLEANUP_MESSAGE = "Candle Craft controls now appear inside messages."
+REPLY_KEYBOARD_CLEANUP_STATE_KEY = "reply_keyboard_removed_chat_hashes"
 
 ADMIN_COMMAND_DELIVERY_STATUSES: tuple[str, ...] = (
     "dry_run",
@@ -56,6 +64,15 @@ class TelegramAdminCommandTransport(Protocol):
         photo_url: str | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
         """Send one admin command response through Telegram."""
+
+    async def answer_callback_query(
+        self,
+        *,
+        bot_token: str,
+        callback_query_id: str,
+        text: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Acknowledge a Telegram inline button callback."""
 
 
 class HttpxTelegramAdminCommandTransport:
@@ -135,6 +152,22 @@ class HttpxTelegramAdminCommandTransport:
             bot_token=bot_token,
             chat_id=chat_id,
             message=message,
+            http_client=self._http_client,
+            api_base_url=self._api_base_url,
+            timeout=self._timeout,
+        )
+
+    async def answer_callback_query(
+        self,
+        *,
+        bot_token: str,
+        callback_query_id: str,
+        text: str | None = None,
+    ) -> Mapping[str, Any]:
+        return await _answer_callback_query(
+            bot_token=bot_token,
+            callback_query_id=callback_query_id,
+            text=text,
             http_client=self._http_client,
             api_base_url=self._api_base_url,
             timeout=self._timeout,
@@ -263,13 +296,78 @@ async def _process_update(
     audit_path: Path,
 ) -> _ProcessedUpdate:
     update_id = _update_id(update)
+    if update_id is None:
+        return _ProcessedUpdate("ignored_unauthorized", preview="Ignored update without update_id.")
+
+    callback_query = _callback_query_payload(update)
+    if callback_query:
+        await _answer_callback_query_safely(
+            config=config,
+            callback_query_id=_callback_query_id(callback_query),
+            transport=transport,
+        )
+        chat_id = _callback_chat_id(callback_query)
+        callback_scope, command = command_for_callback_data(_callback_data(callback_query))
+        is_admin = _chat_matches_admin(chat_id, config.admin_chat_id)
+        if callback_scope == "public":
+            return await _process_public_update(
+                update_id,
+                command,
+                chat_id,
+                config=config,
+                command_service=command_service,
+                transport=transport,
+                state_path=state_path,
+                audit_path=audit_path,
+            )
+        if callback_scope == "admin" and not is_admin:
+            return await _process_public_update(
+                update_id,
+                "/status",
+                chat_id,
+                config=config,
+                command_service=command_service,
+                transport=transport,
+                state_path=state_path,
+                audit_path=audit_path,
+            )
+        if callback_scope == "admin":
+            return await _process_admin_update(
+                update_id,
+                command,
+                chat_id,
+                config=config,
+                command_service=command_service,
+                transport=transport,
+                state_path=state_path,
+                audit_path=audit_path,
+            )
+        if is_admin:
+            return await _process_admin_update(
+                update_id,
+                command,
+                chat_id,
+                config=config,
+                command_service=command_service,
+                transport=transport,
+                state_path=state_path,
+                audit_path=audit_path,
+            )
+        return await _process_public_update(
+            update_id,
+            command,
+            chat_id,
+            config=config,
+            command_service=command_service,
+            transport=transport,
+            state_path=state_path,
+            audit_path=audit_path,
+        )
+
     message = _message_payload(update)
     chat_id = _chat_id(message)
     command = normalize_admin_command(_message_text(message))
     is_admin = _chat_matches_admin(chat_id, config.admin_chat_id)
-
-    if update_id is None:
-        return _ProcessedUpdate("ignored_unauthorized", preview="Ignored update without update_id.")
 
     if not is_admin:
         return await _process_public_update(
@@ -283,6 +381,29 @@ async def _process_update(
             audit_path=audit_path,
         )
 
+    return await _process_admin_update(
+        update_id,
+        command,
+        chat_id,
+        config=config,
+        command_service=command_service,
+        transport=transport,
+        state_path=state_path,
+        audit_path=audit_path,
+    )
+
+
+async def _process_admin_update(
+    update_id: int,
+    command: str,
+    chat_id: str,
+    *,
+    config: TelegramAdminConfig,
+    command_service: TelegramAdminCommandService,
+    transport: TelegramAdminCommandTransport,
+    state_path: Path,
+    audit_path: Path,
+) -> _ProcessedUpdate:
     response = command_service.response_for(command, admin_config=config)
     skipped = _skip_status(config)
     if skipped is not None:
@@ -293,6 +414,14 @@ async def _process_update(
         _append_command_audit(audit_path, update_id, chat_id, response, "dry_run")
         _save_latest_processed_update_id(state_path, update_id)
         return _ProcessedUpdate("dry_run", preview=_preview(response.text))
+
+    await _cleanup_reply_keyboard_if_needed(
+        config=config,
+        chat_id=chat_id,
+        response=response,
+        transport=transport,
+        state_path=state_path,
+    )
 
     try:
         raw_results = await transport.send_message(
@@ -341,6 +470,14 @@ async def _process_public_update(
         _append_public_command_audit(audit_path, update_id, chat_id, response, "dry_run")
         _save_latest_processed_update_id(state_path, update_id)
         return _ProcessedUpdate("dry_run", preview=_preview(response.text))
+
+    await _cleanup_reply_keyboard_if_needed(
+        config=config,
+        chat_id=chat_id,
+        response=response,
+        transport=transport,
+        state_path=state_path,
+    )
 
     try:
         raw_results = await _send_public_command_response(
@@ -442,6 +579,52 @@ async def _send_public_text_response(
 
 def _raw_results_sent(results: Sequence[Mapping[str, Any]]) -> bool:
     return bool(results) and all(result.get("status") == "sent" for result in results)
+
+
+async def _cleanup_reply_keyboard_if_needed(
+    *,
+    config: TelegramAdminConfig,
+    chat_id: str,
+    response: AdminCommandResponse,
+    transport: TelegramAdminCommandTransport,
+    state_path: Path,
+) -> None:
+    if not response.cleanup_reply_keyboard:
+        return
+    if _display(chat_id) == NA or not config.bot_token:
+        return
+    if _reply_keyboard_cleanup_already_sent(state_path, chat_id):
+        return
+    try:
+        results = await transport.send_message(
+            bot_token=config.bot_token or "",
+            chat_id=chat_id,
+            message=REPLY_KEYBOARD_CLEANUP_MESSAGE,
+            reply_markup=reply_keyboard_remove_markup(),
+            photo_path=None,
+            photo_url=None,
+        )
+    except Exception:
+        return
+    if _raw_results_sent(results):
+        _mark_reply_keyboard_cleanup_sent(state_path, chat_id)
+
+
+async def _answer_callback_query_safely(
+    *,
+    config: TelegramAdminConfig,
+    callback_query_id: str,
+    transport: TelegramAdminCommandTransport,
+) -> None:
+    if _display(callback_query_id) == NA or not config.bot_token or config.dry_run:
+        return
+    try:
+        await transport.answer_callback_query(
+            bot_token=config.bot_token or "",
+            callback_query_id=callback_query_id,
+        )
+    except Exception:
+        return
 
 
 def _skip_status(config: TelegramAdminConfig) -> str | None:
@@ -827,6 +1010,60 @@ async def _send_admin_messages_with_reply_markup(
     return tuple(results)
 
 
+async def _answer_callback_query(
+    *,
+    bot_token: str,
+    callback_query_id: str,
+    text: str | None,
+    http_client: httpx.AsyncClient | None,
+    api_base_url: str,
+    timeout: float,
+) -> Mapping[str, Any]:
+    close_client = http_client is None
+    client = http_client or httpx.AsyncClient(base_url=api_base_url, timeout=timeout)
+    url = f"/bot{bot_token}/answerCallbackQuery"
+    payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text[:200]
+
+    try:
+        try:
+            response = await client.post(url, json=payload)
+        except httpx.TimeoutException:
+            return {"status": "failed", "error": "Telegram callback acknowledgement timed out."}
+        except httpx.HTTPError as exc:
+            return {"status": "failed", "error": f"Telegram callback acknowledgement failed: {exc}"}
+
+        if response.status_code != 200:
+            return {
+                "status": "failed",
+                "http_status": response.status_code,
+                "rate_limited": response.status_code == 429,
+                "error": _telegram_send_http_error(response),
+            }
+
+        try:
+            body = response.json()
+        except ValueError:
+            return {
+                "status": "failed",
+                "http_status": response.status_code,
+                "error": "Malformed Telegram callback acknowledgement response.",
+            }
+
+        if not isinstance(body, Mapping) or body.get("ok") is not True:
+            return {
+                "status": "failed",
+                "http_status": response.status_code,
+                "error": _telegram_malformed_body_error(body),
+            }
+
+        return {"status": "sent", "http_status": response.status_code, "rate_limited": False, "error": None}
+    finally:
+        if close_client:
+            await client.aclose()
+
+
 def _admin_send_failure(
     *,
     part_number: int,
@@ -991,14 +1228,7 @@ def _append_audit_record(
 
 
 def _load_latest_processed_update_id(path: Path) -> int | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(payload, Mapping):
-        return None
+    payload = _load_command_state(path)
     value = payload.get("latest_processed_update_id")
     try:
         return int(str(value))
@@ -1010,9 +1240,49 @@ def _save_latest_processed_update_id(path: Path, update_id: int) -> None:
     current = _load_latest_processed_update_id(path)
     if current is not None and current >= update_id:
         return
+    payload = _load_command_state(path)
+    payload["latest_processed_update_id"] = update_id
+    payload["updated_at"] = _now_utc_iso()
+    _save_command_state(path, payload)
+
+
+def _reply_keyboard_cleanup_already_sent(path: Path, chat_id: str) -> bool:
+    chat_hash = _chat_id_hash(chat_id)
+    if chat_hash == NA:
+        return True
+    values = _load_command_state(path).get(REPLY_KEYBOARD_CLEANUP_STATE_KEY)
+    return isinstance(values, list) and chat_hash in values
+
+
+def _mark_reply_keyboard_cleanup_sent(path: Path, chat_id: str) -> None:
+    chat_hash = _chat_id_hash(chat_id)
+    if chat_hash == NA:
+        return
+    payload = _load_command_state(path)
+    values = payload.get(REPLY_KEYBOARD_CLEANUP_STATE_KEY)
+    hashes = [str(value) for value in values] if isinstance(values, list) else []
+    if chat_hash not in hashes:
+        hashes.append(chat_hash)
+    payload[REPLY_KEYBOARD_CLEANUP_STATE_KEY] = sorted(hashes)
+    payload["updated_at"] = _now_utc_iso()
+    _save_command_state(path, payload)
+
+
+def _load_command_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    return dict(payload)
+
+
+def _save_command_state(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"latest_processed_update_id": update_id, "updated_at": _now_utc_iso()}
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _message_payload(update: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1021,6 +1291,31 @@ def _message_payload(update: Mapping[str, Any]) -> Mapping[str, Any]:
         if isinstance(value, Mapping):
             return value
     return {}
+
+
+def _callback_query_payload(update: Mapping[str, Any]) -> Mapping[str, Any]:
+    value = update.get("callback_query")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _callback_query_id(callback_query: Mapping[str, Any]) -> str:
+    return _display(callback_query.get("id"))
+
+
+def _callback_data(callback_query: Mapping[str, Any]) -> str:
+    return _display(callback_query.get("data"))
+
+
+def _callback_chat_id(callback_query: Mapping[str, Any]) -> str:
+    message = callback_query.get("message")
+    if isinstance(message, Mapping):
+        chat_id = _chat_id(message)
+        if chat_id != NA:
+            return chat_id
+    sender = callback_query.get("from")
+    if isinstance(sender, Mapping):
+        return _display(sender.get("id"))
+    return NA
 
 
 def _update_id(update: Mapping[str, Any]) -> int | None:
