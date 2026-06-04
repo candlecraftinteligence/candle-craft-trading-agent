@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -51,6 +52,7 @@ class TelegramAdminCommandTransport(Protocol):
         chat_id: str,
         message: str,
         reply_markup: Mapping[str, Any] | None = None,
+        photo_path: Path | None = None,
         photo_url: str | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
         """Send one admin command response through Telegram."""
@@ -94,8 +96,20 @@ class HttpxTelegramAdminCommandTransport:
         chat_id: str,
         message: str,
         reply_markup: Mapping[str, Any] | None = None,
+        photo_path: Path | None = None,
         photo_url: str | None = None,
     ) -> tuple[Mapping[str, Any], ...]:
+        if photo_path is not None:
+            return await _send_admin_photo_file_with_reply_markup(
+                bot_token=bot_token,
+                chat_id=chat_id,
+                message=message,
+                photo_path=photo_path,
+                reply_markup=reply_markup,
+                http_client=self._http_client,
+                api_base_url=self._api_base_url,
+                timeout=self._timeout,
+            )
         if photo_url is not None:
             return await _send_admin_photo_with_reply_markup(
                 bot_token=bot_token,
@@ -286,6 +300,7 @@ async def _process_update(
             chat_id=config.admin_chat_id or "",
             message=response.text,
             reply_markup=response.reply_markup,
+            photo_path=response.photo_path,
             photo_url=response.photo_url,
         )
     except Exception as exc:
@@ -358,32 +373,69 @@ async def _send_public_command_response(
     response: AdminCommandResponse,
     transport: TelegramAdminCommandTransport,
 ) -> tuple[Mapping[str, Any], ...]:
-    if response.photo_url is None:
+    if response.photo_path is None and response.photo_url is None:
         return await transport.send_message(
             bot_token=config.bot_token or "",
             chat_id=chat_id,
             message=response.text,
             reply_markup=response.reply_markup,
+            photo_path=None,
             photo_url=None,
         )
 
-    try:
-        photo_results = await transport.send_message(
-            bot_token=config.bot_token or "",
-            chat_id=chat_id,
-            message=response.text,
-            reply_markup=response.reply_markup,
-            photo_url=response.photo_url,
-        )
-    except Exception:
-        photo_results = ()
-    if _raw_results_sent(photo_results):
-        return photo_results
+    if response.photo_path is not None:
+        try:
+            photo_results = await transport.send_message(
+                bot_token=config.bot_token or "",
+                chat_id=chat_id,
+                message=response.text,
+                reply_markup=response.reply_markup,
+                photo_path=response.photo_path,
+                photo_url=None,
+            )
+        except Exception:
+            photo_results = ()
+        if _raw_results_sent(photo_results):
+            return photo_results
+        return await _send_public_text_response(config=config, chat_id=chat_id, response=response, transport=transport)
+
+    if response.photo_url is not None:
+        try:
+            photo_results = await transport.send_message(
+                bot_token=config.bot_token or "",
+                chat_id=chat_id,
+                message=response.text,
+                reply_markup=response.reply_markup,
+                photo_path=None,
+                photo_url=response.photo_url,
+            )
+        except Exception:
+            photo_results = ()
+        if _raw_results_sent(photo_results):
+            return photo_results
     return await transport.send_message(
         bot_token=config.bot_token or "",
         chat_id=chat_id,
         message=response.text,
         reply_markup=response.reply_markup,
+        photo_path=None,
+        photo_url=None,
+    )
+
+
+async def _send_public_text_response(
+    *,
+    config: TelegramAdminConfig,
+    chat_id: str,
+    response: AdminCommandResponse,
+    transport: TelegramAdminCommandTransport,
+) -> tuple[Mapping[str, Any], ...]:
+    return await transport.send_message(
+        bot_token=config.bot_token or "",
+        chat_id=chat_id,
+        message=response.text,
+        reply_markup=response.reply_markup,
+        photo_path=None,
         photo_url=None,
     )
 
@@ -440,6 +492,129 @@ def _updates_from_response(response: httpx.Response) -> tuple[Mapping[str, Any],
     if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
         return ()
     return tuple(item for item in results if isinstance(item, Mapping))
+
+
+async def _send_admin_photo_file_with_reply_markup(
+    *,
+    bot_token: str,
+    chat_id: str,
+    message: str,
+    photo_path: Path,
+    reply_markup: Mapping[str, Any] | None,
+    http_client: httpx.AsyncClient | None,
+    api_base_url: str,
+    timeout: float,
+) -> tuple[Mapping[str, Any], ...]:
+    close_client = http_client is None
+    client = http_client or httpx.AsyncClient(base_url=api_base_url, timeout=timeout)
+    chunks = split_message(message, 1024)
+    first_chunk = chunks[0] if chunks else message
+    url = f"/bot{bot_token}/sendPhoto"
+    data: dict[str, Any] = {
+        "chat_id": chat_id,
+        "caption": first_chunk,
+    }
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
+    try:
+        try:
+            handle = photo_path.open("rb")
+        except OSError:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=len(chunks) or 1,
+                    error="Telegram public welcome image file could not be opened.",
+                ),
+            )
+
+        try:
+            files = {"photo": (photo_path.name, handle, _photo_content_type(photo_path))}
+            try:
+                response = await client.post(url, data=data, files=files)
+            except httpx.TimeoutException:
+                return (
+                    _admin_send_failure(
+                        part_number=1,
+                        total_parts=len(chunks) or 1,
+                        error="Telegram public welcome image upload timed out.",
+                    ),
+                )
+            except httpx.HTTPError as exc:
+                return (
+                    _admin_send_failure(
+                        part_number=1,
+                        total_parts=len(chunks) or 1,
+                        error=f"Telegram public welcome image upload failed: {exc}",
+                    ),
+                )
+        finally:
+            handle.close()
+
+        if response.status_code != 200:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=len(chunks) or 1,
+                    error=_telegram_send_http_error(response),
+                    http_status=response.status_code,
+                    rate_limited=response.status_code == 429,
+                ),
+            )
+
+        try:
+            body = response.json()
+        except ValueError:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=len(chunks) or 1,
+                    error="Telegram public welcome image upload response could not be read.",
+                    http_status=response.status_code,
+                ),
+            )
+
+        if not isinstance(body, Mapping) or body.get("ok") is not True:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=len(chunks) or 1,
+                    error=_telegram_malformed_body_error(body),
+                    http_status=response.status_code,
+                ),
+            )
+
+        results: list[Mapping[str, Any]] = [
+            {
+                "status": "sent",
+                "part_number": 1,
+                "total_parts": len(chunks) or 1,
+                "http_status": response.status_code,
+                "rate_limited": False,
+                "error": None,
+                **_telegram_success_metadata(body),
+            }
+        ]
+    finally:
+        if close_client:
+            await client.aclose()
+
+    if len(chunks) > 1:
+        rest = "\n".join(chunks[1:])
+        if rest:
+            results.extend(
+                await _send_admin_messages_with_reply_markup(
+                    bot_token=bot_token,
+                    chat_id=chat_id,
+                    message=rest,
+                    reply_markup=reply_markup or {},
+                    http_client=http_client,
+                    api_base_url=api_base_url,
+                    timeout=timeout,
+                )
+            )
+    return tuple(results)
 
 
 async def _send_admin_photo_with_reply_markup(
@@ -668,6 +843,11 @@ def _admin_send_failure(
         "rate_limited": rate_limited,
         "error": error,
     }
+
+
+def _photo_content_type(path: Path) -> str:
+    content_type, _encoding = mimetypes.guess_type(str(path))
+    return content_type or "application/octet-stream"
 
 
 def _telegram_send_http_error(response: httpx.Response) -> str:
