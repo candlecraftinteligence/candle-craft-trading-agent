@@ -57,6 +57,9 @@ TERMINAL_COMPLETION_ALERT_TYPES = {
 SENT_WATCHLIST_RECONCILIATION_ATTEMPT = "SENT_WATCHLIST_RECONCILIATION"
 SENT_WATCHLIST_RECONCILIATION_NO_MATCH = "sent_watchlist_reconciliation_no_lifecycle_match"
 SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguous"
+SOFT_FAILED_CONFIRMATION_ATTEMPT = "SOFT_FAILED_CONFIRMATION"
+SOFT_FAILED_CONFIRMATION_MIN_OBSERVATIONS = 3
+SOFT_FAILED_CONFIRMATION_REMOVAL_REASON = "Watchlist removed because final confirmation conditions did not improve."
 TERMINAL_IDENTITY_BLOCK_REASONS = {
     "terminal_update_no_prior_public_alert",
     "terminal_update_identity_ambiguous",
@@ -709,6 +712,17 @@ class TelegramLifecycleDeliveryService:
                 )
             return None
 
+        decision = _apply_soft_failed_confirmation_grace_to_decision(
+            repository,
+            symbol_result,
+            decision=decision,
+            prior_alert=prior_active_alert,
+            scan_run_id=scan_run_id,
+            eligibility_context=eligibility_context or TelegramEligibilityContext(),
+        )
+        if decision is None:
+            return None
+
         signal_id = _signal_id(symbol_result)
         message = decision.message
         if decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES and prior_active_alert is not None:
@@ -822,6 +836,12 @@ class TelegramLifecycleDeliveryService:
                 continue
             if repository.has_sent_terminal_outcome(signal_id=prior_alert.signal_id):
                 continue
+            if _has_current_run_soft_failed_confirmation_observation(
+                repository,
+                signal_id=prior_alert.signal_id,
+                scan_run_id=scan_run_id,
+            ):
+                continue
 
             match = _match_sent_watchlist_lifecycle(
                 prior_alert,
@@ -847,6 +867,16 @@ class TelegramLifecycleDeliveryService:
                 prior_alert,
                 match.record,
                 current_result=current_result,
+                eligibility_context=eligibility_context,
+            )
+            if outcome is None:
+                continue
+
+            outcome = _apply_soft_failed_confirmation_grace_to_reconciliation(
+                repository,
+                prior_alert=prior_alert,
+                outcome=outcome,
+                scan_run_id=scan_run_id,
                 eligibility_context=eligibility_context,
             )
             if outcome is None:
@@ -2354,6 +2384,343 @@ def _persist_sent_watchlist_reconciliation_block(
         message_hash=message_hash,
         error_message=reason,
     )
+
+
+def _apply_soft_failed_confirmation_grace_to_decision(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    symbol_result: ScannerSymbolResult,
+    *,
+    decision: TelegramAlertDecision,
+    prior_alert: TelegramAlertAttemptRecord | None,
+    scan_run_id: str | None,
+    eligibility_context: TelegramEligibilityContext,
+) -> TelegramAlertDecision | None:
+    if (
+        decision.alert_type != TelegramAlertType.NO_LONGER_TRACKING
+        or decision.message is None
+        or prior_alert is None
+        or prior_alert.alert_type != TelegramAlertType.WATCHLIST.value
+    ):
+        return decision
+    if _is_explicit_no_longer_tracking_state(symbol_result) and not _soft_failed_confirmation_lifecycle_evidence(
+        symbol_result
+    ):
+        return decision
+    if (
+        _terminal_alert_type_for_lifecycle_state(_status_key(_lifecycle_state_text(symbol_result)))
+        == TelegramAlertType.NO_LONGER_TRACKING
+    ):
+        blockers = _confirmed_guard_blockers(symbol_result, eligibility_context)
+        if _soft_failed_confirmation_blocker_key(symbol_result, blockers) == NA:
+            return decision
+    else:
+        blockers = _confirmed_guard_blockers(symbol_result, eligibility_context)
+
+    blocker_key = _soft_failed_confirmation_blocker_key(symbol_result, blockers)
+    if blocker_key == NA:
+        return decision
+    seen_count = _record_soft_failed_confirmation_observation(
+        repository,
+        prior_alert=prior_alert,
+        symbol_result=symbol_result,
+        blocker_key=blocker_key,
+        blockers=blockers,
+        scan_run_id=scan_run_id,
+        eligibility_context=eligibility_context,
+    )
+    if seen_count < SOFT_FAILED_CONFIRMATION_MIN_OBSERVATIONS:
+        return None
+    return replace(
+        decision,
+        message=replace(
+            decision.message,
+            invalidation_reason=SOFT_FAILED_CONFIRMATION_REMOVAL_REASON,
+        ),
+    )
+
+
+def _apply_soft_failed_confirmation_grace_to_reconciliation(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    prior_alert: TelegramAlertAttemptRecord,
+    outcome: SentWatchlistReconciliationOutcome,
+    scan_run_id: str | None,
+    eligibility_context: TelegramEligibilityContext,
+) -> SentWatchlistReconciliationOutcome | None:
+    if outcome.alert_type != TelegramAlertType.NO_LONGER_TRACKING:
+        return outcome
+    if _is_explicit_no_longer_tracking_state(
+        outcome.symbol_result
+    ) and not _soft_failed_confirmation_lifecycle_evidence(outcome.symbol_result):
+        return outcome
+    blockers = _confirmed_guard_blockers(outcome.symbol_result, eligibility_context)
+    blocker_key = _soft_failed_confirmation_blocker_key(outcome.symbol_result, blockers)
+    if blocker_key == NA:
+        return outcome
+    seen_count = _record_soft_failed_confirmation_observation(
+        repository,
+        prior_alert=prior_alert,
+        symbol_result=outcome.symbol_result,
+        blocker_key=blocker_key,
+        blockers=blockers,
+        scan_run_id=scan_run_id,
+        eligibility_context=eligibility_context,
+    )
+    if seen_count < SOFT_FAILED_CONFIRMATION_MIN_OBSERVATIONS:
+        return None
+    return SentWatchlistReconciliationOutcome(
+        alert_type=outcome.alert_type,
+        message=replace(
+            outcome.message,
+            invalidation_reason=SOFT_FAILED_CONFIRMATION_REMOVAL_REASON,
+        ),
+        symbol_result=outcome.symbol_result,
+    )
+
+
+def _record_soft_failed_confirmation_observation(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    prior_alert: TelegramAlertAttemptRecord,
+    symbol_result: ScannerSymbolResult,
+    blocker_key: str,
+    blockers: Sequence[str],
+    scan_run_id: str | None,
+    eligibility_context: TelegramEligibilityContext,
+) -> int:
+    alert_type = _soft_failed_confirmation_alert_type(blocker_key)
+    existing = repository.get_attempt(signal_id=prior_alert.signal_id, alert_type=alert_type)
+    seen_at = now_utc_iso()
+    transition = symbol_result.lifecycle_transition
+    previous_state = transition.from_state.value if transition and transition.from_state else NA
+    new_state = transition.to_state.value if transition else _lifecycle_state_text(symbol_result)
+    reason = f"soft_failed_confirmation:{blocker_key}"
+    message_hash = hashlib.sha256(
+        f"{prior_alert.signal_id}|{SOFT_FAILED_CONFIRMATION_ATTEMPT}|{blocker_key}".encode("utf-8")
+    ).hexdigest()
+    message = telegram_signal_message_from_symbol(symbol_result)
+    record = TelegramAlertAttemptRecord(
+        signal_id=prior_alert.signal_id,
+        symbol=prior_alert.symbol,
+        direction=prior_alert.direction,
+        previous_state=previous_state,
+        new_state=new_state,
+        alert_type=alert_type,
+        lifecycle_state=_lifecycle_state_text(symbol_result),
+        sent_at=seen_at,
+        telegram_status="skipped",
+        message_hash=message_hash,
+        scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        attempted_alert_type=SOFT_FAILED_CONFIRMATION_ATTEMPT,
+        setup_quality_score=_quality_score(symbol_result),
+        rr_planned=_text(message.planned_rr),
+        min_rr=_text(eligibility_context.min_rr),
+        opportunity_score=_opportunity_score_text(symbol_result),
+        min_score_for_idea=_text(eligibility_context.min_score_for_idea),
+        technical_score=_technical_score_text(symbol_result),
+        price_level=_text(message.price_level),
+        blocked_reason=reason,
+        invalid_target_fields=_invalid_target_fields_from_reason("; ".join(str(blocker) for blocker in blockers)),
+        error_message=reason,
+        first_seen_at=existing.first_seen_at if existing is not None else seen_at,
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        last_error_message=reason,
+    )
+    if existing is None:
+        inserted = repository.insert_attempt(record)
+        if inserted:
+            return 1
+    repository.compact_repeated_attempt(record)
+    updated = repository.get_attempt(signal_id=prior_alert.signal_id, alert_type=alert_type)
+    return updated.seen_count if updated is not None else 1
+
+
+def _has_current_run_soft_failed_confirmation_observation(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    signal_id: str,
+    scan_run_id: str | None,
+) -> bool:
+    if scan_run_id is None:
+        return False
+    return any(
+        attempt.attempted_alert_type == SOFT_FAILED_CONFIRMATION_ATTEMPT
+        and attempt.telegram_status == "skipped"
+        and attempt.last_scan_run_id == scan_run_id
+        for attempt in repository.list_attempts(signal_id=signal_id)
+    )
+
+
+def _confirmed_guard_blockers(
+    symbol_result: ScannerSymbolResult,
+    eligibility_context: TelegramEligibilityContext,
+) -> tuple[str, ...]:
+    message = replace(
+        telegram_signal_message_from_symbol(symbol_result),
+        min_rr=eligibility_context.min_rr,
+    )
+    blockers = (
+        *_defensive_delivery_blockers(
+            symbol_result,
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            message,
+            eligibility_context,
+        ),
+        *_failed_confirmation_core_blockers(symbol_result),
+    )
+    return tuple(dict.fromkeys(str(blocker) for blocker in blockers if _text(blocker) != NA))
+
+
+def _soft_failed_confirmation_blocker_key(
+    symbol_result: ScannerSymbolResult,
+    blockers: Sequence[str],
+) -> str:
+    if not blockers or _hard_failed_confirmation_blockers(symbol_result, blockers):
+        return NA
+    lifecycle = symbol_result.lifecycle_state
+    failed_gate = _status_key(getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA)
+    if "regime_compatibility" in failed_gate:
+        return "regime_compatibility"
+    if "rr_below" in failed_gate or "low_rr" in failed_gate:
+        return "rr_below_min"
+    if "target_expansion" in failed_gate or "target_integrity" in failed_gate:
+        return "target_expansion"
+    haystack = " ".join(
+        (
+            _failed_confirmation_haystack(symbol_result),
+            " ".join(str(blocker) for blocker in blockers),
+        )
+    )
+    key = _status_key(haystack)
+    if "regime_compatibility" in key or "cleaner_regime" in key or "regime_weakness" in key:
+        return "regime_compatibility"
+    if "target_expansion" in key or "target_integrity" in key or "not_enough_room" in key:
+        return "target_expansion"
+    if "rr_below" in key or "planned_rr_below" in key or "low_rr" in key or "risk_reward_below" in key:
+        return "rr_below_min"
+    if "opportunity_score" in key or "score_below" in key or "scoring" in key:
+        return "score_below_min"
+    if "technical_score" in key or "technical_quality" in key:
+        return "technical_score"
+    if "quality_gate" in key or "final_quality" in key or "setup_quality" in key:
+        return "quality_gate"
+    if "trade_idea_missing" in key or "missing_required_fields" in key:
+        return "incomplete_confirmation"
+    return NA
+
+
+def _is_explicit_no_longer_tracking_state(symbol_result: ScannerSymbolResult) -> bool:
+    return (
+        _terminal_alert_type_for_lifecycle_state(_status_key(_lifecycle_state_text(symbol_result)))
+        == TelegramAlertType.NO_LONGER_TRACKING
+    )
+
+
+def _soft_failed_confirmation_lifecycle_evidence(symbol_result: ScannerSymbolResult) -> bool:
+    lifecycle = symbol_result.lifecycle_state
+    if lifecycle is None:
+        return False
+    haystack = _status_key(
+        " ".join(
+            _text(value)
+            for value in (
+                lifecycle.failed_gate,
+                lifecycle.action_label,
+                lifecycle.invalidation_reason,
+                _failed_confirmation_haystack(symbol_result),
+            )
+            if _text(value) != NA
+        )
+    )
+    return any(
+        token in haystack
+        for token in (
+            "regime_compatibility",
+            "cleaner_regime",
+            "target_expansion",
+            "target_integrity",
+            "rr_below",
+            "low_rr",
+            "score_below",
+            "technical_score",
+            "quality_gate",
+        )
+    )
+
+
+def _hard_failed_confirmation_blockers(
+    symbol_result: ScannerSymbolResult,
+    blockers: Sequence[str],
+) -> bool:
+    if _failed_confirmation_is_structural_invalidation(symbol_result, blockers):
+        return True
+    invalid_target_fields = _invalid_target_fields_from_reason("; ".join(str(blocker) for blocker in blockers))
+    if invalid_target_fields != NA and _target_integrity_has_numeric_terminal_failure(symbol_result):
+        return True
+    haystack = " ".join(
+        (
+            _failed_confirmation_haystack(symbol_result),
+            " ".join(str(blocker) for blocker in blockers),
+        )
+    )
+    key = _status_key(haystack)
+    return any(
+        token in key
+        for token in (
+            "accepted_beyond_invalidation",
+            "acceptance_beyond_invalidation",
+            "body_acceptance_failure",
+            "invalidation_broken",
+            "stop_broken",
+            "wrong_side_target",
+            "non_monotonic",
+            "impossible_target",
+        )
+    )
+
+
+def _target_integrity_has_numeric_terminal_failure(symbol_result: ScannerSymbolResult) -> bool:
+    message = telegram_signal_message_from_symbol(symbol_result)
+    side = _status_key(message.direction)
+    if side not in {"long", "short"}:
+        return False
+    entry_reference = _entry_reference(symbol_result, message)
+    if entry_reference is None:
+        return False
+
+    stop_loss = _decimal_or_none(message.stop_loss)
+    if stop_loss is not None:
+        if side == "long" and stop_loss >= entry_reference:
+            return True
+        if side == "short" and stop_loss <= entry_reference:
+            return True
+
+    targets = tuple(
+        value
+        for value in (
+            _decimal_or_none(message.tp1),
+            _decimal_or_none(message.tp2),
+            _decimal_or_none(message.tp3),
+        )
+        if value is not None
+    )
+    for target in targets:
+        if side == "long" and target <= entry_reference:
+            return True
+        if side == "short" and target >= entry_reference:
+            return True
+    for left, right in zip(targets, targets[1:]):
+        if side == "long" and left >= right:
+            return True
+        if side == "short" and left <= right:
+            return True
+    return False
+
+
+def _soft_failed_confirmation_alert_type(blocker_key: str) -> str:
+    digest = hashlib.sha256(_status_key(blocker_key).encode("utf-8")).hexdigest()[:12]
+    return f"{SOFT_FAILED_CONFIRMATION_ATTEMPT}_{digest}"
 
 
 def _match_sent_watchlist_lifecycle(
