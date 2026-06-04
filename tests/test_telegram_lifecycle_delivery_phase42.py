@@ -314,6 +314,18 @@ def _telegram_attempt_rows(db_path: Path) -> list[tuple[str, str, str]]:
         ).fetchall()
 
 
+def _soft_failed_confirmation_rows(db_path: Path) -> list[tuple[str, str, str, int]]:
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT attempted_alert_type, telegram_status, blocked_reason, seen_count
+            FROM telegram_alert_attempts
+            WHERE attempted_alert_type = 'SOFT_FAILED_CONFIRMATION'
+            ORDER BY id
+            """
+        ).fetchall()
+
+
 def _assert_transition_message_clean(message: str, *, signal_id: str, status: str) -> None:
     assert message.startswith(HEADER_PREFIX)
     assert message.endswith(FOOTER)
@@ -770,14 +782,10 @@ def test_phase42k_watchlist_transition_matrix_preserves_original_id_rows_and_ded
             "no-longer-tracking",
             TelegramAlertType.NO_LONGER_TRACKING,
             "NO LONGER TRACKING",
-            lambda signal_id: _with_lifecycle_fields(
-                _symbol(
-                    SetupLifecycleState.CONFIRMED,
-                    previous=SetupLifecycleState.TRIGGERED,
-                    signal_id=signal_id,
-                ),
-                failed_gate="regime_compatibility",
-                invalidation_reason="Setup rejected by regime weakness.",
+            lambda signal_id: _symbol(
+                SetupLifecycleState.COOLDOWN,
+                previous=SetupLifecycleState.TRIGGERED,
+                signal_id=signal_id,
             ),
         ),
     )
@@ -834,16 +842,17 @@ def test_phase42k_watchlist_transition_matrix_preserves_original_id_rows_and_ded
         ]
 
 
-def test_phase42k_reconciles_failed_confirmation_gate_variants_to_no_longer_tracking(
+def test_phase42l_reconciles_soft_failed_confirmation_gate_variants_after_grace_threshold(
     tmp_path: Path,
 ) -> None:
     cases = (
-        ("target_integrity", "Watchlist removed because final RR or target quality failed before confirmation."),
-        ("rr_below_min", "Watchlist removed because final RR or target quality failed before confirmation."),
+        ("target_expansion", "soft_failed_confirmation:target_expansion"),
+        ("target_integrity", "soft_failed_confirmation:target_expansion"),
+        ("rr_below_min", "soft_failed_confirmation:rr_below_min"),
     )
-    for failed_gate, expected_reason in cases:
+    for failed_gate, expected_soft_reason in cases:
         db_path = tmp_path / f"{failed_gate}.db"
-        signal_id = f"phase42k-{failed_gate}"
+        signal_id = f"phase42l-{failed_gate}"
         _seed_prior_active_alert(
             db_path,
             signal_id=signal_id,
@@ -876,26 +885,123 @@ def test_phase42k_reconciles_failed_confirmation_gate_variants_to_no_longer_trac
             min_score_for_idea=Decimal("80"),
         )
 
-        summary = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42k-{failed_gate}"))
-        repeated = run(
-            service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42k-repeat-{failed_gate}")
+        first = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42l-{failed_gate}-1"))
+        second = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42l-{failed_gate}-2"))
+        third = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42l-{failed_gate}-3"))
+        duplicate = run(
+            service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42l-{failed_gate}-4")
         )
 
-        assert summary.sent == 1
-        assert repeated.sent == 0
-        assert repeated.duplicate == 0
+        assert first.sent == 0
+        assert second.sent == 0
+        assert third.sent == 1
+        assert duplicate.sent == 0
+        assert duplicate.duplicate == 0
         assert len(sender.messages) == 1
         _assert_transition_message_clean(
             sender.messages[0],
             signal_id=signal_id,
             status="NO LONGER TRACKING",
         )
-        assert expected_reason in sender.messages[0]
+        assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
         assert "CANDLE CRAFT SIGNAL CONFIRMED" not in sender.messages[0]
-        assert _telegram_attempt_rows(db_path) == [
-            (signal_id, TelegramAlertType.WATCHLIST.value, "sent"),
-            (signal_id, TelegramAlertType.NO_LONGER_TRACKING.value, "sent"),
-        ]
+        soft_rows = _soft_failed_confirmation_rows(db_path)
+        assert len(soft_rows) == 1
+        assert soft_rows[0][0] == "SOFT_FAILED_CONFIRMATION"
+        assert soft_rows[0][1] == "skipped"
+        assert soft_rows[0][2] == expected_soft_reason
+        assert soft_rows[0][3] == 3
+        attempt_rows = _telegram_attempt_rows(db_path)
+        assert attempt_rows[0] == (signal_id, TelegramAlertType.WATCHLIST.value, "sent")
+        assert attempt_rows[1][0] == signal_id
+        assert attempt_rows[1][1].startswith("SOFT_FAILED_CONFIRMATION_")
+        assert attempt_rows[1][2] == "skipped"
+        assert attempt_rows[2] == (signal_id, TelegramAlertType.NO_LONGER_TRACKING.value, "sent")
+
+
+def test_phase42l_soft_blocker_observations_do_not_block_later_valid_confirmation(tmp_path: Path) -> None:
+    db_path = tmp_path / "soft-then-confirmed.db"
+    signal_id = "phase42l-soft-then-confirmed"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    _store_lifecycle_record(
+        db_path,
+        SetupLifecycleRecord(
+            lifecycle_id=signal_id,
+            symbol="BTCUSDT",
+            mode="swing",
+            direction="long",
+            current_state=SetupLifecycleState.CONFIRMED,
+            previous_state=SetupLifecycleState.TRIGGERED,
+            first_seen_at="2026-06-03T00:00:00+00:00",
+            last_seen_at="2026-06-03T00:05:00+00:00",
+            last_transition_at="2026-06-03T00:00:00+00:00",
+            failed_gate="regime_compatibility",
+            action_label="Wait for cleaner regime",
+            invalidation_reason="Setup rejected by regime weakness.",
+        ),
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+        min_rr=Decimal("3"),
+        min_score_for_idea=Decimal("80"),
+    )
+
+    first = run(service.deliver_for_run(_empty_run_result(), scan_run_id="soft-1"))
+    second = run(service.deliver_for_run(_empty_run_result(), scan_run_id="soft-2"))
+    confirmed = _symbol(SetupLifecycleState.CONFIRMED, transitioned=False, signal_id=signal_id)
+    assert confirmed.lifecycle_state is not None
+    _store_lifecycle_record(db_path, confirmed.lifecycle_state)
+    third = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="confirmed-3"))
+
+    assert first.sent == 0
+    assert second.sent == 0
+    assert third.sent == 1
+    assert len(sender.messages) == 1
+    assert "CANDLE CRAFT SIGNAL CONFIRMED" in sender.messages[0]
+    assert "Signal ID:\nphase42l-soft-then-confirmed" in sender.messages[0]
+    soft_rows = _soft_failed_confirmation_rows(db_path)
+    assert len(soft_rows) == 1
+    assert soft_rows[0][3] == 2
+    assert _telegram_attempt_rows(db_path)[-1] == (
+        signal_id,
+        TelegramAlertType.SIGNAL_CONFIRMED.value,
+        "sent",
+    )
+
+
+def test_phase42l_wrong_side_targets_terminalize_without_soft_grace(tmp_path: Path) -> None:
+    db_path = tmp_path / "wrong-side-target.db"
+    signal_id = "phase42l-wrong-side-target"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+        min_rr=Decimal("3"),
+        min_score_for_idea=Decimal("80"),
+    )
+    confirmed = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        signal_id=signal_id,
+        diagnostics=_diagnostics(tp1=Decimal("90")),
+    )
+
+    summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="wrong-target-1"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
+    assert "Signal ID:\nphase42l-wrong-side-target" in sender.messages[0]
+    assert _soft_failed_confirmation_rows(db_path) == []
+    assert _telegram_attempt_rows(db_path) == [
+        (signal_id, TelegramAlertType.WATCHLIST.value, "sent"),
+        (signal_id, TelegramAlertType.NO_LONGER_TRACKING.value, "sent"),
+    ]
 
 
 def test_watchlist_to_confirmed_with_regime_failed_gate_sends_no_longer_tracking(tmp_path: Path) -> None:
@@ -923,26 +1029,30 @@ def test_watchlist_to_confirmed_with_regime_failed_gate_sends_no_longer_tracking
         invalidation_reason="Setup rejected by regime weakness: penalty 15; scalp compatibility Weak.",
     )
 
-    summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime"))
+    first = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime-1"))
+    second = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime-2"))
+    third = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime-3"))
     duplicate = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime-repeat"))
 
-    assert summary.sent == 1
+    assert first.sent == 0
+    assert second.sent == 0
+    assert third.sent == 1
     assert duplicate.duplicate == 1
     assert len(sender.messages) == 1
     assert "CANDLE CRAFT SIGNAL CONFIRMED" not in sender.messages[0]
     assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
     assert "Signal ID:\nsig-regime-watch" in sender.messages[0]
-    assert "Watchlist removed because market conditions failed before confirmation." in sender.messages[0]
+    assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
     assert "penalty 15" not in sender.messages[0]
     assert "scalp compatibility Weak" not in sender.messages[0]
     assert sender.messages[0].startswith(HEADER_PREFIX)
     assert sender.messages[0].endswith(FOOTER)
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows == [
-        (TelegramAlertType.WATCHLIST.value, "sent"),
-        (TelegramAlertType.NO_LONGER_TRACKING.value, "sent"),
-    ]
+    assert rows[0] == (TelegramAlertType.WATCHLIST.value, "sent")
+    assert rows[1][0].startswith("SOFT_FAILED_CONFIRMATION_")
+    assert rows[1][1] == "skipped"
+    assert rows[2] == (TelegramAlertType.NO_LONGER_TRACKING.value, "sent")
 
 
 def test_mstr_style_confirmed_regime_rejection_sends_no_longer_tracking(tmp_path: Path) -> None:
@@ -977,22 +1087,27 @@ def test_mstr_style_confirmed_regime_rejection_sends_no_longer_tracking(tmp_path
         invalidation_reason="Wait for cleaner regime. Setup rejected by regime weakness: penalty 15.",
     )
 
-    summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-mstr"))
+    first = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-mstr-1"))
+    second = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-mstr-2"))
+    third = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-mstr-3"))
 
-    assert summary.sent == 1
+    assert first.sent == 0
+    assert second.sent == 0
+    assert third.sent == 1
     assert len(sender.messages) == 1
     assert "MSTRUSDT | long" in sender.messages[0]
     assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
     assert "Signal ID:\nmstr-watch" in sender.messages[0]
-    assert "Watchlist removed because market conditions failed before confirmation." in sender.messages[0]
+    assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
     assert "SIGNAL CONFIRMED" not in sender.messages[0]
     assert "penalty 15" not in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute("SELECT signal_id, alert_type, direction FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows == [
-        ("mstr-watch", TelegramAlertType.WATCHLIST.value, "long"),
-        ("mstr-watch", TelegramAlertType.NO_LONGER_TRACKING.value, "long"),
-    ]
+    assert rows[0] == ("mstr-watch", TelegramAlertType.WATCHLIST.value, "long")
+    assert rows[1][0] == "mstr-watch"
+    assert rows[1][1].startswith("SOFT_FAILED_CONFIRMATION_")
+    assert rows[1][2] == "long"
+    assert rows[2] == ("mstr-watch", TelegramAlertType.NO_LONGER_TRACKING.value, "long")
 
 
 def test_watchlist_to_confirmed_with_rr_guard_failure_sends_no_longer_tracking(tmp_path: Path) -> None:
@@ -1018,12 +1133,16 @@ def test_watchlist_to_confirmed_with_rr_guard_failure_sends_no_longer_tracking(t
         trade_idea=_trade_idea(best_rr=Decimal("2.79")),
     )
 
-    summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-low-rr"))
+    first = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-low-rr-1"))
+    second = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-low-rr-2"))
+    third = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-low-rr-3"))
 
-    assert summary.sent == 1
+    assert first.sent == 0
+    assert second.sent == 0
+    assert third.sent == 1
     assert len(sender.messages) == 1
     assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
-    assert "Watchlist removed because final RR or target quality failed before confirmation." in sender.messages[0]
+    assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
     assert "SIGNAL CONFIRMED" not in sender.messages[0]
 
 
@@ -1102,10 +1221,14 @@ def test_sent_watchlist_reconciliation_mstr_current_confirmed_failed_gate_sends_
         min_score_for_idea=Decimal("80"),
     )
 
-    summary = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-mstr-reconcile"))
+    first = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-mstr-reconcile-1"))
+    second = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-mstr-reconcile-2"))
+    third = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-mstr-reconcile-3"))
     repeated = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-mstr-repeat"))
 
-    assert summary.sent == 1
+    assert first.sent == 0
+    assert second.sent == 0
+    assert third.sent == 1
     assert repeated.sent == 0
     assert len(sender.messages) == 1
     message = sender.messages[0]
@@ -1114,7 +1237,7 @@ def test_sent_watchlist_reconciliation_mstr_current_confirmed_failed_gate_sends_
     assert "MSTRUSDT | long" in message
     assert "Status:\nNO LONGER TRACKING" in message
     assert "Signal ID:\nmstr-watch" in message
-    assert "Watchlist removed because market conditions failed before confirmation." in message
+    assert "Watchlist removed because final confirmation conditions did not improve." in message
     assert "SIGNAL CONFIRMED" not in message
     assert "penalty 15" not in message
     assert "scalp compatibility Weak" not in message
@@ -1126,10 +1249,11 @@ def test_sent_watchlist_reconciliation_mstr_current_confirmed_failed_gate_sends_
         rows = connection.execute(
             "SELECT signal_id, alert_type, telegram_status, direction FROM telegram_alert_attempts ORDER BY id"
         ).fetchall()
-    assert rows == [
-        ("mstr-watch", TelegramAlertType.WATCHLIST.value, "sent", "long"),
-        ("mstr-watch", TelegramAlertType.NO_LONGER_TRACKING.value, "sent", "long"),
-    ]
+    assert rows[0] == ("mstr-watch", TelegramAlertType.WATCHLIST.value, "sent", "long")
+    assert rows[1][0] == "mstr-watch"
+    assert rows[1][1].startswith("SOFT_FAILED_CONFIRMATION_")
+    assert rows[1][2:] == ("skipped", "long")
+    assert rows[2] == ("mstr-watch", TelegramAlertType.NO_LONGER_TRACKING.value, "sent", "long")
 
 
 def test_sent_watchlist_reconciliation_current_terminal_states_send_updates(tmp_path: Path) -> None:
@@ -1220,12 +1344,16 @@ def test_sent_watchlist_reconciliation_confirmed_with_eligibility_fail_sends_no_
         min_score_for_idea=Decimal("80"),
     )
 
-    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-low-rr-reconcile"))
+    first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-low-rr-reconcile-1"))
+    second = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-low-rr-reconcile-2"))
+    third = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-low-rr-reconcile-3"))
 
-    assert summary.sent == 1
+    assert first.sent == 0
+    assert second.sent == 0
+    assert third.sent == 1
     assert len(sender.messages) == 1
     assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
-    assert "Watchlist removed because final RR or target quality failed before confirmation." in sender.messages[0]
+    assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
     assert "SIGNAL CONFIRMED" not in sender.messages[0]
 
 
