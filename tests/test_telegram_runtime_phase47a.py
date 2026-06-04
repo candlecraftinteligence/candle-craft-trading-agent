@@ -309,7 +309,7 @@ def test_public_commands_and_reply_buttons_return_public_safe_screens(tmp_path: 
     assert "Candle Craft public signal desk status." in messages[6]
     assert "BTCUSDT" in messages[7]
     assert "About Candle Craft" in messages[8]
-    assert "Use the buttons below to enter the signal desk." in messages[9]
+    assert "Use the buttons below to access the signal channel and bot info." in messages[9]
     for message in messages:
         assert "System Desk" not in message
         assert "Configuration Desk" not in message
@@ -425,6 +425,7 @@ def test_check_telegram_runtime_masks_token_and_does_not_send_by_default(capsys)
             telegram_chat_id="legacy-chat",
             telegram_admin_chat_id="admin-chat",
             telegram_public_chat_id="public-chat",
+            telegram_signal_channel_invite_link="https://t.me/+runtime-private-invite",
             telegram_commands_enabled=True,
             telegram_dry_run=False,
         ),
@@ -433,6 +434,7 @@ def test_check_telegram_runtime_masks_token_and_does_not_send_by_default(capsys)
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "telegram_bot_token=present ([REDACTED])" in output
+    assert "signal_channel_invite_link_configured=true" in output
     assert "command_listener_script_present=true" in output
     assert "getme_status=skipped" in output
     assert "admin_test_status" not in output
@@ -440,6 +442,7 @@ def test_check_telegram_runtime_masks_token_and_does_not_send_by_default(capsys)
     assert "super-secret-token" not in output
     assert "admin-chat" not in output
     assert "public-chat" not in output
+    assert "https://t.me/+runtime-private-invite" not in output
 
 
 def test_check_telegram_runtime_getme_uses_mocked_api_and_masks_token(capsys) -> None:
@@ -466,6 +469,7 @@ def test_check_telegram_runtime_getme_uses_mocked_api_and_masks_token(capsys) ->
     assert exit_code == 0
     assert "getme_status=ok" in output
     assert "getme_bot_username=candle_craft_bot" in output
+    assert "signal_channel_invite_link_configured=false" in output
     assert "super-secret-token" not in output
     assert "admin-chat" not in output
     assert "public-chat" not in output

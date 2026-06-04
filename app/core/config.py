@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     telegram_admin_chat_id: str | None = None
     telegram_public_chat_id: str | None = None
     telegram_public_channel_id: str | None = None
+    telegram_signal_channel_invite_link: str | None = None
     telegram_vip_channel_id: str | None = None
     telegram_signals_enabled: bool = False
     telegram_public_ui_enabled: bool | None = None

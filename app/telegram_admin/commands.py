@@ -16,6 +16,11 @@ SCREEN_HEADER = "🐺🟠"
 SCREEN_FOOTER = "Candle Craft | Signal. Structure. Execution."
 SCREEN_DIVIDER = "━━━━━━━━━━━━━━━━━━"
 UNVERIFIED = "Unverified"
+JOIN_SIGNAL_CHANNEL_BUTTON_LABEL = "🐺 Join Signal Channel"
+PUBLIC_SIGNAL_CHANNEL_COPY = (
+    "Join the private Candle Craft signal channel for live watchlists and lifecycle updates."
+)
+PUBLIC_SIGNAL_CHANNEL_MISSING_COPY = "Signal channel invite link is not configured yet."
 ADMIN_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
     ("📊 Status", "🚨 Alerts"),
     ("👁 Watchlists", "🧾 Integrity"),
@@ -175,9 +180,9 @@ class TelegramAdminCommandService:
     def response_for(self, command: str, *, admin_config: Any | None = None) -> AdminCommandResponse:
         normalized = normalize_admin_command(command)
         if normalized == "/start":
-            return _admin_response(normalized, "start", format_start_response())
+            return _admin_response(normalized, "start", format_start_response(), admin_config=admin_config)
         if normalized == "/menu":
-            return _admin_response(normalized, "menu", format_menu_response())
+            return _admin_response(normalized, "menu", format_menu_response(), admin_config=admin_config)
         if normalized in {"/help", "/guide"}:
             return _admin_response(normalized, "guide", format_help_response())
         if normalized == "/status":
@@ -185,7 +190,7 @@ class TelegramAdminCommandService:
         if normalized == "/latest":
             return self._latest_alerts_response()
         if normalized == "/about":
-            return _admin_response(normalized, "about", format_about_response())
+            return _admin_response(normalized, "about", format_about_response(), admin_config=admin_config)
         if normalized == "/alerts":
             return self._alerts_response()
         if normalized == "/watchlists":
@@ -222,20 +227,26 @@ class TelegramAdminCommandService:
             return _public_response(
                 normalized,
                 "public_menu",
-                format_public_menu_response(),
+                format_public_menu_response(public_config),
                 photo_path=photo_path,
                 photo_url=(
                     _public_logo_url(public_config)
                     if normalized == "/start" and photo_path is None
                     else None
                 ),
+                public_config=public_config,
             )
         if normalized == "/status":
             return self._public_status_response(public_config=public_config)
         if normalized == "/latest":
             return self._public_latest_alerts_response()
         if normalized == "/about":
-            return _public_response(normalized, "public_about", format_public_about_response())
+            return _public_response(
+                normalized,
+                "public_about",
+                format_public_about_response(public_config),
+                public_config=public_config,
+            )
         if normalized == "/lastscan":
             return self._public_lastscan_response()
         if normalized == "/signals":
@@ -273,7 +284,12 @@ class TelegramAdminCommandService:
             return _public_response(normalized, "public_help", format_public_help_response())
         if normalized in PUBLIC_ADMIN_RESERVED_COMMANDS:
             return _public_response(normalized, "public_admin_reserved", format_public_admin_reserved_response())
-        return _public_response(normalized, "public_menu", format_public_menu_response())
+        return _public_response(
+            normalized,
+            "public_menu",
+            format_public_menu_response(public_config),
+            public_config=public_config,
+        )
 
     def _latest_alerts_response(self) -> AdminCommandResponse:
         rows = self._latest_telegram_alert_rows()
@@ -644,6 +660,7 @@ class TelegramAdminCommandService:
                 "Sensitive data:",
                 f"Bot token: {_hidden_status(admin_config, 'bot_token')}",
                 f"Chat ID: {_hidden_status(admin_config, 'admin_chat_id')}",
+                f"Signal channel invite: {_config_presence(admin_config, 'signal_channel_invite_link')}",
                 SCREEN_DIVIDER,
                 "",
                 "This panel is informational only.",
@@ -956,11 +973,12 @@ def format_about_response() -> str:
     )
 
 
-def format_public_about_response() -> str:
+def format_public_about_response(config: Any | None = None) -> str:
     return _screen(
         "About Candle Craft",
         (
             "Candle Craft Intelligence filters crypto futures for clean structure.",
+            _public_signal_channel_copy(config),
             "",
             SCREEN_DIVIDER,
             "Public alerts are lifecycle updates from the signal engine.",
@@ -974,7 +992,7 @@ def format_public_about_response() -> str:
     )
 
 
-def format_public_menu_response() -> str:
+def format_public_menu_response(config: Any | None = None) -> str:
     return _screen(
         "Candle Craft Intelligence",
         (
@@ -992,7 +1010,11 @@ def format_public_menu_response() -> str:
             "Only filtered opportunities when the structure is clean.",
             "",
             SCREEN_DIVIDER,
-            "Use the buttons below to enter the signal desk.",
+            "Use the buttons below to access the signal channel and bot info.",
+            _public_signal_channel_copy(config),
+            "",
+            "System:",
+            "Manual signal intelligence only. No order execution.",
         ),
     )
 
@@ -1207,21 +1229,25 @@ def admin_menu_inline_markup() -> Mapping[str, Any]:
     }
 
 
-def public_menu_inline_markup() -> Mapping[str, Any]:
-    return {
-        "inline_keyboard": [
+def public_menu_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
+    keyboard = _signal_channel_button_rows(config)
+    keyboard.extend(
+        [
             [{"text": label, "callback_data": PUBLIC_MENU_BUTTON_CALLBACKS[label]} for label in row]
             for row in PUBLIC_MENU_BUTTON_ROWS
-        ],
-    }
+        ]
+    )
+    return {"inline_keyboard": keyboard}
 
 
 def admin_back_to_menu_inline_markup() -> Mapping[str, Any]:
     return {"inline_keyboard": [[{"text": "↩ Back to Menu", "callback_data": "admin:menu"}]]}
 
 
-def public_back_to_menu_inline_markup() -> Mapping[str, Any]:
-    return {"inline_keyboard": [[{"text": "↩ Back to Menu", "callback_data": "public:menu"}]]}
+def public_back_to_menu_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
+    keyboard = _signal_channel_button_rows(config)
+    keyboard.append([{"text": "↩ Back to Menu", "callback_data": "public:menu"}])
+    return {"inline_keyboard": keyboard}
 
 
 def public_donate_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
@@ -1256,13 +1282,14 @@ def _admin_response(
     text: str,
     *,
     run_id: str = NA,
+    admin_config: Any | None = None,
 ) -> AdminCommandResponse:
     return AdminCommandResponse(
         command=command,
         response_type=response_type,
         text=text,
         run_id=run_id,
-        reply_markup=_admin_reply_markup_for(command, response_type),
+        reply_markup=_admin_reply_markup_for(command, response_type, admin_config),
         cleanup_reply_keyboard=command in {"/start", "/menu"},
     )
 
@@ -1277,6 +1304,7 @@ def _public_response(
     photo_url: str | None = None,
     reply_markup: Mapping[str, Any] | None = None,
     suppress_reply_markup: bool = False,
+    public_config: Any | None = None,
 ) -> AdminCommandResponse:
     return AdminCommandResponse(
         command=command,
@@ -1286,7 +1314,7 @@ def _public_response(
         reply_markup=(
             None
             if suppress_reply_markup
-            else (reply_markup or _public_reply_markup_for(command, response_type))
+            else (reply_markup or _public_reply_markup_for(command, response_type, public_config))
         ),
         photo_path=photo_path,
         photo_url=photo_url,
@@ -1294,16 +1322,36 @@ def _public_response(
     )
 
 
-def _admin_reply_markup_for(command: str, response_type: str) -> Mapping[str, Any]:
+def _admin_reply_markup_for(command: str, response_type: str, config: Any | None = None) -> Mapping[str, Any]:
+    signal_rows = _signal_channel_button_rows(config)
     if command in {"/start", "/menu"} or response_type in {"start", "menu"}:
-        return admin_menu_inline_markup()
-    return admin_back_to_menu_inline_markup()
+        markup = admin_menu_inline_markup()
+        return {"inline_keyboard": signal_rows + list(markup["inline_keyboard"])}
+    markup = admin_back_to_menu_inline_markup()
+    return {"inline_keyboard": signal_rows + list(markup["inline_keyboard"])}
 
 
-def _public_reply_markup_for(command: str, response_type: str) -> Mapping[str, Any]:
+def _public_reply_markup_for(command: str, response_type: str, config: Any | None = None) -> Mapping[str, Any]:
     if command in {"/start", "/menu"} or response_type == "public_menu":
-        return public_menu_inline_markup()
-    return public_back_to_menu_inline_markup()
+        return public_menu_inline_markup(config)
+    return public_back_to_menu_inline_markup(config)
+
+
+def _signal_channel_button_rows(config: Any | None) -> list[list[dict[str, Any]]]:
+    invite_link = _signal_channel_invite_link(config)
+    if invite_link == NA:
+        return []
+    return [[{"text": JOIN_SIGNAL_CHANNEL_BUTTON_LABEL, "url": invite_link}]]
+
+
+def _public_signal_channel_copy(config: Any | None) -> str:
+    return PUBLIC_SIGNAL_CHANNEL_COPY if _signal_channel_invite_link(config) != NA else PUBLIC_SIGNAL_CHANNEL_MISSING_COPY
+
+
+def _signal_channel_invite_link(config: Any | None) -> str:
+    if config is None:
+        return NA
+    return _display(getattr(config, "signal_channel_invite_link", NA))
 
 
 def _screen(title: str, lines: Sequence[str]) -> str:
@@ -2223,6 +2271,7 @@ __all__ = [
     "PUBLIC_ADMIN_RESERVED_COMMANDS",
     "PUBLIC_CALLBACK_COMMANDS",
     "PUBLIC_COMMANDS",
+    "JOIN_SIGNAL_CHANNEL_BUTTON_LABEL",
     "PUBLIC_MENU_BUTTON_CALLBACKS",
     "PUBLIC_MENU_BUTTON_ROWS",
     "SIMPLE_REPLY_BUTTON_COMMANDS",

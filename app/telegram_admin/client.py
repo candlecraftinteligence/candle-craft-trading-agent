@@ -41,6 +41,7 @@ class TelegramAdminConfig:
     admin_chat_id: str | None = None
     public_chat_id: str | None = None
     public_channel_id: str | None = None
+    signal_channel_invite_link: str | None = None
     vip_channel_id: str | None = None
     public_logo_path: str | None = None
     public_logo_url: str | None = None
@@ -72,6 +73,9 @@ class TelegramAdminConfig:
             or _clean_optional(getattr(settings, "telegram_chat_id", None)),
             public_chat_id=_clean_optional(getattr(settings, "telegram_public_chat_id", None)),
             public_channel_id=_clean_optional(getattr(settings, "telegram_public_channel_id", None)),
+            signal_channel_invite_link=_clean_optional(
+                getattr(settings, "telegram_signal_channel_invite_link", None)
+            ),
             vip_channel_id=_clean_optional(getattr(settings, "telegram_vip_channel_id", None)),
             public_logo_path=_clean_optional(getattr(settings, "candle_craft_public_logo_path", None)),
             public_logo_url=_clean_optional(getattr(settings, "candle_craft_public_logo_url", None)),
@@ -242,6 +246,7 @@ def _sanitize_error(value: Any, config: TelegramAdminConfig) -> str:
         config.admin_chat_id,
         config.public_chat_id,
         config.public_channel_id,
+        config.signal_channel_invite_link,
         config.vip_channel_id,
     ):
         if secret:

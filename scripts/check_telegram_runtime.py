@@ -52,6 +52,7 @@ def main(
     print(f"admin_chat_configured={_bool_text(bool(admin_config.admin_chat_id))}")
     print(f"public_chat_configured={_bool_text(bool(admin_config.public_chat_id))}")
     print(f"public_channel_configured={_bool_text(bool(admin_config.public_channel_id))}")
+    print(f"signal_channel_invite_link_configured={_bool_text(bool(admin_config.signal_channel_invite_link))}")
     print(f"public_destination_source={public_destination.source}")
     if public_destination.warning != NA and runtime_settings.telegram_signals_enabled:
         print(f"public_destination_warning={public_destination.warning}")
@@ -227,6 +228,7 @@ def _sanitize_error(value: Any, config: TelegramAdminConfig, *, extra: Sequence[
         config.admin_chat_id,
         config.public_chat_id,
         config.public_channel_id,
+        config.signal_channel_invite_link,
         config.vip_channel_id,
         *extra,
     ):

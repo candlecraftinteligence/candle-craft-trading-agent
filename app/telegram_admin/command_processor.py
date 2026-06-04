@@ -1375,6 +1375,7 @@ def _sanitize_error(
         config.admin_chat_id,
         config.public_chat_id,
         config.public_channel_id,
+        config.signal_channel_invite_link,
         config.vip_channel_id,
         *extra_secrets,
     ):

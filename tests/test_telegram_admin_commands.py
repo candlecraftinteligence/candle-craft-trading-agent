@@ -20,6 +20,7 @@ from app.telegram_admin.commands import (
     ADMIN_CALLBACK_COMMANDS,
     ADMIN_MENU_BUTTON_CALLBACKS,
     ADMIN_MENU_BUTTON_ROWS,
+    JOIN_SIGNAL_CHANNEL_BUTTON_LABEL,
     PUBLIC_CALLBACK_COMMANDS,
     PUBLIC_MENU_BUTTON_CALLBACKS,
     PUBLIC_MENU_BUTTON_ROWS,
@@ -346,6 +347,31 @@ def _copy_text_values(reply_markup: Mapping[str, Any] | None) -> list[str]:
     return values
 
 
+def _url_button_items(reply_markup: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    return [item for item in _inline_button_items(reply_markup) if "url" in item]
+
+
+def _assert_join_signal_channel_button(
+    reply_markup: Mapping[str, Any] | None,
+    *,
+    invite_link: str,
+) -> None:
+    items = [
+        item
+        for item in _url_button_items(reply_markup)
+        if str(item.get("text") or "") == JOIN_SIGNAL_CHANNEL_BUTTON_LABEL
+    ]
+    assert len(items) == 1
+    assert items[0]["url"] == invite_link
+    assert "callback_data" not in items[0]
+    assert "copy_text" not in items[0]
+
+
+def _assert_no_join_signal_channel_button(reply_markup: Mapping[str, Any] | None) -> None:
+    assert JOIN_SIGNAL_CHANNEL_BUTTON_LABEL not in _button_labels(reply_markup)
+    assert _url_button_items(reply_markup) == []
+
+
 def _assert_inline_markup(reply_markup: Mapping[str, Any] | None) -> None:
     assert reply_markup is not None
     assert "inline_keyboard" in reply_markup
@@ -450,7 +476,11 @@ def _expected_public_start_text() -> str:
             "Only filtered opportunities when the structure is clean.",
             "",
             "━━━━━━━━━━━━━━━━━━",
-            "Use the buttons below to enter the signal desk.",
+            "Use the buttons below to access the signal channel and bot info.",
+            "Signal channel invite link is not configured yet.",
+            "",
+            "System:",
+            "Manual signal intelligence only. No order execution.",
             "",
             SCREEN_FOOTER,
         )
@@ -792,6 +822,7 @@ def test_config_screen_redacts_secrets_and_raw_chat_ids(tmp_path) -> None:
             bot_token="secret-token",
             admin_chat_id="123456789",
             public_channel_id="public-channel",
+            signal_channel_invite_link="https://t.me/+config-private-invite",
             vip_channel_id="vip-channel",
         ),
     )
@@ -805,9 +836,11 @@ def test_config_screen_redacts_secrets_and_raw_chat_ids(tmp_path) -> None:
     assert "Test mode: Inactive" in response.text
     assert "Bot token: Hidden" in response.text
     assert "Chat ID: Hidden" in response.text
+    assert "Signal channel invite: configured" in response.text
     assert "secret-token" not in response.text
     assert "123456789" not in response.text
     assert "public-channel" not in response.text
+    assert "https://t.me/+config-private-invite" not in response.text
     assert "vip-channel" not in response.text
 
 
@@ -825,6 +858,7 @@ def test_telegram_admin_config_splits_command_ui_from_admin_reports() -> None:
             candle_craft_donate_ton_address="TEST_TON_ADDRESS",
             candle_craft_donate_btc_address="TEST_BTC_ADDRESS",
             candle_craft_donate_url="https://donate.example.test/candlecraft",
+            telegram_signal_channel_invite_link="https://t.me/+test-private-invite",
         )
     )
 
@@ -836,6 +870,7 @@ def test_telegram_admin_config_splits_command_ui_from_admin_reports() -> None:
     assert config.donate_ton_address == "TEST_TON_ADDRESS"
     assert config.donate_btc_address == "TEST_BTC_ADDRESS"
     assert config.donate_url == "https://donate.example.test/candlecraft"
+    assert config.signal_channel_invite_link == "https://t.me/+test-private-invite"
 
 
 def test_public_start_response_uses_public_copy_and_optional_logo(tmp_path) -> None:
@@ -854,7 +889,7 @@ def test_public_start_response_uses_public_copy_and_optional_logo(tmp_path) -> N
     assert response.text == _expected_public_start_text()
     assert "Welcome to the Moon Trip signal desk" in response.text
     assert "No random signals." in response.text
-    assert "Use the buttons below to enter the signal desk." in response.text
+    assert "Use the buttons below to access the signal channel and bot info." in response.text
     assert "System Desk" not in response.text
     assert "Integrity Desk" not in response.text
     assert "Configuration Desk" not in response.text
@@ -943,6 +978,38 @@ def test_public_menu_has_only_public_buttons_and_no_logo_when_missing(tmp_path) 
     assert "Configuration Desk" not in response.text
     assert response.photo_path is None
     assert response.photo_url is None
+
+
+def test_public_start_menu_and_about_include_join_button_when_invite_link_configured(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    invite_link = "https://t.me/+test-private-invite"
+    config = TelegramAdminConfig(signal_channel_invite_link=invite_link)
+
+    for command in ("/start", "/menu", "/about"):
+        response = service.public_response_for(command, public_config=config)
+
+        _assert_shell_screen(response.text)
+        _assert_public_screen_safe(response.text)
+        _assert_join_signal_channel_button(response.reply_markup, invite_link=invite_link)
+        _assert_no_execution_buttons(response.reply_markup)
+        assert JOIN_SIGNAL_CHANNEL_BUTTON_LABEL in _button_labels(response.reply_markup)
+        assert "Join the private Candle Craft signal channel for live watchlists and lifecycle updates." in response.text
+        assert "Signal channel invite link is not configured yet." not in response.text
+        assert invite_link not in response.text
+
+
+def test_public_start_menu_and_about_hide_join_button_when_invite_link_missing(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    config = TelegramAdminConfig()
+
+    for command in ("/start", "/menu", "/about"):
+        response = service.public_response_for(command, public_config=config)
+
+        _assert_shell_screen(response.text)
+        _assert_public_screen_safe(response.text)
+        _assert_no_join_signal_channel_button(response.reply_markup)
+        _assert_no_execution_buttons(response.reply_markup)
+        assert "Signal channel invite link is not configured yet." in response.text
 
 
 def test_public_lastscan_shows_summary_without_admin_internals(tmp_path) -> None:
@@ -1174,6 +1241,7 @@ def test_public_links_and_logo_load_from_settings_and_render(tmp_path) -> None:
     service = TelegramAdminCommandService(project_root=tmp_path)
     config = TelegramAdminConfig.from_settings(
         Settings(
+            _env_file=None,
             candle_craft_public_logo_url="https://cdn.example.test/logo.png",
             candle_craft_x_url="https://x.example.test/candlecraft",
             candle_craft_telegram_url="https://t.me/example_candlecraft",
@@ -1220,7 +1288,7 @@ def test_command_menu_cleanup_calls_telegram_safely_and_does_not_print_token(cap
     try:
         exit_code = clear_menu_script.main(
             [],
-            settings=Settings(telegram_bot_token="secret-token"),
+            settings=Settings(_env_file=None, telegram_bot_token="secret-token"),
             http_client=client,
         )
     finally:
@@ -1248,7 +1316,7 @@ def test_command_menu_cleanup_redacts_token_on_telegram_error(capsys) -> None:
     try:
         exit_code = clear_menu_script.main(
             [],
-            settings=Settings(telegram_bot_token="secret-token"),
+            settings=Settings(_env_file=None, telegram_bot_token="secret-token"),
             http_client=client,
         )
     finally:
@@ -1391,6 +1459,50 @@ def test_public_start_and_menu_updates_route_to_public_ui(tmp_path) -> None:
     serialized = json.dumps(records)
     assert "public-chat" not in serialized
     assert "secret-token" not in serialized
+
+
+def test_public_and_admin_start_updates_receive_configured_join_button(tmp_path) -> None:
+    service = _write_artifacts(tmp_path, rows=[_alert_row(), _near_row()])
+    audit_path = tmp_path / "audit.jsonl"
+    transport = FakeCommandTransport()
+    invite_link = "https://t.me/+route-private-invite"
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                signal_channel_invite_link=invite_link,
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=audit_path,
+            state_path=tmp_path / "state.json",
+            updates=(
+                _update(22, "public-chat", "/start"),
+                _update(23, "admin-chat", "/start"),
+            ),
+        )
+    )
+
+    assert result.delivery_status == "sent_admin"
+    assert result.sent_count == 2
+    screen_calls = _screen_send_calls(transport)
+    assert [call["chat_id"] for call in screen_calls] == ["public-chat", "admin-chat"]
+    _assert_join_signal_channel_button(screen_calls[0]["reply_markup"], invite_link=invite_link)
+    _assert_join_signal_channel_button(screen_calls[1]["reply_markup"], invite_link=invite_link)
+    assert "System Desk" not in screen_calls[0]["message"]
+    assert "Configuration Desk" not in screen_calls[0]["message"]
+    assert "System Desk" in screen_calls[1]["message"]
+    assert invite_link not in screen_calls[0]["message"]
+    assert invite_link not in screen_calls[1]["message"]
+    serialized = json.dumps(_read_jsonl(audit_path))
+    assert invite_link not in serialized
+    assert "secret-token" not in serialized
+    assert "public-chat" not in serialized
+    assert "admin-chat" not in serialized
 
 
 def test_public_start_sends_local_logo_path_when_configured_file_exists(tmp_path) -> None:
@@ -2032,7 +2144,10 @@ def test_update_offset_prevents_duplicate_replies_for_same_update_id(tmp_path) -
 def test_command_audit_records_are_written_safely_and_redact_secrets(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_valid_row()])
     audit_path = tmp_path / "audit.jsonl"
-    transport = FakeCommandTransport(fail_send_with="Telegram rejected secret-token for admin-chat")
+    invite_link = "https://t.me/+audit-private-invite"
+    transport = FakeCommandTransport(
+        fail_send_with=f"Telegram rejected secret-token for admin-chat and {invite_link}"
+    )
 
     result = asyncio.run(
         process_telegram_admin_commands(
@@ -2041,6 +2156,7 @@ def test_command_audit_records_are_written_safely_and_redact_secrets(tmp_path) -
                 dry_run=False,
                 bot_token="secret-token",
                 admin_chat_id="admin-chat",
+                signal_channel_invite_link=invite_link,
             ),
             command_service=service,
             transport=transport,
@@ -2060,6 +2176,7 @@ def test_command_audit_records_are_written_safely_and_redact_secrets(tmp_path) -
     serialized = json.dumps(records)
     assert "secret-token" not in serialized
     assert "admin-chat" not in serialized
+    assert invite_link not in serialized
 
 
 def test_script_dry_run_disabled_skips_network_and_prints_preview(tmp_path, capsys) -> None:
@@ -2076,6 +2193,7 @@ def test_script_dry_run_disabled_skips_network_and_prints_preview(tmp_path, caps
             str(tmp_path / "audit.jsonl"),
         ],
         settings=Settings(
+            _env_file=None,
             telegram_admin_enabled=False,
             telegram_commands_enabled=False,
             telegram_admin_reports_enabled=False,
@@ -2101,6 +2219,7 @@ def test_command_ui_runs_when_legacy_admin_flag_is_disabled(tmp_path) -> None:
         process_telegram_admin_commands(
             config=TelegramAdminConfig.from_settings(
                 Settings(
+                    _env_file=None,
                     telegram_admin_enabled=False,
                     telegram_commands_enabled=True,
                     telegram_admin_reports_enabled=False,
