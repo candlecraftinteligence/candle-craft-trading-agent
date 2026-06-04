@@ -360,34 +360,10 @@ def _assert_public_menu_only(reply_markup: Mapping[str, Any] | None) -> None:
     assert admin_labels.isdisjoint(labels)
 
 
-def _assert_public_donate_markup(
-    reply_markup: Mapping[str, Any] | None,
-    *,
-    donate_url: str | None = None,
-) -> None:
-    assert reply_markup is not None
-    _assert_inline_markup(reply_markup)
-    labels = _button_labels(reply_markup)
-    expected = ["USDT TON Address", "TON Address", "BTC Address"]
-    if donate_url is not None:
-        expected.append("Open Donation Page")
-    expected.append("↩ Back to Menu")
-    assert labels == expected
-    assert _callback_data_values(reply_markup) == [
-        "public:donate_usdt_ton",
-        "public:donate_ton",
-        "public:donate_btc",
-        "public:menu",
-    ]
-    if donate_url is not None:
-        assert {"text": "Open Donation Page", "url": donate_url} in [
-            item
-            for row in reply_markup["inline_keyboard"]
-            for item in row
-            if isinstance(item, Mapping)
-        ]
-    admin_labels = {label for row in ADMIN_MENU_BUTTON_ROWS for label in row}
-    assert admin_labels.isdisjoint(labels)
+def _assert_public_donate_text_only(reply_markup: Mapping[str, Any] | None) -> None:
+    assert reply_markup is None
+    assert _button_labels(reply_markup) == []
+    assert _callback_data_values(reply_markup) == []
 
 
 def _assert_admin_menu_only(reply_markup: Mapping[str, Any] | None) -> None:
@@ -457,28 +433,6 @@ def _assert_public_screen_safe(text: str) -> None:
     lowered = text.lower()
     for phrase in forbidden:
         assert phrase.lower() not in lowered
-
-
-def _expected_public_donate_address_text(
-    title: str,
-    address: str,
-    *,
-    network: str,
-    send_warning: str,
-) -> str:
-    return "\n".join(
-        (
-            f"{SCREEN_HEADER} {title}",
-            "",
-            "Address:",
-            address,
-            "",
-            f"Network: {network}",
-            send_warning,
-            "",
-            SCREEN_FOOTER,
-        )
-    )
 
 
 def _rejected_row(symbol: str = "REJECTUSDT") -> dict[str, Any]:
@@ -1037,16 +991,22 @@ def test_public_donate_screen_shows_crypto_sections_and_missing_addresses_as_na(
 
     _assert_shell_screen(donate.text)
     _assert_public_screen_safe(donate.text)
-    _assert_public_donate_markup(donate.reply_markup)
+    _assert_public_donate_text_only(donate.reply_markup)
     _assert_no_execution_buttons(donate.reply_markup)
     assert donate.text.startswith(f"{SCREEN_HEADER} Donate")
-    assert "Support Candle Craft development." in donate.text
-    assert "USDT on TON\nNetwork: TON\nAddress: N/A" in donate.text
-    assert "TON\nNetwork: TON\nAddress: N/A" in donate.text
-    assert "BTC\nNetwork: Bitcoin\nAddress: N/A" in donate.text
+    assert "Support Candle Craft development and help us grow the signal engine." in donate.text
+    assert "USDT on TON\nNetwork: TON\nAddress:\nN/A" in donate.text
+    assert "TON\nNetwork: TON\nAddress:\nN/A" in donate.text
+    assert "BTC\nNetwork: Bitcoin\nAddress:\nN/A" in donate.text
+    assert "Tap the address to copy it." in donate.text
+    assert "Use your wallet to donate." in donate.text
     assert "Always verify the network before sending." in donate.text
     assert "Support is optional." in donate.text
     assert "Donation link:" not in donate.text
+    assert "USDT TON Address" not in _button_labels(donate.reply_markup)
+    assert "TON Address" not in _button_labels(donate.reply_markup)
+    assert "BTC Address" not in _button_labels(donate.reply_markup)
+    assert "Open Donation Page" not in _button_labels(donate.reply_markup)
 
 
 def test_public_social_and_donate_render_configured_values(tmp_path) -> None:
@@ -1071,70 +1031,11 @@ def test_public_social_and_donate_render_configured_values(tmp_path) -> None:
     _assert_shell_screen(donate.text)
     assert "https://x.example.test/candlecraft" in social.text
     assert "https://t.me/example_candlecraft" in social.text
-    assert "Address: TEST_USDT_TON_ADDRESS" in donate.text
-    assert "Address: TEST_TON_ADDRESS" in donate.text
-    assert "Address: TEST_BTC_ADDRESS" in donate.text
+    assert "USDT on TON\nNetwork: TON\nAddress:\nTEST_USDT_TON_ADDRESS" in donate.text
+    assert "TON\nNetwork: TON\nAddress:\nTEST_TON_ADDRESS" in donate.text
+    assert "BTC\nNetwork: Bitcoin\nAddress:\nTEST_BTC_ADDRESS" in donate.text
     assert "https://donate.example.test/candlecraft" not in donate.text
-    _assert_public_donate_markup(
-        donate.reply_markup,
-        donate_url="https://donate.example.test/candlecraft",
-    )
-
-
-def test_public_donate_address_buttons_return_copy_ready_messages(tmp_path) -> None:
-    service = TelegramAdminCommandService(project_root=tmp_path)
-    config = TelegramAdminConfig(
-        donate_usdt_ton_address="TEST_USDT_TON_ADDRESS",
-        donate_ton_address="TEST_TON_ADDRESS",
-        donate_btc_address="TEST_BTC_ADDRESS",
-    )
-    cases = (
-        (
-            "/donate_usdt_ton",
-            "USDT on TON",
-            "TEST_USDT_TON_ADDRESS",
-            "TON",
-            "Send only USDT on TON to this address.",
-        ),
-        (
-            "/donate_ton",
-            "TON",
-            "TEST_TON_ADDRESS",
-            "TON",
-            "Send only TON to this address.",
-        ),
-        (
-            "/donate_btc",
-            "BTC",
-            "TEST_BTC_ADDRESS",
-            "Bitcoin",
-            "Send only BTC to this address.",
-        ),
-    )
-
-    for command, title, address, network, send_warning in cases:
-        response = service.public_response_for(command, public_config=config)
-
-        assert response.text == _expected_public_donate_address_text(
-            title,
-            address,
-            network=network,
-            send_warning=send_warning,
-        )
-        _assert_public_menu_only(response.reply_markup)
-        _assert_no_execution_buttons(response.reply_markup)
-
-
-def test_public_donate_address_buttons_return_not_configured_when_missing(tmp_path) -> None:
-    service = TelegramAdminCommandService(project_root=tmp_path)
-    config = TelegramAdminConfig()
-
-    for command in ("/donate_usdt_ton", "/donate_ton", "/donate_btc"):
-        response = service.public_response_for(command, public_config=config)
-
-        assert response.text == "Not configured yet."
-        _assert_public_menu_only(response.reply_markup)
-        _assert_no_execution_buttons(response.reply_markup)
+    _assert_public_donate_text_only(donate.reply_markup)
 
 
 def test_public_links_and_logo_load_from_settings_and_render(tmp_path) -> None:
@@ -1269,7 +1170,7 @@ def test_every_public_screen_has_brand_header_footer_and_no_execution_buttons(tm
         assert response.text.startswith(f"{SCREEN_HEADER} ")
         assert response.text.endswith(SCREEN_FOOTER)
         if command == "/donate":
-            _assert_public_donate_markup(response.reply_markup)
+            _assert_public_donate_text_only(response.reply_markup)
         else:
             _assert_public_menu_only(response.reply_markup)
         _assert_no_execution_buttons(response.reply_markup)
@@ -1553,22 +1454,16 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
     assert "Social" in screen_calls[3]["message"]
     assert "Help" in screen_calls[4]["message"]
     assert "Donate" in screen_calls[5]["message"]
-    assert screen_calls[6]["message"] == "Not configured yet."
-    assert screen_calls[7]["message"] == "Not configured yet."
-    assert screen_calls[8]["message"] == "Not configured yet."
-    assert "Welcome to the Moon Trip signal desk" in screen_calls[9]["message"]
+    assert "Welcome to the Moon Trip signal desk" in screen_calls[6]["message"]
     for call in screen_calls[:5]:
         _assert_public_menu_only(call["reply_markup"])
         assert _callback_data_values(call["reply_markup"]) == ["public:menu"]
         _assert_public_screen_safe(call["message"])
         assert "System Desk" not in call["message"]
         assert "Integrity Desk" not in call["message"]
-    _assert_public_donate_markup(screen_calls[5]["reply_markup"])
-    for call in screen_calls[6:9]:
-        _assert_public_menu_only(call["reply_markup"])
-        assert _callback_data_values(call["reply_markup"]) == ["public:menu"]
-        _assert_no_execution_buttons(call["reply_markup"])
-    _assert_public_full_menu(screen_calls[9]["reply_markup"])
+    _assert_public_donate_text_only(screen_calls[5]["reply_markup"])
+    _assert_no_execution_buttons(screen_calls[5]["reply_markup"])
+    _assert_public_full_menu(screen_calls[6]["reply_markup"])
     records = _read_jsonl(tmp_path / "audit.jsonl")
     assert [record["command"] for record in records] == list(PUBLIC_CALLBACK_COMMANDS.values())
     assert all(record["is_admin"] is False for record in records)
@@ -1577,14 +1472,9 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
     assert "public-chat" not in serialized
 
 
-def test_public_users_can_access_configured_donation_address_buttons(tmp_path) -> None:
+def test_public_users_can_access_configured_donation_text_screen(tmp_path) -> None:
     service = TelegramAdminCommandService(project_root=tmp_path)
     transport = FakeCommandTransport()
-    updates = (
-        _callback_update(50, "public-chat", "public:donate_usdt_ton"),
-        _callback_update(51, "public-chat", "public:donate_ton"),
-        _callback_update(52, "public-chat", "public:donate_btc"),
-    )
 
     result = asyncio.run(
         process_telegram_admin_commands(
@@ -1601,41 +1491,28 @@ def test_public_users_can_access_configured_donation_address_buttons(tmp_path) -
             transport=transport,
             audit_path=tmp_path / "audit.jsonl",
             state_path=tmp_path / "state.json",
-            updates=updates,
+            updates=(_callback_update(50, "public-chat", "public:donate"),),
         )
     )
 
     assert result.delivery_status == "sent_public"
-    assert result.sent_count == 3
+    assert result.sent_count == 1
     screen_calls = _screen_send_calls(transport)
-    assert [call["chat_id"] for call in screen_calls] == ["public-chat", "public-chat", "public-chat"]
-    assert screen_calls[0]["message"] == _expected_public_donate_address_text(
-        "USDT on TON",
-        "TEST_USDT_TON_ADDRESS",
-        network="TON",
-        send_warning="Send only USDT on TON to this address.",
-    )
-    assert screen_calls[1]["message"] == _expected_public_donate_address_text(
-        "TON",
-        "TEST_TON_ADDRESS",
-        network="TON",
-        send_warning="Send only TON to this address.",
-    )
-    assert screen_calls[2]["message"] == _expected_public_donate_address_text(
-        "BTC",
-        "TEST_BTC_ADDRESS",
-        network="Bitcoin",
-        send_warning="Send only BTC to this address.",
-    )
-    for call in screen_calls:
-        _assert_public_menu_only(call["reply_markup"])
-        _assert_no_execution_buttons(call["reply_markup"])
-        assert "System Desk" not in call["message"]
-        assert "Integrity Desk" not in call["message"]
-        assert "Configuration Desk" not in call["message"]
+    assert len(screen_calls) == 1
+    assert screen_calls[0]["chat_id"] == "public-chat"
+    assert "USDT on TON\nNetwork: TON\nAddress:\nTEST_USDT_TON_ADDRESS" in screen_calls[0]["message"]
+    assert "TON\nNetwork: TON\nAddress:\nTEST_TON_ADDRESS" in screen_calls[0]["message"]
+    assert "BTC\nNetwork: Bitcoin\nAddress:\nTEST_BTC_ADDRESS" in screen_calls[0]["message"]
+    assert "Tap the address to copy it." in screen_calls[0]["message"]
+    assert "Use your wallet to donate." in screen_calls[0]["message"]
+    _assert_public_donate_text_only(screen_calls[0]["reply_markup"])
+    _assert_no_execution_buttons(screen_calls[0]["reply_markup"])
+    assert "System Desk" not in screen_calls[0]["message"]
+    assert "Integrity Desk" not in screen_calls[0]["message"]
+    assert "Configuration Desk" not in screen_calls[0]["message"]
     records = _read_jsonl(tmp_path / "audit.jsonl")
-    assert [record["command"] for record in records] == ["/donate_usdt_ton", "/donate_ton", "/donate_btc"]
-    assert all(record["is_admin"] is False for record in records)
+    assert records[0]["command"] == "/donate"
+    assert records[0]["is_admin"] is False
     serialized = json.dumps(records)
     assert "secret-token" not in serialized
     assert "public-chat" not in serialized
