@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,12 +9,18 @@ from typing import Any
 
 from app.alerts.integrity_manifest import audit_alert_integrity_artifact
 from app.data.dtos import NA
+from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
 from app.watchlists.presets import presets_with_counts
 
 SCREEN_HEADER = "🐺🟠"
 SCREEN_FOOTER = "Candle Craft | Signal. Structure. Execution."
 SCREEN_DIVIDER = "━━━━━━━━━━━━━━━━━━"
 UNVERIFIED = "Unverified"
+JOIN_SIGNAL_CHANNEL_BUTTON_LABEL = "🐺 Join Signal Channel"
+PUBLIC_SIGNAL_CHANNEL_COPY = (
+    "Join the private Candle Craft signal channel for live watchlists and lifecycle updates."
+)
+PUBLIC_SIGNAL_CHANNEL_MISSING_COPY = "Signal channel invite link is not configured yet."
 ADMIN_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
     ("📊 Status", "🚨 Alerts"),
     ("👁 Watchlists", "🧾 Integrity"),
@@ -58,6 +65,13 @@ PUBLIC_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
     "❓ help": "/help",
     "🧡 donate": "/donate",
 }
+SIMPLE_REPLY_BUTTON_COMMANDS: Mapping[str, str] = {
+    "🐺 menu": "/menu",
+    "📡 status": "/status",
+    "📊 latest alerts": "/latest",
+    "ℹ️ about": "/about",
+    "ℹ about": "/about",
+}
 PUBLIC_CALLBACK_COMMANDS: Mapping[str, str] = {
     "public:lastscan": "/lastscan",
     "public:signals": "/signals",
@@ -82,6 +96,8 @@ ADMIN_COMMANDS: tuple[str, ...] = (
     "/start",
     "/menu",
     "/status",
+    "/latest",
+    "/about",
     "/alerts",
     "/watchlists",
     "/integrity",
@@ -96,6 +112,9 @@ ADMIN_COMMANDS: tuple[str, ...] = (
 PUBLIC_COMMANDS: tuple[str, ...] = (
     "/start",
     "/menu",
+    "/status",
+    "/latest",
+    "/about",
     "/lastscan",
     "/signals",
     "/watchlist",
@@ -105,7 +124,6 @@ PUBLIC_COMMANDS: tuple[str, ...] = (
 )
 PUBLIC_ADMIN_RESERVED_COMMANDS: frozenset[str] = frozenset(
     {
-        "/status",
         "/alerts",
         "/watchlists",
         "/audit",
@@ -147,10 +165,12 @@ class TelegramAdminCommandService:
         *,
         project_root: Path | str = Path("."),
         manifest_path: Path | str = DEFAULT_SCAN_RUN_MANIFEST_PATH,
+        database_path: Path | str = DEFAULT_DATABASE_PATH,
         max_rows: int = DEFAULT_ADMIN_COMMAND_ROW_LIMIT,
     ) -> None:
         self._project_root = Path(project_root)
         self._manifest_path = self._resolve_project_path(manifest_path)
+        self._database_path = self._resolve_project_path(database_path)
         self._max_rows = max(1, max_rows)
 
     @property
@@ -160,13 +180,17 @@ class TelegramAdminCommandService:
     def response_for(self, command: str, *, admin_config: Any | None = None) -> AdminCommandResponse:
         normalized = normalize_admin_command(command)
         if normalized == "/start":
-            return _admin_response(normalized, "start", format_start_response())
+            return _admin_response(normalized, "start", format_start_response(), admin_config=admin_config)
         if normalized == "/menu":
-            return _admin_response(normalized, "menu", format_menu_response())
+            return _admin_response(normalized, "menu", format_menu_response(), admin_config=admin_config)
         if normalized in {"/help", "/guide"}:
             return _admin_response(normalized, "guide", format_help_response())
         if normalized == "/status":
             return self._status_response()
+        if normalized == "/latest":
+            return self._latest_alerts_response()
+        if normalized == "/about":
+            return _admin_response(normalized, "about", format_about_response(), admin_config=admin_config)
         if normalized == "/alerts":
             return self._alerts_response()
         if normalized == "/watchlists":
@@ -203,13 +227,25 @@ class TelegramAdminCommandService:
             return _public_response(
                 normalized,
                 "public_menu",
-                format_public_menu_response(),
+                format_public_menu_response(public_config),
                 photo_path=photo_path,
                 photo_url=(
                     _public_logo_url(public_config)
                     if normalized == "/start" and photo_path is None
                     else None
                 ),
+                public_config=public_config,
+            )
+        if normalized == "/status":
+            return self._public_status_response(public_config=public_config)
+        if normalized == "/latest":
+            return self._public_latest_alerts_response()
+        if normalized == "/about":
+            return _public_response(
+                normalized,
+                "public_about",
+                format_public_about_response(public_config),
+                public_config=public_config,
             )
         if normalized == "/lastscan":
             return self._public_lastscan_response()
@@ -248,7 +284,102 @@ class TelegramAdminCommandService:
             return _public_response(normalized, "public_help", format_public_help_response())
         if normalized in PUBLIC_ADMIN_RESERVED_COMMANDS:
             return _public_response(normalized, "public_admin_reserved", format_public_admin_reserved_response())
-        return _public_response(normalized, "public_menu", format_public_menu_response())
+        return _public_response(
+            normalized,
+            "public_menu",
+            format_public_menu_response(public_config),
+            public_config=public_config,
+        )
+
+    def _latest_alerts_response(self) -> AdminCommandResponse:
+        rows = self._latest_telegram_alert_rows()
+        sent_count, blocked_count = self._telegram_alert_counts()
+        lines: list[str] = [
+            "Latest sent lifecycle alerts from local scan history.",
+            "Manual execution only.",
+            "",
+            SCREEN_DIVIDER,
+            f"Sent alerts: {_display(sent_count)}",
+            f"Blocked attempts: {_display(blocked_count)}",
+            "",
+        ]
+        if rows:
+            lines.extend(_latest_alert_lines(rows, include_signal_id=True, max_rows=self._max_rows))
+        else:
+            lines.extend(("No sent lifecycle alerts found yet.", "The scanner has not published a public alert."))
+        lines.extend(("", "No execution controls are available.", SCREEN_DIVIDER))
+        return _admin_response("/latest", "latest", _screen("Latest Alerts", lines))
+
+    def _public_status_response(self, *, public_config: Any | None) -> AdminCommandResponse:
+        manifest_row = self.latest_manifest_row()
+        lines: list[str] = [
+            "Candle Craft public signal desk status.",
+            "",
+            SCREEN_DIVIDER,
+            "Mode: Manual-only",
+            "Execution: Disabled",
+            "Quality gates: Protected",
+            "Public UI: " + _enabled_disabled_na(public_config, "public_command_ui_enabled"),
+            "Latest scan: " + (_display(manifest_row.get("timestamp")) if manifest_row is not None else NA),
+            "Confirmed setups: " + (_display(manifest_row.get("valid_setup_count")) if manifest_row is not None else NA),
+            "Watchlist setups: " + (_display(manifest_row.get("near_miss_count")) if manifest_row is not None else NA),
+            SCREEN_DIVIDER,
+            "",
+            "The engine only posts filtered lifecycle alerts.",
+        ]
+        return _public_response("/status", "public_status", _screen("Status", lines))
+
+    def _public_latest_alerts_response(self) -> AdminCommandResponse:
+        rows = self._latest_telegram_alert_rows()
+        lines: list[str] = [
+            "Latest sent public lifecycle alerts.",
+            "",
+            SCREEN_DIVIDER,
+        ]
+        if rows:
+            lines.extend(_latest_alert_lines(rows, include_signal_id=False, max_rows=self._max_rows))
+        else:
+            lines.extend(("No public lifecycle alerts have been sent yet.", "The engine is waiting for clean structure."))
+        lines.extend(("", "Risk warning: crypto derivatives are high risk. Manual review only.", SCREEN_DIVIDER))
+        return _public_response("/latest", "public_latest", _screen("Latest Alerts", lines))
+
+    def _latest_telegram_alert_rows(self) -> tuple[Mapping[str, Any], ...]:
+        connection = None
+        try:
+            connection = open_initialized_database(self._database_path)
+            rows = connection.execute(
+                """
+                SELECT signal_id, symbol, direction, alert_type, sent_at
+                FROM telegram_alert_attempts
+                WHERE telegram_status = 'sent'
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (self._max_rows,),
+            ).fetchall()
+        except (StorageError, sqlite3.Error, OSError):
+            return ()
+        finally:
+            if connection is not None:
+                connection.close()
+        return tuple(dict(row) for row in rows)
+
+    def _telegram_alert_counts(self) -> tuple[int, int]:
+        connection = None
+        try:
+            connection = open_initialized_database(self._database_path)
+            sent_count = connection.execute(
+                "SELECT COUNT(*) FROM telegram_alert_attempts WHERE telegram_status = 'sent'"
+            ).fetchone()[0]
+            blocked_count = connection.execute(
+                "SELECT COUNT(*) FROM telegram_alert_attempts WHERE telegram_status = 'blocked'"
+            ).fetchone()[0]
+        except (StorageError, sqlite3.Error, OSError):
+            return 0, 0
+        finally:
+            if connection is not None:
+                connection.close()
+        return int(sent_count), int(blocked_count)
 
     def latest_manifest_row(self) -> Mapping[str, Any] | None:
         return load_latest_manifest_row(self._manifest_path)
@@ -529,6 +660,7 @@ class TelegramAdminCommandService:
                 "Sensitive data:",
                 f"Bot token: {_hidden_status(admin_config, 'bot_token')}",
                 f"Chat ID: {_hidden_status(admin_config, 'admin_chat_id')}",
+                f"Signal channel invite: {_config_presence(admin_config, 'signal_channel_invite_link')}",
                 SCREEN_DIVIDER,
                 "",
                 "This panel is informational only.",
@@ -822,7 +954,45 @@ def format_menu_response() -> str:
     return format_start_response()
 
 
-def format_public_menu_response() -> str:
+def format_about_response() -> str:
+    return _screen(
+        "About",
+        (
+            "Candle Craft Intelligence monitors crypto futures structure.",
+            "",
+            SCREEN_DIVIDER,
+            "Mode: Manual-only",
+            "Execution: Disabled",
+            "Order placement: Not available",
+            "Withdrawals/transfers: Not available",
+            "Quality gates: Protected",
+            SCREEN_DIVIDER,
+            "",
+            "Alerts are trade ideas for manual review, not financial advice.",
+        ),
+    )
+
+
+def format_public_about_response(config: Any | None = None) -> str:
+    return _screen(
+        "About Candle Craft",
+        (
+            "Candle Craft Intelligence filters crypto futures for clean structure.",
+            _public_signal_channel_copy(config),
+            "",
+            SCREEN_DIVIDER,
+            "Public alerts are lifecycle updates from the signal engine.",
+            "No execution controls are available from Telegram.",
+            "No financial advice.",
+            "Risk management is always your responsibility.",
+            SCREEN_DIVIDER,
+            "",
+            "Quality over quantity.",
+        ),
+    )
+
+
+def format_public_menu_response(config: Any | None = None) -> str:
     return _screen(
         "Candle Craft Intelligence",
         (
@@ -840,7 +1010,11 @@ def format_public_menu_response() -> str:
             "Only filtered opportunities when the structure is clean.",
             "",
             SCREEN_DIVIDER,
-            "Use the buttons below to enter the signal desk.",
+            "Use the buttons below to access the signal channel and bot info.",
+            _public_signal_channel_copy(config),
+            "",
+            "System:",
+            "Manual signal intelligence only. No order execution.",
         ),
     )
 
@@ -1005,6 +1179,9 @@ def normalize_admin_command(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    mapped = SIMPLE_REPLY_BUTTON_COMMANDS.get(text.lower())
+    if mapped is not None:
+        return mapped
     mapped = ADMIN_MENU_BUTTON_COMMANDS.get(text.lower())
     if mapped is not None:
         return mapped
@@ -1052,21 +1229,25 @@ def admin_menu_inline_markup() -> Mapping[str, Any]:
     }
 
 
-def public_menu_inline_markup() -> Mapping[str, Any]:
-    return {
-        "inline_keyboard": [
+def public_menu_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
+    keyboard = _signal_channel_button_rows(config)
+    keyboard.extend(
+        [
             [{"text": label, "callback_data": PUBLIC_MENU_BUTTON_CALLBACKS[label]} for label in row]
             for row in PUBLIC_MENU_BUTTON_ROWS
-        ],
-    }
+        ]
+    )
+    return {"inline_keyboard": keyboard}
 
 
 def admin_back_to_menu_inline_markup() -> Mapping[str, Any]:
     return {"inline_keyboard": [[{"text": "↩ Back to Menu", "callback_data": "admin:menu"}]]}
 
 
-def public_back_to_menu_inline_markup() -> Mapping[str, Any]:
-    return {"inline_keyboard": [[{"text": "↩ Back to Menu", "callback_data": "public:menu"}]]}
+def public_back_to_menu_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
+    keyboard = _signal_channel_button_rows(config)
+    keyboard.append([{"text": "↩ Back to Menu", "callback_data": "public:menu"}])
+    return {"inline_keyboard": keyboard}
 
 
 def public_donate_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
@@ -1101,13 +1282,14 @@ def _admin_response(
     text: str,
     *,
     run_id: str = NA,
+    admin_config: Any | None = None,
 ) -> AdminCommandResponse:
     return AdminCommandResponse(
         command=command,
         response_type=response_type,
         text=text,
         run_id=run_id,
-        reply_markup=_admin_reply_markup_for(command, response_type),
+        reply_markup=_admin_reply_markup_for(command, response_type, admin_config),
         cleanup_reply_keyboard=command in {"/start", "/menu"},
     )
 
@@ -1122,6 +1304,7 @@ def _public_response(
     photo_url: str | None = None,
     reply_markup: Mapping[str, Any] | None = None,
     suppress_reply_markup: bool = False,
+    public_config: Any | None = None,
 ) -> AdminCommandResponse:
     return AdminCommandResponse(
         command=command,
@@ -1131,7 +1314,7 @@ def _public_response(
         reply_markup=(
             None
             if suppress_reply_markup
-            else (reply_markup or _public_reply_markup_for(command, response_type))
+            else (reply_markup or _public_reply_markup_for(command, response_type, public_config))
         ),
         photo_path=photo_path,
         photo_url=photo_url,
@@ -1139,16 +1322,36 @@ def _public_response(
     )
 
 
-def _admin_reply_markup_for(command: str, response_type: str) -> Mapping[str, Any]:
+def _admin_reply_markup_for(command: str, response_type: str, config: Any | None = None) -> Mapping[str, Any]:
+    signal_rows = _signal_channel_button_rows(config)
     if command in {"/start", "/menu"} or response_type in {"start", "menu"}:
-        return admin_menu_inline_markup()
-    return admin_back_to_menu_inline_markup()
+        markup = admin_menu_inline_markup()
+        return {"inline_keyboard": signal_rows + list(markup["inline_keyboard"])}
+    markup = admin_back_to_menu_inline_markup()
+    return {"inline_keyboard": signal_rows + list(markup["inline_keyboard"])}
 
 
-def _public_reply_markup_for(command: str, response_type: str) -> Mapping[str, Any]:
+def _public_reply_markup_for(command: str, response_type: str, config: Any | None = None) -> Mapping[str, Any]:
     if command in {"/start", "/menu"} or response_type == "public_menu":
-        return public_menu_inline_markup()
-    return public_back_to_menu_inline_markup()
+        return public_menu_inline_markup(config)
+    return public_back_to_menu_inline_markup(config)
+
+
+def _signal_channel_button_rows(config: Any | None) -> list[list[dict[str, Any]]]:
+    invite_link = _signal_channel_invite_link(config)
+    if invite_link == NA:
+        return []
+    return [[{"text": JOIN_SIGNAL_CHANNEL_BUTTON_LABEL, "url": invite_link}]]
+
+
+def _public_signal_channel_copy(config: Any | None) -> str:
+    return PUBLIC_SIGNAL_CHANNEL_COPY if _signal_channel_invite_link(config) != NA else PUBLIC_SIGNAL_CHANNEL_MISSING_COPY
+
+
+def _signal_channel_invite_link(config: Any | None) -> str:
+    if config is None:
+        return NA
+    return _display(getattr(config, "signal_channel_invite_link", NA))
 
 
 def _screen(title: str, lines: Sequence[str]) -> str:
@@ -1452,6 +1655,44 @@ def _integrity_issue_lines(issues: Sequence[Any], *, max_rows: int) -> list[str]
         for issue in visible[:max_rows]
     ]
     return _with_omitted(lines, total=len(visible), max_rows=max_rows)
+
+
+def _latest_alert_lines(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    include_signal_id: bool,
+    max_rows: int,
+) -> list[str]:
+    visible = tuple(rows[:max_rows])
+    lines: list[str] = []
+    for row in visible:
+        symbol = _display(row.get("symbol"))
+        direction = _title_text(row.get("direction"))
+        alert_type = _alert_type_label(row.get("alert_type"))
+        sent_at = _display(row.get("sent_at"))
+        first_line = f"{symbol} {direction} - {alert_type}" if direction != NA else f"{symbol} - {alert_type}"
+        lines.append(first_line)
+        lines.append(f"Sent: {sent_at}")
+        if include_signal_id:
+            lines.append(f"Signal: {_short_signal_id(row.get('signal_id'))}")
+        lines.append("")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return _with_omitted(lines, total=len(rows), max_rows=max_rows)
+
+
+def _alert_type_label(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    return _title_text(text.replace("_", " "))
+
+
+def _short_signal_id(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    return text if len(text) <= 12 else f"{text[:8]}..."
 
 
 def _with_omitted(lines: list[str], *, total: int, max_rows: int) -> list[str]:
@@ -2030,8 +2271,10 @@ __all__ = [
     "PUBLIC_ADMIN_RESERVED_COMMANDS",
     "PUBLIC_CALLBACK_COMMANDS",
     "PUBLIC_COMMANDS",
+    "JOIN_SIGNAL_CHANNEL_BUTTON_LABEL",
     "PUBLIC_MENU_BUTTON_CALLBACKS",
     "PUBLIC_MENU_BUTTON_ROWS",
+    "SIMPLE_REPLY_BUTTON_COMMANDS",
     "DEFAULT_ADMIN_COMMAND_ROW_LIMIT",
     "DEFAULT_SCAN_RUN_MANIFEST_PATH",
     "SCREEN_DIVIDER",
@@ -2046,6 +2289,8 @@ __all__ = [
     "command_for_callback_data",
     "format_help_response",
     "format_menu_response",
+    "format_about_response",
+    "format_public_about_response",
     "format_public_admin_reserved_response",
     "format_public_donate_response",
     "format_public_donate_btc_address_response",

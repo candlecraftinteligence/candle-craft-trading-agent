@@ -20,9 +20,12 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
     telegram_admin_chat_id: str | None = None
+    telegram_public_chat_id: str | None = None
     telegram_public_channel_id: str | None = None
+    telegram_signal_channel_invite_link: str | None = None
     telegram_vip_channel_id: str | None = None
     telegram_signals_enabled: bool = False
+    telegram_public_ui_enabled: bool | None = None
     candle_craft_public_logo_path: str | None = None
     candle_craft_public_logo_url: str | None = None
     candle_craft_x_url: str | None = None

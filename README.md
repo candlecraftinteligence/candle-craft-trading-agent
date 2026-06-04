@@ -742,6 +742,35 @@ Phase 8 adds `AlertAgent` under `app/agents` and alert helpers under `app/alerts
 - The alert agent does not call exchanges, use private exchange APIs, place orders, route orders, or execute trades.
 - Missing data remains `N/A`, unreliable data remains `Unverified`, and every formatted alert includes a risk warning.
 
+### Public Telegram runtime
+
+Phase 47A separates Telegram destinations and runtime processes:
+
+- Admin/private replies and reports use `TELEGRAM_ADMIN_CHAT_ID`, falling back to legacy `TELEGRAM_CHAT_ID` only for admin/private routing.
+- Public lifecycle alerts use `TELEGRAM_PUBLIC_CHAT_ID`, then `TELEGRAM_PUBLIC_CHANNEL_ID`, then `TELEGRAM_CHAT_ID` only as a local/manual fallback with a warning.
+- `TELEGRAM_COMMANDS_ENABLED=true` only enables command handling in config. Buttons respond only while the listener process is running.
+- `ORDER_EXECUTION_ENABLED=false` remains required. Telegram commands do not place orders, transfer funds, or call exchange write endpoints.
+
+Local two-terminal operation:
+
+```powershell
+# Terminal 1: Telegram UI listener only
+python scripts/run_telegram_bot.py
+```
+
+```powershell
+# Terminal 2: scanner watch loop only
+python scripts/run_scan.py --telegram-manual-signals --watch --watch-interval-sec 900
+```
+
+Safe runtime diagnostics:
+
+```powershell
+python scripts/check_telegram_runtime.py
+```
+
+The diagnostic masks the bot token, performs a safe `getMe` check when a token is configured, and does not send test messages unless `--send-admin-test` or `--send-public-test` is provided. Configure `TELEGRAM_PUBLIC_CHAT_ID` or `TELEGRAM_PUBLIC_CHANNEL_ID` before expecting public lifecycle delivery.
+
 Example dry-run usage:
 
 ```python

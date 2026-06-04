@@ -35,10 +35,13 @@ class TelegramAdminConfig:
     admin_enabled: bool = False
     commands_enabled: bool | None = None
     admin_reports_enabled: bool | None = None
+    public_ui_enabled: bool | None = None
     dry_run: bool = True
     bot_token: str | None = None
     admin_chat_id: str | None = None
+    public_chat_id: str | None = None
     public_channel_id: str | None = None
+    signal_channel_invite_link: str | None = None
     vip_channel_id: str | None = None
     public_logo_path: str | None = None
     public_logo_url: str | None = None
@@ -63,10 +66,16 @@ class TelegramAdminConfig:
                 getattr(settings, "telegram_admin_reports_enabled", None),
                 legacy_admin_enabled,
             ),
+            public_ui_enabled=getattr(settings, "telegram_public_ui_enabled", None),
             dry_run=bool(getattr(settings, "telegram_dry_run", True)),
             bot_token=_clean_optional(getattr(settings, "telegram_bot_token", None)),
-            admin_chat_id=_clean_optional(getattr(settings, "telegram_admin_chat_id", None)),
+            admin_chat_id=_clean_optional(getattr(settings, "telegram_admin_chat_id", None))
+            or _clean_optional(getattr(settings, "telegram_chat_id", None)),
+            public_chat_id=_clean_optional(getattr(settings, "telegram_public_chat_id", None)),
             public_channel_id=_clean_optional(getattr(settings, "telegram_public_channel_id", None)),
+            signal_channel_invite_link=_clean_optional(
+                getattr(settings, "telegram_signal_channel_invite_link", None)
+            ),
             vip_channel_id=_clean_optional(getattr(settings, "telegram_vip_channel_id", None)),
             public_logo_path=_clean_optional(getattr(settings, "candle_craft_public_logo_path", None)),
             public_logo_url=_clean_optional(getattr(settings, "candle_craft_public_logo_url", None)),
@@ -91,6 +100,10 @@ class TelegramAdminConfig:
     @property
     def admin_report_enabled(self) -> bool:
         return self.admin_enabled if self.admin_reports_enabled is None else bool(self.admin_reports_enabled)
+
+    @property
+    def public_command_ui_enabled(self) -> bool:
+        return self.command_ui_enabled if self.public_ui_enabled is None else bool(self.public_ui_enabled)
 
 
 @dataclass(frozen=True)
@@ -228,7 +241,14 @@ def _sanitize_error(value: Any, config: TelegramAdminConfig) -> str:
     text = str(value or "").strip()
     if not text:
         return NA
-    for secret in (config.bot_token, config.admin_chat_id, config.public_channel_id, config.vip_channel_id):
+    for secret in (
+        config.bot_token,
+        config.admin_chat_id,
+        config.public_chat_id,
+        config.public_channel_id,
+        config.signal_channel_invite_link,
+        config.vip_channel_id,
+    ):
         if secret:
             text = text.replace(secret, "[REDACTED]")
     return text
