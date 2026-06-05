@@ -18,8 +18,13 @@ from app.telegram_admin.active_watchlists import (
 )
 from app.telegram_admin.commands import (
     SCREEN_HEADER,
+    SIGNAL_DETAIL_BACK_BUTTON_LABEL,
+    SIGNAL_DETAIL_LIFECYCLE_BUTTON_LABEL,
+    SIGNAL_DETAIL_REFRESH_BUTTON_LABEL,
+    SIGNAL_DETAIL_WHY_VALID_BUTTON_LABEL,
     WATCHLIST_BACK_BUTTON_LABEL,
     WATCHLIST_REFRESH_BUTTON_LABEL,
+    command_for_callback_data,
 )
 from tests.test_telegram_admin_commands import (
     FakeCommandTransport,
@@ -234,6 +239,32 @@ def _insert_lifecycle_record(
         connection.close()
 
 
+def _insert_lifecycle_event(
+    db_path: Path,
+    *,
+    lifecycle_id: str,
+    symbol: str,
+    from_state: str,
+    to_state: str,
+    reason: str = "Existing lifecycle transition.",
+    timestamp: str = "2026-06-04T12:00:00Z",
+) -> None:
+    connection = open_initialized_database(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO setup_lifecycle_events (
+                lifecycle_id, timestamp, symbol, from_state, to_state, reason,
+                readiness_score, quality_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (lifecycle_id, timestamp, symbol, from_state, to_state, reason, 75, 90),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _insert_candidate(
     db_path: Path,
     *,
@@ -245,6 +276,9 @@ def _insert_candidate(
     tp1: str = NA,
     tp2: str = NA,
     tp3: str = NA,
+    invalidation: str = "Invalid beyond stop.",
+    quality_grade: str = "B",
+    raw_candidate: dict[str, Any] | None = None,
 ) -> None:
     connection = open_initialized_database(db_path)
     try:
@@ -296,11 +330,11 @@ def _insert_candidate(
                 tp2,
                 tp3,
                 "3",
-                "Invalid beyond stop.",
-                "B",
+                invalidation,
+                quality_grade,
                 "70",
                 "Manual review only.",
-                "{}",
+                json.dumps(raw_candidate or {}),
             ),
         )
         connection.commit()
@@ -310,6 +344,18 @@ def _insert_candidate(
 
 def _service(tmp_path: Path, db_path: Path | None = None) -> TelegramAdminCommandService:
     return TelegramAdminCommandService(project_root=tmp_path, database_path=db_path or tmp_path / "missing.db")
+
+
+def _callback_update_with_chat_type(update_id: int, chat_id: str, callback_data: str, chat_type: str) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"callback-{update_id}",
+            "from": {"id": chat_id},
+            "message": {"chat": {"id": chat_id, "type": chat_type}},
+            "data": callback_data,
+        },
+    }
 
 
 def test_grouped_watchlist_formatter_orders_buckets_and_empty_rows() -> None:
@@ -418,6 +464,238 @@ def test_active_signals_use_sent_runtime_signal_attempts(tmp_path: Path) -> None
     assert "WATCHUSDT" not in response.text
     assert "BLOCKUSDT" not in response.text
     assert "order was placed" not in response.text.lower()
+
+
+def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="sig-detail",
+        symbol="BTCUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        new_state="CONFIRMED",
+        lifecycle_state="CONFIRMED",
+        setup_quality_score="A-",
+        scan_run_id="run-detail",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+        tp2="118",
+        tp3="125",
+    )
+    _insert_candidate(
+        db_path,
+        run_id="run-detail",
+        symbol="BTCUSDT",
+        direction="long",
+        entry="100-102",
+        stop="95",
+        tp1="110",
+        tp2="118",
+        tp3="125",
+        invalidation="Price accepts below 95.",
+        quality_grade="A-",
+        raw_candidate={
+            "reason_for_trade": "Liquidity swept and structure shifted.",
+            "confirmed_facts": ["Sweep confirmed.", "Structure shift confirmed."],
+            "quality_gate_result": {"passed": True},
+        },
+    )
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="sig-detail",
+        symbol="BTCUSDT",
+        current_state="EXECUTING",
+        direction="long",
+        quality_score=90,
+    )
+    _insert_lifecycle_event(
+        db_path,
+        lifecycle_id="sig-detail",
+        symbol="BTCUSDT",
+        from_state="WATCHLISTED",
+        to_state="CONFIRMED",
+        reason="Confirmed by existing lifecycle data.",
+        timestamp="2026-06-04T11:00:00Z",
+    )
+    _insert_lifecycle_event(
+        db_path,
+        lifecycle_id="sig-detail",
+        symbol="BTCUSDT",
+        from_state="CONFIRMED",
+        to_state="EXECUTING",
+        reason="Waiting limit fill from persisted lifecycle.",
+        timestamp="2026-06-04T12:00:00Z",
+    )
+    service = _service(tmp_path, db_path)
+
+    active = service.public_response_for("/signals")
+
+    assert "Symbol: BTCUSDT" in active.text
+    assert _button_labels(active.reply_markup) == [
+        "BTCUSDT",
+        SIGNAL_DETAIL_REFRESH_BUTTON_LABEL,
+        SIGNAL_DETAIL_BACK_BUTTON_LABEL,
+    ]
+    assert _callback_data_values(active.reply_markup) == ["public:signal:BTCUSDT", "public:signals", "public:menu"]
+
+    detail = service.public_response_for("/signal BTCUSDT")
+
+    assert detail.text.startswith("🐺🟠 BTCUSDT — SIGNAL DETAIL")
+    assert "Bias: LONG" in detail.text
+    assert "Status: CONFIRMED" in detail.text
+    assert "Quality: A-" in detail.text
+    assert "Lifecycle: WATCHLISTED → CONFIRMED → EXECUTING" in detail.text
+    assert "Entry: 100 – 102" in detail.text
+    assert "Stop: 95" in detail.text
+    assert "TP1: 110" in detail.text
+    assert "TP2: 118" in detail.text
+    assert "TP3: 125" in detail.text
+    assert "Liquidity swept and structure shifted." in detail.text
+    assert "Price accepts below 95." in detail.text
+    assert detail.text.endswith("Candle Craft | Signal. Structure. Execution.")
+    assert _button_labels(detail.reply_markup) == [
+        SIGNAL_DETAIL_REFRESH_BUTTON_LABEL,
+        SIGNAL_DETAIL_LIFECYCLE_BUTTON_LABEL,
+        SIGNAL_DETAIL_WHY_VALID_BUTTON_LABEL,
+        SIGNAL_DETAIL_BACK_BUTTON_LABEL,
+    ]
+    assert _callback_data_values(detail.reply_markup) == [
+        "public:signal:BTCUSDT",
+        "public:signal_lifecycle:BTCUSDT",
+        "public:signal_why:BTCUSDT",
+        "public:signals",
+    ]
+
+    lifecycle = service.public_response_for("/signal_lifecycle BTCUSDT")
+    assert lifecycle.text.startswith("🐺🟠 BTCUSDT — LIFECYCLE")
+    assert "WATCHLISTED → CONFIRMED → EXECUTING" in lifecycle.text
+    assert "Latest reason: Waiting limit fill from persisted lifecycle." in lifecycle.text
+
+    why = service.public_response_for("/signal_why BTCUSDT")
+    assert why.text.startswith("🐺🟠 BTCUSDT — WHY VALID?")
+    assert "Confirmed facts\nSweep confirmed.\nStructure shift confirmed." in why.text
+    assert "Confirmed gates\nLifecycle state EXECUTING." in why.text
+    assert "strategy_diagnostics" not in why.text
+    assert "{" not in why.text
+
+    with open_initialized_database(db_path) as connection:
+        connection.execute(
+            "UPDATE telegram_alert_attempts SET tp1 = ? WHERE signal_id = ? AND alert_type = ?",
+            ("111", "sig-detail", "SIGNAL_CONFIRMED"),
+        )
+        connection.commit()
+    scope, refresh_command = command_for_callback_data("public:signal:BTCUSDT")
+    assert scope == "public"
+    refreshed = service.public_response_for(refresh_command)
+    assert "TP1: 111" in refreshed.text
+    assert "TP1: 110" not in refreshed.text
+
+
+def test_signal_detail_callbacks_route_safely_and_back_to_active_signals(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="sig-callback",
+        symbol="ETHUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        setup_quality_score="A",
+        entry_low="10",
+        entry_high="11",
+        stop_loss="9",
+        tp1="12",
+    )
+    service = _service(tmp_path, db_path)
+    transport = FakeCommandTransport()
+    updates = (
+        _callback_update(20, "public-chat", "public:signal:ETHUSDT"),
+        _callback_update(21, "public-chat", "public:signal_why:ETHUSDT"),
+        _callback_update(22, "public-chat", "public:signal_lifecycle:ETHUSDT"),
+        _callback_update(23, "public-chat", "public:signals"),
+    )
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=updates,
+        )
+    )
+
+    screen_calls = _screen_send_calls(transport)
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == len(updates)
+    assert [call["callback_query_id"] for call in transport.answer_callback_calls] == [
+        "callback-20",
+        "callback-21",
+        "callback-22",
+        "callback-23",
+    ]
+    assert screen_calls[0]["message"].startswith("🐺🟠 ETHUSDT — SIGNAL DETAIL")
+    assert screen_calls[1]["message"].startswith("🐺🟠 ETHUSDT — WHY VALID?")
+    assert screen_calls[2]["message"].startswith("🐺🟠 ETHUSDT — LIFECYCLE")
+    assert "Active Signals" in screen_calls[3]["message"]
+    assert _callback_data_values(screen_calls[0]["reply_markup"]) == [
+        "public:signal:ETHUSDT",
+        "public:signal_lifecycle:ETHUSDT",
+        "public:signal_why:ETHUSDT",
+        "public:signals",
+    ]
+    assert "order was placed" not in "\n".join(call["message"].lower() for call in screen_calls)
+
+
+def test_signal_detail_ui_is_not_sent_to_public_channel_group_or_supergroup(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="sig-channel-safe",
+        symbol="ADAUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        setup_quality_score="A",
+        entry_low="1",
+        entry_high="1.1",
+    )
+    service = _service(tmp_path, db_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_channel_id="public-channel",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(
+                _callback_update_with_chat_type(30, "public-channel", "public:signal:ADAUSDT", "channel"),
+                _callback_update_with_chat_type(31, "group-chat", "public:signal:ADAUSDT", "group"),
+                _callback_update_with_chat_type(32, "supergroup-chat", "public:signal:ADAUSDT", "supergroup"),
+            ),
+        )
+    )
+
+    assert result.delivery_status == "ignored_unauthorized"
+    assert result.sent_count == 0
+    assert transport.send_calls == []
+    assert [call["callback_query_id"] for call in transport.answer_callback_calls] == [
+        "callback-30",
+        "callback-31",
+        "callback-32",
+    ]
 
 
 def test_active_signals_empty_state_does_not_promote_watchlists(tmp_path: Path) -> None:

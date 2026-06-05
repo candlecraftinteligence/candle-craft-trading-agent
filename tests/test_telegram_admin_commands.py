@@ -29,6 +29,8 @@ from app.telegram_admin.commands import (
     PUBLIC_MENU_BUTTON_ROWS,
     SCREEN_FOOTER,
     SCREEN_HEADER,
+    SIGNAL_DETAIL_BACK_BUTTON_LABEL,
+    SIGNAL_DETAIL_REFRESH_BUTTON_LABEL,
     WATCHLIST_BACK_BUTTON_LABEL,
     WATCHLIST_REFRESH_BUTTON_LABEL,
     WOLF_BRIEFING_PUBLISH_BUTTON_LABEL,
@@ -1150,7 +1152,14 @@ def test_public_active_signals_only_include_confirmed_signal_rows(tmp_path) -> N
 
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
-    _assert_public_menu_only(response.reply_markup)
+    _assert_inline_markup(response.reply_markup)
+    assert _button_labels(response.reply_markup) == [
+        "ALERTUSDT",
+        SIGNAL_DETAIL_REFRESH_BUTTON_LABEL,
+        SIGNAL_DETAIL_BACK_BUTTON_LABEL,
+    ]
+    assert _callback_data_values(response.reply_markup) == ["public:signal:ALERTUSDT", "public:signals", "public:menu"]
+    _assert_no_execution_buttons(response.reply_markup)
     assert response.text.startswith(f"{SCREEN_HEADER} Active Signals")
     assert "Confirmed Candle Craft setups." in response.text
     assert "Filtered by the signal engine." in response.text
