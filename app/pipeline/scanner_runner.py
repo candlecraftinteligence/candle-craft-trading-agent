@@ -70,7 +70,9 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_QUANT = Decimal("0.00000001")
 MIN_DERIVATIVES_SCORE = Decimal("40")
+ACTIONABLE_STRATEGY_MIN_RR = Decimal("2.7")
 LIQUIDITY_GRAB_STRATEGY_NAME = "liquidity_grab_pullback"
+STRATEGY_TECHNICAL_STATUS_USED = "strategy_evidence_used"
 DEFAULT_STRATEGY_MODES = (
     LiquidityGrabMode.challenge,
     LiquidityGrabMode.swing,
@@ -320,6 +322,12 @@ class ScannerSymbolResult(BaseModel):
     latest_high: MaybeDecimal = NA
     latest_low: MaybeDecimal = NA
     technical_score: MaybeInt = NA
+    generic_technical_score: MaybeInt = NA
+    scoring_technical_score: MaybeInt = NA
+    strategy_technical_score: MaybeInt = NA
+    strategy_technical_status: str = NA
+    strategy_evidence_source: str = NA
+    strategy_technical_note: str = NA
     derivatives_score: MaybeInt = NA
     trend_context: str = NA
     recent_range_high: MaybeDecimal = NA
@@ -354,6 +362,7 @@ class ScannerSymbolResult(BaseModel):
     formatted_strategy_output: str = NA
     strategy_diagnostics: dict[str, Any] = Field(default_factory=dict)
     valid_strategy_modes: tuple[str, ...] = ()
+    strategy_valid_modes: tuple[str, ...] = ()
     rejected_strategy_modes: tuple[str, ...] = ()
     strategy_missing_data: tuple[str, ...] = ()
     strategy_unverified_data: tuple[str, ...] = ()
@@ -490,6 +499,12 @@ class _StrategyExecution(BaseModel):
     strategy_diagnostics: dict[str, Any] = Field(default_factory=dict)
     valid_strategy_modes: tuple[str, ...] = ()
     rejected_strategy_modes: tuple[str, ...] = ()
+    generic_technical_score: MaybeInt = NA
+    scoring_technical_score: MaybeInt = NA
+    strategy_technical_score: MaybeInt = NA
+    strategy_technical_status: str = NA
+    strategy_evidence_source: str = NA
+    strategy_technical_note: str = NA
     strategy_missing_data: tuple[str, ...] = ()
     strategy_unverified_data: tuple[str, ...] = ()
     volume_profile: VolumeProfileResult | None = None
@@ -506,6 +521,17 @@ class _TargetIntegrityDecision(BaseModel):
     reason: str = NA
     warning: str = NA
     strategy_execution: _StrategyExecution | None = None
+
+    model_config = ConfigDict(frozen=True)
+
+
+class _StrategyTechnicalEvidence(BaseModel):
+    generic_score: MaybeInt = NA
+    scoring_score: MaybeInt = NA
+    strategy_score: MaybeInt = NA
+    status: str = NA
+    source: str = NA
+    note: str = NA
 
     model_config = ConfigDict(frozen=True)
 
@@ -889,10 +915,41 @@ class ScannerRunner:
                 strategy_execution=strategy_execution,
             )
 
+        target_integrity = _target_integrity_decision(strategy_execution, candidate)
+        if target_integrity.blocked:
+            return self._symbol_result(
+                symbol=symbol,
+                status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+                status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+                candles=candles,
+                current_price=current_price,
+                optional_data=optional_data,
+                missing_data=base_missing,
+                unverified_data=base_unverified,
+                rejection_reason=target_integrity.reason,
+                technical_result=technical,
+                derivatives_result=derivatives,
+                derivatives_enrichment=derivatives_enrichment,
+                risk_decision=risk_decision,
+                strategy_execution=target_integrity.strategy_execution or strategy_execution,
+                rejection_stage_override=TARGET_INTEGRITY_FAILED_GATE,
+            )
+
+        technical_evidence = _strategy_technical_evidence(
+            setup=strategy_execution.selected_setup,
+            strategy_execution=strategy_execution,
+            generic_technical_score=Decimal(technical.structure_score),
+            risk_decision=risk_decision,
+            target_integrity=target_integrity,
+        )
+        strategy_execution = _strategy_execution_with_technical_evidence(
+            strategy_execution,
+            technical_evidence,
+        )
         strategy_catalyst_score = _strategy_catalyst_score(strategy_execution.selected_setup)
         score_result = self.scoring_engine.score(
             {
-                "technical_score": Decimal(technical.structure_score),
+                "technical_score": Decimal(technical_evidence.scoring_score),
                 "derivatives_score": _scoring_derivatives_score(derivatives_enrichment),
                 "risk_approved": risk_decision.approved,
                 "best_rr": _best_rr_for_scoring(risk_decision),
@@ -906,6 +963,7 @@ class ScannerRunner:
                 "unverified_data": _scoring_unverified_data(base_unverified),
             }
         )
+        score_result = _score_result_with_strategy_note(score_result, technical_evidence)
         if (
             not score_result.hard_filter_result.passed
             or score_result.decision == "reject"
@@ -927,27 +985,6 @@ class ScannerRunner:
                 risk_decision=risk_decision,
                 score_result=score_result,
                 strategy_execution=strategy_execution,
-            )
-
-        target_integrity = _target_integrity_decision(strategy_execution, candidate)
-        if target_integrity.blocked:
-            return self._symbol_result(
-                symbol=symbol,
-                status=ScannerPipelineStatus.SCANNED_NO_SETUP,
-                status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
-                candles=candles,
-                current_price=current_price,
-                optional_data=optional_data,
-                missing_data=base_missing,
-                unverified_data=base_unverified,
-                rejection_reason=target_integrity.reason,
-                technical_result=technical,
-                derivatives_result=derivatives,
-                derivatives_enrichment=derivatives_enrichment,
-                risk_decision=risk_decision,
-                score_result=score_result,
-                strategy_execution=target_integrity.strategy_execution or strategy_execution,
-                rejection_stage_override=TARGET_INTEGRITY_FAILED_GATE,
             )
 
         trade_idea = self.trade_idea_agent.create(
@@ -1486,6 +1523,21 @@ class ScannerRunner:
             missing_data=cleaned_missing,
             unverified_data=cleaned_unverified,
         )
+        generic_technical_score = (
+            technical_result.structure_score
+            if technical_result is not None
+            else strategy_execution.generic_technical_score
+        )
+        score_breakdown_technical_score = (
+            _integer_or_na(score_result.score_breakdown.technical_score)
+            if score_result is not None
+            else NA
+        )
+        scoring_technical_score = _first_non_na(
+            score_breakdown_technical_score,
+            strategy_execution.scoring_technical_score,
+            generic_technical_score,
+        )
         return ScannerSymbolResult(
             symbol=symbol,
             status=status,
@@ -1504,6 +1556,12 @@ class ScannerRunner:
             latest_high=_decimal_field(candles[-1], ("high",)) if candles else NA,
             latest_low=_decimal_field(candles[-1], ("low",)) if candles else NA,
             technical_score=technical_result.structure_score if technical_result is not None else NA,
+            generic_technical_score=generic_technical_score,
+            scoring_technical_score=scoring_technical_score,
+            strategy_technical_score=strategy_execution.strategy_technical_score,
+            strategy_technical_status=strategy_execution.strategy_technical_status,
+            strategy_evidence_source=strategy_execution.strategy_evidence_source,
+            strategy_technical_note=strategy_execution.strategy_technical_note,
             derivatives_score=derivatives_enrichment.derivatives_score
             if derivatives_enrichment is not None
             else derivatives_result.derivatives_score
@@ -1556,6 +1614,7 @@ class ScannerRunner:
             formatted_strategy_output=strategy_execution.formatted_strategy_output,
             strategy_diagnostics=strategy_execution.strategy_diagnostics,
             valid_strategy_modes=strategy_execution.valid_strategy_modes,
+            strategy_valid_modes=strategy_execution.valid_strategy_modes,
             rejected_strategy_modes=strategy_execution.rejected_strategy_modes,
             strategy_missing_data=strategy_execution.strategy_missing_data,
             strategy_unverified_data=strategy_execution.strategy_unverified_data,
@@ -1661,7 +1720,7 @@ def _setup_quality_for_result(
         derivatives_enrichment=derivatives_enrichment,
     )
     stop_distance_pct = _stop_distance_pct(setup)
-    required_rr = Decimal("2.7") if mode == "challenge" else Decimal("2.5")
+    required_rr = _strategy_mode_required_rr(mode)
 
     return validate_setup_quality(
         SetupQualityInput(
@@ -2511,6 +2570,156 @@ def _target_htf_candles(
         if timeframe != NA.lower() and candles_by_timeframe.get(timeframe):
             return candles_by_timeframe[timeframe]
     return ()
+
+
+def _strategy_technical_evidence(
+    *,
+    setup: LiquidityGrabSetup | None,
+    strategy_execution: _StrategyExecution,
+    generic_technical_score: Decimal,
+    risk_decision: RiskDecision,
+    target_integrity: _TargetIntegrityDecision,
+) -> _StrategyTechnicalEvidence:
+    generic_score = _bounded_score_or_na(generic_technical_score)
+    fallback_score = generic_score if generic_score != NA else 0
+    default = _StrategyTechnicalEvidence(generic_score=generic_score, scoring_score=fallback_score)
+    if (
+        setup is None
+        or not risk_decision.approved
+        or target_integrity.blocked
+        or not _strict_strategy_evidence_valid(setup)
+    ):
+        return default
+
+    trust_score = _bounded_score_or_na(setup.trust_meter.percentage)
+    if trust_score == NA:
+        return default
+
+    strategy_score = max(int(fallback_score), trust_score)
+    note = (
+        f"Generic technical_score {generic_score} preserved; "
+        f"{LIQUIDITY_GRAB_STRATEGY_NAME} {setup.mode.value} evidence passed strict gates, "
+        f"so opportunity scoring used strategy technical evidence score {strategy_score}."
+    )
+    return _StrategyTechnicalEvidence(
+        generic_score=generic_score,
+        scoring_score=strategy_score,
+        strategy_score=strategy_score,
+        status=STRATEGY_TECHNICAL_STATUS_USED,
+        source=LIQUIDITY_GRAB_STRATEGY_NAME,
+        note=note,
+    )
+
+
+def _strict_strategy_evidence_valid(setup: LiquidityGrabSetup) -> bool:
+    if not setup.is_valid or not setup.gate_result.passed:
+        return False
+    if not _no_failed_strategy_gate(setup.first_failed_gate):
+        return False
+    if setup.hard_rejection_reasons or setup.gates_failed:
+        return False
+    if setup.rr_to_tp2 == NA or _decimal_from(setup.rr_to_tp2, "rr_to_tp2") < ACTIONABLE_STRATEGY_MIN_RR:
+        return False
+    if setup.mode == LiquidityGrabMode.challenge and setup.trust_meter.percentage < 85:
+        return False
+    if setup.mode != LiquidityGrabMode.challenge and setup.trust_meter.percentage < 75:
+        return False
+    if not setup.sweep.is_present or not setup.structure_shift.is_present:
+        return False
+    if not setup.order_block.is_present and not setup.fair_value_gap.is_present:
+        return False
+    if not setup.pullback_zone.valid:
+        return False
+    if not setup.fib_alignment.is_aligned or setup.fib_alignment.rejected_deeper_than_786:
+        return False
+    if setup.entry_source == NA or setup.selected_zone_type == NA:
+        return False
+
+    required_gates = (
+        "sweep",
+        "bos_choch",
+        "ob_fvg",
+        "pullback_zone",
+        "fib_alignment",
+        "rr",
+        "trust_meter",
+        "final_strategy_gates",
+    )
+    gates_passed = set(setup.gates_passed)
+    return all(gate in gates_passed for gate in required_gates)
+
+
+def _strategy_execution_with_technical_evidence(
+    strategy_execution: _StrategyExecution,
+    evidence: _StrategyTechnicalEvidence,
+) -> _StrategyExecution:
+    diagnostics = dict(strategy_execution.strategy_diagnostics)
+    if evidence.strategy_score != NA:
+        payload = {
+            "generic_technical_score": evidence.generic_score,
+            "strategy_technical_score": evidence.strategy_score,
+            "scoring_technical_score": evidence.scoring_score,
+            "strategy_technical_status": evidence.status,
+            "strategy_evidence_source": evidence.source,
+            "strategy_valid_modes": strategy_execution.valid_strategy_modes,
+            "strategy_technical_note": evidence.note,
+        }
+        target_modes = strategy_execution.valid_strategy_modes
+        if not target_modes and strategy_execution.selected_setup is not None:
+            target_modes = (strategy_execution.selected_setup.mode.value,)
+        for mode in target_modes:
+            raw = diagnostics.get(mode)
+            if isinstance(raw, Mapping):
+                mode_diagnostics = dict(raw)
+                mode_diagnostics.update(payload)
+                diagnostics[mode] = mode_diagnostics
+
+    return strategy_execution.model_copy(
+        update={
+            "strategy_diagnostics": diagnostics,
+            "generic_technical_score": evidence.generic_score,
+            "scoring_technical_score": evidence.scoring_score,
+            "strategy_technical_score": evidence.strategy_score,
+            "strategy_technical_status": evidence.status,
+            "strategy_evidence_source": evidence.source,
+            "strategy_technical_note": evidence.note,
+        }
+    )
+
+
+def _score_result_with_strategy_note(
+    score_result: OpportunityScoreResult,
+    evidence: _StrategyTechnicalEvidence,
+) -> OpportunityScoreResult:
+    if evidence.note == NA:
+        return score_result
+    return score_result.model_copy(update={"notes": _unique_strings((*score_result.notes, evidence.note))})
+
+
+def _bounded_score_or_na(value: Any) -> MaybeInt:
+    if _display_decimal_or_text(value) == NA:
+        return NA
+    try:
+        score = _decimal_from(value, "score")
+    except ValueError:
+        return NA
+    score = min(Decimal("100"), max(Decimal("0"), score))
+    return int(score)
+
+
+def _no_failed_strategy_gate(value: Any) -> bool:
+    text = _display_decimal_or_text(value)
+    return text in (NA, "None", "none", "null")
+
+
+def _strategy_mode_required_rr(mode: LiquidityGrabMode | str) -> Decimal:
+    try:
+        selected = LiquidityGrabMode(mode)
+    except ValueError:
+        return Decimal("2.5")
+    if selected == LiquidityGrabMode.challenge:
+        return ACTIONABLE_STRATEGY_MIN_RR
+    return Decimal("2.5")
 
 
 def _is_valid_strategy_setup(setup: LiquidityGrabSetup) -> bool:

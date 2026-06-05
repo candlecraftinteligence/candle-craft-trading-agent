@@ -881,6 +881,7 @@ Phase 10 adds the first scanner pipeline under `app/pipeline`:
 - It does not place trades, route orders, use private exchange API access, withdraw funds, transfer funds, or require exchange API keys.
 - Alerts are dry-run by default. The runner formats the alert through the alert agent but does not send live Telegram messages unless a caller explicitly disables dry-run behavior and supplies live alert settings.
 - Trade ideas are created only after technical context, derivatives checks, risk-manager gates, opportunity-scoring gates, and the configured minimum scanner score pass.
+- The generic top-level technical score remains a broad market-structure diagnostic. For a fully valid Liquidity-Grab Pullback mode, the scanner can pass explicit strategy technical evidence into opportunity scoring while preserving the original generic score in diagnostics.
 - Missing data is preserved as `N/A`; unreliable data is preserved as `Unverified`.
 - If a symbol fails, the failure is recorded on that symbol and the scanner continues with the next symbol.
 - Weak setups are rejected. If there is no sweep, BOS, or CHoCH context, the symbol returns `scanned_no_setup`.
@@ -979,6 +980,8 @@ Phase 12 connects the Phase 11 Liquidity-Grab Pullback Engine into the Phase 10 
 - For each symbol, the scanner collects Phase 12.1 multi-timeframe context: synthetic 2D from 1D candles, direct 12H bias candles, direct 15m execution candles, and direct 5m confirmation candles. Existing 4H and 1H context remains optional when available.
 - Strategy results, formatted Candle Craft output, diagnostics, valid/rejected modes, missing data, and unverified data are included in the scanner result and JSON export.
 - A trade idea is created only when the strategy returns at least one valid A/B setup and the existing technical, derivatives, risk, scoring, and trade-idea gates also pass.
+- Strategy-aware scoring is an evidence bridge only: `generic_technical_score` is preserved, and `strategy_technical_score` is used for scoring only when the Liquidity-Grab Pullback mode is valid, RR is at or above the actionable 2.7 floor, Trust Meter passes, risk is approved, target integrity is clean, and there are no failed or hard strategy gates.
+- This does not weaken confirmation or structure gates. Missing sweep, missing BOS/CHoCH, failed OB/FVG pullback, failed fib alignment, blocked target integrity, risk rejection, or rejected/no-setup rows remain rejected.
 - If no valid Liquidity-Grab Pullback setup exists, the symbol returns `scanned_no_setup`, `rejection_stage = strategy`, and `No valid Liquidity-Grab Pullback setup.`
 - Rejected strategy setups are diagnostics only. They are not signals, do not create trade ideas, do not create alerts, and do not create journal entries.
 - Telegram remains dry-run by default. The scanner does not live-send Telegram alerts unless `dry_run_alerts=False` is explicitly provided by a caller.

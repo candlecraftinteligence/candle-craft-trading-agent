@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 
 from app.agents.alert_agent import AlertAgent
+from app.agents.risk_manager import RiskDecision, RiskRuleViolation
+from app.agents.technical_structure import TechnicalStructureAgent
 from app.analytics.setup_quality import SetupQualityState
 from app.analytics.target_intelligence import TargetFailureType, TargetIntelligenceResult, TargetQualityGrade
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE
@@ -14,6 +16,7 @@ from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, display_fields
 from app.pipeline import scanner_runner as scanner_runner_module
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunner
+from app.strategies.liquidity_grab_pullback import LiquidityGrabEngine
 
 
 def run(coro: Any) -> Any:
@@ -232,6 +235,48 @@ class SpyAlertAgent(AlertAgent):
         return await super().send(payload)
 
 
+class FixedScoreTechnicalAgent:
+    def __init__(self, score: int) -> None:
+        self.score = score
+        self.base = TechnicalStructureAgent()
+
+    def analyze(self, candles):
+        result = self.base.analyze(candles)
+        return result.model_copy(update={"structure_score": self.score})
+
+
+class RejectingRiskManager:
+    def analyze(self, *args, **kwargs) -> RiskDecision:
+        return RiskDecision(
+            approved=False,
+            decision="rejected",
+            violations=(
+                RiskRuleViolation(
+                    code="daily_risk_exceeded",
+                    message="Current daily loss percentage exceeds max daily risk percentage.",
+                ),
+            ),
+            best_risk_reward_ratio=Decimal("3.5"),
+            invalidation_reason="Invalid if price accepts below the stop.",
+            data_quality_score=Decimal("100"),
+        )
+
+
+class ActionableRRStrategyEngine:
+    def __init__(self) -> None:
+        self.base = LiquidityGrabEngine()
+
+    def analyze(self, strategy_input):
+        result = self.base.analyze(strategy_input)
+        return result.model_copy(
+            update={
+                "challenge": _setup_with_actionable_rr(result.challenge),
+                "swing": _setup_with_actionable_rr(result.swing),
+                "scalp": _setup_with_actionable_rr(result.scalp),
+            }
+        )
+
+
 def _clean_target_intelligence() -> TargetIntelligenceResult:
     return TargetIntelligenceResult(
         tp1_candidate=Decimal("112"),
@@ -286,6 +331,81 @@ def _config(symbols: list[str], **overrides: object) -> ScannerRunConfig:
     return ScannerRunConfig.model_validate(data)
 
 
+def _approved_risk_decision(rr: Decimal = Decimal("3.5")) -> RiskDecision:
+    return RiskDecision(
+        approved=True,
+        decision="approved",
+        best_risk_reward_ratio=rr,
+        invalidation_reason="Invalid if price accepts below the stop.",
+        data_quality_score=Decimal("100"),
+    )
+
+
+def _setup_with_actionable_rr(setup, rr_to_tp2: Decimal = Decimal("3.5")):
+    if not setup.is_valid or setup.entry == NA or setup.stop == NA or setup.bias not in ("long", "short"):
+        return setup
+    risk = setup.entry - setup.stop if setup.bias == "long" else setup.stop - setup.entry
+    if risk <= 0:
+        return setup
+    rr_to_tp1 = Decimal("2.7")
+    rr_to_tp3 = Decimal("4.2")
+    if setup.bias == "long":
+        tp1 = setup.entry + risk * rr_to_tp1
+        tp2 = setup.entry + risk * rr_to_tp2
+        tp3 = setup.entry + risk * rr_to_tp3
+    else:
+        tp1 = setup.entry - risk * rr_to_tp1
+        tp2 = setup.entry - risk * rr_to_tp2
+        tp3 = setup.entry - risk * rr_to_tp3
+    pullback_zone = setup.pullback_zone.model_copy(
+        update={
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "rr_to_tp2": rr_to_tp2,
+        }
+    )
+    return setup.model_copy(
+        update={
+            "tp1": tp1,
+            "tp2": tp2,
+            "tp3": tp3,
+            "rr_to_tp2": rr_to_tp2,
+            "pullback_zone": pullback_zone,
+            "rr_diagnostics": f"passed: RR to TP2 {rr_to_tp2}.",
+        }
+    )
+
+
+def _scan_strategy_with_generic_technical_score(score: int) -> tuple[Any, SpyAlertAgent]:
+    alert_agent = SpyAlertAgent()
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    result = run(
+        ScannerRunner(
+            exchange_client=client,
+            alert_agent=alert_agent,
+            technical_agent=FixedScoreTechnicalAgent(score),
+            strategy_engine=ActionableRRStrategyEngine(),
+        ).run(_config(["BTCUSDT"]))
+    )
+    return result, alert_agent
+
+
+def _strategy_evidence_from_scan(score: int = 30) -> tuple[Any, Any]:
+    result, _alert_agent = _scan_strategy_with_generic_technical_score(score)
+    symbol_result = result.results[0]
+    setup = symbol_result.strategy_results["swing"].swing
+    execution = scanner_runner_module._StrategyExecution(
+        strategy_name=symbol_result.strategy_name,
+        strategy_results=symbol_result.strategy_results,
+        strategy_diagnostics=symbol_result.strategy_diagnostics,
+        valid_strategy_modes=symbol_result.valid_strategy_modes,
+        selected_setup=setup,
+        target_intelligence=symbol_result.target_intelligence,
+    )
+    return setup, execution
+
+
 def test_scanner_handles_one_valid_mocked_symbol() -> None:
     client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
     result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
@@ -307,6 +427,134 @@ def test_scanner_handles_one_valid_mocked_symbol() -> None:
     assert result.trade_ideas_created == 1
 
 
+def test_strategy_valid_low_generic_technical_uses_strategy_evidence_without_weak_filter() -> None:
+    result, alert_agent = _scan_strategy_with_generic_technical_score(30)
+
+    symbol_result = result.results[0]
+    violation_codes = {
+        violation.code
+        for violation in symbol_result.score_result.hard_filter_result.violations
+    }
+
+    assert symbol_result.status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+    assert symbol_result.technical_score == 30
+    assert symbol_result.generic_technical_score == 30
+    assert symbol_result.strategy_technical_score == 100
+    assert symbol_result.scoring_technical_score == 100
+    assert symbol_result.strategy_technical_status == "strategy_evidence_used"
+    assert symbol_result.strategy_evidence_source == "liquidity_grab_pullback"
+    assert symbol_result.strategy_valid_modes == ("swing", "scalp")
+    assert "weak_technical_score" not in violation_codes
+    assert symbol_result.alert_result is not None
+    assert alert_agent.calls[0]["dry_run"] is True
+
+    diagnostics = symbol_result.strategy_diagnostics["swing"]
+    assert diagnostics["generic_technical_score"] == 30
+    assert diagnostics["strategy_technical_score"] == 100
+    assert diagnostics["scoring_technical_score"] == 100
+    assert "strategy technical evidence" in diagnostics["strategy_technical_note"]
+    assert any("strategy technical evidence" in note for note in symbol_result.score_result.notes)
+
+
+def test_strategy_valid_generic_technical_40_can_become_trade_candidate_when_score_passes() -> None:
+    result, _alert_agent = _scan_strategy_with_generic_technical_score(40)
+
+    symbol_result = result.results[0]
+
+    assert symbol_result.status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+    assert symbol_result.score_result.total_score >= Decimal("80")
+    assert symbol_result.score_result.decision in ("alert_candidate", "high_quality_candidate")
+    assert symbol_result.trade_idea is not None
+
+
+def test_low_generic_technical_still_rejects_without_valid_strategy_evidence() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _trend_candles_with_valid_setup()})
+    result = run(
+        ScannerRunner(
+            exchange_client=client,
+            technical_agent=FixedScoreTechnicalAgent(30),
+        ).run(_config(["BTCUSDT"], enable_strategy_output=False))
+    )
+
+    symbol_result = result.results[0]
+    violation_codes = {
+        violation.code
+        for violation in symbol_result.score_result.hard_filter_result.violations
+    }
+
+    assert symbol_result.status == ScannerPipelineStatus.REJECTED_BY_SCORING
+    assert "weak_technical_score" in violation_codes
+    assert symbol_result.generic_technical_score == 30
+    assert symbol_result.scoring_technical_score == 30
+    assert symbol_result.strategy_technical_score == NA
+
+
+def test_strategy_technical_evidence_requires_rr_bos_pullback_fib_and_clean_gates() -> None:
+    setup, execution = _strategy_evidence_from_scan()
+    approved_risk = _approved_risk_decision()
+    clean_target = scanner_runner_module._TargetIntegrityDecision()
+
+    def evidence_for(candidate):
+        return scanner_runner_module._strategy_technical_evidence(
+            setup=candidate,
+            strategy_execution=execution,
+            generic_technical_score=Decimal("30"),
+            risk_decision=approved_risk,
+            target_integrity=clean_target,
+        )
+
+    assert evidence_for(setup).strategy_score == 100
+    assert evidence_for(setup.model_copy(update={"rr_to_tp2": Decimal("2.69")})).strategy_score == NA
+    assert evidence_for(
+        setup.model_copy(update={"gates_passed": tuple(gate for gate in setup.gates_passed if gate != "bos_choch")})
+    ).strategy_score == NA
+    assert evidence_for(
+        setup.model_copy(update={"gates_passed": tuple(gate for gate in setup.gates_passed if gate != "ob_fvg")})
+    ).strategy_score == NA
+    assert evidence_for(
+        setup.model_copy(update={"gates_passed": tuple(gate for gate in setup.gates_passed if gate != "fib_alignment")})
+    ).strategy_score == NA
+    assert evidence_for(setup.model_copy(update={"first_failed_gate": "target_integrity"})).strategy_score == NA
+    assert evidence_for(setup.model_copy(update={"hard_rejection_reasons": ("Rejected by hard gate.",)})).strategy_score == NA
+
+
+def test_strategy_technical_evidence_not_used_when_target_integrity_blocks() -> None:
+    setup, execution = _strategy_evidence_from_scan()
+    blocked_target = scanner_runner_module._TargetIntegrityDecision(
+        blocked=True,
+        reason="Target integrity blocked alert creation.",
+    )
+
+    evidence = scanner_runner_module._strategy_technical_evidence(
+        setup=setup,
+        strategy_execution=execution,
+        generic_technical_score=Decimal("30"),
+        risk_decision=_approved_risk_decision(),
+        target_integrity=blocked_target,
+    )
+
+    assert evidence.strategy_score == NA
+    assert evidence.scoring_score == 30
+
+
+def test_risk_rejected_strategy_setup_does_not_use_strategy_technical_evidence() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    result = run(
+        ScannerRunner(
+            exchange_client=client,
+            technical_agent=FixedScoreTechnicalAgent(30),
+            risk_manager=RejectingRiskManager(),
+        ).run(_config(["BTCUSDT"]))
+    )
+
+    symbol_result = result.results[0]
+
+    assert symbol_result.status == ScannerPipelineStatus.REJECTED_BY_RISK
+    assert symbol_result.strategy_technical_score == NA
+    assert symbol_result.score_result is None
+    assert symbol_result.alert_result is None
+
+
 def test_target_quality_reject_blocks_trade_idea_alert_and_journal(monkeypatch) -> None:
     target_intelligence = TargetIntelligenceResult(
         target_quality_grade=TargetQualityGrade.REJECT,
@@ -324,6 +572,8 @@ def test_target_quality_reject_blocks_trade_idea_alert_and_journal(monkeypatch) 
     assert symbol_result.trade_idea is None
     assert symbol_result.alert_result is None
     assert symbol_result.journal_entry is None
+    assert symbol_result.strategy_technical_score == NA
+    assert symbol_result.score_result is None
     assert result.trade_ideas_created == 0
     assert result.dry_run_alerts_created == 0
     assert result.journal_entries_created == 0
