@@ -184,7 +184,7 @@ class MarketRegimeInput(BaseModel):
     def _normalize_maybe_decimal(cls, value: Any) -> MaybeDecimal:
         if _is_missing(value):
             return NA
-        return _quantize(_decimal_from(value, "market regime input"))
+        return _quantize(_decimal_from(value, "market climate input"))
 
     @field_validator("btc_d_context", "usdt_d_context", mode="before")
     @classmethod

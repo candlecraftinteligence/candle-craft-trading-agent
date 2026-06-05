@@ -293,7 +293,7 @@ def build_adjustment(
 
 def default_adjustment() -> RegimeAdjustment:
     return RegimeAdjustment(
-        explanation="Market regime is N/A because required candle data is incomplete.",
+        explanation="Market climate is N/A because required candle data is incomplete.",
     )
 
 
@@ -305,7 +305,7 @@ def disabled_adjustment() -> RegimeAdjustment:
         min_quality_score_adjustment=0,
         min_rr_adjustment=Decimal("0"),
         risk_multiplier=Decimal("1"),
-        explanation="Market regime filter disabled.",
+        explanation="Market climate filter disabled.",
     )
 
 
@@ -318,7 +318,7 @@ def default_result() -> MarketRegimeResult:
         confidence_band=confidence_band(45),
         adjustment=adjustment,
         missing_data=("market_regime: N/A",),
-        warnings=("Market regime has not been evaluated.",),
+        warnings=("Market climate has not been evaluated.",),
         environment_notes=("Missing regime context remains cautious/neutral.",),
     )
 
@@ -333,8 +333,8 @@ def disabled_result() -> MarketRegimeResult:
         confidence_band=confidence_band(50),
         adjustment=adjustment,
         missing_data=("market_regime: N/A",),
-        warnings=("Market regime filter disabled.",),
-        environment_notes=("Market regime filter disabled.",),
+        warnings=("Market climate filter disabled.",),
+        environment_notes=("Market climate filter disabled.",),
     )
 
 

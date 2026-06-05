@@ -10,6 +10,7 @@ import httpx
 
 from app.alerts.integrity_manifest import build_alert_integrity_manifest
 from app.core.config import Settings
+from app.storage.database import open_initialized_database
 from app.telegram_admin import (
     HttpxTelegramAdminCommandTransport,
     TelegramAdminCommandService,
@@ -138,6 +139,57 @@ def _write_artifacts(
     manifest_row.update(manifest_extra or {})
     (scan_dir / "scan_run_manifest.jsonl").write_text(json.dumps(manifest_row) + "\n", encoding="utf-8")
     return TelegramAdminCommandService(project_root=project_root)
+
+
+def _insert_runtime_attempt(
+    db_path: Path,
+    *,
+    signal_id: str,
+    symbol: str,
+    alert_type: str,
+    status: str = "sent",
+    direction: str = "long",
+    setup_quality_score: str = "N/A",
+    entry_low: str = "N/A",
+    entry_high: str = "N/A",
+    stop_loss: str = "N/A",
+    tp1: str = "N/A",
+    tp2: str = "N/A",
+    tp3: str = "N/A",
+) -> None:
+    connection = open_initialized_database(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO telegram_alert_attempts (
+                signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
+                sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score,
+                entry_low, entry_high, stop_loss, tp1, tp2, tp3
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                symbol,
+                direction,
+                "CONFIRMED",
+                alert_type,
+                "CONFIRMED",
+                "2026-06-01T12:00:00+00:00",
+                status,
+                f"hash-{signal_id}-{alert_type}",
+                "run-46c",
+                setup_quality_score,
+                entry_low,
+                entry_high,
+                stop_loss,
+                tp1,
+                tp2,
+                tp3,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _valid_row(symbol: str = "VALIDUSDT") -> dict[str, Any]:
@@ -668,7 +720,7 @@ def test_status_loads_latest_manifest_and_formats_core_counts(tmp_path) -> None:
     assert "Quality gates: Protected" in response.text
     assert "Run: run-46c" in response.text
     assert "Symbol list: Manual" in response.text
-    assert "Market regime: Mixed" in response.text
+    assert "Market Climate: Mixed" in response.text
     assert "Regime confidence: 72" in response.text
     assert "Symbols scanned: 3" in response.text
     assert "Confirmed setups: 1" in response.text
@@ -1024,7 +1076,7 @@ def test_public_lastscan_shows_summary_without_admin_internals(tmp_path) -> None
     assert "Symbols scanned: 4" in response.text
     assert "Confirmed setups: 1" in response.text
     assert "Watchlist setups: 1" in response.text
-    assert "Market regime: Mixed" in response.text
+    assert "Market Climate: Mixed" in response.text
     assert "The engine only promotes setups that pass the filters." in response.text
     assert "ALERTUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
@@ -1032,6 +1084,29 @@ def test_public_lastscan_shows_summary_without_admin_internals(tmp_path) -> None
 
 def test_public_active_signals_only_include_confirmed_signal_rows(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_alert_row(), _near_row(), _blocked_row(), _rejected_row()])
+    db_path = tmp_path / "scan_runs" / "candle_craft.db"
+    _insert_runtime_attempt(
+        db_path,
+        signal_id="sig-alert",
+        symbol="ALERTUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        setup_quality_score="91",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="112",
+        tp2="120",
+    )
+    _insert_runtime_attempt(db_path, signal_id="sig-watch", symbol="NEARUSDT", alert_type="WATCHLIST", entry_low="90", entry_high="91")
+    _insert_runtime_attempt(
+        db_path,
+        signal_id="sig-blocked",
+        symbol="TARGETUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        status="blocked",
+        entry_low="80",
+        entry_high="81",
+    )
 
     response = service.public_response_for("/signals")
 
@@ -1044,7 +1119,8 @@ def test_public_active_signals_only_include_confirmed_signal_rows(tmp_path) -> N
     assert "Manual execution only." not in response.text
     assert "Symbol: ALERTUSDT" in response.text
     assert "Direction: Long" in response.text
-    assert "Entry: 100 - 102" in response.text
+    assert "Grade: 91" in response.text
+    assert "Entry: 100 – 102" in response.text
     assert "Stop: 95" in response.text
     assert "Targets: 112, 120" in response.text
     assert "Status: Confirmed setup" in response.text
