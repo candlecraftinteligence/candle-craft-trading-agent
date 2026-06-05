@@ -8,6 +8,7 @@ from pathlib import Path
 from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
+    DEFAULT_CONFIRMED_MIN_RR,
     SQLiteTelegramAlertAttemptRepository,
     TelegramAlertType,
     TelegramEligibilityContext,
@@ -396,7 +397,7 @@ def _assert_transition_message_clean(message: str, *, signal_id: str, status: st
 def test_confirmed_and_watchlist_lifecycle_states_are_eligible() -> None:
     confirmed = telegram_alert_decision_for_symbol(
         _symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED),
-        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+        eligibility_context=TelegramEligibilityContext(min_rr=DEFAULT_CONFIRMED_MIN_RR, min_score_for_idea=Decimal("80")),
     )
     watchlist = telegram_alert_decision_for_symbol(
         _symbol(SetupLifecycleState.WATCHLISTED, diagnostics=_public_ready_watchlist_diagnostics())
@@ -573,7 +574,7 @@ def test_hype_style_public_ready_watchlist_sends_watchlist_not_confirmed() -> No
                 tp1=Decimal("72.2"),
                 tp2=Decimal("73.1"),
                 tp3=Decimal("74.4"),
-                rr_to_tp2=Decimal("2.9"),
+                rr_to_tp2=Decimal("2.6"),
             ),
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=72),
         ).model_copy(update={"symbol": "HYPEUSDT"})
@@ -589,7 +590,7 @@ def test_hype_style_public_ready_watchlist_sends_watchlist_not_confirmed() -> No
     assert "Limit Zone:\n71.41 \u2013 71.68" in text
     assert "Potential Targets:" in text
     assert "TP2: 73.1" in text
-    assert "Planned RR: 2.9R \u2014 watchlist only, final RR must improve to \u22653R before confirmation." in text
+    assert "Planned RR: 2.6R \u2014 watchlist only, final RR must improve to \u22652.7R before confirmation." in text
     assert "71.407944" not in text
     assert "70.77" in text
     assert "70.77363571" not in text
@@ -622,18 +623,27 @@ def test_rr_below_min_watchlist_never_routes_to_signal_confirmed() -> None:
         _symbol(
             SetupLifecycleState.CONFIRMED,
             previous=SetupLifecycleState.TRIGGERED,
-            diagnostics=_public_ready_watchlist_diagnostics(rr_to_tp2=Decimal("2.9")),
+            diagnostics=_diagnostics(
+                rr_to_tp2=Decimal("2.69"),
+                first_failed_gate="rr_below_minimum",
+                gates_passed=("sweep", "bos_choch", "pullback_zone", "fib_alignment"),
+                gates_failed=("rr_below_minimum",),
+                execution_sweep_status="passed",
+                confirmation_structure_shift_status="passed",
+                pullback_zone_status="valid",
+            ),
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=72),
         ),
-        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+        eligibility_context=TelegramEligibilityContext(min_rr=DEFAULT_CONFIRMED_MIN_RR, min_score_for_idea=Decimal("80")),
     )
 
     assert decision.eligible is True
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert decision.message is not None
+    assert decision.message.planned_rr == Decimal("2.69")
     text = format_telegram_signal_message(decision.alert_type, decision.message)
     assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
-    assert "Final RR" in text
+    assert "watchlist only, final RR must improve to \u22652.7R before confirmation." in text
 
 
 def test_action_watchlist_only_sends_watchlist_not_confirmed() -> None:
@@ -2392,14 +2402,47 @@ def test_confirmed_alert_is_blocked_when_planned_rr_is_below_min_rr() -> None:
         _symbol(
             SetupLifecycleState.CONFIRMED,
             previous=SetupLifecycleState.TRIGGERED,
-            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.79181174")),
-            trade_idea=_trade_idea(best_rr=Decimal("2.79181174")),
+            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.69")),
+            trade_idea=_trade_idea(best_rr=Decimal("2.69")),
         ),
-        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+        eligibility_context=TelegramEligibilityContext(min_rr=DEFAULT_CONFIRMED_MIN_RR, min_score_for_idea=Decimal("80")),
     )
 
     assert decision.eligible is False
     assert "planned_rr_below_min" in decision.reason
+
+
+def test_confirmed_alert_allows_rr_at_calibrated_minimum() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.70")),
+            trade_idea=_trade_idea(best_rr=Decimal("2.70")),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=DEFAULT_CONFIRMED_MIN_RR, min_score_for_idea=Decimal("80")),
+    )
+
+    assert DEFAULT_CONFIRMED_MIN_RR == Decimal("2.7")
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+
+
+def test_confirmed_alert_with_rr_270_still_blocks_target_integrity_failure() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.70"), tp2=Decimal("99")),
+            trade_idea=_trade_idea(
+                best_rr=Decimal("2.70"),
+                take_profit_targets=(Decimal("110"), Decimal("99"), Decimal("120")),
+            ),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=DEFAULT_CONFIRMED_MIN_RR, min_score_for_idea=Decimal("80")),
+    )
+
+    _assert_target_integrity_blocked(decision, "tp2")
 
 
 def test_long_confirmed_blocks_when_stop_is_above_entry() -> None:
@@ -2640,19 +2683,19 @@ def test_allousdt_style_contradictory_confirmed_alert_is_blocked() -> None:
         _symbol(
             SetupLifecycleState.CONFIRMED,
             previous=SetupLifecycleState.TRIGGERED,
-            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.79181174"), invalidation=rejection_text),
+            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.69"), invalidation=rejection_text),
             trade_idea=_trade_idea(
-                best_rr=Decimal("2.79181174"),
+                best_rr=Decimal("2.69"),
                 opportunity_score=Decimal("79"),
                 invalidation=rejection_text,
             ),
             technical_score=Decimal("49"),
         ),
-        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+        eligibility_context=TelegramEligibilityContext(min_rr=DEFAULT_CONFIRMED_MIN_RR, min_score_for_idea=Decimal("80")),
     )
 
     assert decision.eligible is False
-    assert "planned_rr_below_min:2.79181174<3" in decision.reason
+    assert "planned_rr_below_min:2.69<2.7" in decision.reason
     assert "opportunity_score_below_min:79<80" in decision.reason
     assert "technical_score_below_min:49<50" in decision.reason
     assert "invalidation_contains_rejection_reason" in decision.reason
@@ -2710,15 +2753,15 @@ def test_blocked_confirmed_alert_persists_safe_research_metadata(tmp_path: Path)
         database_path=db_path,
         settings=Settings(_env_file=None),
         sender=sender,
-        min_rr=Decimal("3"),
+        min_rr=DEFAULT_CONFIRMED_MIN_RR,
         min_score_for_idea=Decimal("80"),
     )
     result = _run_result(
         _symbol(
             SetupLifecycleState.CONFIRMED,
             previous=SetupLifecycleState.TRIGGERED,
-            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.79")),
-            trade_idea=_trade_idea(best_rr=Decimal("2.79")),
+            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.69")),
+            trade_idea=_trade_idea(best_rr=Decimal("2.69")),
         )
     )
 
@@ -2735,8 +2778,8 @@ def test_blocked_confirmed_alert_persists_safe_research_metadata(tmp_path: Path)
         ).fetchone()
     assert row[0] == "blocked"
     assert row[1] == TelegramAlertType.SIGNAL_CONFIRMED.value
-    assert row[2] == "2.79"
-    assert row[3] == "3"
+    assert row[2] == "2.69"
+    assert row[3] == "2.7"
     assert row[4] == "80"
     assert "planned_rr_below_min" in row[5]
 

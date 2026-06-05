@@ -222,6 +222,7 @@ def test_command_preset_configuration_defaults() -> None:
     assert daily.confirmation_timeframe == "5m"
     assert daily.min_score_for_idea == "80"
     assert daily.min_rr == Decimal("2.5")
+    assert run_scan.COMMAND_PRESETS["challenge"].min_rr == Decimal("2.7")
     assert daily.rank_results is True
     assert daily.portfolio_select is True
     assert daily.continue_watch is True

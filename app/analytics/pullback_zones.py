@@ -17,7 +17,7 @@ from app.analytics.wick_close_structure import (
 
 OUTPUT_QUANT = Decimal("0.00000001")
 BASE_MIN_RR = Decimal("2.5")
-CHALLENGE_MIN_RR = Decimal("3.0")
+CHALLENGE_MIN_RR = Decimal("2.7")
 DEFAULT_TICK_SIZE = Decimal("0.00000001")
 ATR_STOP_BUFFER_MULTIPLIER = Decimal("0.10")
 

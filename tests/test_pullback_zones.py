@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from app.analytics.pullback_zones import AcceptanceStatus, PullbackZoneInput, analyze_pullback_zone, calculate_fib_alignment
+from app.analytics.pullback_zones import (
+    CHALLENGE_MIN_RR,
+    AcceptanceStatus,
+    PullbackZoneInput,
+    analyze_pullback_zone,
+    calculate_fib_alignment,
+)
 from app.data.dtos import NA
 
 
@@ -150,7 +156,7 @@ def test_fib_levels_calculated_correctly() -> None:
 
 
 def test_ob_fvg_overlap_inside_fib_zone_becomes_valid_pullback_zone() -> None:
-    result = analyze_pullback_zone(_input(_bullish_valid_candles(), minimum_rr=Decimal("3.0")))
+    result = analyze_pullback_zone(_input(_bullish_valid_candles(), minimum_rr=CHALLENGE_MIN_RR))
 
     assert result.valid is True
     assert result.selected_zone_type == "OB_FVG_OVERLAP"
@@ -316,15 +322,23 @@ def test_rr_below_25_rejects() -> None:
     assert result.first_failed_gate == "rr_below_minimum"
 
 
-def test_challenge_rr_below_30_rejects() -> None:
-    result = analyze_pullback_zone(_input(_bullish_valid_candles(), minimum_rr=Decimal("3.0"), atr_15m=Decimal("20")))
+def test_challenge_rr_269_rejects_while_270_passes() -> None:
+    rejected = analyze_pullback_zone(
+        _input(_bullish_valid_candles(), minimum_rr=CHALLENGE_MIN_RR, atr_15m=Decimal("34.72862454"))
+    )
+    accepted = analyze_pullback_zone(
+        _input(_bullish_valid_candles(), minimum_rr=CHALLENGE_MIN_RR, atr_15m=Decimal("33.96296296"))
+    )
 
-    assert result.valid is False
-    assert result.first_failed_gate == "rr_below_minimum"
+    assert rejected.valid is False
+    assert rejected.rr_to_tp2 == Decimal("2.69000000")
+    assert rejected.first_failed_gate == "rr_below_minimum"
+    assert accepted.valid is True
+    assert accepted.rr_to_tp2 == Decimal("2.70000000")
 
 
 def test_valid_zone_produces_entry_stop_targets_and_rr() -> None:
-    result = analyze_pullback_zone(_input(_bullish_valid_candles(), minimum_rr=Decimal("3.0")))
+    result = analyze_pullback_zone(_input(_bullish_valid_candles(), minimum_rr=CHALLENGE_MIN_RR))
 
     assert result.valid is True
     assert result.entry != NA
@@ -335,7 +349,7 @@ def test_valid_zone_produces_entry_stop_targets_and_rr() -> None:
 
 
 def test_poc_is_confluence_only() -> None:
-    result = analyze_pullback_zone(_input(_bullish_valid_candles(), minimum_rr=Decimal("3.0"), poc=Decimal("117.2")))
+    result = analyze_pullback_zone(_input(_bullish_valid_candles(), minimum_rr=CHALLENGE_MIN_RR, poc=Decimal("117.2")))
 
     assert result.valid is True
     assert result.selected_zone.confluence == ("POC inside pullback zone",)

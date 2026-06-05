@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from app.lifecycle.models import SetupLifecycleEvent, SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
-from app.lifecycle.service import apply_lifecycle_to_run_result, prioritize_watch_symbols
+from app.lifecycle.service import apply_lifecycle_to_run_result, observation_from_symbol_result, prioritize_watch_symbols
 from app.lifecycle.state_machine import LifecycleObservation, evaluate_lifecycle_transition, transition_record
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
 from app.research.queries import ResearchFilters, build_research_report
@@ -327,6 +327,34 @@ def _body_acceptance_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
     )
 
 
+def _challenge_rr_symbol(
+    rr_to_tp2: Decimal,
+    *,
+    first_failed_gate: str = "N/A",
+    gates_failed: tuple[str, ...] = (),
+    symbol: str = "BTCUSDT",
+) -> ScannerSymbolResult:
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        rejected_strategy_modes=("challenge",),
+        strategy_diagnostics={
+            "challenge": {
+                "mode": "challenge",
+                "bias": "long",
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "valid",
+                "rr_to_tp2": rr_to_tp2,
+                "first_failed_gate": first_failed_gate,
+                "gates_passed": ("sweep", "bos_choch", "pullback_zone"),
+                "gates_failed": gates_failed,
+            }
+        },
+    )
+
+
 def test_valid_state_progression() -> None:
     initial = evaluate_lifecycle_transition(
         None,
@@ -428,6 +456,26 @@ def test_lifecycle_invalidates_body_acceptance_failure(tmp_path) -> None:
     assert lifecycle.current_state == SetupLifecycleState.INVALIDATED
     assert lifecycle.invalidation_reason == "body accepted beyond 0.786 invalidation zone"
     assert transition.reason == SetupTransitionReason.SETUP_INVALIDATED
+
+
+def test_challenge_lifecycle_rr_gate_uses_calibrated_minimum_without_ignoring_failures() -> None:
+    accepted = observation_from_symbol_result(_challenge_rr_symbol(Decimal("2.70")))
+    rejected_low_rr = observation_from_symbol_result(_challenge_rr_symbol(Decimal("2.69")))
+    rejected_flagged_rr = observation_from_symbol_result(
+        _challenge_rr_symbol(
+            Decimal("2.70"),
+            first_failed_gate="rr_below_minimum",
+            gates_failed=("rr_below_minimum",),
+        )
+    )
+
+    assert accepted.mode == "challenge"
+    assert accepted.sweep_detected is True
+    assert accepted.structure_shift_detected is True
+    assert accepted.pullback_valid is True
+    assert accepted.rr_valid is True
+    assert rejected_low_rr.rr_valid is False
+    assert rejected_flagged_rr.rr_valid is False
 
 
 def test_invalid_state_transition_rejected() -> None:

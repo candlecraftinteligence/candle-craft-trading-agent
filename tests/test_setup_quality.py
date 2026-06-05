@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from app.analytics.setup_quality import SetupQualityState, validate_setup_quality
+from app.analytics.setup_quality import CHALLENGE_REQUIRED_RR, SetupQualityState, validate_setup_quality
+from app.data.dtos import NA
 
 
 def _base_quality_input(**overrides: object) -> dict[str, object]:
@@ -116,6 +117,79 @@ def test_rr_below_required_minimum_cannot_be_high_quality() -> None:
 
     assert result.quality_state != SetupQualityState.HIGH_QUALITY_TRADE
     assert "marginal RR" in result.weakest_factors
+
+
+def test_challenge_rr_269_fails_but_270_passes_quality_gate() -> None:
+    below = validate_setup_quality(
+        _base_quality_input(mode="challenge", required_rr=NA, rr_to_tp2=Decimal("2.69"), best_rr=Decimal("2.69"))
+    )
+    at_minimum = validate_setup_quality(
+        _base_quality_input(mode="challenge", required_rr=NA, rr_to_tp2=Decimal("2.70"), best_rr=Decimal("2.70"))
+    )
+
+    assert CHALLENGE_REQUIRED_RR == Decimal("2.7")
+    assert below.quality_state != SetupQualityState.HIGH_QUALITY_TRADE
+    assert "marginal RR" in below.weakest_factors
+    assert at_minimum.quality_state == SetupQualityState.HIGH_QUALITY_TRADE
+    assert "RR meets threshold" in at_minimum.strongest_factors
+
+
+def test_challenge_rr_270_still_fails_without_bos_choch() -> None:
+    result = validate_setup_quality(
+        _base_quality_input(
+            mode="challenge",
+            required_rr=NA,
+            setup_valid=False,
+            confirmation_passed=False,
+            pullback_valid=False,
+            ob_or_fvg_valid=False,
+            fib_valid=False,
+            rr_to_tp2=Decimal("2.70"),
+            best_rr=Decimal("2.70"),
+            first_failed_gate="missing_confirmation_structure_shift",
+            gates_failed=("missing_confirmation_structure_shift",),
+            gates_passed=("sweep",),
+        )
+    )
+
+    assert result.quality_state == SetupQualityState.REJECTED_NO_EDGE
+    assert result.action_label == "Wait for confirmation"
+
+
+def test_challenge_rr_270_still_waitlists_failed_ob_fvg_or_fib_gate() -> None:
+    ob_fvg_failed = validate_setup_quality(
+        _base_quality_input(
+            mode="challenge",
+            required_rr=NA,
+            setup_valid=False,
+            pullback_valid=False,
+            ob_or_fvg_valid=False,
+            fib_valid=False,
+            rr_to_tp2=Decimal("2.70"),
+            best_rr=Decimal("2.70"),
+            first_failed_gate="no_ob_or_fvg_zone",
+            gates_failed=("no_ob_or_fvg_zone",),
+            gates_passed=("sweep", "bos_choch"),
+        )
+    )
+    fib_failed = validate_setup_quality(
+        _base_quality_input(
+            mode="challenge",
+            required_rr=NA,
+            setup_valid=False,
+            fib_valid=False,
+            rr_to_tp2=Decimal("2.70"),
+            best_rr=Decimal("2.70"),
+            first_failed_gate="pullback_beyond_786",
+            gates_failed=("pullback_beyond_786",),
+            gates_passed=("sweep", "bos_choch", "pullback_zone"),
+        )
+    )
+
+    assert ob_fvg_failed.quality_state == SetupQualityState.WATCHLIST_NEAR_MISS
+    assert fib_failed.quality_state == SetupQualityState.WATCHLIST_NEAR_MISS
+    assert ob_fvg_failed.quality_state != SetupQualityState.HIGH_QUALITY_TRADE
+    assert fib_failed.quality_state != SetupQualityState.HIGH_QUALITY_TRADE
 
 
 def test_severe_derivatives_conflict_rejects_after_technical_gates_pass() -> None:
