@@ -1953,9 +1953,9 @@ def _market_regime_lines(result: ScannerRunResult) -> tuple[str, ...]:
     regime = result.market_regime
     adjustment = regime.adjustment
     if not regime.enabled:
-        return ("Market Regime", "Market regime filter disabled")
+        return ("Market Climate", "Market climate filter disabled")
     return (
-        "Market Regime",
+        "Market Climate",
         f"State: {regime.state.value}",
         f"Confidence: {regime.confidence_score}",
         f"Risk: {regime.risk_level.value}",

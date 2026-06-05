@@ -1090,7 +1090,7 @@ class ScannerRunner:
         *,
         progress: Callable[[str], Any] | None = None,
     ) -> dict[str, Any]:
-        await _emit_progress(progress, "Evaluating market regime...")
+        await _emit_progress(progress, "Evaluating market climate...")
         timeframe = config.bias_timeframe.strip().lower()
         if timeframe == "2d":
             timeframe = SYNTHETIC_2D_SOURCE_TIMEFRAME
@@ -1101,12 +1101,12 @@ class ScannerRunner:
             try:
                 context[key] = await self._request_public_api(
                     config,
-                    f"{symbol} {timeframe} candles for market regime",
+                    f"{symbol} {timeframe} candles for market climate",
                     lambda symbol=symbol: client.get_klines(symbol, timeframe, fetch_limit),
                     timeout_sec=_optional_request_timeout(config),
                 )
             except Exception as exc:
-                self.logger.debug("Market regime %s candles unavailable: %s", symbol, exc)
+                self.logger.debug("Market climate %s candles unavailable: %s", symbol, exc)
                 context["missing_data"].append(f"{symbol}_candles: N/A")
         context["missing_data"].extend(limit_warnings)
         return context
@@ -3212,14 +3212,14 @@ def _symbol_regime_warnings(
     warnings: list[str] = []
     if market_regime.risk_level in (RegimeRiskLevel.HIGH, RegimeRiskLevel.EXTREME):
         warnings.append(
-            f"Market regime {market_regime.state.value} risk {market_regime.risk_level.value}: {adjustment.explanation}"
+            f"Market climate {market_regime.state.value} risk {market_regime.risk_level.value}: {adjustment.explanation}"
         )
     if mode != NA and compatibility is not None and not compatibility.allowed:
         warnings.append(_regime_block_reason(market_regime, mode, compatibility))
     elif mode != NA and not _mode_allowed_by_regime(mode, adjustment):
-        warnings.append(f"Market regime blocks {mode} setups: {adjustment.explanation}")
+        warnings.append(f"Market climate blocks {mode} setups: {adjustment.explanation}")
     elif adjustment.risk_multiplier < Decimal("1"):
-        warnings.append(f"Market regime risk multiplier {adjustment.risk_multiplier} applies: {adjustment.explanation}")
+        warnings.append(f"Market climate risk multiplier {adjustment.risk_multiplier} applies: {adjustment.explanation}")
     return _unique_strings(warnings)
 
 
@@ -3360,8 +3360,8 @@ def _adjust_setup_quality_for_regime(
     elif state == SetupQualityState.HIGH_QUALITY_TRADE and quality_score < 85:
         state = SetupQualityState.VALID_BUT_LOWER_QUALITY
 
-    weakest = _unique_strings((*quality.weakest_factors, "market regime risk"))
-    decision_reason = f"{quality.decision_reason} Market regime overlay: {adjustment.explanation}"
+    weakest = _unique_strings((*quality.weakest_factors, "market climate risk"))
+    decision_reason = f"{quality.decision_reason} Market climate overlay: {adjustment.explanation}"
     action_label = "Wait for cleaner regime" if mode_blocked else quality.action_label
     return quality.model_copy(
         update={

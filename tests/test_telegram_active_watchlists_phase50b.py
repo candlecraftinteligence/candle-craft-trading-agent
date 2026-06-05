@@ -23,6 +23,7 @@ def _insert_attempt(
     sent_at: str = "2026-06-04T12:00:00Z",
     scan_run_id: str = "run-active",
     price_level: str = NA,
+    setup_quality_score: str = NA,
     entry_low: str = NA,
     entry_high: str = NA,
     stop_loss: str = NA,
@@ -36,9 +37,9 @@ def _insert_attempt(
             """
             INSERT INTO telegram_alert_attempts (
                 signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
-                sent_at, telegram_status, message_hash, scan_run_id, price_level,
+                sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score, price_level,
                 entry_low, entry_high, stop_loss, tp1, tp2, tp3
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal_id,
@@ -51,6 +52,7 @@ def _insert_attempt(
                 status,
                 f"hash-{signal_id}-{alert_type}",
                 scan_run_id,
+                setup_quality_score,
                 price_level,
                 entry_low,
                 entry_high,
@@ -171,6 +173,116 @@ def test_active_watchlists_empty_state_when_no_scan_database_exists(tmp_path: Pa
     assert "scan_runs" not in response.text
 
 
+def test_active_signals_use_sent_runtime_signal_attempts(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="sig-confirmed",
+        symbol="BTCUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        setup_quality_score="91",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="112",
+        tp2="120",
+        tp3="130",
+    )
+    _insert_attempt(db_path, signal_id="sig-watch", symbol="WATCHUSDT", alert_type="WATCHLIST", entry_low="1", entry_high="2")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-blocked",
+        symbol="BLOCKUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        status="blocked",
+        entry_low="1",
+        entry_high="2",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert response.text.startswith(f"{SCREEN_HEADER} Active Signals")
+    assert "Confirmed Candle Craft setups." in response.text
+    assert "Symbol: BTCUSDT" in response.text
+    assert "Direction: Long" in response.text
+    assert "Grade: 91" in response.text
+    assert "Entry: 100 – 102" in response.text
+    assert "Stop: 95" in response.text
+    assert "Targets: 112, 120, 130" in response.text
+    assert "Status: Confirmed setup" in response.text
+    assert "Updated: 2026-06-04T12:00:00Z" in response.text
+    assert "WATCHUSDT" not in response.text
+    assert "BLOCKUSDT" not in response.text
+    assert "order was placed" not in response.text.lower()
+
+
+def test_active_signals_empty_state_does_not_promote_watchlists(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(db_path, signal_id="sig-watch", symbol="BTCUSDT", alert_type="WATCHLIST", entry_low="100", entry_high="102")
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "No active confirmed signals right now." in response.text
+    assert "The engine is waiting for clean structure." in response.text
+    assert "BTCUSDT" not in response.text
+
+
+def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="sig-active",
+        symbol="ENAUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        entry_low="0.09402",
+        entry_high="0.09497",
+        stop_loss="0.0923",
+        tp1="0.1",
+        tp2="0.105",
+    )
+    _insert_attempt(db_path, signal_id="sig-active", symbol="ENAUSDT", alert_type="LIMIT_HIT")
+    _insert_attempt(db_path, signal_id="sig-active", symbol="ENAUSDT", alert_type="TP1_HIT", sent_at="2026-06-04T12:15:00Z")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-closed",
+        symbol="CLOSEDUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        entry_low="10",
+        entry_high="11",
+    )
+    _insert_attempt(db_path, signal_id="sig-closed", symbol="CLOSEDUSDT", alert_type="TP3_HIT")
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "Symbol: ENAUSDT" in response.text
+    assert "Status: TP1 HIT" in response.text
+    assert "Updated: 2026-06-04T12:15:00Z" in response.text
+    assert "CLOSEDUSDT" not in response.text
+
+
+def test_active_signals_find_scan_run_sqlite_when_default_runtime_db_is_empty(tmp_path: Path) -> None:
+    scan_dir = tmp_path / "scan_runs"
+    scan_dir.mkdir()
+    default_db = scan_dir / "candle_craft.db"
+    open_initialized_database(default_db).close()
+    run_db = scan_dir / "runtime.sqlite"
+    _insert_attempt(
+        run_db,
+        signal_id="sig-runtime",
+        symbol="SOLUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        entry_low="150",
+        entry_high="151",
+        stop_loss="148",
+        tp1="155",
+    )
+
+    response = TelegramAdminCommandService(project_root=tmp_path).public_response_for("/signals")
+
+    assert "Symbol: SOLUSDT" in response.text
+    assert "No active confirmed signals right now." not in response.text
+
+
 def test_active_watchlists_derive_statuses_and_exclude_terminal_or_non_public_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_attempt(
@@ -253,6 +365,17 @@ def test_active_watchlists_derive_statuses_and_exclude_terminal_or_non_public_ro
     assert "}" not in response.text
     assert "order was placed" not in response.text.lower()
     assert "automatic execution" not in response.text.lower()
+
+
+def test_active_watchlists_exclude_sent_lifecycle_terminal_updates(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(db_path, signal_id="sig-invalidated", symbol="BTCUSDT", entry_low="100", entry_high="102")
+    _insert_attempt(db_path, signal_id="sig-invalidated", symbol="BTCUSDT", alert_type="INVALIDATED")
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert "No active public watchlists right now." in response.text
+    assert "BTCUSDT" not in response.text
 
 
 def test_active_watchlists_fall_back_to_setup_candidates_and_na_missing_levels(tmp_path: Path) -> None:

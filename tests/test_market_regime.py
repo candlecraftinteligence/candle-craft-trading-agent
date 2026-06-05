@@ -175,7 +175,7 @@ def test_scanner_dashboard_includes_regime() -> None:
 
     text = format_scan_dashboard(result)
 
-    assert "Market Regime" in text
+    assert "Market Climate" in text
     assert "State: TREND_EXPANSION" in text
     assert "Risk: LOW" in text
     assert "Trade permission: Scalp yes | Swing yes | Challenge yes" in text
@@ -202,8 +202,8 @@ def test_json_includes_regime() -> None:
     payload = run_scan._json_payload(result)
 
     assert payload["market_regime"]["enabled"] is False
-    assert payload["regime_adjustments"]["explanation"] == "Market regime filter disabled."
-    assert payload["regime_warnings"] == ["Market regime filter disabled."]
+    assert payload["regime_adjustments"]["explanation"] == "Market climate filter disabled."
+    assert payload["regime_warnings"] == ["Market climate filter disabled."]
 
 
 def test_disable_regime_filter_cli_flag() -> None:

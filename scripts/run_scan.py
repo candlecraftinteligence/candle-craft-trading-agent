@@ -2962,7 +2962,7 @@ def _format_symbol_diagnostics(symbol_result: ScannerSymbolResult) -> str:
 def _format_regime_details(result: ScannerRunResult) -> str:
     regime = result.market_regime
     lines = [
-        "Market Regime Details",
+        "Market Climate Details",
         f"State: {_display(regime.state.value)}",
         f"Confidence: {_display(regime.confidence_score)}",
         f"Band: {_display(regime.confidence_band.value)}",

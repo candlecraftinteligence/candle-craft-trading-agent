@@ -15,15 +15,50 @@ WATCHLIST_STATUS_WAITING = "Waiting for Limit Zone"
 WATCHLIST_STATUS_LIMIT_HIT = "LIMIT ZONE HIT"
 WATCHLIST_STATUS_TP1_HIT = "TP1 HIT"
 WATCHLIST_STATUS_TP2_HIT = "TP2 HIT"
+SIGNAL_STATUS_CONFIRMED = "Confirmed setup"
 
 _WATCHLIST_TYPE = TelegramAlertType.WATCHLIST.value
+_SIGNAL_CONFIRMED_TYPE = TelegramAlertType.SIGNAL_CONFIRMED.value
 _LIMIT_TYPE = TelegramAlertType.LIMIT_HIT.value
 _TP1_TYPE = TelegramAlertType.TP1_HIT.value
 _TP2_TYPE = TelegramAlertType.TP2_HIT.value
 _TP3_TYPE = TelegramAlertType.TP3_HIT.value
 _SL_TYPE = TelegramAlertType.SL_HIT.value
-_ACTIVE_QUERY_TYPES = (_WATCHLIST_TYPE, _LIMIT_TYPE, _TP1_TYPE, _TP2_TYPE, _TP3_TYPE, _SL_TYPE)
-_TERMINAL_OUTCOME_TYPES = {_TP3_TYPE, _SL_TYPE}
+_INVALIDATED_TYPE = TelegramAlertType.INVALIDATED.value
+_EXPIRED_TYPE = TelegramAlertType.EXPIRED.value
+_NO_LONGER_TRACKING_TYPE = TelegramAlertType.NO_LONGER_TRACKING.value
+_TERMINAL_OUTCOME_TYPES = {
+    _TP3_TYPE,
+    _SL_TYPE,
+    _INVALIDATED_TYPE,
+    _EXPIRED_TYPE,
+    _NO_LONGER_TRACKING_TYPE,
+    "COOLDOWN",
+}
+_WATCHLIST_QUERY_TYPES = (
+    _WATCHLIST_TYPE,
+    _LIMIT_TYPE,
+    _TP1_TYPE,
+    _TP2_TYPE,
+    _TP3_TYPE,
+    _SL_TYPE,
+    _INVALIDATED_TYPE,
+    _EXPIRED_TYPE,
+    _NO_LONGER_TRACKING_TYPE,
+    "COOLDOWN",
+)
+_SIGNAL_QUERY_TYPES = (
+    _SIGNAL_CONFIRMED_TYPE,
+    _LIMIT_TYPE,
+    _TP1_TYPE,
+    _TP2_TYPE,
+    _TP3_TYPE,
+    _SL_TYPE,
+    _INVALIDATED_TYPE,
+    _EXPIRED_TYPE,
+    _NO_LONGER_TRACKING_TYPE,
+    "COOLDOWN",
+)
 _LEVEL_COLUMNS = ("entry_low", "entry_high", "stop_loss", "tp1", "tp2", "tp3")
 
 
@@ -55,6 +90,40 @@ class ActiveWatchlistQueryResult:
     total: int = 0
 
 
+@dataclass(frozen=True)
+class ActiveSignalItem:
+    signal_id: str
+    symbol: str
+    direction: str
+    updated_at: str
+    status: str
+    grade: str = NA
+    entry_low: str = NA
+    entry_high: str = NA
+    stop_loss: str = NA
+    tp1: str = NA
+    tp2: str = NA
+    tp3: str = NA
+    hit_alert_types: frozenset[str] = frozenset()
+    sort_id: int = 0
+
+    @property
+    def entry_text(self) -> str:
+        return _zone_text(self.entry_low, self.entry_high)
+
+    @property
+    def targets_text(self) -> str:
+        targets = [target for target in (self.tp1, self.tp2, self.tp3) if target != NA]
+        return ", ".join(targets) if targets else NA
+
+
+@dataclass(frozen=True)
+class ActiveSignalQueryResult:
+    source_available: bool
+    items: tuple[ActiveSignalItem, ...] = ()
+    total: int = 0
+
+
 def load_active_public_watchlists(
     *,
     project_root: Path | str,
@@ -65,13 +134,13 @@ def load_active_public_watchlists(
 
     root = Path(project_root)
     preferred_path = _resolve_project_path(root, database_path)
-    selected_path = _latest_watchlist_database(root, preferred_path)
+    selected_path = _latest_runtime_database(root, preferred_path, alert_types=_WATCHLIST_QUERY_TYPES)
     if selected_path is None:
         return ActiveWatchlistQueryResult(source_available=False)
 
     try:
         with _connect_readonly(selected_path) as connection:
-            rows = _sent_alert_attempt_rows(connection)
+            rows = _sent_alert_attempt_rows(connection, alert_types=_WATCHLIST_QUERY_TYPES)
             items = _active_items_from_rows(connection, rows)
     except (OSError, sqlite3.Error):
         return ActiveWatchlistQueryResult(source_available=False)
@@ -79,6 +148,32 @@ def load_active_public_watchlists(
     total = len(items)
     visible = tuple(items[: max(1, limit)])
     return ActiveWatchlistQueryResult(source_available=True, items=visible, total=total)
+
+
+def load_active_public_signals(
+    *,
+    project_root: Path | str,
+    database_path: Path | str,
+    limit: int,
+) -> ActiveSignalQueryResult:
+    """Read active public SIGNAL_CONFIRMED alerts from the runtime store only."""
+
+    root = Path(project_root)
+    preferred_path = _resolve_project_path(root, database_path)
+    selected_path = _latest_runtime_database(root, preferred_path, alert_types=_SIGNAL_QUERY_TYPES)
+    if selected_path is None:
+        return ActiveSignalQueryResult(source_available=False)
+
+    try:
+        with _connect_readonly(selected_path) as connection:
+            rows = _sent_alert_attempt_rows(connection, alert_types=_SIGNAL_QUERY_TYPES)
+            items = _active_signal_items_from_rows(connection, rows)
+    except (OSError, sqlite3.Error):
+        return ActiveSignalQueryResult(source_available=False)
+
+    total = len(items)
+    visible = tuple(items[: max(1, limit)])
+    return ActiveSignalQueryResult(source_available=True, items=visible, total=total)
 
 
 def format_active_watchlist_lines(result: ActiveWatchlistQueryResult) -> list[str]:
@@ -106,15 +201,54 @@ def format_active_watchlist_lines(result: ActiveWatchlistQueryResult) -> list[st
     return lines
 
 
-def _latest_watchlist_database(project_root: Path, preferred_path: Path) -> Path | None:
-    if _has_telegram_alert_attempts(preferred_path):
+def format_active_signal_lines(result: ActiveSignalQueryResult) -> list[str]:
+    if result.total == 0:
+        return [
+            "No active confirmed signals right now.",
+            "",
+            "The engine is waiting for clean structure.",
+        ]
+
+    lines: list[str] = []
+    for item in result.items:
+        if lines:
+            lines.append("")
+        lines.extend(
+            (
+                f"Symbol: {item.symbol}",
+                f"Direction: {_title_text(item.direction)}",
+                f"Grade: {item.grade}",
+                f"Entry: {item.entry_text}",
+                f"Stop: {item.stop_loss}",
+                f"Targets: {item.targets_text}",
+                f"Status: {item.status}",
+                f"Updated: {item.updated_at}",
+            )
+        )
+    if result.total > len(result.items):
+        lines.append(f"{result.total - len(result.items)} more not shown.")
+    return lines
+
+
+def _latest_runtime_database(
+    project_root: Path,
+    preferred_path: Path,
+    *,
+    alert_types: Sequence[str],
+) -> Path | None:
+    if _has_sent_alert_attempt(preferred_path, alert_types=alert_types):
         return preferred_path
 
     scan_dir = project_root / "scan_runs"
-    if not scan_dir.exists():
-        return None
+    candidates = sorted(scan_dir.glob("*.sqlite"), key=lambda path: path.stat().st_mtime, reverse=True) if scan_dir.exists() else []
+    for candidate in candidates:
+        if candidate.resolve() == preferred_path.resolve():
+            continue
+        if _has_sent_alert_attempt(candidate, alert_types=alert_types):
+            return candidate
 
-    candidates = sorted(scan_dir.glob("*.sqlite"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if _has_telegram_alert_attempts(preferred_path):
+        return preferred_path
     for candidate in candidates:
         if candidate.resolve() == preferred_path.resolve():
             continue
@@ -133,13 +267,43 @@ def _has_telegram_alert_attempts(path: Path) -> bool:
         return False
 
 
+def _has_sent_alert_attempt(path: Path, *, alert_types: Sequence[str]) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        with _connect_readonly(path) as connection:
+            if not _table_exists(connection, "telegram_alert_attempts"):
+                return False
+            columns = _table_columns(connection, "telegram_alert_attempts")
+            if not {"alert_type", "telegram_status"} <= columns:
+                return False
+            placeholders = ",".join("?" for _ in alert_types)
+            row = connection.execute(
+                f"""
+                SELECT 1
+                FROM telegram_alert_attempts
+                WHERE telegram_status = 'sent'
+                  AND alert_type IN ({placeholders})
+                LIMIT 1
+                """,
+                tuple(alert_types),
+            ).fetchone()
+            return row is not None
+    except (OSError, sqlite3.Error):
+        return False
+
+
 def _connect_readonly(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     return connection
 
 
-def _sent_alert_attempt_rows(connection: sqlite3.Connection) -> tuple[Mapping[str, Any], ...]:
+def _sent_alert_attempt_rows(
+    connection: sqlite3.Connection,
+    *,
+    alert_types: Sequence[str],
+) -> tuple[Mapping[str, Any], ...]:
     columns = _table_columns(connection, "telegram_alert_attempts")
     required = {"id", "signal_id", "symbol", "direction", "alert_type", "sent_at", "telegram_status"}
     if not required <= columns:
@@ -153,10 +317,12 @@ def _sent_alert_attempt_rows(connection: sqlite3.Connection) -> tuple[Mapping[st
         "sent_at",
         "telegram_status",
         _select_or_na("scan_run_id", columns),
+        _select_or_na("setup_quality_score", columns),
         _select_or_na("price_level", columns),
+        _select_or_na("last_seen_at", columns),
         *(_select_or_na(column, columns) for column in _LEVEL_COLUMNS),
     ]
-    placeholders = ",".join("?" for _ in _ACTIVE_QUERY_TYPES)
+    placeholders = ",".join("?" for _ in alert_types)
     rows = connection.execute(
         f"""
         SELECT {", ".join(select_columns)}
@@ -165,7 +331,7 @@ def _sent_alert_attempt_rows(connection: sqlite3.Connection) -> tuple[Mapping[st
           AND alert_type IN ({placeholders})
         ORDER BY id ASC
         """,
-        _ACTIVE_QUERY_TYPES,
+        tuple(alert_types),
     ).fetchall()
     return tuple(dict(row) for row in rows)
 
@@ -205,6 +371,50 @@ def _active_items_from_rows(
                 status=_status_from_outcomes(hit_alert_types),
                 hit_alert_types=hit_alert_types,
                 sort_id=_row_id(watch_row),
+                **levels,
+            )
+        )
+    items.sort(key=lambda item: item.sort_id, reverse=True)
+    return tuple(items)
+
+
+def _active_signal_items_from_rows(
+    connection: sqlite3.Connection,
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[ActiveSignalItem, ...]:
+    by_signal: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        signal_id = _clean(row.get("signal_id"))
+        if signal_id == NA:
+            continue
+        by_signal.setdefault(signal_id, []).append(row)
+
+    items: list[ActiveSignalItem] = []
+    for signal_id, signal_rows in by_signal.items():
+        confirmed_rows = [row for row in signal_rows if _clean(row.get("alert_type")) == _SIGNAL_CONFIRMED_TYPE]
+        if not confirmed_rows:
+            continue
+        signal_row = max(confirmed_rows, key=_row_id)
+        outcome_rows = [row for row in signal_rows if _clean(row.get("alert_type")) != _SIGNAL_CONFIRMED_TYPE]
+        if any(_clean(row.get("alert_type")) in _TERMINAL_OUTCOME_TYPES for row in outcome_rows):
+            continue
+        symbol = _symbol_text(signal_row.get("symbol"))
+        direction = _direction_text(signal_row.get("direction"))
+        if symbol == NA or direction == NA:
+            continue
+        hit_alert_types = frozenset(_clean(row.get("alert_type")) for row in outcome_rows)
+        levels = _levels_for_watchlist(connection, signal_row, outcome_rows)
+        latest_row = max((signal_row, *outcome_rows), key=_row_id)
+        items.append(
+            ActiveSignalItem(
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                updated_at=_first_non_na(_clean(latest_row.get("last_seen_at")), _clean(latest_row.get("sent_at"))),
+                status=_signal_status_from_outcomes(hit_alert_types),
+                grade=_first_non_na(_clean(signal_row.get("setup_quality_score")), NA),
+                hit_alert_types=hit_alert_types,
+                sort_id=_row_id(latest_row),
                 **levels,
             )
         )
@@ -347,6 +557,16 @@ def _status_from_outcomes(alert_types: frozenset[str]) -> str:
     return WATCHLIST_STATUS_WAITING
 
 
+def _signal_status_from_outcomes(alert_types: frozenset[str]) -> str:
+    if _TP2_TYPE in alert_types:
+        return WATCHLIST_STATUS_TP2_HIT
+    if _TP1_TYPE in alert_types:
+        return WATCHLIST_STATUS_TP1_HIT
+    if _LIMIT_TYPE in alert_types:
+        return WATCHLIST_STATUS_LIMIT_HIT
+    return SIGNAL_STATUS_CONFIRMED
+
+
 def _target_progress_lines(item: ActiveWatchlistItem) -> list[str]:
     lines: list[str] = []
     for target_type, label, level in (
@@ -400,6 +620,13 @@ def _direction_text(value: Any) -> str:
         return NA
     upper = text.upper()
     return upper if upper in {"LONG", "SHORT"} else upper
+
+
+def _title_text(value: Any) -> str:
+    text = _clean(value)
+    if text == NA:
+        return NA
+    return " ".join(word[:1].upper() + word[1:].lower() for word in text.replace("_", " ").split())
 
 
 def _zone_text(low: Any, high: Any) -> str:

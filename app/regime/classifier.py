@@ -330,7 +330,7 @@ def _warnings_for_state(
     required_data_missing: bool,
 ) -> tuple[str, ...]:
     if required_data_missing:
-        return ("Required BTC/ETH candle data is incomplete; market regime is cautious/neutral.",)
+        return ("Required BTC/ETH candle data is incomplete; market climate is cautious/neutral.",)
     if risk_level in (RegimeRiskLevel.HIGH, RegimeRiskLevel.EXTREME):
         return (f"{state.value} regime risk is {risk_level.value}: {explanation}",)
     if state in (RegimeState.RANGE_COMPRESSION, RegimeState.MIXED, RegimeState.LOW_VOLATILITY, RegimeState.TRANSITION):

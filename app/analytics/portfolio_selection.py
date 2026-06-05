@@ -439,7 +439,7 @@ def _candidate_from_symbol_result(symbol_result: Any, *, default_risk_pct: Maybe
 
 def _preselection_decision(candidate: PortfolioCandidate) -> tuple[PortfolioDecision, str] | None:
     if candidate.regime_blocked:
-        reason = candidate.regime_warnings[0] if candidate.regime_warnings else "Market regime blocks this setup mode."
+        reason = candidate.regime_warnings[0] if candidate.regime_warnings else "Market climate blocks this setup mode."
         return PortfolioDecision.WATCHLIST_ONLY, reason
     if candidate.data_incomplete:
         return PortfolioDecision.DATA_INCOMPLETE, "Required setup or risk data is incomplete."
@@ -564,7 +564,7 @@ def _apply_regime_to_candidate(candidate: PortfolioCandidate, adjustment: Any | 
     }
     mode_allowed = _mode_allowed_by_regime(candidate.mode, adjustment)
     if candidate.valid_trade and not mode_allowed:
-        warnings.append(f"Market regime blocks {candidate.mode} setups: {_display(getattr(adjustment, 'explanation', NA))}")
+        warnings.append(f"Market climate blocks {candidate.mode} setups: {_display(getattr(adjustment, 'explanation', NA))}")
         updates.update(
             {
                 "valid_trade": False,
@@ -577,7 +577,7 @@ def _apply_regime_to_candidate(candidate: PortfolioCandidate, adjustment: Any | 
     risk_multiplier = _regime_risk_multiplier(adjustment)
     if candidate.valid_trade and risk_multiplier < Decimal("1"):
         warnings.append(
-            f"Market regime risk multiplier {risk_multiplier} applies: {_display(getattr(adjustment, 'explanation', NA))}"
+            f"Market climate risk multiplier {risk_multiplier} applies: {_display(getattr(adjustment, 'explanation', NA))}"
         )
         updates.update(
             {

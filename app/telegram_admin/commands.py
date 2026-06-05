@@ -12,7 +12,9 @@ from app.data.dtos import NA
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
 from app.telegram_admin.active_watchlists import (
     ACTIVE_WATCHLIST_DISPLAY_LIMIT,
+    format_active_signal_lines,
     format_active_watchlist_lines,
+    load_active_public_signals,
     load_active_public_watchlists,
 )
 from app.watchlists.presets import presets_with_counts
@@ -454,7 +456,7 @@ class TelegramAdminCommandService:
                 "Latest scan:",
                 f"Run: {_run_text(manifest_row.get('run_id'))}",
                 f"Symbol list: {_symbol_list_text(manifest_row)}",
-                f"Market regime: {_title_text(manifest_row.get('market_regime'))}",
+                f"Market Climate: {_title_text(manifest_row.get('market_regime'))}",
                 f"Regime confidence: {_display(manifest_row.get('regime_confidence'))}",
                 f"Symbols scanned: {_display(manifest_row.get('symbols_scanned'))}",
                 f"Confirmed setups: {_display(manifest_row.get('valid_setup_count'))}",
@@ -629,7 +631,7 @@ class TelegramAdminCommandService:
                     "Symbols scanned: N/A",
                     "Confirmed setups: N/A",
                     "Watchlist setups: N/A",
-                    "Market regime: N/A",
+                    "Market Climate: N/A",
                     SCREEN_DIVIDER,
                     "",
                     "The engine only promotes setups that pass the filters.",
@@ -647,7 +649,7 @@ class TelegramAdminCommandService:
                 f"Symbols scanned: {_display(artifacts.manifest_row.get('symbols_scanned'))}",
                 f"Confirmed setups: {_display(artifacts.manifest_row.get('valid_setup_count'))}",
                 f"Watchlist setups: {_display(artifacts.manifest_row.get('near_miss_count'))}",
-                f"Market regime: {_title_text(artifacts.manifest_row.get('market_regime'))}",
+                f"Market Climate: {_title_text(artifacts.manifest_row.get('market_regime'))}",
                 SCREEN_DIVIDER,
                 "",
                 "The engine only promotes setups that pass the filters.",
@@ -661,31 +663,23 @@ class TelegramAdminCommandService:
         )
 
     def _public_signals_response(self) -> AdminCommandResponse:
-        artifacts = self.latest_scan_artifacts()
-        rows = _public_artifact_rows(artifacts)
-        signal_rows = _public_active_signal_rows(rows)
+        result = load_active_public_signals(
+            project_root=self._project_root,
+            database_path=self._database_path,
+            limit=self._max_rows,
+        )
         lines: list[str] = [
             "Confirmed Candle Craft setups.",
             "Filtered by the signal engine.",
             "",
             SCREEN_DIVIDER,
         ]
-        if signal_rows:
-            lines.extend(_public_signal_lines(signal_rows, max_rows=self._max_rows))
-        else:
-            lines.extend(
-                (
-                    "No active confirmed signals right now.",
-                    "",
-                    "The engine is waiting for clean structure.",
-                )
-            )
+        lines.extend(format_active_signal_lines(result))
         lines.append(SCREEN_DIVIDER)
         return _public_response(
             "/signals",
             "public_signals",
             _screen("Active Signals", lines),
-            run_id=_public_run_id(artifacts),
         )
 
     def _public_watchlist_response(self, *, command: str = "/watchlists") -> AdminCommandResponse:
@@ -742,7 +736,7 @@ class TelegramAdminCommandService:
             f"Run: {_run_text(manifest_row.get('run_id'), payload.get('run_id'))}",
             f"Timestamp: {_display(manifest_row.get('timestamp'))}",
             f"Symbol list: {_symbol_list_text(manifest_row, payload)}",
-            f"Market regime: {_title_text(_first_text(manifest_row.get('market_regime'), _nested_value(payload, 'market_regime', 'state')))}",
+            f"Market Climate: {_title_text(_first_text(manifest_row.get('market_regime'), _nested_value(payload, 'market_regime', 'state')))}",
             f"Symbols scanned: {_first_text(manifest_row.get('symbols_scanned'), payload.get('scanned_symbols'), len(rows))}",
             f"Confirmed setups: {_first_text(manifest_row.get('valid_setup_count'), len(valid_rows))}",
             f"Watch candidates: {_first_text(manifest_row.get('near_miss_count'), len(near_rows))}",
