@@ -13,10 +13,12 @@ from app.formatters.telegram_wolf_briefing import build_wolf_briefing_snapshot, 
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
 from app.telegram_admin.active_watchlists import (
     ACTIVE_WATCHLIST_DISPLAY_LIMIT,
+    WATCHLIST_STAGE_DISPLAY_LIMIT,
     format_active_signal_lines,
-    format_active_watchlist_lines,
+    format_watchlist_stage_dashboard,
     load_active_public_signals,
     load_active_public_watchlists,
+    load_watchlist_stage_dashboard,
 )
 from app.telegram_admin.wolf_briefing import WolfScanArtifacts, load_latest_db_scan_artifacts
 from app.watchlists.presets import presets_with_counts
@@ -36,6 +38,8 @@ WOLF_BRIEFING_CANCEL_COMMAND = "/wolf_cancel"
 WOLF_BRIEFING_PUBLISH_BUTTON_LABEL = "📣 Send to Public Channel"
 WOLF_BRIEFING_REFRESH_BUTTON_LABEL = "🔄 Refresh"
 WOLF_BRIEFING_CANCEL_BUTTON_LABEL = "❌ Cancel"
+WATCHLIST_REFRESH_BUTTON_LABEL = "🔄 Refresh"
+WATCHLIST_BACK_BUTTON_LABEL = "⬅️ Back"
 ADMIN_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
     ("🐺 Wolf Briefing", "📊 Status"),
     ("🚨 Alerts", "👁 Watchlist Desk"),
@@ -647,7 +651,7 @@ class TelegramAdminCommandService:
         )
 
     def _watchlists_response(self) -> AdminCommandResponse:
-        text = self._active_watchlists_text()
+        text = self._watchlists_dashboard_text(include_lifecycle_fallback=True)
         return _admin_response(
             "/watchlists",
             "watchlists",
@@ -822,22 +826,17 @@ class TelegramAdminCommandService:
         return _public_response(
             command,
             "public_watchlist",
-            self._active_watchlists_text(),
+            self._watchlists_dashboard_text(include_lifecycle_fallback=False),
         )
 
-    def _active_watchlists_text(self) -> str:
-        result = load_active_public_watchlists(
+    def _watchlists_dashboard_text(self, *, include_lifecycle_fallback: bool) -> str:
+        result = load_watchlist_stage_dashboard(
             project_root=self._project_root,
             database_path=self._database_path,
-            limit=ACTIVE_WATCHLIST_DISPLAY_LIMIT,
+            limit=WATCHLIST_STAGE_DISPLAY_LIMIT,
+            include_lifecycle_fallback=include_lifecycle_fallback,
         )
-        lines = [
-            *format_active_watchlist_lines(result),
-            "",
-            "System:",
-            "Manual tracking only. No order execution.",
-        ]
-        return _screen("ACTIVE WATCHLISTS", lines)
+        return format_watchlist_stage_dashboard(result)
 
     def _lastscan_response(self) -> AdminCommandResponse:
         artifacts = self.latest_scan_artifacts()
@@ -1345,6 +1344,28 @@ def wolf_briefing_preview_inline_markup() -> Mapping[str, Any]:
     }
 
 
+def admin_watchlists_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
+    keyboard = _signal_channel_button_rows(config)
+    keyboard.extend(
+        [
+            [{"text": WATCHLIST_REFRESH_BUTTON_LABEL, "callback_data": "admin:watchlists"}],
+            [{"text": WATCHLIST_BACK_BUTTON_LABEL, "callback_data": "admin:menu"}],
+        ]
+    )
+    return {"inline_keyboard": keyboard}
+
+
+def public_watchlists_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
+    keyboard = _signal_channel_button_rows(config)
+    keyboard.extend(
+        [
+            [{"text": WATCHLIST_REFRESH_BUTTON_LABEL, "callback_data": "public:watchlist"}],
+            [{"text": WATCHLIST_BACK_BUTTON_LABEL, "callback_data": "public:menu"}],
+        ]
+    )
+    return {"inline_keyboard": keyboard}
+
+
 def public_back_to_menu_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
     keyboard = _signal_channel_button_rows(config)
     keyboard.append([{"text": "↩ Back to Menu", "callback_data": "public:menu"}])
@@ -1426,6 +1447,8 @@ def _public_response(
 def _admin_reply_markup_for(command: str, response_type: str, config: Any | None = None) -> Mapping[str, Any]:
     if response_type == "wolf_briefing_preview":
         return wolf_briefing_preview_inline_markup()
+    if response_type == "watchlists":
+        return admin_watchlists_inline_markup(config)
     signal_rows = _signal_channel_button_rows(config)
     if command in {"/start", "/menu"} or response_type in {"start", "menu"}:
         markup = admin_menu_inline_markup()
@@ -1437,6 +1460,8 @@ def _admin_reply_markup_for(command: str, response_type: str, config: Any | None
 def _public_reply_markup_for(command: str, response_type: str, config: Any | None = None) -> Mapping[str, Any]:
     if command in {"/start", "/menu"} or response_type == "public_menu":
         return public_menu_inline_markup(config)
+    if response_type == "public_watchlist":
+        return public_watchlists_inline_markup(config)
     return public_back_to_menu_inline_markup(config)
 
 
@@ -2396,12 +2421,15 @@ __all__ = [
     "WOLF_BRIEFING_PUBLISH_BUTTON_LABEL",
     "WOLF_BRIEFING_PUBLISH_COMMAND",
     "WOLF_BRIEFING_REFRESH_BUTTON_LABEL",
+    "WATCHLIST_BACK_BUTTON_LABEL",
+    "WATCHLIST_REFRESH_BUTTON_LABEL",
     "AdminCommandResponse",
     "LatestScanArtifacts",
     "TelegramAdminCommandService",
     "admin_back_to_menu_inline_markup",
     "admin_menu_inline_markup",
     "admin_menu_reply_markup",
+    "admin_watchlists_inline_markup",
     "command_for_callback_data",
     "format_help_response",
     "format_menu_response",
@@ -2423,6 +2451,7 @@ __all__ = [
     "public_donate_inline_markup",
     "public_menu_inline_markup",
     "public_menu_reply_markup",
+    "public_watchlists_inline_markup",
     "reply_keyboard_remove_markup",
     "wolf_briefing_preview_inline_markup",
 ]
