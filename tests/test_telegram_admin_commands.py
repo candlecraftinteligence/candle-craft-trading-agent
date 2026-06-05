@@ -151,7 +151,7 @@ def _insert_runtime_attempt(
     alert_type: str,
     status: str = "sent",
     direction: str = "long",
-    setup_quality_score: str = "N/A",
+    setup_quality_score: str = "B+",
     entry_low: str = "N/A",
     entry_high: str = "N/A",
     stop_loss: str = "N/A",

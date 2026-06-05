@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.analytics.public_signal_quality import public_quality_passes
+from app.alerts.watchlist_expiry import watchlist_expiry_decision
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import RANGE_DASH, TelegramAlertType, format_telegram_price
 
@@ -318,7 +320,10 @@ def _sent_alert_attempt_rows(
         "telegram_status",
         _select_or_na("scan_run_id", columns),
         _select_or_na("setup_quality_score", columns),
+        _select_or_na("new_state", columns),
+        _select_or_na("lifecycle_state", columns),
         _select_or_na("price_level", columns),
+        _select_or_na("first_seen_at", columns),
         _select_or_na("last_seen_at", columns),
         *(_select_or_na(column, columns) for column in _LEVEL_COLUMNS),
     ]
@@ -356,11 +361,15 @@ def _active_items_from_rows(
         outcome_rows = [row for row in signal_rows if _clean(row.get("alert_type")) != _WATCHLIST_TYPE]
         if any(_clean(row.get("alert_type")) in _TERMINAL_OUTCOME_TYPES for row in outcome_rows):
             continue
+        hit_alert_types = frozenset(_clean(row.get("alert_type")) for row in outcome_rows)
+        if _watchlist_row_expired(watch_row, outcome_rows):
+            continue
+        if not _public_alert_quality_passes(watch_row):
+            continue
         symbol = _symbol_text(watch_row.get("symbol"))
         direction = _direction_text(watch_row.get("direction"))
         if symbol == NA or direction == NA:
             continue
-        hit_alert_types = frozenset(_clean(row.get("alert_type")) for row in outcome_rows)
         levels = _levels_for_watchlist(connection, watch_row, outcome_rows)
         items.append(
             ActiveWatchlistItem(
@@ -398,6 +407,8 @@ def _active_signal_items_from_rows(
         outcome_rows = [row for row in signal_rows if _clean(row.get("alert_type")) != _SIGNAL_CONFIRMED_TYPE]
         if any(_clean(row.get("alert_type")) in _TERMINAL_OUTCOME_TYPES for row in outcome_rows):
             continue
+        if not _public_alert_quality_passes(signal_row):
+            continue
         symbol = _symbol_text(signal_row.get("symbol"))
         direction = _direction_text(signal_row.get("direction"))
         if symbol == NA or direction == NA:
@@ -420,6 +431,31 @@ def _active_signal_items_from_rows(
         )
     items.sort(key=lambda item: item.sort_id, reverse=True)
     return tuple(items)
+
+
+def _watchlist_row_expired(
+    watch_row: Mapping[str, Any],
+    outcome_rows: Sequence[Mapping[str, Any]],
+) -> bool:
+    state_candidates = (
+        watch_row.get("lifecycle_state"),
+        watch_row.get("new_state"),
+        watch_row.get("alert_type"),
+        *(row.get("lifecycle_state") for row in outcome_rows),
+        *(row.get("new_state") for row in outcome_rows),
+        *(row.get("alert_type") for row in outcome_rows),
+    )
+    # Active public views are read-only, so use telegram_alert_attempts.first_seen_at
+    # as the stable public watch anchor and leave persistence to lifecycle delivery.
+    return watchlist_expiry_decision(
+        timestamp_candidates=(watch_row.get("first_seen_at"), watch_row.get("sent_at")),
+        state_candidates=state_candidates,
+    ).expired
+
+
+def _public_alert_quality_passes(row: Mapping[str, Any]) -> bool:
+    quality = row.get("setup_quality_score")
+    return public_quality_passes(grade_candidates=(quality,), score_candidates=(quality,))
 
 
 def _levels_for_watchlist(

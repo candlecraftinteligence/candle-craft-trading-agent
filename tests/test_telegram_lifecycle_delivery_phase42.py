@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -38,7 +39,7 @@ class FakeSender:
         self.status = status
         self.messages: list[str] = []
 
-    async def send_text(self, text: str) -> TelegramSendResult:
+    async def send_text(self, text: str, **kwargs: object) -> TelegramSendResult:
         self.messages.append(text)
         return TelegramSendResult(status=self.status, detail=f"{self.status}.")
 
@@ -195,6 +196,15 @@ def _setup_quality(
     )
 
 
+def _setup_quality_with_grade(
+    grade: SetupQualityGrade,
+    *,
+    quality_state: SetupQualityState = SetupQualityState.HIGH_QUALITY_TRADE,
+    quality_score: int = 88,
+) -> SetupQualityResult:
+    return _setup_quality(quality_state, quality_score=quality_score).model_copy(update={"quality_grade": grade})
+
+
 def _symbol(
     state: SetupLifecycleState,
     *,
@@ -295,6 +305,7 @@ def _seed_prior_active_alert(
     status: str = "sent",
     symbol: str = "BTCUSDT",
     direction: str = "long",
+    sent_at: str | None = None,
     price_level: object = _DEFAULT_PLAN_LEVEL,
     entry_low: object = _DEFAULT_PLAN_LEVEL,
     entry_high: object = _DEFAULT_PLAN_LEVEL,
@@ -315,6 +326,7 @@ def _seed_prior_active_alert(
         if price_level is not _DEFAULT_PLAN_LEVEL
         else f"{stored_entry_low}-{stored_entry_high}"
     )
+    stored_sent_at = sent_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         repository.insert_attempt(
             TelegramAlertAttemptRecord(
@@ -325,10 +337,11 @@ def _seed_prior_active_alert(
                 new_state="WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
                 alert_type=alert_type.value,
                 lifecycle_state="WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
-                sent_at="2026-06-02T00:00:00+00:00",
+                sent_at=stored_sent_at,
                 telegram_status=status,
                 message_hash=f"{signal_id}-active",
                 attempted_alert_type=alert_type.value,
+                setup_quality_score="B+",
                 price_level=stored_price_level,
                 entry_low=stored_entry_low,
                 entry_high=stored_entry_high,
@@ -336,6 +349,7 @@ def _seed_prior_active_alert(
                 tp1=stored_tp1,
                 tp2=stored_tp2,
                 tp3=stored_tp3,
+                first_seen_at=stored_sent_at,
             )
         )
 
@@ -485,6 +499,90 @@ def test_watchlist_alert_allows_na_rr_when_setup_is_not_fully_formed() -> None:
     assert weak.alert_type == TelegramAlertType.WATCHLIST
     assert weak.message is not None
     assert weak.message.planned_rr == NA
+
+
+def test_grade_b_is_blocked_from_public_watchlist() -> None:
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=_public_ready_watchlist_diagnostics(),
+        setup_quality=_setup_quality_with_grade(
+            SetupQualityGrade.B,
+            quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+            quality_score=70,
+        ),
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "below_min_public_grade" in decision.reason
+
+
+def test_grade_b_plus_passes_public_watchlist_gate_when_other_gates_pass() -> None:
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=_public_ready_watchlist_diagnostics(),
+        setup_quality=_setup_quality_with_grade(
+            SetupQualityGrade.B_PLUS,
+            quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+            quality_score=78,
+        ),
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+
+
+def test_grade_b_is_blocked_from_public_confirmed_signal() -> None:
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        setup_quality=_setup_quality_with_grade(SetupQualityGrade.B, quality_score=70),
+        trade_idea=_trade_idea(opportunity_grade="B", opportunity_score=Decimal("88")),
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+    assert "below_min_public_grade" in decision.reason
+
+
+def test_public_confirmed_signal_allows_b_plus_and_a_family_grades() -> None:
+    for grade in (
+        SetupQualityGrade.B_PLUS,
+        SetupQualityGrade.A_MINUS,
+        SetupQualityGrade.A,
+        SetupQualityGrade.A_PLUS,
+    ):
+        symbol = _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            setup_quality=_setup_quality_with_grade(grade),
+            trade_idea=_trade_idea(opportunity_grade=grade.value, opportunity_score=Decimal("88")),
+        )
+
+        decision = telegram_alert_decision_for_symbol(symbol)
+
+        assert decision.eligible is True
+        assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+
+
+def test_numeric_only_public_quality_score_maps_to_b_plus_gate() -> None:
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        setup_quality=_setup_quality_with_grade(SetupQualityGrade.NA, quality_score=76),
+        trade_idea=_trade_idea(opportunity_grade="N/A", opportunity_score=Decimal("88")),
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
 
 
 def test_no_ob_fvg_watchlist_near_miss_without_plan_is_blocked() -> None:
@@ -671,7 +769,7 @@ def test_rr_below_min_watchlist_never_routes_to_signal_confirmed() -> None:
     assert "WATCHLIST" in text
 
 
-def test_action_watchlist_only_sends_watchlist_not_confirmed() -> None:
+def test_rejected_action_watchlist_only_is_not_public_below_min_grade() -> None:
     quality = _setup_quality(SetupQualityState.REJECTED_NO_EDGE, quality_score=41).model_copy(
         update={"action_label": "Watchlist only"}
     )
@@ -686,8 +784,9 @@ def test_action_watchlist_only_sends_watchlist_not_confirmed() -> None:
         )
     )
 
-    assert decision.eligible is True
+    assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "below_min_public_grade" in decision.reason
 
 
 def test_fallback_signal_id_is_stable_for_same_watchlist_candidate() -> None:
@@ -1470,6 +1569,38 @@ def test_sent_watchlist_reconciliation_current_watch_states_send_nothing_without
         assert rows == [(TelegramAlertType.WATCHLIST.value,)]
 
 
+def test_sent_watchlist_older_than_48h_records_expiry_audit_without_send(tmp_path: Path) -> None:
+    db_path = tmp_path / "expired-watch.db"
+    old_sent_at = (datetime.now(UTC) - timedelta(hours=49)).isoformat().replace("+00:00", "Z")
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="stale-watch",
+        alert_type=TelegramAlertType.WATCHLIST,
+        sent_at=old_sent_at,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+
+    summary = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-expiry"))
+
+    assert summary.skipped == 1
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT attempted_alert_type, telegram_status, blocked_reason
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+    assert rows[0] == (TelegramAlertType.WATCHLIST.value, "sent", NA)
+    assert rows[1] == ("WATCHLIST_EXPIRY", "skipped", "watchlist_expired_48h")
+
+
 def test_sent_watchlist_reconciliation_symbol_fallback_requires_one_active_watchlist(
     tmp_path: Path,
 ) -> None:
@@ -2140,6 +2271,42 @@ def test_blocked_incomplete_watchlist_persists_without_telegram_send(tmp_path: P
     assert row[1] == TelegramAlertType.WATCHLIST.value
     assert "watchlist_missing_trackable_plan" in row[2]
     assert row[3] == "run-blocked"
+
+
+def test_below_min_public_grade_is_audited_without_telegram_send(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=_public_ready_watchlist_diagnostics(),
+        signal_id="below-grade-watch",
+        setup_quality=_setup_quality_with_grade(
+            SetupQualityGrade.B,
+            quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+            quality_score=70,
+        ),
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-below-grade"))
+
+    assert summary.blocked == 1
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT telegram_status, attempted_alert_type, blocked_reason, scan_run_id
+            FROM telegram_alert_attempts
+            """
+        ).fetchone()
+    assert row[0] == "blocked"
+    assert row[1] == TelegramAlertType.WATCHLIST.value
+    assert "below_min_public_grade" in row[2]
+    assert row[3] == "run-below-grade"
 
 
 def test_blocked_target_integrity_persists_invalid_target_fields(tmp_path: Path) -> None:

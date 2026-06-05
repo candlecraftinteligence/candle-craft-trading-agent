@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +21,13 @@ def _insert_attempt(
     direction: str = "long",
     alert_type: str = "WATCHLIST",
     status: str = "sent",
+    new_state: str = "WATCHLISTED",
+    lifecycle_state: str = "WATCHLISTED",
     sent_at: str = "2026-06-04T12:00:00Z",
+    first_seen_at: str = "2026-06-04T12:00:00Z",
     scan_run_id: str = "run-active",
     price_level: str = NA,
-    setup_quality_score: str = NA,
+    setup_quality_score: str = "B+",
     entry_low: str = NA,
     entry_high: str = NA,
     stop_loss: str = NA,
@@ -38,22 +42,23 @@ def _insert_attempt(
             INSERT INTO telegram_alert_attempts (
                 signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
                 sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score, price_level,
-                entry_low, entry_high, stop_loss, tp1, tp2, tp3
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                first_seen_at, entry_low, entry_high, stop_loss, tp1, tp2, tp3
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal_id,
                 symbol,
                 direction,
-                "WATCHLISTED",
+                new_state,
                 alert_type,
-                "WATCHLISTED",
+                lifecycle_state,
                 sent_at,
                 status,
                 f"hash-{signal_id}-{alert_type}",
                 scan_run_id,
                 setup_quality_score,
                 price_level,
+                first_seen_at,
                 entry_low,
                 entry_high,
                 stop_loss,
@@ -376,6 +381,104 @@ def test_active_watchlists_exclude_sent_lifecycle_terminal_updates(tmp_path: Pat
 
     assert "No active public watchlists right now." in response.text
     assert "BTCUSDT" not in response.text
+
+
+def test_active_watchlist_older_than_48h_expires_from_public_output(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    old_seen = (datetime.now(UTC) - timedelta(hours=49)).isoformat().replace("+00:00", "Z")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-old-watch",
+        symbol="OLDUSDT",
+        first_seen_at=old_seen,
+        sent_at=old_seen,
+        entry_low="100",
+        entry_high="102",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert "No active public watchlists right now." in response.text
+    assert "OLDUSDT" not in response.text
+
+
+def test_active_watchlist_younger_than_48h_remains_visible(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    fresh_seen = (datetime.now(UTC) - timedelta(hours=47)).isoformat().replace("+00:00", "Z")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-fresh-watch",
+        symbol="FRESHUSDT",
+        first_seen_at=fresh_seen,
+        sent_at=fresh_seen,
+        entry_low="100",
+        entry_high="102",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert "FRESHUSDT | LONG" in response.text
+
+
+def test_triggered_watchlist_does_not_expire_due_to_watch_ttl(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    old_seen = (datetime.now(UTC) - timedelta(hours=96)).isoformat().replace("+00:00", "Z")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-triggered-watch",
+        symbol="TRIGGERUSDT",
+        new_state="TRIGGERED",
+        lifecycle_state="TRIGGERED",
+        first_seen_at=old_seen,
+        sent_at=old_seen,
+        entry_low="100",
+        entry_high="102",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert "TRIGGERUSDT | LONG" in response.text
+
+
+def test_confirmed_active_signal_does_not_expire_due_to_watch_ttl(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    old_seen = (datetime.now(UTC) - timedelta(hours=96)).isoformat().replace("+00:00", "Z")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-confirmed-old",
+        symbol="CONFIRMUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        new_state="CONFIRMED",
+        lifecycle_state="CONFIRMED",
+        first_seen_at=old_seen,
+        sent_at=old_seen,
+        setup_quality_score="B+",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "Symbol: CONFIRMUSDT" in response.text
+
+
+def test_grade_b_is_hidden_from_public_active_watchlist_output(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="sig-grade-b",
+        symbol="LOWGRADEUSDT",
+        setup_quality_score="B",
+        entry_low="100",
+        entry_high="102",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert "LOWGRADEUSDT" not in response.text
+    assert "No active public watchlists right now." in response.text
 
 
 def test_active_watchlists_fall_back_to_setup_candidates_and_na_missing_levels(tmp_path: Path) -> None:

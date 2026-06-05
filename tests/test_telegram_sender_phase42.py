@@ -6,6 +6,7 @@ import logging
 import httpx
 
 from app.alerts.telegram_sender import TelegramSender
+from app.alerts.telegram_routing import TelegramDestination, TelegramMessageType
 
 
 def run(coro):
@@ -86,4 +87,24 @@ def test_token_is_not_logged_when_delivery_is_skipped(caplog) -> None:
     result = run(sender.send_text("hello"))
 
     assert result.status == "skipped"
+    assert "super-secret-token" not in caplog.text
+
+
+def test_signal_channel_blocks_welcome_before_api_call(monkeypatch, caplog) -> None:
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("blocked signal-channel messages must not call Telegram API")
+
+    monkeypatch.setattr("app.alerts.telegram_sender.send_telegram_messages", fail_if_called)
+    caplog.set_level(logging.WARNING)
+    sender = TelegramSender(
+        bot_token="super-secret-token",
+        chat_id="signal-channel",
+        signals_enabled=True,
+        destination=TelegramDestination.SIGNAL_CHANNEL,
+    )
+
+    result = run(sender.send_text("welcome", message_type=TelegramMessageType.WELCOME))
+
+    assert result.status == "skipped"
+    assert result.error_message == "message_type_not_allowed_for_signal_channel"
     assert "super-secret-token" not in caplog.text

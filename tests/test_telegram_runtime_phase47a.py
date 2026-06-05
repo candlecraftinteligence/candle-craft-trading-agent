@@ -14,6 +14,7 @@ from app.alerts.telegram_sender import (
     PUBLIC_DESTINATION_MISSING_WARNING,
     TelegramSender,
 )
+from app.alerts.telegram_routing import TelegramMessageType
 from app.core.config import Settings
 from app.storage.database import open_initialized_database
 from app.telegram_admin import TelegramAdminCommandService, TelegramAdminConfig, process_telegram_admin_commands
@@ -121,8 +122,8 @@ def _seed_telegram_alert_attempts(db_path: Path) -> None:
             """
             INSERT INTO telegram_alert_attempts (
                 signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
-                sent_at, telegram_status, message_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sent_at, telegram_status, message_hash, setup_quality_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "signal-confirmed-abcdef123456",
@@ -134,6 +135,7 @@ def _seed_telegram_alert_attempts(db_path: Path) -> None:
                 "2026-06-04T12:00:00Z",
                 "sent",
                 "hash-sent",
+                "B+",
             ),
         )
         connection.execute(
@@ -166,7 +168,7 @@ def _send_with_settings(settings: Settings) -> tuple[CaptureTelegramApi, Any]:
     client = httpx.AsyncClient(transport=httpx.MockTransport(capture.handler), base_url="https://telegram.test")
     try:
         sender = TelegramSender.from_settings(settings, http_client=client, api_base_url="https://telegram.test")
-        result = run(sender.send_text("hello"))
+        result = run(sender.send_text("hello", message_type=TelegramMessageType.PUBLIC_SIGNAL))
     finally:
         run(client.aclose())
     return capture, result

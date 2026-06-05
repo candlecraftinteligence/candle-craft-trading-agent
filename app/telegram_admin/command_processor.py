@@ -12,6 +12,13 @@ from typing import Any, Protocol
 import httpx
 
 from app.alerts.telegram import DEFAULT_TELEGRAM_TIMEOUT, TELEGRAM_API_BASE_URL, send_telegram_messages
+from app.alerts.telegram_routing import (
+    TelegramDestination,
+    TelegramMessageType,
+    can_send_to_destination,
+    log_blocked_telegram_route,
+    signal_channel_destination_for_chat,
+)
 from app.alerts.templates import TELEGRAM_MAX_MESSAGE_LENGTH, split_message
 from app.data.dtos import NA
 from app.telegram_admin.client import TelegramAdminConfig
@@ -498,6 +505,22 @@ async def _process_admin_wolf_publish_update(
             error_message="unsafe_wolf_briefing_publish_channel",
         )
 
+    route_decision = can_send_to_destination(TelegramDestination.SIGNAL_CHANNEL, TelegramMessageType.WOLF_BRIEFING)
+    if not route_decision.allowed:
+        log_blocked_telegram_route(route_decision)
+        return await _send_admin_publish_notice(
+            update_id,
+            chat_id,
+            "Wolf Briefing publish blocked by signal-channel routing guard.",
+            response_type="wolf_briefing_publish_blocked",
+            delivery_status="skipped_disabled",
+            config=config,
+            transport=transport,
+            state_path=state_path,
+            audit_path=audit_path,
+            error_message=route_decision.reason,
+        )
+
     try:
         raw_results = await transport.send_message(
             bot_token=config.bot_token or "",
@@ -745,6 +768,23 @@ async def _send_public_command_response(
     response: AdminCommandResponse,
     transport: TelegramAdminCommandTransport,
 ) -> tuple[Mapping[str, Any], ...]:
+    route_decision = can_send_to_destination(
+        signal_channel_destination_for_chat(
+            chat_id,
+            public_channel_id=config.public_channel_id,
+            wolf_briefing_channel_id=config.wolf_briefing_channel_id,
+        ),
+        _message_type_for_public_response(response),
+    )
+    if not route_decision.allowed:
+        log_blocked_telegram_route(route_decision)
+        return (
+            {
+                "status": "skipped",
+                "error": route_decision.reason,
+            },
+        )
+
     if response.photo_path is None and response.photo_url is None:
         return await transport.send_message(
             bot_token=config.bot_token or "",
@@ -814,6 +854,28 @@ async def _send_public_text_response(
 
 def _raw_results_sent(results: Sequence[Mapping[str, Any]]) -> bool:
     return bool(results) and all(result.get("status") == "sent" for result in results)
+
+
+def _message_type_for_public_response(response: AdminCommandResponse) -> TelegramMessageType:
+    response_type = _display(response.response_type)
+    command = _display(response.command)
+    if response_type in {"wolf_briefing_public", "public_wolf_briefing"}:
+        return TelegramMessageType.WOLF_BRIEFING
+    if response_type.startswith("public_donate") or command.startswith("/donate"):
+        return TelegramMessageType.DONATE
+    if response_type == "public_menu" or command in {"/start", "/menu"}:
+        return TelegramMessageType.PUBLIC_MENU
+    if response_type in {"alerts", "watchlists", "public_signals", "public_watchlist"}:
+        return TelegramMessageType.PUBLIC_MENU
+    if response_type in {"blocked", "integrity"}:
+        return TelegramMessageType.DIAGNOSTICS
+    if response_type in {"near"}:
+        return TelegramMessageType.REJECTED_SETUP
+    if response_type in {"public_latest", "public_lastscan", "public_status"}:
+        return TelegramMessageType.SCAN_SUMMARY
+    if response_type.startswith("public_"):
+        return TelegramMessageType.PUBLIC_MENU
+    return TelegramMessageType.UNKNOWN
 
 
 async def _cleanup_reply_keyboard_if_needed(
