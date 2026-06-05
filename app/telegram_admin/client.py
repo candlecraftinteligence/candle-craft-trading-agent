@@ -45,6 +45,8 @@ class TelegramAdminConfig:
     vip_channel_id: str | None = None
     wolf_briefing_enabled: bool = False
     wolf_briefing_public_enabled: bool = False
+    wolf_briefing_channel_publish_enabled: bool = False
+    wolf_briefing_channel_id: str | None = None
     public_logo_path: str | None = None
     public_logo_url: str | None = None
     x_url: str | None = None
@@ -83,6 +85,12 @@ class TelegramAdminConfig:
             wolf_briefing_public_enabled=bool(
                 getattr(settings, "telegram_wolf_briefing_public_enabled", False)
             ),
+            wolf_briefing_channel_publish_enabled=bool(
+                getattr(settings, "telegram_wolf_briefing_channel_publish_enabled", False)
+            ),
+            wolf_briefing_channel_id=_clean_optional(
+                getattr(settings, "telegram_wolf_briefing_channel_id", None)
+            ),
             public_logo_path=_clean_optional(getattr(settings, "candle_craft_public_logo_path", None)),
             public_logo_url=_clean_optional(getattr(settings, "candle_craft_public_logo_url", None)),
             x_url=_clean_optional(getattr(settings, "candle_craft_x_url", None)),
@@ -110,6 +118,10 @@ class TelegramAdminConfig:
     @property
     def public_command_ui_enabled(self) -> bool:
         return self.command_ui_enabled if self.public_ui_enabled is None else bool(self.public_ui_enabled)
+
+    @property
+    def wolf_briefing_publish_channel_id(self) -> str | None:
+        return self.wolf_briefing_channel_id or self.public_channel_id
 
 
 @dataclass(frozen=True)
@@ -252,6 +264,7 @@ def _sanitize_error(value: Any, config: TelegramAdminConfig) -> str:
         config.admin_chat_id,
         config.public_chat_id,
         config.public_channel_id,
+        config.wolf_briefing_channel_id,
         config.signal_channel_invite_link,
         config.vip_channel_id,
     ):

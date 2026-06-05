@@ -21,12 +21,14 @@ from app.telegram_admin.commands import (
     ADMIN_CALLBACK_COMMANDS,
     ADMIN_MENU_BUTTON_CALLBACKS,
     ADMIN_MENU_BUTTON_ROWS,
+    ADMIN_WOLF_BRIEFING_CALLBACK_COMMANDS,
     JOIN_SIGNAL_CHANNEL_BUTTON_LABEL,
     PUBLIC_CALLBACK_COMMANDS,
     PUBLIC_MENU_BUTTON_CALLBACKS,
     PUBLIC_MENU_BUTTON_ROWS,
     SCREEN_FOOTER,
     SCREEN_HEADER,
+    WOLF_BRIEFING_PUBLISH_BUTTON_LABEL,
     command_for_callback_data,
     normalize_admin_command,
 )
@@ -659,6 +661,8 @@ def test_menu_button_labels_normalize_to_commands() -> None:
 def test_inline_callback_data_maps_to_commands() -> None:
     for callback_data, command in PUBLIC_CALLBACK_COMMANDS.items():
         assert command_for_callback_data(callback_data) == ("public", command)
+    for callback_data, command in ADMIN_WOLF_BRIEFING_CALLBACK_COMMANDS.items():
+        assert command_for_callback_data(callback_data) == ("admin", command)
     for callback_data, command in ADMIN_CALLBACK_COMMANDS.items():
         assert command_for_callback_data(callback_data) == ("admin", command)
     assert command_for_callback_data("admin:unknown") == ("", "")
@@ -875,6 +879,7 @@ def test_config_screen_redacts_secrets_and_raw_chat_ids(tmp_path) -> None:
             bot_token="secret-token",
             admin_chat_id="123456789",
             public_channel_id="public-channel",
+            wolf_briefing_channel_id="wolf-public-channel",
             signal_channel_invite_link="https://t.me/+config-private-invite",
             vip_channel_id="vip-channel",
         ),
@@ -893,6 +898,7 @@ def test_config_screen_redacts_secrets_and_raw_chat_ids(tmp_path) -> None:
     assert "secret-token" not in response.text
     assert "123456789" not in response.text
     assert "public-channel" not in response.text
+    assert "wolf-public-channel" not in response.text
     assert "https://t.me/+config-private-invite" not in response.text
     assert "vip-channel" not in response.text
 
@@ -909,6 +915,8 @@ def test_telegram_admin_config_splits_command_ui_from_admin_reports() -> None:
             telegram_admin_chat_id="admin-chat",
             telegram_wolf_briefing_enabled=True,
             telegram_wolf_briefing_public_enabled=False,
+            telegram_wolf_briefing_channel_publish_enabled=True,
+            telegram_wolf_briefing_channel_id="wolf-public-channel",
             candle_craft_donate_usdt_ton_address="TEST_USDT_TON_ADDRESS",
             candle_craft_donate_ton_address="TEST_TON_ADDRESS",
             candle_craft_donate_btc_address="TEST_BTC_ADDRESS",
@@ -922,6 +930,9 @@ def test_telegram_admin_config_splits_command_ui_from_admin_reports() -> None:
     assert config.admin_report_enabled is False
     assert config.wolf_briefing_enabled is True
     assert config.wolf_briefing_public_enabled is False
+    assert config.wolf_briefing_channel_publish_enabled is True
+    assert config.wolf_briefing_channel_id == "wolf-public-channel"
+    assert config.wolf_briefing_publish_channel_id == "wolf-public-channel"
     assert config.dry_run is False
     assert config.donate_usdt_ton_address == "TEST_USDT_TON_ADDRESS"
     assert config.donate_ton_address == "TEST_TON_ADDRESS"
@@ -1915,7 +1926,7 @@ def test_admin_callbacks_route_to_admin_screens(tmp_path) -> None:
     screen_calls = _screen_send_calls(transport)
     assert len(cleanup_calls) == 1
     assert len(screen_calls) == len(ADMIN_CALLBACK_COMMANDS)
-    assert "WOLF BRIEFING" in screen_calls[0]["message"]
+    assert "WOLF BRIEFING PREVIEW" in screen_calls[0]["message"]
     assert "System Desk" in screen_calls[1]["message"]
     assert "Alert Desk" in screen_calls[2]["message"]
     assert "ACTIVE WATCHLISTS" in screen_calls[3]["message"]
@@ -1923,7 +1934,13 @@ def test_admin_callbacks_route_to_admin_screens(tmp_path) -> None:
     assert "Configuration Desk" in screen_calls[5]["message"]
     assert "Command Guide" in screen_calls[6]["message"]
     assert "Candle Craft Intelligence" in screen_calls[7]["message"]
-    for call in screen_calls[:7]:
+    assert WOLF_BRIEFING_PUBLISH_BUTTON_LABEL in _button_labels(screen_calls[0]["reply_markup"])
+    assert _callback_data_values(screen_calls[0]["reply_markup"]) == [
+        "admin:wolf_publish",
+        "admin:wolf_refresh",
+        "admin:wolf_cancel",
+    ]
+    for call in screen_calls[1:7]:
         _assert_admin_menu_only(call["reply_markup"])
         assert _callback_data_values(call["reply_markup"]) == ["admin:menu"]
     _assert_admin_full_menu(screen_calls[7]["reply_markup"])
@@ -2132,7 +2149,7 @@ def test_command_processor_works_when_admin_reports_are_disabled(tmp_path) -> No
     assert "secret-token" not in serialized
 
 
-def test_public_and_vip_channel_ids_receive_public_reserved_screen(tmp_path) -> None:
+def test_public_and_vip_channel_ids_do_not_receive_command_ui(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_valid_row()])
     transport = FakeCommandTransport()
     audit_path = tmp_path / "audit.jsonl"
@@ -2158,35 +2175,10 @@ def test_public_and_vip_channel_ids_receive_public_reserved_screen(tmp_path) -> 
         )
     )
 
-    assert result.delivery_status == "sent_public"
-    assert len(transport.send_calls) == 2
-    assert [call["chat_id"] for call in transport.send_calls] == ["public-channel", "vip-channel"]
-    status_call = transport.send_calls[0]
-    assert "Candle Craft public signal desk status." in status_call["message"]
-    assert "admin" not in status_call["message"].lower()
-    assert "System Desk" not in status_call["message"]
-    assert "Integrity Desk" not in status_call["message"]
-    assert "Configuration Desk" not in status_call["message"]
-    assert "VALIDUSDT" not in status_call["message"]
-    _assert_public_menu_only(status_call["reply_markup"])
-    _assert_no_execution_buttons(status_call["reply_markup"])
-
-    for call in transport.send_calls[1:]:
-        assert "That signal desk view is not available here." in call["message"]
-        assert "Use the buttons below to enter the signal desk." in call["message"]
-        assert "admin" not in call["message"].lower()
-        assert "System Desk" not in call["message"]
-        assert "Integrity Desk" not in call["message"]
-        assert "Configuration Desk" not in call["message"]
-        assert "VALIDUSDT" not in call["message"]
-        _assert_public_menu_only(call["reply_markup"])
-        _assert_no_execution_buttons(call["reply_markup"])
-    records = _read_jsonl(audit_path)
-    assert [record["delivery_status"] for record in records] == ["sent_public", "sent_public"]
-    assert [record["is_admin"] for record in records] == [False, False]
-    serialized = json.dumps(records)
-    assert "public-channel" not in serialized
-    assert "vip-channel" not in serialized
+    assert result.delivery_status == "ignored_unauthorized"
+    assert result.sent_count == 0
+    assert transport.send_calls == []
+    assert not audit_path.exists()
 
 
 def test_update_offset_prevents_duplicate_replies_for_same_update_id(tmp_path) -> None:
