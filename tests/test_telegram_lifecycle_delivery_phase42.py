@@ -416,8 +416,9 @@ def _watchlist_outcome_rows(db_path: Path) -> list[tuple[str, str, str, str]]:
 def _assert_transition_message_clean(message: str, *, signal_id: str, status: str) -> None:
     assert message.startswith(HEADER_PREFIX)
     assert message.endswith(FOOTER)
-    assert f"Status:\n{status}" in message
-    assert f"Signal ID:\n{signal_id}" in message
+    assert "Signal ID:" not in message
+    assert signal_id not in message
+    assert "Status:" in message or status in message
     assert "Setup Type" not in message
     assert "Decimal(" not in message
     assert "{" not in message
@@ -617,19 +618,19 @@ def test_hype_style_public_ready_watchlist_sends_watchlist_not_confirmed() -> No
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert decision.message is not None
     text = format_telegram_signal_message(decision.alert_type, decision.message)
-    assert "CANDLE CRAFT WATCHLIST" in text
-    assert "HYPEUSDT | long" in text
-    assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
-    assert "Limit Zone:\n71.41 \u2013 71.68" in text
-    assert "Potential Targets:" in text
-    assert "TP2: 73.1" in text
-    assert "Planned RR: 2.9R \u2014 watchlist only, final RR must improve to \u22653R before confirmation." in text
+    assert "WATCHLIST — HYPEUSDT" in text
+    assert "Bias: LONG" in text
+    assert "CONFIRMED SIGNAL" not in text
+    assert "Zone: 71.41 \u2013 71.68" in text
+    assert "Potential RR: 2.9R" in text
+    assert "Area of Interest" in text
+    assert "No confirmation = no trade." in text
     assert "71.407944" not in text
     assert "70.77" in text
     assert "70.77363571" not in text
-    assert "final RR" in text or "Final RR" in text
-    assert "Watchlist invalidates if" in text
-    assert "System:\nWatchlist only. No active signal yet." in text
+    assert "WATCHLIST" in text
+    assert "Invalid below/above: 70.77" in text
+    assert "We let the market come to us." in text
 
 
 def test_watchlist_context_avoids_awkward_raw_confirmation_wording() -> None:
@@ -646,9 +647,9 @@ def test_watchlist_context_avoids_awkward_raw_confirmation_wording() -> None:
     assert decision.eligible is True
     assert decision.message is not None
     text = format_telegram_signal_message(decision.alert_type, decision.message)
-    context = text.split("Current Context:\n", 1)[1].split("\n\nNeeds Next:", 1)[0]
+    context = text.split("👀 What we want to see\n", 1)[1].split("\n\n📍 Area of Interest", 1)[0]
     assert "because bullish BOS/CHoCH confirmed" not in context
-    assert "fresh LTF BOS/CHoCH confirmation is still required" in context
+    assert "BOS/CHoCH" in context
 
 
 def test_rr_below_min_watchlist_never_routes_to_signal_confirmed() -> None:
@@ -666,8 +667,8 @@ def test_rr_below_min_watchlist_never_routes_to_signal_confirmed() -> None:
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert decision.message is not None
     text = format_telegram_signal_message(decision.alert_type, decision.message)
-    assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
-    assert "Final RR" in text
+    assert "CONFIRMED SIGNAL" not in text
+    assert "WATCHLIST" in text
 
 
 def test_action_watchlist_only_sends_watchlist_not_confirmed() -> None:
@@ -827,8 +828,8 @@ def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> N
     assert watchlist.sent == 1
     assert confirmed.sent == 1
     assert duplicate_confirmed.duplicate == 1
-    assert "CANDLE CRAFT WATCHLIST" in sender.messages[0]
-    assert "CANDLE CRAFT SIGNAL CONFIRMED" in sender.messages[1]
+    assert "WATCHLIST — BTCUSDT" in sender.messages[0]
+    assert "WATCHLIST UPGRADED — BTCUSDT" in sender.messages[1]
 
 
 def test_phase42k_watchlist_transition_matrix_preserves_original_id_rows_and_dedupes(
@@ -918,10 +919,10 @@ def test_phase42k_watchlist_transition_matrix_preserves_original_id_rows_and_ded
         assert transitioned.sent == 1
         assert duplicate.duplicate == 1
         assert len(sender.messages) == 2
-        assert "CANDLE CRAFT WATCHLIST" in sender.messages[0]
-        assert "CANDLE CRAFT WATCHLIST" not in sender.messages[1]
+        assert "WATCHLIST — BTCUSDT" in sender.messages[0]
+        assert "WATCHLIST — BTCUSDT" not in sender.messages[1]
         if expected_alert_type == TelegramAlertType.NO_LONGER_TRACKING:
-            assert "CANDLE CRAFT SIGNAL CONFIRMED" not in sender.messages[1]
+            assert "CONFIRMED SIGNAL" not in sender.messages[1]
         _assert_transition_message_clean(sender.messages[1], signal_id=signal_id, status=expected_status)
         assert _telegram_attempt_rows(db_path) == [
             (signal_id, TelegramAlertType.WATCHLIST.value, "sent"),
@@ -990,8 +991,8 @@ def test_phase42l_reconciles_soft_failed_confirmation_gate_variants_after_grace_
             signal_id=signal_id,
             status="NO LONGER TRACKING",
         )
-        assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
-        assert "CANDLE CRAFT SIGNAL CONFIRMED" not in sender.messages[0]
+        assert "The wolf walks away." in sender.messages[0]
+        assert "CONFIRMED SIGNAL" not in sender.messages[0]
         soft_rows = _soft_failed_confirmation_rows(db_path)
         assert len(soft_rows) == 1
         assert soft_rows[0][0] == "SOFT_FAILED_CONFIRMATION"
@@ -1047,8 +1048,8 @@ def test_phase42l_soft_blocker_observations_do_not_block_later_valid_confirmatio
     assert second.sent == 0
     assert third.sent == 1
     assert len(sender.messages) == 1
-    assert "CANDLE CRAFT SIGNAL CONFIRMED" in sender.messages[0]
-    assert "Signal ID:\nphase42l-soft-then-confirmed" in sender.messages[0]
+    assert "WATCHLIST UPGRADED — BTCUSDT" in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
     soft_rows = _soft_failed_confirmation_rows(db_path)
     assert len(soft_rows) == 1
     assert soft_rows[0][3] == 2
@@ -1082,8 +1083,8 @@ def test_phase42l_wrong_side_targets_terminalize_without_soft_grace(tmp_path: Pa
 
     assert summary.sent == 1
     assert len(sender.messages) == 1
-    assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
-    assert "Signal ID:\nphase42l-wrong-side-target" in sender.messages[0]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
     assert _soft_failed_confirmation_rows(db_path) == []
     assert _telegram_attempt_rows(db_path) == [
         (signal_id, TelegramAlertType.WATCHLIST.value, "sent"),
@@ -1126,10 +1127,10 @@ def test_watchlist_to_confirmed_with_regime_failed_gate_sends_no_longer_tracking
     assert third.sent == 1
     assert duplicate.duplicate == 1
     assert len(sender.messages) == 1
-    assert "CANDLE CRAFT SIGNAL CONFIRMED" not in sender.messages[0]
-    assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
-    assert "Signal ID:\nsig-regime-watch" in sender.messages[0]
-    assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
+    assert "CONFIRMED SIGNAL" not in sender.messages[0]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
+    assert "The wolf walks away." in sender.messages[0]
     assert "penalty 15" not in sender.messages[0]
     assert "scalp compatibility Weak" not in sender.messages[0]
     assert sender.messages[0].startswith(HEADER_PREFIX)
@@ -1182,10 +1183,10 @@ def test_mstr_style_confirmed_regime_rejection_sends_no_longer_tracking(tmp_path
     assert second.sent == 0
     assert third.sent == 1
     assert len(sender.messages) == 1
-    assert "MSTRUSDT | long" in sender.messages[0]
-    assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
-    assert "Signal ID:\nmstr-watch" in sender.messages[0]
-    assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
+    assert "WATCHLIST INVALIDATED — MSTRUSDT" in sender.messages[0]
+    assert "Bias was: LONG" in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
+    assert "The wolf walks away." in sender.messages[0]
     assert "SIGNAL CONFIRMED" not in sender.messages[0]
     assert "penalty 15" not in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
@@ -1228,8 +1229,8 @@ def test_watchlist_to_confirmed_with_rr_guard_failure_sends_no_longer_tracking(t
     assert second.sent == 0
     assert third.sent == 1
     assert len(sender.messages) == 1
-    assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
-    assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
+    assert "The wolf walks away." in sender.messages[0]
     assert "SIGNAL CONFIRMED" not in sender.messages[0]
 
 
@@ -1260,9 +1261,9 @@ def test_watchlist_to_confirmed_with_structural_failure_sends_invalidation(tmp_p
 
     assert summary.sent == 1
     assert len(sender.messages) == 1
-    assert "CANDLE CRAFT INVALIDATION" in sender.messages[0]
-    assert "Status:\nINVALIDATED" in sender.messages[0]
-    assert "Signal ID:\nsig-structure-watch" in sender.messages[0]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
+    assert "Status: INVALIDATED" in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
     assert rows == [
@@ -1321,10 +1322,10 @@ def test_sent_watchlist_reconciliation_mstr_current_confirmed_failed_gate_sends_
     message = sender.messages[0]
     assert message.startswith(HEADER_PREFIX)
     assert message.endswith(FOOTER)
-    assert "MSTRUSDT | long" in message
-    assert "Status:\nNO LONGER TRACKING" in message
-    assert "Signal ID:\nmstr-watch" in message
-    assert "Watchlist removed because final confirmation conditions did not improve." in message
+    assert "WATCHLIST INVALIDATED — MSTRUSDT" in message
+    assert "Bias was: LONG" in message
+    assert "Signal ID:" not in message
+    assert "The wolf walks away." in message
     assert "SIGNAL CONFIRMED" not in message
     assert "penalty 15" not in message
     assert "scalp compatibility Weak" not in message
@@ -1345,10 +1346,10 @@ def test_sent_watchlist_reconciliation_mstr_current_confirmed_failed_gate_sends_
 
 def test_sent_watchlist_reconciliation_current_terminal_states_send_updates(tmp_path: Path) -> None:
     cases = (
-        (SetupLifecycleState.INVALIDATED, TelegramAlertType.INVALIDATED, "Status:\nINVALIDATED"),
-        (SetupLifecycleState.EXPIRED, TelegramAlertType.EXPIRED, "Status:\nEXPIRED"),
-        (SetupLifecycleState.COOLDOWN, TelegramAlertType.NO_LONGER_TRACKING, "Status:\nNO LONGER TRACKING"),
-        (SetupLifecycleState.COOLED_DOWN, TelegramAlertType.NO_LONGER_TRACKING, "Status:\nNO LONGER TRACKING"),
+        (SetupLifecycleState.INVALIDATED, TelegramAlertType.INVALIDATED, "Status: INVALIDATED"),
+        (SetupLifecycleState.EXPIRED, TelegramAlertType.EXPIRED, "WATCHLIST INVALIDATED"),
+        (SetupLifecycleState.COOLDOWN, TelegramAlertType.NO_LONGER_TRACKING, "WATCHLIST INVALIDATED"),
+        (SetupLifecycleState.COOLED_DOWN, TelegramAlertType.NO_LONGER_TRACKING, "WATCHLIST INVALIDATED"),
     )
     for state, expected_alert_type, expected_status in cases:
         db_path = tmp_path / f"{state.value.lower()}.db"
@@ -1370,7 +1371,7 @@ def test_sent_watchlist_reconciliation_current_terminal_states_send_updates(tmp_
         assert summary.sent == 1
         assert len(sender.messages) == 1
         assert expected_status in sender.messages[0]
-        assert f"Signal ID:\n{signal_id}" in sender.messages[0]
+        assert "Signal ID:" not in sender.messages[0]
         with sqlite3.connect(db_path) as connection:
             rows = connection.execute("SELECT alert_type FROM telegram_alert_attempts ORDER BY id").fetchall()
         assert rows == [(TelegramAlertType.WATCHLIST.value,), (expected_alert_type.value,)]
@@ -1400,8 +1401,8 @@ def test_sent_watchlist_reconciliation_confirmed_with_eligibility_pass_sends_sig
     assert summary.sent == 1
     assert repeated.duplicate == 1
     assert len(sender.messages) == 1
-    assert "CANDLE CRAFT SIGNAL CONFIRMED" in sender.messages[0]
-    assert "Signal ID:\nsig-reconcile-confirm" in sender.messages[0]
+    assert "WATCHLIST UPGRADED — BTCUSDT" in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute("SELECT alert_type FROM telegram_alert_attempts ORDER BY id").fetchall()
     assert rows == [(TelegramAlertType.WATCHLIST.value,), (TelegramAlertType.SIGNAL_CONFIRMED.value,)]
@@ -1439,8 +1440,8 @@ def test_sent_watchlist_reconciliation_confirmed_with_eligibility_fail_sends_no_
     assert second.sent == 0
     assert third.sent == 1
     assert len(sender.messages) == 1
-    assert "Status:\nNO LONGER TRACKING" in sender.messages[0]
-    assert "Watchlist removed because final confirmation conditions did not improve." in sender.messages[0]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
+    assert "The wolf walks away." in sender.messages[0]
     assert "SIGNAL CONFIRMED" not in sender.messages[0]
 
 
@@ -1492,7 +1493,7 @@ def test_sent_watchlist_reconciliation_symbol_fallback_requires_one_active_watch
     summary = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-fallback"))
 
     assert summary.sent == 1
-    assert "Signal ID:\nfallback-watch" in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute("SELECT signal_id, alert_type FROM telegram_alert_attempts ORDER BY id").fetchall()
     assert rows == [
@@ -1589,8 +1590,8 @@ def test_sent_watchlist_reconciliation_exact_match_wins_and_uses_original_direct
     assert summary.sent == 1
     assert summary.blocked == 1
     assert len(sender.messages) == 1
-    assert "BTCUSDT | long" in sender.messages[0]
-    assert "Signal ID:\nexact-watch" in sender.messages[0]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(
             "SELECT signal_id, alert_type, direction, blocked_reason FROM telegram_alert_attempts ORDER BY id"
@@ -1655,13 +1656,13 @@ def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> Non
     assert watchlist.sent == 1
     assert invalidated.sent == 1
     assert duplicate_invalidated.duplicate == 1
-    assert "CANDLE CRAFT WATCHLIST" in sender.messages[0]
-    assert "CANDLE CRAFT INVALIDATION" in sender.messages[1]
+    assert "WATCHLIST — BTCUSDT" in sender.messages[0]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[1]
     assert sender.messages[1].startswith(HEADER_PREFIX)
     assert sender.messages[1].endswith(FOOTER)
-    assert "Status:\nINVALIDATED" in sender.messages[1]
-    assert "Signal ID:\nsig-invalidates" in sender.messages[1]
-    assert "System:\nWatchlist removed from active tracking." in sender.messages[1]
+    assert "Status: INVALIDATED" in sender.messages[1]
+    assert "Signal ID:" not in sender.messages[1]
+    assert "The wolf walks away." in sender.messages[1]
     assert "Setup Type" not in sender.messages[1]
     assert "Decimal(" not in sender.messages[1]
     with sqlite3.connect(db_path) as connection:
@@ -1728,10 +1729,9 @@ def test_watchlist_to_expired_sends_expired_once(tmp_path: Path) -> None:
     assert expired.sent == 1
     assert duplicate_expired.duplicate == 1
     assert len(sender.messages) == 2
-    assert "Status:\nEXPIRED" in sender.messages[1]
-    assert "Signal ID:\nsig-expires" in sender.messages[1]
-    assert "Watchlist expired because it did not confirm within the valid tracking window." in sender.messages[1]
-    assert "System:\nWatchlist expired. No active signal." in sender.messages[1]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[1]
+    assert "Signal ID:" not in sender.messages[1]
+    assert "The wolf walks away." in sender.messages[1]
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
     assert rows == [
@@ -1790,10 +1790,9 @@ def test_watchlist_to_cooldown_sends_no_longer_tracking_once(tmp_path: Path) -> 
     assert cooldown.sent == 1
     assert duplicate_cooldown.duplicate == 1
     assert len(sender.messages) == 2
-    assert "Status:\nNO LONGER TRACKING" in sender.messages[1]
-    assert "Signal ID:\nsig-cooldown" in sender.messages[1]
-    assert "Watchlist removed because the setup entered cooldown before confirmation." in sender.messages[1]
-    assert "System:\nWatchlist removed from active tracking." in sender.messages[1]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[1]
+    assert "Signal ID:" not in sender.messages[1]
+    assert "The wolf walks away." in sender.messages[1]
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
     assert rows == [
@@ -1929,8 +1928,9 @@ def test_terminal_update_uses_original_fallback_signal_id_when_lifecycle_id_diff
 
     assert terminal.sent == 1
     assert len(sender.messages) == 1
-    assert f"Signal ID:\n{original_signal_id}" in sender.messages[0]
-    assert "Signal ID:\nnew-life" not in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
+    assert original_signal_id not in sender.messages[0]
+    assert "new-life" not in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute("SELECT signal_id, alert_type FROM telegram_alert_attempts ORDER BY id").fetchall()
     assert rows == [
@@ -1968,8 +1968,9 @@ def test_terminal_update_symbol_fallback_matches_single_active_watchlist_with_or
 
     assert summary.sent == 1
     assert len(sender.messages) == 1
-    assert "BTCUSDT | short" in sender.messages[0]
-    assert "Signal ID:\noriginal-symbol-watch" in sender.messages[0]
+    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
+    assert "Bias was: SHORT" in sender.messages[0]
+    assert "Signal ID:" not in sender.messages[0]
     assert "terminal-symbol-life" not in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(
@@ -2730,9 +2731,8 @@ def test_confluence_from_raw_derivatives_context_is_public_text() -> None:
     message = telegram_signal_message_from_symbol(symbol_result)
     text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, message)
 
-    assert "Confluence:" in text
-    assert "funding is normal while open interest is falling" in text
-    assert "Volume is candle-estimated." in text
+    assert "🧠 Why this setup matters" in text
+    assert "Technical context:" in text
     for forbidden in ("Decimal(", "{", "}", "true", "false", "funding_rate:", "open_interest:"):
         assert forbidden not in text
 
@@ -2883,9 +2883,9 @@ def test_sent_watchlist_limit_zone_touch_sends_limit_hit_once(tmp_path: Path) ->
     assert first.sent == 1
     assert second.sent == 0
     assert len(sender.messages) == 1
-    assert "Status:\nLIMIT ZONE HIT" in sender.messages[0]
-    assert "Price has reached the planned watchlist Limit Zone." in sender.messages[0]
-    assert "No order was placed by the system." in sender.messages[0]
+    assert "LIMIT ZONE HIT — BTCUSDT" in sender.messages[0]
+    assert "Price entered our hunting zone." in sender.messages[0]
+    assert "No panic. No chase." in sender.messages[0]
     rows = _watchlist_outcome_rows(db_path)
     assert (TelegramAlertType.LIMIT_HIT.value, "sent", TelegramAlertType.LIMIT_HIT.value, NA) in rows
 
@@ -2926,7 +2926,7 @@ def test_watchlist_same_candle_entry_and_target_sends_only_limit_and_audits_ambi
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="same-candle"))
 
     assert summary.sent == 1
-    assert "Status:\nLIMIT ZONE HIT" in sender.messages[0]
+    assert "LIMIT ZONE HIT — BTCUSDT" in sender.messages[0]
     rows = _watchlist_outcome_rows(db_path)
     assert not any(row[0] == TelegramAlertType.TP1_HIT.value for row in rows)
     assert any(row[3] == "outcome_tracking_same_candle_ambiguous" for row in rows)
@@ -3027,7 +3027,7 @@ def test_short_watchlist_uses_stored_tp1_not_recalculated_current_target(tmp_pat
     )
 
     assert tp_attempt.sent == 0
-    assert not any("Status:\nTP1 HIT" in message for message in sender.messages)
+    assert not any("TP1 HIT" in message for message in sender.messages)
     rows = _watchlist_outcome_rows(db_path)
     assert not any(row[0] == TelegramAlertType.TP1_HIT.value and row[1] == "sent" for row in rows)
 
@@ -3070,10 +3070,10 @@ def test_long_watchlist_tracks_tp_sequence_after_limit_hit(tmp_path: Path) -> No
     )
 
     assert (tp1.sent, tp2.sent, tp3.sent, repeat.sent) == (1, 1, 1, 0)
-    assert "Status:\nTP1 HIT" in sender.messages[1]
-    assert "Status:\nTP2 HIT" in sender.messages[2]
-    assert "Status:\nTP3 HIT" in sender.messages[3]
-    assert "Watchlist outcome tracking completed." in sender.messages[3]
+    assert "TP1 HIT — BTCUSDT" in sender.messages[1]
+    assert "TP2 HIT — BTCUSDT" in sender.messages[2]
+    assert "TP3 HIT — BTCUSDT" in sender.messages[3]
+    assert "Full target sequence completed." in sender.messages[3]
     rows = [row[0] for row in _watchlist_outcome_rows(db_path)]
     assert rows.count(TelegramAlertType.TP1_HIT.value) == 1
     assert rows.count(TelegramAlertType.TP2_HIT.value) == 1
@@ -3107,8 +3107,8 @@ def test_long_watchlist_tracks_sl_after_limit_hit_even_when_terminal_updates_dis
 
     assert sl.sent == 1
     assert repeat.sent == 0
-    assert "Status:\nSL HIT" in sender.messages[1]
-    assert "Watchlist outcome tracking closed." in sender.messages[1]
+    assert "STOP HIT — BTCUSDT" in sender.messages[1]
+    assert "Small controlled losses protect us for the next A-grade opportunity." in sender.messages[1]
 
 
 def test_short_watchlist_tracks_tp_and_sl_rules_after_limit_hit(tmp_path: Path) -> None:
@@ -3169,8 +3169,8 @@ def test_short_watchlist_tracks_tp_and_sl_rules_after_limit_hit(tmp_path: Path) 
 
     assert tp.sent == 1
     assert sl.sent == 1
-    assert any("Status:\nTP1 HIT" in message and "watch-short-tp" in message for message in sender.messages)
-    assert any("Status:\nSL HIT" in message and "watch-short-sl" in message for message in sl_sender.messages)
+    assert any("TP1 HIT" in message for message in sender.messages)
+    assert any("STOP HIT" in message for message in sl_sender.messages)
 
 
 def test_missing_targets_do_not_break_limit_or_sl_tracking(tmp_path: Path) -> None:

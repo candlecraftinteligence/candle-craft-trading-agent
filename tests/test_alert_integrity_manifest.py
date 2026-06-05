@@ -193,8 +193,10 @@ def test_watch_activation_alert_includes_invalidation_risk_warning_and_manifest(
         live=False,
     )
 
-    assert "Invalidation: Invalid below 95." in message
-    assert "Risk warning:" in message
+    assert "WATCHLIST UPGRADED" in message
+    assert "The wolf has confirmation." in message
+    assert "Previous state: WATCHLIST" in message
+    assert "New state: CONFIRMED SIGNAL" in message
     assert manifest.is_valid is True
     assert manifest.deduplication_key == "watch-activation-BTCUSDT-SWING"
 

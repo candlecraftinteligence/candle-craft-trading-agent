@@ -776,7 +776,10 @@ class TelegramLifecycleDeliveryService:
         message = decision.message
         if decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES and prior_active_alert is not None:
             signal_id = prior_active_alert.signal_id
-            message = _message_with_prior_public_identity(message, prior_active_alert)
+            message = replace(
+                _message_with_prior_public_identity(message, prior_active_alert),
+                was_watchlist=prior_active_alert.alert_type == TelegramAlertType.WATCHLIST.value,
+            )
             if repository.has_sent_terminal_outcome(signal_id=signal_id) and not repository.has_attempt(
                 signal_id=signal_id,
                 alert_type=decision.alert_type,
@@ -790,7 +793,10 @@ class TelegramLifecycleDeliveryService:
                 )
         elif decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and prior_active_alert is not None:
             signal_id = prior_active_alert.signal_id
-            message = _message_with_prior_public_identity(message, prior_active_alert)
+            message = replace(
+                _message_with_prior_public_identity(message, prior_active_alert),
+                upgraded_from_watchlist=prior_active_alert.alert_type == TelegramAlertType.WATCHLIST.value,
+            )
 
         if repository.has_attempt(signal_id=signal_id, alert_type=decision.alert_type):
             repository.compact_existing_attempt(
@@ -1199,7 +1205,10 @@ def telegram_alert_decision_for_symbol(
     context = eligibility_context or TelegramEligibilityContext()
     message = _telegram_signal_message_for_alert(symbol_result, alert_type, context)
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES and prior_public_alert is not None:
-        message = _message_with_prior_public_identity(message, prior_public_alert)
+        message = replace(
+            _message_with_prior_public_identity(message, prior_public_alert),
+            was_watchlist=prior_public_alert.alert_type == TelegramAlertType.WATCHLIST.value,
+        )
     if _requires_prior_active_alert(alert_type) and not previously_active_sent:
         if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
             reason = terminal_identity_failure_reason or "terminal_update_no_prior_public_alert"
@@ -1257,10 +1266,27 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
         diagnostics.get("bias"),
         diagnostics.get("direction"),
     )
+    mode = _first_non_na(
+        getattr(lifecycle, "mode", NA),
+        symbol_result.valid_strategy_modes[0] if symbol_result.valid_strategy_modes else NA,
+        symbol_result.rejected_strategy_modes[0] if symbol_result.rejected_strategy_modes else NA,
+        _field(setup, "mode"),
+        diagnostics.get("mode"),
+        getattr(trade_idea, "setup_type", NA) if trade_idea is not None else NA,
+    )
+    quality = _first_non_na(
+        getattr(getattr(symbol_result.setup_quality, "quality_grade", None), "value", NA),
+        getattr(trade_idea, "grade", NA) if trade_idea is not None else NA,
+        _field(getattr(setup, "trust_meter", None), "grade"),
+        diagnostics.get("trust_grade"),
+        diagnostics.get("grade"),
+    )
     return TelegramSignalMessage(
         symbol=symbol_result.symbol,
         direction=direction,
         signal_id=_signal_id(symbol_result),
+        mode=mode,
+        quality=quality,
         watch_zone=_watch_zone_text(symbol_result, diagnostics),
         entry_low=_first_non_na(
             _field(setup, "entry_low"),
@@ -1787,7 +1813,10 @@ def _failed_confirmation_terminal_decision(
             True,
             "eligible_failed_confirmation_update",
             alert_type=terminal_alert_type,
-            message=_message_with_prior_public_identity(failed_message, prior_public_alert),
+            message=replace(
+                _message_with_prior_public_identity(failed_message, prior_public_alert),
+                was_watchlist=prior_public_alert.alert_type == TelegramAlertType.WATCHLIST.value,
+            ),
             lifecycle_transition=lifecycle_transition,
         )
 
@@ -3575,9 +3604,12 @@ def _sent_watchlist_reconciliation_outcome(
     symbol_result = _reconciliation_symbol_result(record, prior_alert, current_result=current_result)
     terminal_alert_type = _terminal_alert_type_for_lifecycle_state(state_key)
     if terminal_alert_type is not None:
-        message = _message_with_prior_public_identity(
-            _telegram_signal_message_for_alert(symbol_result, terminal_alert_type, eligibility_context),
-            prior_alert,
+        message = replace(
+            _message_with_prior_public_identity(
+                _telegram_signal_message_for_alert(symbol_result, terminal_alert_type, eligibility_context),
+                prior_alert,
+            ),
+            was_watchlist=prior_alert.alert_type == TelegramAlertType.WATCHLIST.value,
         )
         return SentWatchlistReconciliationOutcome(
             alert_type=terminal_alert_type,
@@ -3638,7 +3670,10 @@ def _confirmed_reconciliation_outcome(
             blockers=blockers,
             eligibility_context=eligibility_context,
         )
-    message = _message_with_prior_public_identity(confirmed_message, prior_alert)
+    message = replace(
+        _message_with_prior_public_identity(confirmed_message, prior_alert),
+        upgraded_from_watchlist=prior_alert.alert_type == TelegramAlertType.WATCHLIST.value,
+    )
     return SentWatchlistReconciliationOutcome(
         alert_type=TelegramAlertType.SIGNAL_CONFIRMED,
         message=message,
@@ -3664,7 +3699,10 @@ def _failed_confirmed_reconciliation_outcome(
     )
     return SentWatchlistReconciliationOutcome(
         alert_type=TelegramAlertType.NO_LONGER_TRACKING,
-        message=_message_with_prior_public_identity(message, prior_alert),
+        message=replace(
+            _message_with_prior_public_identity(message, prior_alert),
+            was_watchlist=prior_alert.alert_type == TelegramAlertType.WATCHLIST.value,
+        ),
         symbol_result=symbol_result,
     )
 

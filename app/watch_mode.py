@@ -15,6 +15,7 @@ from app.analytics.portfolio_selection import PortfolioSelectionResult, selected
 from app.analytics.setup_quality import SetupQualityState
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display
+from app.formatters.telegram_signal_formatter import TelegramSignalMessage, format_watchlist_upgraded_message
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
 
 DEFAULT_WATCH_STATE_PATH = Path("scan_runs/watch_state.json")
@@ -365,29 +366,23 @@ def format_watch_activation_alert(symbol_result: ScannerSymbolResult) -> str:
     if trade_idea is None:
         raise WatchModeError("cannot format activation alert without a trade idea")
 
-    mode = _activation_mode(symbol_result)
-    quality = symbol_result.setup_quality
-    quality_text = f"{_quality_grade_text(quality)}/{_quality_score_text(quality)}"
-
-    return "\n".join(
-        (
-            "🚨 Candle Craft Setup Activated",
-            "",
-            f"{symbol_result.symbol} — {mode}",
-            f"Direction: {_display(getattr(trade_idea, 'direction', NA)).upper()}",
-            f"Entry: {_level_text(getattr(trade_idea, 'entry_zone', None))}",
-            f"Stop: {_level_text(getattr(trade_idea, 'stop_loss', None))}",
-            f"TP1: {_take_profit_text(trade_idea, 1)}",
-            f"TP2: {_take_profit_text(trade_idea, 2)}",
-            f"RR: {_display(getattr(trade_idea, 'best_rr', NA))}",
-            f"Quality: {quality_text}",
-            f"Invalidation: {_display(getattr(trade_idea, 'invalidation', NA))}",
-            f"Reason: {_short_reason(getattr(trade_idea, 'reason_for_trade', NA))}",
-            f"Risk warning: {_display(getattr(trade_idea, 'risk_warning', NA))}",
-            "",
-            "Candle Craft | Signal. Structure. Execution.",
-        )
+    message = TelegramSignalMessage(
+        symbol=symbol_result.symbol,
+        direction=getattr(trade_idea, "direction", NA),
+        mode=_activation_mode(symbol_result),
+        quality=_quality_grade_text(symbol_result.setup_quality),
+        entry_low=_level_field(getattr(trade_idea, "entry_zone", None), "low"),
+        entry_high=_level_field(getattr(trade_idea, "entry_zone", None), "high"),
+        stop_loss=_level_field(getattr(trade_idea, "stop_loss", None), "price"),
+        tp1=_take_profit_price(trade_idea, 1),
+        tp2=_take_profit_price(trade_idea, 2),
+        tp3=_take_profit_price(trade_idea, 3),
+        planned_rr=getattr(trade_idea, "best_rr", NA),
+        structure_reason=_short_reason(getattr(trade_idea, "reason_for_trade", NA)),
+        invalidation_reason=getattr(trade_idea, "invalidation", NA),
+        upgraded_from_watchlist=True,
     )
+    return format_watchlist_upgraded_message(message)
 
 
 def build_watch_activation_alert_manifest(
@@ -617,6 +612,20 @@ def _take_profit_text(trade_idea: Any, target_number: int) -> str:
     if index >= len(targets):
         return NA
     return _display(getattr(targets[index], "price", NA))
+
+
+def _take_profit_price(trade_idea: Any, target_number: int) -> Any:
+    targets = getattr(trade_idea, "take_profits", ())
+    if not isinstance(targets, Sequence):
+        return NA
+    index = target_number - 1
+    if index >= len(targets):
+        return NA
+    return getattr(targets[index], "price", NA)
+
+
+def _level_field(level: Any, field: str) -> Any:
+    return getattr(level, field, NA)
 
 
 def _short_reason(value: Any) -> str:

@@ -16,35 +16,16 @@ TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 def format_trade_alert(trade_idea: Any) -> str:
     """Format a structured trade idea into a plain-text alert message."""
 
-    data = _as_mapping(trade_idea)
-    symbol = _value_text(data.get("symbol"))
+    from app.formatters.telegram_signal_formatter import (
+        format_premium_public_signal_message,
+        format_public_no_trade_message,
+    )
 
-    lines = [
-        f"🟢 Trade Setup Alert — {symbol}",
-        "",
-        f"Direction: {_value_text(data.get('direction'))}",
-        f"Exchange: {_value_text(data.get('exchange'))}",
-        f"Market type: {_value_text(data.get('market_type'))}",
-        f"Timeframe: {_value_text(data.get('timeframe'))}",
-        f"Setup type: {_value_text(data.get('setup_type'))}",
-        f"Status: {_value_text(data.get('status'))}",
-        f"Entry zone: {_format_level(data.get('entry_zone'))}",
-        f"Stop loss: {_format_level(data.get('stop_loss'))}",
-        f"Invalidation: {_value_text(data.get('invalidation'))}",
-        f"Take profits: {_format_take_profits(data.get('take_profits'))}",
-        f"Best R:R: {_value_text(data.get('best_rr'))}",
-        f"Confidence score: {_value_text(data.get('confidence_score'))}",
-        f"Grade: {_value_text(data.get('grade'))}",
-        f"Reason for trade: {_value_text(data.get('reason_for_trade'))}",
-        f"Confirmed facts: {_format_sequence(data.get('confirmed_facts'))}",
-        f"Missing data: {_format_sequence(data.get('missing_data'))}",
-        f"Unverified data: {_format_sequence(data.get('unverified_data'))}",
-        f"Cancel condition: {_value_text(data.get('cancel_condition'))}",
-        f"Risk warning: {_risk_warning(data.get('risk_warning'))}",
-        "",
-        CANDLE_CRAFT_SIGNATURE,
-    ]
-    return "\n".join(lines)
+    data = _as_mapping(trade_idea)
+    message = _signal_message_from_trade_idea(data)
+    if _is_rejected_trade_idea(data):
+        return format_public_no_trade_message(message, _rejection_reason(data))
+    return format_premium_public_signal_message(message)
 
 
 def split_message(message: str, max_length: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> tuple[str, ...]:
@@ -150,6 +131,79 @@ def _risk_warning(value: Any) -> str:
     if text == NA:
         return DEFAULT_RISK_WARNING
     return text
+
+
+def _signal_message_from_trade_idea(data: Mapping[str, Any]) -> Any:
+    from app.formatters.telegram_signal_formatter import TelegramSignalMessage
+
+    return TelegramSignalMessage(
+        symbol=data.get("symbol", NA),
+        direction=data.get("direction", NA),
+        mode=data.get("setup_type", NA),
+        quality=data.get("grade", NA),
+        entry_low=_level_field(data.get("entry_zone"), "low"),
+        entry_high=_level_field(data.get("entry_zone"), "high"),
+        stop_loss=_level_field(data.get("stop_loss"), "price"),
+        tp1=_take_profit_price(data.get("take_profits"), 1),
+        tp2=_take_profit_price(data.get("take_profits"), 2),
+        tp3=_take_profit_price(data.get("take_profits"), 3),
+        planned_rr=data.get("best_rr", NA),
+        structure_reason=_first_value(
+            data.get("reason_for_trade", NA),
+            _format_sequence(data.get("confirmed_facts")),
+        ),
+        invalidation_reason=data.get("invalidation", NA),
+    )
+
+
+def _is_rejected_trade_idea(data: Mapping[str, Any]) -> bool:
+    if _value_text(data.get("status")).lower() == "rejected":
+        return True
+    gate = _to_plain(data.get("quality_gate_result"))
+    if isinstance(gate, Mapping) and gate.get("passed") is False:
+        return True
+    return False
+
+
+def _rejection_reason(data: Mapping[str, Any]) -> str:
+    gate = _to_plain(data.get("quality_gate_result"))
+    if isinstance(gate, Mapping):
+        violations = gate.get("violations")
+        if isinstance(violations, Sequence) and not isinstance(violations, (str, bytes)):
+            for violation in violations:
+                plain = _to_plain(violation)
+                if isinstance(plain, Mapping):
+                    text = _value_text(plain.get("message"))
+                    if text != NA:
+                        return text
+    return _value_text(data.get("reason_for_trade"))
+
+
+def _level_field(value: Any, field: str) -> Any:
+    plain_value = _to_plain(value)
+    if isinstance(plain_value, Mapping):
+        return plain_value.get(field, NA)
+    return NA
+
+
+def _take_profit_price(value: Any, target_number: int) -> Any:
+    plain_value = _to_plain(value)
+    if not isinstance(plain_value, Sequence) or isinstance(plain_value, (str, bytes)):
+        return NA
+    index = target_number - 1
+    if index >= len(plain_value):
+        return NA
+    target = plain_value[index]
+    if isinstance(target, Mapping):
+        return target.get("price", NA)
+    return target
+
+
+def _first_value(*values: Any) -> Any:
+    for value in values:
+        if _value_text(value) != NA:
+            return value
+    return NA
 
 
 def _value_text(value: Any) -> str:

@@ -9,11 +9,10 @@ from typing import Any
 from app.data.dtos import NA
 
 HEADER_PREFIX = "\U0001F43A\U0001F7E0"
-FOOTER = "\U0001F43A Candle Craft | Signal. Structure. Execution."
+FOOTER = "Candle Craft | Signal. Structure. Execution."
 BULLET = "\u2022"
 RANGE_DASH = "\u2013"
 EM_DASH = "\u2014"
-GREATER_EQUAL = "\u2265"
 DEFAULT_MIN_RR_DISPLAY = Decimal("3")
 
 
@@ -37,10 +36,10 @@ PUBLIC_STATUS_BY_ALERT_TYPE = {
     TelegramAlertType.TP1_HIT: "TP1 HIT",
     TelegramAlertType.TP2_HIT: "TP2 HIT",
     TelegramAlertType.TP3_HIT: "TP3 HIT",
-    TelegramAlertType.SL_HIT: "SL HIT",
+    TelegramAlertType.SL_HIT: "STOP HIT",
     TelegramAlertType.INVALIDATED: "INVALIDATED",
-    TelegramAlertType.EXPIRED: "EXPIRED",
-    TelegramAlertType.NO_LONGER_TRACKING: "NO LONGER TRACKING",
+    TelegramAlertType.EXPIRED: "INVALIDATED",
+    TelegramAlertType.NO_LONGER_TRACKING: "INVALIDATED",
 }
 
 
@@ -49,6 +48,8 @@ class TelegramSignalMessage:
     symbol: Any = NA
     direction: Any = NA
     signal_id: Any = NA
+    mode: Any = NA
+    quality: Any = NA
     watch_zone: Any = NA
     entry_low: Any = NA
     entry_high: Any = NA
@@ -71,6 +72,8 @@ class TelegramSignalMessage:
     price_level: Any = NA
     min_rr: Any = NA
     watchlist_outcome: bool = False
+    upgraded_from_watchlist: bool = False
+    was_watchlist: bool = False
 
 
 def format_telegram_signal_message(
@@ -79,9 +82,9 @@ def format_telegram_signal_message(
 ) -> str:
     normalized = alert_type if isinstance(alert_type, TelegramAlertType) else TelegramAlertType(str(alert_type))
     if normalized == TelegramAlertType.WATCHLIST:
-        return format_watchlist_alert(message)
+        return format_premium_watchlist_message(message)
     if normalized == TelegramAlertType.SIGNAL_CONFIRMED:
-        return format_signal_confirmed_alert(message)
+        return format_premium_public_signal_message(message)
     if normalized == TelegramAlertType.LIMIT_HIT:
         return format_limit_hit_update(message)
     if normalized == TelegramAlertType.TP1_HIT:
@@ -101,429 +104,440 @@ def format_telegram_signal_message(
     raise ValueError(f"Unsupported Telegram alert type: {alert_type}")
 
 
-def format_watchlist_alert(message: TelegramSignalMessage) -> str:
+def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
+    if message.upgraded_from_watchlist:
+        return format_watchlist_upgraded_message(message)
+
+    reason = safe_reason_text(message.structure_reason, message.confluence)
     return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT WATCHLIST",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
+        f"{HEADER_PREFIX} {_signal_title(message)} {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Status:",
-        "WATCHLIST",
+        "The wolf found liquidity.",
         "",
-        "Limit Zone:",
-        _watch_zone(message),
+        f"Bias: {format_direction(message.direction)}",
+        "Status: CONFIRMED",
+        f"Quality: {_quality_display(message.quality)}",
+        f"RR: {format_rr(message.planned_rr)}",
         "",
-        "Current Context:",
-        _display(message.current_context),
+        "\U0001F3AF Trade Map",
+        f"Entry Zone: {format_entry_zone(message)}",
+        f"Stop: {format_price(message.stop_loss)}",
+        *format_tp_lines(message),
         "",
-        "Needs Next:",
-        *_needs_next_lines(message),
+        "\U0001F9E0 Why this setup matters",
+        reason,
+        f"Now we wait for execution inside the limit zone {EM_DASH} no chase.",
         "",
-        "Potential Plan:",
-        f"Entry: {_entry_range(message)}",
-        f"SL: {_price_display(message.stop_loss)}",
-        "Potential Targets:",
-        f"TP1: {_price_display(message.tp1)}",
-        f"TP2: {_price_display(message.tp2)}",
-        f"TP3: {_price_display(message.tp3)}",
-        _watchlist_planned_rr_line(message),
+        "\U0001F6AB Invalid if",
+        safe_invalidation_text(message),
         "",
-        "Invalidation:",
-        _first_display(message.watchlist_invalidation_reason, message.invalidation_reason),
-        "",
-        "Signal ID:",
-        _display(message.signal_id),
-        "",
-        "System:",
-        "Watchlist only. No active signal yet.",
+        "\u26A0\ufe0f Manual execution only. Manage risk.",
         "",
         FOOTER,
     )
 
 
-def format_signal_confirmed_alert(message: TelegramSignalMessage) -> str:
+def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
+    requirements = _confirmation_requirements(message)
+    invalidation_level = _watchlist_invalidation_level(message)
     return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT SIGNAL CONFIRMED",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
+        f"{HEADER_PREFIX} WATCHLIST {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Status:",
-        "CONFIRMED",
+        "The wolf is stalking this one.",
         "",
-        "Entry Zone:",
-        _entry_range(message),
+        f"Bias: {format_direction(message.direction)}",
+        "Status: WATCHLIST",
+        f"Quality: {_quality_display(message.quality)}",
+        f"Potential RR: {format_rr(message.planned_rr)}",
         "",
-        "Stop Loss:",
-        _price_display(message.stop_loss),
+        "\U0001F440 What we want to see",
+        requirements,
         "",
-        "Take Profits:",
-        f"TP1: {_price_display(message.tp1)}",
-        f"TP2: {_price_display(message.tp2)}",
-        f"TP3: {_price_display(message.tp3)}",
+        "\U0001F4CD Area of Interest",
+        f"Zone: {format_entry_zone(message)}",
+        f"Invalid below/above: {invalidation_level}",
         "",
-        "Planned RR:",
-        _rr_with_unit(message.planned_rr),
-        "",
-        "Structure:",
-        _display(message.structure_reason),
-        "",
-        "Confluence:",
-        _display(message.confluence),
-        "",
-        "Invalidation:",
-        _display(message.invalidation_reason),
-        "",
-        "Signal ID:",
-        _display(message.signal_id),
-        "",
-        "System:",
-        "Alert only. Trade managed manually by Adam.",
+        "No confirmation = no trade.",
+        "We let the market come to us.",
         "",
         FOOTER,
     )
+
+
+def format_watchlist_upgraded_message(message: TelegramSignalMessage) -> str:
+    return _join(
+        f"{HEADER_PREFIX} WATCHLIST UPGRADED {EM_DASH} {format_symbol(message.symbol)}",
+        "",
+        "The wolf has confirmation.",
+        "",
+        "Previous state: WATCHLIST",
+        "New state: CONFIRMED SIGNAL",
+        f"Bias: {format_direction(message.direction)}",
+        f"Quality: {_quality_display(message.quality)}",
+        f"RR: {format_rr(message.planned_rr)}",
+        "",
+        "What changed:",
+        safe_reason_text(message.structure_reason, message.confluence),
+        "",
+        "\U0001F3AF Trade Map",
+        f"Entry Zone: {format_entry_zone(message)}",
+        f"Stop: {format_price(message.stop_loss)}",
+        *format_tp_lines(message),
+        "",
+        "\U0001F6AB Invalid if",
+        safe_invalidation_text(message),
+        "",
+        "\u26A0\ufe0f Manual execution only. Manage risk.",
+        "",
+        "Now it becomes execution-ready.",
+        "",
+        FOOTER,
+    )
+
+
+def format_premium_lifecycle_update_message(
+    alert_type: TelegramAlertType | str,
+    message: TelegramSignalMessage,
+) -> str:
+    return format_telegram_signal_message(alert_type, message)
 
 
 def format_limit_hit_update(message: TelegramSignalMessage) -> str:
-    if message.watchlist_outcome:
-        return _join(
-            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-            f"{_display(message.symbol)} | {_display(message.direction)}",
-            "",
-            "Status:",
-            "LIMIT ZONE HIT",
-            "",
-            "Signal ID:",
-            _display(message.signal_id),
-            "",
-            "Update:",
-            "Price has reached the planned watchlist Limit Zone.",
-            "",
-            "Limit Zone:",
-            _watch_zone(message),
-            "",
-            "System:",
-            "Watchlist tracking update. No order was placed by the system.",
-            "",
-            FOOTER,
-        )
     return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
+        f"{HEADER_PREFIX} LIMIT ZONE HIT {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Status:",
-        "LIMIT ZONE HIT",
+        "Price entered our hunting zone.",
         "",
-        "Signal ID:",
-        _display(message.signal_id),
+        f"Signal: {format_direction(message.direction)}",
+        f"Entry Zone: {format_entry_zone(message)}",
+        "Current Status: ACTIVE MONITORING",
         "",
-        "Entry Zone:",
-        _entry_range(message),
+        "Now we watch reaction:",
+        f"{BULLET} Hold zone = setup stays alive",
+        f"{BULLET} Weak bounce = caution",
+        f"{BULLET} Acceptance beyond stop = invalidation risk",
         "",
-        "Update:",
-        "Price has reached the planned entry zone.",
-        "",
-        "Current State:",
-        "Setup remains valid while price respects the entry structure and invalidation level.",
-        "",
-        "Risk Level:",
-        f"SL: {_price_display(message.stop_loss)}",
-        "",
-        "Targets:",
-        f"TP1: {_price_display(message.tp1)}",
-        f"TP2: {_price_display(message.tp2)}",
-        f"TP3: {_price_display(message.tp3)}",
-        "",
-        "System:",
-        "Price alert only. No order was placed by the system.",
+        "No panic. No chase.",
+        "Let the structure speak.",
         "",
         FOOTER,
     )
 
 
 def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
-    if message.watchlist_outcome:
-        return _join(
-            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-            f"{_display(message.symbol)} | {_display(message.direction)}",
-            "",
-            "Status:",
-            "TP1 HIT",
-            "",
-            "Signal ID:",
-            _display(message.signal_id),
-            "",
-            "Result:",
-            "First target reached from the watchlist plan.",
-            "",
-            "Target Level:",
-            _price_display(message.tp1),
-            "",
-            "Observed Price:",
-            _price_display(message.price_level),
-            "",
-            "System:",
-            "Watchlist tracking update. Manual trade management only.",
-            "",
-            FOOTER,
-        )
     return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
+        f"{HEADER_PREFIX} TP1 HIT {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Status:",
-        "TP1 HIT",
+        "First target secured.",
         "",
-        "Signal ID:",
-        _display(message.signal_id),
+        f"Direction: {format_direction(message.direction)}",
+        f"TP1: {format_price(message.tp1)}",
+        "Status: PARTIAL WIN",
         "",
-        "Result:",
-        "First target reached.",
+        "Nice execution from the zone.",
+        "Risk should now be reduced according to your own plan.",
         "",
-        "Price Level:",
-        _price_display(message.tp1),
+        "Next levels:",
+        f"TP2: {format_price(message.tp2)}",
+        f"TP3: {format_price(message.tp3)}",
         "",
-        "Current State:",
-        "Setup remains active while structure holds.",
-        "",
-        "Next Targets:",
-        f"TP2: {_price_display(message.tp2)}",
-        f"TP3: {_price_display(message.tp3)}",
-        "",
-        "Research:",
-        "Outcome saved for performance analysis.",
+        "The wolf eats step by step.",
         "",
         FOOTER,
     )
 
 
 def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
-    if message.watchlist_outcome:
-        return _join(
-            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-            f"{_display(message.symbol)} | {_display(message.direction)}",
-            "",
-            "Status:",
-            "TP2 HIT",
-            "",
-            "Signal ID:",
-            _display(message.signal_id),
-            "",
-            "Result:",
-            "Second target reached from the watchlist plan.",
-            "",
-            "Target Level:",
-            _price_display(message.tp2),
-            "",
-            "Observed Price:",
-            _price_display(message.price_level),
-            "",
-            "System:",
-            "Watchlist tracking update. Manual trade management only.",
-            "",
-            FOOTER,
-        )
     return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
+        f"{HEADER_PREFIX} TP2 HIT {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Status:",
-        "TP2 HIT",
+        "The move is developing cleanly.",
         "",
-        "Signal ID:",
-        _display(message.signal_id),
+        f"Direction: {format_direction(message.direction)}",
+        f"TP2: {format_price(message.tp2)}",
+        "Status: STRONG FOLLOW-THROUGH",
         "",
-        "Result:",
-        "Second target reached.",
+        "Market respected the setup and expanded from our zone.",
         "",
-        "Price Level:",
-        _price_display(message.tp2),
+        "Remaining target:",
+        f"TP3: {format_price(message.tp3)}",
         "",
-        "Current State:",
-        "Final target remains active while structure holds.",
-        "",
-        "Next Target:",
-        f"TP3: {_price_display(message.tp3)}",
-        "",
-        "Research:",
-        "Outcome saved for performance analysis.",
+        "Discipline pays better than chasing.",
         "",
         FOOTER,
     )
 
 
 def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
-    if message.watchlist_outcome:
-        return _join(
-            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-            f"{_display(message.symbol)} | {_display(message.direction)}",
-            "",
-            "Status:",
-            "TP3 HIT",
-            "",
-            "Signal ID:",
-            _display(message.signal_id),
-            "",
-            "Result:",
-            "Final target reached from the watchlist plan.",
-            "",
-            "Target Level:",
-            _price_display(message.tp3),
-            "",
-            "Observed Price:",
-            _price_display(message.price_level),
-            "",
-            "Lifecycle:",
-            "Watchlist outcome tracking completed.",
-            "",
-            "System:",
-            "Watchlist tracking update. Manual trade management only.",
-            "",
-            FOOTER,
-        )
     return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
+        f"{HEADER_PREFIX} TP3 HIT {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Status:",
-        "TP3 HIT",
+        "Full target sequence completed.",
         "",
-        "Signal ID:",
-        _display(message.signal_id),
+        f"Direction: {format_direction(message.direction)}",
+        f"Final Target: {format_price(message.tp3)}",
+        "Status: TRADE COMPLETE",
         "",
-        "Result:",
-        "Final target reached.",
+        "Clean setup. Clean execution. Clean finish.",
         "",
-        "Price Level:",
-        _price_display(message.tp3),
+        "The wolf tracked it from liquidity to expansion.",
         "",
-        "Lifecycle:",
-        "Signal completed.",
+        FOOTER,
+    )
+
+
+def format_trade_complete_update(message: TelegramSignalMessage) -> str:
+    return _join(
+        f"{HEADER_PREFIX} TRADE COMPLETE {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Research:",
-        "Outcome saved for performance analysis.",
+        "Full target sequence completed.",
+        "",
+        f"Direction: {format_direction(message.direction)}",
+        "Status: TRADE COMPLETE",
+        "",
+        "Clean setup. Clean execution. Clean finish.",
+        "",
+        "The wolf tracked it from liquidity to expansion.",
         "",
         FOOTER,
     )
 
 
 def format_sl_hit_update(message: TelegramSignalMessage) -> str:
-    if message.watchlist_outcome:
-        return _join(
-            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-            f"{_display(message.symbol)} | {_display(message.direction)}",
-            "",
-            "Status:",
-            "SL HIT",
-            "",
-            "Signal ID:",
-            _display(message.signal_id),
-            "",
-            "Result:",
-            "Stop level reached from the watchlist plan.",
-            "",
-            "Stop Level:",
-            _price_display(message.stop_loss),
-            "",
-            "Observed Price:",
-            _price_display(message.price_level),
-            "",
-            "Lifecycle:",
-            "Watchlist outcome tracking closed.",
-            "",
-            "System:",
-            "Watchlist tracking update. Manual trade management only.",
-            "",
-            FOOTER,
-        )
     return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
+        f"{HEADER_PREFIX} STOP HIT {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Status:",
-        "SL HIT",
+        "Setup invalidated.",
         "",
-        "Signal ID:",
-        _display(message.signal_id),
+        f"Direction: {format_direction(message.direction)}",
+        f"Stop: {format_price(message.stop_loss)}",
+        "Status: CLOSED",
         "",
-        "Result:",
-        "Stop level reached.",
+        "The market failed to hold the structure, so the idea is no longer valid.",
         "",
-        "Price Level:",
-        _price_display(message.stop_loss),
-        "",
-        "Lifecycle:",
-        "Signal closed.",
-        "",
-        "Research:",
-        "Outcome saved for failure analysis.",
+        "This is part of the process.",
+        "Small controlled losses protect us for the next A-grade opportunity.",
         "",
         FOOTER,
     )
 
 
 def format_invalidated_update(message: TelegramSignalMessage) -> str:
-    return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT INVALIDATION",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
-        "",
-        "Status:",
-        "INVALIDATED",
-        "",
-        "Signal ID:",
-        _display(message.signal_id),
-        "",
-        "Reason:",
-        _display(message.invalidation_reason),
-        "",
-        "System:",
-        "Watchlist removed from active tracking.",
-        "",
-        FOOTER,
-    )
+    if message.was_watchlist:
+        return _format_watchlist_invalidated_update(message)
+    return _format_signal_invalidated_update(message)
 
 
 def format_expired_update(message: TelegramSignalMessage) -> str:
-    return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
-        "",
-        "Status:",
-        "EXPIRED",
-        "",
-        "Signal ID:",
-        _display(message.signal_id),
-        "",
-        "Reason:",
-        _display(message.invalidation_reason),
-        "",
-        "System:",
-        "Watchlist expired. No active signal.",
-        "",
-        FOOTER,
-    )
+    return _format_watchlist_invalidated_update(message)
 
 
 def format_no_longer_tracking_update(message: TelegramSignalMessage) -> str:
+    return _format_watchlist_invalidated_update(message)
+
+
+def format_public_no_trade_message(message: TelegramSignalMessage, reason: Any = NA) -> str:
     return _join(
-        f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
-        f"{_display(message.symbol)} | {_display(message.direction)}",
+        f"{HEADER_PREFIX} NO TRADE {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Status:",
-        "NO LONGER TRACKING",
+        "The wolf is watching, but not entering.",
         "",
-        "Signal ID:",
-        _display(message.signal_id),
+        "Status: NO VALID SETUP",
+        f"Reason: {safe_public_rejection_summary(reason)}",
         "",
-        "Reason:",
-        _display(message.invalidation_reason),
+        "This one does not meet our quality rules yet.",
         "",
-        "System:",
-        "Watchlist removed from active tracking.",
+        "No confirmation = no trade.",
+        "We protect the edge by saying no.",
         "",
         FOOTER,
     )
 
 
+def _format_watchlist_invalidated_update(message: TelegramSignalMessage) -> str:
+    return _join(
+        f"{HEADER_PREFIX} WATCHLIST INVALIDATED {EM_DASH} {format_symbol(message.symbol)}",
+        "",
+        "The wolf walks away.",
+        "",
+        f"Bias was: {format_direction(message.direction)}",
+        "Status: INVALIDATED",
+        "",
+        "Price failed the required structure and no longer fits our setup rules.",
+        "",
+        "No forced trades.",
+        "No revenge entries.",
+        "No weak confirmations.",
+        "",
+        "We wait for the next clean opportunity.",
+        "",
+        FOOTER,
+    )
+
+
+def _format_signal_invalidated_update(message: TelegramSignalMessage) -> str:
+    return _join(
+        f"{HEADER_PREFIX} SIGNAL INVALIDATED {EM_DASH} {format_symbol(message.symbol)}",
+        "",
+        "The setup is cancelled.",
+        "",
+        f"Bias was: {format_direction(message.direction)}",
+        "Status: INVALIDATED",
+        "",
+        "Price failed the required structure before clean execution.",
+        "",
+        "No chase.",
+        "No forced entry.",
+        "The setup no longer meets Candle Craft rules.",
+        "",
+        FOOTER,
+    )
+
+
+def format_watchlist_alert(message: TelegramSignalMessage) -> str:
+    return format_premium_watchlist_message(message)
+
+
+def format_signal_confirmed_alert(message: TelegramSignalMessage) -> str:
+    return format_premium_public_signal_message(message)
+
+
+def format_symbol(value: Any) -> str:
+    text = _display(value)
+    return text.upper() if text != NA else NA
+
+
+def format_direction(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    key = text.strip().lower()
+    if key in {"bullish", "buy", "long"}:
+        return "LONG"
+    if key in {"bearish", "sell", "short"}:
+        return "SHORT"
+    return text.upper()
+
+
+def format_rr(value: Any) -> str:
+    return _rr_with_unit(value)
+
+
+def format_price(value: Any) -> str:
+    return _price_display(value)
+
+
+def format_entry_zone(message: TelegramSignalMessage) -> str:
+    return _watch_zone(message) if _watch_zone(message) != NA else _entry_range(message)
+
+
+def format_tp_lines(message: TelegramSignalMessage) -> tuple[str, str, str]:
+    return (
+        f"TP1: {format_price(message.tp1)}",
+        f"TP2: {format_price(message.tp2)}",
+        f"TP3: {format_price(message.tp3)}",
+    )
+
+
+def safe_reason_text(*values: Any) -> str:
+    for value in values:
+        text = _safe_public_text(value)
+        if text != NA:
+            return text
+    return NA
+
+
+def safe_invalidation_text(message: TelegramSignalMessage) -> str:
+    text = _safe_public_text(_first_display(message.invalidation_reason, message.watchlist_invalidation_reason))
+    if text != NA:
+        return text
+    stop = format_price(message.stop_loss)
+    direction = _direction_key(message.direction)
+    if stop == NA:
+        return NA
+    if direction == "long":
+        return f"Price accepts below {stop}."
+    if direction == "short":
+        return f"Price accepts above {stop}."
+    return f"Price accepts beyond {stop}."
+
+
+def safe_public_rejection_summary(value: Any) -> str:
+    text = _safe_public_text(value)
+    if text != NA:
+        return text
+    key = _status_key(value)
+    if (
+        key in {
+            "missing_confirmation_structure_shift",
+            "missing_structure_shift",
+            "confirmation_missing",
+            "no_bos_choch",
+        }
+        or "missing_confirmation" in key
+        or "confirmation_structure" in key
+    ):
+        return "Confirmation is not clean yet."
+    if "rr" in key or "risk_reward" in key:
+        return "Reward does not justify the risk yet."
+    if "score" in key or "quality" in key or "gate" in key:
+        return "Quality is not strong enough yet."
+    if "target" in key:
+        return "Target path is not clean enough yet."
+    if "regime" in key:
+        return "Market conditions are not supportive enough yet."
+    if "data" in key:
+        return "Required data is not clean enough yet."
+    return NA
+
+
+def format_telegram_price(value: Any) -> str:
+    return format_price(value)
+
+
+def format_telegram_rr(value: Any) -> str:
+    return format_rr(value)
+
+
+def _signal_title(message: TelegramSignalMessage) -> str:
+    mode = _mode_display(message.mode)
+    return "SIGNAL" if mode == NA else f"{mode} SIGNAL"
+
+
+def _mode_display(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    key = text.lower()
+    for mode in ("scalp", "swing", "challenge"):
+        if key == mode or key.endswith(f"_{mode}") or f"_{mode}_" in key:
+            return mode.upper()
+    return NA
+
+
+def _quality_display(value: Any) -> str:
+    text = _display(value)
+    return text.upper() if text != NA else NA
+
+
+def _confirmation_requirements(message: TelegramSignalMessage) -> str:
+    lines = _needs_next_lines(message)
+    if lines:
+        return "\n".join(lines)
+    text = safe_reason_text(message.confirmation_needed, message.current_context)
+    return text if text != NA else NA
+
+
+def _watchlist_invalidation_level(message: TelegramSignalMessage) -> str:
+    stop = format_price(message.stop_loss)
+    if stop != NA:
+        return stop
+    invalidation = safe_invalidation_text(message)
+    return invalidation if invalidation != NA else NA
+
+
 def _entry_range(message: TelegramSignalMessage) -> str:
-    return f"{_price_display(message.entry_low)} {RANGE_DASH} {_price_display(message.entry_high)}"
+    return f"{format_price(message.entry_low)} {RANGE_DASH} {format_price(message.entry_high)}"
 
 
 def _watch_zone(message: TelegramSignalMessage) -> str:
@@ -536,35 +550,12 @@ def _needs_next_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     values = message.needs_next
     if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
         for value in values:
-            text = _display(value)
+            text = _safe_public_text(value)
             if text != NA and _chart_only_need(text):
-                lines.append(text)
+                lines.append(f"{BULLET} {text}")
             if len(lines) == 3:
                 break
-    if not lines:
-        lines.extend(_fallback_needs_next(message))
-    return tuple(f"{index}. {line}" for index, line in enumerate(lines, start=1))
-
-
-def _fallback_needs_next(message: TelegramSignalMessage) -> tuple[str, str, str]:
-    side = _display(message.direction).lower()
-    if side == "long":
-        return (
-            "Price must trade into the Limit Zone.",
-            "Limit Zone must hold as support after the pullback.",
-            "Bullish structure must remain valid above the invalidation level.",
-        )
-    if side == "short":
-        return (
-            "Price must trade into the Limit Zone.",
-            "Limit Zone must hold as resistance after the pullback.",
-            "Bearish structure must remain valid below the invalidation level.",
-        )
-    return (
-        "Price must interact with the Limit Zone.",
-        "Structure must remain valid.",
-        "Invalidation level must hold.",
-    )
+    return tuple(lines)
 
 
 def _chart_only_need(value: str) -> bool:
@@ -580,14 +571,43 @@ def _chart_only_need(value: str) -> bool:
         "quality score",
         "final confluence threshold",
         "scanner threshold",
-        "grade",
         "hard rejection",
         "required threshold",
         "quality gate",
         "final quality",
         "core engine",
+        "first_failed_gate",
+        "strategy_diagnostics",
     )
     return "rr" not in tokens and not any(fragment in text for fragment in forbidden)
+
+
+def _safe_public_text(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    lowered = text.lower()
+    if (
+        "decimal(" in lowered
+        or "strategy_diagnostics" in lowered
+        or "first_failed_gate" in lowered
+        or "missing_structure_shift" in lowered
+        or "missing_confirmation_structure_shift" in lowered
+        or "hard rejection" in lowered
+        or "risk/reward" in lowered
+        or "opportunity score" in lowered
+        or "quality score" in lowered
+        or "quality gate" in lowered
+        or "below minimum" in lowered
+        or "below 80" in lowered
+        or "failed gate" in lowered
+        or "gate failed" in lowered
+        or "{" in text
+        or "}" in text
+        or lowered in {"true", "false"}
+    ):
+        return NA
+    return text if text.endswith((".", "!", "?")) else f"{text}."
 
 
 def _first_display(*values: Any) -> str:
@@ -618,14 +638,6 @@ def _display(value: Any) -> str:
         return NA
     text = " ".join(str(value).split())
     return text if text else NA
-
-
-def format_telegram_price(value: Any) -> str:
-    return _price_display(value)
-
-
-def format_telegram_rr(value: Any) -> str:
-    return _rr_with_unit(value)
 
 
 def _price_display(value: Any) -> str:
@@ -689,40 +701,6 @@ def _decimal_value(value: Any) -> Decimal | None:
     return number if number.is_finite() else None
 
 
-def _watchlist_planned_rr_line(message: TelegramSignalMessage) -> str:
-    rr = _rr_with_unit(message.planned_rr)
-    if rr == NA:
-        if _watchlist_has_trackable_price_level(message):
-            return f"Planned RR: {NA} {EM_DASH} final RR must validate before confirmation."
-        return f"Planned RR: {NA}"
-
-    planned_rr = _decimal_value(message.planned_rr)
-    min_rr_value = _decimal_value(message.min_rr) or DEFAULT_MIN_RR_DISPLAY
-    min_rr = _rr_display(min_rr_value)
-    if planned_rr is not None and min_rr_value is not None and planned_rr < min_rr_value:
-        return (
-            f"Planned RR: {rr} {EM_DASH} watchlist only, final RR must improve "
-            f"to {GREATER_EQUAL}{min_rr}R before confirmation."
-        )
-    return f"Planned RR: {rr}"
-
-
-def _watchlist_has_trackable_price_level(message: TelegramSignalMessage) -> bool:
-    if _price_range_text(message.watch_zone) != NA:
-        return True
-    return any(
-        _price_display(value) != NA
-        for value in (
-            message.entry_low,
-            message.entry_high,
-            message.stop_loss,
-            message.tp1,
-            message.tp2,
-            message.tp3,
-        )
-    )
-
-
 def _rr_display(value: Any) -> str:
     number = _decimal_value(value)
     if number is None:
@@ -737,23 +715,57 @@ def _rr_with_unit(value: Any) -> str:
     return NA if text == NA else f"{text}R"
 
 
+def _direction_key(value: Any) -> str:
+    text = _display(value).lower()
+    if text in {"long", "bullish", "buy"}:
+        return "long"
+    if text in {"short", "bearish", "sell"}:
+        return "short"
+    return ""
+
+
+def _status_key(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return ""
+    key = text.lower().strip().replace("-", "_").replace(" ", "_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key.strip("_")
+
+
 __all__ = [
     "FOOTER",
     "HEADER_PREFIX",
     "PUBLIC_STATUS_BY_ALERT_TYPE",
     "TelegramAlertType",
     "TelegramSignalMessage",
+    "format_entry_zone",
     "format_expired_update",
     "format_invalidated_update",
     "format_limit_hit_update",
     "format_no_longer_tracking_update",
+    "format_premium_lifecycle_update_message",
+    "format_premium_public_signal_message",
+    "format_premium_watchlist_message",
+    "format_price",
+    "format_public_no_trade_message",
     "format_signal_confirmed_alert",
     "format_sl_hit_update",
+    "format_symbol",
+    "format_direction",
+    "format_rr",
     "format_telegram_signal_message",
     "format_telegram_price",
     "format_telegram_rr",
     "format_tp1_hit_update",
     "format_tp2_hit_update",
     "format_tp3_hit_update",
+    "format_trade_complete_update",
+    "format_tp_lines",
     "format_watchlist_alert",
+    "format_watchlist_upgraded_message",
+    "safe_invalidation_text",
+    "safe_public_rejection_summary",
+    "safe_reason_text",
 ]

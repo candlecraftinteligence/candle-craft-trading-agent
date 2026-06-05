@@ -17,6 +17,10 @@ from app.formatters.telegram_signal_formatter import (
     HEADER_PREFIX as TELEGRAM_SIGNAL_HEADER_PREFIX,
     TelegramAlertType,
     TelegramSignalMessage,
+    format_premium_lifecycle_update_message,
+    format_premium_public_signal_message,
+    format_premium_watchlist_message,
+    format_public_no_trade_message,
     format_telegram_signal_message,
 )
 
@@ -35,5 +39,9 @@ __all__ = [
     "TELEGRAM_SIGNAL_HEADER_PREFIX",
     "TelegramAlertType",
     "TelegramSignalMessage",
+    "format_premium_lifecycle_update_message",
+    "format_premium_public_signal_message",
+    "format_premium_watchlist_message",
+    "format_public_no_trade_message",
     "format_telegram_signal_message",
 ]
