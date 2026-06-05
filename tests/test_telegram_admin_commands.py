@@ -17,6 +17,7 @@ from app.telegram_admin import (
     TelegramAdminConfig,
     process_telegram_admin_commands,
 )
+from app.telegram_admin.active_watchlists import WATCHLIST_DASHBOARD_FOOTER
 from app.telegram_admin.commands import (
     ADMIN_CALLBACK_COMMANDS,
     ADMIN_MENU_BUTTON_CALLBACKS,
@@ -28,6 +29,8 @@ from app.telegram_admin.commands import (
     PUBLIC_MENU_BUTTON_ROWS,
     SCREEN_FOOTER,
     SCREEN_HEADER,
+    WATCHLIST_BACK_BUTTON_LABEL,
+    WATCHLIST_REFRESH_BUTTON_LABEL,
     WOLF_BRIEFING_PUBLISH_BUTTON_LABEL,
     command_for_callback_data,
     normalize_admin_command,
@@ -341,7 +344,7 @@ def _write_local_logo(project_root: Path) -> Path:
 
 def _assert_shell_screen(text: str) -> None:
     assert text.startswith(SCREEN_HEADER)
-    assert text.endswith(SCREEN_FOOTER)
+    assert text.endswith(SCREEN_FOOTER) or text.endswith(WATCHLIST_DASHBOARD_FOOTER)
 
 
 def _button_labels(reply_markup: Mapping[str, Any] | None) -> list[str]:
@@ -465,6 +468,15 @@ def _assert_public_menu_only(reply_markup: Mapping[str, Any] | None) -> None:
     assert admin_labels.isdisjoint(labels)
 
 
+def _assert_public_watchlist_controls(reply_markup: Mapping[str, Any] | None) -> None:
+    assert reply_markup is not None
+    _assert_inline_markup(reply_markup)
+    assert _button_labels(reply_markup) == [WATCHLIST_REFRESH_BUTTON_LABEL, WATCHLIST_BACK_BUTTON_LABEL]
+    assert _callback_data_values(reply_markup) == ["public:watchlist", "public:menu"]
+    admin_labels = {label for row in ADMIN_MENU_BUTTON_ROWS for label in row}
+    assert admin_labels.isdisjoint(_button_labels(reply_markup))
+
+
 def _assert_public_donate_copy_markup(
     reply_markup: Mapping[str, Any] | None,
     *,
@@ -502,6 +514,13 @@ def _assert_admin_menu_only(reply_markup: Mapping[str, Any] | None) -> None:
     assert labels == expected or labels == ["↩ Back to Menu"]
     callbacks = _callback_data_values(reply_markup)
     assert callbacks == [ADMIN_MENU_BUTTON_CALLBACKS[label] for label in expected] or callbacks == ["admin:menu"]
+
+
+def _assert_admin_watchlist_controls(reply_markup: Mapping[str, Any] | None) -> None:
+    assert reply_markup is not None
+    _assert_inline_markup(reply_markup)
+    assert _button_labels(reply_markup) == [WATCHLIST_REFRESH_BUTTON_LABEL, WATCHLIST_BACK_BUTTON_LABEL]
+    assert _callback_data_values(reply_markup) == ["admin:watchlists", "admin:menu"]
 
 
 def _assert_no_execution_buttons(reply_markup: Mapping[str, Any] | None) -> None:
@@ -693,7 +712,8 @@ def test_empty_states_use_premium_copy_without_developer_wording(tmp_path) -> No
 
     combined = "\n".join(response.text for response in responses)
     assert "No lifecycle alerts available right now." in combined
-    assert "No local watchlist data found yet. Start the scanner first." in combined
+    assert "None right now." in combined
+    assert "No forced trades." in combined
     assert "No safety summary available yet." in combined
     assert "Preset lists:" not in watchlists.text
     assert "Data status: Unverified" not in combined
@@ -843,9 +863,9 @@ def test_watchlists_screen_uses_active_public_watchlist_store(tmp_path) -> None:
     response = service.response_for("/watchlists")
 
     _assert_shell_screen(response.text)
-    assert response.text.startswith(f"{SCREEN_HEADER} ACTIVE WATCHLISTS")
-    assert "No local watchlist data found yet. Start the scanner first." in response.text
-    assert "Manual tracking only. No order execution." in response.text
+    assert response.text.startswith("🐺🟠 WATCHLISTS")
+    assert response.text.count("None right now.") == 3
+    assert "No forced trades." in response.text
     assert "NEARUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
     assert "Preset lists:" not in response.text
@@ -1168,10 +1188,10 @@ def test_public_watchlists_use_active_public_watchlist_store(tmp_path) -> None:
 
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
-    _assert_public_menu_only(response.reply_markup)
-    assert response.text.startswith(f"{SCREEN_HEADER} ACTIVE WATCHLISTS")
-    assert "No local watchlist data found yet. Start the scanner first." in response.text
-    assert "Manual tracking only. No order execution." in response.text
+    _assert_public_watchlist_controls(response.reply_markup)
+    assert response.text.startswith("🐺🟠 WATCHLISTS")
+    assert response.text.count("None right now.") == 3
+    assert "No forced trades." in response.text
     assert "ALERTUSDT" not in response.text
     assert "NEARUSDT" not in response.text
     assert "scan_runs" not in response.text
@@ -1184,8 +1204,9 @@ def test_public_watchlist_empty_state_uses_safe_local_data_copy(tmp_path) -> Non
 
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
-    assert "No local watchlist data found yet. Start the scanner first." in response.text
-    assert "Manual tracking only. No order execution." in response.text
+    _assert_public_watchlist_controls(response.reply_markup)
+    assert response.text.count("None right now.") == 3
+    assert "No forced trades." in response.text
     assert "ALERTUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
     assert "REJECTUSDT" not in response.text
@@ -1452,10 +1473,14 @@ def test_every_public_screen_has_brand_header_footer_and_no_execution_buttons(tm
         response = service.public_response_for(command, public_config=config)
         _assert_shell_screen(response.text)
         assert response.text.startswith(f"{SCREEN_HEADER} ")
-        assert response.text.endswith(SCREEN_FOOTER)
-        if command == "/donate":
+        if command in {"/watchlist", "/watchlists"}:
+            assert response.text.endswith(WATCHLIST_DASHBOARD_FOOTER)
+            _assert_public_watchlist_controls(response.reply_markup)
+        elif command == "/donate":
+            assert response.text.endswith(SCREEN_FOOTER)
             _assert_public_donate_copy_markup(response.reply_markup)
         else:
+            assert response.text.endswith(SCREEN_FOOTER)
             _assert_public_menu_only(response.reply_markup)
         _assert_no_execution_buttons(response.reply_markup)
 
@@ -1477,10 +1502,10 @@ def test_public_admin_reserved_response_does_not_expose_admin_data(tmp_path) -> 
 
     watchlists_response = service.public_response_for("/watchlists")
     _assert_shell_screen(watchlists_response.text)
-    _assert_public_menu_only(watchlists_response.reply_markup)
+    _assert_public_watchlist_controls(watchlists_response.reply_markup)
     _assert_no_execution_buttons(watchlists_response.reply_markup)
-    assert watchlists_response.text.startswith(f"{SCREEN_HEADER} ACTIVE WATCHLISTS")
-    assert "No local watchlist data found yet. Start the scanner first." in watchlists_response.text
+    assert watchlists_response.text.startswith("🐺🟠 WATCHLISTS")
+    assert "No forced trades." in watchlists_response.text
     assert "System Desk" not in watchlists_response.text
     assert "Integrity Desk" not in watchlists_response.text
     assert "Configuration Desk" not in watchlists_response.text
@@ -1811,7 +1836,7 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
     assert len(screen_calls) == len(PUBLIC_CALLBACK_COMMANDS)
     assert "Last Scan" in screen_calls[0]["message"]
     assert "Active Signals" in screen_calls[1]["message"]
-    assert "ACTIVE WATCHLISTS" in screen_calls[2]["message"]
+    assert "WATCHLISTS" in screen_calls[2]["message"]
     assert "Social" in screen_calls[3]["message"]
     assert "Help" in screen_calls[4]["message"]
     assert "Donate" in screen_calls[5]["message"]
@@ -1819,12 +1844,14 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
     assert screen_calls[7]["message"] == "Not configured yet."
     assert screen_calls[8]["message"] == "Not configured yet."
     assert "Welcome to the Moon Trip signal desk" in screen_calls[9]["message"]
-    for call in screen_calls[:5]:
+    for call in (screen_calls[0], screen_calls[1], screen_calls[3], screen_calls[4]):
         _assert_public_menu_only(call["reply_markup"])
         assert _callback_data_values(call["reply_markup"]) == ["public:menu"]
         _assert_public_screen_safe(call["message"])
         assert "System Desk" not in call["message"]
         assert "Integrity Desk" not in call["message"]
+    _assert_public_watchlist_controls(screen_calls[2]["reply_markup"])
+    _assert_public_screen_safe(screen_calls[2]["message"])
     _assert_public_donate_copy_markup(screen_calls[5]["reply_markup"])
     _assert_no_execution_buttons(screen_calls[5]["reply_markup"])
     for call in screen_calls[6:9]:
@@ -1929,7 +1956,7 @@ def test_admin_callbacks_route_to_admin_screens(tmp_path) -> None:
     assert "WOLF BRIEFING PREVIEW" in screen_calls[0]["message"]
     assert "System Desk" in screen_calls[1]["message"]
     assert "Alert Desk" in screen_calls[2]["message"]
-    assert "ACTIVE WATCHLISTS" in screen_calls[3]["message"]
+    assert "WATCHLISTS" in screen_calls[3]["message"]
     assert "Integrity Desk" in screen_calls[4]["message"]
     assert "Configuration Desk" in screen_calls[5]["message"]
     assert "Command Guide" in screen_calls[6]["message"]
@@ -1940,9 +1967,10 @@ def test_admin_callbacks_route_to_admin_screens(tmp_path) -> None:
         "admin:wolf_refresh",
         "admin:wolf_cancel",
     ]
-    for call in screen_calls[1:7]:
+    for call in (screen_calls[1], screen_calls[2], screen_calls[4], screen_calls[5], screen_calls[6]):
         _assert_admin_menu_only(call["reply_markup"])
         assert _callback_data_values(call["reply_markup"]) == ["admin:menu"]
+    _assert_admin_watchlist_controls(screen_calls[3]["reply_markup"])
     _assert_admin_full_menu(screen_calls[7]["reply_markup"])
     records = _read_jsonl(tmp_path / "audit.jsonl")
     assert [record["command"] for record in records] == list(ADMIN_CALLBACK_COMMANDS.values())
@@ -2171,6 +2199,13 @@ def test_public_and_vip_channel_ids_do_not_receive_command_ui(tmp_path) -> None:
             updates=(
                 _update(4, "public-channel", "/status"),
                 _update(5, "vip-channel", "/near"),
+                _update(6, "public-channel", "/watchlists"),
+                {"update_id": 7, "message": {"chat": {"id": "group-chat", "type": "group"}, "text": "/watchlists"}},
+                {
+                    "update_id": 8,
+                    "message": {"chat": {"id": "supergroup-chat", "type": "supergroup"}, "text": "/watchlists"},
+                },
+                {"update_id": 9, "channel_post": {"chat": {"id": "channel-chat", "type": "channel"}, "text": "/watchlists"}},
             ),
         )
     )

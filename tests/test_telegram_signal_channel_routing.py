@@ -67,5 +67,29 @@ def test_start_welcome_update_cannot_send_to_signal_channel_id(tmp_path: Path) -
     assert transport.send_calls == []
 
 
+def test_watchlists_dashboard_cannot_send_to_signal_channel_id(tmp_path: Path) -> None:
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                commands_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_channel_id="signal-channel",
+            ),
+            command_service=TelegramAdminCommandService(project_root=tmp_path),
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_update(2, "signal-channel", "/watchlists"),),
+        )
+    )
+
+    assert result.delivery_status == "ignored_unauthorized"
+    assert transport.send_calls == []
+
+
 def _update(update_id: int, chat_id: str, text: str) -> dict[str, object]:
     return {"update_id": update_id, "message": {"chat": {"id": chat_id}, "text": text}}
