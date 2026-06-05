@@ -9,6 +9,7 @@ from typing import Any
 
 from app.alerts.integrity_manifest import audit_alert_integrity_artifact
 from app.data.dtos import NA
+from app.formatters.telegram_wolf_briefing import build_wolf_briefing_snapshot, format_wolf_briefing
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
 from app.telegram_admin.active_watchlists import (
     ACTIVE_WATCHLIST_DISPLAY_LIMIT,
@@ -17,6 +18,7 @@ from app.telegram_admin.active_watchlists import (
     load_active_public_signals,
     load_active_public_watchlists,
 )
+from app.telegram_admin.wolf_briefing import WolfScanArtifacts, load_latest_db_scan_artifacts
 from app.watchlists.presets import presets_with_counts
 
 SCREEN_HEADER = "🐺🟠"
@@ -29,11 +31,13 @@ PUBLIC_SIGNAL_CHANNEL_COPY = (
 )
 PUBLIC_SIGNAL_CHANNEL_MISSING_COPY = "Signal channel invite link is not configured yet."
 ADMIN_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
-    ("📊 Status", "🚨 Alerts"),
-    ("👁 Watchlist Desk", "🧾 Integrity"),
-    ("⚙️ Config", "❓ Guide"),
+    ("🐺 Wolf Briefing", "📊 Status"),
+    ("🚨 Alerts", "👁 Watchlist Desk"),
+    ("🧾 Integrity", "⚙️ Config"),
+    ("❓ Guide",),
 )
 ADMIN_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
+    "🐺 wolf briefing": "/wolf",
     "📊 status": "/status",
     "🚨 alerts": "/alerts",
     "👁 watchlist desk": "/watchlists",
@@ -43,6 +47,7 @@ ADMIN_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
     "❓ guide": "/guide",
 }
 ADMIN_CALLBACK_COMMANDS: Mapping[str, str] = {
+    "admin:wolf": "/wolf",
     "admin:status": "/status",
     "admin:alerts": "/alerts",
     "admin:watchlists": "/watchlists",
@@ -52,6 +57,7 @@ ADMIN_CALLBACK_COMMANDS: Mapping[str, str] = {
     "admin:menu": "/menu",
 }
 ADMIN_MENU_BUTTON_CALLBACKS: Mapping[str, str] = {
+    "🐺 Wolf Briefing": "admin:wolf",
     "📊 Status": "admin:status",
     "🚨 Alerts": "admin:alerts",
     "👁 Watchlist Desk": "admin:watchlists",
@@ -106,6 +112,7 @@ ADMIN_COMMANDS: tuple[str, ...] = (
     "/start",
     "/menu",
     "/status",
+    "/wolf",
     "/latest",
     "/about",
     "/alerts",
@@ -139,6 +146,7 @@ PUBLIC_ADMIN_RESERVED_COMMANDS: frozenset[str] = frozenset(
         "/audit",
         "/integrity",
         "/config",
+        "/wolf",
         "/near",
         "/blocked",
         "/guide",
@@ -197,6 +205,8 @@ class TelegramAdminCommandService:
             return _admin_response(normalized, "guide", format_help_response())
         if normalized == "/status":
             return self._status_response()
+        if normalized == "/wolf":
+            return self._wolf_briefing_response(admin_config=admin_config)
         if normalized == "/latest":
             return self._latest_alerts_response()
         if normalized == "/about":
@@ -319,6 +329,69 @@ class TelegramAdminCommandService:
             lines.extend(("No sent lifecycle alerts found yet.", "The scanner has not published a public alert."))
         lines.extend(("", "No execution controls are available.", SCREEN_DIVIDER))
         return _admin_response("/latest", "latest", _screen("Latest Alerts", lines))
+
+    def _wolf_briefing_response(self, *, admin_config: Any | None) -> AdminCommandResponse:
+        if not _config_enabled(admin_config, "wolf_briefing_enabled"):
+            text = _screen(
+                "Wolf Briefing",
+                (
+                    "Wolf Briefing is disabled.",
+                    "",
+                    SCREEN_DIVIDER,
+                    "Enable TELEGRAM_WOLF_BRIEFING_ENABLED=true to allow manual admin briefing delivery.",
+                    "No scan, signal, or execution state was changed.",
+                    SCREEN_DIVIDER,
+                ),
+            )
+            return _admin_response(
+                "/wolf",
+                "wolf_briefing_disabled",
+                text,
+                admin_config=admin_config,
+            )
+
+        artifacts = self._wolf_scan_artifacts()
+        active_signals = load_active_public_signals(
+            project_root=self._project_root,
+            database_path=self._database_path,
+            limit=self._max_rows,
+        )
+        active_watchlists = load_active_public_watchlists(
+            project_root=self._project_root,
+            database_path=self._database_path,
+            limit=ACTIVE_WATCHLIST_DISPLAY_LIMIT,
+        )
+        snapshot = build_wolf_briefing_snapshot(
+            manifest_row=artifacts.manifest_row,
+            scan_payload=artifacts.scan_payload,
+            active_signal_items=active_signals.items if active_signals.source_available else (),
+            active_signal_count=active_signals.total if active_signals.source_available else None,
+            watchlist_items=active_watchlists.items if active_watchlists.source_available else (),
+            watchlist_count=active_watchlists.total if active_watchlists.source_available else None,
+            max_focus=self._max_rows,
+        )
+        return _admin_response(
+            "/wolf",
+            "wolf_briefing",
+            format_wolf_briefing(snapshot, max_focus=self._max_rows),
+            run_id=snapshot.run_id,
+            admin_config=admin_config,
+        )
+
+    def _wolf_scan_artifacts(self) -> WolfScanArtifacts:
+        db_artifacts = load_latest_db_scan_artifacts(
+            project_root=self._project_root,
+            database_path=self._database_path,
+        )
+        if db_artifacts.manifest_row is not None or db_artifacts.scan_payload is not None:
+            return db_artifacts
+
+        artifacts = self.latest_scan_artifacts()
+        return WolfScanArtifacts(
+            manifest_row=artifacts.manifest_row,
+            scan_payload=artifacts.scan_payload,
+            source_path=artifacts.scan_path,
+        )
 
     def _public_status_response(self, *, public_config: Any | None) -> AdminCommandResponse:
         manifest_row = self.latest_manifest_row()
@@ -603,6 +676,8 @@ class TelegramAdminCommandService:
                 "Execution: Disabled",
                 f"Command UI: {_enabled_disabled_na(admin_config, 'command_ui_enabled')}",
                 f"Admin reports: {_enabled_disabled_na(admin_config, 'admin_report_enabled')}",
+                f"Wolf Briefing: {_enabled_disabled_na(admin_config, 'wolf_briefing_enabled')}",
+                f"Public Wolf Briefing: {_enabled_disabled_na(admin_config, 'wolf_briefing_public_enabled')}",
                 f"Test mode: {_active_inactive_na(admin_config, 'dry_run')}",
                 "Quality gates: Protected",
                 "Signal filters: Protected",
@@ -858,6 +933,9 @@ def format_start_response() -> str:
             "Manual execution. Quality gates protected.",
             "",
             SCREEN_DIVIDER,
+            "🐺 Wolf Briefing",
+            "Current market mood, active signals, watchlist, and near-miss focus.",
+            "",
             "📊 System Desk",
             "Engine health, scan status, and safety mode.",
             "",
@@ -1083,6 +1161,9 @@ def format_help_response() -> str:
             "",
             "/status",
             "View system health and scan state.",
+            "",
+            "/wolf",
+            "View the latest Wolf Briefing.",
             "",
             "/alerts",
             "View latest lifecycle alerts.",
@@ -2164,6 +2245,12 @@ def _config_bool(config: Any | None, name: str) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return UNVERIFIED
+
+
+def _config_enabled(config: Any | None, name: str) -> bool:
+    if config is None:
+        return False
+    return bool(getattr(config, name, False))
 
 
 def _config_presence(config: Any | None, name: str) -> str:

@@ -43,6 +43,8 @@ class TelegramAdminConfig:
     public_channel_id: str | None = None
     signal_channel_invite_link: str | None = None
     vip_channel_id: str | None = None
+    wolf_briefing_enabled: bool = False
+    wolf_briefing_public_enabled: bool = False
     public_logo_path: str | None = None
     public_logo_url: str | None = None
     x_url: str | None = None
@@ -77,6 +79,10 @@ class TelegramAdminConfig:
                 getattr(settings, "telegram_signal_channel_invite_link", None)
             ),
             vip_channel_id=_clean_optional(getattr(settings, "telegram_vip_channel_id", None)),
+            wolf_briefing_enabled=bool(getattr(settings, "telegram_wolf_briefing_enabled", False)),
+            wolf_briefing_public_enabled=bool(
+                getattr(settings, "telegram_wolf_briefing_public_enabled", False)
+            ),
             public_logo_path=_clean_optional(getattr(settings, "candle_craft_public_logo_path", None)),
             public_logo_url=_clean_optional(getattr(settings, "candle_craft_public_logo_url", None)),
             x_url=_clean_optional(getattr(settings, "candle_craft_x_url", None)),

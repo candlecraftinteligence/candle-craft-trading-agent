@@ -613,8 +613,8 @@ def test_start_response_contains_admin_desk_welcome_and_command_list(tmp_path) -
             assert label.split(maxsplit=1)[0] in response.text
     _assert_admin_full_menu(response.reply_markup)
     _assert_no_execution_buttons(response.reply_markup)
-    assert response.reply_markup["inline_keyboard"][0][0]["text"] == "📊 Status"
-    assert response.reply_markup["inline_keyboard"][0][0]["callback_data"] == "admin:status"
+    assert response.reply_markup["inline_keyboard"][0][0]["text"] == "🐺 Wolf Briefing"
+    assert response.reply_markup["inline_keyboard"][0][0]["callback_data"] == "admin:wolf"
     assert "No execution buttons" in response.text
     assert "Your market-structure command center." in response.text
     assert "Manual execution. Quality gates protected." in response.text
@@ -630,12 +630,15 @@ def test_help_response_lists_commands_and_safety_note(tmp_path) -> None:
     assert response.text.startswith(f"{SCREEN_HEADER} Command Guide")
     assert "/status" in response.text
     assert "View system health and scan state." in response.text
+    assert "/wolf" in response.text
+    assert "View the latest Wolf Briefing." in response.text
     assert "/audit" in response.text
     assert "View safety and duplicate checks." in response.text
     assert "No weak setup promotion." in response.text
 
 
 def test_menu_button_labels_normalize_to_commands() -> None:
+    assert normalize_admin_command("🐺 Wolf Briefing") == "/wolf"
     assert normalize_admin_command("📊 Status") == "/status"
     assert normalize_admin_command("🚨 Alerts") == "/alerts"
     assert normalize_admin_command("👁 Watchlists") == "/watchlists"
@@ -904,6 +907,8 @@ def test_telegram_admin_config_splits_command_ui_from_admin_reports() -> None:
             telegram_dry_run=False,
             telegram_bot_token="secret-token",
             telegram_admin_chat_id="admin-chat",
+            telegram_wolf_briefing_enabled=True,
+            telegram_wolf_briefing_public_enabled=False,
             candle_craft_donate_usdt_ton_address="TEST_USDT_TON_ADDRESS",
             candle_craft_donate_ton_address="TEST_TON_ADDRESS",
             candle_craft_donate_btc_address="TEST_BTC_ADDRESS",
@@ -915,6 +920,8 @@ def test_telegram_admin_config_splits_command_ui_from_admin_reports() -> None:
     assert config.admin_enabled is True
     assert config.command_ui_enabled is True
     assert config.admin_report_enabled is False
+    assert config.wolf_briefing_enabled is True
+    assert config.wolf_briefing_public_enabled is False
     assert config.dry_run is False
     assert config.donate_usdt_ton_address == "TEST_USDT_TON_ADDRESS"
     assert config.donate_ton_address == "TEST_TON_ADDRESS"
@@ -1889,6 +1896,7 @@ def test_admin_callbacks_route_to_admin_screens(tmp_path) -> None:
                 dry_run=False,
                 bot_token="secret-token",
                 admin_chat_id="admin-chat",
+                wolf_briefing_enabled=True,
             ),
             command_service=service,
             transport=transport,
@@ -1907,17 +1915,18 @@ def test_admin_callbacks_route_to_admin_screens(tmp_path) -> None:
     screen_calls = _screen_send_calls(transport)
     assert len(cleanup_calls) == 1
     assert len(screen_calls) == len(ADMIN_CALLBACK_COMMANDS)
-    assert "System Desk" in screen_calls[0]["message"]
-    assert "Alert Desk" in screen_calls[1]["message"]
-    assert "ACTIVE WATCHLISTS" in screen_calls[2]["message"]
-    assert "Integrity Desk" in screen_calls[3]["message"]
-    assert "Configuration Desk" in screen_calls[4]["message"]
-    assert "Command Guide" in screen_calls[5]["message"]
-    assert "Candle Craft Intelligence" in screen_calls[6]["message"]
-    for call in screen_calls[:6]:
+    assert "WOLF BRIEFING" in screen_calls[0]["message"]
+    assert "System Desk" in screen_calls[1]["message"]
+    assert "Alert Desk" in screen_calls[2]["message"]
+    assert "ACTIVE WATCHLISTS" in screen_calls[3]["message"]
+    assert "Integrity Desk" in screen_calls[4]["message"]
+    assert "Configuration Desk" in screen_calls[5]["message"]
+    assert "Command Guide" in screen_calls[6]["message"]
+    assert "Candle Craft Intelligence" in screen_calls[7]["message"]
+    for call in screen_calls[:7]:
         _assert_admin_menu_only(call["reply_markup"])
         assert _callback_data_values(call["reply_markup"]) == ["admin:menu"]
-    _assert_admin_full_menu(screen_calls[6]["reply_markup"])
+    _assert_admin_full_menu(screen_calls[7]["reply_markup"])
     records = _read_jsonl(tmp_path / "audit.jsonl")
     assert [record["command"] for record in records] == list(ADMIN_CALLBACK_COMMANDS.values())
     assert all(record["is_admin"] is True for record in records)
