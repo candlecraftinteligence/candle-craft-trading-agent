@@ -33,6 +33,7 @@ COMMANDS_TO_REGISTER: tuple[Mapping[str, str], ...] = (
     {"command": "menu", "description": "Open the Candle Craft menu"},
     {"command": "status", "description": "Show bot status"},
     {"command": "latest", "description": "Show latest public lifecycle alerts"},
+    {"command": "watchlists", "description": "Show active public watchlists"},
     {"command": "about", "description": "About Candle Craft"},
 )
 

@@ -10,10 +10,15 @@ from typing import Any
 from app.alerts.integrity_manifest import audit_alert_integrity_artifact
 from app.data.dtos import NA
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
+from app.telegram_admin.active_watchlists import (
+    ACTIVE_WATCHLIST_DISPLAY_LIMIT,
+    format_active_watchlist_lines,
+    load_active_public_watchlists,
+)
 from app.watchlists.presets import presets_with_counts
 
 SCREEN_HEADER = "🐺🟠"
-SCREEN_FOOTER = "Candle Craft | Signal. Structure. Execution."
+SCREEN_FOOTER = "🐺 Candle Craft | Signal. Structure. Execution."
 SCREEN_DIVIDER = "━━━━━━━━━━━━━━━━━━"
 UNVERIFIED = "Unverified"
 JOIN_SIGNAL_CHANNEL_BUTTON_LABEL = "🐺 Join Signal Channel"
@@ -23,12 +28,13 @@ PUBLIC_SIGNAL_CHANNEL_COPY = (
 PUBLIC_SIGNAL_CHANNEL_MISSING_COPY = "Signal channel invite link is not configured yet."
 ADMIN_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
     ("📊 Status", "🚨 Alerts"),
-    ("👁 Watchlists", "🧾 Integrity"),
+    ("👁 Watchlist Desk", "🧾 Integrity"),
     ("⚙️ Config", "❓ Guide"),
 )
 ADMIN_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
     "📊 status": "/status",
     "🚨 alerts": "/alerts",
+    "👁 watchlist desk": "/watchlists",
     "👁 watchlists": "/watchlists",
     "🧾 integrity": "/integrity",
     "⚙️ config": "/config",
@@ -46,21 +52,22 @@ ADMIN_CALLBACK_COMMANDS: Mapping[str, str] = {
 ADMIN_MENU_BUTTON_CALLBACKS: Mapping[str, str] = {
     "📊 Status": "admin:status",
     "🚨 Alerts": "admin:alerts",
-    "👁 Watchlists": "admin:watchlists",
+    "👁 Watchlist Desk": "admin:watchlists",
     "🧾 Integrity": "admin:integrity",
     "⚙️ Config": "admin:config",
     "❓ Guide": "admin:guide",
 }
 PUBLIC_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
     ("📡 Last Scan", "🔥 Active Signals"),
-    ("👁 Watchlist", "🌐 Social"),
+    ("👁 Watchlists", "🌐 Social"),
     ("❓ Help", "🧡 Donate"),
 )
 PUBLIC_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
     "📡 last scan": "/lastscan",
     "🔥 active signals": "/signals",
-    "👁 watchlist": "/watchlist",
-    "👁 watchlist signals": "/watchlist",
+    "👁 watchlist": "/watchlists",
+    "👁 watchlists": "/watchlists",
+    "👁 watchlist signals": "/watchlists",
     "🌐 social": "/social",
     "❓ help": "/help",
     "🧡 donate": "/donate",
@@ -71,11 +78,12 @@ SIMPLE_REPLY_BUTTON_COMMANDS: Mapping[str, str] = {
     "📊 latest alerts": "/latest",
     "ℹ️ about": "/about",
     "ℹ about": "/about",
+    "active watchlists": "/watchlists",
 }
 PUBLIC_CALLBACK_COMMANDS: Mapping[str, str] = {
     "public:lastscan": "/lastscan",
     "public:signals": "/signals",
-    "public:watchlist": "/watchlist",
+    "public:watchlist": "/watchlists",
     "public:social": "/social",
     "public:help": "/help",
     "public:donate": "/donate",
@@ -87,7 +95,7 @@ PUBLIC_CALLBACK_COMMANDS: Mapping[str, str] = {
 PUBLIC_MENU_BUTTON_CALLBACKS: Mapping[str, str] = {
     "📡 Last Scan": "public:lastscan",
     "🔥 Active Signals": "public:signals",
-    "👁 Watchlist": "public:watchlist",
+    "👁 Watchlists": "public:watchlist",
     "🌐 Social": "public:social",
     "❓ Help": "public:help",
     "🧡 Donate": "public:donate",
@@ -118,6 +126,7 @@ PUBLIC_COMMANDS: tuple[str, ...] = (
     "/lastscan",
     "/signals",
     "/watchlist",
+    "/watchlists",
     "/social",
     "/help",
     "/donate",
@@ -125,7 +134,6 @@ PUBLIC_COMMANDS: tuple[str, ...] = (
 PUBLIC_ADMIN_RESERVED_COMMANDS: frozenset[str] = frozenset(
     {
         "/alerts",
-        "/watchlists",
         "/audit",
         "/integrity",
         "/config",
@@ -251,8 +259,8 @@ class TelegramAdminCommandService:
             return self._public_lastscan_response()
         if normalized == "/signals":
             return self._public_signals_response()
-        if normalized == "/watchlist":
-            return self._public_watchlist_response()
+        if normalized in {"/watchlist", "/watchlists"}:
+            return self._public_watchlist_response(command=normalized)
         if normalized == "/social":
             return _public_response(normalized, "public_social", format_public_social_response(public_config))
         if normalized == "/donate":
@@ -508,71 +516,11 @@ class TelegramAdminCommandService:
         )
 
     def _watchlists_response(self) -> AdminCommandResponse:
-        artifacts = self.latest_scan_artifacts()
-        preset_lines = _watchlist_preset_lines()
-        if artifacts.manifest_row is None:
-            text = _screen(
-                "Watchlist Desk",
-                (
-                    "Setups currently monitored by the engine.",
-                    "Watchlist does not mean confirmed signal.",
-                    "",
-                    SCREEN_DIVIDER,
-                    "Run: N/A",
-                    "No active watchlist setups right now.",
-                    SCREEN_DIVIDER,
-                    "",
-                    "The engine is filtering.",
-                    "No forced trades.",
-                ),
-            )
-            return _admin_response("/watchlists", "watchlists", text, run_id=NA)
-        run_id = _display(artifacts.manifest_row.get("run_id"))
-        if artifacts.scan_payload is None:
-            text = _screen(
-                "Watchlist Desk",
-                (
-                    "Setups currently monitored by the engine.",
-                    "Watchlist does not mean confirmed signal.",
-                    "",
-                    SCREEN_DIVIDER,
-                    f"Run: {_run_text(run_id)}",
-                    "No active watchlist setups right now.",
-                    SCREEN_DIVIDER,
-                    "",
-                    "The engine is filtering.",
-                    "No forced trades.",
-                ),
-            )
-            return _admin_response("/watchlists", "watchlists", text, run_id=run_id)
-
-        rows = _result_rows(artifacts.scan_payload)
-        watch_rows = _watchlist_rows(rows)
-        text = _screen(
-            "Watchlist Desk",
-            (
-                "Setups currently monitored by the engine.",
-                "Watchlist does not mean confirmed signal.",
-                "",
-                SCREEN_DIVIDER,
-                f"Run: {_run_text(artifacts.manifest_row.get('run_id'), artifacts.scan_payload.get('run_id'))}",
-                f"Watch candidates: {len(watch_rows)}",
-                "",
-                *_watchlist_lines(watch_rows, max_rows=self._max_rows),
-                "",
-                "Preset lists:",
-                *preset_lines,
-                SCREEN_DIVIDER,
-                "",
-                "The engine is filtering.",
-                "No forced trades.",
-            ),
-        )
+        text = self._active_watchlists_text()
         return _admin_response(
             "/watchlists",
             "watchlists",
             text,
-            run_id=_first_text(artifacts.manifest_row.get("run_id"), artifacts.scan_payload.get("run_id")),
         )
 
     def _integrity_response(self, command: str) -> AdminCommandResponse:
@@ -740,34 +688,26 @@ class TelegramAdminCommandService:
             run_id=_public_run_id(artifacts),
         )
 
-    def _public_watchlist_response(self) -> AdminCommandResponse:
-        artifacts = self.latest_scan_artifacts()
-        rows = _public_artifact_rows(artifacts)
-        watch_rows = _public_watchlist_rows(rows)
-        lines: list[str] = [
-            "Conditional setups being monitored.",
-            "Watchlist does not mean confirmed signal.",
-            "",
-            SCREEN_DIVIDER,
-        ]
-        if watch_rows:
-            lines.extend(_public_watchlist_lines(watch_rows, max_rows=self._max_rows))
-        else:
-            lines.extend(
-                (
-                    "No watchlist signals right now.",
-                    "",
-                    "The engine is filtering.",
-                )
-            )
-        lines.append(SCREEN_DIVIDER)
-        lines.extend(("", "No confirmation = no signal."))
+    def _public_watchlist_response(self, *, command: str = "/watchlists") -> AdminCommandResponse:
         return _public_response(
-            "/watchlist",
+            command,
             "public_watchlist",
-            _screen("Watchlist Signals", lines),
-            run_id=_public_run_id(artifacts),
+            self._active_watchlists_text(),
         )
+
+    def _active_watchlists_text(self) -> str:
+        result = load_active_public_watchlists(
+            project_root=self._project_root,
+            database_path=self._database_path,
+            limit=ACTIVE_WATCHLIST_DISPLAY_LIMIT,
+        )
+        lines = [
+            *format_active_watchlist_lines(result),
+            "",
+            "System:",
+            "Manual tracking only. No order execution.",
+        ]
+        return _screen("ACTIVE WATCHLISTS", lines)
 
     def _lastscan_response(self) -> AdminCommandResponse:
         artifacts = self.latest_scan_artifacts()
@@ -1119,8 +1059,8 @@ def format_public_help_response() -> str:
             "🔥 Active Signals",
             "Confirmed setups only.",
             "",
-            "👁 Watchlist Signals",
-            "Conditional setups waiting for confirmation.",
+            "👁 Watchlists",
+            "Active public watchlist plans.",
             "",
             "🌐 Social",
             "Official Candle Craft links.",

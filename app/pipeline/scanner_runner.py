@@ -317,6 +317,8 @@ class ScannerSymbolResult(BaseModel):
     open_interest: MaybeDecimal = NA
     candles_fetched: int = 0
     latest_close: MaybeDecimal = NA
+    latest_high: MaybeDecimal = NA
+    latest_low: MaybeDecimal = NA
     technical_score: MaybeInt = NA
     derivatives_score: MaybeInt = NA
     trend_context: str = NA
@@ -1499,6 +1501,8 @@ class ScannerRunner:
             else _decimal_field(optional_data.open_interest, ("open_interest", "current_open_interest", "oi")),
             candles_fetched=len(candles),
             latest_close=_current_price_from_candles(candles),
+            latest_high=_decimal_field(candles[-1], ("high",)) if candles else NA,
+            latest_low=_decimal_field(candles[-1], ("low",)) if candles else NA,
             technical_score=technical_result.structure_score if technical_result is not None else NA,
             derivatives_score=derivatives_enrichment.derivatives_score
             if derivatives_enrichment is not None

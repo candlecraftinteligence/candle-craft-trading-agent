@@ -198,6 +198,12 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
                 technical_score TEXT NOT NULL DEFAULT 'N/A',
                 price_level TEXT NOT NULL DEFAULT 'N/A',
+                entry_low TEXT NOT NULL DEFAULT 'N/A',
+                entry_high TEXT NOT NULL DEFAULT 'N/A',
+                stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                tp1 TEXT NOT NULL DEFAULT 'N/A',
+                tp2 TEXT NOT NULL DEFAULT 'N/A',
+                tp3 TEXT NOT NULL DEFAULT 'N/A',
                 blocked_reason TEXT NOT NULL DEFAULT 'N/A',
                 invalid_target_fields TEXT NOT NULL DEFAULT 'N/A',
                 error_message TEXT NOT NULL DEFAULT 'N/A',
@@ -275,6 +281,12 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "min_score_for_idea", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "technical_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "price_level", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "entry_low", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "entry_high", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "stop_loss", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "tp1", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "tp2", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "tp3", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "blocked_reason", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "invalid_target_fields", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "error_message", "TEXT NOT NULL DEFAULT 'N/A'")

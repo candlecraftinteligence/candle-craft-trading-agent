@@ -33,7 +33,7 @@ class TelegramAlertType(str, Enum):
 PUBLIC_STATUS_BY_ALERT_TYPE = {
     TelegramAlertType.WATCHLIST: "WATCHLIST",
     TelegramAlertType.SIGNAL_CONFIRMED: "CONFIRMED",
-    TelegramAlertType.LIMIT_HIT: "LIMIT HIT",
+    TelegramAlertType.LIMIT_HIT: "LIMIT ZONE HIT",
     TelegramAlertType.TP1_HIT: "TP1 HIT",
     TelegramAlertType.TP2_HIT: "TP2 HIT",
     TelegramAlertType.TP3_HIT: "TP3 HIT",
@@ -70,6 +70,7 @@ class TelegramSignalMessage:
     derivatives_status: Any = NA
     price_level: Any = NA
     min_rr: Any = NA
+    watchlist_outcome: bool = False
 
 
 def format_telegram_signal_message(
@@ -108,14 +109,14 @@ def format_watchlist_alert(message: TelegramSignalMessage) -> str:
         "Status:",
         "WATCHLIST",
         "",
-        "Watch Zone:",
+        "Limit Zone:",
         _watch_zone(message),
         "",
         "Current Context:",
         _display(message.current_context),
         "",
         "Needs Next:",
-        *_needs_next_lines(message.needs_next),
+        *_needs_next_lines(message),
         "",
         "Potential Plan:",
         f"Entry: {_entry_range(message)}",
@@ -181,12 +182,34 @@ def format_signal_confirmed_alert(message: TelegramSignalMessage) -> str:
 
 
 def format_limit_hit_update(message: TelegramSignalMessage) -> str:
+    if message.watchlist_outcome:
+        return _join(
+            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
+            f"{_display(message.symbol)} | {_display(message.direction)}",
+            "",
+            "Status:",
+            "LIMIT ZONE HIT",
+            "",
+            "Signal ID:",
+            _display(message.signal_id),
+            "",
+            "Update:",
+            "Price has reached the planned watchlist Limit Zone.",
+            "",
+            "Limit Zone:",
+            _watch_zone(message),
+            "",
+            "System:",
+            "Watchlist tracking update. No order was placed by the system.",
+            "",
+            FOOTER,
+        )
     return _join(
         f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
         f"{_display(message.symbol)} | {_display(message.direction)}",
         "",
         "Status:",
-        "LIMIT HIT",
+        "LIMIT ZONE HIT",
         "",
         "Signal ID:",
         _display(message.signal_id),
@@ -216,6 +239,28 @@ def format_limit_hit_update(message: TelegramSignalMessage) -> str:
 
 
 def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
+    if message.watchlist_outcome:
+        return _join(
+            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
+            f"{_display(message.symbol)} | {_display(message.direction)}",
+            "",
+            "Status:",
+            "TP1 HIT",
+            "",
+            "Signal ID:",
+            _display(message.signal_id),
+            "",
+            "Result:",
+            "First target reached from the watchlist plan.",
+            "",
+            "Price Level:",
+            _price_display(message.tp1),
+            "",
+            "System:",
+            "Watchlist tracking update. Manual trade management only.",
+            "",
+            FOOTER,
+        )
     return _join(
         f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
         f"{_display(message.symbol)} | {_display(message.direction)}",
@@ -247,6 +292,28 @@ def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
 
 
 def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
+    if message.watchlist_outcome:
+        return _join(
+            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
+            f"{_display(message.symbol)} | {_display(message.direction)}",
+            "",
+            "Status:",
+            "TP2 HIT",
+            "",
+            "Signal ID:",
+            _display(message.signal_id),
+            "",
+            "Result:",
+            "Second target reached from the watchlist plan.",
+            "",
+            "Price Level:",
+            _price_display(message.tp2),
+            "",
+            "System:",
+            "Watchlist tracking update. Manual trade management only.",
+            "",
+            FOOTER,
+        )
     return _join(
         f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
         f"{_display(message.symbol)} | {_display(message.direction)}",
@@ -277,6 +344,28 @@ def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
 
 
 def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
+    if message.watchlist_outcome:
+        return _join(
+            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
+            f"{_display(message.symbol)} | {_display(message.direction)}",
+            "",
+            "Status:",
+            "TP3 HIT",
+            "",
+            "Signal ID:",
+            _display(message.signal_id),
+            "",
+            "Result:",
+            "Final target reached from the watchlist plan.",
+            "",
+            "Lifecycle:",
+            "Watchlist outcome tracking completed.",
+            "",
+            "System:",
+            "Watchlist tracking update. Manual trade management only.",
+            "",
+            FOOTER,
+        )
     return _join(
         f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
         f"{_display(message.symbol)} | {_display(message.direction)}",
@@ -304,6 +393,31 @@ def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
 
 
 def format_sl_hit_update(message: TelegramSignalMessage) -> str:
+    if message.watchlist_outcome:
+        return _join(
+            f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
+            f"{_display(message.symbol)} | {_display(message.direction)}",
+            "",
+            "Status:",
+            "SL HIT",
+            "",
+            "Signal ID:",
+            _display(message.signal_id),
+            "",
+            "Result:",
+            "Stop level reached from the watchlist plan.",
+            "",
+            "Price Level:",
+            _price_display(message.stop_loss),
+            "",
+            "Lifecycle:",
+            "Watchlist outcome tracking closed.",
+            "",
+            "System:",
+            "Watchlist tracking update. Manual trade management only.",
+            "",
+            FOOTER,
+        )
     return _join(
         f"{HEADER_PREFIX} CANDLE CRAFT UPDATE",
         f"{_display(message.symbol)} | {_display(message.direction)}",
@@ -402,18 +516,63 @@ def _watch_zone(message: TelegramSignalMessage) -> str:
     return watch_zone if watch_zone != NA else _entry_range(message)
 
 
-def _needs_next_lines(values: Sequence[Any]) -> tuple[str, ...]:
+def _needs_next_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     lines: list[str] = []
+    values = message.needs_next
     if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
         for value in values:
             text = _display(value)
-            if text != NA:
+            if text != NA and _chart_only_need(text):
                 lines.append(text)
             if len(lines) == 3:
                 break
     if not lines:
-        lines.append("N/A \u2014 waiting for the next lifecycle update from the core engine.")
+        lines.extend(_fallback_needs_next(message))
     return tuple(f"{index}. {line}" for index, line in enumerate(lines, start=1))
+
+
+def _fallback_needs_next(message: TelegramSignalMessage) -> tuple[str, str, str]:
+    side = _display(message.direction).lower()
+    if side == "long":
+        return (
+            "Price must trade into the Limit Zone.",
+            "Limit Zone must hold as support after the pullback.",
+            "Bullish structure must remain valid above the invalidation level.",
+        )
+    if side == "short":
+        return (
+            "Price must trade into the Limit Zone.",
+            "Limit Zone must hold as resistance after the pullback.",
+            "Bearish structure must remain valid below the invalidation level.",
+        )
+    return (
+        "Price must interact with the Limit Zone.",
+        "Structure must remain valid.",
+        "Invalidation level must hold.",
+    )
+
+
+def _chart_only_need(value: str) -> bool:
+    text = value.lower()
+    tokens = text.replace("/", " ").replace("-", " ").replace(".", " ").replace(",", " ").split()
+    forbidden = (
+        "trust meter",
+        " risk/reward",
+        "risk reward",
+        "score",
+        "scoring",
+        "opportunity score",
+        "quality score",
+        "final confluence threshold",
+        "scanner threshold",
+        "grade",
+        "hard rejection",
+        "required threshold",
+        "quality gate",
+        "final quality",
+        "core engine",
+    )
+    return "rr" not in tokens and not any(fragment in text for fragment in forbidden)
 
 
 def _first_display(*values: Any) -> str:
