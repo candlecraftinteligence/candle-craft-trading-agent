@@ -1593,7 +1593,7 @@ def _rr_readiness_points(
 def _required_rr(diagnostics: Mapping[str, Any], failed_gate: str) -> Decimal:
     mode = _display(diagnostics.get("mode")).lower()
     if mode == "challenge" or failed_gate.startswith("challenge_"):
-        return Decimal("3.0")
+        return Decimal("2.7")
     return Decimal("2.5")
 
 

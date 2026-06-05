@@ -75,8 +75,8 @@ def test_watchlist_needs_next_excludes_internal_scanner_language() -> None:
                 "RR and final quality gates must pass before confirmation.",
                 "Price must trade into the Limit Zone.",
             ),
-            planned_rr=Decimal("2.9"),
-            min_rr=Decimal("3"),
+            planned_rr=Decimal("2.6"),
+            min_rr=Decimal("2.7"),
             watchlist_invalidation_reason="Watchlist invalidates if price accepts below 95.",
         ),
     )
@@ -94,7 +94,7 @@ def test_watchlist_needs_next_excludes_internal_scanner_language() -> None:
     ):
         assert forbidden.lower() not in needs_next.lower()
     assert "Price must trade into the Limit Zone." in needs_next
-    assert "Planned RR: 2.9R \u2014 watchlist only, final RR must improve to \u22653R before confirmation." in text
+    assert "Planned RR: 2.6R \u2014 watchlist only, final RR must improve to \u22652.7R before confirmation." in text
     assert "Watchlist invalidates if price accepts below 95." in text
 
 
@@ -273,8 +273,8 @@ def test_watchlist_formats_clean_targets_and_below_min_rr_warning() -> None:
             tp1=Decimal("72.95123"),
             tp2=Decimal("73.252056"),
             tp3=Decimal("73.8167"),
-            planned_rr=Decimal("2.91918017"),
-            min_rr=Decimal("3"),
+            planned_rr=Decimal("2.61918017"),
+            min_rr=Decimal("2.7"),
         ),
     )
 
@@ -282,7 +282,7 @@ def test_watchlist_formats_clean_targets_and_below_min_rr_warning() -> None:
     assert "Entry: 71.41 \u2013 71.68" in text
     assert "SL: 70.77" in text
     assert "Potential Targets:\nTP1: 72.95\nTP2: 73.25\nTP3: 73.82" in text
-    assert "Planned RR: 2.9R \u2014 watchlist only, final RR must improve to \u22653R before confirmation." in text
+    assert "Planned RR: 2.6R \u2014 watchlist only, final RR must improve to \u22652.7R before confirmation." in text
     assert "CANDLE CRAFT SIGNAL CONFIRMED" not in text
     assert "73.252056" not in text
 

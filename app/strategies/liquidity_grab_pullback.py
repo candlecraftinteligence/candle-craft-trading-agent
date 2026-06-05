@@ -33,7 +33,7 @@ SWEEP_ATR_MULTIPLIER = Decimal("0.35")
 DEFAULT_ATR_PERIOD = 14
 VOLUME_CONFIRMATION_MULTIPLIER = Decimal("1.5")
 BASE_MIN_RR = Decimal("2.5")
-CHALLENGE_MIN_RR = Decimal("3.0")
+CHALLENGE_MIN_RR = Decimal("2.7")
 TICK_SIZE = Decimal("0.00000001")
 RISK_WARNING = (
     "This is not financial advice. Pullback ideas are conditional and must be invalidated at the stop."
@@ -1535,7 +1535,7 @@ def _gate_result(
         if trust_meter.percentage < 85:
             violations.append(_violation("challenge_trust_below_85", "Challenge mode requires Trust Meter >= 85%."))
         if rr_to_tp2 != NA and _decimal_from(rr_to_tp2, "rr_to_tp2") < CHALLENGE_MIN_RR:
-            violations.append(_violation("challenge_rr_below_3", "Challenge mode requires RR >= 3.0."))
+            violations.append(_violation("challenge_rr_below_3", f"Challenge mode requires RR >= {CHALLENGE_MIN_RR}."))
         if entry_source == NA:
             violations.append(_violation("challenge_limit_entry_missing", "Challenge mode requires limit pullback entry."))
         if _is_meme_or_illiquid(data):

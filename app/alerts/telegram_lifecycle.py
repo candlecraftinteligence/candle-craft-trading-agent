@@ -73,7 +73,7 @@ TERMINAL_IDENTITY_BLOCK_REASONS = {
     "terminal_update_not_public_tracked",
     "terminal_update_not_terminal_state",
 }
-DEFAULT_CONFIRMED_MIN_RR = Decimal("3")
+DEFAULT_CONFIRMED_MIN_RR = Decimal("2.7")
 DEFAULT_MIN_TECHNICAL_SCORE = Decimal("50")
 CONFIRMED_REJECTED_STATUS_KEYS = {
     "scan_error",

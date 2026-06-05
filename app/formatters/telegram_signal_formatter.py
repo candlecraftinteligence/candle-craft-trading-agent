@@ -14,7 +14,7 @@ BULLET = "\u2022"
 RANGE_DASH = "\u2013"
 EM_DASH = "\u2014"
 GREATER_EQUAL = "\u2265"
-DEFAULT_MIN_RR_DISPLAY = Decimal("3")
+DEFAULT_MIN_RR_DISPLAY = Decimal("2.7")
 
 
 class TelegramAlertType(str, Enum):

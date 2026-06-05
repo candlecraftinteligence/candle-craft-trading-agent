@@ -881,6 +881,7 @@ Phase 10 adds the first scanner pipeline under `app/pipeline`:
 - It does not place trades, route orders, use private exchange API access, withdraw funds, transfer funds, or require exchange API keys.
 - Alerts are dry-run by default. The runner formats the alert through the alert agent but does not send live Telegram messages unless a caller explicitly disables dry-run behavior and supplies live alert settings.
 - Trade ideas are created only after technical context, derivatives checks, risk-manager gates, opportunity-scoring gates, and the configured minimum scanner score pass.
+- The generic top-level technical score remains a broad market-structure diagnostic. For a fully valid Liquidity-Grab Pullback mode, the scanner can pass explicit strategy technical evidence into opportunity scoring while preserving the original generic score in diagnostics.
 - Missing data is preserved as `N/A`; unreliable data is preserved as `Unverified`.
 - If a symbol fails, the failure is recorded on that symbol and the scanner continues with the next symbol.
 - Weak setups are rejected. If there is no sweep, BOS, or CHoCH context, the symbol returns `scanned_no_setup`.
@@ -904,9 +905,11 @@ Phase 11 adds `LiquidityGrabEngine` under `app/strategies` for deterministic set
 
 Supported modes:
 
-- `challenge`: strictest mode. Uses 2D HTF structure, 12H/4H bias, and 15m/5m execution. Requires Trust Meter >= 85, RR >= 3.0, fixed 5% risk text, limit pullback entries only, no meme/illiquid token classification, and no active BTC/event guard when provided. Invalid Challenge output exposes the exact message `No valid challenge setup.`
+- `challenge`: strictest mode. Uses 2D HTF structure, 12H/4H bias, and 15m/5m execution. Requires Trust Meter >= 85, actionable RR >= 2.7, fixed 5% risk text, limit pullback entries only, no meme/illiquid token classification, and no active BTC/event guard when provided. Invalid Challenge output exposes the exact message `No valid challenge setup.`
 - `swing`: uses 2D/12H structure with 4H or 1H execution where available, with 15m/5m fallback, and applies the base RR >= 2.5 gate. Invalid Swing output exposes the exact message `No valid swing setup.`
 - `scalp`: uses 12H/4H bias with 15m/5m execution and requires the pullback entry to remain valid within the short LTF window. Invalid Scalp output exposes the exact message `No valid scalp setup.`
+
+The actionable RR >= 2.7 requirement is an RR calibration only. It does not weaken the confirmed liquidity sweep, 5m BOS/CHoCH, OB/FVG pullback, fib alignment, target integrity, Trust Meter, lifecycle, risk, alert, or portfolio safety gates.
 
 Trust Meter scoring totals 12 points:
 
@@ -977,6 +980,8 @@ Phase 12 connects the Phase 11 Liquidity-Grab Pullback Engine into the Phase 10 
 - For each symbol, the scanner collects Phase 12.1 multi-timeframe context: synthetic 2D from 1D candles, direct 12H bias candles, direct 15m execution candles, and direct 5m confirmation candles. Existing 4H and 1H context remains optional when available.
 - Strategy results, formatted Candle Craft output, diagnostics, valid/rejected modes, missing data, and unverified data are included in the scanner result and JSON export.
 - A trade idea is created only when the strategy returns at least one valid A/B setup and the existing technical, derivatives, risk, scoring, and trade-idea gates also pass.
+- Strategy-aware scoring is an evidence bridge only: `generic_technical_score` is preserved, and `strategy_technical_score` is used for scoring only when the Liquidity-Grab Pullback mode is valid, RR is at or above the actionable 2.7 floor, Trust Meter passes, risk is approved, target integrity is clean, and there are no failed or hard strategy gates.
+- This does not weaken confirmation or structure gates. Missing sweep, missing BOS/CHoCH, failed OB/FVG pullback, failed fib alignment, blocked target integrity, risk rejection, or rejected/no-setup rows remain rejected.
 - If no valid Liquidity-Grab Pullback setup exists, the symbol returns `scanned_no_setup`, `rejection_stage = strategy`, and `No valid Liquidity-Grab Pullback setup.`
 - Rejected strategy setups are diagnostics only. They are not signals, do not create trade ideas, do not create alerts, and do not create journal entries.
 - Telegram remains dry-run by default. The scanner does not live-send Telegram alerts unless `dry_run_alerts=False` is explicitly provided by a caller.
@@ -1106,7 +1111,7 @@ Phase 14 adds `app/analytics/pullback_zones.py` for the Liquidity-Grab Pullback 
 - Body-close acceptance beyond 0.786 or persistent acceptance beyond the invalidation zone is rejected. Wick-only breaches are classified by the Phase 41 wick/close layer instead of being treated as automatic `pullback_too_deep`.
 - Stops use the sweep wick plus a 0.10 ATR(15m) buffer, or the farther OB structure edge when that is more conservative. If ATR is unavailable, the structure edge is used and the ATR buffer remains `N/A`.
 - TP1 uses the nearest opposing liquidity/range level when available, otherwise fib 1.272. TP2 uses fib 1.618 and TP3 uses fib 2.0.
-- RR to TP2 must be at least 2.5 for swing/scalp and at least 3.0 for challenge mode. Failed RR rejects with `rr_too_low`.
+- RR to TP2 must be at least 2.5 for swing/scalp and at least 2.7 for challenge mode. Failed RR rejects with `rr_too_low`.
 
 No setup is created unless the pullback zone and RR are valid. Missing or uncertain OB/FVG/fib fields remain `N/A`, and rejected setups stay rejected. POC, VAL, and VAH remain confluence only; they can annotate a selected zone but never create a setup by themselves.
 
@@ -2333,7 +2338,7 @@ Safety boundaries:
 Purpose:
 
 - Improve target selection diagnostics so the scanner can explain whether a setup has real profit room before RR rejection.
-- Keep existing RR hard gates unchanged. A setup with TP2 below the required RR remains rejected or near-miss only.
+- Keep calibrated RR hard gates intact. A setup with TP2 below the required RR remains rejected or near-miss only.
 - Map visible target room from available candle structure, not from arbitrary R-multiple expansion.
 
 Target detection hierarchy:
@@ -2382,7 +2387,7 @@ best_target_conditions
 Safety boundaries:
 
 - Phase 42 is diagnostics, target mapping, display, JSON, and research only.
-- It does not lower RR requirements, weaken strategy gates, invent wider targets, create valid trades from invalid structures, place orders, use private exchange API access, add withdrawals or transfers, or send live Telegram by default.
+- It does not bypass calibrated RR requirements, weaken strategy gates, invent wider targets, create valid trades from invalid structures, place orders, use private exchange API access, add withdrawals or transfers, or send live Telegram by default.
 - Missing data remains `N/A`; unreliable data remains `Unverified`; market data is never invented.
 
 ## Safety Boundaries

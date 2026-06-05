@@ -65,6 +65,12 @@ def _full_bullish_setup_candles(*, with_fvg: bool = True, sweep_volume: Decimal 
     return candles
 
 
+def _full_bullish_setup_candles_with_calibrated_challenge_rr() -> list[dict[str, Decimal | int]]:
+    candles = _full_bullish_setup_candles()
+    candles[35]["high"] = Decimal("115")
+    return candles
+
+
 def _mtf_execution_sweep_candles() -> list[dict[str, Decimal | int]]:
     candles = _full_bullish_setup_candles()
     for index, candle in enumerate(candles):
@@ -438,18 +444,38 @@ def test_challenge_rejects_if_trust_meter_below_85() -> None:
     assert any(violation.code == "challenge_trust_below_85" for violation in result.challenge.gate_result.violations)
 
 
-def test_challenge_rejects_if_rr_below_30() -> None:
+def test_challenge_accepts_rr_above_calibrated_minimum() -> None:
     result = analyze_liquidity_grab_pullback(
         {
             "symbol": "SOLUSDT",
             "mode": LiquidityGrabMode.challenge,
-            "candles_15m": _full_bullish_setup_candles(),
+            "candles_15m": _full_bullish_setup_candles_with_calibrated_challenge_rr(),
+            "candles_5m": _full_bullish_setup_candles_with_calibrated_challenge_rr(),
+            "candles_2d": _trend_candles(),
+            "user_resistance_levels": (Decimal("112"), Decimal("121")),
+        }
+    )
+
+    assert result.challenge.rr_to_tp2 >= Decimal("2.7")
+    assert result.challenge.rr_to_tp2 < Decimal("3.0")
+    assert result.challenge.is_valid is True
+    assert "rr" in result.challenge.gates_passed
+    assert not any(violation.code == "rr_below_minimum" for violation in result.challenge.gate_result.violations)
+
+
+def test_challenge_rejects_if_rr_below_calibrated_minimum() -> None:
+    result = analyze_liquidity_grab_pullback(
+        {
+            "symbol": "SOLUSDT",
+            "mode": LiquidityGrabMode.challenge,
+            "candles_15m": _rr_failure_candles(),
             "candles_5m": _full_bullish_setup_candles(),
             "candles_2d": _trend_candles(),
             "user_resistance_levels": (Decimal("112"), Decimal("120")),
         }
     )
 
+    assert result.challenge.rr_to_tp2 < Decimal("2.7")
     assert result.challenge.is_valid is False
     assert result.challenge.first_failed_gate == "rr_below_minimum"
     assert any(violation.code == "rr_below_minimum" for violation in result.challenge.gate_result.violations)

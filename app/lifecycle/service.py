@@ -104,7 +104,7 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
     mode = _mode_from_result(symbol_result, diagnostics)
     direction = _direction_from_result(symbol_result, diagnostics)
     rr = _decimal_or_none(_first_non_na(diagnostics.get("rr_to_tp2"), _risk_best_rr(symbol_result)))
-    required_rr = Decimal("3.0") if mode == "challenge" else Decimal("2.5")
+    required_rr = Decimal("2.7") if mode == "challenge" else Decimal("2.5")
     pullback_status = _display(diagnostics.get("pullback_zone_status")).lower()
     valid_trade_idea = _valid_trade_idea_exists(symbol_result, display.display_status)
     pullback_valid = (

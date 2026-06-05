@@ -248,7 +248,7 @@ def test_pullback_intelligence_does_not_weaken_strategy_gates() -> None:
     )
 
     assert BASE_MIN_RR == Decimal("2.5")
-    assert CHALLENGE_MIN_RR == Decimal("3.0")
+    assert CHALLENGE_MIN_RR == Decimal("2.7")
     assert intelligence.is_diagnostic_only is True
     assert intelligence.pullback_quality_grade == PullbackQualityGrade.REJECT
 
