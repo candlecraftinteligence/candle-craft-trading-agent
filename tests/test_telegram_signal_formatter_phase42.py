@@ -150,6 +150,16 @@ def test_watchlist_outcome_update_formatters_use_phase50_wording() -> None:
             assert snippet in text
 
 
+def test_watchlist_outcome_formatter_separates_target_and_observed_price() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.TP1_HIT,
+        _message(watchlist_outcome=True, price_level=Decimal("110.5")),
+    )
+
+    assert "Target Level:\n110" in text
+    assert "Observed Price:\n110.5" in text
+
+
 def test_terminal_update_formatters_are_short_and_clean() -> None:
     for alert_type in (
         TelegramAlertType.INVALIDATED,

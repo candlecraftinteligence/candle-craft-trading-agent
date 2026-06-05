@@ -2788,7 +2788,7 @@ def _watchlist_outcome_for_current_result(
         )
         return None
 
-    message = _message_with_prior_public_identity(
+    message = _message_with_prior_public_plan(
         replace(
             telegram_signal_message_from_symbol(current_result),
             min_rr=eligibility_context.min_rr,
@@ -2824,8 +2824,8 @@ def _watchlist_outcome_for_current_result(
             message=message,
         )
 
-    targets, missing_targets = _valid_watchlist_targets(message, limit_zone)
-    if missing_targets:
+    targets, target_tracking_unresolved = _valid_watchlist_targets(message, limit_zone)
+    if target_tracking_unresolved:
         _persist_watchlist_outcome_audit(
             repository,
             prior_alert,
@@ -2847,7 +2847,8 @@ def _watchlist_outcome_for_current_result(
                 price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
             )
             return None
-        if _same_candle_touches_post_limit_outcome(candle, side=side, stop_loss=stop_loss, targets=targets):
+        tracked_targets = () if target_tracking_unresolved else targets
+        if _same_candle_touches_post_limit_outcome(candle, side=side, stop_loss=stop_loss, targets=tracked_targets):
             _persist_watchlist_outcome_audit(
                 repository,
                 prior_alert,
@@ -2874,7 +2875,8 @@ def _watchlist_outcome_for_current_result(
         return None
 
     sl_hit = stop_loss is not None and _stop_touched(candle, side=side, stop_loss=stop_loss)
-    next_tp = _next_touched_watchlist_tp(repository, prior_alert.signal_id, candle, side=side, targets=targets)
+    tracked_targets = () if target_tracking_unresolved else targets
+    next_tp = _next_touched_watchlist_tp(repository, prior_alert.signal_id, candle, side=side, targets=tracked_targets)
     if sl_hit and next_tp is not None:
         _persist_watchlist_outcome_audit(
             repository,
@@ -2887,9 +2889,19 @@ def _watchlist_outcome_for_current_result(
         )
         return None
     if sl_hit:
-        return TelegramAlertType.SL_HIT, message
+        return TelegramAlertType.SL_HIT, _message_with_observed_watchlist_price(
+            message,
+            alert_type=TelegramAlertType.SL_HIT,
+            candle=candle,
+            side=side,
+        )
     if next_tp is not None:
-        return next_tp, message
+        return next_tp, _message_with_observed_watchlist_price(
+            message,
+            alert_type=next_tp,
+            candle=candle,
+            side=side,
+        )
     return None
 
 
@@ -3883,6 +3895,55 @@ def _message_with_prior_public_identity(
         symbol=prior_alert.symbol,
         direction=prior_alert.direction,
     )
+
+
+def _message_with_prior_public_plan(
+    message: TelegramSignalMessage,
+    prior_alert: TelegramAlertAttemptRecord,
+) -> TelegramSignalMessage:
+    watch_zone = prior_alert.price_level if _decimal_pair_text(prior_alert.price_level) is not None else NA
+    return replace(
+        _message_with_prior_public_identity(message, prior_alert),
+        watch_zone=watch_zone,
+        entry_low=prior_alert.entry_low,
+        entry_high=prior_alert.entry_high,
+        stop_loss=prior_alert.stop_loss,
+        tp1=prior_alert.tp1,
+        tp2=prior_alert.tp2,
+        tp3=prior_alert.tp3,
+    )
+
+
+def _message_with_observed_watchlist_price(
+    message: TelegramSignalMessage,
+    *,
+    alert_type: TelegramAlertType,
+    candle: WatchlistCandleSnapshot,
+    side: str,
+) -> TelegramSignalMessage:
+    observed_price = _observed_watchlist_outcome_price(alert_type, candle=candle, side=side)
+    if observed_price is None:
+        return message
+    return replace(message, price_level=observed_price)
+
+
+def _observed_watchlist_outcome_price(
+    alert_type: TelegramAlertType,
+    *,
+    candle: WatchlistCandleSnapshot,
+    side: str,
+) -> Decimal | None:
+    if alert_type in {TelegramAlertType.TP1_HIT, TelegramAlertType.TP2_HIT, TelegramAlertType.TP3_HIT}:
+        if side == "long":
+            return candle.high
+        if side == "short":
+            return candle.low
+    if alert_type == TelegramAlertType.SL_HIT:
+        if side == "long":
+            return candle.low
+        if side == "short":
+            return candle.high
+    return None
 
 
 def _preferred_prior_active_record(

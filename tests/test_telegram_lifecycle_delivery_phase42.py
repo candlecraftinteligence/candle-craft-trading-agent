@@ -12,7 +12,10 @@ from app.alerts.telegram_lifecycle import (
     TelegramAlertType,
     TelegramEligibilityContext,
     TelegramLifecycleDeliveryService,
+    WatchlistCandleSnapshot,
     _signal_id,
+    _stop_touched,
+    _target_touched,
     telegram_alert_decision_for_symbol,
     telegram_signal_message_from_symbol,
 )
@@ -281,6 +284,9 @@ def _assert_target_integrity_blocked(decision, *fields: str) -> None:
         assert field in decision.reason
 
 
+_DEFAULT_PLAN_LEVEL = object()
+
+
 def _seed_prior_active_alert(
     db_path: Path,
     *,
@@ -289,7 +295,26 @@ def _seed_prior_active_alert(
     status: str = "sent",
     symbol: str = "BTCUSDT",
     direction: str = "long",
+    price_level: object = _DEFAULT_PLAN_LEVEL,
+    entry_low: object = _DEFAULT_PLAN_LEVEL,
+    entry_high: object = _DEFAULT_PLAN_LEVEL,
+    stop_loss: object = _DEFAULT_PLAN_LEVEL,
+    tp1: object = _DEFAULT_PLAN_LEVEL,
+    tp2: object = _DEFAULT_PLAN_LEVEL,
+    tp3: object = _DEFAULT_PLAN_LEVEL,
 ) -> None:
+    short = direction.lower() == "short"
+    stored_entry_low = entry_low if entry_low is not _DEFAULT_PLAN_LEVEL else Decimal("100")
+    stored_entry_high = entry_high if entry_high is not _DEFAULT_PLAN_LEVEL else Decimal("102")
+    stored_stop_loss = stop_loss if stop_loss is not _DEFAULT_PLAN_LEVEL else Decimal("105" if short else "95")
+    stored_tp1 = tp1 if tp1 is not _DEFAULT_PLAN_LEVEL else Decimal("95" if short else "110")
+    stored_tp2 = tp2 if tp2 is not _DEFAULT_PLAN_LEVEL else Decimal("90" if short else "115")
+    stored_tp3 = tp3 if tp3 is not _DEFAULT_PLAN_LEVEL else Decimal("85" if short else "120")
+    stored_price_level = (
+        price_level
+        if price_level is not _DEFAULT_PLAN_LEVEL
+        else f"{stored_entry_low}-{stored_entry_high}"
+    )
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         repository.insert_attempt(
             TelegramAlertAttemptRecord(
@@ -304,6 +329,13 @@ def _seed_prior_active_alert(
                 telegram_status=status,
                 message_hash=f"{signal_id}-active",
                 attempted_alert_type=alert_type.value,
+                price_level=stored_price_level,
+                entry_low=stored_entry_low,
+                entry_high=stored_entry_high,
+                stop_loss=stored_stop_loss,
+                tp1=stored_tp1,
+                tp2=stored_tp2,
+                tp3=stored_tp3,
             )
         )
 
@@ -334,6 +366,7 @@ def _soft_failed_confirmation_rows(db_path: Path) -> list[tuple[str, str, str, i
 def _outcome_scan_symbol(
     *,
     signal_id: str = "outcome-watch",
+    symbol: str = "BTCUSDT",
     direction: str = "long",
     high: Decimal = Decimal("101"),
     low: Decimal = Decimal("99"),
@@ -360,6 +393,7 @@ def _outcome_scan_symbol(
         diagnostics=payload,
     ).model_copy(
         update={
+            "symbol": symbol,
             "lifecycle_state": None,
             "lifecycle_transition": None,
             "latest_high": high,
@@ -2898,6 +2932,106 @@ def test_watchlist_same_candle_entry_and_target_sends_only_limit_and_audits_ambi
     assert any(row[3] == "outcome_tracking_same_candle_ambiguous" for row in rows)
 
 
+def test_watchlist_target_touch_rules_are_direction_aware() -> None:
+    short_above_tp1 = WatchlistCandleSnapshot(high=Decimal("0.359"), low=Decimal("0.356"))
+    short_exact_tp1 = WatchlistCandleSnapshot(high=Decimal("0.359"), low=Decimal("0.3526"))
+    short_below_tp1 = WatchlistCandleSnapshot(high=Decimal("0.359"), low=Decimal("0.351"))
+    long_below_tp1 = WatchlistCandleSnapshot(high=Decimal("109.99"), low=Decimal("103"))
+    long_exact_tp1 = WatchlistCandleSnapshot(high=Decimal("110"), low=Decimal("103"))
+
+    assert not _target_touched(short_above_tp1, side="short", target=Decimal("0.3526"))
+    assert _target_touched(short_exact_tp1, side="short", target=Decimal("0.3526"))
+    assert _target_touched(short_below_tp1, side="short", target=Decimal("0.3526"))
+    assert not _target_touched(long_below_tp1, side="long", target=Decimal("110"))
+    assert _target_touched(long_exact_tp1, side="long", target=Decimal("110"))
+
+
+def test_watchlist_stop_touch_rules_are_direction_aware() -> None:
+    long_above_sl = WatchlistCandleSnapshot(high=Decimal("101"), low=Decimal("95.01"))
+    long_exact_sl = WatchlistCandleSnapshot(high=Decimal("101"), low=Decimal("95"))
+    short_below_sl = WatchlistCandleSnapshot(high=Decimal("104.99"), low=Decimal("100"))
+    short_exact_sl = WatchlistCandleSnapshot(high=Decimal("105"), low=Decimal("100"))
+
+    assert not _stop_touched(long_above_sl, side="long", stop_loss=Decimal("95"))
+    assert _stop_touched(long_exact_sl, side="long", stop_loss=Decimal("95"))
+    assert not _stop_touched(short_below_sl, side="short", stop_loss=Decimal("105"))
+    assert _stop_touched(short_exact_sl, side="short", stop_loss=Decimal("105"))
+
+
+def test_short_watchlist_uses_stored_tp1_not_recalculated_current_target(tmp_path: Path) -> None:
+    db_path = tmp_path / "ondo-short-target.db"
+    signal_id = "ondo-watch-short"
+    stored_plan = {
+        "entry_low": Decimal("0.3589"),
+        "entry_high": Decimal("0.36066"),
+        "stop_loss": Decimal("0.36521"),
+        "tp1": Decimal("0.3526"),
+        "tp2": Decimal("0.34854"),
+        "tp3": Decimal("0.3448"),
+    }
+    current_recalculated = _public_ready_watchlist_diagnostics(
+        bias="short",
+        direction="short",
+        entry_low=Decimal("0.3589"),
+        entry_high=Decimal("0.36066"),
+        stop=Decimal("0.36521"),
+        tp1=Decimal("0.356"),
+        tp2=Decimal("0.35"),
+        tp3=Decimal("0.345"),
+        rr_to_tp2=Decimal("3"),
+    )
+    _seed_prior_active_alert(
+        db_path,
+        signal_id=signal_id,
+        symbol="ONDOUSDT",
+        alert_type=TelegramAlertType.WATCHLIST,
+        direction="short",
+        **stored_plan,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+
+    run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    symbol="ONDOUSDT",
+                    direction="short",
+                    high=Decimal("0.36"),
+                    low=Decimal("0.359"),
+                    diagnostics=current_recalculated,
+                )
+            ),
+            scan_run_id="ondo-limit",
+        )
+    )
+    tp_attempt = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    symbol="ONDOUSDT",
+                    direction="short",
+                    high=Decimal("0.359"),
+                    low=Decimal("0.356"),
+                    diagnostics=current_recalculated,
+                )
+            ),
+            scan_run_id="ondo-current-above-stored-tp1",
+        )
+    )
+
+    assert tp_attempt.sent == 0
+    assert not any("Status:\nTP1 HIT" in message for message in sender.messages)
+    rows = _watchlist_outcome_rows(db_path)
+    assert not any(row[0] == TelegramAlertType.TP1_HIT.value and row[1] == "sent" for row in rows)
+
+
 def test_long_watchlist_tracks_tp_sequence_after_limit_hit(tmp_path: Path) -> None:
     db_path = tmp_path / "long-tps.db"
     signal_id = "watch-long-tps"
@@ -3043,7 +3177,14 @@ def test_missing_targets_do_not_break_limit_or_sl_tracking(tmp_path: Path) -> No
     db_path = tmp_path / "missing-targets.db"
     signal_id = "watch-missing-targets"
     diagnostics = _public_ready_watchlist_diagnostics(tp1=NA, tp2=NA, tp3=NA)
-    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    _seed_prior_active_alert(
+        db_path,
+        signal_id=signal_id,
+        alert_type=TelegramAlertType.WATCHLIST,
+        tp1=NA,
+        tp2=NA,
+        tp3=NA,
+    )
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,
@@ -3082,7 +3223,14 @@ def test_missing_entry_blocks_watchlist_outcome_tracking_and_compacts(tmp_path: 
     db_path = tmp_path / "missing-entry.db"
     signal_id = "watch-missing-entry"
     diagnostics = _public_ready_watchlist_diagnostics(entry_low=NA, entry_high=NA, watch_zone=NA, entry_zone=NA)
-    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    _seed_prior_active_alert(
+        db_path,
+        signal_id=signal_id,
+        alert_type=TelegramAlertType.WATCHLIST,
+        price_level=NA,
+        entry_low=NA,
+        entry_high=NA,
+    )
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,
