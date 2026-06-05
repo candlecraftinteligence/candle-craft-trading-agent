@@ -13,12 +13,83 @@ from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import (
     LifecycleObservation,
     WATCH_PRIORITY_STATES,
+    entry_zone_touched,
     evaluate_lifecycle_transition,
     is_watchable_lifecycle_state,
     now_utc_iso,
 )
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
 from app.storage.database import DEFAULT_DATABASE_PATH
+
+PUBLIC_A_GRADE_MIN_RR = Decimal("3.0")
+A_GRADE_WATCH_GRADES = {"a", "a+"}
+A_GRADE_ALLOWED_WAITING_GATES = {
+    "challenge_limit_entry_missing",
+    "entry_limit_missing",
+    "entry_not_hit",
+    "entry_not_touched",
+    "entry_pending",
+    "entry_zone_not_touched",
+    "entry_zone_pending",
+    "limit_entry_missing",
+    "limit_fill_pending",
+    "limit_not_hit",
+    "limit_not_touched",
+    "limit_zone_not_touched",
+    "price_has_not_touched_entry_zone",
+    "price_not_in_entry_zone",
+    "waiting_limit_fill",
+    "waiting_limit_zone",
+}
+A_GRADE_HARD_STATUS_BLOCKERS = {
+    "failed",
+    "rejected_by_derivatives",
+    "rejected_by_regime",
+    "rejected_by_risk",
+    "rejected_by_scoring",
+    "rejected_by_technical",
+    "scan_error",
+}
+A_GRADE_HARD_GATE_BLOCKERS = {
+    "body_acceptance_failure",
+    "challenge_rr_below_3",
+    "challenge_trust_below_85",
+    "derivatives_conflict",
+    "entry_window_expired",
+    "funding_oi_guard",
+    "invalidation_missing",
+    "invalidation_triggered",
+    "invalidated",
+    "missing_entry",
+    "missing_entry_zone",
+    "missing_invalidation",
+    "missing_rr",
+    "missing_stop",
+    "missing_target",
+    "missing_targets",
+    "missing_tp",
+    "missing_tp1",
+    "missing_tp2",
+    "no_displacement_candle",
+    "no_ob_or_fvg_zone",
+    "pullback_beyond_786",
+    "pullback_too_deep",
+    "quality_filter",
+    "regime_compatibility",
+    "risk",
+    "risk_validation_failed",
+    "rr_below_minimum",
+    "rr_too_low",
+    "scanner_error",
+    "stop_wrong_side",
+    "structural_breakdown",
+    "target_integrity",
+    "target_order_invalid",
+    "targets_not_monotonic",
+    "trust_meter_below_minimum",
+    "wrong_side_stop",
+}
+TARGET_INTEGRITY_BLOCKED_KEYS = {"blocked", "failed", "fail", "rejected", "reject"}
 
 
 class SetupLifecycleService:
@@ -124,11 +195,31 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
         or "bos_choch" in gates_passed
     )
     quality_score = _int_or_zero(getattr(symbol_result.setup_quality, "quality_score", 0))
+    quality_grade = _quality_grade_text(symbol_result, diagnostics)
     edge_score = _first_non_na(
         getattr(symbol_result.setup_quality, "profitability_edge_score", NA),
         symbol_result.historical_expectancy,
         symbol_result.expectancy_metrics.get("expectancy") if symbol_result.expectancy_metrics else NA,
     )
+    a_grade_watch_candidate = _a_grade_watch_candidate(
+        symbol_result,
+        diagnostics,
+        mode=mode,
+        direction=direction,
+        quality_grade=quality_grade,
+        rr=rr,
+        required_rr=required_rr,
+        failed_gate=failed_gate,
+        gates_failed=gates_failed,
+    )
+    requires_limit_fill = a_grade_watch_candidate or _requires_limit_fill_before_active(symbol_result, diagnostics)
+    if (
+        not a_grade_watch_candidate
+        and not valid_trade_idea
+        and not symbol_result.valid_strategy_modes
+        and _status_key(failed_gate)
+    ):
+        rr_valid = False
 
     return LifecycleObservation(
         symbol=symbol_result.symbol,
@@ -137,6 +228,7 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
         readiness_score=display.readiness_score,
         readiness_label=display.readiness_label,
         quality_score=quality_score,
+        quality_grade=quality_grade,
         edge_score=_display(edge_score),
         failed_gate=failed_gate,
         regime_state=_first_non_na(symbol_result.regime_state, symbol_result.regime_diagnostics.get("state")),
@@ -153,9 +245,11 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
         pullback_valid=pullback_valid,
         rr_valid=rr_valid,
         valid_trade_idea=valid_trade_idea,
-        entry_filled=False,
+        limit_fill_required=requires_limit_fill,
+        a_grade_watch_candidate=a_grade_watch_candidate,
+        entry_filled=_entry_zone_touched_for_result(symbol_result, diagnostics),
         invalidated=_structural_acceptance_invalidated(pullback_failure_type, acceptance_status, failed_gate),
-        expired=failed_gate == "entry_window_expired",
+        expired=_status_key(failed_gate) == "entry_window_expired",
     )
 
 
@@ -244,6 +338,312 @@ def _valid_trade_idea_exists(symbol_result: ScannerSymbolResult, display_status:
 def _risk_best_rr(symbol_result: ScannerSymbolResult) -> Any:
     risk_decision = symbol_result.risk_decision
     return getattr(risk_decision, "best_risk_reward_ratio", NA) if risk_decision is not None else NA
+
+
+def _risk_validation_failed(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> bool:
+    risk_decision = symbol_result.risk_decision
+    if risk_decision is not None and getattr(risk_decision, "approved", True) is not True:
+        return True
+    risk_approved = diagnostics.get("risk_approved")
+    if isinstance(risk_approved, bool) and risk_approved is False:
+        return True
+    risk_status = _status_key(_first_non_na(diagnostics.get("risk_status"), diagnostics.get("risk_validation_status")))
+    return risk_status in {"blocked", "failed", "fail", "rejected", "reject"}
+
+
+def _requires_limit_fill_before_active(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> bool:
+    return _quality_grade_key(_quality_grade_text(symbol_result, diagnostics)) in {"a", "a+"}
+
+
+def _a_grade_watch_candidate(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    *,
+    mode: str,
+    direction: str,
+    quality_grade: str,
+    rr: Decimal | None,
+    required_rr: Decimal,
+    failed_gate: str,
+    gates_failed: Sequence[str],
+) -> bool:
+    if _quality_grade_key(quality_grade) not in A_GRADE_WATCH_GRADES:
+        return False
+    if _display(symbol_result.symbol) == NA or _display(symbol_result.symbol).upper() == NA:
+        return False
+    side = _display(direction).lower()
+    if side not in {"long", "short"}:
+        return False
+    if _display(symbol_result.error_message) != NA:
+        return False
+    if _status_keys(symbol_result) & A_GRADE_HARD_STATUS_BLOCKERS:
+        return False
+    if _risk_validation_failed(symbol_result, diagnostics):
+        return False
+    if _target_integrity_failed(diagnostics):
+        return False
+
+    gate_keys = _gate_keys(failed_gate, gates_failed, diagnostics)
+    hard_gates = gate_keys & A_GRADE_HARD_GATE_BLOCKERS
+    if hard_gates:
+        return False
+    actionable_gates = {gate for gate in gate_keys if gate and gate != "n_a"}
+    if actionable_gates and not actionable_gates <= A_GRADE_ALLOWED_WAITING_GATES:
+        return False
+
+    entry_low, entry_high = (_decimal_or_none(value) for value in _entry_zone_values(symbol_result, diagnostics))
+    stop = _decimal_or_none(_stop_value(symbol_result, diagnostics))
+    targets = _target_values(symbol_result, diagnostics)
+    tp1 = _decimal_or_none(targets[0])
+    tp2 = _decimal_or_none(targets[1])
+    tp3 = _decimal_or_none(targets[2])
+    invalidation = _invalidation_value(symbol_result, diagnostics)
+    min_rr = max(required_rr, PUBLIC_A_GRADE_MIN_RR)
+
+    if entry_low is None or entry_high is None:
+        return False
+    if stop is None or tp1 is None or tp2 is None:
+        return False
+    if _display(invalidation) == NA:
+        return False
+    if rr is None or rr < min_rr:
+        return False
+
+    return _trade_map_geometry_valid(
+        side=side,
+        entry_low=entry_low,
+        entry_high=entry_high,
+        stop=stop,
+        targets=tuple(target for target in (tp1, tp2, tp3) if target is not None),
+    )
+
+
+def _quality_grade_text(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    setup_quality = symbol_result.setup_quality
+    trade_idea = symbol_result.trade_idea
+    return _first_non_na(
+        getattr(getattr(setup_quality, "quality_grade", None), "value", NA),
+        getattr(trade_idea, "grade", NA) if trade_idea is not None else NA,
+        diagnostics.get("quality_grade"),
+        diagnostics.get("trust_grade"),
+        diagnostics.get("grade"),
+    )
+
+
+def _quality_grade_key(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return ""
+    return text.lower().strip().replace(" ", "")
+
+
+def _status_keys(symbol_result: ScannerSymbolResult) -> set[str]:
+    values: list[Any] = [getattr(symbol_result.status, "value", symbol_result.status)]
+    values.extend(getattr(status, "value", status) for status in symbol_result.status_history)
+    return {_status_key(value) for value in values if _status_key(value)}
+
+
+def _gate_keys(failed_gate: Any, gates_failed: Sequence[str], diagnostics: Mapping[str, Any]) -> set[str]:
+    values: list[Any] = [failed_gate]
+    values.extend(gates_failed)
+    values.extend(_sequence_values(diagnostics.get("hard_rejection_reasons")))
+    values.extend(_sequence_values(diagnostics.get("blocking_reasons")))
+    return {_status_key(value) for value in values if _status_key(value)}
+
+
+def _target_integrity_failed(diagnostics: Mapping[str, Any]) -> bool:
+    status = _status_key(
+        _first_non_na(
+            diagnostics.get("target_integrity_status"),
+            diagnostics.get("target_status"),
+            diagnostics.get("target_validation_status"),
+        )
+    )
+    if status in TARGET_INTEGRITY_BLOCKED_KEYS:
+        return True
+    return _status_key(diagnostics.get("first_failed_gate")) == "target_integrity" or "target_integrity" in {
+        _status_key(value) for value in _sequence_values(diagnostics.get("gates_failed"))
+    }
+
+
+def _stop_value(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Any:
+    trade_idea = symbol_result.trade_idea
+    return _first_non_na(
+        diagnostics.get("stop_loss"),
+        diagnostics.get("stop"),
+        _level_field(getattr(trade_idea, "stop_loss", None), "price") if trade_idea is not None else NA,
+    )
+
+
+def _target_values(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+    trade_idea = symbol_result.trade_idea
+    return (
+        _first_non_na(diagnostics.get("tp1"), diagnostics.get("target_1"), _take_profit(trade_idea, 1)),
+        _first_non_na(diagnostics.get("tp2"), diagnostics.get("target_2"), _take_profit(trade_idea, 2)),
+        _first_non_na(diagnostics.get("tp3"), diagnostics.get("target_3"), _take_profit(trade_idea, 3)),
+    )
+
+
+def _take_profit(trade_idea: Any | None, target_number: int) -> Any:
+    targets = getattr(trade_idea, "take_profits", ()) if trade_idea is not None else ()
+    if not isinstance(targets, Sequence) or isinstance(targets, (str, bytes, bytearray, Mapping)):
+        return NA
+    index = target_number - 1
+    if index >= len(targets):
+        return NA
+    return _level_field(targets[index], "price")
+
+
+def _invalidation_value(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Any:
+    trade_idea = symbol_result.trade_idea
+    return _first_non_na(
+        getattr(trade_idea, "invalidation", NA) if trade_idea is not None else NA,
+        diagnostics.get("invalidation"),
+        diagnostics.get("watchlist_invalidation"),
+        diagnostics.get("invalidation_reason"),
+    )
+
+
+def _trade_map_geometry_valid(
+    *,
+    side: str,
+    entry_low: Decimal,
+    entry_high: Decimal,
+    stop: Decimal,
+    targets: Sequence[Decimal],
+) -> bool:
+    entry_reference = (min(entry_low, entry_high) + max(entry_low, entry_high)) / Decimal("2")
+    if side == "long" and stop >= entry_reference:
+        return False
+    if side == "short" and stop <= entry_reference:
+        return False
+    for target in targets:
+        if side == "long" and target <= entry_reference:
+            return False
+        if side == "short" and target >= entry_reference:
+            return False
+    for left, right in zip(targets, targets[1:]):
+        if side == "long" and left >= right:
+            return False
+        if side == "short" and left <= right:
+            return False
+    return True
+
+
+def _entry_zone_touched_for_result(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> bool:
+    entry_low, entry_high = _entry_zone_values(symbol_result, diagnostics)
+    if _display(entry_low) == NA or _display(entry_high) == NA:
+        return False
+
+    for high, low in _latest_range_candidates(symbol_result, diagnostics):
+        if entry_zone_touched(high, low, entry_low, entry_high):
+            return True
+    return False
+
+
+def _entry_zone_values(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> tuple[Any, Any]:
+    trade_idea = symbol_result.trade_idea
+    entry_zone = getattr(trade_idea, "entry_zone", None) if trade_idea is not None else None
+    diagnostic_zone_low, diagnostic_zone_high = _zone_from_value(diagnostics.get("entry_zone"))
+    watch_zone_low, watch_zone_high = _zone_from_value(diagnostics.get("watch_zone"))
+    entry_text_low, entry_text_high = _zone_from_value(diagnostics.get("entry"))
+    return (
+        _first_non_na(
+            diagnostics.get("entry_low"),
+            _mapping_value(diagnostics.get("entry_zone"), "low"),
+            _level_field(entry_zone, "low"),
+            _level_field(entry_zone, "price"),
+            diagnostic_zone_low,
+            watch_zone_low,
+            entry_text_low,
+        ),
+        _first_non_na(
+            diagnostics.get("entry_high"),
+            _mapping_value(diagnostics.get("entry_zone"), "high"),
+            _level_field(entry_zone, "high"),
+            _level_field(entry_zone, "price"),
+            diagnostic_zone_high,
+            watch_zone_high,
+            entry_text_high,
+        ),
+    )
+
+
+def _latest_range_candidates(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> tuple[tuple[Any, Any], ...]:
+    candidates: list[tuple[Any, Any]] = []
+    for key in ("current_candle", "latest_candle", "candle"):
+        high, low = _range_from_value(diagnostics.get(key))
+        if _display(high) != NA and _display(low) != NA:
+            candidates.append((high, low))
+
+    for high_key, low_key in (
+        ("candle_high", "candle_low"),
+        ("latest_high", "latest_low"),
+        ("current_high", "current_low"),
+        ("high", "low"),
+    ):
+        high = diagnostics.get(high_key)
+        low = diagnostics.get(low_key)
+        if _display(high) != NA and _display(low) != NA:
+            candidates.append((high, low))
+
+    if _display(symbol_result.latest_high) != NA and _display(symbol_result.latest_low) != NA:
+        candidates.append((symbol_result.latest_high, symbol_result.latest_low))
+
+    for key in ("candles_5m", "candles_15m", "candles_1h", "candles_4h", "candles_12h", "candles_2d", "candles"):
+        values = diagnostics.get(key)
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray, Mapping)) or not values:
+            continue
+        high, low = _range_from_value(values[-1])
+        if _display(high) != NA and _display(low) != NA:
+            candidates.append((high, low))
+
+    current_price = _first_non_na(
+        diagnostics.get("current_price"),
+        diagnostics.get("price"),
+        diagnostics.get("last_price"),
+        symbol_result.current_price,
+        symbol_result.latest_close,
+    )
+    if _display(current_price) != NA:
+        candidates.append((current_price, current_price))
+
+    return tuple(candidates)
+
+
+def _range_from_value(value: Any) -> tuple[Any, Any]:
+    if isinstance(value, Mapping):
+        return value.get("high", NA), value.get("low", NA)
+    return getattr(value, "high", NA), getattr(value, "low", NA)
+
+
+def _zone_from_value(value: Any) -> tuple[Any, Any]:
+    if isinstance(value, Mapping):
+        return (
+            _first_non_na(value.get("low"), value.get("entry_low")),
+            _first_non_na(value.get("high"), value.get("entry_high")),
+        )
+    text = _display(value)
+    if text == NA:
+        return NA, NA
+    normalized = text.replace("–", "-").replace("—", "-")
+    parts = [part.strip() for part in normalized.split("-") if part.strip()]
+    if len(parts) == 1:
+        return parts[0], parts[0]
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    return NA, NA
+
+
+def _mapping_value(value: Any, key: str) -> Any:
+    return value.get(key, NA) if isinstance(value, Mapping) else NA
+
+
+def _level_field(level: Any, field: str) -> Any:
+    return getattr(level, field, NA)
 
 
 def _invalidation_reason(
@@ -359,10 +759,22 @@ def _display(value: Any) -> str:
         return NA
     if value == NA:
         return NA
+    if hasattr(value, "value") and not isinstance(value, (str, int, float, bool, Decimal)):
+        value = value.value
     if isinstance(value, Decimal):
         text = format(value, "f")
         return text.rstrip("0").rstrip(".") if "." in text else text
     return str(value)
+
+
+def _status_key(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return ""
+    key = text.lower().strip().replace("-", "_").replace(" ", "_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key.strip("_")
 
 
 __all__ = [

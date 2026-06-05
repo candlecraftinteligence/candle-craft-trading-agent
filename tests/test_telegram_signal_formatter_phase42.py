@@ -97,11 +97,12 @@ def test_watchlist_upgraded_requires_upgrade_flag() -> None:
 def test_limit_zone_hit_renders_hunting_zone_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.LIMIT_HIT, _message())
 
-    assert "🐺🟠 LIMIT ZONE HIT — BTCUSDT" in text
-    assert "Price entered our hunting zone." in text
-    assert "Current Status: ACTIVE MONITORING" in text
-    assert "Hold zone = setup stays alive" in text
-    assert "No panic. No chase." in text
+    assert "🐺🟠 SCALP SIGNAL — BTCUSDT" in text
+    assert "Entry Zone Touched." in text
+    assert "Status: LIMIT ZONE HIT" in text
+    assert "Entry Zone: 100 – 102" in text
+    assert "TP1: 110" in text
+    assert "Manual execution only. Manage risk." in text
     assert "TP1 HIT" not in text
 
 

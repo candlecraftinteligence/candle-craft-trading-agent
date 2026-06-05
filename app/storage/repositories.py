@@ -346,26 +346,38 @@ def _symbol_result_record(
 
 
 def _setup_candidate_record(run_id: str, symbol_result: ScannerSymbolResult) -> SetupCandidateRecord | None:
-    if not symbol_result.valid_strategy_modes:
+    lifecycle_state = _display(getattr(getattr(symbol_result, "lifecycle_state", None), "current_state", NA))
+    a_grade_watch = lifecycle_state == "A_GRADE_WATCH"
+    if not symbol_result.valid_strategy_modes and not a_grade_watch:
         return None
-    mode = symbol_result.valid_strategy_modes[0]
-    setup_result = symbol_result.strategy_results.get(mode)
-    setup = getattr(setup_result, mode, None)
     diagnostics = _representative_diagnostics(symbol_result)
+    mode = _display(
+        _first_non_na(
+            symbol_result.valid_strategy_modes[0] if symbol_result.valid_strategy_modes else NA,
+            symbol_result.rejected_strategy_modes[0] if symbol_result.rejected_strategy_modes else NA,
+            diagnostics.get("mode"),
+        )
+    )
+    if mode == NA:
+        return None
+    setup_result = symbol_result.strategy_results.get(mode)
+    setup = getattr(setup_result, mode, None) if setup_result is not None else None
     quality = symbol_result.setup_quality
     raw_candidate = setup.model_dump(mode="json") if isinstance(setup, BaseModel) else dict(diagnostics)
     return SetupCandidateRecord(
         run_id=run_id,
         symbol=symbol_result.symbol,
         mode=mode,
-        direction=_display(_first_non_na(getattr(setup, "bias", NA), diagnostics.get("bias"))),
-        entry=_display(_first_non_na(getattr(setup, "entry", NA), diagnostics.get("entry"))),
-        stop=_display(_first_non_na(getattr(setup, "stop", NA), diagnostics.get("stop"))),
+        direction=_display(_first_non_na(getattr(setup, "bias", NA), diagnostics.get("bias"), diagnostics.get("direction"))),
+        entry=_display(_first_non_na(getattr(setup, "entry", NA), diagnostics.get("entry"), _entry_zone_text(diagnostics))),
+        stop=_display(_first_non_na(getattr(setup, "stop", NA), diagnostics.get("stop"), diagnostics.get("stop_loss"))),
         tp1=_display(_first_non_na(getattr(setup, "tp1", NA), diagnostics.get("tp1"))),
         tp2=_display(_first_non_na(getattr(setup, "tp2", NA), diagnostics.get("tp2"))),
         tp3=_display(_first_non_na(getattr(setup, "tp3", NA), diagnostics.get("tp3"))),
         rr=_display(_first_non_na(getattr(setup, "rr_to_tp2", NA), diagnostics.get("rr_to_tp2"))),
-        invalidation=_display(_first_non_na(getattr(setup, "invalidation", NA), diagnostics.get("invalidation"))),
+        invalidation=_display(
+            _first_non_na(getattr(setup, "invalidation", NA), diagnostics.get("invalidation"), diagnostics.get("invalidation_reason"))
+        ),
         quality_grade=_display(getattr(quality.quality_grade, "value", quality.quality_grade)),
         trust_meter=_trust_meter_text(setup, diagnostics),
         risk_warning=_display(getattr(setup, "risk_warning", NA)),
@@ -545,6 +557,22 @@ def _rejection_reason(symbol_result: ScannerSymbolResult, diagnostics: Mapping[s
     return NA
 
 
+def _entry_zone_text(diagnostics: Mapping[str, Any]) -> str:
+    low = _display(_first_non_na(diagnostics.get("entry_low"), _mapping_value(diagnostics.get("entry_zone"), "low")))
+    high = _display(_first_non_na(diagnostics.get("entry_high"), _mapping_value(diagnostics.get("entry_zone"), "high")))
+    if low == NA and high == NA:
+        return NA
+    if low == NA:
+        return high
+    if high == NA or high == low:
+        return low
+    return f"{low}-{high}"
+
+
+def _mapping_value(value: Any, key: str) -> Any:
+    return value.get(key, NA) if isinstance(value, Mapping) else NA
+
+
 def _trust_meter_text(setup: Any, diagnostics: Mapping[str, Any]) -> str:
     trust_meter = getattr(setup, "trust_meter", None)
     grade = _display(getattr(trust_meter, "grade", diagnostics.get("trust_grade")))
@@ -619,6 +647,9 @@ def _display(value: Any) -> str:
         return NA
     if value == NA:
         return NA
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, str):
+        return enum_value
     if isinstance(value, Decimal):
         text = format(value, "f")
         return text.rstrip("0").rstrip(".") if "." in text else text

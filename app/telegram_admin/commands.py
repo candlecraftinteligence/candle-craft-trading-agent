@@ -897,7 +897,7 @@ class TelegramAdminCommandService:
         return _public_response(
             command,
             "public_watchlist",
-            self._watchlists_dashboard_text(include_lifecycle_fallback=False),
+            self._watchlists_dashboard_text(include_lifecycle_fallback=True),
         )
 
     def _watchlists_dashboard_text(self, *, include_lifecycle_fallback: bool) -> str:

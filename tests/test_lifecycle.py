@@ -4,6 +4,8 @@ import asyncio
 import json
 from decimal import Decimal
 
+from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
+from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleEvent, SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.service import apply_lifecycle_to_run_result, prioritize_watch_symbols
@@ -327,6 +329,73 @@ def _body_acceptance_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
     )
 
 
+def _setup_quality_result(grade: SetupQualityGrade, *, score: int = 90) -> SetupQualityResult:
+    return SetupQualityResult(
+        quality_state=SetupQualityState.HIGH_QUALITY_TRADE,
+        quality_grade=grade,
+        quality_score=score,
+        tradeability_score=score,
+        profitability_edge_score=score,
+        execution_risk_score=max(0, 100 - score),
+        strongest_factors=("structure", "RR meets threshold"),
+        weakest_factors=(),
+        decision_reason="Synthetic A-grade setup.",
+        action_label="Trade candidate",
+    )
+
+
+def _a_grade_watch_symbol(
+    *,
+    grade: SetupQualityGrade = SetupQualityGrade.A,
+    symbol: str = "BTCUSDT",
+    latest_high: object = Decimal("110"),
+    latest_low: object = Decimal("108"),
+    current_price: object = NA,
+    status: ScannerPipelineStatus = ScannerPipelineStatus.SCANNED_NO_SETUP,
+    diagnostics_overrides: dict[str, object] | None = None,
+) -> ScannerSymbolResult:
+    diagnostics: dict[str, object] = {
+        "mode": "swing",
+        "bias": "long",
+        "execution_sweep_status": "passed",
+        "confirmation_structure_shift_status": "passed",
+        "pullback_zone_status": "valid",
+        "first_failed_gate": "limit_zone_not_touched",
+        "gates_passed": ("sweep", "bos_choch", "pullback_zone"),
+        "gates_failed": ("limit_zone_not_touched",),
+        "entry_low": Decimal("100"),
+        "entry_high": Decimal("102"),
+        "stop": Decimal("95"),
+        "tp1": Decimal("110"),
+        "tp2": Decimal("115"),
+        "tp3": Decimal("120"),
+        "rr_to_tp2": Decimal("3.2"),
+        "invalidation": "Invalid if price accepts below 95.",
+        "quality_grade": grade.value,
+    }
+    diagnostics.update(diagnostics_overrides or {})
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=status,
+        status_history=(status,),
+        current_price=current_price,
+        latest_high=latest_high,
+        latest_low=latest_low,
+        rejected_strategy_modes=("swing",),
+        strategy_diagnostics={"swing": diagnostics},
+        setup_quality=_setup_quality_result(grade, score=92 if grade == SetupQualityGrade.A_PLUS else 88),
+    )
+
+
+def _apply_single_lifecycle(symbol_result: ScannerSymbolResult, tmp_path, *, now: str):
+    return apply_lifecycle_to_run_result(
+        _scan_result(symbol_result),
+        database_path=tmp_path / "a_grade_lifecycle.db",
+        scan_run_id="run-a-grade",
+        now=now,
+    ).results[0]
+
+
 def test_valid_state_progression() -> None:
     initial = evaluate_lifecycle_transition(
         None,
@@ -369,6 +438,162 @@ def test_valid_state_progression() -> None:
         now="2026-05-18T09:20:00+00:00",
     )
     assert executing.to_state == SetupLifecycleState.EXECUTING
+
+
+def test_a_plus_complete_map_enters_a_grade_watch_without_valid_status(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(grade=SetupQualityGrade.A_PLUS),
+        tmp_path,
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    assert symbol_result.valid_strategy_modes == ()
+    assert symbol_result.trade_idea is None
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.A_GRADE_WATCH
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.EXECUTING
+
+
+def test_a_complete_map_enters_a_grade_watch_without_valid_status(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(grade=SetupQualityGrade.A),
+        tmp_path,
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    assert symbol_result.valid_strategy_modes == ()
+    assert symbol_result.trade_idea is None
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.A_GRADE_WATCH
+
+
+def test_a_grade_watch_does_not_become_active_before_limit_zone_touch(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(latest_high=Decimal("110"), latest_low=Decimal("108")),
+        tmp_path,
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.A_GRADE_WATCH
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.EXECUTING
+
+
+def test_a_plus_a_grade_watch_promotes_when_candle_overlaps_entry_zone(tmp_path) -> None:
+    _apply_single_lifecycle(
+        _a_grade_watch_symbol(grade=SetupQualityGrade.A_PLUS, latest_high=Decimal("110"), latest_low=Decimal("108")),
+        tmp_path,
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(grade=SetupQualityGrade.A_PLUS, latest_high=Decimal("102.5"), latest_low=Decimal("101")),
+        tmp_path,
+        now="2026-05-18T09:05:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_transition is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.EXECUTING
+    assert symbol_result.lifecycle_transition.from_state == SetupLifecycleState.A_GRADE_WATCH
+    assert symbol_result.lifecycle_transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
+
+
+def test_a_a_grade_watch_promotes_when_candle_overlaps_entry_zone(tmp_path) -> None:
+    _apply_single_lifecycle(
+        _a_grade_watch_symbol(grade=SetupQualityGrade.A, latest_high=Decimal("110"), latest_low=Decimal("108")),
+        tmp_path,
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(grade=SetupQualityGrade.A, latest_high=Decimal("101.5"), latest_low=Decimal("99.5")),
+        tmp_path,
+        now="2026-05-18T09:05:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.EXECUTING
+
+
+def test_a_grade_watch_promotes_from_current_price_inside_zone_when_candle_range_unavailable(tmp_path) -> None:
+    _apply_single_lifecycle(
+        _a_grade_watch_symbol(latest_high=Decimal("110"), latest_low=Decimal("108")),
+        tmp_path,
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(latest_high=NA, latest_low=NA, current_price=Decimal("101")),
+        tmp_path,
+        now="2026-05-18T09:05:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.EXECUTING
+
+
+def test_lower_grade_setup_is_not_promoted_by_a_grade_watch_path(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(grade=SetupQualityGrade.B_PLUS),
+        tmp_path,
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.A_GRADE_WATCH
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.EXECUTING
+
+
+def test_a_grade_watch_creation_blocks_missing_entry_stop_invalidation_rr_and_target_integrity(tmp_path) -> None:
+    cases = (
+        {"entry_low": NA, "entry_high": NA, "first_failed_gate": "missing_entry_zone", "gates_failed": ("missing_entry_zone",)},
+        {"stop": NA, "first_failed_gate": "missing_stop", "gates_failed": ("missing_stop",)},
+        {"invalidation": NA, "first_failed_gate": "missing_invalidation", "gates_failed": ("missing_invalidation",)},
+        {"rr_to_tp2": Decimal("2.2"), "first_failed_gate": "rr_below_minimum", "gates_failed": ("rr_below_minimum",)},
+        {
+            "target_integrity_status": "blocked",
+            "first_failed_gate": "target_integrity",
+            "gates_failed": ("target_integrity",),
+        },
+    )
+
+    for index, overrides in enumerate(cases):
+        symbol_result = _apply_single_lifecycle(
+            _a_grade_watch_symbol(symbol=f"CASE{index}USDT", diagnostics_overrides=overrides),
+            tmp_path,
+            now=f"2026-05-18T09:{index:02d}:00+00:00",
+        )
+
+        assert symbol_result.lifecycle_state is not None
+        assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.A_GRADE_WATCH
+        assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.EXECUTING
+
+
+def test_a_grade_watch_invalidates_instead_of_activating_when_invalidation_happens_first(tmp_path) -> None:
+    _apply_single_lifecycle(
+        _a_grade_watch_symbol(latest_high=Decimal("110"), latest_low=Decimal("108")),
+        tmp_path,
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(
+            latest_high=Decimal("102"),
+            latest_low=Decimal("101"),
+            diagnostics_overrides={
+                "first_failed_gate": "body_acceptance_failure",
+                "gates_failed": ("body_acceptance_failure",),
+                "acceptance_status": "BODY_ACCEPTANCE_FAILURE",
+                "pullback_failure_reason": "Body accepted beyond invalidation before entry.",
+            },
+        ),
+        tmp_path,
+        now="2026-05-18T09:05:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.INVALIDATED
 
 
 def test_lifecycle_invalidates_triggered_setup_on_too_deep_pullback(tmp_path) -> None:

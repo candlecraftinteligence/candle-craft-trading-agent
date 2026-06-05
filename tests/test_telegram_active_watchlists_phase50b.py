@@ -51,6 +51,7 @@ def _insert_attempt(
     scan_run_id: str = "run-active",
     price_level: str = NA,
     setup_quality_score: str = "B+",
+    rr_planned: str = NA,
     entry_low: str = NA,
     entry_high: str = NA,
     stop_loss: str = NA,
@@ -67,10 +68,10 @@ def _insert_attempt(
             """
             INSERT INTO telegram_alert_attempts (
                 signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
-                sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score, price_level,
+                sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score, rr_planned, price_level,
                 first_seen_at, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
                 blocked_reason, error_message, last_error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal_id,
@@ -84,6 +85,7 @@ def _insert_attempt(
                 f"hash-{signal_id}-{alert_type}",
                 scan_run_id,
                 setup_quality_score,
+                rr_planned,
                 price_level,
                 first_seen_at,
                 entry_low,
@@ -466,6 +468,45 @@ def test_active_signals_use_sent_runtime_signal_attempts(tmp_path: Path) -> None
     assert "order was placed" not in response.text.lower()
 
 
+def test_active_signals_show_direct_limit_zone_hit_setups(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="sig-limit",
+        symbol="BTCUSDT",
+        alert_type="LIMIT_HIT",
+        new_state="EXECUTING",
+        lifecycle_state="EXECUTING",
+        setup_quality_score="A+",
+        rr_planned="3.2",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+        tp2="115",
+        tp3="120",
+    )
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="sig-limit",
+        symbol="BTCUSDT",
+        current_state="EXECUTING",
+        invalidation_reason="Invalid if price accepts below 95.",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "Symbol: BTCUSDT" in response.text
+    assert "Status: LIMIT ZONE HIT" in response.text
+    assert "Grade: A+" in response.text
+    assert "RR: 3.2" in response.text
+    assert "Entry: 100 – 102" in response.text
+    assert "Stop: 95" in response.text
+    assert "Targets: 110, 115, 120" in response.text
+    assert "Invalidation: Invalid if price accepts below 95." in response.text
+    assert "Lifecycle: EXECUTING" in response.text
+
+
 def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_attempt(
@@ -707,6 +748,46 @@ def test_active_signals_empty_state_does_not_promote_watchlists(tmp_path: Path) 
     assert "No active confirmed signals right now." in response.text
     assert "The engine is waiting for clean structure." in response.text
     assert "BTCUSDT" not in response.text
+
+
+def test_watchlists_show_a_grade_waiting_candidate_from_lifecycle_fallback(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="life-a-watch",
+        symbol="ETHUSDT",
+        current_state="A_GRADE_WATCH",
+        direction="long",
+        invalidation_reason="Invalid if price accepts below 95.",
+        quality_score=92,
+    )
+    _insert_candidate(
+        db_path,
+        run_id="run-a-watch",
+        symbol="ETHUSDT",
+        direction="long",
+        entry="100-102",
+        stop="95",
+        tp1="110",
+        tp2="115",
+        tp3="120",
+        invalidation="Invalid if price accepts below 95.",
+        quality_grade="A+",
+    )
+
+    watch_response = _service(tmp_path, db_path).public_response_for("/watchlists")
+    signal_response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "ETHUSDT" in watch_response.text
+    assert "Status: A-GRADE WATCH — Waiting Limit Zone" in watch_response.text
+    assert "Direction: Long" in watch_response.text
+    assert "Entry Zone: 100 – 102" in watch_response.text
+    assert "Stop: 95" in watch_response.text
+    assert "Targets: 110, 115, 120" in watch_response.text
+    assert "RR: 3" in watch_response.text
+    assert "Quality: A+" in watch_response.text
+    assert "Invalidation: Invalid if price accepts below 95." in watch_response.text
+    assert "ETHUSDT" not in signal_response.text
 
 
 def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path: Path) -> None:

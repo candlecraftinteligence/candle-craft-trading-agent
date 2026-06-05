@@ -29,7 +29,7 @@ from app.formatters.telegram_signal_formatter import (
 )
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
-from app.lifecycle.state_machine import now_utc_iso
+from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
 from app.storage.models import TelegramAlertAttemptRecord
@@ -97,6 +97,16 @@ CONFIRMED_REJECTED_STATUS_KEYS = {
     "no_setup",
     "rejected",
 }
+A_GRADE_PUBLIC_LIMIT_HARD_STATUS_KEYS = {
+    "failed",
+    "rejected_by_derivatives",
+    "rejected_by_regime",
+    "rejected_by_risk",
+    "rejected_by_scoring",
+    "rejected_by_technical",
+    "scan_error",
+}
+A_GRADE_PUBLIC_LIMIT_GRADES = {"a", "a+"}
 CONFIRMED_ALLOWED_QUALITY_STATE_KEYS = {
     "high_quality_trade",
     "valid_but_lower_quality",
@@ -1245,7 +1255,8 @@ def telegram_alert_decision_for_symbol(
             _message_with_prior_public_identity(message, prior_public_alert),
             was_watchlist=prior_public_alert.alert_type == TelegramAlertType.WATCHLIST.value,
         )
-    if _requires_prior_active_alert(alert_type) and not previously_active_sent:
+    direct_limit_hit = _direct_a_grade_limit_hit_public_signal(symbol_result, alert_type)
+    if _requires_prior_active_alert(alert_type) and not previously_active_sent and not direct_limit_hit:
         if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
             reason = terminal_identity_failure_reason or "terminal_update_no_prior_public_alert"
         else:
@@ -1327,6 +1338,8 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
         entry_low=_first_non_na(
             _field(setup, "entry_low"),
             diagnostics.get("entry_low"),
+            _mapping_value(diagnostics.get("entry_zone"), "low"),
+            _mapping_value(diagnostics.get("watch_zone"), "low"),
             _level_field(getattr(trade_idea, "entry_zone", None), "low"),
             _level_field(getattr(trade_idea, "entry_zone", None), "price"),
             diagnostics.get("entry"),
@@ -1334,6 +1347,8 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
         entry_high=_first_non_na(
             _field(setup, "entry_high"),
             diagnostics.get("entry_high"),
+            _mapping_value(diagnostics.get("entry_zone"), "high"),
+            _mapping_value(diagnostics.get("watch_zone"), "high"),
             _level_field(getattr(trade_idea, "entry_zone", None), "high"),
             _level_field(getattr(trade_idea, "entry_zone", None), "price"),
             diagnostics.get("entry"),
@@ -1740,6 +1755,10 @@ def _alert_type_for_transition(
     transition: SetupTransitionResult,
 ) -> TelegramAlertType | None:
     state = transition.to_state
+    if state == SetupLifecycleState.A_GRADE_WATCH:
+        return None
+    if state == SetupLifecycleState.EXECUTING and transition.from_state == SetupLifecycleState.A_GRADE_WATCH:
+        return TelegramAlertType.LIMIT_HIT
     if state in WATCH_ALERT_STATES:
         return TelegramAlertType.WATCHLIST
     if state in SIGNAL_ALERT_STATES:
@@ -1761,6 +1780,21 @@ def _alert_type_for_transition(
     if _explicit_watchlist_candidate(symbol_result):
         return TelegramAlertType.WATCHLIST
     return None
+
+
+def _direct_a_grade_limit_hit_public_signal(
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+) -> bool:
+    if alert_type != TelegramAlertType.LIMIT_HIT:
+        return False
+    transition = symbol_result.lifecycle_transition
+    if transition is None:
+        return False
+    return transition.from_state == SetupLifecycleState.A_GRADE_WATCH and transition.to_state in {
+        SetupLifecycleState.EXECUTING,
+        SetupLifecycleState.MANAGING,
+    }
 
 
 def _tp_alert_type(symbol_result: ScannerSymbolResult) -> TelegramAlertType | None:
@@ -2123,13 +2157,16 @@ def _missing_required_fields(alert_type: TelegramAlertType, message: TelegramSig
         )
     elif alert_type in {
         TelegramAlertType.SIGNAL_CONFIRMED,
+        TelegramAlertType.LIMIT_HIT,
         TelegramAlertType.INVALIDATED,
         TelegramAlertType.EXPIRED,
         TelegramAlertType.NO_LONGER_TRACKING,
     }:
         required.append(("invalidation_reason", message.invalidation_reason))
+    if alert_type in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}:
+        required.extend((("tp1", message.tp1), ("tp2", message.tp2)))
     if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
-        required.extend((("tp1", message.tp1), ("tp2", message.tp2), ("tp3", message.tp3)))
+        required.append(("tp3", message.tp3))
     if alert_type == TelegramAlertType.TP1_HIT:
         required.append(("tp1", message.tp1))
     if alert_type == TelegramAlertType.TP2_HIT:
@@ -2174,6 +2211,9 @@ def _defensive_delivery_blockers(
         if missing:
             blockers.append(f"missing_required_fields:{','.join(missing)}")
         return tuple(dict.fromkeys(blockers))
+
+    if alert_type == TelegramAlertType.LIMIT_HIT and _direct_a_grade_limit_hit_public_signal(symbol_result, alert_type):
+        return _a_grade_limit_hit_public_blockers(symbol_result, message, context)
 
     if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
         return ()
@@ -2233,18 +2273,106 @@ def _defensive_delivery_blockers(
     return tuple(dict.fromkeys(blockers))
 
 
+def _a_grade_limit_hit_public_blockers(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+    context: TelegramEligibilityContext,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    blockers.extend(_public_quality_gate_blockers(symbol_result))
+
+    grade_key = _status_key(
+        _first_non_na(
+            message.quality,
+            getattr(getattr(symbol_result.setup_quality, "quality_grade", None), "value", NA),
+            _representative_diagnostics(symbol_result).get("quality_grade"),
+            _representative_diagnostics(symbol_result).get("trust_grade"),
+            _representative_diagnostics(symbol_result).get("grade"),
+        )
+    )
+    if grade_key not in A_GRADE_PUBLIC_LIMIT_GRADES:
+        blockers.append(f"quality_grade_not_a:{grade_key or 'missing'}")
+
+    status_keys = set(_status_keys(symbol_result))
+    for status_key in sorted(status_keys & A_GRADE_PUBLIC_LIMIT_HARD_STATUS_KEYS):
+        blockers.append(f"core_status_blocked:{status_key}")
+
+    missing = _missing_required_fields(TelegramAlertType.LIMIT_HIT, message)
+    if missing:
+        blockers.append(f"missing_required_fields:{','.join(missing)}")
+
+    planned_rr = _decimal_or_none(message.planned_rr)
+    if planned_rr is None:
+        blockers.append("planned_rr_missing_or_invalid")
+    elif planned_rr < context.min_rr:
+        blockers.append(f"planned_rr_below_min:{_text(planned_rr)}<{_text(context.min_rr)}")
+
+    raw_invalidation = _raw_invalidation_text(symbol_result)
+    if _text(message.invalidation_reason) == NA:
+        blockers.append("invalidation_missing")
+    if _looks_like_rejection_reason(raw_invalidation) or _looks_like_rejection_reason(message.invalidation_reason):
+        blockers.append("invalidation_contains_rejection_reason")
+
+    blockers.extend(_a_grade_limit_hit_status_blockers(symbol_result))
+    blockers.extend(_target_integrity_blockers(symbol_result, TelegramAlertType.LIMIT_HIT, message))
+    return tuple(dict.fromkeys(blockers))
+
+
+def _a_grade_limit_hit_status_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    diagnostics = _representative_diagnostics(symbol_result)
+    blockers: list[str] = []
+    if _text(symbol_result.error_message) != NA:
+        blockers.append("scanner_error_present")
+    risk_decision = symbol_result.risk_decision
+    if risk_decision is not None and getattr(risk_decision, "approved", True) is not True:
+        blockers.append("risk_validation_failed")
+    risk_approved = diagnostics.get("risk_approved")
+    if isinstance(risk_approved, bool) and risk_approved is False:
+        blockers.append("risk_validation_failed")
+    if _status_key(diagnostics.get("target_integrity_status")) in {"blocked", "failed", "fail", "rejected", "reject"}:
+        blockers.append("target_integrity")
+    failed_gate = _status_key(_first_non_na(diagnostics.get("first_failed_gate"), getattr(symbol_result.lifecycle_state, "failed_gate", NA)))
+    if failed_gate in {
+        "body_acceptance_failure",
+        "challenge_rr_below_3",
+        "derivatives_conflict",
+        "entry_window_expired",
+        "funding_oi_guard",
+        "missing_entry",
+        "missing_entry_zone",
+        "missing_invalidation",
+        "missing_rr",
+        "missing_stop",
+        "missing_target",
+        "missing_targets",
+        "no_ob_or_fvg_zone",
+        "pullback_beyond_786",
+        "pullback_too_deep",
+        "regime_compatibility",
+        "risk",
+        "risk_validation_failed",
+        "rr_below_minimum",
+        "rr_too_low",
+        "scanner_error",
+        "structural_breakdown",
+        "target_integrity",
+    }:
+        blockers.append(f"failed_gate_blocked:{failed_gate}")
+    return tuple(dict.fromkeys(blockers))
+
+
 def _target_integrity_blockers(
     symbol_result: ScannerSymbolResult,
     alert_type: TelegramAlertType,
     message: TelegramSignalMessage,
 ) -> tuple[str, ...]:
-    if alert_type not in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED}:
+    if alert_type not in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}:
         return ()
     side = _status_key(message.direction)
     if side not in {"long", "short"}:
         return ()
 
-    confirmed = alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+    confirmed = alert_type in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}
     entry_reference = _entry_reference(symbol_result, message)
     stop_loss = _decimal_or_none(message.stop_loss)
     targets = (
@@ -3576,6 +3704,16 @@ def _watchlist_candle_snapshot(symbol_result: ScannerSymbolResult) -> WatchlistC
         snapshot = _candle_snapshot_from_value(values[-1])
         if snapshot is not None:
             return snapshot
+    current_price = _first_non_na(
+        diagnostics.get("current_price"),
+        diagnostics.get("price"),
+        diagnostics.get("last_price"),
+        getattr(symbol_result, "current_price", NA),
+        getattr(symbol_result, "latest_close", NA),
+    )
+    snapshot = _candle_snapshot_from_high_low(current_price, current_price)
+    if snapshot is not None:
+        return snapshot
     return None
 
 
@@ -3629,7 +3767,7 @@ def _limit_zone_values(message: TelegramSignalMessage) -> tuple[Decimal, Decimal
 
 def _candle_touches_zone(candle: WatchlistCandleSnapshot, zone: tuple[Decimal, Decimal]) -> bool:
     low, high = zone
-    return candle.high >= low and candle.low <= high
+    return entry_zone_touched(candle.high, candle.low, low, high)
 
 
 def _valid_watchlist_stop(message: TelegramSignalMessage, zone: tuple[Decimal, Decimal]) -> Decimal | None:
@@ -4549,6 +4687,7 @@ def _raw_invalidation_text(symbol_result: ScannerSymbolResult) -> str:
         getattr(trade_idea, "invalidation", NA) if trade_idea is not None else NA,
         _field(setup, "invalidation"),
         diagnostics.get("invalidation"),
+        diagnostics.get("invalidation_reason"),
         getattr(lifecycle, "invalidation_reason", NA),
     )
 
@@ -4596,6 +4735,10 @@ def _field(source: Any | None, name: str) -> Any:
     if isinstance(source, Mapping):
         return source.get(name, NA)
     return getattr(source, name, NA)
+
+
+def _mapping_value(value: Any, key: str) -> Any:
+    return value.get(key, NA) if isinstance(value, Mapping) else NA
 
 
 def _first_non_na(*values: Any) -> Any:
