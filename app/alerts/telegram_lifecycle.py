@@ -10,7 +10,15 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from app.analytics.public_signal_quality import MIN_PUBLIC_SIGNAL_GRADE, public_quality_decision
 from app.alerts.telegram_sender import TelegramSender
+from app.alerts.telegram_routing import TelegramMessageType
+from app.alerts.watchlist_expiry import (
+    WATCHLIST_EXPIRY_REASON,
+    WATCHLIST_EXPIRY_TIMESTAMP_NA_REASON,
+    WATCHLIST_EXPIRY_TIMESTAMP_UNVERIFIED_REASON,
+    watchlist_expiry_decision,
+)
 from app.core.config import Settings
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
@@ -60,6 +68,7 @@ WATCHLIST_OUTCOME_TERMINAL_ALERT_TYPES = {
 }
 WATCHLIST_OUTCOME_TRACKING_ATTEMPT = "WATCHLIST_OUTCOME_TRACKING"
 WATCHLIST_TERMINAL_SUPPRESSION_ATTEMPT = "WATCHLIST_TERMINAL_SUPPRESSION"
+WATCHLIST_EXPIRY_ATTEMPT = "WATCHLIST_EXPIRY"
 SENT_WATCHLIST_RECONCILIATION_ATTEMPT = "SENT_WATCHLIST_RECONCILIATION"
 SENT_WATCHLIST_RECONCILIATION_NO_MATCH = "sent_watchlist_reconciliation_no_lifecycle_match"
 SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguous"
@@ -814,7 +823,10 @@ class TelegramLifecycleDeliveryService:
 
         message_text = format_telegram_signal_message(decision.alert_type, message)
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
-        send_result = await self.sender.send_text(message_text)
+        send_result = await self.sender.send_text(
+            message_text,
+            message_type=_telegram_message_type_for_alert(decision.alert_type, message),
+        )
         transition = decision.lifecycle_transition
         previous_state = transition.from_state.value if transition and transition.from_state else NA
         new_state = transition.to_state.value if transition else _lifecycle_state_text(symbol_result)
@@ -892,6 +904,24 @@ class TelegramLifecycleDeliveryService:
                 continue
             if repository.has_sent_terminal_outcome(signal_id=prior_alert.signal_id):
                 continue
+            expiry = _prior_watchlist_expiry_decision(repository, prior_alert)
+            if expiry.expired:
+                deliveries.append(
+                    _persist_watchlist_expiry_audit(
+                        repository,
+                        prior_alert,
+                        reason=WATCHLIST_EXPIRY_REASON,
+                        scan_run_id=scan_run_id,
+                    )
+                )
+                continue
+            if expiry.reason in {WATCHLIST_EXPIRY_TIMESTAMP_NA_REASON, WATCHLIST_EXPIRY_TIMESTAMP_UNVERIFIED_REASON}:
+                _persist_watchlist_expiry_audit(
+                    repository,
+                    prior_alert,
+                    reason=expiry.reason,
+                    scan_run_id=scan_run_id,
+                )
             if _has_current_run_soft_failed_confirmation_observation(
                 repository,
                 signal_id=prior_alert.signal_id,
@@ -1061,7 +1091,10 @@ class TelegramLifecycleDeliveryService:
 
         message_text = format_telegram_signal_message(alert_type, message)
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
-        send_result = await self.sender.send_text(message_text)
+        send_result = await self.sender.send_text(
+            message_text,
+            message_type=_telegram_message_type_for_alert(alert_type, message),
+        )
         transition = current_result.lifecycle_transition
         previous_state = transition.from_state.value if transition and transition.from_state else prior_alert.new_state
         new_state = transition.to_state.value if transition else _lifecycle_state_text(current_result)
@@ -1128,7 +1161,10 @@ class TelegramLifecycleDeliveryService:
     ) -> TelegramLifecycleDelivery:
         message_text = format_telegram_signal_message(outcome.alert_type, outcome.message)
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
-        send_result = await self.sender.send_text(message_text)
+        send_result = await self.sender.send_text(
+            message_text,
+            message_type=_telegram_message_type_for_alert(outcome.alert_type, outcome.message),
+        )
         transition = outcome.symbol_result.lifecycle_transition
         previous_state = transition.from_state.value if transition and transition.from_state else NA
         new_state = transition.to_state.value if transition else _lifecycle_state_text(outcome.symbol_result)
@@ -1749,6 +1785,25 @@ def _requires_prior_active_alert(alert_type: TelegramAlertType) -> bool:
     return alert_type not in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED}
 
 
+def _telegram_message_type_for_alert(
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage | None = None,
+) -> TelegramMessageType:
+    if alert_type == TelegramAlertType.SIGNAL_CONFIRMED and message is not None and message.upgraded_from_watchlist:
+        return TelegramMessageType.WATCHLIST_CONFIRMED
+    if alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED}:
+        return TelegramMessageType.PUBLIC_SIGNAL
+    if alert_type == TelegramAlertType.LIMIT_HIT:
+        return TelegramMessageType.LIMIT_ZONE_HIT
+    if alert_type in {TelegramAlertType.TP1_HIT, TelegramAlertType.TP2_HIT, TelegramAlertType.TP3_HIT}:
+        return TelegramMessageType.TP_HIT
+    if alert_type == TelegramAlertType.SL_HIT:
+        return TelegramMessageType.SL_HIT
+    if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
+        return TelegramMessageType.INVALIDATED
+    return TelegramMessageType.LIFECYCLE_UPDATE
+
+
 def _terminal_transition_blockers(
     symbol_result: ScannerSymbolResult,
     alert_type: TelegramAlertType,
@@ -2094,6 +2149,10 @@ def _defensive_delivery_blockers(
 ) -> tuple[str, ...]:
     if alert_type == TelegramAlertType.WATCHLIST:
         blockers: list[str] = []
+        expiry = _watchlist_candidate_expiry_decision(symbol_result)
+        if expiry.expired:
+            blockers.append(WATCHLIST_EXPIRY_REASON)
+        blockers.extend(_public_quality_gate_blockers(symbol_result))
         explicit_watchlist = _explicit_watchlist_candidate(symbol_result)
         blockers.extend(_watchlist_status_blockers(symbol_result, explicit_watchlist=explicit_watchlist))
         quality_state = _setup_quality_state_key(symbol_result)
@@ -2120,6 +2179,7 @@ def _defensive_delivery_blockers(
         return ()
 
     blockers: list[str] = []
+    blockers.extend(_public_quality_gate_blockers(symbol_result))
     blockers.extend(_core_status_blockers(symbol_result))
     blockers.extend(_failed_confirmation_core_blockers(symbol_result))
 
@@ -2479,6 +2539,54 @@ def _setup_quality_state_key(symbol_result: ScannerSymbolResult) -> str:
     return _status_key(getattr(quality_state, "value", quality_state))
 
 
+def _public_quality_gate_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    diagnostics = _representative_diagnostics(symbol_result)
+    trade_idea = symbol_result.trade_idea
+    setup_quality = symbol_result.setup_quality
+    decision = public_quality_decision(
+        grade_candidates=(
+            getattr(getattr(setup_quality, "quality_grade", None), "value", NA),
+            getattr(trade_idea, "grade", NA) if trade_idea is not None else NA,
+            diagnostics.get("quality_grade"),
+            diagnostics.get("opportunity_grade"),
+            diagnostics.get("grade"),
+            diagnostics.get("trust_grade"),
+        ),
+        score_candidates=(
+            getattr(setup_quality, "quality_score", NA),
+            getattr(trade_idea, "confidence_score", NA) if trade_idea is not None else NA,
+            diagnostics.get("setup_quality_score"),
+            diagnostics.get("quality_score"),
+            diagnostics.get("opportunity_score"),
+            diagnostics.get("confidence_score"),
+            diagnostics.get("trust_percentage"),
+            diagnostics.get("readiness_score"),
+        ),
+    )
+    if decision.passed:
+        return ()
+    grade = decision.grade if _text(decision.grade) != NA else NA
+    source = decision.source if _text(decision.source) != NA else NA
+    return (f"{decision.reason}:grade={grade}:min={MIN_PUBLIC_SIGNAL_GRADE}:source={source}",)
+
+
+def _watchlist_candidate_expiry_decision(symbol_result: ScannerSymbolResult):
+    transition = symbol_result.lifecycle_transition
+    timestamp = transition.event.timestamp if transition is not None and transition.event is not None else NA
+    lifecycle = symbol_result.lifecycle_state
+    # For a new public WATCHLIST candidate, the transition event timestamp is the safest
+    # promoted-at anchor. Lifecycle first_seen_at can predate public promotion and would
+    # expire internal research rows before they were ever shown publicly.
+    return watchlist_expiry_decision(
+        timestamp_candidates=(timestamp,),
+        state_candidates=(
+            transition.to_state if transition is not None else NA,
+            getattr(lifecycle, "current_state", NA) if lifecycle is not None else NA,
+            getattr(lifecycle, "action_label", NA) if lifecycle is not None else NA,
+        ),
+    )
+
+
 def _explicit_watchlist_candidate(symbol_result: ScannerSymbolResult) -> bool:
     diagnostics = _representative_diagnostics(symbol_result)
     lifecycle = symbol_result.lifecycle_state
@@ -2783,6 +2891,96 @@ def _persist_suppressed_watchlist_terminal_update(
         symbol=prior_alert.symbol,
         signal_id=prior_alert.signal_id,
         alert_type=alert_type.value,
+        status=status,
+        detail=detail,
+        message_hash=message_hash,
+        error_message=reason,
+    )
+
+
+def _prior_watchlist_expiry_decision(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    prior_alert: TelegramAlertAttemptRecord,
+):
+    attempts = repository.list_attempts(signal_id=prior_alert.signal_id)
+    state_candidates = (
+        prior_alert.lifecycle_state,
+        prior_alert.new_state,
+        prior_alert.alert_type,
+        *(attempt.lifecycle_state for attempt in attempts),
+        *(attempt.new_state for attempt in attempts),
+        *(attempt.alert_type for attempt in attempts),
+    )
+    # Public watchlist TTL starts from telegram_alert_attempts.first_seen_at because
+    # that column records the first public WATCHLIST display/send for a signal. If
+    # older databases lack it, sent_at is the deterministic public-send fallback.
+    return watchlist_expiry_decision(
+        timestamp_candidates=(prior_alert.first_seen_at, prior_alert.sent_at),
+        state_candidates=state_candidates,
+    )
+
+
+def _persist_watchlist_expiry_audit(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    prior_alert: TelegramAlertAttemptRecord,
+    *,
+    reason: str,
+    scan_run_id: str | None,
+) -> TelegramLifecycleDelivery:
+    seen_at = now_utc_iso()
+    alert_type = _watchlist_expiry_audit_alert_type(reason)
+    message_hash = hashlib.sha256(
+        f"{prior_alert.signal_id}|{WATCHLIST_EXPIRY_ATTEMPT}|{reason}".encode("utf-8")
+    ).hexdigest()
+    record = TelegramAlertAttemptRecord(
+        signal_id=prior_alert.signal_id,
+        symbol=prior_alert.symbol,
+        direction=prior_alert.direction,
+        previous_state=prior_alert.previous_state,
+        new_state=prior_alert.new_state,
+        alert_type=alert_type,
+        lifecycle_state=prior_alert.lifecycle_state,
+        sent_at=seen_at,
+        telegram_status="skipped",
+        message_hash=message_hash,
+        scan_run_id=scan_run_id,
+        attempted_alert_type=WATCHLIST_EXPIRY_ATTEMPT,
+        setup_quality_score=prior_alert.setup_quality_score,
+        rr_planned=prior_alert.rr_planned,
+        min_rr=prior_alert.min_rr,
+        opportunity_score=prior_alert.opportunity_score,
+        min_score_for_idea=prior_alert.min_score_for_idea,
+        technical_score=prior_alert.technical_score,
+        price_level=prior_alert.price_level,
+        entry_low=prior_alert.entry_low,
+        entry_high=prior_alert.entry_high,
+        stop_loss=prior_alert.stop_loss,
+        tp1=prior_alert.tp1,
+        tp2=prior_alert.tp2,
+        tp3=prior_alert.tp3,
+        blocked_reason=reason,
+        invalid_target_fields=NA,
+        error_message=reason,
+        first_seen_at=_first_non_na(prior_alert.first_seen_at, prior_alert.sent_at),
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id,
+        last_error_message=reason,
+    )
+    inserted = repository.insert_attempt(record)
+    status = "skipped"
+    detail = "Public watchlist expired after the 48-hour watch TTL."
+    if not inserted:
+        compacted = repository.compact_repeated_attempt(record)
+        status = "blocked_repeat" if compacted else "duplicate"
+        detail = (
+            "Repeated public watchlist expiry audit compacted."
+            if compacted
+            else "Duplicate public watchlist expiry audit prevented."
+        )
+    return TelegramLifecycleDelivery(
+        symbol=prior_alert.symbol,
+        signal_id=prior_alert.signal_id,
+        alert_type=WATCHLIST_EXPIRY_ATTEMPT,
         status=status,
         detail=detail,
         message_hash=message_hash,
@@ -3834,6 +4032,11 @@ def _watchlist_outcome_audit_alert_type(reason: str) -> str:
 def _watchlist_terminal_suppression_alert_type(alert_type: TelegramAlertType) -> str:
     digest = hashlib.sha256(alert_type.value.encode("utf-8")).hexdigest()[:12]
     return f"{WATCHLIST_TERMINAL_SUPPRESSION_ATTEMPT}_{digest}"
+
+
+def _watchlist_expiry_audit_alert_type(reason: str) -> str:
+    digest = hashlib.sha256(_status_key(reason).encode("utf-8")).hexdigest()[:12]
+    return f"{WATCHLIST_EXPIRY_ATTEMPT}_{digest}"
 
 
 def _selected_setup(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Any | None:

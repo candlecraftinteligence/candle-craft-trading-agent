@@ -7,6 +7,12 @@ from typing import Any, Literal, Protocol
 import httpx
 
 from app.alerts.telegram import DEFAULT_TELEGRAM_TIMEOUT, TELEGRAM_API_BASE_URL, send_telegram_messages
+from app.alerts.telegram_routing import (
+    TelegramMessageType,
+    can_send_to_destination,
+    log_blocked_telegram_route,
+    signal_channel_destination_for_chat,
+)
 from app.data.dtos import NA
 
 TelegramAdminDeliveryStatus = Literal[
@@ -202,6 +208,22 @@ class TelegramAdminClient:
                     "local draft artifact persisted instead."
                 ),
                 error_message="missing_telegram_admin_credentials",
+            )
+
+        route_decision = can_send_to_destination(
+            signal_channel_destination_for_chat(
+                self._config.admin_chat_id,
+                public_channel_id=self._config.public_channel_id,
+                wolf_briefing_channel_id=self._config.wolf_briefing_channel_id,
+            ),
+            TelegramMessageType.ADMIN_REPORT,
+        )
+        if not route_decision.allowed:
+            log_blocked_telegram_route(route_decision)
+            return TelegramAdminDelivery(
+                status="skipped_disabled",
+                detail="Telegram admin report blocked by signal-channel routing guard.",
+                error_message=route_decision.reason,
             )
 
         try:

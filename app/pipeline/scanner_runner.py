@@ -3385,10 +3385,16 @@ def _regime_adjusted_grade(state: SetupQualityState, quality_score: int) -> Setu
         return SetupQualityGrade.REJECT
     if quality_score >= 90:
         return SetupQualityGrade.A_PLUS
-    if quality_score >= 80:
+    if quality_score >= 85:
         return SetupQualityGrade.A
+    if quality_score >= 80:
+        return SetupQualityGrade.A_MINUS
+    if quality_score >= 75:
+        return SetupQualityGrade.B_PLUS
     if quality_score >= 65:
         return SetupQualityGrade.B
+    if quality_score >= 55:
+        return SetupQualityGrade.B_MINUS
     if quality_score >= 50:
         return SetupQualityGrade.C
     return SetupQualityGrade.REJECT

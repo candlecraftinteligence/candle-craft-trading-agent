@@ -8,6 +8,13 @@ from typing import Any
 import httpx
 
 from app.alerts.telegram import DEFAULT_TELEGRAM_TIMEOUT, TELEGRAM_API_BASE_URL, send_telegram_messages
+from app.alerts.telegram_routing import (
+    TelegramDestination,
+    TelegramMessageType,
+    can_send_to_destination,
+    log_blocked_telegram_route,
+    normalize_destination,
+)
 from app.core.config import Settings
 from app.data.dtos import NA
 
@@ -49,6 +56,7 @@ class TelegramSender:
         http_client: httpx.AsyncClient | None = None,
         api_base_url: str = TELEGRAM_API_BASE_URL,
         timeout: float = DEFAULT_TELEGRAM_TIMEOUT,
+        destination: TelegramDestination | str = TelegramDestination.UNKNOWN,
     ) -> None:
         self._bot_token = _clean_optional(bot_token)
         self._chat_id = _clean_optional(chat_id)
@@ -57,6 +65,7 @@ class TelegramSender:
         self._http_client = http_client
         self._api_base_url = api_base_url
         self._timeout = timeout
+        self._destination = normalize_destination(destination)
 
     @classmethod
     def from_settings(
@@ -70,6 +79,13 @@ class TelegramSender:
         destination = resolve_public_signal_destination(settings)
         if destination.warning != NA and getattr(settings, "telegram_signals_enabled", False):
             logger.warning(destination.warning)
+        destination_type = (
+            TelegramDestination.SIGNAL_CHANNEL
+            if destination.source == "TELEGRAM_PUBLIC_CHANNEL_ID"
+            else TelegramDestination.PUBLIC_CHAT
+            if destination.source in {"TELEGRAM_PUBLIC_CHAT_ID", "TELEGRAM_CHAT_ID"}
+            else TelegramDestination.UNKNOWN
+        )
         return cls(
             bot_token=settings.telegram_bot_token,
             chat_id=destination.chat_id,
@@ -78,9 +94,15 @@ class TelegramSender:
             http_client=http_client,
             api_base_url=api_base_url,
             timeout=timeout,
+            destination=destination_type,
         )
 
-    async def send_text(self, text: str) -> TelegramSendResult:
+    async def send_text(
+        self,
+        text: str,
+        *,
+        message_type: TelegramMessageType | str = TelegramMessageType.UNKNOWN,
+    ) -> TelegramSendResult:
         if not self._local_manual_mode:
             logger.warning("Telegram signal delivery skipped because LOCAL_MANUAL_MODE is false.")
             return TelegramSendResult(
@@ -103,6 +125,15 @@ class TelegramSender:
                 error_message="missing_telegram_credentials",
             )
 
+        route_decision = can_send_to_destination(self._destination, message_type)
+        if not route_decision.allowed:
+            log_blocked_telegram_route(route_decision)
+            return TelegramSendResult(
+                status="skipped",
+                detail="Telegram message blocked by signal-channel routing guard.",
+                error_message=route_decision.reason,
+            )
+
         results = await send_telegram_messages(
             bot_token=self._bot_token,
             chat_id=self._chat_id,
@@ -120,11 +151,16 @@ class TelegramSender:
             error_message=error,
         )
 
-    def send_message(self, text: str) -> bool:
+    def send_message(
+        self,
+        text: str,
+        *,
+        message_type: TelegramMessageType | str = TelegramMessageType.UNKNOWN,
+    ) -> bool:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.send_text(text)).sent
+            return asyncio.run(self.send_text(text, message_type=message_type)).sent
         raise RuntimeError("send_message cannot be called from a running event loop; use send_text instead.")
 
 
