@@ -18,6 +18,7 @@ from app.telegram_admin.client import TelegramAdminConfig
 from app.telegram_admin.commands import (
     AdminCommandResponse,
     TelegramAdminCommandService,
+    WOLF_BRIEFING_PUBLISH_COMMAND,
     command_for_callback_data,
     normalize_admin_command,
     reply_keyboard_remove_markup,
@@ -307,6 +308,10 @@ async def _process_update(
             transport=transport,
         )
         chat_id = _callback_chat_id(callback_query)
+        chat_type = _callback_chat_type(callback_query)
+        if not _command_chat_is_private(chat_id, chat_type, config):
+            _save_latest_processed_update_id(state_path, update_id)
+            return _ProcessedUpdate("ignored_unauthorized", preview="Ignored non-private Telegram command update.")
         callback_scope, command = command_for_callback_data(_callback_data(callback_query))
         is_admin = _chat_matches_admin(chat_id, config.admin_chat_id)
         if callback_scope == "public":
@@ -324,6 +329,16 @@ async def _process_update(
             return await _process_public_update(
                 update_id,
                 "/status",
+                chat_id,
+                config=config,
+                command_service=command_service,
+                transport=transport,
+                state_path=state_path,
+                audit_path=audit_path,
+            )
+        if callback_scope == "admin" and command == WOLF_BRIEFING_PUBLISH_COMMAND:
+            return await _process_admin_wolf_publish_update(
+                update_id,
                 chat_id,
                 config=config,
                 command_service=command_service,
@@ -366,6 +381,10 @@ async def _process_update(
 
     message = _message_payload(update)
     chat_id = _chat_id(message)
+    chat_type = _chat_type(message)
+    if not _command_chat_is_private(chat_id, chat_type, config):
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("ignored_unauthorized", preview="Ignored non-private Telegram command update.")
     command = normalize_admin_command(_message_text(message))
     is_admin = _chat_matches_admin(chat_id, config.admin_chat_id)
 
@@ -391,6 +410,218 @@ async def _process_update(
         state_path=state_path,
         audit_path=audit_path,
     )
+
+
+async def _process_admin_wolf_publish_update(
+    update_id: int,
+    chat_id: str,
+    *,
+    config: TelegramAdminConfig,
+    command_service: TelegramAdminCommandService,
+    transport: TelegramAdminCommandTransport,
+    state_path: Path,
+    audit_path: Path,
+) -> _ProcessedUpdate:
+    if not bool(getattr(config, "wolf_briefing_enabled", False)):
+        return await _send_admin_publish_notice(
+            update_id,
+            chat_id,
+            "Wolf Briefing is disabled. Enable TELEGRAM_WOLF_BRIEFING_ENABLED=true before publishing.",
+            response_type="wolf_briefing_disabled",
+            delivery_status="skipped_disabled",
+            config=config,
+            transport=transport,
+            state_path=state_path,
+            audit_path=audit_path,
+        )
+
+    response = command_service.wolf_briefing_public_response(
+        admin_config=config,
+        command=WOLF_BRIEFING_PUBLISH_COMMAND,
+    )
+    skipped = _skip_status(config)
+    if skipped is not None:
+        _append_command_audit(audit_path, update_id, chat_id, response, skipped)
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate(skipped, preview=_preview(response.text))
+    if config.dry_run:
+        _append_command_audit(audit_path, update_id, chat_id, response, "dry_run")
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("dry_run", preview=_preview(response.text))
+    if not bool(getattr(config, "wolf_briefing_channel_publish_enabled", False)):
+        return await _send_admin_publish_notice(
+            update_id,
+            chat_id,
+            (
+                "Wolf Briefing channel publishing is disabled. "
+                "Enable TELEGRAM_WOLF_BRIEFING_CHANNEL_PUBLISH_ENABLED=true to publish manually."
+            ),
+            response_type="wolf_briefing_publish_disabled",
+            delivery_status="skipped_disabled",
+            config=config,
+            transport=transport,
+            state_path=state_path,
+            audit_path=audit_path,
+        )
+
+    target_channel_id = _wolf_briefing_publish_channel_id(config)
+    if target_channel_id == NA:
+        return await _send_admin_publish_notice(
+            update_id,
+            chat_id,
+            (
+                "Wolf Briefing public channel is not configured. "
+                "Set TELEGRAM_WOLF_BRIEFING_CHANNEL_ID or TELEGRAM_PUBLIC_CHANNEL_ID."
+            ),
+            response_type="wolf_briefing_publish_missing_target",
+            delivery_status="skipped_missing_credentials",
+            config=config,
+            transport=transport,
+            state_path=state_path,
+            audit_path=audit_path,
+            error_message="missing_wolf_briefing_publish_channel",
+        )
+    if _wolf_publish_target_is_unsafe(target_channel_id, chat_id, config):
+        return await _send_admin_publish_notice(
+            update_id,
+            chat_id,
+            (
+                "Wolf Briefing public channel target is not safe to use. "
+                "Set TELEGRAM_WOLF_BRIEFING_CHANNEL_ID or TELEGRAM_PUBLIC_CHANNEL_ID to a public signal channel."
+            ),
+            response_type="wolf_briefing_publish_unsafe_target",
+            delivery_status="skipped_missing_credentials",
+            config=config,
+            transport=transport,
+            state_path=state_path,
+            audit_path=audit_path,
+            error_message="unsafe_wolf_briefing_publish_channel",
+        )
+
+    try:
+        raw_results = await transport.send_message(
+            bot_token=config.bot_token or "",
+            chat_id=target_channel_id,
+            message=response.text,
+            reply_markup=None,
+            photo_path=None,
+            photo_url=None,
+        )
+    except Exception as exc:
+        error = _sanitize_error(exc, config, extra_secrets=(target_channel_id,))
+        return await _send_admin_publish_notice(
+            update_id,
+            chat_id,
+            f"Wolf Briefing publish failed: {error}",
+            response_type="wolf_briefing_publish_failed",
+            delivery_status="failed",
+            config=config,
+            transport=transport,
+            state_path=state_path,
+            audit_path=audit_path,
+            error_message=error,
+        )
+
+    sanitized_results = tuple(
+        _sanitize_result(item, config, extra_secrets=(target_channel_id,)) for item in raw_results
+    )
+    if _raw_results_sent(sanitized_results):
+        _append_command_audit(audit_path, update_id, chat_id, response, "sent_public")
+        _save_latest_processed_update_id(state_path, update_id)
+        await _send_wolf_publish_confirmation(config=config, transport=transport)
+        return _ProcessedUpdate("sent_public", sent=True, preview=_preview(response.text))
+
+    error = _first_result_error(sanitized_results)
+    return await _send_admin_publish_notice(
+        update_id,
+        chat_id,
+        f"Wolf Briefing publish failed: {error}",
+        response_type="wolf_briefing_publish_failed",
+        delivery_status="failed",
+        config=config,
+        transport=transport,
+        state_path=state_path,
+        audit_path=audit_path,
+        error_message=error,
+    )
+
+
+async def _send_admin_publish_notice(
+    update_id: int,
+    chat_id: str,
+    message: str,
+    *,
+    response_type: str,
+    delivery_status: str,
+    config: TelegramAdminConfig,
+    transport: TelegramAdminCommandTransport,
+    state_path: Path,
+    audit_path: Path,
+    error_message: str = NA,
+) -> _ProcessedUpdate:
+    response = AdminCommandResponse(
+        command=WOLF_BRIEFING_PUBLISH_COMMAND,
+        response_type=response_type,
+        text=message,
+    )
+    if config.dry_run:
+        _append_command_audit(audit_path, update_id, chat_id, response, "dry_run", error_message=error_message)
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("dry_run", preview=_preview(message), error_message=error_message)
+    if not config.bot_token or not config.admin_chat_id:
+        _append_command_audit(
+            audit_path,
+            update_id,
+            chat_id,
+            response,
+            "skipped_missing_credentials",
+            error_message=error_message,
+        )
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("skipped_missing_credentials", preview=_preview(message), error_message=error_message)
+    try:
+        raw_results = await transport.send_message(
+            bot_token=config.bot_token or "",
+            chat_id=config.admin_chat_id or "",
+            message=message,
+            reply_markup=None,
+            photo_path=None,
+            photo_url=None,
+        )
+    except Exception as exc:
+        error = _sanitize_error(exc, config)
+        _append_command_audit(audit_path, update_id, chat_id, response, "failed", error_message=error)
+        return _ProcessedUpdate("failed", preview=_preview(message), error_message=error)
+
+    sanitized_results = tuple(_sanitize_result(item, config) for item in raw_results)
+    if _raw_results_sent(sanitized_results):
+        _append_command_audit(audit_path, update_id, chat_id, response, delivery_status, error_message=error_message)
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate(delivery_status, sent=True, preview=_preview(message), error_message=error_message)
+
+    error = _first_result_error(sanitized_results)
+    _append_command_audit(audit_path, update_id, chat_id, response, "failed", error_message=error)
+    return _ProcessedUpdate("failed", preview=_preview(message), error_message=error)
+
+
+async def _send_wolf_publish_confirmation(
+    *,
+    config: TelegramAdminConfig,
+    transport: TelegramAdminCommandTransport,
+) -> None:
+    if not config.bot_token or not config.admin_chat_id:
+        return
+    try:
+        await transport.send_message(
+            bot_token=config.bot_token or "",
+            chat_id=config.admin_chat_id or "",
+            message="Wolf Briefing published to public channel.",
+            reply_markup=None,
+            photo_path=None,
+            photo_url=None,
+        )
+    except Exception:
+        return
 
 
 async def _process_admin_update(
@@ -1326,6 +1557,13 @@ def _callback_chat_id(callback_query: Mapping[str, Any]) -> str:
     return NA
 
 
+def _callback_chat_type(callback_query: Mapping[str, Any]) -> str:
+    message = callback_query.get("message")
+    if isinstance(message, Mapping):
+        return _chat_type(message)
+    return NA
+
+
 def _update_id(update: Mapping[str, Any]) -> int | None:
     try:
         return int(str(update.get("update_id")))
@@ -1340,14 +1578,49 @@ def _chat_id(message: Mapping[str, Any]) -> str:
     return NA
 
 
+def _chat_type(message: Mapping[str, Any]) -> str:
+    chat = message.get("chat")
+    if isinstance(chat, Mapping):
+        return _display(chat.get("type")).lower()
+    return NA
+
+
 def _message_text(message: Mapping[str, Any]) -> str:
     return _display(message.get("text"))
+
+
+def _command_chat_is_private(chat_id: str, chat_type: str, config: TelegramAdminConfig) -> bool:
+    if _display(chat_id) == NA:
+        return False
+    if _display(chat_id) in {
+        _display(config.public_channel_id),
+        _display(config.vip_channel_id),
+        _display(getattr(config, "wolf_briefing_publish_channel_id", None)),
+    }:
+        return False
+    normalized_type = _display(chat_type).lower()
+    if normalized_type in {"group", "supergroup", "channel"}:
+        return False
+    return normalized_type in {NA.lower(), "private"}
 
 
 def _chat_matches_admin(chat_id: str, admin_chat_id: str | None) -> bool:
     if not admin_chat_id:
         return False
     return _display(chat_id) == str(admin_chat_id).strip()
+
+
+def _wolf_briefing_publish_channel_id(config: TelegramAdminConfig) -> str:
+    return _display(getattr(config, "wolf_briefing_publish_channel_id", None))
+
+
+def _wolf_publish_target_is_unsafe(target_channel_id: str, chat_id: str, config: TelegramAdminConfig) -> bool:
+    target = _display(target_channel_id)
+    return target == NA or target in {
+        _display(chat_id),
+        _display(config.admin_chat_id),
+        _display(config.public_chat_id),
+    }
 
 
 def _chat_id_hash(chat_id: str) -> str:
@@ -1383,6 +1656,7 @@ def _sanitize_error(
         config.admin_chat_id,
         config.public_chat_id,
         config.public_channel_id,
+        config.wolf_briefing_channel_id,
         config.signal_channel_invite_link,
         config.vip_channel_id,
         *extra_secrets,

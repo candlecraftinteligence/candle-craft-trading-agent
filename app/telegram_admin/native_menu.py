@@ -120,6 +120,7 @@ def _sanitize_error(value: Any, config: TelegramAdminConfig) -> str:
         config.admin_chat_id,
         config.public_chat_id,
         config.public_channel_id,
+        config.wolf_briefing_channel_id,
         config.vip_channel_id,
     ):
         if secret:

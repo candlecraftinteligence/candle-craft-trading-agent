@@ -13,6 +13,12 @@ from app.formatters.telegram_wolf_briefing import (
     format_wolf_briefing,
 )
 from app.telegram_admin import TelegramAdminCommandService, TelegramAdminConfig, process_telegram_admin_commands
+from app.telegram_admin.commands import (
+    WOLF_BRIEFING_PREVIEW_HEADER,
+    WOLF_BRIEFING_PUBLISH_BUTTON_LABEL,
+    WOLF_BRIEFING_REFRESH_BUTTON_LABEL,
+    WOLF_BRIEFING_CANCEL_BUTTON_LABEL,
+)
 
 
 class FakeCommandTransport:
@@ -225,12 +231,12 @@ def test_wolf_button_dry_run_routes_to_briefing_without_sending(tmp_path: Path) 
     assert result.delivery_status == "dry_run"
     assert result.sent_count == 0
     assert transport.send_calls == []
-    assert "WOLF BRIEFING" in result.previews[0]
+    assert "WOLF BRIEFING PREVIEW" in result.previews[0]
     records = _read_jsonl(tmp_path / "audit.jsonl")
     assert records[0]["command"] == "/wolf"
 
 
-def test_wolf_command_sends_only_to_admin_when_enabled(tmp_path: Path) -> None:
+def test_admin_private_wolf_command_shows_preview_with_publish_button(tmp_path: Path) -> None:
     service = _write_wolf_artifacts(tmp_path)
     transport = FakeCommandTransport()
 
@@ -254,9 +260,82 @@ def test_wolf_command_sends_only_to_admin_when_enabled(tmp_path: Path) -> None:
     assert result.delivery_status == "sent_admin"
     assert result.sent_count == 1
     assert transport.send_calls[0]["chat_id"] == "admin-chat"
-    assert "WOLF BRIEFING" in transport.send_calls[0]["message"]
+    assert transport.send_calls[0]["message"].startswith(WOLF_BRIEFING_PREVIEW_HEADER)
+    assert "WOLF BRIEFING\n" not in transport.send_calls[0]["message"]
     assert transport.send_calls[0]["message"].endswith(WOLF_BRIEFING_SIGNATURE)
     assert "Regime" not in transport.send_calls[0]["message"]
+    assert _button_labels(transport.send_calls[0]["reply_markup"]) == [
+        WOLF_BRIEFING_PUBLISH_BUTTON_LABEL,
+        WOLF_BRIEFING_REFRESH_BUTTON_LABEL,
+        WOLF_BRIEFING_CANCEL_BUTTON_LABEL,
+    ]
+
+
+def test_admin_wolf_button_shows_preview_with_publish_button(tmp_path: Path) -> None:
+    service = _write_wolf_artifacts(tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                commands_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_channel_id="public-channel",
+                wolf_briefing_enabled=True,
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_callback_update(33, "admin-chat", "admin:wolf"),),
+        )
+    )
+
+    assert result.delivery_status == "sent_admin"
+    assert transport.send_calls[0]["chat_id"] == "admin-chat"
+    assert transport.send_calls[0]["message"].startswith(WOLF_BRIEFING_PREVIEW_HEADER)
+    assert WOLF_BRIEFING_PUBLISH_BUTTON_LABEL in _button_labels(transport.send_calls[0]["reply_markup"])
+
+
+def test_admin_publish_sends_clean_wolf_briefing_to_configured_channel(tmp_path: Path) -> None:
+    service = _write_wolf_artifacts(tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                commands_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_channel_id="public-channel",
+                wolf_briefing_enabled=True,
+                wolf_briefing_channel_publish_enabled=True,
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_callback_update(34, "admin-chat", "admin:wolf_publish"),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == 1
+    assert len(transport.send_calls) == 2
+    channel_call = transport.send_calls[0]
+    admin_call = transport.send_calls[1]
+    assert channel_call["chat_id"] == "public-channel"
+    assert channel_call["reply_markup"] is None
+    assert channel_call["message"].startswith("🐺🟠 WOLF BRIEFING")
+    assert "PREVIEW" not in channel_call["message"]
+    assert "Regime" not in channel_call["message"]
+    assert channel_call["message"].endswith(WOLF_BRIEFING_SIGNATURE)
+    assert admin_call["chat_id"] == "admin-chat"
+    assert admin_call["reply_markup"] is None
+    assert admin_call["message"] == "Wolf Briefing published to public channel."
 
 
 def test_public_user_cannot_access_wolf_briefing(tmp_path: Path) -> None:
@@ -285,6 +364,186 @@ def test_public_user_cannot_access_wolf_briefing(tmp_path: Path) -> None:
     assert "WOLF BRIEFING" not in transport.send_calls[0]["message"]
     assert "That signal desk view is not available here." in transport.send_calls[0]["message"]
     assert "admin" not in transport.send_calls[0]["message"].lower()
+
+
+def test_public_user_cannot_publish_wolf_briefing(tmp_path: Path) -> None:
+    service = _write_wolf_artifacts(tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                commands_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_channel_id="public-channel",
+                wolf_briefing_enabled=True,
+                wolf_briefing_channel_publish_enabled=True,
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_callback_update(5, "public-chat", "admin:wolf_publish"),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert all(call["chat_id"] != "public-channel" for call in transport.send_calls)
+    assert "published to public channel" not in transport.send_calls[0]["message"]
+
+
+def test_public_user_does_not_see_publish_button_when_public_wolf_enabled(tmp_path: Path) -> None:
+    service = _write_wolf_artifacts(tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                commands_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                wolf_briefing_enabled=True,
+                wolf_briefing_public_enabled=True,
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_update(6, "public-chat", "/wolf"),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert "WOLF BRIEFING" in transport.send_calls[0]["message"]
+    assert "PREVIEW" not in transport.send_calls[0]["message"]
+    assert WOLF_BRIEFING_PUBLISH_BUTTON_LABEL not in _button_labels(transport.send_calls[0]["reply_markup"])
+
+
+def test_group_supergroup_and_channel_cannot_trigger_wolf_response(tmp_path: Path) -> None:
+    service = _write_wolf_artifacts(tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                commands_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                wolf_briefing_enabled=True,
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(
+                _update(7, "group-chat", "/wolf", chat_type="group"),
+                _update(8, "supergroup-chat", "/wolf", chat_type="supergroup"),
+                _channel_post_update(9, "channel-chat", "/wolf"),
+            ),
+        )
+    )
+
+    assert result.delivery_status == "ignored_unauthorized"
+    assert result.sent_count == 0
+    assert transport.send_calls == []
+
+
+def test_public_wolf_flag_does_not_create_channel_bot_ui(tmp_path: Path) -> None:
+    service = _write_wolf_artifacts(tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                commands_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_channel_id="public-channel",
+                wolf_briefing_enabled=True,
+                wolf_briefing_public_enabled=True,
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_channel_post_update(10, "public-channel", "/wolf"),),
+        )
+    )
+
+    assert result.delivery_status == "ignored_unauthorized"
+    assert transport.send_calls == []
+
+
+def test_publish_disabled_informs_admin_without_channel_send(tmp_path: Path) -> None:
+    service = _write_wolf_artifacts(tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                commands_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_channel_id="public-channel",
+                wolf_briefing_enabled=True,
+                wolf_briefing_channel_publish_enabled=False,
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_callback_update(11, "admin-chat", "admin:wolf_publish"),),
+        )
+    )
+
+    assert result.delivery_status == "skipped_disabled"
+    assert transport.send_calls == [
+        {
+            "bot_token": "secret-token",
+            "chat_id": "admin-chat",
+            "message": (
+                "Wolf Briefing channel publishing is disabled. "
+                "Enable TELEGRAM_WOLF_BRIEFING_CHANNEL_PUBLISH_ENABLED=true to publish manually."
+            ),
+            "reply_markup": None,
+            "photo_path": None,
+            "photo_url": None,
+        }
+    ]
+
+
+def test_missing_publish_target_informs_admin_without_channel_send(tmp_path: Path) -> None:
+    service = _write_wolf_artifacts(tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                commands_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                wolf_briefing_enabled=True,
+                wolf_briefing_channel_publish_enabled=True,
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_callback_update(12, "admin-chat", "admin:wolf_publish"),),
+        )
+    )
+
+    assert result.delivery_status == "skipped_missing_credentials"
+    assert len(transport.send_calls) == 1
+    assert transport.send_calls[0]["chat_id"] == "admin-chat"
+    assert "public channel is not configured" in transport.send_calls[0]["message"]
 
 
 def _write_wolf_artifacts(project_root: Path) -> TelegramAdminCommandService:
@@ -328,8 +587,31 @@ def _write_wolf_artifacts(project_root: Path) -> TelegramAdminCommandService:
     return TelegramAdminCommandService(project_root=project_root)
 
 
-def _update(update_id: int, chat_id: str, text: str) -> dict[str, Any]:
-    return {"update_id": update_id, "message": {"chat": {"id": chat_id}, "text": text}}
+def _button_labels(reply_markup: dict[str, Any] | None) -> list[str]:
+    if not isinstance(reply_markup, dict):
+        return []
+    keyboard = reply_markup.get("inline_keyboard")
+    if not isinstance(keyboard, list):
+        return []
+    labels: list[str] = []
+    for row in keyboard:
+        if not isinstance(row, list):
+            continue
+        for item in row:
+            if isinstance(item, dict):
+                labels.append(str(item.get("text") or ""))
+    return labels
+
+
+def _update(update_id: int, chat_id: str, text: str, *, chat_type: str | None = None) -> dict[str, Any]:
+    chat: dict[str, Any] = {"id": chat_id}
+    if chat_type is not None:
+        chat["type"] = chat_type
+    return {"update_id": update_id, "message": {"chat": chat, "text": text}}
+
+
+def _channel_post_update(update_id: int, chat_id: str, text: str) -> dict[str, Any]:
+    return {"update_id": update_id, "channel_post": {"chat": {"id": chat_id, "type": "channel"}, "text": text}}
 
 
 def _callback_update(update_id: int, chat_id: str, callback_data: str) -> dict[str, Any]:

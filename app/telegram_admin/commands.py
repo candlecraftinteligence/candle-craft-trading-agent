@@ -30,6 +30,12 @@ PUBLIC_SIGNAL_CHANNEL_COPY = (
     "Join the private Candle Craft signal channel for live watchlists and lifecycle updates."
 )
 PUBLIC_SIGNAL_CHANNEL_MISSING_COPY = "Signal channel invite link is not configured yet."
+WOLF_BRIEFING_PREVIEW_HEADER = "🐺🟠 WOLF BRIEFING PREVIEW"
+WOLF_BRIEFING_PUBLISH_COMMAND = "/wolf_publish"
+WOLF_BRIEFING_CANCEL_COMMAND = "/wolf_cancel"
+WOLF_BRIEFING_PUBLISH_BUTTON_LABEL = "📣 Send to Public Channel"
+WOLF_BRIEFING_REFRESH_BUTTON_LABEL = "🔄 Refresh"
+WOLF_BRIEFING_CANCEL_BUTTON_LABEL = "❌ Cancel"
 ADMIN_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
     ("🐺 Wolf Briefing", "📊 Status"),
     ("🚨 Alerts", "👁 Watchlist Desk"),
@@ -55,6 +61,11 @@ ADMIN_CALLBACK_COMMANDS: Mapping[str, str] = {
     "admin:config": "/config",
     "admin:guide": "/guide",
     "admin:menu": "/menu",
+}
+ADMIN_WOLF_BRIEFING_CALLBACK_COMMANDS: Mapping[str, str] = {
+    "admin:wolf_publish": WOLF_BRIEFING_PUBLISH_COMMAND,
+    "admin:wolf_refresh": "/wolf",
+    "admin:wolf_cancel": WOLF_BRIEFING_CANCEL_COMMAND,
 }
 ADMIN_MENU_BUTTON_CALLBACKS: Mapping[str, str] = {
     "🐺 Wolf Briefing": "admin:wolf",
@@ -207,6 +218,22 @@ class TelegramAdminCommandService:
             return self._status_response()
         if normalized == "/wolf":
             return self._wolf_briefing_response(admin_config=admin_config)
+        if normalized == WOLF_BRIEFING_CANCEL_COMMAND:
+            return _admin_response(
+                normalized,
+                "wolf_briefing_cancelled",
+                _screen(
+                    "Wolf Briefing",
+                    (
+                        "Wolf Briefing preview canceled.",
+                        "",
+                        SCREEN_DIVIDER,
+                        "No public channel message was sent.",
+                        SCREEN_DIVIDER,
+                    ),
+                ),
+                admin_config=admin_config,
+            )
         if normalized == "/latest":
             return self._latest_alerts_response()
         if normalized == "/about":
@@ -300,6 +327,20 @@ class TelegramAdminCommandService:
                 "public_donate_btc",
                 format_public_donate_btc_address_response(public_config),
             )
+        if normalized == "/wolf":
+            if _config_enabled(public_config, "wolf_briefing_enabled") and _config_enabled(
+                public_config,
+                "wolf_briefing_public_enabled",
+            ):
+                response = self.wolf_briefing_public_response(public_config=public_config, command="/wolf")
+                return _public_response(
+                    "/wolf",
+                    "public_wolf_briefing",
+                    response.text,
+                    run_id=response.run_id,
+                    public_config=public_config,
+                )
+            return _public_response(normalized, "public_admin_reserved", format_public_admin_reserved_response())
         if normalized == "/help":
             return _public_response(normalized, "public_help", format_public_help_response())
         if normalized in PUBLIC_ADMIN_RESERVED_COMMANDS:
@@ -350,6 +391,22 @@ class TelegramAdminCommandService:
                 admin_config=admin_config,
             )
 
+        response = self.wolf_briefing_public_response(admin_config=admin_config, command="/wolf")
+        return _admin_response(
+            "/wolf",
+            "wolf_briefing_preview",
+            format_wolf_briefing_preview(response.text),
+            run_id=response.run_id,
+            admin_config=admin_config,
+        )
+
+    def wolf_briefing_public_response(
+        self,
+        *,
+        admin_config: Any | None = None,
+        public_config: Any | None = None,
+        command: str = WOLF_BRIEFING_PUBLISH_COMMAND,
+    ) -> AdminCommandResponse:
         artifacts = self._wolf_scan_artifacts()
         active_signals = load_active_public_signals(
             project_root=self._project_root,
@@ -370,12 +427,11 @@ class TelegramAdminCommandService:
             watchlist_count=active_watchlists.total if active_watchlists.source_available else None,
             max_focus=self._max_rows,
         )
-        return _admin_response(
-            "/wolf",
-            "wolf_briefing",
-            format_wolf_briefing(snapshot, max_focus=self._max_rows),
+        return AdminCommandResponse(
+            command=command,
+            response_type="wolf_briefing_public",
+            text=format_wolf_briefing(snapshot, max_focus=self._max_rows),
             run_id=snapshot.run_id,
-            admin_config=admin_config,
         )
 
     def _wolf_scan_artifacts(self) -> WolfScanArtifacts:
@@ -677,7 +733,11 @@ class TelegramAdminCommandService:
                 f"Command UI: {_enabled_disabled_na(admin_config, 'command_ui_enabled')}",
                 f"Admin reports: {_enabled_disabled_na(admin_config, 'admin_report_enabled')}",
                 f"Wolf Briefing: {_enabled_disabled_na(admin_config, 'wolf_briefing_enabled')}",
-                f"Public Wolf Briefing: {_enabled_disabled_na(admin_config, 'wolf_briefing_public_enabled')}",
+                f"Public private Wolf Briefing: {_enabled_disabled_na(admin_config, 'wolf_briefing_public_enabled')}",
+                (
+                    "Wolf channel publish: "
+                    f"{_enabled_disabled_na(admin_config, 'wolf_briefing_channel_publish_enabled')}"
+                ),
                 f"Test mode: {_active_inactive_na(admin_config, 'dry_run')}",
                 "Quality gates: Protected",
                 "Signal filters: Protected",
@@ -685,6 +745,7 @@ class TelegramAdminCommandService:
                 "Sensitive data:",
                 f"Bot token: {_hidden_status(admin_config, 'bot_token')}",
                 f"Chat ID: {_hidden_status(admin_config, 'admin_chat_id')}",
+                f"Wolf publish channel: {_config_presence(admin_config, 'wolf_briefing_publish_channel_id')}",
                 f"Signal channel invite: {_config_presence(admin_config, 'signal_channel_invite_link')}",
                 SCREEN_DIVIDER,
                 "",
@@ -1190,6 +1251,16 @@ def format_help_response() -> str:
     )
 
 
+def format_wolf_briefing_preview(public_text: str) -> str:
+    lines = str(public_text or "").splitlines()
+    if lines and lines[0].strip() == "🐺🟠 WOLF BRIEFING":
+        lines = lines[1:]
+        if lines and not lines[0].strip():
+            lines = lines[1:]
+    body = "\n".join(lines).strip() or NA
+    return f"{WOLF_BRIEFING_PREVIEW_HEADER}\n\n{body}"
+
+
 def normalize_admin_command(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
@@ -1212,6 +1283,9 @@ def command_for_callback_data(value: str | None) -> tuple[str, str]:
     public_command = PUBLIC_CALLBACK_COMMANDS.get(text)
     if public_command is not None:
         return "public", public_command
+    wolf_command = ADMIN_WOLF_BRIEFING_CALLBACK_COMMANDS.get(text)
+    if wolf_command is not None:
+        return "admin", wolf_command
     admin_command = ADMIN_CALLBACK_COMMANDS.get(text)
     if admin_command is not None:
         return "admin", admin_command
@@ -1257,6 +1331,18 @@ def public_menu_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
 
 def admin_back_to_menu_inline_markup() -> Mapping[str, Any]:
     return {"inline_keyboard": [[{"text": "↩ Back to Menu", "callback_data": "admin:menu"}]]}
+
+
+def wolf_briefing_preview_inline_markup() -> Mapping[str, Any]:
+    return {
+        "inline_keyboard": [
+            [{"text": WOLF_BRIEFING_PUBLISH_BUTTON_LABEL, "callback_data": "admin:wolf_publish"}],
+            [
+                {"text": WOLF_BRIEFING_REFRESH_BUTTON_LABEL, "callback_data": "admin:wolf_refresh"},
+                {"text": WOLF_BRIEFING_CANCEL_BUTTON_LABEL, "callback_data": "admin:wolf_cancel"},
+            ],
+        ]
+    }
 
 
 def public_back_to_menu_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
@@ -1338,6 +1424,8 @@ def _public_response(
 
 
 def _admin_reply_markup_for(command: str, response_type: str, config: Any | None = None) -> Mapping[str, Any]:
+    if response_type == "wolf_briefing_preview":
+        return wolf_briefing_preview_inline_markup()
     signal_rows = _signal_channel_button_rows(config)
     if command in {"/start", "/menu"} or response_type in {"start", "menu"}:
         markup = admin_menu_inline_markup()
@@ -2289,6 +2377,7 @@ __all__ = [
     "ADMIN_COMMANDS",
     "ADMIN_MENU_BUTTON_CALLBACKS",
     "ADMIN_MENU_BUTTON_ROWS",
+    "ADMIN_WOLF_BRIEFING_CALLBACK_COMMANDS",
     "PUBLIC_ADMIN_RESERVED_COMMANDS",
     "PUBLIC_CALLBACK_COMMANDS",
     "PUBLIC_COMMANDS",
@@ -2301,6 +2390,12 @@ __all__ = [
     "SCREEN_DIVIDER",
     "SCREEN_FOOTER",
     "SCREEN_HEADER",
+    "WOLF_BRIEFING_CANCEL_BUTTON_LABEL",
+    "WOLF_BRIEFING_CANCEL_COMMAND",
+    "WOLF_BRIEFING_PREVIEW_HEADER",
+    "WOLF_BRIEFING_PUBLISH_BUTTON_LABEL",
+    "WOLF_BRIEFING_PUBLISH_COMMAND",
+    "WOLF_BRIEFING_REFRESH_BUTTON_LABEL",
     "AdminCommandResponse",
     "LatestScanArtifacts",
     "TelegramAdminCommandService",
@@ -2321,6 +2416,7 @@ __all__ = [
     "format_public_menu_response",
     "format_public_social_response",
     "format_start_response",
+    "format_wolf_briefing_preview",
     "load_latest_manifest_row",
     "normalize_admin_command",
     "public_back_to_menu_inline_markup",
@@ -2328,4 +2424,5 @@ __all__ = [
     "public_menu_inline_markup",
     "public_menu_reply_markup",
     "reply_keyboard_remove_markup",
+    "wolf_briefing_preview_inline_markup",
 ]
