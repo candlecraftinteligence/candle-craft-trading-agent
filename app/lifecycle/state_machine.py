@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.data.dtos import NA
@@ -19,11 +20,13 @@ ACTIVE_PROGRESSION = (
     SetupLifecycleState.STALKING,
     SetupLifecycleState.TRIGGERED,
     SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.EXECUTING,
     SetupLifecycleState.MANAGING,
 )
 VALID_STATES = {
     SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.EXECUTING,
     SetupLifecycleState.MANAGING,
     SetupLifecycleState.TP_HIT,
@@ -36,6 +39,7 @@ OUTCOME_STATES = {
     SetupLifecycleState.EXPIRED,
 }
 WATCH_PRIORITY_STATES = (
+    SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.STALKING,
     SetupLifecycleState.TRIGGERED,
     SetupLifecycleState.CONFIRMED,
@@ -44,12 +48,45 @@ WATCH_PRIORITY_STATES = (
 DEFAULT_COOLDOWN_HOURS = 24
 
 ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
-    SetupLifecycleState.DISCOVERED: {SetupLifecycleState.WATCHLISTED, SetupLifecycleState.REJECTED},
-    SetupLifecycleState.REJECTED: {SetupLifecycleState.WATCHLISTED, SetupLifecycleState.ARCHIVED},
-    SetupLifecycleState.WATCHLISTED: {SetupLifecycleState.STALKING, SetupLifecycleState.REJECTED},
-    SetupLifecycleState.STALKING: {SetupLifecycleState.TRIGGERED, SetupLifecycleState.WATCHLISTED, SetupLifecycleState.REJECTED},
-    SetupLifecycleState.TRIGGERED: {SetupLifecycleState.CONFIRMED, SetupLifecycleState.STALKING, SetupLifecycleState.INVALIDATED},
-    SetupLifecycleState.CONFIRMED: {SetupLifecycleState.EXECUTING, SetupLifecycleState.INVALIDATED, SetupLifecycleState.EXPIRED},
+    SetupLifecycleState.DISCOVERED: {
+        SetupLifecycleState.WATCHLISTED,
+        SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.REJECTED,
+    },
+    SetupLifecycleState.REJECTED: {
+        SetupLifecycleState.WATCHLISTED,
+        SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.ARCHIVED,
+    },
+    SetupLifecycleState.WATCHLISTED: {
+        SetupLifecycleState.STALKING,
+        SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.REJECTED,
+    },
+    SetupLifecycleState.STALKING: {
+        SetupLifecycleState.TRIGGERED,
+        SetupLifecycleState.WATCHLISTED,
+        SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.REJECTED,
+    },
+    SetupLifecycleState.TRIGGERED: {
+        SetupLifecycleState.CONFIRMED,
+        SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.STALKING,
+        SetupLifecycleState.INVALIDATED,
+    },
+    SetupLifecycleState.CONFIRMED: {
+        SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.EXECUTING,
+        SetupLifecycleState.INVALIDATED,
+        SetupLifecycleState.EXPIRED,
+    },
+    SetupLifecycleState.A_GRADE_WATCH: {
+        SetupLifecycleState.EXECUTING,
+        SetupLifecycleState.INVALIDATED,
+        SetupLifecycleState.EXPIRED,
+        SetupLifecycleState.COOLDOWN,
+    },
     SetupLifecycleState.EXECUTING: {SetupLifecycleState.MANAGING, SetupLifecycleState.INVALIDATED, SetupLifecycleState.EXPIRED},
     SetupLifecycleState.MANAGING: {
         SetupLifecycleState.TP_HIT,
@@ -74,6 +111,7 @@ class LifecycleObservation:
     readiness_score: int = 0
     readiness_label: str = NA
     quality_score: int = 0
+    quality_grade: str = NA
     edge_score: str = NA
     failed_gate: str = NA
     regime_state: str = NA
@@ -84,6 +122,8 @@ class LifecycleObservation:
     pullback_valid: bool = False
     rr_valid: bool = False
     valid_trade_idea: bool = False
+    limit_fill_required: bool = False
+    a_grade_watch_candidate: bool = False
     entry_filled: bool = False
     tp_hit: bool = False
     sl_hit: bool = False
@@ -264,6 +304,8 @@ def evaluate_lifecycle_transition(
 
 def initial_state_for_observation(observation: LifecycleObservation) -> SetupLifecycleState:
     target = observed_state(observation)
+    if observation.a_grade_watch_candidate:
+        return SetupLifecycleState.A_GRADE_WATCH
     if target in {SetupLifecycleState.EXECUTING, SetupLifecycleState.MANAGING}:
         return SetupLifecycleState.CONFIRMED
     return target
@@ -278,6 +320,8 @@ def observed_state(observation: LifecycleObservation) -> SetupLifecycleState:
         return SetupLifecycleState.INVALIDATED
     if observation.expired:
         return SetupLifecycleState.EXPIRED
+    if observation.a_grade_watch_candidate:
+        return SetupLifecycleState.EXECUTING if observation.entry_filled else SetupLifecycleState.A_GRADE_WATCH
     if observation.valid_trade_idea or observation.pullback_and_rr_valid:
         return SetupLifecycleState.CONFIRMED
     if observation.sweep_detected and observation.structure_shift_detected:
@@ -334,28 +378,50 @@ def next_state_for_observation(
             return SetupLifecycleState.INVALIDATED
         if observation.expired:
             return SetupLifecycleState.EXPIRED
+        if observation.a_grade_watch_candidate and not observation.entry_filled:
+            return SetupLifecycleState.A_GRADE_WATCH
+        if observation.entry_filled:
+            return SetupLifecycleState.EXECUTING
         if observation.valid_trade_idea:
+            if observation.limit_fill_required:
+                return current
+            return SetupLifecycleState.EXECUTING
+        return current
+    if current == SetupLifecycleState.A_GRADE_WATCH:
+        if observation.invalidated or target == SetupLifecycleState.REJECTED:
+            return SetupLifecycleState.INVALIDATED
+        if observation.expired:
+            return SetupLifecycleState.EXPIRED
+        if observation.entry_filled and target in {SetupLifecycleState.A_GRADE_WATCH, SetupLifecycleState.EXECUTING}:
             return SetupLifecycleState.EXECUTING
         return current
     if current == SetupLifecycleState.REJECTED:
+        if target == SetupLifecycleState.A_GRADE_WATCH:
+            return SetupLifecycleState.A_GRADE_WATCH
         if target in WATCH_PRIORITY_STATES or target in VALID_STATES:
             return SetupLifecycleState.WATCHLISTED if observation.readiness_score > record.readiness_score else current
         return current
     if current == SetupLifecycleState.DISCOVERED:
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
+        if target == SetupLifecycleState.A_GRADE_WATCH:
+            return SetupLifecycleState.A_GRADE_WATCH
         if target in WATCH_PRIORITY_STATES or target in VALID_STATES:
             return SetupLifecycleState.WATCHLISTED
         return current
     if current == SetupLifecycleState.WATCHLISTED:
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
+        if target == SetupLifecycleState.A_GRADE_WATCH:
+            return SetupLifecycleState.A_GRADE_WATCH
         if observation.sweep_detected:
             return SetupLifecycleState.STALKING
         return current
     if current == SetupLifecycleState.STALKING:
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
+        if target == SetupLifecycleState.A_GRADE_WATCH:
+            return SetupLifecycleState.A_GRADE_WATCH
         if observation.sweep_detected and observation.structure_shift_detected:
             return SetupLifecycleState.TRIGGERED
         if not observation.sweep_detected and target == SetupLifecycleState.WATCHLISTED:
@@ -364,6 +430,8 @@ def next_state_for_observation(
     if current == SetupLifecycleState.TRIGGERED:
         if observation.invalidated or target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.INVALIDATED
+        if target == SetupLifecycleState.A_GRADE_WATCH:
+            return SetupLifecycleState.A_GRADE_WATCH
         if observation.pullback_and_rr_valid or observation.valid_trade_idea:
             return SetupLifecycleState.CONFIRMED
         if observation.sweep_detected and not observation.structure_shift_detected:
@@ -378,6 +446,28 @@ def is_watchable_lifecycle_state(record: SetupLifecycleRecord, *, now: str | Non
     if record.current_state == SetupLifecycleState.COOLDOWN:
         return False
     return record.current_state in WATCH_PRIORITY_STATES
+
+
+def entry_zone_touched(
+    latest_high: Any,
+    latest_low: Any,
+    entry_low: Any,
+    entry_high: Any,
+) -> bool:
+    """Return True when the latest price range overlaps the planned entry zone."""
+
+    candle_high = _decimal_or_none(latest_high)
+    candle_low = _decimal_or_none(latest_low)
+    zone_low = _decimal_or_none(entry_low)
+    zone_high = _decimal_or_none(entry_high)
+    if candle_high is None or candle_low is None or zone_low is None or zone_high is None:
+        return False
+
+    latest_range_low = min(candle_high, candle_low)
+    latest_range_high = max(candle_high, candle_low)
+    entry_range_low = min(zone_low, zone_high)
+    entry_range_high = max(zone_low, zone_high)
+    return latest_range_high >= entry_range_low and latest_range_low <= entry_range_high
 
 
 def _record_with_observation(
@@ -419,7 +509,11 @@ def _reason_for_state(
         return SetupTransitionReason.STRUCTURE_SHIFT_CONFIRMED
     if state == SetupLifecycleState.CONFIRMED:
         return SetupTransitionReason.PULLBACK_RR_VALID
+    if state == SetupLifecycleState.A_GRADE_WATCH:
+        return SetupTransitionReason.A_GRADE_WATCH
     if state == SetupLifecycleState.EXECUTING:
+        if observation.entry_filled and (observation.a_grade_watch_candidate or observation.limit_fill_required):
+            return SetupTransitionReason.ENTRY_ZONE_TOUCHED
         return SetupTransitionReason.VALID_TRADE_IDEA
     if state == SetupLifecycleState.MANAGING:
         return SetupTransitionReason.ENTRY_FILL_SIMULATED
@@ -444,7 +538,10 @@ def _is_watch_ready(observation: LifecycleObservation) -> bool:
 
 
 def _active_setup_invalidated(current: SetupLifecycleState, target: SetupLifecycleState) -> bool:
-    return current in {SetupLifecycleState.CONFIRMED, SetupLifecycleState.EXECUTING} and target == SetupLifecycleState.REJECTED
+    return (
+        current in {SetupLifecycleState.CONFIRMED, SetupLifecycleState.A_GRADE_WATCH, SetupLifecycleState.EXECUTING}
+        and target == SetupLifecycleState.REJECTED
+    )
 
 
 def _cooldown_until(record: SetupLifecycleRecord, to_state: SetupLifecycleState, timestamp: str) -> str | None:
@@ -498,6 +595,17 @@ def _bounded_score(value: Any, default: int) -> int:
     return max(0, min(100, score))
 
 
+def _decimal_or_none(value: Any) -> Decimal | None:
+    text = _text(value)
+    if text == NA:
+        return None
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    return number if number.is_finite() else None
+
+
 def _text_or(value: str | None, default: str) -> str:
     text = _text(value)
     return default if text == NA else text
@@ -518,6 +626,7 @@ __all__ = [
     "OUTCOME_STATES",
     "VALID_STATES",
     "WATCH_PRIORITY_STATES",
+    "entry_zone_touched",
     "evaluate_lifecycle_transition",
     "initial_state_for_observation",
     "is_watchable_lifecycle_state",

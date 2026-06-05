@@ -254,6 +254,34 @@ def _run_result(symbol_result: ScannerSymbolResult) -> ScannerRunResult:
     )
 
 
+def _direct_a_grade_limit_hit_symbol(
+    *,
+    signal_id: str = "sig-a-grade-limit",
+    grade: SetupQualityGrade = SetupQualityGrade.A_PLUS,
+) -> ScannerSymbolResult:
+    diagnostics = _diagnostics(
+        first_failed_gate="limit_zone_not_touched",
+        gates_failed=("limit_zone_not_touched",),
+        quality_grade=grade.value,
+    )
+    symbol = _symbol(
+        SetupLifecycleState.EXECUTING,
+        previous=SetupLifecycleState.A_GRADE_WATCH,
+        diagnostics=diagnostics,
+        signal_id=signal_id,
+        trade_idea=None,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        setup_quality=_setup_quality_with_grade(grade, quality_score=92 if grade == SetupQualityGrade.A_PLUS else 88),
+    )
+    return symbol.model_copy(
+        update={
+            "valid_strategy_modes": (),
+            "rejected_strategy_modes": ("swing",),
+            "status_history": (ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        }
+    )
+
+
 def _empty_run_result() -> ScannerRunResult:
     return ScannerRunResult(
         config=_config(),
@@ -264,6 +292,58 @@ def _empty_run_result() -> ScannerRunResult:
         dry_run_alerts_created=0,
         journal_entries_created=0,
     )
+
+
+def test_a_grade_watch_waiting_state_does_not_send_public_watchlist_alert() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.A_GRADE_WATCH,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(first_failed_gate="limit_zone_not_touched", gates_failed=("limit_zone_not_touched",)),
+            setup_quality=_setup_quality_with_grade(SetupQualityGrade.A_PLUS, quality_score=92),
+            trade_idea=None,
+            status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        )
+    )
+
+    assert decision.eligible is False
+    assert decision.reason == "lifecycle_state_not_eligible"
+
+
+def test_direct_a_grade_limit_hit_sends_clean_public_signal_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "telegram.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    result = _run_result(_direct_a_grade_limit_hit_symbol(signal_id="sig-limit-hit"))
+
+    first = run(service.deliver_for_run(result, scan_run_id="run-limit-1"))
+    second = run(service.deliver_for_run(result, scan_run_id="run-limit-2"))
+
+    assert first.sent == 1
+    assert second.sent == 0
+    assert second.duplicate == 1
+    assert len(sender.messages) == 1
+    message = sender.messages[0]
+    assert message.startswith(f"{HEADER_PREFIX} SCALP SIGNAL — BTCUSDT")
+    assert "Status: LIMIT ZONE HIT" in message
+    assert "Entry Zone Touched" in message
+    assert "TP1:" in message and "TP2:" in message and "TP3:" in message
+    assert message.endswith(FOOTER)
+    lowered = message.lower()
+    assert "inline_keyboard" not in lowered
+    assert "callback_data" not in lowered
+    assert "admin:" not in lowered
+    assert "automatic fill" not in lowered
+    assert "order was placed" not in lowered
+
+
+def test_direct_a_grade_limit_hit_rejects_b_grade_public_signal() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _direct_a_grade_limit_hit_symbol(signal_id="sig-b-limit", grade=SetupQualityGrade.B_PLUS)
+    )
+
+    assert decision.eligible is False
+    assert "quality_grade_not_a" in decision.reason
 
 
 def _store_lifecycle_record(db_path: Path, record: SetupLifecycleRecord) -> None:
@@ -3050,9 +3130,10 @@ def test_sent_watchlist_limit_zone_touch_sends_limit_hit_once(tmp_path: Path) ->
     assert first.sent == 1
     assert second.sent == 0
     assert len(sender.messages) == 1
-    assert "LIMIT ZONE HIT — BTCUSDT" in sender.messages[0]
-    assert "Price entered our hunting zone." in sender.messages[0]
-    assert "No panic. No chase." in sender.messages[0]
+    assert "SCALP SIGNAL — BTCUSDT" in sender.messages[0]
+    assert "Status: LIMIT ZONE HIT" in sender.messages[0]
+    assert "Entry Zone Touched." in sender.messages[0]
+    assert "Manual execution only. Manage risk." in sender.messages[0]
     rows = _watchlist_outcome_rows(db_path)
     assert (TelegramAlertType.LIMIT_HIT.value, "sent", TelegramAlertType.LIMIT_HIT.value, NA) in rows
 
@@ -3093,7 +3174,8 @@ def test_watchlist_same_candle_entry_and_target_sends_only_limit_and_audits_ambi
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="same-candle"))
 
     assert summary.sent == 1
-    assert "LIMIT ZONE HIT — BTCUSDT" in sender.messages[0]
+    assert "SCALP SIGNAL — BTCUSDT" in sender.messages[0]
+    assert "Status: LIMIT ZONE HIT" in sender.messages[0]
     rows = _watchlist_outcome_rows(db_path)
     assert not any(row[0] == TelegramAlertType.TP1_HIT.value for row in rows)
     assert any(row[3] == "outcome_tracking_same_candle_ambiguous" for row in rows)

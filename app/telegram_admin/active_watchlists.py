@@ -73,7 +73,7 @@ _WATCHLIST_STAGE_QUERY_TYPES = tuple(
 )
 _LEVEL_COLUMNS = ("entry_low", "entry_high", "stop_loss", "tp1", "tp2", "tp3")
 _ACTIVE_SIGNAL_STATE_KEYS = {"confirmed", "executing", "managing"}
-_WATCH_STATE_KEYS = {"watch", "watchlist", "watchlisted"}
+_WATCH_STATE_KEYS = {"a_grade_watch", "watch", "watching_limit_zone", "watchlist", "watchlisted"}
 _STALKING_STATE_KEYS = {"stalking", "triggered"}
 _COOLDOWN_STATE_KEYS = {
     "cooldown",
@@ -160,6 +160,9 @@ class ActiveSignalItem:
     updated_at: str
     status: str
     grade: str = NA
+    rr: str = NA
+    invalidation: str = NA
+    lifecycle_state: str = NA
     entry_low: str = NA
     entry_high: str = NA
     stop_loss: str = NA
@@ -193,6 +196,17 @@ class WatchlistStageItem:
     stage: str
     reason: str
     updated_at: str = NA
+    direction: str = NA
+    entry_low: str = NA
+    entry_high: str = NA
+    stop_loss: str = NA
+    tp1: str = NA
+    tp2: str = NA
+    tp3: str = NA
+    rr: str = NA
+    grade: str = NA
+    invalidation: str = NA
+    lifecycle_state: str = NA
     quality_sort: float = 0.0
     readiness_sort: int = 0
     updated_sort: float = 0.0
@@ -337,9 +351,12 @@ def format_active_signal_lines(result: ActiveSignalQueryResult) -> list[str]:
                 f"Symbol: {item.symbol}",
                 f"Direction: {_title_text(item.direction)}",
                 f"Grade: {item.grade}",
+                f"RR: {item.rr}",
                 f"Entry: {item.entry_text}",
                 f"Stop: {item.stop_loss}",
                 f"Targets: {item.targets_text}",
+                f"Invalidation: {item.invalidation}",
+                f"Lifecycle: {item.lifecycle_state}",
                 f"Status: {item.status}",
                 f"Updated: {item.updated_at}",
             )
@@ -366,7 +383,10 @@ def format_watchlist_stage_dashboard(result: WatchlistStageDashboardResult) -> s
             lines.append("None right now.")
         else:
             for item in items:
-                lines.append(f"{item.symbol} — {item.reason}")
+                if _status_key(item.lifecycle_state) == "a_grade_watch":
+                    lines.extend(_a_grade_watch_stage_lines(item))
+                else:
+                    lines.append(f"{item.symbol} — {item.reason}")
             if total > len(items):
                 lines.append(f"+ {total - len(items)} more")
         lines.append("")
@@ -375,6 +395,22 @@ def format_watchlist_stage_dashboard(result: WatchlistStageDashboardResult) -> s
         lines.append("No forced trades.")
     lines.append(WATCHLIST_DASHBOARD_FOOTER)
     return "\n".join(lines)
+
+
+def _a_grade_watch_stage_lines(item: WatchlistStageItem) -> list[str]:
+    targets = ", ".join(target for target in (item.tp1, item.tp2, item.tp3) if target != NA) or NA
+    return [
+        f"{item.symbol}",
+        "Status: A-GRADE WATCH — Waiting Limit Zone",
+        f"Direction: {_title_text(item.direction)}",
+        f"Entry Zone: {_zone_text(item.entry_low, item.entry_high)}",
+        f"Stop: {item.stop_loss}",
+        f"Targets: {targets}",
+        f"RR: {item.rr}",
+        f"Quality: {item.grade}",
+        f"Invalidation: {item.invalidation}",
+        f"Reason: {item.reason}",
+    ]
 
 
 def _latest_runtime_database(
@@ -555,6 +591,8 @@ def _stage_items_from_alert_rows(
 
         watch_row = max(watch_rows, key=_row_id)
         outcome_rows = [row for row in signal_rows if _row_id(row) != _row_id(watch_row)]
+        if any(_clean(row.get("alert_type")) == _LIMIT_TYPE for row in outcome_rows):
+            continue
         latest_row = max(signal_rows, key=_row_id)
         lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
         lifecycle_event = _latest_lifecycle_event(connection, lifecycle_row)
@@ -574,6 +612,8 @@ def _stage_items_from_alert_rows(
         symbol = _symbol_text(watch_row.get("symbol"))
         if symbol == NA:
             continue
+        levels = _levels_for_watchlist(connection, watch_row, outcome_rows)
+        candidate_meta = _candidate_metadata(connection, latest_row)
         reason = _stage_reason(
             stage=stage,
             latest_row=latest_row,
@@ -591,9 +631,15 @@ def _stage_items_from_alert_rows(
                 stage=stage,
                 reason=reason,
                 updated_at=_updated_at_for_stage_item(latest_row, lifecycle_row),
+                direction=_direction_text(_first_non_na(watch_row.get("direction"), lifecycle_row.get("direction"))),
+                rr=_first_non_na(watch_row.get("rr_planned"), candidate_meta.get("rr")),
+                grade=_first_non_na(watch_row.get("setup_quality_score"), candidate_meta.get("quality_grade")),
+                invalidation=_first_non_na(lifecycle_row.get("invalidation_reason"), candidate_meta.get("invalidation")),
+                lifecycle_state=_first_non_na(lifecycle_row.get("current_state"), latest_row.get("lifecycle_state"), latest_row.get("new_state")),
                 quality_sort=_quality_sort(watch_row, lifecycle_row, symbol_row, raw_result),
                 readiness_sort=_readiness_sort(lifecycle_row, symbol_row, raw_result),
                 updated_sort=_timestamp_sort(_updated_at_for_stage_item(latest_row, lifecycle_row)),
+                **levels,
             )
         )
     return tuple(items)
@@ -641,6 +687,8 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
         if symbol == NA:
             continue
         event = _latest_lifecycle_event(connection, row)
+        levels = _candidate_levels(connection, row)
+        candidate_meta = _candidate_metadata(connection, row)
         reason = _stage_reason(
             stage=stage,
             latest_row={},
@@ -659,9 +707,15 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
                 stage=stage,
                 reason=reason,
                 updated_at=updated_at,
+                direction=_direction_text(row.get("direction")),
+                rr=candidate_meta.get("rr", NA),
+                grade=_first_non_na(candidate_meta.get("quality_grade"), row.get("quality_score")),
+                invalidation=_first_non_na(row.get("invalidation_reason"), candidate_meta.get("invalidation")),
+                lifecycle_state=row.get("current_state"),
                 quality_sort=_score_from_quality(row.get("quality_score")),
                 readiness_sort=_int_value(row.get("readiness_score")),
                 updated_sort=_timestamp_sort(updated_at),
+                **levels,
             )
         )
     return tuple(items)
@@ -761,10 +815,12 @@ def _active_signal_items_from_rows(
     items: list[ActiveSignalItem] = []
     for signal_id, signal_rows in by_signal.items():
         confirmed_rows = [row for row in signal_rows if _clean(row.get("alert_type")) == _SIGNAL_CONFIRMED_TYPE]
-        if not confirmed_rows:
+        limit_rows = [row for row in signal_rows if _clean(row.get("alert_type")) == _LIMIT_TYPE]
+        base_rows = confirmed_rows or limit_rows
+        if not base_rows:
             continue
-        signal_row = max(confirmed_rows, key=_row_id)
-        outcome_rows = [row for row in signal_rows if _clean(row.get("alert_type")) != _SIGNAL_CONFIRMED_TYPE]
+        signal_row = max(base_rows, key=_row_id)
+        outcome_rows = [row for row in signal_rows if _row_id(row) != _row_id(signal_row)]
         if any(_clean(row.get("alert_type")) in _TERMINAL_OUTCOME_TYPES for row in outcome_rows):
             continue
         if not _public_alert_quality_passes(signal_row):
@@ -773,9 +829,20 @@ def _active_signal_items_from_rows(
         direction = _direction_text(signal_row.get("direction"))
         if symbol == NA or direction == NA:
             continue
-        hit_alert_types = frozenset(_clean(row.get("alert_type")) for row in outcome_rows)
+        hit_alert_types = frozenset(
+            _clean(row.get("alert_type"))
+            for row in (signal_row, *outcome_rows)
+            if _clean(row.get("alert_type")) not in {_SIGNAL_CONFIRMED_TYPE, NA}
+        )
         levels = _levels_for_watchlist(connection, signal_row, outcome_rows)
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
+        lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
+        candidate_meta = _candidate_metadata(connection, latest_row)
+        lifecycle_state = _first_non_na(
+            lifecycle_row.get("current_state"),
+            latest_row.get("lifecycle_state"),
+            latest_row.get("new_state"),
+        )
         items.append(
             ActiveSignalItem(
                 signal_id=signal_id,
@@ -784,6 +851,9 @@ def _active_signal_items_from_rows(
                 updated_at=_first_non_na(_clean(latest_row.get("last_seen_at")), _clean(latest_row.get("sent_at"))),
                 status=_signal_status_from_outcomes(hit_alert_types),
                 grade=_first_non_na(_clean(signal_row.get("setup_quality_score")), NA),
+                rr=_first_non_na(_clean(signal_row.get("rr_planned")), candidate_meta.get("rr")),
+                invalidation=_first_non_na(lifecycle_row.get("invalidation_reason"), candidate_meta.get("invalidation")),
+                lifecycle_state=lifecycle_state,
                 hit_alert_types=hit_alert_types,
                 sort_id=_row_id(latest_row),
                 **levels,
@@ -1368,6 +1438,50 @@ def _candidate_levels(connection: sqlite3.Connection, watch_row: Mapping[str, An
     if row is None:
         return {}
     return _levels_from_candidate_row(dict(row))
+
+
+def _candidate_metadata(connection: sqlite3.Connection, watch_row: Mapping[str, Any]) -> dict[str, str]:
+    if not _table_exists(connection, "setup_candidates"):
+        return {}
+    columns = _table_columns(connection, "setup_candidates")
+    if not {"symbol", "direction"} <= columns:
+        return {}
+    select_columns = [
+        _select_or_na("id", columns),
+        _select_or_na("run_id", columns),
+        "symbol",
+        "direction",
+        _select_or_na("rr", columns),
+        _select_or_na("invalidation", columns),
+        _select_or_na("quality_grade", columns),
+        _select_or_na("raw_candidate_json", columns),
+    ]
+    scan_run_id = _clean(watch_row.get("scan_run_id"))
+    if "run_id" in columns and scan_run_id != NA:
+        order_clause = "ORDER BY CASE WHEN run_id = ? THEN 0 ELSE 1 END, id DESC"
+        params: tuple[Any, ...] = (_clean(watch_row.get("symbol")), _clean(watch_row.get("direction")), scan_run_id)
+    else:
+        order_clause = "ORDER BY id DESC" if "id" in columns else ""
+        params = (_clean(watch_row.get("symbol")), _clean(watch_row.get("direction")))
+    row = connection.execute(
+        f"""
+        SELECT {", ".join(select_columns)}
+        FROM setup_candidates
+        WHERE UPPER(symbol) = UPPER(?)
+          AND UPPER(direction) = UPPER(?)
+        {order_clause}
+        LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    if row is None:
+        return {}
+    raw = _json_mapping(row["raw_candidate_json"] if "raw_candidate_json" in row.keys() else NA)
+    return {
+        "rr": _first_non_na(row["rr"], raw.get("rr_to_tp2"), raw.get("planned_rr")),
+        "invalidation": _first_non_na(row["invalidation"], raw.get("invalidation"), raw.get("invalidation_reason")),
+        "quality_grade": _first_non_na(row["quality_grade"], raw.get("quality_grade"), raw.get("trust_grade")),
+    }
 
 
 def _levels_from_candidate_row(row: Mapping[str, Any]) -> dict[str, str]:
