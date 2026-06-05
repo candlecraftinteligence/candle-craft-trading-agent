@@ -9,10 +9,18 @@ from typing import Any
 
 from app.alerts.integrity_manifest import audit_alert_integrity_artifact
 from app.data.dtos import NA
+from app.formatters.telegram_signal_detail import (
+    format_signal_detail,
+    format_signal_detail_lifecycle,
+    format_signal_detail_why_valid,
+)
+from app.formatters.telegram_signal_formatter import FOOTER as SIGNAL_FOOTER
+from app.formatters.telegram_signal_formatter import HEADER_PREFIX as SIGNAL_HEADER_PREFIX
 from app.formatters.telegram_wolf_briefing import build_wolf_briefing_snapshot, format_wolf_briefing
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
 from app.telegram_admin.active_watchlists import (
     ACTIVE_WATCHLIST_DISPLAY_LIMIT,
+    ActiveSignalItem,
     WATCHLIST_STAGE_DISPLAY_LIMIT,
     format_active_signal_lines,
     format_watchlist_stage_dashboard,
@@ -20,6 +28,7 @@ from app.telegram_admin.active_watchlists import (
     load_active_public_watchlists,
     load_watchlist_stage_dashboard,
 )
+from app.telegram_admin.signal_detail import load_active_signal_detail
 from app.telegram_admin.wolf_briefing import WolfScanArtifacts, load_latest_db_scan_artifacts
 from app.watchlists.presets import presets_with_counts
 
@@ -40,6 +49,10 @@ WOLF_BRIEFING_REFRESH_BUTTON_LABEL = "🔄 Refresh"
 WOLF_BRIEFING_CANCEL_BUTTON_LABEL = "❌ Cancel"
 WATCHLIST_REFRESH_BUTTON_LABEL = "🔄 Refresh"
 WATCHLIST_BACK_BUTTON_LABEL = "⬅️ Back"
+SIGNAL_DETAIL_REFRESH_BUTTON_LABEL = "🔄 Refresh"
+SIGNAL_DETAIL_LIFECYCLE_BUTTON_LABEL = "📜 Lifecycle"
+SIGNAL_DETAIL_WHY_VALID_BUTTON_LABEL = "🧠 Why valid?"
+SIGNAL_DETAIL_BACK_BUTTON_LABEL = "⬅️ Back"
 ADMIN_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
     ("🐺 Wolf Briefing", "📊 Status"),
     ("🚨 Alerts", "👁 Watchlist Desk"),
@@ -132,6 +145,9 @@ ADMIN_COMMANDS: tuple[str, ...] = (
     "/about",
     "/alerts",
     "/watchlists",
+    "/signal",
+    "/signal_lifecycle",
+    "/signal_why",
     "/integrity",
     "/config",
     "/guide",
@@ -151,6 +167,9 @@ PUBLIC_COMMANDS: tuple[str, ...] = (
     "/signals",
     "/watchlist",
     "/watchlists",
+    "/signal",
+    "/signal_lifecycle",
+    "/signal_why",
     "/social",
     "/help",
     "/donate",
@@ -246,6 +265,12 @@ class TelegramAdminCommandService:
             return self._alerts_response()
         if normalized == "/watchlists":
             return self._watchlists_response()
+        if normalized in {"/signal", "/signal_lifecycle", "/signal_why"}:
+            return self._signal_detail_response(
+                command,
+                public=False,
+                admin_config=admin_config,
+            )
         if normalized in {"/integrity", "/audit"}:
             return self._integrity_response(normalized)
         if normalized == "/config":
@@ -302,6 +327,8 @@ class TelegramAdminCommandService:
             return self._public_lastscan_response()
         if normalized == "/signals":
             return self._public_signals_response()
+        if normalized in {"/signal", "/signal_lifecycle", "/signal_why"}:
+            return self._signal_detail_response(command, public=True, public_config=public_config)
         if normalized in {"/watchlist", "/watchlists"}:
             return self._public_watchlist_response(command=normalized)
         if normalized == "/social":
@@ -820,6 +847,50 @@ class TelegramAdminCommandService:
             "/signals",
             "public_signals",
             _screen("Active Signals", lines),
+            reply_markup=public_active_signals_inline_markup(result.items) if result.items else None,
+        )
+
+    def _signal_detail_response(
+        self,
+        command: str,
+        *,
+        public: bool,
+        admin_config: Any | None = None,
+        public_config: Any | None = None,
+    ) -> AdminCommandResponse:
+        normalized = normalize_admin_command(command)
+        selector = _signal_detail_selector(command)
+        result = load_active_signal_detail(
+            project_root=self._project_root,
+            database_path=self._database_path,
+            selector=selector,
+        )
+        detail = result.detail
+        if detail is None:
+            text = _signal_detail_missing_text(selector, source_available=result.source_available)
+            symbol = selector
+        else:
+            symbol = _display(detail.symbol)
+            if normalized == "/signal_lifecycle":
+                text = format_signal_detail_lifecycle(detail)
+            elif normalized == "/signal_why":
+                text = format_signal_detail_why_valid(detail)
+            else:
+                text = format_signal_detail(detail)
+        if public:
+            return _public_response(
+                command,
+                f"public_signal_detail{_signal_detail_response_suffix(normalized)}",
+                text,
+                reply_markup=signal_detail_inline_markup(symbol, scope="public"),
+                public_config=public_config,
+            )
+        return _admin_response(
+            command,
+            f"signal_detail{_signal_detail_response_suffix(normalized)}",
+            text,
+            reply_markup=signal_detail_inline_markup(symbol, scope="admin"),
+            admin_config=admin_config,
         )
 
     def _public_watchlist_response(self, *, command: str = "/watchlists") -> AdminCommandResponse:
@@ -1260,6 +1331,37 @@ def format_wolf_briefing_preview(public_text: str) -> str:
     return f"{WOLF_BRIEFING_PREVIEW_HEADER}\n\n{body}"
 
 
+def _signal_detail_selector(command: str | None) -> str:
+    parts = str(command or "").strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return NA
+    selector = parts[1].strip()
+    return selector.upper() if selector else NA
+
+
+def _signal_detail_response_suffix(command: str) -> str:
+    if command == "/signal_lifecycle":
+        return "_lifecycle"
+    if command == "/signal_why":
+        return "_why"
+    return ""
+
+
+def _signal_detail_missing_text(selector: str, *, source_available: bool) -> str:
+    symbol = _display(selector)
+    status = "No active signal detail found." if source_available else "No local active signal source found."
+    return "\n".join(
+        (
+            f"{SIGNAL_HEADER_PREFIX} {symbol} \u2014 SIGNAL DETAIL",
+            "",
+            f"Status: {status}",
+            "No data was changed.",
+            "",
+            SIGNAL_FOOTER,
+        )
+    )
+
+
 def normalize_admin_command(value: str | None) -> str:
     text = str(value or "").strip()
     if not text:
@@ -1279,6 +1381,9 @@ def normalize_admin_command(value: str | None) -> str:
 
 def command_for_callback_data(value: str | None) -> tuple[str, str]:
     text = str(value or "").strip().lower()
+    dynamic_scope, dynamic_command = _signal_detail_command_for_callback(text)
+    if dynamic_scope:
+        return dynamic_scope, dynamic_command
     public_command = PUBLIC_CALLBACK_COMMANDS.get(text)
     if public_command is not None:
         return "public", public_command
@@ -1288,6 +1393,21 @@ def command_for_callback_data(value: str | None) -> tuple[str, str]:
     admin_command = ADMIN_CALLBACK_COMMANDS.get(text)
     if admin_command is not None:
         return "admin", admin_command
+    return "", ""
+
+
+def _signal_detail_command_for_callback(text: str) -> tuple[str, str]:
+    for scope in ("public", "admin"):
+        for action, command in (
+            ("signal_lifecycle", "/signal_lifecycle"),
+            ("signal_why", "/signal_why"),
+            ("signal", "/signal"),
+        ):
+            prefix = f"{scope}:{action}:"
+            if text.startswith(prefix):
+                selector = text[len(prefix) :].strip()
+                if selector:
+                    return scope, f"{command} {selector}"
     return "", ""
 
 
@@ -1366,6 +1486,39 @@ def public_watchlists_inline_markup(config: Any | None = None) -> Mapping[str, A
     return {"inline_keyboard": keyboard}
 
 
+def public_active_signals_inline_markup(items: Sequence[ActiveSignalItem]) -> Mapping[str, Any]:
+    keyboard = _signal_button_rows(items, scope="public")
+    keyboard.extend(
+        [
+            [{"text": SIGNAL_DETAIL_REFRESH_BUTTON_LABEL, "callback_data": "public:signals"}],
+            [{"text": SIGNAL_DETAIL_BACK_BUTTON_LABEL, "callback_data": "public:menu"}],
+        ]
+    )
+    return {"inline_keyboard": keyboard}
+
+
+def signal_detail_inline_markup(symbol: str, *, scope: str) -> Mapping[str, Any]:
+    safe_scope = "admin" if scope == "admin" else "public"
+    selector = _callback_selector(symbol)
+    back_callback = "admin:menu" if safe_scope == "admin" else "public:signals"
+    return {
+        "inline_keyboard": [
+            [{"text": SIGNAL_DETAIL_REFRESH_BUTTON_LABEL, "callback_data": f"{safe_scope}:signal:{selector}"}],
+            [
+                {
+                    "text": SIGNAL_DETAIL_LIFECYCLE_BUTTON_LABEL,
+                    "callback_data": f"{safe_scope}:signal_lifecycle:{selector}",
+                },
+                {
+                    "text": SIGNAL_DETAIL_WHY_VALID_BUTTON_LABEL,
+                    "callback_data": f"{safe_scope}:signal_why:{selector}",
+                },
+            ],
+            [{"text": SIGNAL_DETAIL_BACK_BUTTON_LABEL, "callback_data": back_callback}],
+        ]
+    }
+
+
 def public_back_to_menu_inline_markup(config: Any | None = None) -> Mapping[str, Any]:
     keyboard = _signal_channel_button_rows(config)
     keyboard.append([{"text": "↩ Back to Menu", "callback_data": "public:menu"}])
@@ -1404,6 +1557,7 @@ def _admin_response(
     text: str,
     *,
     run_id: str = NA,
+    reply_markup: Mapping[str, Any] | None = None,
     admin_config: Any | None = None,
 ) -> AdminCommandResponse:
     return AdminCommandResponse(
@@ -1411,7 +1565,7 @@ def _admin_response(
         response_type=response_type,
         text=text,
         run_id=run_id,
-        reply_markup=_admin_reply_markup_for(command, response_type, admin_config),
+        reply_markup=reply_markup or _admin_reply_markup_for(command, response_type, admin_config),
         cleanup_reply_keyboard=command in {"/start", "/menu"},
     )
 
@@ -1470,6 +1624,28 @@ def _signal_channel_button_rows(config: Any | None) -> list[list[dict[str, Any]]
     if invite_link == NA:
         return []
     return [[{"text": JOIN_SIGNAL_CHANNEL_BUTTON_LABEL, "url": invite_link}]]
+
+
+def _signal_button_rows(items: Sequence[ActiveSignalItem], *, scope: str) -> list[list[dict[str, Any]]]:
+    rows: list[list[dict[str, Any]]] = []
+    current_row: list[dict[str, Any]] = []
+    safe_scope = "admin" if scope == "admin" else "public"
+    for item in items:
+        symbol = _display(item.symbol)
+        if symbol == NA:
+            continue
+        current_row.append({"text": symbol, "callback_data": f"{safe_scope}:signal:{_callback_selector(symbol)}"})
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+    return rows
+
+
+def _callback_selector(value: Any) -> str:
+    text = _display(value)
+    return "na" if text == NA else text.strip().upper()
 
 
 def _public_signal_channel_copy(config: Any | None) -> str:
@@ -2423,6 +2599,10 @@ __all__ = [
     "WOLF_BRIEFING_REFRESH_BUTTON_LABEL",
     "WATCHLIST_BACK_BUTTON_LABEL",
     "WATCHLIST_REFRESH_BUTTON_LABEL",
+    "SIGNAL_DETAIL_BACK_BUTTON_LABEL",
+    "SIGNAL_DETAIL_LIFECYCLE_BUTTON_LABEL",
+    "SIGNAL_DETAIL_REFRESH_BUTTON_LABEL",
+    "SIGNAL_DETAIL_WHY_VALID_BUTTON_LABEL",
     "AdminCommandResponse",
     "LatestScanArtifacts",
     "TelegramAdminCommandService",
@@ -2447,11 +2627,13 @@ __all__ = [
     "format_wolf_briefing_preview",
     "load_latest_manifest_row",
     "normalize_admin_command",
+    "public_active_signals_inline_markup",
     "public_back_to_menu_inline_markup",
     "public_donate_inline_markup",
     "public_menu_inline_markup",
     "public_menu_reply_markup",
     "public_watchlists_inline_markup",
     "reply_keyboard_remove_markup",
+    "signal_detail_inline_markup",
     "wolf_briefing_preview_inline_markup",
 ]
