@@ -12,7 +12,7 @@ from app.data.dtos import NA, MaybeDecimal, MaybeInt
 OUTPUT_QUANT = Decimal("0.00000001")
 MAX_SCORE = Decimal("100")
 DEFAULT_REQUIRED_RR = Decimal("2.5")
-CHALLENGE_REQUIRED_RR = Decimal("3.0")
+CHALLENGE_REQUIRED_RR = Decimal("2.7")
 MIN_SCANNER_RR = Decimal("2.0")
 
 STRUCTURE_WEIGHT = Decimal("25")

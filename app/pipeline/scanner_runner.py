@@ -1196,7 +1196,7 @@ class ScannerRunner:
             strategy_results[mode_name] = result
             setup = _strategy_setup_for_mode(result, mode)
             mode_diagnostics = _strategy_diagnostics_for_setup(setup)
-            mode_diagnostics["required_rr"] = "3.0" if mode == LiquidityGrabMode.challenge else "2.5"
+            mode_diagnostics["required_rr"] = "2.7" if mode == LiquidityGrabMode.challenge else "2.5"
             pullback_intelligence = build_pullback_intelligence(mode_diagnostics)
             mode_diagnostics["pullback_intelligence"] = pullback_intelligence.model_dump(mode="json")
             target_intelligence = _target_intelligence_for_setup(
@@ -1661,7 +1661,7 @@ def _setup_quality_for_result(
         derivatives_enrichment=derivatives_enrichment,
     )
     stop_distance_pct = _stop_distance_pct(setup)
-    required_rr = Decimal("3.0") if mode == "challenge" else Decimal("2.5")
+    required_rr = Decimal("2.7") if mode == "challenge" else Decimal("2.5")
 
     return validate_setup_quality(
         SetupQualityInput(
@@ -2442,7 +2442,7 @@ def _target_intelligence_for_setup(
     htf_candles = _target_htf_candles(candles_by_timeframe, setup)
     profile = higher_timeframe_volume_profile or volume_profile
     mode = setup.mode.value
-    required_rr = Decimal("3.0") if mode == "challenge" else Decimal("2.5")
+    required_rr = Decimal("2.7") if mode == "challenge" else Decimal("2.5")
     return build_target_intelligence(
         symbol=setup.pullback_zone.symbol if hasattr(setup.pullback_zone, "symbol") else diagnostics.get("symbol", NA),
         mode=mode,

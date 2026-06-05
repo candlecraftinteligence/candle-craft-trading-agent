@@ -904,9 +904,11 @@ Phase 11 adds `LiquidityGrabEngine` under `app/strategies` for deterministic set
 
 Supported modes:
 
-- `challenge`: strictest mode. Uses 2D HTF structure, 12H/4H bias, and 15m/5m execution. Requires Trust Meter >= 85, RR >= 3.0, fixed 5% risk text, limit pullback entries only, no meme/illiquid token classification, and no active BTC/event guard when provided. Invalid Challenge output exposes the exact message `No valid challenge setup.`
+- `challenge`: strictest mode. Uses 2D HTF structure, 12H/4H bias, and 15m/5m execution. Requires Trust Meter >= 85, actionable RR >= 2.7, fixed 5% risk text, limit pullback entries only, no meme/illiquid token classification, and no active BTC/event guard when provided. Invalid Challenge output exposes the exact message `No valid challenge setup.`
 - `swing`: uses 2D/12H structure with 4H or 1H execution where available, with 15m/5m fallback, and applies the base RR >= 2.5 gate. Invalid Swing output exposes the exact message `No valid swing setup.`
 - `scalp`: uses 12H/4H bias with 15m/5m execution and requires the pullback entry to remain valid within the short LTF window. Invalid Scalp output exposes the exact message `No valid scalp setup.`
+
+The actionable RR >= 2.7 requirement is an RR calibration only. It does not weaken the confirmed liquidity sweep, 5m BOS/CHoCH, OB/FVG pullback, fib alignment, target integrity, Trust Meter, lifecycle, risk, alert, or portfolio safety gates.
 
 Trust Meter scoring totals 12 points:
 
@@ -1106,7 +1108,7 @@ Phase 14 adds `app/analytics/pullback_zones.py` for the Liquidity-Grab Pullback 
 - Body-close acceptance beyond 0.786 or persistent acceptance beyond the invalidation zone is rejected. Wick-only breaches are classified by the Phase 41 wick/close layer instead of being treated as automatic `pullback_too_deep`.
 - Stops use the sweep wick plus a 0.10 ATR(15m) buffer, or the farther OB structure edge when that is more conservative. If ATR is unavailable, the structure edge is used and the ATR buffer remains `N/A`.
 - TP1 uses the nearest opposing liquidity/range level when available, otherwise fib 1.272. TP2 uses fib 1.618 and TP3 uses fib 2.0.
-- RR to TP2 must be at least 2.5 for swing/scalp and at least 3.0 for challenge mode. Failed RR rejects with `rr_too_low`.
+- RR to TP2 must be at least 2.5 for swing/scalp and at least 2.7 for challenge mode. Failed RR rejects with `rr_too_low`.
 
 No setup is created unless the pullback zone and RR are valid. Missing or uncertain OB/FVG/fib fields remain `N/A`, and rejected setups stay rejected. POC, VAL, and VAH remain confluence only; they can annotate a selected zone but never create a setup by themselves.
 
@@ -2333,7 +2335,7 @@ Safety boundaries:
 Purpose:
 
 - Improve target selection diagnostics so the scanner can explain whether a setup has real profit room before RR rejection.
-- Keep existing RR hard gates unchanged. A setup with TP2 below the required RR remains rejected or near-miss only.
+- Keep calibrated RR hard gates intact. A setup with TP2 below the required RR remains rejected or near-miss only.
 - Map visible target room from available candle structure, not from arbitrary R-multiple expansion.
 
 Target detection hierarchy:
@@ -2382,7 +2384,7 @@ best_target_conditions
 Safety boundaries:
 
 - Phase 42 is diagnostics, target mapping, display, JSON, and research only.
-- It does not lower RR requirements, weaken strategy gates, invent wider targets, create valid trades from invalid structures, place orders, use private exchange API access, add withdrawals or transfers, or send live Telegram by default.
+- It does not bypass calibrated RR requirements, weaken strategy gates, invent wider targets, create valid trades from invalid structures, place orders, use private exchange API access, add withdrawals or transfers, or send live Telegram by default.
 - Missing data remains `N/A`; unreliable data remains `Unverified`; market data is never invented.
 
 ## Safety Boundaries

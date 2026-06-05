@@ -795,6 +795,24 @@ def test_scanner_returns_strategy_results_output_and_diagnostics() -> None:
     assert symbol_result.strategy_diagnostics["challenge"]["candles_5m_count"] == 220
     assert symbol_result.strategy_diagnostics["challenge"]["execution_sweep_status"] == "passed"
     assert symbol_result.strategy_diagnostics["challenge"]["confirmation_structure_shift_status"] == "passed"
+    assert symbol_result.strategy_diagnostics["challenge"]["required_rr"] == "2.7"
+
+
+def test_scanner_uses_calibrated_challenge_rr_for_target_intelligence(monkeypatch) -> None:
+    captured_min_rr: dict[str, Decimal] = {}
+
+    def capture_target_intelligence(*args, **kwargs):
+        captured_min_rr[kwargs["mode"]] = kwargs["minimum_rr"]
+        return _clean_target_intelligence()
+
+    monkeypatch.setattr(scanner_runner_module, "build_target_intelligence", capture_target_intelligence)
+
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+
+    assert captured_min_rr["challenge"] == Decimal("2.7")
+    assert captured_min_rr["swing"] == Decimal("2.5")
+    assert captured_min_rr["scalp"] == Decimal("2.5")
 
 
 def test_challenge_invalid_output_remains_exact_message() -> None:
