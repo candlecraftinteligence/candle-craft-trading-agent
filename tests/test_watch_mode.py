@@ -236,7 +236,7 @@ def test_alert_only_when_valid_setup_appears() -> None:
 
     assert current_result_is_valid_activation(symbol_result) is True
     assert should_trigger_activation_alert(symbol_result, previous) is True
-    assert "Candle Craft Setup Activated" in format_watch_activation_alert(symbol_result)
+    assert "WATCHLIST UPGRADED" in format_watch_activation_alert(symbol_result)
 
 
 def test_no_alert_for_near_miss() -> None:
@@ -284,7 +284,7 @@ def test_dry_run_default_does_not_call_telegram(tmp_path, monkeypatch, capsys) -
     assert "Telegram manual lifecycle alerts: disabled" in captured.out
     assert "Telegram admin drafts: disabled/dry-run" in captured.out
     assert "Legacy scanner alerts: dry-run" in captured.out
-    assert "Candle Craft Setup Activated" in captured.out
+    assert "WATCHLIST UPGRADED" in captured.out
 
 
 def test_watch_mode_single_iteration_updates_state_and_jsonl(tmp_path, monkeypatch, capsys) -> None:

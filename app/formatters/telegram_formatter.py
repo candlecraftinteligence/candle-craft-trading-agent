@@ -6,6 +6,11 @@ from typing import Any, Literal
 
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display
+from app.formatters.telegram_signal_formatter import (
+    TelegramSignalMessage,
+    format_premium_public_signal_message,
+    format_public_no_trade_message,
+)
 from app.analytics.setup_quality import SetupQualityResult, SetupQualityState
 from app.pipeline.scanner_runner import ScannerSymbolResult
 from app.strategies.liquidity_grab_pullback import LiquidityGrabMode, LiquidityGrabResult, LiquidityGrabSetup
@@ -22,7 +27,7 @@ TARGET = "\U0001F3AF"
 CHECK = "\u2705"
 CROSS = "\u274c"
 SWORDS = "\u2694\ufe0f"
-FOOTER = f"{SWORDS} Candle Craft | Signal. Structure. Execution."
+FOOTER = "Candle Craft | Signal. Structure. Execution."
 RISK_WARNING_FALLBACK = (
     "This is not financial advice. Pullback ideas are conditional and must be invalidated at the stop."
 )
@@ -71,66 +76,15 @@ def format_valid_setup_message(
 ) -> str:
     setup = setup or _setup_from_symbol_result(symbol_result, mode)
     diagnostics = _diagnostics_for_mode(symbol_result, mode)
-    mode_title = _mode_title(mode)
-    symbol = symbol_result.symbol
-    grade = _trust_grade(setup, diagnostics)
-    trust_percentage = _trust_percentage(setup, diagnostics)
-    status = _display(_setup_field(setup, diagnostics, "status"))
-    if status == NA:
-        status = "Pending"
-    display = build_symbol_display(symbol_result)
-    quality = symbol_result.setup_quality
-
-    if compact:
-        quality_text = _quality_valid_text(quality)
-        return "\n".join(
-            (
-                (
-                    f"{symbol} {DASH} Valid Setup | {mode_title} {grade} {trust_percentage}% | "
-                    f"{quality_text} | "
-                    f"Bias: {_trade_bias(setup, diagnostics)} | Entry: {_entry_text(setup, diagnostics)} | "
-                    f"Stop: {_display(_setup_field(setup, diagnostics, 'stop'))} | "
-                    f"RR: {_display(_setup_field(setup, diagnostics, 'rr_to_tp2'))} | Trade idea created."
-                ),
-                FOOTER,
-            )
+    text = format_premium_public_signal_message(
+        _premium_signal_message_from_setup(
+            symbol_result,
+            mode=mode,
+            setup=setup,
+            diagnostics=diagnostics,
         )
-
-    lines = [
-        f"{symbol} {DASH} Valid Setup",
-        "",
-        f"{PIN} Bias",
-        f"{BULLET} 2D HTF: {_display(_setup_field(setup, diagnostics, 'htf_2d_trend'))}",
-        f"{BULLET} 12H Bias: {_display(_setup_field(setup, diagnostics, 'mtf_12h_trend'))}",
-        "",
-        f"{CHECK} Passed",
-        *_telegram_passed_lines(display),
-        *_telegram_quality_lines(quality),
-        "",
-        "Orderflow",
-        f"{BULLET} POC: {_display(_first_available(_setup_field(setup, diagnostics, 'poc'), symbol_result.poc))}",
-        f"{BULLET} VAH/VAL: {_vah_val_text(symbol_result)}",
-        f"{BULLET} Funding: {_funding_text(symbol_result)}",
-        f"{BULLET} OI: {_oi_text(symbol_result)}",
-        "",
-        f"{TARGET} Trade Idea",
-        f"{BULLET} Bias: {_trade_bias(setup, diagnostics)}",
-        f"{BULLET} Entry: {_entry_text(setup, diagnostics)}",
-        f"{BULLET} Stop: {_display(_setup_field(setup, diagnostics, 'stop'))}",
-        f"{BULLET} RR: {_display(_setup_field(setup, diagnostics, 'rr_to_tp2'))}",
-        f"{BULLET} Trust Meter: {grade} + {trust_percentage}%",
-        f"{BULLET} Invalidation: {_display(_setup_field(setup, diagnostics, 'invalidation'))}",
-        f"{BULLET} Risk warning: {_risk_warning(setup, diagnostics)}",
-        "",
-        f"{BRAIN} Final Result",
-        f"Trade idea created. Status: {status}.",
-    ]
-
-    if diagnostics_level == "full":
-        lines.extend(("", "4) Diagnostics", *_diagnostic_lines(symbol_result, diagnostics)))
-
-    lines.extend(("", FOOTER))
-    return "\n".join(lines)
+    )
+    return _append_full_diagnostics(text, symbol_result, diagnostics, diagnostics_level=diagnostics_level)
 
 
 def format_no_setup_message(
@@ -153,72 +107,13 @@ def format_rejection_summary(
     compact: bool = False,
 ) -> str:
     diagnostics = _representative_diagnostics(symbol_result)
-    symbol = symbol_result.symbol
     display = build_symbol_display(symbol_result)
     quality = symbol_result.setup_quality
-    failed_gate = _failed_gate(symbol_result, diagnostics)
-    reason = display.short_reason
-
-    if _quality_evaluated(quality):
-        lines = [
-            f"{symbol} {DASH} No valid trade",
-            f"Action: {quality.action_label}",
-            f"Reason: {quality.decision_reason}",
-        ]
-        if diagnostics_level == "full":
-            lines.extend(("", "Diagnostics", *_diagnostic_lines(symbol_result, diagnostics)))
-        lines.extend(("", FOOTER))
-        return "\n".join(lines)
-
-    if compact:
-        action = _telegram_action_text(display)
-        return "\n".join(
-            (
-                (
-                    f"{symbol} {DASH} {_telegram_no_setup_title(display.display_status)} | "
-                    f"Failed: {_telegram_failed_summary(display, failed_gate)} | "
-                    f"Why: {reason} | {action}"
-                ),
-                FOOTER,
-            )
-        )
-
-    action = _telegram_action_text(display)
-    lines = [
-        f"{symbol} {DASH} {_telegram_no_setup_title(display.display_status)}",
-        "",
-        f"{PIN} Bias",
-        f"{BULLET} 2D HTF: {_display(diagnostics.get('htf_2d_trend'))}",
-        f"{BULLET} 12H Bias: {_display(diagnostics.get('mtf_12h_trend'))}",
-        "",
-        f"{CHECK} Passed",
-        *_telegram_passed_lines(display),
-        "",
-        f"{CROSS} Failed",
-        *_telegram_failed_lines(display, failed_gate),
-        "",
-        f"{BRAIN} Why",
-        reason,
-        "",
-        f"{TARGET} Action",
-        action,
-    ]
-
-    if _show_watchlist_plan(display):
-        lines.extend(("", "Needs next", *_telegram_plan_lines(display), ""))
-        intelligence = display.near_miss_intelligence
-        lines.extend(
-            (
-                f"Activation hint: {intelligence.activation_hint if intelligence is not None else NA}",
-                f"Invalidation hint: {intelligence.invalidation_hint if intelligence is not None else NA}",
-            )
-        )
-
-    if diagnostics_level == "full":
-        lines.extend(("", "Diagnostics", *_diagnostic_lines(symbol_result, diagnostics)))
-
-    lines.extend(("", FOOTER))
-    return "\n".join(lines)
+    text = format_public_no_trade_message(
+        _premium_no_trade_message(symbol_result, diagnostics=diagnostics),
+        _public_rejection_reason(symbol_result, diagnostics, display, quality),
+    )
+    return _append_full_diagnostics(text, symbol_result, diagnostics, diagnostics_level=diagnostics_level)
 
 
 def _telegram_no_setup_title(display_status: str) -> str:
@@ -577,6 +472,125 @@ def _display(value: Any) -> str:
         text = format(value, "f")
         return text.rstrip("0").rstrip(".") if "." in text else text
     return str(value)
+
+
+def _premium_signal_message_from_setup(
+    symbol_result: ScannerSymbolResult,
+    *,
+    mode: str,
+    setup: LiquidityGrabSetup | None,
+    diagnostics: Mapping[str, Any],
+) -> TelegramSignalMessage:
+    return TelegramSignalMessage(
+        symbol=symbol_result.symbol,
+        direction=_trade_bias(setup, diagnostics),
+        mode=mode,
+        quality=_premium_quality(symbol_result, setup, diagnostics),
+        entry_low=_setup_field(setup, diagnostics, "entry_low"),
+        entry_high=_setup_field(setup, diagnostics, "entry_high"),
+        stop_loss=_setup_field(setup, diagnostics, "stop"),
+        tp1=_setup_field(setup, diagnostics, "tp1"),
+        tp2=_setup_field(setup, diagnostics, "tp2"),
+        tp3=_setup_field(setup, diagnostics, "tp3"),
+        planned_rr=_setup_field(setup, diagnostics, "rr_to_tp2"),
+        structure_reason=_first_available(
+            diagnostics.get("structure_reason"),
+            diagnostics.get("confirmation_bos_choch_reason"),
+            diagnostics.get("pullback_zone_diagnostics"),
+        ),
+        invalidation_reason=_setup_field(setup, diagnostics, "invalidation"),
+    )
+
+
+def _premium_no_trade_message(
+    symbol_result: ScannerSymbolResult,
+    *,
+    diagnostics: Mapping[str, Any],
+) -> TelegramSignalMessage:
+    return TelegramSignalMessage(
+        symbol=symbol_result.symbol,
+        direction=_first_available(
+            diagnostics.get("bias"),
+            diagnostics.get("direction"),
+            _symbol_context_bias(symbol_result, diagnostics),
+        ),
+        mode=_first_available(
+            symbol_result.rejected_strategy_modes[0] if symbol_result.rejected_strategy_modes else NA,
+            symbol_result.valid_strategy_modes[0] if symbol_result.valid_strategy_modes else NA,
+            diagnostics.get("mode"),
+        ),
+        quality=_premium_quality(symbol_result, None, diagnostics),
+    )
+
+
+def _symbol_context_bias(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    trends = (
+        _display(diagnostics.get("htf_2d_trend")),
+        _display(diagnostics.get("mtf_12h_trend")),
+        symbol_result.trend_context,
+    )
+    bullish = sum(1 for trend in trends if str(trend).lower() == "bullish")
+    bearish = sum(1 for trend in trends if str(trend).lower() == "bearish")
+    if bullish > bearish:
+        return "bullish"
+    if bearish > bullish:
+        return "bearish"
+    return NA
+
+
+def _premium_quality(
+    symbol_result: ScannerSymbolResult,
+    setup: LiquidityGrabSetup | None,
+    diagnostics: Mapping[str, Any],
+) -> str:
+    quality = symbol_result.setup_quality
+    if _quality_evaluated(quality):
+        return _display(quality.quality_grade.value)
+    return _first_available(_trust_grade(setup, diagnostics), diagnostics.get("grade"))
+
+
+def _public_rejection_reason(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    display: Any,
+    quality: SetupQualityResult,
+) -> str:
+    if _quality_evaluated(quality):
+        return _display(quality.decision_reason)
+    for value in (
+        getattr(display, "short_reason", NA),
+        diagnostics.get("confirmation_bos_choch_reason"),
+        diagnostics.get("pullback_failure_reason"),
+        diagnostics.get("rr_diagnostics"),
+        symbol_result.rejection_reason,
+        _failed_gate(symbol_result, diagnostics),
+    ):
+        text = _display(value)
+        if text != NA:
+            return text
+    return NA
+
+
+def _append_full_diagnostics(
+    text: str,
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    *,
+    diagnostics_level: DiagnosticsLevel,
+) -> str:
+    if diagnostics_level != "full":
+        return text
+    body = text.removesuffix(FOOTER).rstrip()
+    return "\n".join(
+        (
+            body,
+            "",
+            "Diagnostics",
+            *_diagnostic_lines(symbol_result, diagnostics),
+            "",
+            FOOTER,
+        )
+    )
 
 
 __all__ = [

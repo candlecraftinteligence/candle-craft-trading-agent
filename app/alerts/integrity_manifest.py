@@ -192,7 +192,9 @@ def build_alert_integrity_manifest(
     message = "" if formatted_message is None else str(formatted_message)
     if not message.strip():
         _add_issue(issues, "error", "empty_alert_message", "Alert message is empty.", "formatted_message")
-    if not _message_has_field(message, "Risk warning"):
+    message_has_risk_warning = _message_has_risk_warning(message)
+    message_has_invalidation = _message_has_invalidation(message)
+    if not message_has_risk_warning:
         _add_issue(
             issues,
             "blocker",
@@ -201,7 +203,7 @@ def build_alert_integrity_manifest(
             "formatted_message",
             "risk_warning",
         )
-    if not _message_has_field(message, "Invalidation"):
+    if not message_has_invalidation:
         _add_issue(
             issues,
             "blocker",
@@ -254,8 +256,8 @@ def build_alert_integrity_manifest(
         "deduplication_key_present": _present(deduplication_key),
         "dry_run": dry_run,
         "invalidation_present": required_field_status.get("invalidation", False),
-        "message_has_invalidation": _message_has_field(message, "Invalidation"),
-        "message_has_risk_warning": _message_has_field(message, "Risk warning"),
+        "message_has_invalidation": message_has_invalidation,
+        "message_has_risk_warning": message_has_risk_warning,
         "no_forbidden_alert_keys": not forbidden_keys,
         "risk_warning_present": required_field_status.get("risk_warning", False),
     }
@@ -681,6 +683,35 @@ def _message_has_field(message: str, label: str) -> bool:
             continue
         value = line[len(prefix) :].strip()
         return _present(value)
+    return False
+
+
+def _message_has_risk_warning(message: str) -> bool:
+    if _message_has_field(message, "Risk warning"):
+        return True
+    for line in message.splitlines():
+        text = line.strip().lower()
+        if "manual execution" in text and "manage risk" in text:
+            return True
+    return False
+
+
+def _message_has_invalidation(message: str) -> bool:
+    if _message_has_field(message, "Invalidation"):
+        return True
+    lines = message.splitlines()
+    for index, line in enumerate(lines):
+        if "invalid if" in line.strip().lower():
+            return _next_non_blank_line_present(lines, index + 1)
+    return False
+
+
+def _next_non_blank_line_present(lines: Sequence[str], start: int) -> bool:
+    for line in lines[start:]:
+        text = line.strip()
+        if not text:
+            continue
+        return _present(text)
     return False
 
 

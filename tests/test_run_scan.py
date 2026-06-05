@@ -1693,10 +1693,10 @@ def test_show_strategy_output_with_telegram_format_prints_clean_message(monkeypa
 
     captured = capsys.readouterr()
     assert "BTCUSDT Candle Craft strategy output:" in captured.out
-    assert "BTCUSDT — No valid trade" in captured.out
-    assert "Action: Wait for confirmation" in captured.out
+    assert "🐺🟠 NO TRADE — BTCUSDT" in captured.out
+    assert "The wolf is watching, but not entering." in captured.out
     assert "Reason: Sweep passed but 5m BOS/CHoCH confirmation is missing." in captured.out
-    assert "⚔️ Candle Craft | Signal. Structure. Execution." in captured.out
+    assert "Candle Craft | Signal. Structure. Execution." in captured.out
     assert "Challenge: No valid challenge setup." not in captured.out
 
 

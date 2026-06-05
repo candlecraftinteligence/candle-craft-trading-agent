@@ -52,14 +52,19 @@ def _idea(**overrides: object) -> TradeIdeaResult:
 def test_formats_valid_trade_idea() -> None:
     message = AlertAgent().format(_idea())
 
-    assert "🟢 Trade Setup Alert — BTCUSDT" in message
-    assert "Direction: long" in message
-    assert "Exchange: Binance" in message
-    assert "Market type: perpetual" in message
-    assert "Entry zone: 100.00000000 - 102.00000000" in message
-    assert "Stop loss: 95.00000000" in message
-    assert "Take profits: TP1: 112.00000000; TP2: 120.00000000" in message
-    assert "Risk warning: This is not financial advice." in message
+    assert "🐺🟠 SIGNAL — BTCUSDT" in message
+    assert "The wolf found liquidity." in message
+    assert "Bias: LONG" in message
+    assert "Status: CONFIRMED" in message
+    assert "Quality: A" in message
+    assert "RR: 3.5R" in message
+    assert "Entry Zone: 100 – 102" in message
+    assert "Stop: 95" in message
+    assert "TP1: 112" in message
+    assert "TP2: 120" in message
+    assert "TP3: N/A" in message
+    assert "⚠️ Manual execution only. Manage risk." in message
+    assert "Exchange:" not in message
 
 
 def test_dry_run_does_not_call_telegram() -> None:
@@ -90,7 +95,7 @@ def test_dry_run_returns_formatted_message() -> None:
 
     assert result.status == "dry_run"
     assert result.dry_run is True
-    assert "Trade Setup Alert" in result.formatted_message
+    assert "🐺🟠 SIGNAL — BTCUSDT" in result.formatted_message
     assert result.message_parts == (result.formatted_message,)
 
 
@@ -135,7 +140,7 @@ def test_mocked_telegram_success() -> None:
             payload = json.loads(request.content.decode())
             assert request.url.path == "/bottoken/sendMessage"
             assert payload["chat_id"] == "chat"
-            assert "Trade Setup Alert" in payload["text"]
+            assert "🐺🟠 SIGNAL — BTCUSDT" in payload["text"]
             assert CANDLE_CRAFT_SIGNATURE in payload["text"]
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
 
@@ -215,21 +220,21 @@ def test_missing_data_preserved_as_na() -> None:
         )
     )
 
-    assert "Reason for trade: Technical context: N/A." in message
-    assert "Missing data: funding: N/A; technical_summary: N/A" in message
+    assert "Technical context: N/A." in message
+    assert "Missing data:" not in message
 
 
 def test_unverified_data_preserved_as_unverified() -> None:
     message = AlertAgent().format(_idea(unverified_data=("funding: Unverified", "open_interest: Unverified")))
 
-    assert "Unverified data: funding: Unverified; open_interest: Unverified" in message
+    assert "Unverified data:" not in message
+    assert "Unverified" not in message
 
 
 def test_risk_warning_included() -> None:
     message = AlertAgent().format(_idea())
 
-    assert "Risk warning:" in message
-    assert "This is not financial advice." in message
+    assert "⚠️ Manual execution only. Manage risk." in message
 
 
 def test_candle_craft_signature_included() -> None:
