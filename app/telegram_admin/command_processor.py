@@ -405,6 +405,10 @@ async def _process_admin_update(
     audit_path: Path,
 ) -> _ProcessedUpdate:
     response = command_service.response_for(command, admin_config=config)
+    if _response_delivery_disabled(response):
+        _append_command_audit(audit_path, update_id, chat_id, response, "skipped_disabled")
+        _save_latest_processed_update_id(state_path, update_id)
+        return _ProcessedUpdate("skipped_disabled", preview=_preview(response.text))
     skipped = _skip_status(config)
     if skipped is not None:
         _append_command_audit(audit_path, update_id, chat_id, response, skipped)
@@ -635,6 +639,10 @@ def _skip_status(config: TelegramAdminConfig) -> str | None:
     if not config.has_admin_credentials:
         return "skipped_missing_credentials"
     return None
+
+
+def _response_delivery_disabled(response: AdminCommandResponse) -> bool:
+    return response.response_type == "wolf_briefing_disabled"
 
 
 def _public_skip_status(config: TelegramAdminConfig, chat_id: str) -> str | None:

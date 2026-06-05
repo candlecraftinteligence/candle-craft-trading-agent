@@ -20,6 +20,8 @@ def test_default_settings_are_safe() -> None:
     assert settings.telegram_dry_run is True
     assert settings.telegram_signals_enabled is False
     assert settings.telegram_signal_channel_invite_link is None
+    assert settings.telegram_wolf_briefing_enabled is False
+    assert settings.telegram_wolf_briefing_public_enabled is False
     assert settings.candle_craft_donate_usdt_ton_address is None
     assert settings.candle_craft_donate_ton_address is None
     assert settings.candle_craft_donate_btc_address is None

@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     telegram_public_ui_enabled: bool | None = None
     telegram_watchlist_outcome_tracking_enabled: bool = True
     telegram_public_watchlist_terminal_updates_enabled: bool = False
+    telegram_wolf_briefing_enabled: bool = False
+    telegram_wolf_briefing_public_enabled: bool = False
     candle_craft_public_logo_path: str | None = None
     candle_craft_public_logo_url: str | None = None
     candle_craft_x_url: str | None = None
