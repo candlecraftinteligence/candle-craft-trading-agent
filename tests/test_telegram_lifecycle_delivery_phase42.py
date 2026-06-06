@@ -26,8 +26,10 @@ from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import FOOTER, HEADER_PREFIX, format_telegram_signal_message
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
-from app.storage.models import TelegramAlertAttemptRecord
+from app.lifecycle.service import apply_lifecycle_to_run_result
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
+from app.storage.models import TelegramAlertAttemptRecord
+from app.telegram_admin.active_watchlists import load_active_public_signals
 
 
 def run(coro):
@@ -81,6 +83,29 @@ def _record(
         regime_state=NA,
         action_label=NA,
         invalidation_reason="Invalid if price accepts below 95.",
+    )
+
+
+def _stored_plan_record(
+    state: SetupLifecycleState,
+    *,
+    signal_id: str,
+    direction: str = "long",
+) -> SetupLifecycleRecord:
+    short = direction.lower() == "short"
+    return _record(state, signal_id=signal_id).model_copy(
+        update={
+            "direction": direction,
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "105" if short else "95",
+            "tp1": "95" if short else "110",
+            "tp2": "90" if short else "115",
+            "tp3": "85" if short else "120",
+            "rr": "3",
+            "invalidation_reason": "Invalid if price accepts above 105." if short else "Invalid if price accepts below 95.",
+            "invalidation_logic": "Invalid if price accepts above 105." if short else "Invalid if price accepts below 95.",
+        }
     )
 
 
@@ -273,8 +298,11 @@ def _direct_a_grade_limit_hit_symbol(
         status=ScannerPipelineStatus.SCANNED_NO_SETUP,
         setup_quality=_setup_quality_with_grade(grade, quality_score=92 if grade == SetupQualityGrade.A_PLUS else 88),
     )
+    assert symbol.lifecycle_transition is not None
+    transition = symbol.lifecycle_transition.model_copy(update={"reason": SetupTransitionReason.ENTRY_ZONE_TOUCHED})
     return symbol.model_copy(
         update={
+            "lifecycle_transition": transition,
             "valid_strategy_modes": (),
             "rejected_strategy_modes": ("swing",),
             "status_history": (ScannerPipelineStatus.SCANNED_NO_SETUP,),
@@ -325,9 +353,11 @@ def test_direct_a_grade_limit_hit_sends_clean_public_signal_once(tmp_path: Path)
     assert len(sender.messages) == 1
     message = sender.messages[0]
     assert message.startswith(f"{HEADER_PREFIX} SCALP SIGNAL — BTCUSDT")
-    assert "Status: LIMIT ZONE HIT" in message
-    assert "The wolf found liquidity." in message
-    assert "TP1:" in message and "TP2:" in message and "TP3:" in message
+    assert "Entry Zone Touched." in message
+    assert "Status: LIMIT HIT" in message
+    assert "Direction: LONG" in message
+    assert "The setup is now active for manual execution." in message
+    assert "TP1:" not in message and "TP2:" not in message and "TP3:" not in message
     assert message.endswith(FOOTER)
     lowered = message.lower()
     assert "inline_keyboard" not in lowered
@@ -3131,11 +3161,137 @@ def test_sent_watchlist_limit_zone_touch_sends_limit_hit_once(tmp_path: Path) ->
     assert second.sent == 0
     assert len(sender.messages) == 1
     assert "SCALP SIGNAL — BTCUSDT" in sender.messages[0]
-    assert "Status: LIMIT ZONE HIT" in sender.messages[0]
-    assert "The wolf found liquidity." in sender.messages[0]
-    assert "Manual execution only. Manage risk." in sender.messages[0]
+    assert "Entry Zone Touched." in sender.messages[0]
+    assert "Status: LIMIT HIT" in sender.messages[0]
+    assert "The setup is now active for manual execution." in sender.messages[0]
     rows = _watchlist_outcome_rows(db_path)
     assert (TelegramAlertType.LIMIT_HIT.value, "sent", TelegramAlertType.LIMIT_HIT.value, NA) in rows
+
+
+def test_watchlist_long_stored_entry_zone_touch_sends_limit_hit_once_and_becomes_active(tmp_path: Path) -> None:
+    db_path = tmp_path / "lifecycle-long-limit.db"
+    signal_id = "life-watch-long"
+    _store_lifecycle_record(db_path, _stored_plan_record(SetupLifecycleState.WATCHLISTED, signal_id=signal_id))
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    scan = _outcome_scan_symbol(
+        signal_id=signal_id,
+        high=Decimal("101"),
+        low=Decimal("101"),
+        diagnostics=_public_ready_watchlist_diagnostics(
+            entry_low=Decimal("200"),
+            entry_high=Decimal("202"),
+            stop=Decimal("190"),
+            tp1=Decimal("210"),
+            tp2=Decimal("215"),
+            tp3=Decimal("220"),
+            rr_to_tp2=Decimal("3"),
+        ),
+    )
+
+    first_run = apply_lifecycle_to_run_result(
+        _run_result(scan),
+        database_path=db_path,
+        scan_run_id="touch-1",
+        now="2026-06-02T00:05:00+00:00",
+    )
+    first_symbol = first_run.results[0]
+    assert first_symbol.lifecycle_transition is not None
+    assert first_symbol.lifecycle_transition.from_state == SetupLifecycleState.WATCHLISTED
+    assert first_symbol.lifecycle_transition.to_state == SetupLifecycleState.EXECUTING
+    assert first_symbol.lifecycle_transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
+    assert first_symbol.lifecycle_state is not None
+    assert first_symbol.lifecycle_state.entry_low == "100"
+    assert first_symbol.lifecycle_state.entry_high == "102"
+
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+    first_delivery = run(service.deliver_for_run(first_run, scan_run_id="touch-1"))
+
+    second_run = apply_lifecycle_to_run_result(
+        _run_result(scan),
+        database_path=db_path,
+        scan_run_id="touch-2",
+        now="2026-06-02T00:10:00+00:00",
+    )
+    second_delivery = run(service.deliver_for_run(second_run, scan_run_id="touch-2"))
+
+    assert first_delivery.sent == 1
+    assert second_delivery.sent == 0
+    assert len(sender.messages) == 1
+    message = sender.messages[0]
+    assert "Entry Zone Touched." in message
+    assert "Status: LIMIT HIT" in message
+    assert "Direction: LONG" in message
+    assert "Quality: A" in message
+    assert "Entry Zone: 100 – 102" in message
+    assert "Invalidation: Invalid if price accepts below 95." in message
+    assert "No confirmation = no chase." in message
+
+    active = load_active_public_signals(project_root=tmp_path, database_path=db_path, limit=10)
+    assert active.total == 1
+    assert active.items[0].symbol == "BTCUSDT"
+    assert active.items[0].status == "LIMIT ZONE HIT"
+
+    with sqlite3.connect(db_path) as connection:
+        row_count = connection.execute("SELECT COUNT(*) FROM setup_lifecycle_records").fetchone()[0]
+    assert row_count == 1
+
+
+def test_watchlist_short_stored_entry_zone_touch_sends_limit_hit_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "lifecycle-short-limit.db"
+    signal_id = "life-watch-short"
+    _store_lifecycle_record(
+        db_path,
+        _stored_plan_record(SetupLifecycleState.STALKING, signal_id=signal_id, direction="short"),
+    )
+    _seed_prior_active_alert(
+        db_path,
+        signal_id=signal_id,
+        alert_type=TelegramAlertType.WATCHLIST,
+        direction="short",
+    )
+    scan = _outcome_scan_symbol(
+        signal_id=signal_id,
+        direction="short",
+        high=Decimal("101"),
+        low=Decimal("101"),
+        diagnostics=_public_ready_watchlist_diagnostics(
+            bias="short",
+            direction="short",
+            entry_low=Decimal("200"),
+            entry_high=Decimal("202"),
+            stop=Decimal("210"),
+            tp1=Decimal("190"),
+            tp2=Decimal("185"),
+            tp3=Decimal("180"),
+            rr_to_tp2=Decimal("3"),
+        ),
+    )
+
+    lifecycle_run = apply_lifecycle_to_run_result(
+        _run_result(scan),
+        database_path=db_path,
+        scan_run_id="short-touch",
+        now="2026-06-02T00:05:00+00:00",
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+    delivery = run(service.deliver_for_run(lifecycle_run, scan_run_id="short-touch"))
+
+    assert delivery.sent == 1
+    assert len(sender.messages) == 1
+    assert "Status: LIMIT HIT" in sender.messages[0]
+    assert "Direction: SHORT" in sender.messages[0]
+    assert "Entry Zone: 100 – 102" in sender.messages[0]
+    assert "Invalidation: Invalid if price accepts above 105." in sender.messages[0]
 
 
 def test_watchlist_does_not_send_tp_or_sl_before_limit_hit(tmp_path: Path) -> None:
@@ -3175,7 +3331,7 @@ def test_watchlist_same_candle_entry_and_target_sends_only_limit_and_audits_ambi
 
     assert summary.sent == 1
     assert "SCALP SIGNAL — BTCUSDT" in sender.messages[0]
-    assert "Status: LIMIT ZONE HIT" in sender.messages[0]
+    assert "Status: LIMIT HIT" in sender.messages[0]
     rows = _watchlist_outcome_rows(db_path)
     assert not any(row[0] == TelegramAlertType.TP1_HIT.value for row in rows)
     assert any(row[3] == "outcome_tracking_same_candle_ambiguous" for row in rows)

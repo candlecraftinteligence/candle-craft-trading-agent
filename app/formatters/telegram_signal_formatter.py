@@ -203,29 +203,19 @@ def format_premium_lifecycle_update_message(
 
 
 def format_limit_hit_update(message: TelegramSignalMessage) -> str:
-    reason = safe_reason_text(message.structure_reason, message.confluence)
     return _join(
         f"{HEADER_PREFIX} SCALP SIGNAL {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "The wolf found liquidity.",
+        "Entry Zone Touched.",
         "",
-        f"Bias: {format_direction(message.direction)}",
-        "Status: LIMIT ZONE HIT",
+        "Status: LIMIT HIT",
+        f"Direction: {format_direction(message.direction)}",
         f"Quality: {_quality_display(message.quality)}",
-        f"RR: {format_rr(message.planned_rr)}",
-        "",
-        "\U0001F3AF Trade Map",
         f"Entry Zone: {format_entry_zone(message)}",
-        f"Stop: {format_price(message.stop_loss)}",
-        *format_tp_lines(message),
+        f"Invalidation: {safe_invalidation_text(message)}",
         "",
-        "\U0001F9E0 Why this setup matters",
-        reason,
-        "",
-        "\U0001F6AB Invalid if",
-        safe_invalidation_text(message),
-        "",
-        "\u26A0\ufe0f Manual execution only. Manage risk.",
+        "The setup is now active for manual execution.",
+        "No confirmation = no chase.",
         "",
         FOOTER,
     )

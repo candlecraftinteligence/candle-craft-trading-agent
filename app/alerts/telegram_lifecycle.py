@@ -1329,41 +1329,68 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
         diagnostics.get("trust_grade"),
         diagnostics.get("grade"),
     )
+    entry_low = _first_non_na(
+        getattr(lifecycle, "entry_low", NA),
+        _field(setup, "entry_low"),
+        diagnostics.get("entry_low"),
+        _mapping_value(diagnostics.get("entry_zone"), "low"),
+        _mapping_value(diagnostics.get("watch_zone"), "low"),
+        _level_field(getattr(trade_idea, "entry_zone", None), "low"),
+        _level_field(getattr(trade_idea, "entry_zone", None), "price"),
+        diagnostics.get("entry"),
+    )
+    entry_high = _first_non_na(
+        getattr(lifecycle, "entry_high", NA),
+        _field(setup, "entry_high"),
+        diagnostics.get("entry_high"),
+        _mapping_value(diagnostics.get("entry_zone"), "high"),
+        _mapping_value(diagnostics.get("watch_zone"), "high"),
+        _level_field(getattr(trade_idea, "entry_zone", None), "high"),
+        _level_field(getattr(trade_idea, "entry_zone", None), "price"),
+        diagnostics.get("entry"),
+    )
+    stop_loss = _first_non_na(
+        getattr(lifecycle, "stop_loss", NA),
+        _field(setup, "stop"),
+        diagnostics.get("stop"),
+        _level_field(getattr(trade_idea, "stop_loss", None), "price"),
+        diagnostics.get("stop_loss"),
+    )
+    lifecycle_invalidation = _first_non_na(
+        getattr(lifecycle, "invalidation_reason", NA),
+        getattr(lifecycle, "invalidation_logic", NA),
+    )
+    invalidation_reason = _first_non_na(
+        _clean_public_sentence(lifecycle_invalidation),
+        _public_invalidation_sentence(
+            direction=direction,
+            stop_loss=stop_loss,
+            entry_low=entry_low,
+            entry_high=entry_high,
+            raw_invalidation=_first_non_na(
+                getattr(trade_idea, "invalidation", NA) if trade_idea is not None else NA,
+                _field(setup, "invalidation"),
+                diagnostics.get("invalidation"),
+                _near_miss_invalidation_hint(symbol_result, diagnostics),
+                lifecycle_invalidation,
+            ),
+        ),
+    )
     return TelegramSignalMessage(
         symbol=symbol_result.symbol,
         direction=direction,
         signal_id=_signal_id(symbol_result),
         mode=mode,
         quality=quality,
-        watch_zone=_watch_zone_text(symbol_result, diagnostics),
-        entry_low=_first_non_na(
-            _field(setup, "entry_low"),
-            diagnostics.get("entry_low"),
-            _mapping_value(diagnostics.get("entry_zone"), "low"),
-            _mapping_value(diagnostics.get("watch_zone"), "low"),
-            _level_field(getattr(trade_idea, "entry_zone", None), "low"),
-            _level_field(getattr(trade_idea, "entry_zone", None), "price"),
-            diagnostics.get("entry"),
-        ),
-        entry_high=_first_non_na(
-            _field(setup, "entry_high"),
-            diagnostics.get("entry_high"),
-            _mapping_value(diagnostics.get("entry_zone"), "high"),
-            _mapping_value(diagnostics.get("watch_zone"), "high"),
-            _level_field(getattr(trade_idea, "entry_zone", None), "high"),
-            _level_field(getattr(trade_idea, "entry_zone", None), "price"),
-            diagnostics.get("entry"),
-        ),
-        stop_loss=_first_non_na(
-            _field(setup, "stop"),
-            diagnostics.get("stop"),
-            _level_field(getattr(trade_idea, "stop_loss", None), "price"),
-            diagnostics.get("stop_loss"),
-        ),
-        tp1=_first_non_na(_field(setup, "tp1"), diagnostics.get("tp1"), _take_profit(trade_idea, 1)),
-        tp2=_first_non_na(_field(setup, "tp2"), diagnostics.get("tp2"), _take_profit(trade_idea, 2)),
-        tp3=_first_non_na(_field(setup, "tp3"), diagnostics.get("tp3"), _take_profit(trade_idea, 3)),
+        watch_zone=_first_non_na(_entry_zone_text(entry_low, entry_high), _watch_zone_text(symbol_result, diagnostics)),
+        entry_low=entry_low,
+        entry_high=entry_high,
+        stop_loss=stop_loss,
+        tp1=_first_non_na(getattr(lifecycle, "tp1", NA), _field(setup, "tp1"), diagnostics.get("tp1"), _take_profit(trade_idea, 1)),
+        tp2=_first_non_na(getattr(lifecycle, "tp2", NA), _field(setup, "tp2"), diagnostics.get("tp2"), _take_profit(trade_idea, 2)),
+        tp3=_first_non_na(getattr(lifecycle, "tp3", NA), _field(setup, "tp3"), diagnostics.get("tp3"), _take_profit(trade_idea, 3)),
         planned_rr=_first_non_na(
+            getattr(lifecycle, "rr", NA),
             _field(setup, "rr_to_tp2"),
             diagnostics.get("rr_to_tp2"),
             getattr(trade_idea, "best_rr", NA) if trade_idea is not None else NA,
@@ -1382,46 +1409,12 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
             diagnostics.get("next_trigger_needed"),
             _confirmation_needed(diagnostics),
         ),
-        invalidation_reason=_public_invalidation_sentence(
-            direction=direction,
-            stop_loss=_first_non_na(
-                _field(setup, "stop"),
-                diagnostics.get("stop"),
-                _level_field(getattr(trade_idea, "stop_loss", None), "price"),
-                diagnostics.get("stop_loss"),
-            ),
-            entry_low=_first_non_na(
-                _field(setup, "entry_low"),
-                diagnostics.get("entry_low"),
-                _level_field(getattr(trade_idea, "entry_zone", None), "low"),
-                _level_field(getattr(trade_idea, "entry_zone", None), "price"),
-                diagnostics.get("entry"),
-            ),
-            entry_high=_first_non_na(
-                _field(setup, "entry_high"),
-                diagnostics.get("entry_high"),
-                _level_field(getattr(trade_idea, "entry_zone", None), "high"),
-                _level_field(getattr(trade_idea, "entry_zone", None), "price"),
-                diagnostics.get("entry"),
-            ),
-            raw_invalidation=_first_non_na(
-                getattr(trade_idea, "invalidation", NA) if trade_idea is not None else NA,
-                _field(setup, "invalidation"),
-                diagnostics.get("invalidation"),
-                _near_miss_invalidation_hint(symbol_result, diagnostics),
-                getattr(lifecycle, "invalidation_reason", NA),
-            ),
-        ),
+        invalidation_reason=invalidation_reason,
         watchlist_invalidation_reason=_watchlist_invalidation_sentence(
             symbol_result,
             diagnostics,
             direction=direction,
-            stop_loss=_first_non_na(
-                _field(setup, "stop"),
-                diagnostics.get("stop"),
-                _level_field(getattr(trade_idea, "stop_loss", None), "price"),
-                diagnostics.get("stop_loss"),
-            ),
+            stop_loss=stop_loss,
         ),
         confluence=_human_confluence_sentence(symbol_result, diagnostics),
         htf_bias=_first_non_na(diagnostics.get("htf_2d_trend"), diagnostics.get("mtf_12h_trend")),
@@ -1758,7 +1751,16 @@ def _alert_type_for_transition(
     state = transition.to_state
     if state == SetupLifecycleState.A_GRADE_WATCH:
         return None
-    if state == SetupLifecycleState.EXECUTING and transition.from_state == SetupLifecycleState.A_GRADE_WATCH:
+    if (
+        state == SetupLifecycleState.EXECUTING
+        and transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
+        and transition.from_state
+        in {
+            SetupLifecycleState.A_GRADE_WATCH,
+            SetupLifecycleState.WATCHLISTED,
+            SetupLifecycleState.STALKING,
+        }
+    ):
         return TelegramAlertType.LIMIT_HIT
     if state in WATCH_ALERT_STATES:
         return TelegramAlertType.WATCHLIST

@@ -452,19 +452,15 @@ def test_grouped_watchlist_formatter_orders_buckets_and_empty_rows() -> None:
                 WatchlistStageItem(signal_id="sig-watch", symbol="WATCHUSDT", stage="WATCH", reason=NA),
             ),
             watch_total=1,
-            cooldown_items=(
-                WatchlistStageItem(signal_id="sig-cool", symbol="COOLUSDT", stage="COOLDOWN", reason="invalidated, waiting reset"),
-            ),
-            cooldown_total=1,
         )
     )
 
     assert text.startswith("🐺🟠 WATCHLISTS")
     assert text.endswith(WATCHLIST_DASHBOARD_FOOTER)
-    assert text.index("🔥 STALKING") < text.index("👀 WATCH") < text.index("❄️ COOLDOWN")
+    assert text.index("🔥 STALKING") < text.index("👀 WATCH")
+    assert "❄️ COOLDOWN" not in text
     assert "STALKUSDT — pullback forming" in text
     assert "WATCHUSDT — N/A" in text
-    assert "COOLUSDT — invalidated, waiting reset" in text
     assert "SOLUSDT.P" not in text
     assert "LINKUSDT.P" not in text
 
@@ -472,8 +468,9 @@ def test_grouped_watchlist_formatter_orders_buckets_and_empty_rows() -> None:
 def test_grouped_watchlist_formatter_empty_state() -> None:
     text = format_watchlist_stage_dashboard(WatchlistStageDashboardResult(source_available=False))
 
-    assert text.count("None right now.") == 3
-    assert "No forced trades." in text
+    assert "None right now. The wolf is waiting for cleaner structure." in text
+    assert "None right now. No early ideas passed quality filters." in text
+    assert "❄️ COOLDOWN" not in text
     assert text.endswith(WATCHLIST_DASHBOARD_FOOTER)
 
 
@@ -500,8 +497,8 @@ def test_active_watchlists_empty_state_when_no_scan_database_exists(tmp_path: Pa
     response = TelegramAdminCommandService(project_root=tmp_path).public_response_for("/watchlists")
 
     assert response.text.startswith("🐺🟠 WATCHLISTS")
-    assert response.text.count("None right now.") == 3
-    assert "No forced trades." in response.text
+    assert "None right now. The wolf is waiting for cleaner structure." in response.text
+    assert "None right now. No early ideas passed quality filters." in response.text
     assert "scan_runs" not in response.text
 
 
@@ -1146,7 +1143,7 @@ def test_refresh_button_hides_setup_after_price_invalidation(tmp_path: Path) -> 
     assert all(not value.startswith("public:signal:") for value in _callback_data_values(refreshed_list.reply_markup))
 
 
-def test_watchlists_show_a_grade_waiting_candidate_from_lifecycle_fallback(tmp_path: Path) -> None:
+def test_watchlists_hide_a_grade_waiting_candidate_from_lifecycle_fallback(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_lifecycle_record(
         db_path,
@@ -1174,15 +1171,9 @@ def test_watchlists_show_a_grade_waiting_candidate_from_lifecycle_fallback(tmp_p
     watch_response = _service(tmp_path, db_path).public_response_for("/watchlists")
     signal_response = _service(tmp_path, db_path).public_response_for("/signals")
 
-    assert "ETHUSDT" in watch_response.text
-    assert "Status: A-GRADE WATCH — Waiting Limit Zone" in watch_response.text
-    assert "Direction: Long" in watch_response.text
-    assert "Entry Zone: 100 – 102" in watch_response.text
-    assert "Stop: 95" in watch_response.text
-    assert "Targets: 110, 115, 120" in watch_response.text
-    assert "RR: 3" in watch_response.text
-    assert "Quality: A+" in watch_response.text
-    assert "Invalidation: Invalid if price accepts below 95." in watch_response.text
+    assert "ETHUSDT" not in watch_response.text
+    assert "None right now. The wolf is waiting for cleaner structure." in watch_response.text
+    assert "None right now. No early ideas passed quality filters." in watch_response.text
     assert "ETHUSDT" not in signal_response.text
 
 
@@ -1242,14 +1233,15 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
 
     response = _service(tmp_path, db_path).public_response_for("/signals")
 
-    assert "Active signals: 2" in response.text
-    assert _button_labels(response.reply_markup) == ["TP3USDT", "ENAUSDT"]
+    assert "Active signals: 1" in response.text
+    assert _button_labels(response.reply_markup) == ["ENAUSDT"]
     detail = _service(tmp_path, db_path).public_response_for("/signal ENAUSDT")
     assert "Status: TP1 HIT" in detail.text
     assert f"Updated: {tp1_seen}" in detail.text
     tp3_detail = _service(tmp_path, db_path).public_response_for("/signal TP3USDT")
-    assert "Status: TP3 HIT" in tp3_detail.text
-    assert f"Updated: {tp3_hit_seen}" in tp3_detail.text
+    assert "No active signal available for this symbol. Setup expired or invalidated." in tp3_detail.text
+    assert f"Updated: {tp3_hit_seen}" not in tp3_detail.text
+    assert "TP3USDT" not in response.text
     assert "CLOSEDUSDT" not in response.text
 
 
@@ -1279,7 +1271,7 @@ def test_active_signals_find_scan_run_sqlite_when_default_runtime_db_is_empty(tm
     assert "No active confirmed signals right now." not in response.text
 
 
-def test_watchlists_dashboard_groups_stalking_watch_and_cooldown_data(tmp_path: Path) -> None:
+def test_watchlists_dashboard_groups_only_real_stalking_and_watch_data(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_attempt(
         db_path,
@@ -1339,6 +1331,18 @@ def test_watchlists_dashboard_groups_stalking_watch_and_cooldown_data(tmp_path: 
     _insert_attempt(db_path, signal_id="sig-closed-sl", symbol="DOGEUSDT", alert_type="SL_HIT")
     _insert_attempt(db_path, signal_id="sig-blocked", symbol="BLOCKUSDT", status="blocked", entry_low="1", entry_high="2")
     _insert_attempt(db_path, signal_id="sig-skipped", symbol="SKIPUSDT", status="skipped", entry_low="1", entry_high="2")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-no-valid",
+        symbol="NOVALIDUSDT",
+        blocked_reason="No valid Liquidity-Grab Pullback setup.",
+    )
+    _insert_attempt(
+        db_path,
+        signal_id="sig-failed-quality",
+        symbol="FAILGATEUSDT",
+        blocked_reason="failed quality gates",
+    )
     _insert_attempt(db_path, signal_id="sig-active", symbol="ACTIVEUSDT")
     _insert_attempt(
         db_path,
@@ -1352,17 +1356,22 @@ def test_watchlists_dashboard_groups_stalking_watch_and_cooldown_data(tmp_path: 
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
     assert response.text.startswith("🐺🟠 WATCHLISTS")
-    assert response.text.index("🔥 STALKING") < response.text.index("👀 WATCH") < response.text.index("❄️ COOLDOWN")
+    assert response.text.index("🔥 STALKING") < response.text.index("👀 WATCH")
+    assert "❄️ COOLDOWN" not in response.text
     assert "STALKUSDT — sweep done, waiting BOS/CHoCH" in response.text
     assert "WATCHUSDT — waiting liquidity sweep" in response.text
     assert "UNVERIFIEDUSDT — Unverified" in response.text
     assert "MISSINGUSDT — N/A" in response.text
-    assert "COOLUSDT — invalidated, waiting reset" in response.text
+    assert "COOLUSDT" not in response.text
     assert "ACTIVEUSDT" not in response.text
     assert "ADAUSDT" not in response.text
     assert "DOGEUSDT" not in response.text
     assert "BLOCKUSDT" not in response.text
     assert "SKIPUSDT" not in response.text
+    assert "NOVALIDUSDT" not in response.text
+    assert "FAILGATEUSDT" not in response.text
+    assert "No valid Liquidity-Grab Pullback setup" not in response.text
+    assert "failed quality gates" not in response.text
     assert "Decimal(" not in response.text
     assert "{" not in response.text
     assert "}" not in response.text
@@ -1370,7 +1379,7 @@ def test_watchlists_dashboard_groups_stalking_watch_and_cooldown_data(tmp_path: 
     assert "automatic execution" not in response.text.lower()
 
 
-def test_watchlists_dashboard_retains_invalidated_rows_in_cooldown(tmp_path: Path) -> None:
+def test_watchlists_dashboard_hides_invalidated_rows_instead_of_public_cooldown(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_attempt(db_path, signal_id="sig-invalidated", symbol="BTCUSDT", entry_low="100", entry_high="102")
     _insert_attempt(
@@ -1384,8 +1393,8 @@ def test_watchlists_dashboard_retains_invalidated_rows_in_cooldown(tmp_path: Pat
 
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
-    assert "❄️ COOLDOWN" in response.text
-    assert "BTCUSDT — invalidated, waiting reset" in response.text
+    assert "❄️ COOLDOWN" not in response.text
+    assert "BTCUSDT" not in response.text
 
 
 def test_active_watchlist_older_than_48h_expires_from_public_output(tmp_path: Path) -> None:
@@ -1403,8 +1412,8 @@ def test_active_watchlist_older_than_48h_expires_from_public_output(tmp_path: Pa
 
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
-    assert response.text.count("None right now.") == 3
-    assert "No forced trades." in response.text
+    assert "None right now. The wolf is waiting for cleaner structure." in response.text
+    assert "None right now. No early ideas passed quality filters." in response.text
     assert "OLDUSDT" not in response.text
 
 
@@ -1445,7 +1454,7 @@ def test_triggered_watchlist_does_not_expire_due_to_watch_ttl(tmp_path: Path) ->
 
     assert "🔥 STALKING" in response.text
     assert "TRIGGERUSDT" not in response.text
-    assert "None right now." in response.text.split("🔥 STALKING", 1)[1].split("👀 WATCH", 1)[0]
+    assert "None right now. The wolf is waiting for cleaner structure." in response.text.split("🔥 STALKING", 1)[1].split("👀 WATCH", 1)[0]
 
 
 def test_old_confirmed_active_signal_expires_from_public_output(tmp_path: Path) -> None:
@@ -1491,7 +1500,8 @@ def test_grade_b_is_hidden_from_public_active_watchlist_output(tmp_path: Path) -
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
     assert "LOWGRADEUSDT" not in response.text
-    assert response.text.count("None right now.") == 3
+    assert "None right now. The wolf is waiting for cleaner structure." in response.text
+    assert "None right now. No early ideas passed quality filters." in response.text
 
 
 def test_watchlists_dashboard_missing_reason_displays_na(tmp_path: Path) -> None:

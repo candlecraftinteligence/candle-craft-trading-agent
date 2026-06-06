@@ -602,6 +602,141 @@ def test_a_grade_watch_promotes_from_current_price_inside_zone_when_candle_range
     assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.EXECUTING
 
 
+def test_watchlisted_setup_promotes_from_stored_entry_zone_touch_without_recalculating_levels(tmp_path) -> None:
+    db_path = tmp_path / "watch-touch.db"
+    stored = _record(SetupLifecycleState.WATCHLISTED).model_copy(
+        update={
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "95",
+            "tp1": "110",
+            "tp2": "115",
+            "tp3": "120",
+            "rr": "3.2",
+            "invalidation_reason": "Invalid if price accepts below 95.",
+            "invalidation_logic": "Invalid if price accepts below 95.",
+        }
+    )
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(stored)
+
+    current_scan = _confirmed_candidate_symbol(
+        entry_low=Decimal("200"),
+        entry_high=Decimal("202"),
+        stop=Decimal("190"),
+    ).model_copy(update={"current_price": Decimal("101"), "latest_high": NA, "latest_low": NA})
+
+    result = apply_lifecycle_to_run_result(
+        _scan_result(current_scan),
+        database_path=db_path,
+        scan_run_id="run-touch",
+        now="2026-05-18T09:05:00+00:00",
+    )
+    lifecycle = result.results[0].lifecycle_state
+    transition = result.results[0].lifecycle_transition
+
+    assert lifecycle is not None
+    assert transition is not None
+    assert lifecycle.current_state == SetupLifecycleState.EXECUTING
+    assert transition.from_state == SetupLifecycleState.WATCHLISTED
+    assert transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
+    assert lifecycle.entry_low == "100"
+    assert lifecycle.entry_high == "102"
+    assert lifecycle.stop_loss == "95"
+    assert lifecycle.tp1 == "110"
+    assert lifecycle.invalidation_reason == "Invalid if price accepts below 95."
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        records = repository.get_records_for_symbols(("BTCUSDT",))
+
+    assert len(records) == 1
+
+
+def test_watchlisted_setup_uses_current_price_for_stored_entry_zone_touch(tmp_path) -> None:
+    db_path = tmp_path / "watch-current-price-touch.db"
+    stored = _record(SetupLifecycleState.WATCHLISTED).model_copy(
+        update={
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "95",
+            "tp1": "110",
+            "tp2": "115",
+            "tp3": "120",
+            "rr": "3.2",
+            "invalidation_reason": "Invalid if price accepts below 95.",
+        }
+    )
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(stored)
+
+    current_scan = _confirmed_candidate_symbol(
+        entry_low=Decimal("200"),
+        entry_high=Decimal("202"),
+        stop=Decimal("190"),
+    ).model_copy(update={"current_price": Decimal("103"), "latest_high": Decimal("102"), "latest_low": Decimal("100")})
+
+    result = apply_lifecycle_to_run_result(
+        _scan_result(current_scan),
+        database_path=db_path,
+        scan_run_id="run-current-price-outside",
+        now="2026-05-18T09:05:00+00:00",
+    )
+    lifecycle = result.results[0].lifecycle_state
+    transition = result.results[0].lifecycle_transition
+
+    assert lifecycle is not None
+    assert transition is not None
+    assert lifecycle.current_state != SetupLifecycleState.EXECUTING
+    assert transition.reason != SetupTransitionReason.ENTRY_ZONE_TOUCHED
+
+
+def test_stalking_short_setup_promotes_from_stored_entry_zone_touch(tmp_path) -> None:
+    db_path = tmp_path / "stalk-short-touch.db"
+    stored = _record(
+        SetupLifecycleState.STALKING,
+        direction="short",
+    ).model_copy(
+        update={
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "105",
+            "tp1": "95",
+            "tp2": "90",
+            "tp3": "85",
+            "rr": "3.1",
+            "invalidation_reason": "Invalid if price accepts above 105.",
+            "invalidation_logic": "Invalid if price accepts above 105.",
+        }
+    )
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(stored)
+
+    current_scan = _confirmed_candidate_symbol(
+        direction="short",
+        entry_low=Decimal("200"),
+        entry_high=Decimal("202"),
+        stop=Decimal("210"),
+    ).model_copy(update={"current_price": Decimal("101"), "latest_high": NA, "latest_low": NA})
+
+    result = apply_lifecycle_to_run_result(
+        _scan_result(current_scan),
+        database_path=db_path,
+        scan_run_id="run-short-touch",
+        now="2026-05-18T09:05:00+00:00",
+    )
+    lifecycle = result.results[0].lifecycle_state
+    transition = result.results[0].lifecycle_transition
+
+    assert lifecycle is not None
+    assert transition is not None
+    assert lifecycle.current_state == SetupLifecycleState.EXECUTING
+    assert transition.from_state == SetupLifecycleState.STALKING
+    assert transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
+    assert lifecycle.entry_low == "100"
+    assert lifecycle.entry_high == "102"
+    assert lifecycle.tp1 == "95"
+
+
 def test_lower_grade_setup_is_not_promoted_by_a_grade_watch_path(tmp_path) -> None:
     symbol_result = _apply_single_lifecycle(
         _a_grade_watch_symbol(grade=SetupQualityGrade.B_PLUS),
@@ -734,7 +869,7 @@ def test_invalid_state_transition_rejected() -> None:
 
     assert result.allowed is False
     assert result.transitioned is False
-    assert "WATCHLISTED cannot move directly to EXECUTING" in result.notes
+    assert "WATCHLISTED can move directly to EXECUTING only after entry zone touch" in result.notes
 
 
 def test_cooldown_and_archive_behavior() -> None:

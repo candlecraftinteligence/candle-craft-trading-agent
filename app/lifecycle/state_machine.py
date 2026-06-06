@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -63,6 +63,16 @@ DECAYABLE_STATES = {
     SetupLifecycleState.A_GRADE_WATCH,
 }
 DECAY_GRADE_PATH = ("a+", "a", "a-", "b+")
+ENTRY_TOUCH_MONITOR_STATES = {
+    SetupLifecycleState.WATCHLISTED,
+    SetupLifecycleState.STALKING,
+}
+PLAN_LOCK_STATES = {
+    SetupLifecycleState.WATCHLISTED,
+    SetupLifecycleState.STALKING,
+    SetupLifecycleState.EXECUTING,
+    SetupLifecycleState.MANAGING,
+}
 
 ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
     SetupLifecycleState.DISCOVERED: {
@@ -79,6 +89,7 @@ ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
         SetupLifecycleState.STALKING,
         SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.EXECUTING,
         SetupLifecycleState.REJECTED,
         SetupLifecycleState.EXPIRED,
     },
@@ -87,6 +98,7 @@ ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
         SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.WATCHLISTED,
         SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.EXECUTING,
         SetupLifecycleState.REJECTED,
         SetupLifecycleState.EXPIRED,
     },
@@ -141,6 +153,9 @@ class LifecycleObservation:
     tp2: str = NA
     tp3: str = NA
     rr: str = NA
+    current_price: str = NA
+    latest_high: str = NA
+    latest_low: str = NA
     edge_score: str = NA
     failed_gate: str = NA
     regime_state: str = NA
@@ -217,6 +232,18 @@ def transition_record(
             transitioned=False,
             allowed=False,
             notes=f"{record.current_state.value} cannot move directly to {to_state.value}.",
+            record=record,
+        )
+    if _entry_touch_transition_requires_touch_reason(record.current_state, to_state, reason):
+        return SetupTransitionResult(
+            lifecycle_id=record.lifecycle_id,
+            symbol=record.symbol,
+            from_state=record.current_state,
+            to_state=to_state,
+            reason=SetupTransitionReason.INVALID_TRANSITION,
+            transitioned=False,
+            allowed=False,
+            notes=f"{record.current_state.value} can move directly to {to_state.value} only after entry zone touch.",
             record=record,
         )
 
@@ -343,6 +370,9 @@ def evaluate_lifecycle_transition(
             event=event,
             record=new_record,
         )
+
+    if _stored_monitoring_entry_zone_touched(record, observation):
+        observation = _observation_with_stored_plan(observation, record, entry_filled=True)
 
     updated_record = _record_with_observation(
         record,
@@ -491,6 +521,8 @@ def next_state_for_observation(
             return SetupLifecycleState.WATCHLISTED
         return current
     if current == SetupLifecycleState.WATCHLISTED:
+        if observation.entry_filled and not observation.invalidated and not observation.expired and target != SetupLifecycleState.REJECTED:
+            return SetupLifecycleState.EXECUTING
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
         if target == SetupLifecycleState.A_GRADE_WATCH:
@@ -499,6 +531,8 @@ def next_state_for_observation(
             return SetupLifecycleState.STALKING
         return current
     if current == SetupLifecycleState.STALKING:
+        if observation.entry_filled and not observation.invalidated and not observation.expired and target != SetupLifecycleState.REJECTED:
+            return SetupLifecycleState.EXECUTING
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
         if target == SetupLifecycleState.A_GRADE_WATCH:
@@ -551,6 +585,54 @@ def entry_zone_touched(
     return latest_range_high >= entry_range_low and latest_range_low <= entry_range_high
 
 
+def _stored_monitoring_entry_zone_touched(
+    record: SetupLifecycleRecord,
+    observation: LifecycleObservation,
+) -> bool:
+    if record.current_state not in ENTRY_TOUCH_MONITOR_STATES:
+        return False
+    if _terminal_observation(observation):
+        return False
+    side = _status_key(observation.direction)
+    if side not in {"long", "short"}:
+        side = _status_key(record.direction)
+    if side not in {"long", "short"}:
+        return False
+    if _decimal_or_none(observation.current_price) is not None:
+        return _price_in_zone(observation.current_price, record.entry_low, record.entry_high)
+    return entry_zone_touched(observation.latest_high, observation.latest_low, record.entry_low, record.entry_high)
+
+
+def _price_in_zone(price: Any, entry_low: Any, entry_high: Any) -> bool:
+    current = _decimal_or_none(price)
+    zone_low = _decimal_or_none(entry_low)
+    zone_high = _decimal_or_none(entry_high)
+    if current is None or zone_low is None or zone_high is None:
+        return False
+    return min(zone_low, zone_high) <= current <= max(zone_low, zone_high)
+
+
+def _observation_with_stored_plan(
+    observation: LifecycleObservation,
+    record: SetupLifecycleRecord,
+    *,
+    entry_filled: bool,
+) -> LifecycleObservation:
+    return replace(
+        observation,
+        entry_low=record.entry_low,
+        entry_high=record.entry_high,
+        stop_loss=record.stop_loss,
+        tp1=record.tp1,
+        tp2=record.tp2,
+        tp3=record.tp3,
+        rr=record.rr,
+        invalidation_reason=record.invalidation_reason,
+        entry_filled=entry_filled,
+        limit_fill_required=True,
+    )
+
+
 def _record_with_observation(
     record: SetupLifecycleRecord,
     observation: LifecycleObservation,
@@ -587,15 +669,15 @@ def _record_with_observation(
             "edge_score": _text(observation.edge_score),
             "regime_state": _text(observation.regime_state),
             "action_label": _text(observation.action_label),
-            "invalidation_reason": _invalidation_reason(observation),
-            "entry_low": _text(observation.entry_low),
-            "entry_high": _text(observation.entry_high),
-            "stop_loss": _text(observation.stop_loss),
-            "tp1": _text(observation.tp1),
-            "tp2": _text(observation.tp2),
-            "tp3": _text(observation.tp3),
-            "rr": _text(observation.rr),
-            "invalidation_logic": _text(observation.invalidation_reason),
+            "invalidation_reason": _plan_or_observed_value(record, record.invalidation_reason, _invalidation_reason(observation)),
+            "entry_low": _plan_or_observed_value(record, record.entry_low, observation.entry_low),
+            "entry_high": _plan_or_observed_value(record, record.entry_high, observation.entry_high),
+            "stop_loss": _plan_or_observed_value(record, record.stop_loss, observation.stop_loss),
+            "tp1": _plan_or_observed_value(record, record.tp1, observation.tp1),
+            "tp2": _plan_or_observed_value(record, record.tp2, observation.tp2),
+            "tp3": _plan_or_observed_value(record, record.tp3, observation.tp3),
+            "rr": _plan_or_observed_value(record, record.rr, observation.rr),
+            "invalidation_logic": _plan_or_observed_value(record, record.invalidation_logic, observation.invalidation_reason),
             "confirmation_count": confirmation_count,
             "required_confirmation_cycles": required_confirmation_cycles,
             "quality_grade_current": current_grade,
@@ -681,6 +763,26 @@ def _setup_observable(observation: LifecycleObservation) -> bool:
 
 def _terminal_observation(observation: LifecycleObservation) -> bool:
     return observation.tp_hit or observation.sl_hit or observation.invalidated or observation.expired
+
+
+def _plan_or_observed_value(record: SetupLifecycleRecord, stored: Any, observed: Any) -> str:
+    if record.current_state in PLAN_LOCK_STATES:
+        stored_text = _text(stored)
+        if stored_text != NA:
+            return stored_text
+    return _text(observed)
+
+
+def _entry_touch_transition_requires_touch_reason(
+    from_state: SetupLifecycleState | None,
+    to_state: SetupLifecycleState,
+    reason: SetupTransitionReason,
+) -> bool:
+    return (
+        from_state in ENTRY_TOUCH_MONITOR_STATES
+        and to_state == SetupLifecycleState.EXECUTING
+        and reason != SetupTransitionReason.ENTRY_ZONE_TOUCHED
+    )
 
 
 def _setup_consistent(
@@ -855,7 +957,7 @@ def _reason_for_state(
     if state == SetupLifecycleState.A_GRADE_WATCH:
         return SetupTransitionReason.A_GRADE_WATCH
     if state == SetupLifecycleState.EXECUTING:
-        if observation.entry_filled and (observation.a_grade_watch_candidate or observation.limit_fill_required):
+        if observation.entry_filled:
             return SetupTransitionReason.ENTRY_ZONE_TOUCHED
         return SetupTransitionReason.VALID_TRADE_IDEA
     if state == SetupLifecycleState.MANAGING:
