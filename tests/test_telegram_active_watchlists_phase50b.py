@@ -36,6 +36,23 @@ from tests.test_telegram_admin_commands import (
 )
 
 
+def _fresh_timestamp(*, minutes_ago: int = 0) -> str:
+    return (datetime.now(UTC) - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _default_state_for_alert_type(alert_type: str) -> str:
+    return {
+        "SIGNAL_CONFIRMED": "CONFIRMED",
+        "LIMIT_HIT": "LIMIT_ZONE_HIT",
+        "TP1_HIT": "TP1_HIT",
+        "TP2_HIT": "TP2_HIT",
+        "TP3_HIT": "TP3_HIT",
+        "SL_HIT": "SL_HIT",
+        "INVALIDATED": "INVALIDATED",
+        "EXPIRED": "EXPIRED",
+    }.get(alert_type, "WATCHLISTED")
+
+
 def _insert_attempt(
     db_path: Path,
     *,
@@ -44,10 +61,10 @@ def _insert_attempt(
     direction: str = "long",
     alert_type: str = "WATCHLIST",
     status: str = "sent",
-    new_state: str = "WATCHLISTED",
-    lifecycle_state: str = "WATCHLISTED",
-    sent_at: str = "2026-06-04T12:00:00Z",
-    first_seen_at: str = "2026-06-04T12:00:00Z",
+    new_state: str | None = None,
+    lifecycle_state: str | None = None,
+    sent_at: str | None = None,
+    first_seen_at: str | None = None,
     scan_run_id: str = "run-active",
     price_level: str = NA,
     setup_quality_score: str = "B+",
@@ -62,6 +79,10 @@ def _insert_attempt(
     error_message: str = NA,
     last_error_message: str = NA,
 ) -> None:
+    effective_sent_at = sent_at or _fresh_timestamp()
+    effective_first_seen_at = first_seen_at or effective_sent_at
+    effective_state = new_state or _default_state_for_alert_type(alert_type)
+    effective_lifecycle_state = lifecycle_state or effective_state
     connection = open_initialized_database(db_path)
     try:
         connection.execute(
@@ -77,17 +98,17 @@ def _insert_attempt(
                 signal_id,
                 symbol,
                 direction,
-                new_state,
+                effective_state,
                 alert_type,
-                lifecycle_state,
-                sent_at,
+                effective_lifecycle_state,
+                effective_sent_at,
                 status,
                 f"hash-{signal_id}-{alert_type}",
                 scan_run_id,
                 setup_quality_score,
                 rr_planned,
                 price_level,
-                first_seen_at,
+                effective_first_seen_at,
                 entry_low,
                 entry_high,
                 stop_loss,
@@ -147,6 +168,8 @@ def _insert_symbol_result(
     *,
     run_id: str,
     symbol: str,
+    status: str = "near_miss",
+    display_bucket: str = "near_miss",
     failed_gate: str = NA,
     rejection_reason: str = NA,
     next_trigger_needed: str = NA,
@@ -170,8 +193,8 @@ def _insert_symbol_result(
             (
                 run_id,
                 symbol,
-                "near_miss",
-                "near_miss",
+                status,
+                display_bucket,
                 readiness_score,
                 setup_quality_score,
                 NA,
@@ -348,6 +371,63 @@ def _service(tmp_path: Path, db_path: Path | None = None) -> TelegramAdminComman
     return TelegramAdminCommandService(project_root=tmp_path, database_path=db_path or tmp_path / "missing.db")
 
 
+def _insert_active_signal(
+    db_path: Path,
+    *,
+    signal_id: str = "sig-active-valid",
+    symbol: str = "ACTIVEUSDT",
+    direction: str = "long",
+    alert_type: str = "SIGNAL_CONFIRMED",
+    new_state: str = "CONFIRMED",
+    lifecycle_state: str = "CONFIRMED",
+    setup_quality_score: str = "A-",
+    rr_planned: str = "3.1",
+    sent_at: str | None = None,
+    entry_low: str | None = None,
+    entry_high: str | None = None,
+    stop_loss: str | None = None,
+    tp1: str | None = None,
+    tp2: str | None = None,
+    tp3: str | None = None,
+) -> None:
+    if direction.lower() == "short":
+        defaults = {
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "105",
+            "tp1": "95",
+            "tp2": "90",
+            "tp3": "85",
+        }
+    else:
+        defaults = {
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "95",
+            "tp1": "110",
+            "tp2": "115",
+            "tp3": "120",
+        }
+    _insert_attempt(
+        db_path,
+        signal_id=signal_id,
+        symbol=symbol,
+        direction=direction,
+        alert_type=alert_type,
+        new_state=new_state,
+        lifecycle_state=lifecycle_state,
+        setup_quality_score=setup_quality_score,
+        rr_planned=rr_planned,
+        sent_at=sent_at,
+        entry_low=entry_low or defaults["entry_low"],
+        entry_high=entry_high or defaults["entry_high"],
+        stop_loss=stop_loss or defaults["stop_loss"],
+        tp1=tp1 or defaults["tp1"],
+        tp2=tp2 or defaults["tp2"],
+        tp3=tp3 or defaults["tp3"],
+    )
+
+
 def _callback_update_with_chat_type(update_id: int, chat_id: str, callback_data: str, chat_type: str) -> dict[str, Any]:
     return {
         "update_id": update_id,
@@ -521,7 +601,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
         new_state="LIMIT_ZONE_HIT",
         lifecycle_state="LIMIT_ZONE_HIT",
         setup_quality_score="A-",
-        rr_planned="2.7244673",
+        rr_planned="3.1244673",
         entry_low="42.123456",
         entry_high="42.987654",
         stop_loss="40.75",
@@ -557,7 +637,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
     assert detail.text.startswith("🐺🟠 CRCLUSDT — SIGNAL DETAIL")
     assert "Status: LIMIT ZONE HIT" in detail.text
     assert "Quality: A-" in detail.text
-    assert "RR: 2.72R" in detail.text
+    assert "RR: 3.12R" in detail.text
     assert "Lifecycle: CONFIRMED → LIMIT ZONE HIT" in detail.text
     assert "Entry Zone: 42.12 – 42.99" in detail.text
     assert "Stop: 40.75" in detail.text
@@ -579,7 +659,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
         new_state="CONFIRMED",
         lifecycle_state="CONFIRMED",
         setup_quality_score="A-",
-        rr_planned="2.72",
+        rr_planned="3.12",
         scan_run_id="run-detail",
         entry_low="100",
         entry_high="102",
@@ -647,7 +727,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
     assert "Bias: LONG" in detail.text
     assert "Status: CONFIRMED" in detail.text
     assert "Quality: A-" in detail.text
-    assert "RR: 2.72R" in detail.text
+    assert "RR: 3.12R" in detail.text
     assert "Lifecycle: WATCHLISTED → CONFIRMED → EXECUTING" in detail.text
     assert "Entry Zone: 100 – 102" in detail.text
     assert "Stop: 95" in detail.text
@@ -814,6 +894,157 @@ def test_active_signals_empty_state_does_not_promote_watchlists(tmp_path: Path) 
     assert "BTCUSDT" not in response.text
 
 
+def test_rejected_setup_never_appears_in_active_signals(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_active_signal(
+        db_path,
+        signal_id="sig-rejected",
+        symbol="REJECTUSDT",
+        new_state="REJECTED",
+        lifecycle_state="REJECTED",
+        setup_quality_score="A",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "No active confirmed signals right now." in response.text
+    assert all(not value.startswith("public:signal:") for value in _callback_data_values(response.reply_markup))
+    assert "REJECTUSDT" not in response.text
+
+
+def test_invalid_tp_ordering_blocks_active_signal_display(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_active_signal(
+        db_path,
+        signal_id="sig-bad-targets",
+        symbol="BADTPUSDT",
+        tp1="115",
+        tp2="112",
+        tp3="120",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+    detail = _service(tmp_path, db_path).public_response_for("/signal BADTPUSDT")
+
+    assert "BADTPUSDT" not in response.text
+    assert all(not value.startswith("public:signal:") for value in _callback_data_values(response.reply_markup))
+    assert "No active signal available for this symbol. Setup expired or invalidated." in detail.text
+    assert "Trade Map" not in detail.text
+
+
+def test_long_active_signal_invalidates_after_latest_price_below_stop(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_active_signal(db_path, signal_id="sig-long-invalid", symbol="LONGSTOPUSDT")
+    _insert_symbol_result(
+        db_path,
+        run_id="run-long-stop",
+        symbol="LONGSTOPUSDT",
+        status="valid_setup",
+        display_bucket="valid",
+        raw_result={"current_price": "94.9"},
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "LONGSTOPUSDT" not in response.text
+    assert all(not value.startswith("public:signal:") for value in _callback_data_values(response.reply_markup))
+
+
+def test_short_active_signal_invalidates_after_latest_price_above_stop(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_active_signal(
+        db_path,
+        signal_id="sig-short-invalid",
+        symbol="SHORTSTOPUSDT",
+        direction="short",
+    )
+    _insert_symbol_result(
+        db_path,
+        run_id="run-short-stop",
+        symbol="SHORTSTOPUSDT",
+        status="valid_setup",
+        display_bucket="valid",
+        raw_result={"current_price": "105.1"},
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "SHORTSTOPUSDT" not in response.text
+    assert all(not value.startswith("public:signal:") for value in _callback_data_values(response.reply_markup))
+
+
+def test_stale_database_row_is_not_rendered_by_signal_detail(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_active_signal(db_path, signal_id="sig-stale-row", symbol="STALEUSDT")
+    _insert_symbol_result(
+        db_path,
+        run_id="run-stale-latest",
+        symbol="STALEUSDT",
+        status="no_setup",
+        display_bucket="no_setup",
+        failed_gate="target_integrity",
+        rejection_reason="Latest scanner rejected this setup.",
+        setup_quality_score="20",
+        raw_result={"display_status": "no_setup", "setup_quality": {"quality_grade": "Reject"}},
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/signal STALEUSDT")
+
+    assert "No active signal available for this symbol. Setup expired or invalidated." in response.text
+    assert "Quality: Reject" not in response.text
+    assert "Trade Map" not in response.text
+
+
+def test_quality_reject_cannot_coexist_with_active_lifecycle_display(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_active_signal(
+        db_path,
+        signal_id="sig-reject-contradiction",
+        symbol="SOLUSDT",
+        alert_type="LIMIT_HIT",
+        new_state="LIMIT_ZONE_HIT",
+        lifecycle_state="CONFIRMED",
+        setup_quality_score="Reject",
+    )
+
+    active = _service(tmp_path, db_path).public_response_for("/signals")
+    detail = _service(tmp_path, db_path).public_response_for("/signal SOLUSDT")
+
+    assert "SOLUSDT" not in active.text
+    assert all(not value.startswith("public:signal:") for value in _callback_data_values(active.reply_markup))
+    assert "No active signal available for this symbol. Setup expired or invalidated." in detail.text
+    assert "Quality: Reject" not in detail.text
+    assert "Status: LIMIT ZONE HIT" not in detail.text
+    assert "Lifecycle: CONFIRMED" not in detail.text
+
+
+def test_refresh_button_hides_setup_after_price_invalidation(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    service = _service(tmp_path, db_path)
+    _insert_active_signal(db_path, signal_id="sig-refresh-invalid", symbol="REFRESHUSDT")
+
+    initial = service.public_response_for("/signals")
+    assert _button_labels(initial.reply_markup) == ["REFRESHUSDT"]
+
+    _insert_symbol_result(
+        db_path,
+        run_id="run-refresh-invalid",
+        symbol="REFRESHUSDT",
+        status="valid_setup",
+        display_bucket="valid",
+        raw_result={"current_price": "94.5"},
+    )
+    scope, refresh_command = command_for_callback_data("public:signal:REFRESHUSDT")
+    refreshed_detail = service.public_response_for(refresh_command)
+    refreshed_list = service.public_response_for("/signals")
+
+    assert scope == "public"
+    assert "No active signal available for this symbol. Setup expired or invalidated." in refreshed_detail.text
+    assert "Trade Map" not in refreshed_detail.text
+    assert "REFRESHUSDT" not in refreshed_list.text
+    assert all(not value.startswith("public:signal:") for value in _callback_data_values(refreshed_list.reply_markup))
+
+
 def test_watchlists_show_a_grade_waiting_candidate_from_lifecycle_fallback(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_lifecycle_record(
@@ -856,6 +1087,9 @@ def test_watchlists_show_a_grade_waiting_candidate_from_lifecycle_fallback(tmp_p
 
 def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
+    tp1_seen = _fresh_timestamp(minutes_ago=15)
+    tp3_confirmed_seen = _fresh_timestamp(minutes_ago=10)
+    tp3_hit_seen = _fresh_timestamp(minutes_ago=5)
     _insert_attempt(
         db_path,
         signal_id="sig-active",
@@ -870,7 +1104,7 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
         tp3="0.11",
     )
     _insert_attempt(db_path, signal_id="sig-active", symbol="ENAUSDT", alert_type="LIMIT_HIT")
-    _insert_attempt(db_path, signal_id="sig-active", symbol="ENAUSDT", alert_type="TP1_HIT", sent_at="2026-06-04T12:15:00Z")
+    _insert_attempt(db_path, signal_id="sig-active", symbol="ENAUSDT", alert_type="TP1_HIT", sent_at=tp1_seen)
     _insert_attempt(
         db_path,
         signal_id="sig-open-tp3",
@@ -883,7 +1117,7 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
         tp1="23",
         tp2="25",
         tp3="27",
-        sent_at="2026-06-04T12:20:00Z",
+        sent_at=tp3_confirmed_seen,
     )
     _insert_attempt(
         db_path,
@@ -892,7 +1126,7 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
         alert_type="TP3_HIT",
         lifecycle_state="TP3_HIT",
         new_state="TP3_HIT",
-        sent_at="2026-06-04T12:30:00Z",
+        sent_at=tp3_hit_seen,
     )
     _insert_lifecycle_record(db_path, lifecycle_id="sig-open-tp3", symbol="TP3USDT", current_state="TP3_HIT")
     _insert_attempt(
@@ -911,10 +1145,10 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
     assert _button_labels(response.reply_markup) == ["TP3USDT", "ENAUSDT"]
     detail = _service(tmp_path, db_path).public_response_for("/signal ENAUSDT")
     assert "Status: TP1 HIT" in detail.text
-    assert "Updated: 2026-06-04T12:15:00Z" in detail.text
+    assert f"Updated: {tp1_seen}" in detail.text
     tp3_detail = _service(tmp_path, db_path).public_response_for("/signal TP3USDT")
     assert "Status: TP3 HIT" in tp3_detail.text
-    assert "Updated: 2026-06-04T12:30:00Z" in tp3_detail.text
+    assert f"Updated: {tp3_hit_seen}" in tp3_detail.text
     assert "CLOSEDUSDT" not in response.text
 
 
@@ -1113,7 +1347,7 @@ def test_triggered_watchlist_does_not_expire_due_to_watch_ttl(tmp_path: Path) ->
     assert "None right now." in response.text.split("🔥 STALKING", 1)[1].split("👀 WATCH", 1)[0]
 
 
-def test_confirmed_active_signal_does_not_expire_due_to_watch_ttl(tmp_path: Path) -> None:
+def test_old_confirmed_active_signal_expires_from_public_output(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     old_seen = (datetime.now(UTC) - timedelta(hours=96)).isoformat().replace("+00:00", "Z")
     _insert_attempt(
@@ -1137,7 +1371,9 @@ def test_confirmed_active_signal_does_not_expire_due_to_watch_ttl(tmp_path: Path
 
     response = _service(tmp_path, db_path).public_response_for("/signals")
 
-    assert _button_labels(response.reply_markup) == ["CONFIRMUSDT"]
+    assert "No active confirmed signals right now." in response.text
+    assert all(not value.startswith("public:signal:") for value in _callback_data_values(response.reply_markup))
+    assert "CONFIRMUSDT" not in response.text
 
 
 def test_grade_b_is_hidden_from_public_active_watchlist_output(tmp_path: Path) -> None:
@@ -1181,11 +1417,14 @@ def test_watchlists_dashboard_missing_reason_displays_na(tmp_path: Path) -> None
 
 def test_watchlists_dashboard_limits_each_bucket_to_eight_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
+    fresh_seen = _fresh_timestamp()
     for index in range(11):
         _insert_attempt(
             db_path,
             signal_id=f"sig-{index:02d}",
             symbol=f"SYM{index:02d}USDT",
+            sent_at=fresh_seen,
+            first_seen_at=fresh_seen,
             entry_low=str(100 + index),
             entry_high=str(101 + index),
         )

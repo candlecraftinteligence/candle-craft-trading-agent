@@ -1361,8 +1361,7 @@ def _signal_detail_missing_text(selector: str, *, source_available: bool) -> str
     symbol = _display(selector)
     if source_available:
         status_lines = (
-            "Status: This setup is no longer active.",
-            "It may have been closed, invalidated, or expired.",
+            "No active signal available for this symbol. Setup expired or invalidated.",
         )
     else:
         status_lines = (
