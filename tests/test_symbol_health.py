@@ -9,12 +9,20 @@ from app.analytics.symbol_health import (
     build_symbol_priority_plan,
     calculate_next_health_score,
     cooldown_active,
+    symbol_health_events_from_result,
     update_symbol_health_record,
+)
+from app.lifecycle.models import (
+    SetupLifecycleRecord,
+    SetupLifecycleState,
+    SetupTransitionReason,
+    SetupTransitionResult,
 )
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
 from app.research.queries import build_research_report
 from app.research.reports import format_research_report
-from app.storage.symbol_health import load_symbol_health_records, save_symbol_health_records
+from app.storage.database import open_initialized_database
+from app.storage.symbol_health import load_symbol_health_records, save_symbol_health_records, update_symbol_health_for_result
 from scripts import run_scan
 
 
@@ -98,6 +106,39 @@ def _symbol_result(
     )
 
 
+def _lifecycle_transition_result(
+    *,
+    symbol: str = "BTCUSDT",
+    from_state: SetupLifecycleState = SetupLifecycleState.CONFIRMED,
+    to_state: SetupLifecycleState = SetupLifecycleState.INVALIDATED,
+    failed_gate: str = "body_acceptance_failure",
+) -> ScannerSymbolResult:
+    record = SetupLifecycleRecord(
+        lifecycle_id=f"life-{symbol.lower()}",
+        symbol=symbol,
+        mode="swing",
+        direction="long",
+        current_state=to_state,
+        previous_state=from_state,
+        first_seen_at="2026-05-19T00:00:00+00:00",
+        last_seen_at="2026-05-19T00:05:00+00:00",
+        last_transition_at="2026-05-19T00:05:00+00:00",
+        failed_gate=failed_gate,
+        readiness_score=75,
+        quality_score=82,
+    )
+    transition = SetupTransitionResult(
+        lifecycle_id=record.lifecycle_id,
+        symbol=symbol,
+        from_state=from_state,
+        to_state=to_state,
+        reason=SetupTransitionReason.SETUP_INVALIDATED,
+        transitioned=True,
+        record=record,
+    )
+    return _symbol_result(symbol).model_copy(update={"lifecycle_state": record, "lifecycle_transition": transition})
+
+
 def test_health_score_calculation_rewards_stability_and_usefulness() -> None:
     stable = calculate_next_health_score(
         previous_score=70,
@@ -118,6 +159,52 @@ def test_health_score_calculation_rewards_stability_and_usefulness() -> None:
 
     assert stable > 70
     assert timeout < 50
+
+
+def test_symbol_health_tracks_bad_lifecycle_behavior_events() -> None:
+    symbol_result = _lifecycle_transition_result()
+
+    events = symbol_health_events_from_result(symbol_result, now="2026-05-19T00:05:00+00:00")
+    updated = update_symbol_health_record(
+        SymbolHealthRecord(symbol="BTCUSDT", current_health_score=80),
+        symbol_result,
+        now="2026-05-19T00:05:00+00:00",
+    )
+
+    assert {event["event_type"] for event in events} == {"invalidation", "false_confirmation"}
+    assert updated.invalidation_count == 1
+    assert updated.false_confirmation_count == 1
+    assert updated.current_health_score < 80
+
+
+def test_symbol_health_events_are_persisted_for_lifecycle_outcomes(tmp_path) -> None:
+    db_path = tmp_path / "health.db"
+    result = ScannerRunResult(
+        config=_config(["BTCUSDT"]),
+        results=(_lifecycle_transition_result(),),
+        scanned_symbols=1,
+        failed_symbols=0,
+        trade_ideas_created=0,
+        dry_run_alerts_created=0,
+        journal_entries_created=0,
+        resume_metadata={"scan_run_id": "run-health"},
+    )
+
+    update_symbol_health_for_result(db_path, result, now="2026-05-19T00:05:00+00:00")
+
+    with open_initialized_database(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT symbol, event_type, scan_run_id, lifecycle_id
+            FROM symbol_health_events
+            ORDER BY event_type
+            """
+        ).fetchall()
+
+    assert [(row["symbol"], row["event_type"], row["scan_run_id"], row["lifecycle_id"]) for row in rows] == [
+        ("BTCUSDT", "false_confirmation", "run-health", "life-btcusdt"),
+        ("BTCUSDT", "invalidation", "run-health", "life-btcusdt"),
+    ]
 
 
 def test_timeout_strikes_trigger_temporary_cooldown() -> None:

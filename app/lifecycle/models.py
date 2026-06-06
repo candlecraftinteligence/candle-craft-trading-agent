@@ -34,6 +34,8 @@ class SetupTransitionReason(str, Enum):
     INITIALIZED = "Lifecycle initialized from current scan snapshot."
     DISCOVERED = "Setup discovered and awaiting stronger structure."
     REJECTED = "Setup rejected by current deterministic gates."
+    CONFIRMATION_PENDING = "Setup is waiting for another consistent scan confirmation."
+    MULTI_SCAN_CONFIRMED = "Setup passed required consecutive scan confirmations."
     READINESS_IMPROVED = "Readiness improved enough for watchlist."
     SWEEP_APPEARED = "Execution sweep appeared."
     STRUCTURE_SHIFT_CONFIRMED = "5m BOS/CHoCH confirmed after sweep."
@@ -42,6 +44,7 @@ class SetupTransitionReason(str, Enum):
     VALID_TRADE_IDEA = "Valid trade idea exists."
     ENTRY_ZONE_TOUCHED = "Entry zone touched by latest price range."
     ENTRY_FILL_SIMULATED = "Entry fill simulated or confirmed."
+    SETUP_DECAYED = "Setup confidence decayed after no lifecycle progress."
     TAKE_PROFIT_HIT = "Take-profit outcome recorded."
     STOP_LOSS_HIT = "Stop-loss outcome recorded."
     SETUP_INVALIDATED = "Setup invalidated by current structure or failed gate."
@@ -72,6 +75,25 @@ class SetupLifecycleRecord(BaseModel):
     invalidation_reason: str = NA
     cooldown_until: str | None = None
     archived_at: str | None = None
+    entry_low: str = NA
+    entry_high: str = NA
+    stop_loss: str = NA
+    tp1: str = NA
+    tp2: str = NA
+    tp3: str = NA
+    rr: str = NA
+    invalidation_logic: str = NA
+    confirmation_count: int = Field(default=0, ge=0)
+    required_confirmation_cycles: int = Field(default=2, ge=1)
+    quality_grade_first_seen: str = NA
+    quality_grade_current: str = NA
+    quality_grade_confirmed: str = NA
+    confirmed_at: str | None = None
+    decay_count: int = Field(default=0, ge=0)
+    decay_reason: str = NA
+    symbol_health_score_at_detection: str = NA
+    symbol_health_penalty_cycles: int = Field(default=0, ge=0)
+    setup_identity: str = NA
 
     model_config = ConfigDict(frozen=True)
 
@@ -83,7 +105,29 @@ class SetupLifecycleRecord(BaseModel):
             raise ValueError("symbol must not be blank")
         return normalized
 
-    @field_validator("mode", "direction", "failed_gate", "edge_score", "regime_state", "action_label", "invalidation_reason")
+    @field_validator(
+        "mode",
+        "direction",
+        "failed_gate",
+        "edge_score",
+        "regime_state",
+        "action_label",
+        "invalidation_reason",
+        "entry_low",
+        "entry_high",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "tp3",
+        "rr",
+        "invalidation_logic",
+        "quality_grade_first_seen",
+        "quality_grade_current",
+        "quality_grade_confirmed",
+        "decay_reason",
+        "symbol_health_score_at_detection",
+        "setup_identity",
+    )
     @classmethod
     def _normalize_text(cls, value: str | None) -> str:
         if value is None:
@@ -139,9 +183,68 @@ class SetupTransitionResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class SetupOutcomeAnalyticsRecord(BaseModel):
+    lifecycle_id: str
+    symbol: str
+    bias: str = NA
+    first_seen_at: str
+    confirmed_at: str = NA
+    entry_zone: str = NA
+    stop_loss: str = NA
+    tp1: str = NA
+    tp2: str = NA
+    tp3: str = NA
+    quality_at_first_detection: str = NA
+    quality_at_confirmation: str = NA
+    rr: str = NA
+    lifecycle_path: str = NA
+    final_outcome: str
+    failure_reason: str = NA
+    outcome_reason: str = NA
+    regime_context: str = NA
+    symbol_health_at_detection: str = NA
+    raw_payload_json: str = "{}"
+
+    model_config = ConfigDict(frozen=True)
+
+    @field_validator("symbol")
+    @classmethod
+    def _normalize_symbol(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("symbol must not be blank")
+        return normalized
+
+    @field_validator(
+        "bias",
+        "confirmed_at",
+        "entry_zone",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "tp3",
+        "quality_at_first_detection",
+        "quality_at_confirmation",
+        "rr",
+        "lifecycle_path",
+        "failure_reason",
+        "outcome_reason",
+        "regime_context",
+        "symbol_health_at_detection",
+        "raw_payload_json",
+    )
+    @classmethod
+    def _normalize_text(cls, value: str | None) -> str:
+        if value is None:
+            return NA
+        text = str(value).strip()
+        return text if text else NA
+
+
 __all__ = [
     "SetupLifecycleEvent",
     "SetupLifecycleRecord",
+    "SetupOutcomeAnalyticsRecord",
     "SetupLifecycleState",
     "SetupTransitionReason",
     "SetupTransitionResult",

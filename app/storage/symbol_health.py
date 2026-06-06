@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import closing
@@ -13,6 +14,7 @@ from app.analytics.symbol_health import (
     SymbolPriorityPlan,
     build_symbol_health_summary,
     now_utc_iso,
+    symbol_health_events_from_results,
     update_symbol_health_records,
 )
 from app.data.dtos import NA
@@ -67,6 +69,13 @@ def update_symbol_health_for_result(
                 max_timeout_strikes=max_timeout_strikes,
             )
             _upsert_symbol_health_records(connection, updated.values())
+            _insert_symbol_health_events(
+                connection,
+                symbol_health_events_from_results(tuple(getattr(result, "results", ())), now=timestamp),
+                scan_run_id=getattr(result, "resume_metadata", {}).get("scan_run_id")
+                if isinstance(getattr(result, "resume_metadata", None), Mapping)
+                else None,
+            )
             connection.commit()
     except sqlite3.Error as exc:
         raise StorageError(f"Unable to update symbol health database: {database_path}") from exc
@@ -136,7 +145,10 @@ def _upsert_symbol_health_records(
             last_priority_rank, last_prioritized_at, last_scanned_at,
             last_data_issue_at, last_display_bucket, last_readiness_label,
             useful_scan_count, rejected_count, last_rejected_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            , invalidation_count, expired_setup_count, rejected_setup_count,
+            false_confirmation_count, malformed_setup_event_count,
+            stop_breach_after_confirmation_count, duplicate_noisy_setup_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(symbol) DO UPDATE SET
             successful_scans = excluded.successful_scans,
             timeout_count = excluded.timeout_count,
@@ -155,9 +167,46 @@ def _upsert_symbol_health_records(
             last_readiness_label = excluded.last_readiness_label,
             useful_scan_count = excluded.useful_scan_count,
             rejected_count = excluded.rejected_count,
-            last_rejected_at = excluded.last_rejected_at
+            last_rejected_at = excluded.last_rejected_at,
+            invalidation_count = excluded.invalidation_count,
+            expired_setup_count = excluded.expired_setup_count,
+            rejected_setup_count = excluded.rejected_setup_count,
+            false_confirmation_count = excluded.false_confirmation_count,
+            malformed_setup_event_count = excluded.malformed_setup_event_count,
+            stop_breach_after_confirmation_count = excluded.stop_breach_after_confirmation_count,
+            duplicate_noisy_setup_count = excluded.duplicate_noisy_setup_count
         """,
         [_symbol_health_params(record) for record in rows],
+    )
+
+
+def _insert_symbol_health_events(
+    connection: sqlite3.Connection,
+    events: Sequence[Mapping[str, Any]],
+    *,
+    scan_run_id: str | None = None,
+) -> None:
+    if not events:
+        return
+    connection.executemany(
+        """
+        INSERT INTO symbol_health_events (
+            symbol, event_type, source, occurred_at, scan_run_id, lifecycle_id, details_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                _symbol(event.get("symbol", NA)),
+                _text(event.get("event_type", NA)),
+                _text(event.get("source", "scanner_lifecycle")),
+                _text(event.get("occurred_at", now_utc_iso())),
+                scan_run_id,
+                event.get("lifecycle_id"),
+                json.dumps(event.get("details", {}), sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+            )
+            for event in events
+            if _symbol(event.get("symbol", NA)) != NA and _text(event.get("event_type", NA)) != NA
+        ],
     )
 
 
@@ -182,6 +231,13 @@ def _symbol_health_from_row(row: sqlite3.Row) -> SymbolHealthRecord:
         useful_scan_count=int(row["useful_scan_count"] or 0),
         rejected_count=int(row["rejected_count"] or 0),
         last_rejected_at=row["last_rejected_at"],
+        invalidation_count=int(row["invalidation_count"] or 0),
+        expired_setup_count=int(row["expired_setup_count"] or 0),
+        rejected_setup_count=int(row["rejected_setup_count"] or 0),
+        false_confirmation_count=int(row["false_confirmation_count"] or 0),
+        malformed_setup_event_count=int(row["malformed_setup_event_count"] or 0),
+        stop_breach_after_confirmation_count=int(row["stop_breach_after_confirmation_count"] or 0),
+        duplicate_noisy_setup_count=int(row["duplicate_noisy_setup_count"] or 0),
     )
 
 
@@ -206,6 +262,13 @@ def _symbol_health_params(record: SymbolHealthRecord) -> tuple[Any, ...]:
         record.useful_scan_count,
         record.rejected_count,
         record.last_rejected_at,
+        record.invalidation_count,
+        record.expired_setup_count,
+        record.rejected_setup_count,
+        record.false_confirmation_count,
+        record.malformed_setup_event_count,
+        record.stop_breach_after_confirmation_count,
+        record.duplicate_noisy_setup_count,
     )
 
 
@@ -223,6 +286,13 @@ def _health_symbols_for_result(result: Any, plan: SymbolPriorityPlan | None) -> 
 
 def _symbol(value: Any) -> str:
     text = str(value).strip().upper()
+    return text if text else NA
+
+
+def _text(value: Any) -> str:
+    if value is None or value == "":
+        return NA
+    text = str(value).strip()
     return text if text else NA
 
 

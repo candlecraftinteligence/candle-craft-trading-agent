@@ -5,6 +5,7 @@ import json
 from decimal import Decimal
 
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
+from app.analytics.symbol_health import SymbolHealthRecord
 from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleEvent, SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
@@ -12,6 +13,7 @@ from app.lifecycle.service import apply_lifecycle_to_run_result, prioritize_watc
 from app.lifecycle.state_machine import LifecycleObservation, evaluate_lifecycle_transition, transition_record
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
 from app.research.queries import ResearchFilters, build_research_report
+from app.storage.symbol_health import save_symbol_health_records
 from scripts import run_scan
 
 
@@ -387,6 +389,47 @@ def _a_grade_watch_symbol(
     )
 
 
+def _confirmed_candidate_symbol(
+    *,
+    symbol: str = "BTCUSDT",
+    direction: str = "long",
+    entry_low: Decimal = Decimal("100"),
+    entry_high: Decimal = Decimal("102"),
+    stop: Decimal = Decimal("95"),
+    quality_grade: SetupQualityGrade = SetupQualityGrade.B_PLUS,
+    rr: Decimal = Decimal("3.2"),
+) -> ScannerSymbolResult:
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        latest_high=Decimal("110"),
+        latest_low=Decimal("108"),
+        rejected_strategy_modes=("swing",),
+        strategy_diagnostics={
+            "swing": {
+                "mode": "swing",
+                "bias": direction,
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "valid",
+                "gates_passed": ("sweep", "bos_choch", "pullback_zone"),
+                "gates_failed": (),
+                "entry_low": entry_low,
+                "entry_high": entry_high,
+                "stop": stop,
+                "tp1": Decimal("110"),
+                "tp2": Decimal("117"),
+                "tp3": Decimal("124"),
+                "rr_to_tp2": rr,
+                "invalidation": f"Invalid if price accepts beyond {stop}.",
+                "quality_grade": quality_grade.value,
+            }
+        },
+        setup_quality=_setup_quality_result(quality_grade, score=82),
+    )
+
+
 def _apply_single_lifecycle(symbol_result: ScannerSymbolResult, tmp_path, *, now: str):
     return apply_lifecycle_to_run_result(
         _scan_result(symbol_result),
@@ -423,19 +466,45 @@ def test_valid_state_progression() -> None:
     )
     assert triggered.to_state == SetupLifecycleState.TRIGGERED
 
-    confirmed = evaluate_lifecycle_transition(
+    pending_confirmation = evaluate_lifecycle_transition(
         triggered.record,
-        _observation(sweep_detected=True, structure_shift_detected=True, pullback_valid=True, rr_valid=True),
+        _observation(
+            sweep_detected=True,
+            structure_shift_detected=True,
+            pullback_valid=True,
+            rr_valid=True,
+            quality_score=82,
+            quality_grade="B+",
+            invalidation_reason="Invalid below stop.",
+        ),
         lifecycle_id="life_1",
         now="2026-05-18T09:15:00+00:00",
+    )
+    assert pending_confirmation.to_state == SetupLifecycleState.TRIGGERED
+    assert pending_confirmation.record is not None
+    assert pending_confirmation.record.confirmation_count == 1
+
+    confirmed = evaluate_lifecycle_transition(
+        pending_confirmation.record,
+        _observation(
+            sweep_detected=True,
+            structure_shift_detected=True,
+            pullback_valid=True,
+            rr_valid=True,
+            quality_score=82,
+            quality_grade="B+",
+            invalidation_reason="Invalid below stop.",
+        ),
+        lifecycle_id="life_1",
+        now="2026-05-18T09:20:00+00:00",
     )
     assert confirmed.to_state == SetupLifecycleState.CONFIRMED
 
     executing = evaluate_lifecycle_transition(
         confirmed.record,
-        _observation(valid_trade_idea=True, pullback_valid=True, rr_valid=True),
+        _observation(valid_trade_idea=True, pullback_valid=True, rr_valid=True, invalidation_reason="Invalid below stop."),
         lifecycle_id="life_1",
-        now="2026-05-18T09:20:00+00:00",
+        now="2026-05-18T09:25:00+00:00",
     )
     assert executing.to_state == SetupLifecycleState.EXECUTING
 
@@ -736,6 +805,201 @@ def test_scanner_integration_and_json_lifecycle_output(tmp_path) -> None:
     assert payload["results"][0]["lifecycle_transition"]["event"]["scan_run_id"] == "run_1"
 
 
+def test_one_scan_candidate_does_not_become_confirmed_or_active(tmp_path) -> None:
+    result = apply_lifecycle_to_run_result(
+        _scan_result(_confirmed_candidate_symbol()),
+        database_path=tmp_path / "life.db",
+        scan_run_id="run_1",
+        now="2026-05-18T09:00:00+00:00",
+        confirmation_cycles=2,
+        setup_tolerance_pct=Decimal("0.5"),
+    )
+
+    lifecycle = result.results[0].lifecycle_state
+    assert lifecycle is not None
+    assert lifecycle.current_state == SetupLifecycleState.TRIGGERED
+    assert lifecycle.confirmation_count == 1
+    assert lifecycle.required_confirmation_cycles == 2
+    assert lifecycle.confirmed_at is None
+    assert result.scanner_process_summary["confirmation_pending"] == 1
+
+
+def test_candidate_becomes_confirmed_after_required_consecutive_scans(tmp_path) -> None:
+    db_path = tmp_path / "life.db"
+    apply_lifecycle_to_run_result(
+        _scan_result(_confirmed_candidate_symbol()),
+        database_path=db_path,
+        scan_run_id="run_1",
+        now="2026-05-18T09:00:00+00:00",
+        confirmation_cycles=2,
+        setup_tolerance_pct=Decimal("0.5"),
+    )
+
+    result = apply_lifecycle_to_run_result(
+        _scan_result(_confirmed_candidate_symbol()),
+        database_path=db_path,
+        scan_run_id="run_2",
+        now="2026-05-18T09:05:00+00:00",
+        confirmation_cycles=2,
+        setup_tolerance_pct=Decimal("0.5"),
+    )
+
+    lifecycle = result.results[0].lifecycle_state
+    transition = result.results[0].lifecycle_transition
+    assert lifecycle is not None
+    assert transition is not None
+    assert lifecycle.current_state == SetupLifecycleState.CONFIRMED
+    assert lifecycle.confirmation_count == 2
+    assert lifecycle.confirmed_at == "2026-05-18T09:05:00+00:00"
+    assert transition.reason == SetupTransitionReason.MULTI_SCAN_CONFIRMED
+    assert result.scanner_process_summary["confirmed_after_multi_scan"] == 1
+
+
+def test_contradictory_second_scan_resets_confirmation_count(tmp_path) -> None:
+    db_path = tmp_path / "life.db"
+    apply_lifecycle_to_run_result(
+        _scan_result(_confirmed_candidate_symbol()),
+        database_path=db_path,
+        scan_run_id="run_1",
+        now="2026-05-18T09:00:00+00:00",
+        confirmation_cycles=2,
+        setup_tolerance_pct=Decimal("0.5"),
+    )
+
+    result = apply_lifecycle_to_run_result(
+        _scan_result(_confirmed_candidate_symbol(entry_low=Decimal("120"), entry_high=Decimal("122"), stop=Decimal("114"))),
+        database_path=db_path,
+        scan_run_id="run_2",
+        now="2026-05-18T09:05:00+00:00",
+        confirmation_cycles=2,
+        setup_tolerance_pct=Decimal("0.5"),
+    )
+
+    lifecycle = result.results[0].lifecycle_state
+    assert lifecycle is not None
+    assert lifecycle.current_state == SetupLifecycleState.TRIGGERED
+    assert lifecycle.confirmation_count == 1
+    assert lifecycle.entry_low == "120"
+    assert lifecycle.confirmed_at is None
+
+
+def test_duplicate_candidate_merges_and_preserves_first_seen_at(tmp_path) -> None:
+    db_path = tmp_path / "life.db"
+    first = apply_lifecycle_to_run_result(
+        _scan_result(_confirmed_candidate_symbol()),
+        database_path=db_path,
+        scan_run_id="run_1",
+        now="2026-05-18T09:00:00+00:00",
+        confirmation_cycles=2,
+        setup_tolerance_pct=Decimal("0.5"),
+    )
+    assert first.scanner_process_summary["new_candidates"] == 1
+
+    second = apply_lifecycle_to_run_result(
+        _scan_result(
+            _confirmed_candidate_symbol(
+                entry_low=Decimal("100.20"),
+                entry_high=Decimal("102.20"),
+                stop=Decimal("95.10"),
+            )
+        ),
+        database_path=db_path,
+        scan_run_id="run_2",
+        now="2026-05-18T09:05:00+00:00",
+        confirmation_cycles=2,
+        setup_tolerance_pct=Decimal("0.5"),
+    )
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        records = repository.get_records_for_symbols(("BTCUSDT",))
+
+    assert len(records) == 1
+    assert records[0].first_seen_at == "2026-05-18T09:00:00+00:00"
+    assert records[0].last_seen_at == "2026-05-18T09:05:00+00:00"
+    assert records[0].entry_low == "100.2"
+    assert records[0].confirmation_count == 2
+    assert second.scanner_process_summary["merged_duplicates"] == 1
+
+
+def test_confidence_decays_and_expired_outcome_analytics_are_stored(tmp_path) -> None:
+    db_path = tmp_path / "life.db"
+    times = (
+        "2026-05-18T09:00:00+00:00",
+        "2026-05-18T09:05:00+00:00",
+        "2026-05-18T09:10:00+00:00",
+        "2026-05-18T09:15:00+00:00",
+        "2026-05-18T09:20:00+00:00",
+        "2026-05-18T09:25:00+00:00",
+    )
+    latest = None
+    for index, timestamp in enumerate(times):
+        latest = apply_lifecycle_to_run_result(
+            _scan_result(_a_grade_watch_symbol(grade=SetupQualityGrade.A_PLUS)),
+            database_path=db_path,
+            scan_run_id=f"run_{index}",
+            now=timestamp,
+            confirmation_cycles=2,
+            setup_tolerance_pct=Decimal("0.5"),
+        )
+
+    assert latest is not None
+    lifecycle = latest.results[0].lifecycle_state
+    assert lifecycle is not None
+    assert lifecycle.current_state == SetupLifecycleState.EXPIRED
+    assert lifecycle.quality_grade_current == "Expired"
+    assert lifecycle.decay_count == 4
+    assert lifecycle.failed_gate == "confidence_decay"
+    assert latest.scanner_process_summary["expired"] == 1
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        analytics = repository.list_outcome_analytics(symbol="BTCUSDT")
+
+    assert len(analytics) == 1
+    assert analytics[0].final_outcome == "EXPIRED"
+    assert analytics[0].quality_at_first_detection == "A+"
+    assert analytics[0].failure_reason == "no price reaction or lifecycle progress"
+
+
+def test_poor_symbol_health_requires_extra_confirmation_cycle(tmp_path) -> None:
+    db_path = tmp_path / "life.db"
+    save_symbol_health_records(
+        db_path,
+        {
+            "BTCUSDT": SymbolHealthRecord(
+                symbol="BTCUSDT",
+                current_health_score=25,
+                invalidation_count=3,
+                expired_setup_count=1,
+            )
+        },
+    )
+    apply_lifecycle_to_run_result(
+        _scan_result(_confirmed_candidate_symbol()),
+        database_path=db_path,
+        scan_run_id="run_1",
+        now="2026-05-18T09:00:00+00:00",
+        confirmation_cycles=2,
+        setup_tolerance_pct=Decimal("0.5"),
+    )
+
+    second = apply_lifecycle_to_run_result(
+        _scan_result(_confirmed_candidate_symbol()),
+        database_path=db_path,
+        scan_run_id="run_2",
+        now="2026-05-18T09:05:00+00:00",
+        confirmation_cycles=2,
+        setup_tolerance_pct=Decimal("0.5"),
+    )
+
+    lifecycle = second.results[0].lifecycle_state
+    assert lifecycle is not None
+    assert lifecycle.current_state == SetupLifecycleState.TRIGGERED
+    assert lifecycle.confirmation_count == 2
+    assert lifecycle.required_confirmation_cycles == 3
+    assert lifecycle.symbol_health_penalty_cycles == 1
+    assert second.scanner_process_summary["symbol_health_penalties_applied"] == 1
+
+
 def test_watch_mode_lifecycle_prioritization(tmp_path) -> None:
     db_path = tmp_path / "life.db"
     with SQLiteSetupLifecycleRepository(db_path) as repository:
@@ -776,12 +1040,35 @@ def test_research_lifecycle_queries(tmp_path) -> None:
         now="2026-05-18T09:10:00+00:00",
         scan_run_id="run_3",
     )
-    confirmed = evaluate_lifecycle_transition(
+    pending_confirmation = evaluate_lifecycle_transition(
         triggered.record,
-        _observation(sweep_detected=True, structure_shift_detected=True, pullback_valid=True, rr_valid=True),
+        _observation(
+            sweep_detected=True,
+            structure_shift_detected=True,
+            pullback_valid=True,
+            rr_valid=True,
+            quality_score=82,
+            quality_grade="B+",
+            invalidation_reason="Invalid below stop.",
+        ),
         lifecycle_id="life_1",
         now="2026-05-18T09:15:00+00:00",
         scan_run_id="run_4",
+    )
+    confirmed = evaluate_lifecycle_transition(
+        pending_confirmation.record,
+        _observation(
+            sweep_detected=True,
+            structure_shift_detected=True,
+            pullback_valid=True,
+            rr_valid=True,
+            quality_score=82,
+            quality_grade="B+",
+            invalidation_reason="Invalid below stop.",
+        ),
+        lifecycle_id="life_1",
+        now="2026-05-18T09:20:00+00:00",
+        scan_run_id="run_5",
     )
     transitions = (initial, stalking, triggered, confirmed)
     with SQLiteSetupLifecycleRepository(db_path) as repository:

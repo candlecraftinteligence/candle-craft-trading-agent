@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -8,9 +10,17 @@ from uuid import uuid4
 
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
-from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionResult
+from app.lifecycle.models import (
+    SetupLifecycleRecord,
+    SetupLifecycleState,
+    SetupOutcomeAnalyticsRecord,
+    SetupTransitionReason,
+    SetupTransitionResult,
+)
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import (
+    DEFAULT_CONFIRMATION_CYCLES,
+    DEFAULT_SETUP_MERGE_TOLERANCE_PCT,
     LifecycleObservation,
     WATCH_PRIORITY_STATES,
     entry_zone_touched,
@@ -20,6 +30,7 @@ from app.lifecycle.state_machine import (
 )
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
 from app.storage.database import DEFAULT_DATABASE_PATH
+from app.storage.symbol_health import load_symbol_health_records
 
 PUBLIC_A_GRADE_MIN_RR = Decimal("3.0")
 A_GRADE_WATCH_GRADES = {"a", "a+"}
@@ -93,8 +104,16 @@ TARGET_INTEGRITY_BLOCKED_KEYS = {"blocked", "failed", "fail", "rejected", "rejec
 
 
 class SetupLifecycleService:
-    def __init__(self, database_path: Path | str = DEFAULT_DATABASE_PATH) -> None:
+    def __init__(
+        self,
+        database_path: Path | str = DEFAULT_DATABASE_PATH,
+        *,
+        confirmation_cycles: int | None = None,
+        setup_tolerance_pct: Decimal | str | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
+        self.confirmation_cycles = _confirmation_cycles(confirmation_cycles)
+        self.setup_tolerance_pct = _setup_tolerance_pct(setup_tolerance_pct)
 
     def apply_to_run_result(
         self,
@@ -105,17 +124,20 @@ class SetupLifecycleService:
     ) -> ScannerRunResult:
         timestamp = now or now_utc_iso()
         updated_results: list[ScannerSymbolResult] = []
+        process_summary = _empty_process_summary(scanned_symbols=len(result.results))
+        health_records = _load_health_records(self.database_path, tuple(item.symbol for item in result.results))
         with SQLiteSetupLifecycleRepository(self.database_path) as repository:
             for symbol_result in result.results:
-                updated_results.append(
-                    self.apply_to_symbol_result(
-                        symbol_result,
-                        repository=repository,
-                        scan_run_id=scan_run_id,
-                        now=timestamp,
-                    )
+                updated, meta = self._apply_to_symbol_result_with_meta(
+                    symbol_result,
+                    repository=repository,
+                    scan_run_id=scan_run_id,
+                    now=timestamp,
+                    symbol_health_record=health_records.get(symbol_result.symbol),
                 )
-        return result.model_copy(update={"results": tuple(updated_results)})
+                updated_results.append(updated)
+                _add_process_meta(process_summary, meta)
+        return result.model_copy(update={"results": tuple(updated_results), "scanner_process_summary": process_summary})
 
     def apply_to_symbol_result(
         self,
@@ -125,29 +147,63 @@ class SetupLifecycleService:
         scan_run_id: str | None,
         now: str,
     ) -> ScannerSymbolResult:
+        updated, _meta = self._apply_to_symbol_result_with_meta(
+            symbol_result,
+            repository=repository,
+            scan_run_id=scan_run_id,
+            now=now,
+            symbol_health_record=None,
+        )
+        return updated
+
+    def _apply_to_symbol_result_with_meta(
+        self,
+        symbol_result: ScannerSymbolResult,
+        *,
+        repository: SQLiteSetupLifecycleRepository,
+        scan_run_id: str | None,
+        now: str,
+        symbol_health_record: Any | None,
+    ) -> tuple[ScannerSymbolResult, dict[str, Any]]:
         observation = observation_from_symbol_result(symbol_result)
         existing = repository.get_record(
             symbol=observation.symbol,
             mode=observation.mode,
             direction=observation.direction,
         )
+        health_penalty_cycles = _symbol_health_penalty_cycles(symbol_health_record)
+        health_score = getattr(symbol_health_record, "current_health_score", NA) if symbol_health_record is not None else NA
         transition = evaluate_lifecycle_transition(
             existing,
             observation,
             lifecycle_id=existing.lifecycle_id if existing is not None else uuid4().hex,
             now=now,
             scan_run_id=scan_run_id,
+            required_confirmation_cycles=self.confirmation_cycles,
+            setup_tolerance_pct=self.setup_tolerance_pct,
+            symbol_health_score=health_score,
+            symbol_health_penalty_cycles=health_penalty_cycles,
         )
         if transition.record is not None:
             repository.upsert_record(transition.record)
         if transition.event is not None:
             repository.insert_event(transition.event)
-        return symbol_result.model_copy(
+        if transition.record is not None:
+            outcome_record = _outcome_analytics_record(repository, transition, observation)
+            if outcome_record is not None:
+                repository.upsert_outcome_analytics(outcome_record)
+        updated = symbol_result.model_copy(
             update={
                 "lifecycle_state": transition.record,
                 "lifecycle_transition": transition,
             }
         )
+        meta = _process_meta(
+            existing=existing,
+            transition=transition,
+            symbol_health_penalty_cycles=health_penalty_cycles,
+        )
+        return updated, meta
 
     def reset(self) -> None:
         with SQLiteSetupLifecycleRepository(self.database_path) as repository:
@@ -160,8 +216,14 @@ def apply_lifecycle_to_run_result(
     database_path: Path | str = DEFAULT_DATABASE_PATH,
     scan_run_id: str | None = None,
     now: str | None = None,
+    confirmation_cycles: int | None = None,
+    setup_tolerance_pct: Decimal | str | None = None,
 ) -> ScannerRunResult:
-    return SetupLifecycleService(database_path).apply_to_run_result(result, scan_run_id=scan_run_id, now=now)
+    return SetupLifecycleService(
+        database_path,
+        confirmation_cycles=confirmation_cycles,
+        setup_tolerance_pct=setup_tolerance_pct,
+    ).apply_to_run_result(result, scan_run_id=scan_run_id, now=now)
 
 
 def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> LifecycleObservation:
@@ -220,6 +282,9 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
         and _status_key(failed_gate)
     ):
         rr_valid = False
+    entry_low, entry_high = _entry_zone_values(symbol_result, diagnostics)
+    stop_loss = _stop_value(symbol_result, diagnostics)
+    targets = _target_values(symbol_result, diagnostics)
 
     return LifecycleObservation(
         symbol=symbol_result.symbol,
@@ -229,6 +294,13 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
         readiness_label=display.readiness_label,
         quality_score=quality_score,
         quality_grade=quality_grade,
+        entry_low=_display(entry_low),
+        entry_high=_display(entry_high),
+        stop_loss=_display(stop_loss),
+        tp1=_display(targets[0]),
+        tp2=_display(targets[1]),
+        tp3=_display(targets[2]),
+        rr=_display(rr),
         edge_score=_display(edge_score),
         failed_gate=failed_gate,
         regime_state=_first_non_na(symbol_result.regime_state, symbol_result.regime_diagnostics.get("state")),
@@ -297,6 +369,196 @@ def prioritize_watch_symbols(
         if symbol not in output:
             output.append(symbol)
     return tuple(output)
+
+
+def _confirmation_cycles(value: int | None) -> int:
+    if value is None:
+        raw = os.getenv("SCANNER_CONFIRMATION_CYCLES")
+        value = raw if raw not in (None, "") else DEFAULT_CONFIRMATION_CYCLES
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return DEFAULT_CONFIRMATION_CYCLES
+
+
+def _setup_tolerance_pct(value: Decimal | str | None) -> Decimal:
+    if value is None:
+        raw = os.getenv("SCANNER_SETUP_MERGE_TOLERANCE_PCT")
+        value = raw if raw not in (None, "") else DEFAULT_SETUP_MERGE_TOLERANCE_PCT
+    try:
+        decimal = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return DEFAULT_SETUP_MERGE_TOLERANCE_PCT
+    if not decimal.is_finite() or decimal < 0:
+        return DEFAULT_SETUP_MERGE_TOLERANCE_PCT
+    return decimal
+
+
+def _load_health_records(database_path: Path | str, symbols: Sequence[str]) -> dict[str, Any]:
+    if not symbols:
+        return {}
+    try:
+        return load_symbol_health_records(database_path, symbols)
+    except Exception:
+        return {}
+
+
+def _symbol_health_penalty_cycles(record: Any | None) -> int:
+    if record is None:
+        return 0
+    health_score = _int_or_zero(getattr(record, "current_health_score", 0))
+    bad_events = sum(
+        _int_or_zero(getattr(record, name, 0))
+        for name in (
+            "invalidation_count",
+            "expired_setup_count",
+            "rejected_setup_count",
+            "false_confirmation_count",
+            "malformed_setup_event_count",
+            "stop_breach_after_confirmation_count",
+            "duplicate_noisy_setup_count",
+        )
+    )
+    return 1 if health_score < 40 or bad_events >= 3 else 0
+
+
+def _empty_process_summary(*, scanned_symbols: int) -> dict[str, Any]:
+    return {
+        "scanned_symbols": scanned_symbols,
+        "new_candidates": 0,
+        "merged_duplicates": 0,
+        "confirmation_pending": 0,
+        "confirmed_after_multi_scan": 0,
+        "decayed": 0,
+        "expired": 0,
+        "symbol_health_penalties_applied": 0,
+    }
+
+
+def _add_process_meta(summary: dict[str, Any], meta: Mapping[str, Any]) -> None:
+    for key in (
+        "new_candidates",
+        "merged_duplicates",
+        "confirmation_pending",
+        "confirmed_after_multi_scan",
+        "decayed",
+        "expired",
+        "symbol_health_penalties_applied",
+    ):
+        summary[key] = int(summary.get(key, 0)) + int(meta.get(key, 0))
+
+
+def _process_meta(
+    *,
+    existing: SetupLifecycleRecord | None,
+    transition: SetupTransitionResult,
+    symbol_health_penalty_cycles: int,
+) -> dict[str, int]:
+    record = transition.record
+    previous_decay = existing.decay_count if existing is not None else 0
+    confirmation_pending = 0
+    if record is not None and record.confirmation_count and record.confirmation_count < record.required_confirmation_cycles:
+        confirmation_pending = 1
+    return {
+        "new_candidates": 1 if existing is None and record is not None else 0,
+        "merged_duplicates": 1 if existing is not None and record is not None else 0,
+        "confirmation_pending": confirmation_pending,
+        "confirmed_after_multi_scan": 1 if transition.reason == SetupTransitionReason.MULTI_SCAN_CONFIRMED else 0,
+        "decayed": 1 if record is not None and record.decay_count > previous_decay else 0,
+        "expired": 1
+        if record is not None
+        and record.current_state == SetupLifecycleState.EXPIRED
+        and (existing is None or existing.current_state != SetupLifecycleState.EXPIRED)
+        else 0,
+        "symbol_health_penalties_applied": 1 if symbol_health_penalty_cycles > 0 else 0,
+    }
+
+
+def _outcome_analytics_record(
+    repository: SQLiteSetupLifecycleRepository,
+    transition: SetupTransitionResult,
+    observation: LifecycleObservation,
+) -> SetupOutcomeAnalyticsRecord | None:
+    record = transition.record
+    if record is None:
+        return None
+    final_outcome = _final_outcome_for_state(record.current_state)
+    if final_outcome == NA:
+        return None
+    events = repository.list_events(lifecycle_id=record.lifecycle_id)
+    lifecycle_path = " > ".join(event.to_state.value for event in events)
+    if not lifecycle_path:
+        lifecycle_path = record.current_state.value
+    payload = {
+        "lifecycle_id": record.lifecycle_id,
+        "state": record.current_state.value,
+        "reason": transition.reason.value,
+        "confirmation_count": record.confirmation_count,
+        "required_confirmation_cycles": record.required_confirmation_cycles,
+        "decay_count": record.decay_count,
+        "decay_reason": record.decay_reason,
+    }
+    return SetupOutcomeAnalyticsRecord(
+        lifecycle_id=record.lifecycle_id,
+        symbol=record.symbol,
+        bias=record.direction,
+        first_seen_at=record.first_seen_at,
+        confirmed_at=record.confirmed_at or NA,
+        entry_zone=_zone_text(record.entry_low, record.entry_high),
+        stop_loss=record.stop_loss,
+        tp1=record.tp1,
+        tp2=record.tp2,
+        tp3=record.tp3,
+        quality_at_first_detection=record.quality_grade_first_seen,
+        quality_at_confirmation=record.quality_grade_confirmed,
+        rr=record.rr,
+        lifecycle_path=lifecycle_path,
+        final_outcome=final_outcome,
+        failure_reason=_failure_reason(record),
+        outcome_reason=transition.reason.value,
+        regime_context=record.regime_state,
+        symbol_health_at_detection=record.symbol_health_score_at_detection,
+        raw_payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+    )
+
+
+def _final_outcome_for_state(state: SetupLifecycleState) -> str:
+    if state == SetupLifecycleState.TP_HIT:
+        return "TP1_HIT"
+    if state == SetupLifecycleState.SL_HIT:
+        return "SL_HIT"
+    if state == SetupLifecycleState.INVALIDATED:
+        return "INVALIDATED"
+    if state == SetupLifecycleState.EXPIRED:
+        return "EXPIRED"
+    if state == SetupLifecycleState.REJECTED:
+        return "REJECTED"
+    if state == SetupLifecycleState.COOLDOWN:
+        return "COOLDOWN"
+    return NA
+
+
+def _failure_reason(record: SetupLifecycleRecord) -> str:
+    if record.current_state in {
+        SetupLifecycleState.INVALIDATED,
+        SetupLifecycleState.EXPIRED,
+        SetupLifecycleState.REJECTED,
+        SetupLifecycleState.SL_HIT,
+    }:
+        return _first_non_na(record.invalidation_reason, record.failed_gate, record.decay_reason)
+    return NA
+
+
+def _zone_text(low: Any, high: Any) -> str:
+    low_text = _display(low)
+    high_text = _display(high)
+    if low_text == NA and high_text == NA:
+        return NA
+    if high_text == NA or high_text == low_text:
+        return low_text
+    if low_text == NA:
+        return high_text
+    return f"{low_text}-{high_text}"
 
 
 def _mode_from_result(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:

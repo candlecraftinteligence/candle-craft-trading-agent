@@ -206,7 +206,64 @@ def test_database_creation(tmp_path) -> None:
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
 
-    assert {"scan_runs", "symbol_results", "setup_candidates", "replay_results", "telegram_alert_attempts"} <= tables
+    assert {
+        "scan_runs",
+        "symbol_results",
+        "setup_candidates",
+        "replay_results",
+        "telegram_alert_attempts",
+        "setup_outcome_analytics",
+        "symbol_health_events",
+    } <= tables
+
+
+def test_scanner_process_improvement_schema_columns_exist(tmp_path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        lifecycle_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
+        }
+        health_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(symbol_health)").fetchall()
+        }
+        outcome_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(setup_outcome_analytics)").fetchall()
+        }
+
+    assert {
+        "entry_low",
+        "entry_high",
+        "stop_loss",
+        "rr",
+        "confirmation_count",
+        "required_confirmation_cycles",
+        "quality_grade_first_seen",
+        "quality_grade_current",
+        "quality_grade_confirmed",
+        "confirmed_at",
+        "decay_count",
+        "decay_reason",
+        "symbol_health_score_at_detection",
+        "symbol_health_penalty_cycles",
+        "setup_identity",
+    } <= lifecycle_columns
+    assert {
+        "invalidation_count",
+        "expired_setup_count",
+        "rejected_setup_count",
+        "false_confirmation_count",
+        "malformed_setup_event_count",
+        "stop_breach_after_confirmation_count",
+        "duplicate_noisy_setup_count",
+    } <= health_columns
+    assert {"lifecycle_id", "symbol", "final_outcome", "lifecycle_path", "raw_payload_json"} <= outcome_columns
 
 
 def test_scan_run_migration_adds_watch_columns_without_destroying_rows(tmp_path) -> None:

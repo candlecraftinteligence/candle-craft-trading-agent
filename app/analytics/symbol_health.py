@@ -49,6 +49,13 @@ class SymbolHealthRecord(BaseModel):
     useful_scan_count: int = 0
     rejected_count: int = 0
     last_rejected_at: str | None = None
+    invalidation_count: int = 0
+    expired_setup_count: int = 0
+    rejected_setup_count: int = 0
+    false_confirmation_count: int = 0
+    malformed_setup_event_count: int = 0
+    stop_breach_after_confirmation_count: int = 0
+    duplicate_noisy_setup_count: int = 0
 
     model_config = ConfigDict(frozen=True)
 
@@ -72,6 +79,13 @@ class SymbolHealthRecord(BaseModel):
         "timeout_strikes",
         "useful_scan_count",
         "rejected_count",
+        "invalidation_count",
+        "expired_setup_count",
+        "rejected_setup_count",
+        "false_confirmation_count",
+        "malformed_setup_event_count",
+        "stop_breach_after_confirmation_count",
+        "duplicate_noisy_setup_count",
     )
     @classmethod
     def _non_negative_int(cls, value: int) -> int:
@@ -300,6 +314,8 @@ def update_symbol_health_record(
     data_issue = classification["data_issue"]
     useful = classification["useful"]
     no_setup = classification["display_bucket"] == "no_setup"
+    health_events = symbol_health_events_from_result(symbol_result, now=timestamp)
+    event_counts = _event_counts(health_events)
 
     successful_scans = record.successful_scans
     timeout_count = record.timeout_count
@@ -310,6 +326,16 @@ def update_symbol_health_record(
     last_data_issue_at = record.last_data_issue_at
     rejected_count = record.rejected_count
     last_rejected_at = record.last_rejected_at
+    invalidation_count = record.invalidation_count + event_counts.get("invalidation", 0)
+    expired_setup_count = record.expired_setup_count + event_counts.get("expired_setup", 0)
+    rejected_setup_count = record.rejected_setup_count + event_counts.get("rejected_setup", 0)
+    false_confirmation_count = record.false_confirmation_count + event_counts.get("false_confirmation", 0)
+    malformed_setup_event_count = record.malformed_setup_event_count + event_counts.get("malformed_setup_event", 0)
+    stop_breach_after_confirmation_count = record.stop_breach_after_confirmation_count + event_counts.get(
+        "stop_breach_after_confirmation",
+        0,
+    )
+    duplicate_noisy_setup_count = record.duplicate_noisy_setup_count + event_counts.get("duplicate_noisy_setup", 0)
 
     if timed_out:
         timeout_count += 1
@@ -338,6 +364,7 @@ def update_symbol_health_record(
         readiness_label=classification["readiness_label"],
         timeout_strikes=timeout_strikes,
     )
+    health_score = max(0, health_score - _event_health_penalty(event_counts))
     cooldown_until = record.cooldown_until
     if timed_out and timeout_strikes >= max(1, int(max_timeout_strikes)):
         cooldown_until = cooldown_expiry(timestamp, cooldown_minutes)
@@ -369,6 +396,13 @@ def update_symbol_health_record(
             "useful_scan_count": useful_scan_count,
             "rejected_count": rejected_count,
             "last_rejected_at": last_rejected_at,
+            "invalidation_count": invalidation_count,
+            "expired_setup_count": expired_setup_count,
+            "rejected_setup_count": rejected_setup_count,
+            "false_confirmation_count": false_confirmation_count,
+            "malformed_setup_event_count": malformed_setup_event_count,
+            "stop_breach_after_confirmation_count": stop_breach_after_confirmation_count,
+            "duplicate_noisy_setup_count": duplicate_noisy_setup_count,
         }
     )
     if priority_decision is not None:
@@ -507,6 +541,7 @@ def build_symbol_health_summary(
         {
             "enabled": enabled,
             "timeout_strikes_this_run": timeout_strikes_this_run,
+            "bad_behavior_events_this_run": len(tuple(symbol_health_events_from_results(symbol_results))),
             "slowest_symbols": slowest,
             "records": record_payload,
         }
@@ -535,9 +570,94 @@ def slow_symbol_payload(symbol_results: Sequence[Any], *, limit: int = MAX_SLOW_
     ]
 
 
+def symbol_health_events_from_results(
+    symbol_results: Sequence[Any],
+    *,
+    now: str | None = None,
+) -> tuple[dict[str, Any], ...]:
+    timestamp = now or now_utc_iso()
+    events: list[dict[str, Any]] = []
+    for result in symbol_results:
+        events.extend(symbol_health_events_from_result(result, now=timestamp))
+    return tuple(events)
+
+
+def symbol_health_events_from_result(symbol_result: Any, *, now: str | None = None) -> tuple[dict[str, Any], ...]:
+    timestamp = now or now_utc_iso()
+    symbol = _symbol_from_result(symbol_result)
+    if symbol == NA:
+        return ()
+    transition = getattr(symbol_result, "lifecycle_transition", None)
+    record = getattr(symbol_result, "lifecycle_state", None)
+    lifecycle_id = _display(getattr(record, "lifecycle_id", NA))
+    if transition is None or not bool(getattr(transition, "transitioned", False)):
+        return ()
+    to_state = _display(getattr(getattr(transition, "to_state", None), "value", getattr(transition, "to_state", NA))).upper()
+    from_state = _display(getattr(getattr(transition, "from_state", None), "value", getattr(transition, "from_state", NA))).upper()
+    failed_gate = _display(getattr(record, "failed_gate", NA))
+    details = {
+        "from_state": from_state,
+        "to_state": to_state,
+        "failed_gate": failed_gate,
+        "reason": _display(getattr(getattr(transition, "reason", None), "value", getattr(transition, "reason", NA))),
+    }
+    events: list[dict[str, Any]] = []
+    if to_state == "INVALIDATED":
+        events.append(_health_event(symbol, "invalidation", timestamp, lifecycle_id, details))
+        if from_state in {"CONFIRMED", "EXECUTING", "MANAGING"}:
+            events.append(_health_event(symbol, "false_confirmation", timestamp, lifecycle_id, details))
+    elif to_state == "EXPIRED":
+        events.append(_health_event(symbol, "expired_setup", timestamp, lifecycle_id, details))
+    elif to_state == "REJECTED":
+        events.append(_health_event(symbol, "rejected_setup", timestamp, lifecycle_id, details))
+        if _status_key(failed_gate) in {"missing_entry", "missing_entry_zone", "missing_stop", "missing_invalidation"}:
+            events.append(_health_event(symbol, "malformed_setup_event", timestamp, lifecycle_id, details))
+    elif to_state == "SL_HIT" and from_state in {"CONFIRMED", "EXECUTING", "MANAGING"}:
+        events.append(_health_event(symbol, "stop_breach_after_confirmation", timestamp, lifecycle_id, details))
+    return tuple(events)
+
+
 def cooldown_expiry(timestamp: str, cooldown_minutes: float) -> str:
     parsed = parse_timestamp(timestamp) or datetime.now(timezone.utc)
     return (parsed + timedelta(minutes=max(float(cooldown_minutes), 0.0))).replace(microsecond=0).isoformat()
+
+
+def _health_event(
+    symbol: str,
+    event_type: str,
+    occurred_at: str,
+    lifecycle_id: str,
+    details: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "event_type": event_type,
+        "occurred_at": occurred_at,
+        "lifecycle_id": lifecycle_id if lifecycle_id != NA else None,
+        "details": dict(details),
+    }
+
+
+def _event_counts(events: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        event_type = _display(event.get("event_type"))
+        if event_type == NA:
+            continue
+        counts[event_type] = counts.get(event_type, 0) + 1
+    return counts
+
+
+def _event_health_penalty(counts: Mapping[str, int]) -> int:
+    return (
+        counts.get("invalidation", 0) * 5
+        + counts.get("expired_setup", 0) * 3
+        + counts.get("rejected_setup", 0) * 2
+        + counts.get("false_confirmation", 0) * 8
+        + counts.get("malformed_setup_event", 0) * 5
+        + counts.get("stop_breach_after_confirmation", 0) * 8
+        + counts.get("duplicate_noisy_setup", 0) * 3
+    )
 
 
 def cooldown_active(cooldown_until: str | None, now: str | None = None) -> bool:
@@ -713,6 +833,16 @@ def _display(value: Any) -> str:
     return str(value)
 
 
+def _status_key(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return ""
+    key = text.lower().strip().replace("-", "_").replace(" ", "_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key.strip("_")
+
+
 __all__ = [
     "DEFAULT_MAX_TIMEOUT_STRIKES",
     "DEFAULT_SYMBOL_COOLDOWN_MINUTES",
@@ -732,6 +862,8 @@ __all__ = [
     "now_utc_iso",
     "parse_timestamp",
     "slow_symbol_payload",
+    "symbol_health_events_from_result",
+    "symbol_health_events_from_results",
     "update_average_runtime",
     "update_symbol_health_record",
     "update_symbol_health_records",

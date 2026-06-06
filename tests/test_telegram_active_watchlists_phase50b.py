@@ -546,6 +546,55 @@ def test_active_signals_use_sent_runtime_signal_attempts(tmp_path: Path) -> None
     assert "order was placed" not in response.text.lower()
 
 
+def test_active_signals_dedupe_same_symbol_bias_and_hide_expired_duplicate(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    old_sent = (datetime.now(UTC) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    fresh_sent = (datetime.now(UTC) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-old-expired",
+        symbol="BTCUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        setup_quality_score="A",
+        rr_planned="3.1",
+        entry_low="99",
+        entry_high="101",
+        stop_loss="95",
+        tp1="110",
+        tp2="117",
+        tp3="124",
+        sent_at=old_sent,
+    )
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="sig-old-expired",
+        symbol="BTCUSDT",
+        current_state="EXPIRED",
+        invalidation_reason="no price reaction or lifecycle progress",
+    )
+    _insert_attempt(
+        db_path,
+        signal_id="sig-new-current",
+        symbol="BTCUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        setup_quality_score="A-",
+        rr_planned="3.2",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+        tp2="117",
+        tp3="124",
+        sent_at=fresh_sent,
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "Active signals: 1" in response.text
+    assert _button_labels(response.reply_markup) == ["BTCUSDT"]
+    assert _callback_data_values(response.reply_markup) == ["public:signal:BTCUSDT"]
+
+
 def test_active_signals_show_direct_limit_zone_hit_setups(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_attempt(
@@ -892,6 +941,58 @@ def test_active_signals_empty_state_does_not_promote_watchlists(tmp_path: Path) 
     assert "No active confirmed signals right now." in response.text
     assert "The engine is waiting for clean structure." in response.text
     assert "BTCUSDT" not in response.text
+
+def test_watchlists_dedupe_same_symbol_bias_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="sig-watch-old",
+        symbol="BTCUSDT",
+        direction="long",
+        entry_low="100",
+        entry_high="102",
+        sent_at="2026-06-04T11:55:00Z",
+    )
+    _insert_attempt(
+        db_path,
+        signal_id="sig-watch-new",
+        symbol="BTCUSDT",
+        direction="long",
+        entry_low="100.10",
+        entry_high="102.10",
+        sent_at="2026-06-04T12:00:00Z",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert response.text.count("BTCUSDT") == 1
+    assert "👀 WATCH" in response.text
+
+
+def test_expired_lifecycle_watchlist_is_hidden_from_public_active_output(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="sig-expired-watch",
+        symbol="BTCUSDT",
+        direction="long",
+        entry_low="100",
+        entry_high="102",
+        setup_quality_score="A+",
+    )
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="sig-expired-watch",
+        symbol="BTCUSDT",
+        current_state="EXPIRED",
+        invalidation_reason="no price reaction or lifecycle progress",
+    )
+
+    watch_response = _service(tmp_path, db_path).public_response_for("/watchlists")
+    signal_response = _service(tmp_path, db_path).public_response_for("/signals")
+
+    assert "BTCUSDT" not in watch_response.text
+    assert "BTCUSDT" not in signal_response.text
 
 
 def test_rejected_setup_never_appears_in_active_signals(tmp_path: Path) -> None:

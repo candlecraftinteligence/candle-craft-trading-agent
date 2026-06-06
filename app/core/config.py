@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     candle_craft_donate_url: str | None = None
     local_manual_mode: bool = True
     order_execution_enabled: bool = False
+    scanner_confirmation_cycles: int = 2
+    scanner_setup_merge_tolerance_pct: float = 0.5
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -54,6 +56,16 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_log_level(cls, value: str) -> str:
         return str(value).upper()
+
+    @field_validator("scanner_confirmation_cycles")
+    @classmethod
+    def validate_scanner_confirmation_cycles(cls, value: int) -> int:
+        return max(1, int(value))
+
+    @field_validator("scanner_setup_merge_tolerance_pct")
+    @classmethod
+    def validate_scanner_setup_merge_tolerance_pct(cls, value: float) -> float:
+        return max(0.0, float(value))
 
     @model_validator(mode="after")
     def enforce_manual_only_phase(self) -> Settings:
