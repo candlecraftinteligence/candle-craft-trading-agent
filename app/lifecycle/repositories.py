@@ -11,6 +11,7 @@ from app.lifecycle.models import (
     SetupLifecycleEvent,
     SetupLifecycleRecord,
     SetupLifecycleState,
+    SetupOutcomeAnalyticsRecord,
     SetupTransitionReason,
 )
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
@@ -104,8 +105,12 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 lifecycle_id, symbol, mode, direction, current_state, previous_state,
                 first_seen_at, last_seen_at, last_transition_at, failed_gate,
                 readiness_score, quality_score, edge_score, regime_state, action_label,
-                invalidation_reason, cooldown_until, archived_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                invalidation_reason, cooldown_until, archived_at, entry_low, entry_high,
+                stop_loss, tp1, tp2, tp3, rr, invalidation_logic, confirmation_count,
+                required_confirmation_cycles, quality_grade_first_seen, quality_grade_current,
+                quality_grade_confirmed, confirmed_at, decay_count, decay_reason,
+                symbol_health_score_at_detection, symbol_health_penalty_cycles, setup_identity
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lifecycle_id) DO UPDATE SET
                 symbol = excluded.symbol,
                 mode = excluded.mode,
@@ -123,7 +128,26 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 action_label = excluded.action_label,
                 invalidation_reason = excluded.invalidation_reason,
                 cooldown_until = excluded.cooldown_until,
-                archived_at = excluded.archived_at
+                archived_at = excluded.archived_at,
+                entry_low = excluded.entry_low,
+                entry_high = excluded.entry_high,
+                stop_loss = excluded.stop_loss,
+                tp1 = excluded.tp1,
+                tp2 = excluded.tp2,
+                tp3 = excluded.tp3,
+                rr = excluded.rr,
+                invalidation_logic = excluded.invalidation_logic,
+                confirmation_count = excluded.confirmation_count,
+                required_confirmation_cycles = excluded.required_confirmation_cycles,
+                quality_grade_first_seen = excluded.quality_grade_first_seen,
+                quality_grade_current = excluded.quality_grade_current,
+                quality_grade_confirmed = excluded.quality_grade_confirmed,
+                confirmed_at = excluded.confirmed_at,
+                decay_count = excluded.decay_count,
+                decay_reason = excluded.decay_reason,
+                symbol_health_score_at_detection = excluded.symbol_health_score_at_detection,
+                symbol_health_penalty_cycles = excluded.symbol_health_penalty_cycles,
+                setup_identity = excluded.setup_identity
             """,
             _record_params(record),
         )
@@ -166,6 +190,56 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         rows = self._connection.execute(sql, params).fetchall()
         return tuple(_event_from_row(row) for row in rows)
 
+    def upsert_outcome_analytics(self, record: SetupOutcomeAnalyticsRecord) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO setup_outcome_analytics (
+                lifecycle_id, symbol, bias, first_seen_at, confirmed_at, entry_zone,
+                stop_loss, tp1, tp2, tp3, quality_at_first_detection,
+                quality_at_confirmation, rr, lifecycle_path, final_outcome,
+                failure_reason, outcome_reason, regime_context, symbol_health_at_detection,
+                raw_payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(lifecycle_id, final_outcome) DO UPDATE SET
+                symbol = excluded.symbol,
+                bias = excluded.bias,
+                first_seen_at = excluded.first_seen_at,
+                confirmed_at = excluded.confirmed_at,
+                entry_zone = excluded.entry_zone,
+                stop_loss = excluded.stop_loss,
+                tp1 = excluded.tp1,
+                tp2 = excluded.tp2,
+                tp3 = excluded.tp3,
+                quality_at_first_detection = excluded.quality_at_first_detection,
+                quality_at_confirmation = excluded.quality_at_confirmation,
+                rr = excluded.rr,
+                lifecycle_path = excluded.lifecycle_path,
+                failure_reason = excluded.failure_reason,
+                outcome_reason = excluded.outcome_reason,
+                regime_context = excluded.regime_context,
+                symbol_health_at_detection = excluded.symbol_health_at_detection,
+                raw_payload_json = excluded.raw_payload_json,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            _outcome_params(record),
+        )
+
+    def list_outcome_analytics(self, *, symbol: str | None = None) -> tuple[SetupOutcomeAnalyticsRecord, ...]:
+        where = ""
+        params: list[Any] = []
+        if symbol is not None:
+            where = "WHERE symbol = ?"
+            params.append(_symbol(symbol))
+        rows = self._connection.execute(
+            f"""
+            SELECT * FROM setup_outcome_analytics
+            {where}
+            ORDER BY id ASC
+            """,
+            params,
+        ).fetchall()
+        return tuple(_outcome_from_row(row) for row in rows)
+
     def reset(self) -> None:
         self._connection.execute("DELETE FROM setup_lifecycle_events")
         self._connection.execute("DELETE FROM setup_lifecycle_records")
@@ -197,6 +271,25 @@ def _record_params(record: SetupLifecycleRecord) -> tuple[Any, ...]:
         record.invalidation_reason,
         record.cooldown_until,
         record.archived_at,
+        record.entry_low,
+        record.entry_high,
+        record.stop_loss,
+        record.tp1,
+        record.tp2,
+        record.tp3,
+        record.rr,
+        record.invalidation_logic,
+        record.confirmation_count,
+        record.required_confirmation_cycles,
+        record.quality_grade_first_seen,
+        record.quality_grade_current,
+        record.quality_grade_confirmed,
+        record.confirmed_at,
+        record.decay_count,
+        record.decay_reason,
+        record.symbol_health_score_at_detection,
+        record.symbol_health_penalty_cycles,
+        record.setup_identity,
     )
 
 
@@ -237,6 +330,25 @@ def _record_from_row(row: sqlite3.Row) -> SetupLifecycleRecord:
         invalidation_reason=row["invalidation_reason"],
         cooldown_until=row["cooldown_until"],
         archived_at=row["archived_at"],
+        entry_low=row["entry_low"],
+        entry_high=row["entry_high"],
+        stop_loss=row["stop_loss"],
+        tp1=row["tp1"],
+        tp2=row["tp2"],
+        tp3=row["tp3"],
+        rr=row["rr"],
+        invalidation_logic=row["invalidation_logic"],
+        confirmation_count=int(row["confirmation_count"] or 0),
+        required_confirmation_cycles=max(1, int(row["required_confirmation_cycles"] or 2)),
+        quality_grade_first_seen=row["quality_grade_first_seen"],
+        quality_grade_current=row["quality_grade_current"],
+        quality_grade_confirmed=row["quality_grade_confirmed"],
+        confirmed_at=row["confirmed_at"],
+        decay_count=int(row["decay_count"] or 0),
+        decay_reason=row["decay_reason"],
+        symbol_health_score_at_detection=row["symbol_health_score_at_detection"],
+        symbol_health_penalty_cycles=int(row["symbol_health_penalty_cycles"] or 0),
+        setup_identity=row["setup_identity"],
     )
 
 
@@ -254,6 +366,56 @@ def _event_from_row(row: sqlite3.Row) -> SetupLifecycleEvent:
         quality_score=int(row["quality_score"] or 0),
         failed_gate=row["failed_gate"],
         notes=row["notes"],
+    )
+
+
+def _outcome_params(record: SetupOutcomeAnalyticsRecord) -> tuple[Any, ...]:
+    return (
+        record.lifecycle_id,
+        record.symbol,
+        record.bias,
+        record.first_seen_at,
+        record.confirmed_at,
+        record.entry_zone,
+        record.stop_loss,
+        record.tp1,
+        record.tp2,
+        record.tp3,
+        record.quality_at_first_detection,
+        record.quality_at_confirmation,
+        record.rr,
+        record.lifecycle_path,
+        record.final_outcome,
+        record.failure_reason,
+        record.outcome_reason,
+        record.regime_context,
+        record.symbol_health_at_detection,
+        record.raw_payload_json,
+    )
+
+
+def _outcome_from_row(row: sqlite3.Row) -> SetupOutcomeAnalyticsRecord:
+    return SetupOutcomeAnalyticsRecord(
+        lifecycle_id=row["lifecycle_id"],
+        symbol=row["symbol"],
+        bias=row["bias"],
+        first_seen_at=row["first_seen_at"],
+        confirmed_at=row["confirmed_at"],
+        entry_zone=row["entry_zone"],
+        stop_loss=row["stop_loss"],
+        tp1=row["tp1"],
+        tp2=row["tp2"],
+        tp3=row["tp3"],
+        quality_at_first_detection=row["quality_at_first_detection"],
+        quality_at_confirmation=row["quality_at_confirmation"],
+        rr=row["rr"],
+        lifecycle_path=row["lifecycle_path"],
+        final_outcome=row["final_outcome"],
+        failure_reason=row["failure_reason"],
+        outcome_reason=row["outcome_reason"],
+        regime_context=row["regime_context"],
+        symbol_health_at_detection=row["symbol_health_at_detection"],
+        raw_payload_json=row["raw_payload_json"],
     )
 
 

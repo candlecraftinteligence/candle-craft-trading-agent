@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class StorageError(RuntimeError):
@@ -152,6 +152,25 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 invalidation_reason TEXT NOT NULL DEFAULT 'N/A',
                 cooldown_until TEXT,
                 archived_at TEXT,
+                entry_low TEXT NOT NULL DEFAULT 'N/A',
+                entry_high TEXT NOT NULL DEFAULT 'N/A',
+                stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                tp1 TEXT NOT NULL DEFAULT 'N/A',
+                tp2 TEXT NOT NULL DEFAULT 'N/A',
+                tp3 TEXT NOT NULL DEFAULT 'N/A',
+                rr TEXT NOT NULL DEFAULT 'N/A',
+                invalidation_logic TEXT NOT NULL DEFAULT 'N/A',
+                confirmation_count INTEGER NOT NULL DEFAULT 0,
+                required_confirmation_cycles INTEGER NOT NULL DEFAULT 2,
+                quality_grade_first_seen TEXT NOT NULL DEFAULT 'N/A',
+                quality_grade_current TEXT NOT NULL DEFAULT 'N/A',
+                quality_grade_confirmed TEXT NOT NULL DEFAULT 'N/A',
+                confirmed_at TEXT,
+                decay_count INTEGER NOT NULL DEFAULT 0,
+                decay_reason TEXT NOT NULL DEFAULT 'N/A',
+                symbol_health_score_at_detection TEXT NOT NULL DEFAULT 'N/A',
+                symbol_health_penalty_cycles INTEGER NOT NULL DEFAULT 0,
+                setup_identity TEXT NOT NULL DEFAULT 'N/A',
                 UNIQUE(symbol, mode, direction)
             );
 
@@ -176,6 +195,36 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 ON setup_lifecycle_events(lifecycle_id);
             CREATE INDEX IF NOT EXISTS ix_lifecycle_events_symbol_timestamp
                 ON setup_lifecycle_events(symbol, timestamp);
+
+            CREATE TABLE IF NOT EXISTS setup_outcome_analytics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lifecycle_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                bias TEXT NOT NULL DEFAULT 'N/A',
+                first_seen_at TEXT NOT NULL,
+                confirmed_at TEXT NOT NULL DEFAULT 'N/A',
+                entry_zone TEXT NOT NULL DEFAULT 'N/A',
+                stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                tp1 TEXT NOT NULL DEFAULT 'N/A',
+                tp2 TEXT NOT NULL DEFAULT 'N/A',
+                tp3 TEXT NOT NULL DEFAULT 'N/A',
+                quality_at_first_detection TEXT NOT NULL DEFAULT 'N/A',
+                quality_at_confirmation TEXT NOT NULL DEFAULT 'N/A',
+                rr TEXT NOT NULL DEFAULT 'N/A',
+                lifecycle_path TEXT NOT NULL DEFAULT 'N/A',
+                final_outcome TEXT NOT NULL,
+                failure_reason TEXT NOT NULL DEFAULT 'N/A',
+                outcome_reason TEXT NOT NULL DEFAULT 'N/A',
+                regime_context TEXT NOT NULL DEFAULT 'N/A',
+                symbol_health_at_detection TEXT NOT NULL DEFAULT 'N/A',
+                raw_payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(lifecycle_id, final_outcome)
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_setup_outcome_analytics_symbol
+                ON setup_outcome_analytics(symbol, final_outcome);
 
             CREATE TABLE IF NOT EXISTS telegram_alert_attempts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -239,13 +288,34 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 last_readiness_label TEXT NOT NULL DEFAULT 'N/A',
                 useful_scan_count INTEGER NOT NULL DEFAULT 0,
                 rejected_count INTEGER NOT NULL DEFAULT 0,
-                last_rejected_at TEXT
+                last_rejected_at TEXT,
+                invalidation_count INTEGER NOT NULL DEFAULT 0,
+                expired_setup_count INTEGER NOT NULL DEFAULT 0,
+                rejected_setup_count INTEGER NOT NULL DEFAULT 0,
+                false_confirmation_count INTEGER NOT NULL DEFAULT 0,
+                malformed_setup_event_count INTEGER NOT NULL DEFAULT 0,
+                stop_breach_after_confirmation_count INTEGER NOT NULL DEFAULT 0,
+                duplicate_noisy_setup_count INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS ix_symbol_health_score
                 ON symbol_health(current_health_score DESC);
             CREATE INDEX IF NOT EXISTS ix_symbol_health_cooldown
                 ON symbol_health(cooldown_until);
+
+            CREATE TABLE IF NOT EXISTS symbol_health_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'scanner_lifecycle',
+                occurred_at TEXT NOT NULL,
+                scan_run_id TEXT,
+                lifecycle_id TEXT,
+                details_json TEXT NOT NULL DEFAULT '{}'
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_symbol_health_events_symbol_type
+                ON symbol_health_events(symbol, event_type, occurred_at);
             """
         )
         _ensure_column(connection, "scan_runs", "regime_confidence", "INTEGER NOT NULL DEFAULT 0")
@@ -271,6 +341,40 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "symbol_results", "environment_notes_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(connection, "setup_lifecycle_records", "cooldown_until", "TEXT")
         _ensure_column(connection, "setup_lifecycle_records", "archived_at", "TEXT")
+        _ensure_column(connection, "setup_lifecycle_records", "entry_low", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "entry_high", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "stop_loss", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "tp1", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "tp2", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "tp3", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "rr", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "invalidation_logic", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "confirmation_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(
+            connection,
+            "setup_lifecycle_records",
+            "required_confirmation_cycles",
+            "INTEGER NOT NULL DEFAULT 2",
+        )
+        _ensure_column(connection, "setup_lifecycle_records", "quality_grade_first_seen", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "quality_grade_current", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "quality_grade_confirmed", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "confirmed_at", "TEXT")
+        _ensure_column(connection, "setup_lifecycle_records", "decay_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "setup_lifecycle_records", "decay_reason", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(
+            connection,
+            "setup_lifecycle_records",
+            "symbol_health_score_at_detection",
+            "TEXT NOT NULL DEFAULT 'N/A'",
+        )
+        _ensure_column(
+            connection,
+            "setup_lifecycle_records",
+            "symbol_health_penalty_cycles",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(connection, "setup_lifecycle_records", "setup_identity", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "setup_lifecycle_events", "scan_run_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "scan_run_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "attempted_alert_type", "TEXT NOT NULL DEFAULT 'N/A'")
@@ -305,6 +409,18 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "symbol_health", "useful_scan_count", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_health", "rejected_count", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_health", "last_rejected_at", "TEXT")
+        _ensure_column(connection, "symbol_health", "invalidation_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "symbol_health", "expired_setup_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "symbol_health", "rejected_setup_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "symbol_health", "false_confirmation_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "symbol_health", "malformed_setup_event_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(
+            connection,
+            "symbol_health",
+            "stop_breach_after_confirmation_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(connection, "symbol_health", "duplicate_noisy_setup_count", "INTEGER NOT NULL DEFAULT 0")
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:

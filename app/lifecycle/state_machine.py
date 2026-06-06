@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -46,6 +47,22 @@ WATCH_PRIORITY_STATES = (
     SetupLifecycleState.WATCHLISTED,
 )
 DEFAULT_COOLDOWN_HOURS = 24
+DEFAULT_CONFIRMATION_CYCLES = 2
+DEFAULT_SETUP_MERGE_TOLERANCE_PCT = Decimal("0.5")
+MIN_CONFIRMATION_GRADES = {"a+", "a", "a-", "b+"}
+CONFIRMATION_GATED_STATES = {
+    SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.EXECUTING,
+    SetupLifecycleState.MANAGING,
+}
+DECAYABLE_STATES = {
+    SetupLifecycleState.WATCHLISTED,
+    SetupLifecycleState.STALKING,
+    SetupLifecycleState.TRIGGERED,
+    SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.A_GRADE_WATCH,
+}
+DECAY_GRADE_PATH = ("a+", "a", "a-", "b+")
 
 ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
     SetupLifecycleState.DISCOVERED: {
@@ -60,20 +77,25 @@ ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
     },
     SetupLifecycleState.WATCHLISTED: {
         SetupLifecycleState.STALKING,
+        SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.A_GRADE_WATCH,
         SetupLifecycleState.REJECTED,
+        SetupLifecycleState.EXPIRED,
     },
     SetupLifecycleState.STALKING: {
         SetupLifecycleState.TRIGGERED,
+        SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.WATCHLISTED,
         SetupLifecycleState.A_GRADE_WATCH,
         SetupLifecycleState.REJECTED,
+        SetupLifecycleState.EXPIRED,
     },
     SetupLifecycleState.TRIGGERED: {
         SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.A_GRADE_WATCH,
         SetupLifecycleState.STALKING,
         SetupLifecycleState.INVALIDATED,
+        SetupLifecycleState.EXPIRED,
     },
     SetupLifecycleState.CONFIRMED: {
         SetupLifecycleState.A_GRADE_WATCH,
@@ -112,6 +134,13 @@ class LifecycleObservation:
     readiness_label: str = NA
     quality_score: int = 0
     quality_grade: str = NA
+    entry_low: str = NA
+    entry_high: str = NA
+    stop_loss: str = NA
+    tp1: str = NA
+    tp2: str = NA
+    tp3: str = NA
+    rr: str = NA
     edge_score: str = NA
     failed_gate: str = NA
     regime_state: str = NA
@@ -237,10 +266,20 @@ def evaluate_lifecycle_transition(
     lifecycle_id: str,
     now: str | None = None,
     scan_run_id: str | None = None,
+    required_confirmation_cycles: int = DEFAULT_CONFIRMATION_CYCLES,
+    setup_tolerance_pct: Decimal = DEFAULT_SETUP_MERGE_TOLERANCE_PCT,
+    symbol_health_score: Any = NA,
+    symbol_health_penalty_cycles: int = 0,
 ) -> SetupTransitionResult:
     timestamp = now or now_utc_iso()
+    required_cycles = _required_confirmation_cycles(required_confirmation_cycles, symbol_health_penalty_cycles)
     if record is None:
         initial_state = initial_state_for_observation(observation)
+        confirmation_count = 1 if _confirmation_countable(observation) else 0
+        if _target_requires_confirmation(initial_state) and confirmation_count < required_cycles:
+            initial_state = _pre_confirmation_state(observation)
+        quality_grade = _quality_grade_or_score(observation)
+        confirmed_at = timestamp if initial_state in CONFIRMATION_GATED_STATES and confirmation_count >= required_cycles else None
         new_record = SetupLifecycleRecord(
             lifecycle_id=lifecycle_id,
             symbol=observation.symbol,
@@ -260,6 +299,25 @@ def evaluate_lifecycle_transition(
             invalidation_reason=_invalidation_reason(observation),
             cooldown_until=None,
             archived_at=timestamp if initial_state == SetupLifecycleState.ARCHIVED else None,
+            entry_low=_text(observation.entry_low),
+            entry_high=_text(observation.entry_high),
+            stop_loss=_text(observation.stop_loss),
+            tp1=_text(observation.tp1),
+            tp2=_text(observation.tp2),
+            tp3=_text(observation.tp3),
+            rr=_text(observation.rr),
+            invalidation_logic=_text(observation.invalidation_reason),
+            confirmation_count=confirmation_count,
+            required_confirmation_cycles=required_cycles,
+            quality_grade_first_seen=quality_grade,
+            quality_grade_current=quality_grade,
+            quality_grade_confirmed=quality_grade if confirmed_at is not None else NA,
+            confirmed_at=confirmed_at,
+            decay_count=0,
+            decay_reason=NA,
+            symbol_health_score_at_detection=_text(symbol_health_score),
+            symbol_health_penalty_cycles=max(0, int(symbol_health_penalty_cycles or 0)),
+            setup_identity=_setup_identity(observation),
         )
         event = SetupLifecycleEvent(
             lifecycle_id=lifecycle_id,
@@ -286,9 +344,31 @@ def evaluate_lifecycle_transition(
             record=new_record,
         )
 
-    updated_record = _record_with_observation(record, observation, timestamp)
+    updated_record = _record_with_observation(
+        record,
+        observation,
+        timestamp,
+        setup_tolerance_pct=setup_tolerance_pct,
+        required_confirmation_cycles=required_cycles,
+        symbol_health_penalty_cycles=symbol_health_penalty_cycles,
+    )
     next_state = next_state_for_observation(updated_record, observation, timestamp)
+    next_state, updated_record, decay_reason = _apply_decay_if_needed(
+        record,
+        updated_record,
+        observation,
+        next_state,
+    )
     reason = _reason_for_state(next_state, observation)
+    if decay_reason != NA:
+        reason = SetupTransitionReason.SETUP_EXPIRED if next_state == SetupLifecycleState.EXPIRED else SetupTransitionReason.SETUP_DECAYED
+    elif (
+        next_state in CONFIRMATION_GATED_STATES
+        and updated_record.confirmation_count >= updated_record.required_confirmation_cycles
+        and record.confirmation_count < updated_record.required_confirmation_cycles
+        and next_state == SetupLifecycleState.CONFIRMED
+    ):
+        reason = SetupTransitionReason.MULTI_SCAN_CONFIRMED
     return transition_record(
         updated_record,
         next_state,
@@ -297,7 +377,7 @@ def evaluate_lifecycle_transition(
         scan_run_id=scan_run_id,
         readiness_score=observation.readiness_score,
         quality_score=observation.quality_score,
-        failed_gate=observation.failed_gate,
+        failed_gate=updated_record.failed_gate if decay_reason != NA else observation.failed_gate,
         notes=reason.value if next_state != updated_record.current_state else SetupTransitionReason.NO_CHANGE.value,
     )
 
@@ -342,6 +422,7 @@ def next_state_for_observation(
 ) -> SetupLifecycleState:
     current = record.current_state
     target = observed_state(observation)
+    target = _confirmation_gated_target(record, observation, target)
 
     if current == SetupLifecycleState.COOLDOWN:
         if _cooldown_expired(record.cooldown_until, timestamp):
@@ -433,7 +514,7 @@ def next_state_for_observation(
         if target == SetupLifecycleState.A_GRADE_WATCH:
             return SetupLifecycleState.A_GRADE_WATCH
         if observation.pullback_and_rr_valid or observation.valid_trade_idea:
-            return SetupLifecycleState.CONFIRMED
+            return SetupLifecycleState.CONFIRMED if target == SetupLifecycleState.CONFIRMED else target
         if observation.sweep_detected and not observation.structure_shift_detected:
             return SetupLifecycleState.STALKING
         return current
@@ -474,7 +555,29 @@ def _record_with_observation(
     record: SetupLifecycleRecord,
     observation: LifecycleObservation,
     timestamp: str,
+    *,
+    setup_tolerance_pct: Decimal,
+    required_confirmation_cycles: int,
+    symbol_health_penalty_cycles: int,
 ) -> SetupLifecycleRecord:
+    consistent = _setup_consistent(record, observation, setup_tolerance_pct)
+    confirmation_count = _next_confirmation_count(
+        record,
+        observation,
+        consistent=consistent,
+        required_confirmation_cycles=required_confirmation_cycles,
+    )
+    quality_grade = _quality_grade_or_score(observation)
+    current_grade = _current_quality_grade(record, quality_grade)
+    confirmed_at = record.confirmed_at
+    quality_grade_confirmed = record.quality_grade_confirmed
+    if (
+        confirmation_count >= required_confirmation_cycles
+        and record.confirmation_count < required_confirmation_cycles
+        and _confirmation_countable(observation)
+    ):
+        confirmed_at = timestamp
+        quality_grade_confirmed = current_grade
     return record.model_copy(
         update={
             "last_seen_at": timestamp,
@@ -485,8 +588,248 @@ def _record_with_observation(
             "regime_state": _text(observation.regime_state),
             "action_label": _text(observation.action_label),
             "invalidation_reason": _invalidation_reason(observation),
+            "entry_low": _text(observation.entry_low),
+            "entry_high": _text(observation.entry_high),
+            "stop_loss": _text(observation.stop_loss),
+            "tp1": _text(observation.tp1),
+            "tp2": _text(observation.tp2),
+            "tp3": _text(observation.tp3),
+            "rr": _text(observation.rr),
+            "invalidation_logic": _text(observation.invalidation_reason),
+            "confirmation_count": confirmation_count,
+            "required_confirmation_cycles": required_confirmation_cycles,
+            "quality_grade_current": current_grade,
+            "quality_grade_confirmed": quality_grade_confirmed,
+            "confirmed_at": confirmed_at,
+            "symbol_health_penalty_cycles": max(
+                record.symbol_health_penalty_cycles,
+                max(0, int(symbol_health_penalty_cycles or 0)),
+            ),
+            "setup_identity": _setup_identity(observation),
         }
     )
+
+
+def _required_confirmation_cycles(base_cycles: int, symbol_health_penalty_cycles: int) -> int:
+    try:
+        base = int(base_cycles)
+    except (TypeError, ValueError):
+        base = DEFAULT_CONFIRMATION_CYCLES
+    try:
+        penalty = int(symbol_health_penalty_cycles or 0)
+    except (TypeError, ValueError):
+        penalty = 0
+    return max(1, base) + max(0, penalty)
+
+
+def _confirmation_gated_target(
+    record: SetupLifecycleRecord,
+    observation: LifecycleObservation,
+    target: SetupLifecycleState,
+) -> SetupLifecycleState:
+    if not _target_requires_confirmation(target):
+        return target
+    if record.confirmation_count >= record.required_confirmation_cycles and _confirmation_countable(observation):
+        return target
+    return _pre_confirmation_state(observation)
+
+
+def _target_requires_confirmation(state: SetupLifecycleState) -> bool:
+    return state in CONFIRMATION_GATED_STATES
+
+
+def _pre_confirmation_state(observation: LifecycleObservation) -> SetupLifecycleState:
+    if observation.sweep_detected and observation.structure_shift_detected:
+        return SetupLifecycleState.TRIGGERED
+    if observation.sweep_detected:
+        return SetupLifecycleState.STALKING
+    if _is_watch_ready(observation):
+        return SetupLifecycleState.WATCHLISTED
+    return SetupLifecycleState.DISCOVERED
+
+
+def _next_confirmation_count(
+    record: SetupLifecycleRecord,
+    observation: LifecycleObservation,
+    *,
+    consistent: bool,
+    required_confirmation_cycles: int,
+) -> int:
+    if _terminal_observation(observation):
+        return 0
+    if not _confirmation_countable(observation):
+        return record.confirmation_count if _setup_observable(observation) and consistent else 0
+    if consistent:
+        return min(record.confirmation_count + 1, max(1, required_confirmation_cycles))
+    return 1
+
+
+def _confirmation_countable(observation: LifecycleObservation) -> bool:
+    return (
+        _setup_observable(observation)
+        and observation.rr_valid
+        and _quality_at_least_b_plus(observation.quality_grade, observation.quality_score)
+        and _text(observation.invalidation_reason) != NA
+    )
+
+
+def _setup_observable(observation: LifecycleObservation) -> bool:
+    if observation.valid_trade_idea or observation.pullback_and_rr_valid or observation.a_grade_watch_candidate:
+        return True
+    return observation.sweep_detected or _is_watch_ready(observation)
+
+
+def _terminal_observation(observation: LifecycleObservation) -> bool:
+    return observation.tp_hit or observation.sl_hit or observation.invalidated or observation.expired
+
+
+def _setup_consistent(
+    record: SetupLifecycleRecord,
+    observation: LifecycleObservation,
+    tolerance_pct: Decimal,
+) -> bool:
+    if record.symbol != observation.symbol.upper():
+        return False
+    if _identity_text(record.mode) != _identity_text(observation.mode):
+        return False
+    if _identity_text(record.direction) != _identity_text(observation.direction):
+        return False
+    if not _price_similar(record.entry_low, observation.entry_low, tolerance_pct):
+        return False
+    if not _price_similar(record.entry_high, observation.entry_high, tolerance_pct):
+        return False
+    if not _price_similar(record.stop_loss, observation.stop_loss, tolerance_pct):
+        return False
+    return _logic_similar(record.invalidation_logic or record.invalidation_reason, observation.invalidation_reason)
+
+
+def _price_similar(left: Any, right: Any, tolerance_pct: Decimal) -> bool:
+    left_decimal = _decimal_or_none(left)
+    right_decimal = _decimal_or_none(right)
+    if left_decimal is None or right_decimal is None:
+        return True
+    reference = max(abs(left_decimal), abs(right_decimal), Decimal("1"))
+    tolerance = reference * max(tolerance_pct, Decimal("0")) / Decimal("100")
+    return abs(left_decimal - right_decimal) <= tolerance
+
+
+def _logic_similar(left: Any, right: Any) -> bool:
+    left_key = _status_key(left)
+    right_key = _status_key(right)
+    if not left_key or not right_key:
+        return True
+    if left_key == right_key:
+        return True
+    return _numeric_normalized_logic(left_key) == _numeric_normalized_logic(right_key)
+
+
+def _numeric_normalized_logic(value: str) -> str:
+    return re.sub(r"\d+(?:\.\d+)?", "#", value)
+
+
+def _quality_at_least_b_plus(grade: Any, score: int) -> bool:
+    key = _grade_key(grade)
+    if key in MIN_CONFIRMATION_GRADES:
+        return True
+    if key:
+        return False
+    return _bounded_score(score, 0) >= 75
+
+
+def _quality_grade_or_score(observation: LifecycleObservation) -> str:
+    grade = _text(observation.quality_grade)
+    if grade != NA:
+        return grade
+    score = _bounded_score(observation.quality_score, 0)
+    if score >= 90:
+        return "A+"
+    if score >= 85:
+        return "A"
+    if score >= 80:
+        return "A-"
+    if score >= 75:
+        return "B+"
+    if score >= 65:
+        return "B"
+    if score >= 55:
+        return "B-"
+    return "Reject"
+
+
+def _current_quality_grade(record: SetupLifecycleRecord, observed_grade: str) -> str:
+    if record.decay_count > 0 and _text(record.quality_grade_current) != NA:
+        return record.quality_grade_current
+    return observed_grade
+
+
+def _apply_decay_if_needed(
+    previous: SetupLifecycleRecord,
+    updated: SetupLifecycleRecord,
+    observation: LifecycleObservation,
+    next_state: SetupLifecycleState,
+) -> tuple[SetupLifecycleState, SetupLifecycleRecord, str]:
+    if next_state != previous.current_state or next_state not in DECAYABLE_STATES:
+        return next_state, updated, NA
+    if updated.confirmation_count > previous.confirmation_count:
+        return next_state, updated, NA
+    if updated.setup_identity != previous.setup_identity:
+        return next_state, updated, NA
+    if observation.entry_filled or _terminal_observation(observation):
+        return next_state, updated, NA
+
+    next_grade = _decayed_grade(updated.quality_grade_current)
+    if next_grade == NA:
+        return next_state, updated, NA
+    reason = "no price reaction or lifecycle progress"
+    update = {
+        "decay_count": updated.decay_count + 1,
+        "decay_reason": reason,
+    }
+    if next_grade == "EXPIRED":
+        update["quality_grade_current"] = "Expired"
+        update["failed_gate"] = "confidence_decay"
+        update["invalidation_reason"] = reason
+        return SetupLifecycleState.EXPIRED, updated.model_copy(update=update), reason
+    update["quality_grade_current"] = next_grade
+    return next_state, updated.model_copy(update=update), reason
+
+
+def _decayed_grade(value: Any) -> str:
+    key = _grade_key(value)
+    if key not in DECAY_GRADE_PATH:
+        return NA
+    index = DECAY_GRADE_PATH.index(key)
+    if index + 1 >= len(DECAY_GRADE_PATH):
+        return "EXPIRED"
+    return _grade_label(DECAY_GRADE_PATH[index + 1])
+
+
+def _grade_key(value: Any) -> str:
+    return _text(value).lower().replace(" ", "")
+
+
+def _grade_label(key: str) -> str:
+    return {"a+": "A+", "a": "A", "a-": "A-", "b+": "B+"}.get(key, NA)
+
+
+def _setup_identity(observation: LifecycleObservation) -> str:
+    return "|".join(
+        _text(value)
+        for value in (
+            observation.symbol.upper(),
+            _identity_text(observation.mode),
+            _identity_text(observation.direction),
+            observation.entry_low,
+            observation.entry_high,
+            observation.stop_loss,
+            observation.invalidation_reason,
+        )
+    )
+
+
+def _identity_text(value: Any) -> str:
+    text = _text(value).lower()
+    return text if text != NA.lower() else NA
 
 
 def _reason_for_state(
@@ -618,10 +961,22 @@ def _text(value: Any) -> str:
     return text if text else NA
 
 
+def _status_key(value: Any) -> str:
+    text = _text(value)
+    if text == NA:
+        return ""
+    key = text.lower().strip().replace("-", "_").replace(" ", "_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key.strip("_")
+
+
 __all__ = [
     "ACTIVE_PROGRESSION",
     "ALLOWED_TRANSITIONS",
     "DEFAULT_COOLDOWN_HOURS",
+    "DEFAULT_CONFIRMATION_CYCLES",
+    "DEFAULT_SETUP_MERGE_TOLERANCE_PCT",
     "LifecycleObservation",
     "OUTCOME_STATES",
     "VALID_STATES",

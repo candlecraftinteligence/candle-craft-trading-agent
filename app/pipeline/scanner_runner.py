@@ -434,6 +434,7 @@ class ScannerRunResult(BaseModel):
     regime_warnings: tuple[str, ...] = ()
     performance_memory_summary: dict[str, Any] = Field(default_factory=dict)
     symbol_health: dict[str, Any] = Field(default_factory=dict)
+    scanner_process_summary: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True)
 

@@ -15,7 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from app.analytics.portfolio_selection import PortfolioSelectionResult
-from app.analytics.symbol_health import update_symbol_health_records
+from app.analytics.symbol_health import symbol_health_events_from_results, update_symbol_health_records
 from app.backtesting import ReplaySummary
 from app.data.dtos import NA
 from app.formatters.scanner_display import RankedSymbolDisplay, display_fields
@@ -31,6 +31,7 @@ from app.storage.models import (
 )
 from app.storage.symbol_health import (
     _load_symbol_health_records,
+    _insert_symbol_health_events,
     _upsert_symbol_health_records,
     symbol_health_records_from_payload,
 )
@@ -110,6 +111,12 @@ def _store_symbol_health(connection: sqlite3.Connection, result: ScannerRunResul
             now=timestamp,
         )
     _upsert_symbol_health_records(connection, health_records.values())
+    scan_run_id = result.resume_metadata.get("scan_run_id") if isinstance(result.resume_metadata, Mapping) else None
+    _insert_symbol_health_events(
+        connection,
+        symbol_health_events_from_results(result.results, now=timestamp),
+        scan_run_id=scan_run_id,
+    )
 
 
 def list_scan_history(

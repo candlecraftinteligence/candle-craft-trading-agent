@@ -265,9 +265,9 @@ def load_active_public_watchlists(
     except (OSError, sqlite3.Error):
         return ActiveWatchlistQueryResult(source_available=False)
 
-    total = len(items)
-    visible = tuple(items[: max(1, limit)])
-    return ActiveWatchlistQueryResult(source_available=True, items=visible, total=total)
+    deduped = _dedupe_active_watchlist_items(items)
+    visible = tuple(deduped[: max(1, limit)])
+    return ActiveWatchlistQueryResult(source_available=True, items=visible, total=len(deduped))
 
 
 def load_active_public_signals(
@@ -291,9 +291,9 @@ def load_active_public_signals(
     except (OSError, sqlite3.Error):
         return ActiveSignalQueryResult(source_available=False)
 
-    total = len(items)
-    visible = tuple(items[: max(1, limit)])
-    return ActiveSignalQueryResult(source_available=True, items=visible, total=total)
+    deduped = _dedupe_active_signal_items(items)
+    visible = tuple(deduped[: max(1, limit)])
+    return ActiveSignalQueryResult(source_available=True, items=visible, total=len(deduped))
 
 
 def load_watchlist_stage_dashboard(
@@ -322,7 +322,7 @@ def load_watchlist_stage_dashboard(
     except (OSError, sqlite3.Error):
         return WatchlistStageDashboardResult(source_available=False, bucket_limit=max(1, limit))
 
-    return _stage_dashboard_result(items, limit=max(1, limit), source_available=True)
+    return _stage_dashboard_result(_dedupe_stage_items(items), limit=max(1, limit), source_available=True)
 
 
 def format_active_watchlist_lines(result: ActiveWatchlistQueryResult) -> list[str]:
@@ -620,6 +620,8 @@ def _stage_items_from_alert_rows(
         if _is_completed_outcome_not_retained(latest_row, lifecycle_row):
             continue
         stage = _stage_for_alert_group(latest_row, watch_row, outcome_rows, lifecycle_row, symbol_row, raw_result)
+        if _expired_public_view_row((latest_row, watch_row, *outcome_rows), lifecycle_row):
+            continue
         if stage != WATCHLIST_STAGE_COOLDOWN and _watchlist_row_expired(watch_row, outcome_rows):
             continue
         if not _public_alert_quality_passes(watch_row):
@@ -696,6 +698,8 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
         row = dict(raw_row)
         if _status_key(row.get("current_state")) in _ACTIVE_SIGNAL_STATE_KEYS:
             continue
+        if _expired_public_view_row((row,), row):
+            continue
         stage = _stage_for_lifecycle_row(row)
         if stage == NA:
             continue
@@ -771,6 +775,40 @@ def _stage_dashboard_result(
     )
 
 
+def _dedupe_active_watchlist_items(items: Sequence[ActiveWatchlistItem]) -> tuple[ActiveWatchlistItem, ...]:
+    latest: dict[tuple[str, str], ActiveWatchlistItem] = {}
+    for item in items:
+        key = (item.symbol, item.direction)
+        existing = latest.get(key)
+        if existing is None or item.sort_id > existing.sort_id:
+            latest[key] = item
+    return tuple(sorted(latest.values(), key=lambda item: item.sort_id, reverse=True))
+
+
+def _dedupe_active_signal_items(items: Sequence[ActiveSignalItem]) -> tuple[ActiveSignalItem, ...]:
+    latest: dict[tuple[str, str], ActiveSignalItem] = {}
+    for item in items:
+        key = (item.symbol, item.direction)
+        existing = latest.get(key)
+        if existing is None or item.sort_id > existing.sort_id:
+            latest[key] = item
+    return tuple(sorted(latest.values(), key=lambda item: item.sort_id, reverse=True))
+
+
+def _dedupe_stage_items(items: Sequence[WatchlistStageItem]) -> tuple[WatchlistStageItem, ...]:
+    latest: dict[tuple[str, str], WatchlistStageItem] = {}
+    for item in items:
+        key = (item.symbol, item.direction)
+        existing = latest.get(key)
+        if existing is None or _stage_item_sort(item) > _stage_item_sort(existing):
+            latest[key] = item
+    return tuple(latest.values())
+
+
+def _stage_item_sort(item: WatchlistStageItem) -> tuple[float, float, int, str]:
+    return (item.updated_sort, item.quality_sort, item.readiness_sort, item.signal_id)
+
+
 def _active_items_from_rows(
     connection: sqlite3.Connection,
     rows: Sequence[Mapping[str, Any]],
@@ -836,6 +874,8 @@ def _active_signal_items_from_rows(
         outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
         lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
+        if _expired_public_view_row((signal_row, *outcome_rows), lifecycle_row):
+            continue
         if _active_signal_group_is_closed((signal_row, *outcome_rows), lifecycle_row):
             continue
         if not _active_signal_row_has_complete_trade_map(signal_row):
@@ -898,13 +938,38 @@ def _active_signal_group_is_closed(
     lifecycle_row: Mapping[str, Any],
 ) -> bool:
     values: list[Any] = [
-        lifecycle_row.get("current_state"),
         *(row.get("alert_type") for row in rows),
         *(row.get("new_state") for row in rows),
         *(row.get("lifecycle_state") for row in rows),
     ]
+    if _lifecycle_row_matches_rows(rows, lifecycle_row):
+        values.append(lifecycle_row.get("current_state"))
     keys = {_status_key(value) for value in values if _status_key(value)}
     return bool(keys & (_TERMINAL_ALERT_TYPE_KEYS | _ACTIVE_SIGNAL_CLOSED_OUTCOME_KEYS | _COOLDOWN_STATE_KEYS))
+
+
+def _expired_public_view_row(rows: Sequence[Mapping[str, Any]], lifecycle_row: Mapping[str, Any]) -> bool:
+    values: list[Any] = [
+        *(row.get("alert_type") for row in rows),
+        *(row.get("new_state") for row in rows),
+        *(row.get("lifecycle_state") for row in rows),
+    ]
+    if _lifecycle_row_matches_rows(rows, lifecycle_row):
+        values.extend((lifecycle_row.get("current_state"), lifecycle_row.get("failed_gate")))
+    return "expired" in {_status_key(value) for value in values if _status_key(value)}
+
+
+def _lifecycle_row_matches_rows(rows: Sequence[Mapping[str, Any]], lifecycle_row: Mapping[str, Any]) -> bool:
+    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+    if lifecycle_id == NA:
+        return False
+    row_ids = {
+        identifier
+        for row in rows
+        for identifier in (_clean(row.get("signal_id")), _clean(row.get("lifecycle_id")))
+        if identifier != NA
+    }
+    return lifecycle_id in row_ids
 
 
 def _active_signal_row_has_complete_trade_map(row: Mapping[str, Any]) -> bool:
