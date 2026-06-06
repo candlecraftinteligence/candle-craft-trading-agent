@@ -4,17 +4,21 @@ import json
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from app.analytics.public_signal_quality import grade_from_score, normalize_grade, public_quality_passes
-from app.alerts.watchlist_expiry import watchlist_expiry_decision
+from app.alerts.watchlist_expiry import parse_utc_timestamp, watchlist_expiry_decision
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import RANGE_DASH, TelegramAlertType, format_telegram_price, format_telegram_rr
 
 ACTIVE_WATCHLIST_DISPLAY_LIMIT = 10
 WATCHLIST_STAGE_DISPLAY_LIMIT = 8
+ACTIVE_SIGNAL_TTL_HOURS = 24
+ACTIVE_SIGNAL_TTL_AGE = timedelta(hours=ACTIVE_SIGNAL_TTL_HOURS)
+ACTIVE_SIGNAL_MIN_RR = Decimal("3")
 WATCHLIST_STATUS_WAITING = "Waiting for Limit Zone"
 WATCHLIST_STATUS_LIMIT_HIT = "LIMIT ZONE HIT"
 WATCHLIST_STATUS_TP1_HIT = "TP1 HIT"
@@ -82,6 +86,47 @@ _ACTIVE_SIGNAL_STATE_KEYS |= {
     "tp2_hit",
     "tp3_hit",
     "tp_hit",
+}
+_ACTIVE_SIGNAL_ALLOWED_STATE_KEYS = {
+    "confirmed",
+    "confirmed_setup",
+    "signal_confirmed",
+    "executing",
+    "limit_hit",
+    "limit_zone_hit",
+    "tp1_hit",
+    "tp2_hit",
+    "tp3_hit",
+}
+_ACTIVE_SIGNAL_BLOCKED_STATE_KEYS = {
+    "reject",
+    "rejected",
+    "no_trade",
+    "no_setup",
+    "watch",
+    "watching",
+    "watchlist",
+    "watchlisted",
+    "watchlist_only",
+    "watch_only",
+    "a_grade_watch",
+    "stalking",
+    "triggered",
+    "discovered",
+    "near_miss",
+    "monitoring",
+    "cooldown",
+    "cooled_down",
+    "expired",
+    "invalidated",
+    "no_longer_tracking",
+    "removed",
+    "cancelled",
+    "canceled",
+    "closed",
+    "archived",
+    "sl_hit",
+    "stop_hit",
 }
 _WATCH_STATE_KEYS = {"a_grade_watch", "watch", "watching_limit_zone", "watchlist", "watchlisted"}
 _STALKING_STATE_KEYS = {"stalking", "triggered"}
@@ -874,11 +919,13 @@ def _active_signal_items_from_rows(
         outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
         lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
-        if _expired_public_view_row((signal_row, *outcome_rows), lifecycle_row):
-            continue
-        if _active_signal_group_is_closed((signal_row, *outcome_rows), lifecycle_row):
-            continue
-        if not _active_signal_row_has_complete_trade_map(signal_row):
+        if not _active_signal_group_is_eligible(
+            connection,
+            signal_row=signal_row,
+            outcome_rows=outcome_rows,
+            latest_row=latest_row,
+            lifecycle_row=lifecycle_row,
+        ):
             continue
         symbol = _symbol_text(signal_row.get("symbol"))
         direction = _direction_text(signal_row.get("direction"))
@@ -901,7 +948,7 @@ def _active_signal_items_from_rows(
                 signal_id=signal_id,
                 symbol=symbol,
                 direction=direction,
-                updated_at=_first_non_na(_clean(latest_row.get("last_seen_at")), _clean(latest_row.get("sent_at"))),
+                updated_at=_active_signal_updated_at(latest_row, lifecycle_row),
                 status=_signal_status_from_outcomes(hit_alert_types),
                 grade=_active_quality_text(signal_row),
                 rr=_active_rr_text(signal_row),
@@ -959,6 +1006,60 @@ def _expired_public_view_row(rows: Sequence[Mapping[str, Any]], lifecycle_row: M
     return "expired" in {_status_key(value) for value in values if _status_key(value)}
 
 
+def _active_signal_group_is_eligible(
+    connection: sqlite3.Connection,
+    *,
+    signal_row: Mapping[str, Any],
+    outcome_rows: Sequence[Mapping[str, Any]],
+    latest_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> bool:
+    rows = (signal_row, *outcome_rows)
+    if _expired_public_view_row(rows, lifecycle_row):
+        return False
+    if _active_signal_group_is_closed(rows, lifecycle_row):
+        return False
+    if not _active_signal_state_is_allowed(rows, lifecycle_row):
+        return False
+    if not _active_signal_is_fresh(latest_row, lifecycle_row):
+        return False
+    if not _active_signal_quality_passes(connection, signal_row, latest_row, lifecycle_row):
+        return False
+    if not _active_signal_rr_passes(signal_row):
+        return False
+    if not _active_signal_row_has_complete_trade_map(signal_row):
+        return False
+
+    latest_symbol_row = _latest_symbol_result_for_attempt(connection, latest_row)
+    if _latest_symbol_row_blocks_active(latest_symbol_row):
+        return False
+    raw_result = _json_mapping(latest_symbol_row.get("raw_result_json"))
+    if _latest_price_invalidates_signal(
+        direction=_direction_text(signal_row.get("direction")),
+        levels=_stored_trade_map_levels(signal_row),
+        raw_result=raw_result,
+    ):
+        return False
+    return True
+
+
+def _active_signal_state_is_allowed(
+    rows: Sequence[Mapping[str, Any]],
+    lifecycle_row: Mapping[str, Any],
+) -> bool:
+    values: list[Any] = [
+        *(row.get("alert_type") for row in rows),
+        *(row.get("new_state") for row in rows),
+        *(row.get("lifecycle_state") for row in rows),
+    ]
+    if _lifecycle_row_matches_rows(rows, lifecycle_row):
+        values.append(lifecycle_row.get("current_state"))
+    keys = {_status_key(value) for value in values if _status_key(value)}
+    if keys & _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS:
+        return False
+    return bool(keys & _ACTIVE_SIGNAL_ALLOWED_STATE_KEYS)
+
+
 def _lifecycle_row_matches_rows(rows: Sequence[Mapping[str, Any]], lifecycle_row: Mapping[str, Any]) -> bool:
     lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
     if lifecycle_id == NA:
@@ -969,7 +1070,21 @@ def _lifecycle_row_matches_rows(rows: Sequence[Mapping[str, Any]], lifecycle_row
         for identifier in (_clean(row.get("signal_id")), _clean(row.get("lifecycle_id")))
         if identifier != NA
     }
-    return lifecycle_id in row_ids
+    if lifecycle_id in row_ids:
+        return True
+
+    lifecycle_timestamp = _latest_timestamp(
+        (
+            lifecycle_row.get("last_seen_at"),
+            lifecycle_row.get("last_transition_at"),
+        )
+    )
+    row_timestamp = _latest_timestamp(
+        value
+        for row in rows
+        for value in (row.get("last_seen_at"), row.get("sent_at"))
+    )
+    return lifecycle_timestamp is not None and row_timestamp is not None and lifecycle_timestamp >= row_timestamp
 
 
 def _active_signal_row_has_complete_trade_map(row: Mapping[str, Any]) -> bool:
@@ -979,11 +1094,10 @@ def _active_signal_row_has_complete_trade_map(row: Mapping[str, Any]) -> bool:
         return False
     if _direction_text(row.get("direction")) not in {"LONG", "SHORT"}:
         return False
-    if not _public_alert_quality_passes(row):
+    levels = _stored_trade_map_levels(row)
+    if any(levels.get(column, NA) == NA for column in _LEVEL_COLUMNS):
         return False
-    if format_telegram_rr(row.get("rr_planned")) == NA:
-        return False
-    return all(_price_text(row.get(column)) != NA for column in _LEVEL_COLUMNS)
+    return _trade_map_directionally_valid(direction=_direction_text(row.get("direction")), levels=levels)
 
 
 def _stored_trade_map_levels(row: Mapping[str, Any]) -> dict[str, str]:
@@ -1003,6 +1117,267 @@ def _active_quality_text(row: Mapping[str, Any]) -> str:
 
 def _active_rr_text(row: Mapping[str, Any]) -> str:
     return format_telegram_rr(row.get("rr_planned"))
+
+
+def _active_signal_updated_at(
+    latest_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> str:
+    return _latest_timestamp_text(
+        (
+            lifecycle_row.get("last_seen_at"),
+            lifecycle_row.get("last_transition_at"),
+            latest_row.get("last_seen_at"),
+            latest_row.get("sent_at"),
+        )
+    )
+
+
+def _active_signal_is_fresh(
+    latest_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> bool:
+    parsed = _latest_timestamp(
+        (
+            lifecycle_row.get("last_seen_at"),
+            lifecycle_row.get("last_transition_at"),
+            latest_row.get("last_seen_at"),
+            latest_row.get("sent_at"),
+        )
+    )
+    if parsed is None:
+        return False
+    return datetime.now(UTC) - parsed <= ACTIVE_SIGNAL_TTL_AGE
+
+
+def _active_signal_quality_passes(
+    connection: sqlite3.Connection,
+    signal_row: Mapping[str, Any],
+    latest_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> bool:
+    candidate_meta = _candidate_metadata(connection, latest_row)
+    latest_symbol_row = _latest_symbol_result_for_attempt(connection, latest_row)
+    raw_result = _json_mapping(latest_symbol_row.get("raw_result_json"))
+    diagnostics = _raw_diagnostics(raw_result)
+    setup_quality = _mapping_or_empty(raw_result.get("setup_quality"))
+    trade_idea = _mapping_or_empty(raw_result.get("trade_idea"))
+
+    explicit_grade_candidates = (
+        signal_row.get("setup_quality_score"),
+        candidate_meta.get("quality_grade"),
+        setup_quality.get("quality_grade"),
+        raw_result.get("quality_grade"),
+        trade_idea.get("grade"),
+        _diagnostic_value(diagnostics, "quality_grade"),
+        _diagnostic_value(diagnostics, "trust_grade"),
+    )
+    score_candidates = (
+        signal_row.get("setup_quality_score"),
+        lifecycle_row.get("quality_score"),
+        latest_symbol_row.get("setup_quality_score"),
+        setup_quality.get("quality_score"),
+        _diagnostic_value(diagnostics, "quality_score"),
+        _diagnostic_value(diagnostics, "trust_percentage"),
+        _diagnostic_value(diagnostics, "trust_score"),
+    )
+    if _quality_candidates_reject((*explicit_grade_candidates, *score_candidates)):
+        return False
+    return public_quality_passes(
+        grade_candidates=explicit_grade_candidates,
+        score_candidates=score_candidates,
+    )
+
+
+def _active_signal_rr_passes(row: Mapping[str, Any]) -> bool:
+    rr = _decimal_or_none(row.get("rr_planned"))
+    if rr is None or format_telegram_rr(row.get("rr_planned")) == NA:
+        return False
+    required = max(
+        value
+        for value in (ACTIVE_SIGNAL_MIN_RR, _decimal_or_none(row.get("min_rr")))
+        if value is not None
+    )
+    return rr >= required
+
+
+def _trade_map_directionally_valid(*, direction: str, levels: Mapping[str, str]) -> bool:
+    entry_low = _decimal_or_none(levels.get("entry_low"))
+    entry_high = _decimal_or_none(levels.get("entry_high"))
+    stop = _decimal_or_none(levels.get("stop_loss"))
+    tp1 = _decimal_or_none(levels.get("tp1"))
+    tp2 = _decimal_or_none(levels.get("tp2"))
+    tp3 = _decimal_or_none(levels.get("tp3"))
+    if None in {entry_low, entry_high, stop, tp1, tp2, tp3}:
+        return False
+    entry_min = min(entry_low, entry_high)
+    entry_max = max(entry_low, entry_high)
+    if direction == "LONG":
+        return stop < entry_min and entry_max < tp1 < tp2 < tp3
+    if direction == "SHORT":
+        return stop > entry_max and entry_min > tp1 > tp2 > tp3
+    return False
+
+
+def _latest_symbol_row_blocks_active(row: Mapping[str, Any]) -> bool:
+    if not row:
+        return False
+    raw_result = _json_mapping(row.get("raw_result_json"))
+    setup_quality = _mapping_or_empty(raw_result.get("setup_quality"))
+    state_values = (
+        row.get("status"),
+        row.get("display_bucket"),
+        raw_result.get("status"),
+        raw_result.get("display_status"),
+        raw_result.get("display_bucket"),
+        setup_quality.get("quality_grade"),
+        raw_result.get("quality_grade"),
+        _mapping_or_empty(raw_result.get("trade_idea")).get("grade"),
+    )
+    state_keys = {_status_key(value) for value in state_values if _status_key(value)}
+    if state_keys & _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS:
+        return True
+
+    failure_values = (
+        row.get("failed_gate"),
+        row.get("rejection_reason"),
+        raw_result.get("failed_gate"),
+        raw_result.get("failed_stage"),
+        raw_result.get("rejection_stage"),
+        raw_result.get("rejection_reason"),
+        _diagnostic_value(_raw_diagnostics(raw_result), "first_failed_gate"),
+    )
+    failure_keys = {_status_key(value) for value in failure_values if _status_key(value)}
+    return bool(
+        failure_keys
+        & {
+            "body_acceptance_failure",
+            "challenge_rr_below_3",
+            "invalidation_triggered",
+            "invalidated",
+            "missing_invalidation",
+            "missing_rr",
+            "missing_stop",
+            "missing_target",
+            "missing_targets",
+            "missing_tp",
+            "missing_tp1",
+            "missing_tp2",
+            "pullback_beyond_786",
+            "pullback_too_deep",
+            "quality_filter",
+            "rr_below_minimum",
+            "rr_too_low",
+            "stop_wrong_side",
+            "structural_breakdown",
+            "target_integrity",
+            "target_order_invalid",
+            "targets_not_monotonic",
+            "trust_meter_below_minimum",
+            "wrong_side_stop",
+        }
+    )
+
+
+def _latest_price_invalidates_signal(
+    *,
+    direction: str,
+    levels: Mapping[str, str],
+    raw_result: Mapping[str, Any],
+) -> bool:
+    price = _latest_price_from_raw_result(raw_result)
+    stop = _decimal_or_none(levels.get("stop_loss"))
+    if price is None or stop is None:
+        return False
+    if direction == "LONG":
+        return price <= stop
+    if direction == "SHORT":
+        return price >= stop
+    return True
+
+
+def _latest_price_from_raw_result(raw_result: Mapping[str, Any]) -> Decimal | None:
+    diagnostics = _raw_diagnostics(raw_result)
+    candidates: list[Any] = [
+        raw_result.get("current_price"),
+        raw_result.get("latest_close"),
+        raw_result.get("latest_price"),
+        raw_result.get("last_price"),
+        raw_result.get("price"),
+        raw_result.get("close"),
+        _diagnostic_value(diagnostics, "current_price"),
+        _diagnostic_value(diagnostics, "latest_close"),
+        _diagnostic_value(diagnostics, "latest_price"),
+        _diagnostic_value(diagnostics, "last_price"),
+        _diagnostic_value(diagnostics, "price"),
+    ]
+    for key in ("latest_candle", "current_candle", "candle"):
+        candidates.append(_mapping_value(raw_result.get(key), "close"))
+    for key in ("candles_5m", "candles_15m", "candles_1h", "candles_4h", "candles"):
+        candidates.append(_latest_sequence_close(raw_result.get(key)))
+
+    for value in candidates:
+        parsed = _decimal_or_none(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _latest_sequence_close(value: Any) -> Any:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray, Mapping)) or not value:
+        return NA
+    return _mapping_value(value[-1], "close")
+
+
+def _quality_candidates_reject(values: Sequence[Any]) -> bool:
+    for value in values:
+        key = _status_key(value)
+        if key in {"reject", "rejected", "no_trade", "no_setup"}:
+            return True
+        grade = normalize_grade(value)
+        if grade in {"Reject", "No trade"}:
+            return True
+        score_grade = grade_from_score(value)
+        if score_grade == "Reject" and _decimal_or_none(value) is not None:
+            return True
+    return False
+
+
+def _latest_timestamp(values: Sequence[Any]) -> datetime | None:
+    latest: datetime | None = None
+    for value in values:
+        parsed = parse_utc_timestamp(value)
+        if parsed is not None and (latest is None or parsed > latest):
+            latest = parsed
+    return latest
+
+
+def _latest_timestamp_text(values: Sequence[Any]) -> str:
+    latest: tuple[datetime, str] | None = None
+    fallback = NA
+    for value in values:
+        text = _clean(value)
+        if fallback == NA and text != NA:
+            fallback = text
+        parsed = parse_utc_timestamp(text)
+        if parsed is not None and (latest is None or parsed > latest[0]):
+            latest = (parsed, text)
+    return latest[1] if latest is not None else fallback
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    text = _clean(value)
+    if text == NA:
+        return None
+    try:
+        number = Decimal(text.replace(",", ""))
+    except (InvalidOperation, ValueError):
+        return None
+    return number if number.is_finite() else None
 
 
 def _group_has_confirmed_signal(rows: Sequence[Mapping[str, Any]]) -> bool:
@@ -1237,7 +1612,12 @@ def _is_unverified(value: Any) -> bool:
     return "unverified" in _status_key(value)
 
 
-def _symbol_result_for_attempt(connection: sqlite3.Connection, row: Mapping[str, Any]) -> Mapping[str, Any]:
+def _symbol_result_for_attempt(
+    connection: sqlite3.Connection,
+    row: Mapping[str, Any],
+    *,
+    prefer_scan_run: bool = True,
+) -> Mapping[str, Any]:
     if not _table_exists(connection, "symbol_results"):
         return {}
     columns = _table_columns(connection, "symbol_results")
@@ -1247,6 +1627,8 @@ def _symbol_result_for_attempt(connection: sqlite3.Connection, row: Mapping[str,
         _select_or_zero("id", columns),
         _select_or_na("run_id", columns),
         "symbol",
+        _select_or_na("status", columns),
+        _select_or_na("display_bucket", columns),
         _select_or_na("setup_quality_score", columns),
         _select_or_zero("readiness_score", columns),
         _select_or_na("failed_gate", columns),
@@ -1259,7 +1641,7 @@ def _symbol_result_for_attempt(connection: sqlite3.Connection, row: Mapping[str,
     if symbol == NA:
         return {}
     scan_run_id = _clean(row.get("scan_run_id"))
-    if "run_id" in columns and scan_run_id != NA:
+    if prefer_scan_run and "run_id" in columns and scan_run_id != NA:
         rows = connection.execute(
             f"""
             SELECT {", ".join(select_columns)}
@@ -1282,6 +1664,10 @@ def _symbol_result_for_attempt(connection: sqlite3.Connection, row: Mapping[str,
             (symbol,),
         ).fetchone()
     return dict(rows) if rows is not None else {}
+
+
+def _latest_symbol_result_for_attempt(connection: sqlite3.Connection, row: Mapping[str, Any]) -> Mapping[str, Any]:
+    return _symbol_result_for_attempt(connection, row, prefer_scan_run=False)
 
 
 def _lifecycle_row_for_attempt(connection: sqlite3.Connection, row: Mapping[str, Any]) -> Mapping[str, Any]:
