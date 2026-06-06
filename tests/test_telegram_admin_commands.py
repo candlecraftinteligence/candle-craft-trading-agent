@@ -717,9 +717,9 @@ def test_empty_states_use_premium_copy_without_developer_wording(tmp_path) -> No
 
     combined = "\n".join(response.text for response in responses)
     assert "No lifecycle alerts available right now." in combined
-    assert "None right now. The wolf is waiting for cleaner structure." in combined
-    assert "None right now. No early ideas passed quality filters." in combined
-    assert "No forced trades." not in combined
+    assert "The wolf is stalking liquidity." in combined
+    assert combined.count("None right now.") >= 3
+    assert "No forced trades." in combined
     assert "No safety summary available yet." in combined
     assert "Preset lists:" not in watchlists.text
     assert "Data status: Unverified" not in combined
@@ -870,10 +870,9 @@ def test_watchlists_screen_uses_active_public_watchlist_store(tmp_path) -> None:
 
     _assert_shell_screen(response.text)
     assert response.text.startswith("🐺🟠 WATCHLISTS")
-    assert response.text.count("None right now.") == 2
-    assert "None right now. The wolf is waiting for cleaner structure." in response.text
-    assert "None right now. No early ideas passed quality filters." in response.text
-    assert "No forced trades." not in response.text
+    assert response.text.count("None right now.") == 3
+    assert "The wolf is stalking liquidity." in response.text
+    assert "No forced trades." in response.text
     assert "NEARUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
     assert "Preset lists:" not in response.text
@@ -1198,10 +1197,9 @@ def test_public_watchlists_use_active_public_watchlist_store(tmp_path) -> None:
     _assert_public_screen_safe(response.text)
     _assert_public_watchlist_controls(response.reply_markup)
     assert response.text.startswith("🐺🟠 WATCHLISTS")
-    assert response.text.count("None right now.") == 2
-    assert "None right now. The wolf is waiting for cleaner structure." in response.text
-    assert "None right now. No early ideas passed quality filters." in response.text
-    assert "No forced trades." not in response.text
+    assert response.text.count("None right now.") == 3
+    assert "The wolf is stalking liquidity." in response.text
+    assert "No forced trades." in response.text
     assert "ALERTUSDT" not in response.text
     assert "NEARUSDT" not in response.text
     assert "scan_runs" not in response.text
@@ -1215,10 +1213,9 @@ def test_public_watchlist_empty_state_uses_safe_local_data_copy(tmp_path) -> Non
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
     _assert_public_watchlist_controls(response.reply_markup)
-    assert response.text.count("None right now.") == 2
-    assert "None right now. The wolf is waiting for cleaner structure." in response.text
-    assert "None right now. No early ideas passed quality filters." in response.text
-    assert "No forced trades." not in response.text
+    assert response.text.count("None right now.") == 3
+    assert "The wolf is stalking liquidity." in response.text
+    assert "No forced trades." in response.text
     assert "ALERTUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
     assert "REJECTUSDT" not in response.text
@@ -1517,9 +1514,9 @@ def test_public_admin_reserved_response_does_not_expose_admin_data(tmp_path) -> 
     _assert_public_watchlist_controls(watchlists_response.reply_markup)
     _assert_no_execution_buttons(watchlists_response.reply_markup)
     assert watchlists_response.text.startswith("🐺🟠 WATCHLISTS")
-    assert "No forced trades." not in watchlists_response.text
-    assert "None right now. The wolf is waiting for cleaner structure." in watchlists_response.text
-    assert "None right now. No early ideas passed quality filters." in watchlists_response.text
+    assert "No forced trades." in watchlists_response.text
+    assert "The wolf is stalking liquidity." in watchlists_response.text
+    assert watchlists_response.text.count("None right now.") == 3
     assert "System Desk" not in watchlists_response.text
     assert "Integrity Desk" not in watchlists_response.text
     assert "Configuration Desk" not in watchlists_response.text

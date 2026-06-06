@@ -78,7 +78,18 @@ _WATCHLIST_STAGE_QUERY_TYPES = tuple(
     dict.fromkeys((*_WATCHLIST_QUERY_TYPES, _SIGNAL_CONFIRMED_TYPE))
 )
 _LEVEL_COLUMNS = ("entry_low", "entry_high", "stop_loss", "tp1", "tp2", "tp3")
-_ACTIVE_SIGNAL_STATE_KEYS = {"active", "confirmed", "executing", "limit_hit", "limit_zone_hit", "managing"}
+_WATCHLIST_REQUIRED_LEVEL_COLUMNS = ("entry_low", "entry_high", "stop_loss", "tp1")
+_ACTIVE_SIGNAL_STATE_KEYS = {
+    "active",
+    "confirmed",
+    "executing",
+    "limit_hit",
+    "limit_zone_hit",
+    "managing",
+    "tp1_hit",
+    "tp2_hit",
+    "tp3_hit",
+}
 _ACTIVE_SIGNAL_ALLOWED_STATE_KEYS = {
     "active",
     "confirmed",
@@ -132,6 +143,9 @@ _COOLDOWN_STATE_KEYS = {
     "closed",
     "stopped",
 }
+_PUBLIC_COOLDOWN_STATE_KEYS = {"cooldown", "cooled_down", "invalidated", "expired", "no_longer_tracking"}
+_ACTIVE_OWNED_ALERT_TYPE_KEYS = {"limit_hit", "tp1_hit", "tp2_hit", "tp3_hit"}
+_PUBLIC_COOLDOWN_ALERT_TYPE_KEYS = {"invalidated", "expired", "no_longer_tracking", "cooldown"}
 _TERMINAL_ALERT_TYPE_KEYS = {
     "invalidated",
     "expired",
@@ -178,22 +192,23 @@ _PUBLIC_WATCHLIST_BLOCKED_KEYS = {
     "cancelled",
     "canceled",
     "closed",
-    "cooldown",
-    "cooled_down",
-    "expired",
+    "error",
     "failed",
     "failed_quality_gates",
+    "insufficient_candles",
     "invalid",
-    "invalidated",
-    "no_longer_tracking",
+    "invalid_scanner_result",
+    "missing_required_candles",
     "no_setup",
     "no_trade",
     "no_valid_liquidity_grab_pullback_setup",
     "no_valid_setup",
+    "not_enough_candles",
     "quality_gate_failed",
     "quality_gates_failed",
     "reject",
     "rejected",
+    "rejected_strategy",
     "rejected_by_derivatives",
     "rejected_by_regime",
     "rejected_by_risk",
@@ -201,14 +216,25 @@ _PUBLIC_WATCHLIST_BLOCKED_KEYS = {
     "rejected_by_technical",
     "removed",
     "scan_error",
+    "scanner_error",
     "scanned_no_setup",
     "sl_hit",
     "stop_hit",
+    "strategy_rejected",
     "tp3_hit",
 }
 _PUBLIC_WATCHLIST_BLOCKED_TEXT = (
     "no valid liquidity-grab pullback setup",
+    "no valid liquidity grab pullback setup",
     "no valid setup",
+    "not enough candles",
+    "insufficient candles",
+    "missing required candles",
+    "invalid scanner result",
+    "strategy rejected",
+    "rejected strategy",
+    "scan error",
+    "scanned_no_setup",
     "failed quality gates",
     "quality gates failed",
 )
@@ -315,7 +341,7 @@ class WatchlistStageDashboardResult:
 
     @property
     def total(self) -> int:
-        return self.stalking_total + self.watch_total
+        return self.stalking_total + self.watch_total + self.cooldown_total
 
 
 def load_active_public_watchlists(
@@ -460,27 +486,29 @@ def format_watchlist_stage_dashboard(result: WatchlistStageDashboardResult) -> s
     lines: list[str] = [
         "🐺🟠 WATCHLISTS",
         "",
+        "The wolf is stalking liquidity.",
+        "",
     ]
-    for title, description, empty_state, items, total in (
+    for title, items, total in (
         (
             "🔥 STALKING",
-            "Setup is developing. Liquidity/structure is forming, but confirmation is not complete yet.",
-            "None right now. The wolf is waiting for cleaner structure.",
             result.stalking_items,
             result.stalking_total,
         ),
         (
             "👀 WATCH",
-            "Early idea only. Waiting for stronger structure before it can become stalked.",
-            "None right now. No early ideas passed quality filters.",
             result.watch_items,
             result.watch_total,
         ),
+        (
+            "❄️ COOLDOWN",
+            result.cooldown_items,
+            result.cooldown_total,
+        ),
     ):
         lines.append(title)
-        lines.append(description)
         if total == 0:
-            lines.append(empty_state)
+            lines.append("None right now.")
         else:
             for item in items:
                 lines.append(f"{item.symbol} — {item.reason}")
@@ -488,6 +516,7 @@ def format_watchlist_stage_dashboard(result: WatchlistStageDashboardResult) -> s
                 lines.append(f"+ {total - len(items)} more")
         lines.append("")
 
+    lines.append("No forced trades.")
     lines.append(WATCHLIST_DASHBOARD_FOOTER)
     return "\n".join(lines)
 
@@ -579,7 +608,8 @@ def _has_watchlist_lifecycle_records(path: Path) -> bool:
             columns = _table_columns(connection, "setup_lifecycle_records")
             if not {"current_state", "symbol"} <= columns:
                 return False
-            placeholders = ",".join("?" for _ in (*_WATCH_STATE_KEYS, *_STALKING_STATE_KEYS))
+            lifecycle_stage_keys = (*_WATCH_STATE_KEYS, *_STALKING_STATE_KEYS, *_PUBLIC_COOLDOWN_STATE_KEYS)
+            placeholders = ",".join("?" for _ in lifecycle_stage_keys)
             row = connection.execute(
                 f"""
                 SELECT 1
@@ -587,7 +617,7 @@ def _has_watchlist_lifecycle_records(path: Path) -> bool:
                 WHERE LOWER(REPLACE(REPLACE(current_state, '-', '_'), ' ', '_')) IN ({placeholders})
                 LIMIT 1
                 """,
-                tuple((*_WATCH_STATE_KEYS, *_STALKING_STATE_KEYS)),
+                tuple(lifecycle_stage_keys),
             ).fetchone()
             return row is not None
     except (OSError, sqlite3.Error):
@@ -687,7 +717,7 @@ def _stage_items_from_alert_rows(
             continue
         if _public_watchlist_stage_blocked((latest_row, watch_row, *outcome_rows), lifecycle_row, symbol_row, raw_result, lifecycle_event):
             continue
-        if _expired_public_view_row((latest_row, watch_row, *outcome_rows), lifecycle_row):
+        if stage != WATCHLIST_STAGE_COOLDOWN and _expired_public_view_row((latest_row, watch_row, *outcome_rows), lifecycle_row):
             continue
         if stage != WATCHLIST_STAGE_COOLDOWN and _watchlist_row_expired(watch_row, outcome_rows):
             continue
@@ -697,8 +727,22 @@ def _stage_items_from_alert_rows(
         symbol = _symbol_text(watch_row.get("symbol"))
         if symbol == NA:
             continue
-        levels = _levels_for_watchlist(connection, watch_row, outcome_rows)
-        candidate_meta = _candidate_metadata(connection, latest_row)
+        levels = _levels_for_watchlist(connection, watch_row, outcome_rows, lifecycle_row, raw_result)
+        candidate_meta = _candidate_metadata(connection, watch_row)
+        direction = _planned_direction(
+            watch_row.get("direction"),
+            lifecycle_row.get("direction"),
+            raw_result.get("direction"),
+            raw_result.get("bias"),
+        )
+        invalidation = _planned_invalidation_text(lifecycle_row, candidate_meta, raw_result)
+        if not _watchlist_stage_has_trade_plan(
+            symbol=symbol,
+            direction=direction,
+            levels=levels,
+            invalidation=invalidation,
+        ):
+            continue
         reason = _stage_reason(
             stage=stage,
             latest_row=latest_row,
@@ -708,6 +752,7 @@ def _stage_items_from_alert_rows(
             lifecycle_event=lifecycle_event,
             symbol_row=symbol_row,
             raw_result=raw_result,
+            candidate_meta=candidate_meta,
         )
         items.append(
             WatchlistStageItem(
@@ -716,10 +761,10 @@ def _stage_items_from_alert_rows(
                 stage=stage,
                 reason=reason,
                 updated_at=_updated_at_for_stage_item(latest_row, lifecycle_row),
-                direction=_direction_text(_first_non_na(watch_row.get("direction"), lifecycle_row.get("direction"))),
+                direction=direction,
                 rr=_first_non_na(watch_row.get("rr_planned"), candidate_meta.get("rr")),
                 grade=_first_non_na(watch_row.get("setup_quality_score"), candidate_meta.get("quality_grade")),
-                invalidation=_first_non_na(lifecycle_row.get("invalidation_reason"), candidate_meta.get("invalidation")),
+                invalidation=invalidation,
                 lifecycle_state=_first_non_na(lifecycle_row.get("current_state"), latest_row.get("lifecycle_state"), latest_row.get("new_state")),
                 quality_sort=_quality_sort(watch_row, lifecycle_row, symbol_row, raw_result),
                 readiness_sort=_readiness_sort(lifecycle_row, symbol_row, raw_result),
@@ -751,6 +796,9 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
         _select_or_na("edge_score", columns),
         _select_or_na("action_label", columns),
         _select_or_na("invalidation_reason", columns),
+        _select_or_na("invalidation_logic", columns),
+        _select_or_na("rr", columns),
+        *(_select_or_na(column, columns) for column in _LEVEL_COLUMNS),
     ]
     rows = connection.execute(
         f"""
@@ -765,10 +813,10 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
         row = dict(raw_row)
         if _status_key(row.get("current_state")) in _ACTIVE_SIGNAL_STATE_KEYS:
             continue
-        if _expired_public_view_row((row,), row):
-            continue
         stage = _stage_for_lifecycle_row(row)
         if stage == NA:
+            continue
+        if stage != WATCHLIST_STAGE_COOLDOWN and _expired_public_view_row((row,), row):
             continue
         event = _latest_lifecycle_event(connection, row)
         if _public_watchlist_stage_blocked((row,), row, {}, {}, event):
@@ -776,8 +824,17 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
         symbol = _symbol_text(row.get("symbol"))
         if symbol == NA:
             continue
-        levels = _candidate_levels(connection, row)
         candidate_meta = _candidate_metadata(connection, row)
+        levels = _levels_for_lifecycle_record(connection, row)
+        direction = _planned_direction(row.get("direction"))
+        invalidation = _planned_invalidation_text(row, candidate_meta, {})
+        if not _watchlist_stage_has_trade_plan(
+            symbol=symbol,
+            direction=direction,
+            levels=levels,
+            invalidation=invalidation,
+        ):
+            continue
         reason = _stage_reason(
             stage=stage,
             latest_row={},
@@ -787,6 +844,7 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
             lifecycle_event=event,
             symbol_row={},
             raw_result={},
+            candidate_meta=candidate_meta,
         )
         updated_at = _updated_at_for_stage_item({}, row)
         items.append(
@@ -796,10 +854,10 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
                 stage=stage,
                 reason=reason,
                 updated_at=updated_at,
-                direction=_direction_text(row.get("direction")),
-                rr=candidate_meta.get("rr", NA),
+                direction=direction,
+                rr=_first_non_na(row.get("rr"), candidate_meta.get("rr")),
                 grade=_first_non_na(candidate_meta.get("quality_grade"), row.get("quality_score")),
-                invalidation=_first_non_na(row.get("invalidation_reason"), candidate_meta.get("invalidation")),
+                invalidation=invalidation,
                 lifecycle_state=row.get("current_state"),
                 quality_sort=_score_from_quality(row.get("quality_score")),
                 readiness_sort=_int_value(row.get("readiness_score")),
@@ -819,6 +877,7 @@ def _stage_dashboard_result(
     buckets = {
         WATCHLIST_STAGE_STALKING: [],
         WATCHLIST_STAGE_WATCH: [],
+        WATCHLIST_STAGE_COOLDOWN: [],
     }
     for item in items:
         if item.stage in buckets:
@@ -838,8 +897,8 @@ def _stage_dashboard_result(
         stalking_total=len(sorted_buckets[WATCHLIST_STAGE_STALKING]),
         watch_items=sorted_buckets[WATCHLIST_STAGE_WATCH][:limit],
         watch_total=len(sorted_buckets[WATCHLIST_STAGE_WATCH]),
-        cooldown_items=(),
-        cooldown_total=0,
+        cooldown_items=sorted_buckets[WATCHLIST_STAGE_COOLDOWN][:limit],
+        cooldown_total=len(sorted_buckets[WATCHLIST_STAGE_COOLDOWN]),
         bucket_limit=limit,
     )
 
@@ -907,7 +966,10 @@ def _active_items_from_rows(
         direction = _direction_text(watch_row.get("direction"))
         if symbol == NA or direction == NA:
             continue
-        levels = _levels_for_watchlist(connection, watch_row, outcome_rows)
+        lifecycle_row = _lifecycle_row_for_attempt(connection, watch_row)
+        symbol_row = _symbol_result_for_attempt(connection, watch_row)
+        raw_result = _json_mapping(symbol_row.get("raw_result_json"))
+        levels = _levels_for_watchlist(connection, watch_row, outcome_rows, lifecycle_row, raw_result)
         items.append(
             ActiveWatchlistItem(
                 signal_id=signal_id,
@@ -1057,6 +1119,10 @@ def _public_watchlist_stage_blocked(
         raw_result.get("display_bucket"),
         raw_result.get("first_failed_gate"),
         raw_result.get("rejection_reason"),
+        _sequence_first_text(raw_result.get("rejection_reasons")),
+        _sequence_first_text(raw_result.get("hard_rejection_reasons")),
+        raw_result.get("error"),
+        raw_result.get("error_message"),
     ]
     keys = {_status_key(value) for value in status_values if _status_key(value)}
     if keys & _PUBLIC_WATCHLIST_BLOCKED_KEYS:
@@ -1160,10 +1226,93 @@ def _active_signal_row_has_complete_trade_map(row: Mapping[str, Any]) -> bool:
     return _trade_map_directionally_valid(direction=_direction_text(row.get("direction")), levels=levels)
 
 
+def _watchlist_stage_has_trade_plan(
+    *,
+    symbol: str,
+    direction: str,
+    levels: Mapping[str, str],
+    invalidation: str,
+) -> bool:
+    if _symbol_text(symbol) == NA:
+        return False
+    if direction not in {"LONG", "SHORT"}:
+        return False
+    if any(levels.get(column, NA) == NA for column in _WATCHLIST_REQUIRED_LEVEL_COLUMNS):
+        return False
+    if _safe_plan_text(invalidation) == NA:
+        return False
+    return _watchlist_trade_map_directionally_valid(direction=direction, levels=levels)
+
+
 def _stored_trade_map_levels(row: Mapping[str, Any]) -> dict[str, str]:
     levels = {column: _price_text(row.get(column)) for column in _LEVEL_COLUMNS}
     _normalize_single_level_zone(levels)
     return levels
+
+
+def _watchlist_trade_map_directionally_valid(*, direction: str, levels: Mapping[str, str]) -> bool:
+    entry_low = _decimal_or_none(levels.get("entry_low"))
+    entry_high = _decimal_or_none(levels.get("entry_high"))
+    stop = _decimal_or_none(levels.get("stop_loss"))
+    tp1 = _decimal_or_none(levels.get("tp1"))
+    if None in {entry_low, entry_high, stop, tp1}:
+        return False
+    entry_min = min(entry_low, entry_high)
+    entry_max = max(entry_low, entry_high)
+    if direction == "LONG":
+        return stop < entry_min and entry_max < tp1
+    if direction == "SHORT":
+        return stop > entry_max and entry_min > tp1
+    return False
+
+
+def _planned_direction(*values: Any) -> str:
+    for value in values:
+        text = _direction_text(value)
+        if text in {"LONG", "SHORT"}:
+            return text
+        key = _status_key(value)
+        if key in {"bullish", "long_bias", "bull", "buy", "upside"}:
+            return "LONG"
+        if key in {"bearish", "short_bias", "bear", "sell", "downside"}:
+            return "SHORT"
+    return NA
+
+
+def _planned_invalidation_text(
+    lifecycle_row: Mapping[str, Any],
+    candidate_meta: Mapping[str, Any],
+    raw_result: Mapping[str, Any],
+) -> str:
+    trade_idea = _mapping_or_empty(raw_result.get("trade_idea"))
+    diagnostics = _raw_diagnostics(raw_result)
+    for value in (
+        lifecycle_row.get("invalidation_reason"),
+        lifecycle_row.get("invalidation_logic"),
+        candidate_meta.get("invalidation"),
+        candidate_meta.get("cancel_condition"),
+        raw_result.get("invalidation"),
+        raw_result.get("invalidation_reason"),
+        raw_result.get("cancel_condition"),
+        raw_result.get("watchlist_invalidation"),
+        trade_idea.get("invalidation"),
+        trade_idea.get("cancel_condition"),
+        diagnostics.get("invalidation"),
+        diagnostics.get("invalidation_reason"),
+        diagnostics.get("watchlist_invalidation"),
+        diagnostics.get("invalidation_hint"),
+    ):
+        text = _safe_plan_text(value)
+        if text != NA:
+            return text
+    return NA
+
+
+def _safe_plan_text(value: Any) -> str:
+    text = _short_reason_text(value, max_length=160)
+    if text == NA or _looks_like_public_rejection_text(text):
+        return NA
+    return text
 
 
 def _active_quality_text(row: Mapping[str, Any]) -> str:
@@ -1489,7 +1638,9 @@ def _stage_for_alert_group(
         if _status_key(value)
     )
     latest_alert_key = _status_key(latest_row.get("alert_type"))
-    if latest_alert_key in _TERMINAL_ALERT_TYPE_KEYS or any(key in _COOLDOWN_STATE_KEYS for key in state_keys):
+    if latest_alert_key in _PUBLIC_COOLDOWN_ALERT_TYPE_KEYS or any(key in _PUBLIC_COOLDOWN_STATE_KEYS for key in state_keys):
+        return WATCHLIST_STAGE_COOLDOWN
+    if latest_alert_key in _ACTIVE_OWNED_ALERT_TYPE_KEYS:
         return NA
     if any(key in _STALKING_STATE_KEYS for key in state_keys):
         return WATCHLIST_STAGE_STALKING
@@ -1500,6 +1651,8 @@ def _stage_for_alert_group(
 
 def _stage_for_lifecycle_row(row: Mapping[str, Any]) -> str:
     key = _status_key(row.get("current_state"))
+    if key in _PUBLIC_COOLDOWN_STATE_KEYS:
+        return WATCHLIST_STAGE_COOLDOWN
     if key in _COOLDOWN_STATE_KEYS:
         return NA
     if key in _STALKING_STATE_KEYS:
@@ -1519,6 +1672,7 @@ def _stage_reason(
     lifecycle_event: Mapping[str, Any],
     symbol_row: Mapping[str, Any],
     raw_result: Mapping[str, Any],
+    candidate_meta: Mapping[str, Any] | None = None,
 ) -> str:
     candidates = _reason_candidates(
         latest_row=latest_row,
@@ -1528,6 +1682,7 @@ def _stage_reason(
         lifecycle_event=lifecycle_event,
         symbol_row=symbol_row,
         raw_result=raw_result,
+        candidate_meta=candidate_meta or {},
     )
     if any(_is_unverified(value) for value in candidates):
         return UNVERIFIED
@@ -1551,29 +1706,39 @@ def _reason_candidates(
     lifecycle_event: Mapping[str, Any],
     symbol_row: Mapping[str, Any],
     raw_result: Mapping[str, Any],
+    candidate_meta: Mapping[str, Any],
 ) -> tuple[Any, ...]:
     diagnostics = _raw_diagnostics(raw_result)
+    trade_idea = _mapping_or_empty(raw_result.get("trade_idea"))
     return (
-        raw_result.get("short_reason"),
-        raw_result.get("display_reason"),
+        lifecycle_event.get("notes"),
+        lifecycle_event.get("reason"),
+        raw_result.get("lifecycle_reason"),
+        raw_result.get("signal_reason"),
+        raw_result.get("reason_for_trade"),
+        trade_idea.get("reason_for_trade"),
+        candidate_meta.get("reason"),
+        _sequence_first_text(raw_result.get("confirmed_facts")),
+        _sequence_first_text(trade_idea.get("confirmed_facts")),
+        _sequence_first_text(candidate_meta.get("confirmed_facts")),
         raw_result.get("watchlist_reason"),
+        raw_result.get("display_reason"),
+        raw_result.get("short_reason"),
         _nested_value(raw_result, "near_miss_intelligence", "next_trigger_needed"),
         symbol_row.get("next_trigger_needed"),
         _diagnostic_value(diagnostics, "next_trigger_needed"),
         _gate_reason(_first_text(symbol_row.get("failed_gate"), raw_result.get("first_failed_gate"), _diagnostic_value(diagnostics, "first_failed_gate"))),
-        symbol_row.get("rejection_reason"),
-        raw_result.get("rejection_reason"),
+        candidate_meta.get("cancel_condition"),
+        raw_result.get("cancel_condition"),
+        trade_idea.get("cancel_condition"),
         lifecycle_row.get("invalidation_reason"),
-        lifecycle_event.get("notes"),
-        lifecycle_event.get("reason"),
+        lifecycle_row.get("invalidation_logic"),
+        raw_result.get("invalidation_context"),
+        trade_idea.get("invalidation_context"),
         _gate_reason(lifecycle_row.get("failed_gate")),
-        lifecycle_row.get("action_label"),
         latest_row.get("blocked_reason"),
         latest_row.get("invalid_target_fields"),
-        latest_row.get("error_message"),
-        latest_row.get("last_error_message"),
         watch_row.get("blocked_reason"),
-        watch_row.get("error_message"),
         *(_alert_progress_reason(row) for row in outcome_rows),
     )
 
@@ -1607,6 +1772,8 @@ def _reason_text(value: Any) -> str:
     text = _short_reason_text(value)
     if text == NA:
         return NA
+    if _looks_like_public_rejection_text(text):
+        return NA
     if text in _GATE_REASON_MAP.values():
         return text
     key = _status_key(text)
@@ -1625,6 +1792,28 @@ def _reason_text(value: Any) -> str:
     if "pullback" in key and any(token in key for token in ("forming", "wait", "missing", "need")):
         return "pullback forming"
     return text
+
+
+def _looks_like_public_rejection_text(value: Any) -> bool:
+    text = _clean(value)
+    if text == NA:
+        return False
+    lower = text.lower()
+    key = _status_key(text)
+    if key in _PUBLIC_WATCHLIST_BLOCKED_KEYS:
+        return True
+    if any(fragment in lower for fragment in _PUBLIC_WATCHLIST_BLOCKED_TEXT):
+        return True
+    return any(
+        fragment in lower
+        for fragment in (
+            "scanner rejected",
+            "rejected this setup",
+            "rejection reason",
+            "not a valid setup",
+            "no deterministic setup",
+        )
+    )
 
 
 def _gate_reason(value: Any) -> str:
@@ -1745,6 +1934,9 @@ def _lifecycle_row_for_attempt(connection: sqlite3.Connection, row: Mapping[str,
         _select_or_na("edge_score", columns),
         _select_or_na("action_label", columns),
         _select_or_na("invalidation_reason", columns),
+        _select_or_na("invalidation_logic", columns),
+        _select_or_na("rr", columns),
+        *(_select_or_na(column, columns) for column in _LEVEL_COLUMNS),
     ]
     signal_id = _clean(row.get("signal_id"))
     if signal_id != NA:
@@ -1946,6 +2138,8 @@ def _levels_for_watchlist(
     connection: sqlite3.Connection,
     watch_row: Mapping[str, Any],
     outcome_rows: Sequence[Mapping[str, Any]],
+    lifecycle_row: Mapping[str, Any],
+    raw_result: Mapping[str, Any],
 ) -> dict[str, str]:
     levels = {column: NA for column in _LEVEL_COLUMNS}
     _fill_levels_from_row(levels, watch_row)
@@ -1956,7 +2150,23 @@ def _levels_for_watchlist(
         if _clean(row.get("alert_type")) == _LIMIT_TYPE:
             _fill_zone_from_text(levels, row.get("price_level"))
 
+    _fill_levels_from_row(levels, lifecycle_row)
     candidate_levels = _candidate_levels(connection, watch_row)
+    for key, value in candidate_levels.items():
+        if levels.get(key, NA) == NA:
+            levels[key] = value
+    for source in _plan_level_sources(raw_result):
+        _fill_levels_from_plan_mapping(levels, source)
+    return levels
+
+
+def _levels_for_lifecycle_record(
+    connection: sqlite3.Connection,
+    lifecycle_row: Mapping[str, Any],
+) -> dict[str, str]:
+    levels = {column: NA for column in _LEVEL_COLUMNS}
+    _fill_levels_from_row(levels, lifecycle_row)
+    candidate_levels = _candidate_levels(connection, lifecycle_row)
     for key, value in candidate_levels.items():
         if levels.get(key, NA) == NA:
             levels[key] = value
@@ -2062,8 +2272,16 @@ def _candidate_metadata(connection: sqlite3.Connection, watch_row: Mapping[str, 
     raw = _json_mapping(row["raw_candidate_json"] if "raw_candidate_json" in row.keys() else NA)
     return {
         "rr": _first_non_na(row["rr"], raw.get("rr_to_tp2"), raw.get("planned_rr")),
-        "invalidation": _first_non_na(row["invalidation"], raw.get("invalidation"), raw.get("invalidation_reason")),
+        "invalidation": _first_non_na(
+            row["invalidation"],
+            raw.get("invalidation"),
+            raw.get("invalidation_reason"),
+            raw.get("cancel_condition"),
+        ),
+        "cancel_condition": _first_non_na(raw.get("cancel_condition"), raw.get("watchlist_cancel_condition")),
         "quality_grade": _first_non_na(row["quality_grade"], raw.get("quality_grade"), raw.get("trust_grade")),
+        "reason": _first_non_na(raw.get("reason_for_trade"), raw.get("signal_reason"), raw.get("watchlist_reason")),
+        "confirmed_facts": _sequence_first_text(raw.get("confirmed_facts")),
     }
 
 
@@ -2071,16 +2289,50 @@ def _levels_from_candidate_row(row: Mapping[str, Any]) -> dict[str, str]:
     raw = _json_mapping(row.get("raw_candidate_json"))
     levels = {column: NA for column in _LEVEL_COLUMNS}
 
-    _fill_zone_from_mapping(levels, raw)
-    _fill_zone_from_text(levels, raw.get("watch_zone"))
-    _fill_zone_from_text(levels, raw.get("entry_zone"))
+    _fill_levels_from_plan_mapping(levels, raw)
     _fill_zone_from_text(levels, row.get("entry"))
 
-    levels["stop_loss"] = _first_price(raw.get("stop_loss"), raw.get("stop"), row.get("stop"))
-    levels["tp1"] = _first_price(raw.get("tp1"), _target_from_raw(raw, 1), row.get("tp1"))
-    levels["tp2"] = _first_price(raw.get("tp2"), _target_from_raw(raw, 2), row.get("tp2"))
-    levels["tp3"] = _first_price(raw.get("tp3"), _target_from_raw(raw, 3), row.get("tp3"))
+    if levels["stop_loss"] == NA:
+        levels["stop_loss"] = _first_price(row.get("stop"))
+    if levels["tp1"] == NA:
+        levels["tp1"] = _first_price(row.get("tp1"))
+    if levels["tp2"] == NA:
+        levels["tp2"] = _first_price(row.get("tp2"))
+    if levels["tp3"] == NA:
+        levels["tp3"] = _first_price(row.get("tp3"))
     return levels
+
+
+def _plan_level_sources(raw_result: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    sources: list[Mapping[str, Any]] = [raw_result]
+    for key in ("trade_idea", "setup", "candidate", "plan", "trade_map"):
+        value = raw_result.get(key)
+        if isinstance(value, Mapping):
+            sources.append(value)
+    diagnostics = _raw_diagnostics(raw_result)
+    if diagnostics:
+        sources.extend(value for value in diagnostics.values() if isinstance(value, Mapping))
+    return tuple(sources)
+
+
+def _fill_levels_from_plan_mapping(levels: dict[str, str], raw: Mapping[str, Any]) -> None:
+    _fill_zone_from_mapping(levels, raw)
+    for key in ("watch_zone", "entry_zone", "limit_zone", "entry", "entry_price", "entry_trigger"):
+        _fill_zone_from_text(levels, raw.get(key))
+    if levels["stop_loss"] == NA:
+        levels["stop_loss"] = _first_price(raw.get("stop_loss"), raw.get("stop"), raw.get("stop_price"))
+    if levels["tp1"] == NA:
+        levels["tp1"] = _first_price(
+            raw.get("tp1"),
+            raw.get("take_profit_1"),
+            raw.get("target_1"),
+            raw.get("first_target"),
+            _target_from_raw(raw, 1),
+        )
+    if levels["tp2"] == NA:
+        levels["tp2"] = _first_price(raw.get("tp2"), raw.get("take_profit_2"), raw.get("target_2"), _target_from_raw(raw, 2))
+    if levels["tp3"] == NA:
+        levels["tp3"] = _first_price(raw.get("tp3"), raw.get("take_profit_3"), raw.get("target_3"), _target_from_raw(raw, 3))
 
 
 def _fill_zone_from_mapping(levels: dict[str, str], raw: Mapping[str, Any]) -> None:
@@ -2109,6 +2361,18 @@ def _sequence_item(value: Any, index: int) -> Any:
     if isinstance(item, Mapping):
         return _first_non_na(item.get("price"), item.get("target"), item.get("level"))
     return item
+
+
+def _sequence_first_text(value: Any) -> str:
+    if isinstance(value, str):
+        return _clean(value)
+    if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray, Mapping)):
+        return NA
+    for item in value:
+        text = _clean(item)
+        if text != NA:
+            return text
+    return NA
 
 
 def _status_from_outcomes(alert_types: frozenset[str]) -> str:
