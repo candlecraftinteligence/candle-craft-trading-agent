@@ -433,6 +433,7 @@ def test_active_signals_use_sent_runtime_signal_attempts(tmp_path: Path) -> None
         symbol="BTCUSDT",
         alert_type="SIGNAL_CONFIRMED",
         setup_quality_score="91",
+        rr_planned="3.1",
         entry_low="100",
         entry_high="102",
         stop_loss="95",
@@ -454,15 +455,12 @@ def test_active_signals_use_sent_runtime_signal_attempts(tmp_path: Path) -> None
     response = _service(tmp_path, db_path).public_response_for("/signals")
 
     assert response.text.startswith(f"{SCREEN_HEADER} Active Signals")
-    assert "Confirmed Candle Craft setups." in response.text
-    assert "Symbol: BTCUSDT" in response.text
-    assert "Direction: Long" in response.text
-    assert "Grade: 91" in response.text
-    assert "Entry: 100 – 102" in response.text
-    assert "Stop: 95" in response.text
-    assert "Targets: 112, 120, 130" in response.text
-    assert "Status: Confirmed setup" in response.text
-    assert "Updated: 2026-06-04T12:00:00Z" in response.text
+    assert "Current active signal records." in response.text
+    assert "Select a symbol for details." in response.text
+    assert "Active signals: 1" in response.text
+    assert _button_labels(response.reply_markup) == ["BTCUSDT"]
+    assert _callback_data_values(response.reply_markup) == ["public:signal:BTCUSDT"]
+    assert "Symbol: BTCUSDT" not in response.text
     assert "WATCHUSDT" not in response.text
     assert "BLOCKUSDT" not in response.text
     assert "order was placed" not in response.text.lower()
@@ -496,15 +494,79 @@ def test_active_signals_show_direct_limit_zone_hit_setups(tmp_path: Path) -> Non
 
     response = _service(tmp_path, db_path).public_response_for("/signals")
 
-    assert "Symbol: BTCUSDT" in response.text
-    assert "Status: LIMIT ZONE HIT" in response.text
-    assert "Grade: A+" in response.text
-    assert "RR: 3.2" in response.text
-    assert "Entry: 100 – 102" in response.text
-    assert "Stop: 95" in response.text
-    assert "Targets: 110, 115, 120" in response.text
-    assert "Invalidation: Invalid if price accepts below 95." in response.text
-    assert "Lifecycle: EXECUTING" in response.text
+    assert "Active signals: 1" in response.text
+    assert _button_labels(response.reply_markup) == ["BTCUSDT"]
+    assert "Symbol: BTCUSDT" not in response.text
+
+    detail = _service(tmp_path, db_path).public_response_for("/signal BTCUSDT")
+    assert "Status: LIMIT ZONE HIT" in detail.text
+    assert "Quality: A+" in detail.text
+    assert "RR: 3.20R" in detail.text
+    assert "Entry Zone: 100 – 102" in detail.text
+    assert "Stop: 95" in detail.text
+    assert "TP1: 110" in detail.text
+    assert "TP2: 115" in detail.text
+    assert "TP3: 120" in detail.text
+    assert "Invalid if price accepts below 95." in detail.text
+    assert "Lifecycle: EXECUTING" in detail.text
+
+
+def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="crcl-limit-zone-hit",
+        symbol="CRCLUSDT",
+        alert_type="LIMIT_HIT",
+        new_state="LIMIT_ZONE_HIT",
+        lifecycle_state="LIMIT_ZONE_HIT",
+        setup_quality_score="A-",
+        rr_planned="2.7244673",
+        entry_low="42.123456",
+        entry_high="42.987654",
+        stop_loss="40.75",
+        tp1="45.25",
+        tp2="47.5",
+        tp3="50",
+    )
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="crcl-limit-zone-hit",
+        symbol="CRCLUSDT",
+        current_state="EXECUTING",
+        invalidation_reason="Invalid if price accepts below 40.75.",
+    )
+    _insert_lifecycle_event(
+        db_path,
+        lifecycle_id="crcl-limit-zone-hit",
+        symbol="CRCLUSDT",
+        from_state="CONFIRMED",
+        to_state="LIMIT_ZONE_HIT",
+        reason="Limit zone touched by persisted lifecycle data.",
+        timestamp="2026-06-04T12:05:00Z",
+    )
+    service = _service(tmp_path, db_path)
+
+    active = service.public_response_for("/signals")
+
+    assert _button_labels(active.reply_markup) == ["CRCLUSDT"]
+    assert _callback_data_values(active.reply_markup) == ["public:signal:CRCLUSDT"]
+
+    detail = service.public_response_for("/signal CRCLUSDT")
+
+    assert detail.text.startswith("🐺🟠 CRCLUSDT — SIGNAL DETAIL")
+    assert "Status: LIMIT ZONE HIT" in detail.text
+    assert "Quality: A-" in detail.text
+    assert "RR: 2.72R" in detail.text
+    assert "Lifecycle: CONFIRMED → LIMIT ZONE HIT" in detail.text
+    assert "Entry Zone: 42.12 – 42.99" in detail.text
+    assert "Stop: 40.75" in detail.text
+    assert "TP1: 45.25" in detail.text
+    assert "TP2: 47.5" in detail.text
+    assert "TP3: 50" in detail.text
+    assert "Invalid if price accepts below 40.75." in detail.text
+    assert "No active signal detail found." not in detail.text
+    assert "No data was changed." not in detail.text
 
 
 def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(tmp_path: Path) -> None:
@@ -517,6 +579,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
         new_state="CONFIRMED",
         lifecycle_state="CONFIRMED",
         setup_quality_score="A-",
+        rr_planned="2.72",
         scan_run_id="run-detail",
         entry_low="100",
         entry_high="102",
@@ -573,13 +636,10 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
 
     active = service.public_response_for("/signals")
 
-    assert "Symbol: BTCUSDT" in active.text
-    assert _button_labels(active.reply_markup) == [
-        "BTCUSDT",
-        SIGNAL_DETAIL_REFRESH_BUTTON_LABEL,
-        SIGNAL_DETAIL_BACK_BUTTON_LABEL,
-    ]
-    assert _callback_data_values(active.reply_markup) == ["public:signal:BTCUSDT", "public:signals", "public:menu"]
+    assert "Active signals: 1" in active.text
+    assert "Symbol: BTCUSDT" not in active.text
+    assert _button_labels(active.reply_markup) == ["BTCUSDT"]
+    assert _callback_data_values(active.reply_markup) == ["public:signal:BTCUSDT"]
 
     detail = service.public_response_for("/signal BTCUSDT")
 
@@ -587,8 +647,9 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
     assert "Bias: LONG" in detail.text
     assert "Status: CONFIRMED" in detail.text
     assert "Quality: A-" in detail.text
+    assert "RR: 2.72R" in detail.text
     assert "Lifecycle: WATCHLISTED → CONFIRMED → EXECUTING" in detail.text
-    assert "Entry: 100 – 102" in detail.text
+    assert "Entry Zone: 100 – 102" in detail.text
     assert "Stop: 95" in detail.text
     assert "TP1: 110" in detail.text
     assert "TP2: 118" in detail.text
@@ -642,10 +703,13 @@ def test_signal_detail_callbacks_route_safely_and_back_to_active_signals(tmp_pat
         symbol="ETHUSDT",
         alert_type="SIGNAL_CONFIRMED",
         setup_quality_score="A",
+        rr_planned="3",
         entry_low="10",
         entry_high="11",
         stop_loss="9",
         tp1="12",
+        tp2="13",
+        tp3="14",
     )
     service = _service(tmp_path, db_path)
     transport = FakeCommandTransport()
@@ -797,14 +861,40 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
         signal_id="sig-active",
         symbol="ENAUSDT",
         alert_type="SIGNAL_CONFIRMED",
+        rr_planned="3",
         entry_low="0.09402",
         entry_high="0.09497",
         stop_loss="0.0923",
         tp1="0.1",
         tp2="0.105",
+        tp3="0.11",
     )
     _insert_attempt(db_path, signal_id="sig-active", symbol="ENAUSDT", alert_type="LIMIT_HIT")
     _insert_attempt(db_path, signal_id="sig-active", symbol="ENAUSDT", alert_type="TP1_HIT", sent_at="2026-06-04T12:15:00Z")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-open-tp3",
+        symbol="TP3USDT",
+        alert_type="SIGNAL_CONFIRMED",
+        rr_planned="3",
+        entry_low="20",
+        entry_high="21",
+        stop_loss="19",
+        tp1="23",
+        tp2="25",
+        tp3="27",
+        sent_at="2026-06-04T12:20:00Z",
+    )
+    _insert_attempt(
+        db_path,
+        signal_id="sig-open-tp3",
+        symbol="TP3USDT",
+        alert_type="TP3_HIT",
+        lifecycle_state="TP3_HIT",
+        new_state="TP3_HIT",
+        sent_at="2026-06-04T12:30:00Z",
+    )
+    _insert_lifecycle_record(db_path, lifecycle_id="sig-open-tp3", symbol="TP3USDT", current_state="TP3_HIT")
     _insert_attempt(
         db_path,
         signal_id="sig-closed",
@@ -817,9 +907,14 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
 
     response = _service(tmp_path, db_path).public_response_for("/signals")
 
-    assert "Symbol: ENAUSDT" in response.text
-    assert "Status: TP1 HIT" in response.text
-    assert "Updated: 2026-06-04T12:15:00Z" in response.text
+    assert "Active signals: 2" in response.text
+    assert _button_labels(response.reply_markup) == ["TP3USDT", "ENAUSDT"]
+    detail = _service(tmp_path, db_path).public_response_for("/signal ENAUSDT")
+    assert "Status: TP1 HIT" in detail.text
+    assert "Updated: 2026-06-04T12:15:00Z" in detail.text
+    tp3_detail = _service(tmp_path, db_path).public_response_for("/signal TP3USDT")
+    assert "Status: TP3 HIT" in tp3_detail.text
+    assert "Updated: 2026-06-04T12:30:00Z" in tp3_detail.text
     assert "CLOSEDUSDT" not in response.text
 
 
@@ -834,15 +929,18 @@ def test_active_signals_find_scan_run_sqlite_when_default_runtime_db_is_empty(tm
         signal_id="sig-runtime",
         symbol="SOLUSDT",
         alert_type="SIGNAL_CONFIRMED",
+        rr_planned="3",
         entry_low="150",
         entry_high="151",
         stop_loss="148",
         tp1="155",
+        tp2="160",
+        tp3="165",
     )
 
     response = TelegramAdminCommandService(project_root=tmp_path).public_response_for("/signals")
 
-    assert "Symbol: SOLUSDT" in response.text
+    assert _button_labels(response.reply_markup) == ["SOLUSDT"]
     assert "No active confirmed signals right now." not in response.text
 
 
@@ -1011,7 +1109,8 @@ def test_triggered_watchlist_does_not_expire_due_to_watch_ttl(tmp_path: Path) ->
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
     assert "🔥 STALKING" in response.text
-    assert "TRIGGERUSDT — N/A" in response.text
+    assert "TRIGGERUSDT" not in response.text
+    assert "None right now." in response.text.split("🔥 STALKING", 1)[1].split("👀 WATCH", 1)[0]
 
 
 def test_confirmed_active_signal_does_not_expire_due_to_watch_ttl(tmp_path: Path) -> None:
@@ -1027,15 +1126,18 @@ def test_confirmed_active_signal_does_not_expire_due_to_watch_ttl(tmp_path: Path
         first_seen_at=old_seen,
         sent_at=old_seen,
         setup_quality_score="B+",
+        rr_planned="3",
         entry_low="100",
         entry_high="102",
         stop_loss="95",
         tp1="110",
+        tp2="115",
+        tp3="120",
     )
 
     response = _service(tmp_path, db_path).public_response_for("/signals")
 
-    assert "Symbol: CONFIRMUSDT" in response.text
+    assert _button_labels(response.reply_markup) == ["CONFIRMUSDT"]
 
 
 def test_grade_b_is_hidden_from_public_active_watchlist_output(tmp_path: Path) -> None:

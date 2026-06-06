@@ -16,6 +16,7 @@ def test_signal_detail_formatter_full_active_signal_data() -> None:
             bias="long",
             status="confirmed",
             quality="A-",
+            rr="2.72",
             lifecycle=("confirmed", "executing"),
             entry_low="100",
             entry_high="102",
@@ -25,6 +26,7 @@ def test_signal_detail_formatter_full_active_signal_data() -> None:
             tp3="125",
             why_it_matters="Downside liquidity swept and structure shifted.",
             invalid_if="Price accepts below 95.",
+            updated_at="2026-06-04T12:00:00Z",
         )
     )
 
@@ -32,15 +34,17 @@ def test_signal_detail_formatter_full_active_signal_data() -> None:
     assert "Bias: LONG" in text
     assert "Status: CONFIRMED" in text
     assert "Quality: A-" in text
+    assert "RR: 2.72R" in text
     assert "Lifecycle: CONFIRMED → EXECUTING" in text
     assert "🎯 Trade Map" in text
-    assert "Entry: 100 – 102" in text
+    assert "Entry Zone: 100 – 102" in text
     assert "Stop: 95" in text
     assert "TP1: 110" in text
     assert "TP2: 118" in text
     assert "TP3: 125" in text
     assert "🧠 Why it matters" in text
     assert "🚫 Invalid if" in text
+    assert "Updated: 2026-06-04T12:00:00Z" in text
     assert text.endswith("Candle Craft | Signal. Structure. Execution.")
 
 
@@ -50,8 +54,9 @@ def test_signal_detail_formatter_missing_fields_use_na_and_preserve_unverified()
     assert "Bias: N/A" in missing
     assert "Status: N/A" in missing
     assert "Quality: N/A" in missing
+    assert "RR: N/A" in missing
     assert "Lifecycle: N/A" in missing
-    assert "Entry: N/A" in missing
+    assert "Entry Zone: N/A" in missing
     assert "Stop: N/A" in missing
     assert "TP1: N/A" in missing
     assert "TP2: N/A" in missing
@@ -76,7 +81,7 @@ def test_signal_detail_formatter_missing_fields_use_na_and_preserve_unverified()
     assert "Status: Unverified" in unverified
     assert "Quality: Unverified" in unverified
     assert "Lifecycle: Unverified" in unverified
-    assert "Entry: Unverified" in unverified
+    assert "Entry Zone: Unverified" in unverified
     assert "Stop: Unverified" in unverified
     assert "Why it matters\nUnverified" in unverified
     assert "Invalid if\nUnverified" in unverified

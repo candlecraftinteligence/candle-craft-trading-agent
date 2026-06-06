@@ -326,7 +326,7 @@ def test_direct_a_grade_limit_hit_sends_clean_public_signal_once(tmp_path: Path)
     message = sender.messages[0]
     assert message.startswith(f"{HEADER_PREFIX} SCALP SIGNAL — BTCUSDT")
     assert "Status: LIMIT ZONE HIT" in message
-    assert "Entry Zone Touched" in message
+    assert "The wolf found liquidity." in message
     assert "TP1:" in message and "TP2:" in message and "TP3:" in message
     assert message.endswith(FOOTER)
     lowered = message.lower()
@@ -800,7 +800,7 @@ def test_hype_style_public_ready_watchlist_sends_watchlist_not_confirmed() -> No
     assert "Bias: LONG" in text
     assert "CONFIRMED SIGNAL" not in text
     assert "Zone: 71.41 \u2013 71.68" in text
-    assert "Potential RR: 2.9R" in text
+    assert "Potential RR: 2.90R" in text
     assert "Area of Interest" in text
     assert "No confirmation = no trade." in text
     assert "71.407944" not in text
@@ -3132,7 +3132,7 @@ def test_sent_watchlist_limit_zone_touch_sends_limit_hit_once(tmp_path: Path) ->
     assert len(sender.messages) == 1
     assert "SCALP SIGNAL — BTCUSDT" in sender.messages[0]
     assert "Status: LIMIT ZONE HIT" in sender.messages[0]
-    assert "Entry Zone Touched." in sender.messages[0]
+    assert "The wolf found liquidity." in sender.messages[0]
     assert "Manual execution only. Manage risk." in sender.messages[0]
     rows = _watchlist_outcome_rows(db_path)
     assert (TelegramAlertType.LIMIT_HIT.value, "sent", TelegramAlertType.LIMIT_HIT.value, NA) in rows
@@ -3319,9 +3319,9 @@ def test_long_watchlist_tracks_tp_sequence_after_limit_hit(tmp_path: Path) -> No
     )
 
     assert (tp1.sent, tp2.sent, tp3.sent, repeat.sent) == (1, 1, 1, 0)
-    assert "TP1 HIT — BTCUSDT" in sender.messages[1]
-    assert "TP2 HIT — BTCUSDT" in sender.messages[2]
-    assert "TP3 HIT — BTCUSDT" in sender.messages[3]
+    assert "TAKE PROFIT HIT — BTCUSDT" in sender.messages[1]
+    assert "TAKE PROFIT HIT — BTCUSDT" in sender.messages[2]
+    assert "TAKE PROFIT HIT — BTCUSDT" in sender.messages[3]
     assert "Full target sequence completed." in sender.messages[3]
     rows = [row[0] for row in _watchlist_outcome_rows(db_path)]
     assert rows.count(TelegramAlertType.TP1_HIT.value) == 1
@@ -3418,7 +3418,7 @@ def test_short_watchlist_tracks_tp_and_sl_rules_after_limit_hit(tmp_path: Path) 
 
     assert tp.sent == 1
     assert sl.sent == 1
-    assert any("TP1 HIT" in message for message in sender.messages)
+    assert any("TAKE PROFIT HIT" in message for message in sender.messages)
     assert any("STOP HIT" in message for message in sl_sender.messages)
 
 

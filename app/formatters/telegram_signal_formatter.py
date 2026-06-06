@@ -203,13 +203,14 @@ def format_premium_lifecycle_update_message(
 
 
 def format_limit_hit_update(message: TelegramSignalMessage) -> str:
+    reason = safe_reason_text(message.structure_reason, message.confluence)
     return _join(
         f"{HEADER_PREFIX} SCALP SIGNAL {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Entry Zone Touched.",
+        "The wolf found liquidity.",
         "",
+        f"Bias: {format_direction(message.direction)}",
         "Status: LIMIT ZONE HIT",
-        f"Direction: {format_direction(message.direction)}",
         f"Quality: {_quality_display(message.quality)}",
         f"RR: {format_rr(message.planned_rr)}",
         "",
@@ -217,6 +218,9 @@ def format_limit_hit_update(message: TelegramSignalMessage) -> str:
         f"Entry Zone: {format_entry_zone(message)}",
         f"Stop: {format_price(message.stop_loss)}",
         *format_tp_lines(message),
+        "",
+        "\U0001F9E0 Why this setup matters",
+        reason,
         "",
         "\U0001F6AB Invalid if",
         safe_invalidation_text(message),
@@ -229,7 +233,7 @@ def format_limit_hit_update(message: TelegramSignalMessage) -> str:
 
 def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} TP1 HIT {EM_DASH} {format_symbol(message.symbol)}",
+        f"{HEADER_PREFIX} TAKE PROFIT HIT {EM_DASH} {format_symbol(message.symbol)}",
         "",
         "First target secured.",
         "",
@@ -252,7 +256,7 @@ def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
 
 def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} TP2 HIT {EM_DASH} {format_symbol(message.symbol)}",
+        f"{HEADER_PREFIX} TAKE PROFIT HIT {EM_DASH} {format_symbol(message.symbol)}",
         "",
         "The move is developing cleanly.",
         "",
@@ -273,7 +277,7 @@ def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
 
 def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} TP3 HIT {EM_DASH} {format_symbol(message.symbol)}",
+        f"{HEADER_PREFIX} TAKE PROFIT HIT {EM_DASH} {format_symbol(message.symbol)}",
         "",
         "Full target sequence completed.",
         "",
@@ -708,9 +712,8 @@ def _rr_display(value: Any) -> str:
     number = _decimal_value(value)
     if number is None:
         return NA
-    rounded = number.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-    output = format(rounded, "f")
-    return output.rstrip("0").rstrip(".") if "." in output else output
+    rounded = number.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return format(rounded, "f")
 
 
 def _rr_with_unit(value: Any) -> str:

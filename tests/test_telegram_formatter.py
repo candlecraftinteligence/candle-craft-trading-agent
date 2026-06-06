@@ -76,7 +76,7 @@ def test_valid_setup_formatting_is_premium_telegram_ready() -> None:
     assert "The wolf found liquidity." in text
     assert "Bias: LONG" in text
     assert "Status: CONFIRMED" in text
-    assert "RR: 3.2R" in text
+    assert "RR: 3.25R" in text
     assert "Entry Zone: 103100 – 103300" in text
     assert "TP3: 107500" in text
     assert "Signal ID" not in text

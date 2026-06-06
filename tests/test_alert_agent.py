@@ -57,7 +57,7 @@ def test_formats_valid_trade_idea() -> None:
     assert "Bias: LONG" in message
     assert "Status: CONFIRMED" in message
     assert "Quality: A" in message
-    assert "RR: 3.5R" in message
+    assert "RR: 3.50R" in message
     assert "Entry Zone: 100 – 102" in message
     assert "Stop: 95" in message
     assert "TP1: 112" in message

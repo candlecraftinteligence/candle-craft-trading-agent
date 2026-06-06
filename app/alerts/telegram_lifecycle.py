@@ -48,6 +48,7 @@ SIGNAL_ALERT_STATES = {
 PRIOR_ACTIVE_ALERT_TYPES = {
     TelegramAlertType.WATCHLIST.value,
     TelegramAlertType.SIGNAL_CONFIRMED.value,
+    TelegramAlertType.LIMIT_HIT.value,
 }
 TERMINAL_UPDATE_ALERT_TYPES = {
     TelegramAlertType.INVALIDATED,
@@ -4333,6 +4334,7 @@ def _preferred_prior_active_record(
     alert_priority = {
         TelegramAlertType.WATCHLIST.value: 0,
         TelegramAlertType.SIGNAL_CONFIRMED.value: 1,
+        TelegramAlertType.LIMIT_HIT.value: 2,
     }
     return sorted(
         records,
