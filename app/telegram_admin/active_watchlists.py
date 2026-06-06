@@ -8,10 +8,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.analytics.public_signal_quality import public_quality_passes
+from app.analytics.public_signal_quality import grade_from_score, normalize_grade, public_quality_passes
 from app.alerts.watchlist_expiry import watchlist_expiry_decision
 from app.data.dtos import NA
-from app.formatters.telegram_signal_formatter import RANGE_DASH, TelegramAlertType, format_telegram_price
+from app.formatters.telegram_signal_formatter import RANGE_DASH, TelegramAlertType, format_telegram_price, format_telegram_rr
 
 ACTIVE_WATCHLIST_DISPLAY_LIMIT = 10
 WATCHLIST_STAGE_DISPLAY_LIMIT = 8
@@ -19,6 +19,7 @@ WATCHLIST_STATUS_WAITING = "Waiting for Limit Zone"
 WATCHLIST_STATUS_LIMIT_HIT = "LIMIT ZONE HIT"
 WATCHLIST_STATUS_TP1_HIT = "TP1 HIT"
 WATCHLIST_STATUS_TP2_HIT = "TP2 HIT"
+WATCHLIST_STATUS_TP3_HIT = "TP3 HIT"
 SIGNAL_STATUS_CONFIRMED = "Confirmed setup"
 WATCHLIST_STAGE_STALKING = "STALKING"
 WATCHLIST_STAGE_WATCH = "WATCH"
@@ -36,6 +37,7 @@ _SL_TYPE = TelegramAlertType.SL_HIT.value
 _INVALIDATED_TYPE = TelegramAlertType.INVALIDATED.value
 _EXPIRED_TYPE = TelegramAlertType.EXPIRED.value
 _NO_LONGER_TRACKING_TYPE = TelegramAlertType.NO_LONGER_TRACKING.value
+_ACTIVE_SIGNAL_BASE_TYPES = (_SIGNAL_CONFIRMED_TYPE, _LIMIT_TYPE)
 _TERMINAL_OUTCOME_TYPES = {
     _TP3_TYPE,
     _SL_TYPE,
@@ -73,6 +75,14 @@ _WATCHLIST_STAGE_QUERY_TYPES = tuple(
 )
 _LEVEL_COLUMNS = ("entry_low", "entry_high", "stop_loss", "tp1", "tp2", "tp3")
 _ACTIVE_SIGNAL_STATE_KEYS = {"confirmed", "executing", "managing"}
+_ACTIVE_SIGNAL_STATE_KEYS |= {
+    "triggered",
+    "limit_zone_hit",
+    "tp1_hit",
+    "tp2_hit",
+    "tp3_hit",
+    "tp_hit",
+}
 _WATCH_STATE_KEYS = {"a_grade_watch", "watch", "watching_limit_zone", "watchlist", "watchlisted"}
 _STALKING_STATE_KEYS = {"stalking", "triggered"}
 _COOLDOWN_STATE_KEYS = {
@@ -84,14 +94,20 @@ _COOLDOWN_STATE_KEYS = {
     "removed",
     "cancelled",
     "canceled",
+    "closed",
+    "stopped",
 }
 _TERMINAL_ALERT_TYPE_KEYS = {
     "invalidated",
     "expired",
     "no_longer_tracking",
     "cooldown",
+    "closed",
+    "stopped",
+    "stop_hit",
 }
 _COMPLETED_OUTCOME_ALERT_TYPE_KEYS = {"sl_hit", "tp3_hit"}
+_ACTIVE_SIGNAL_CLOSED_OUTCOME_KEYS = {"sl_hit"}
 _STALKING_ALERT_TYPE_KEYS = {
     "limit_hit",
     "tp1_hit",
@@ -814,16 +830,15 @@ def _active_signal_items_from_rows(
 
     items: list[ActiveSignalItem] = []
     for signal_id, signal_rows in by_signal.items():
-        confirmed_rows = [row for row in signal_rows if _clean(row.get("alert_type")) == _SIGNAL_CONFIRMED_TYPE]
-        limit_rows = [row for row in signal_rows if _clean(row.get("alert_type")) == _LIMIT_TYPE]
-        base_rows = confirmed_rows or limit_rows
-        if not base_rows:
+        signal_row = _active_signal_base_row(signal_rows)
+        if signal_row is None:
             continue
-        signal_row = max(base_rows, key=_row_id)
-        outcome_rows = [row for row in signal_rows if _row_id(row) != _row_id(signal_row)]
-        if any(_clean(row.get("alert_type")) in _TERMINAL_OUTCOME_TYPES for row in outcome_rows):
+        outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
+        latest_row = max((signal_row, *outcome_rows), key=_row_id)
+        lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
+        if _active_signal_group_is_closed((signal_row, *outcome_rows), lifecycle_row):
             continue
-        if not _public_alert_quality_passes(signal_row):
+        if not _active_signal_row_has_complete_trade_map(signal_row):
             continue
         symbol = _symbol_text(signal_row.get("symbol"))
         direction = _direction_text(signal_row.get("direction"))
@@ -834,9 +849,7 @@ def _active_signal_items_from_rows(
             for row in (signal_row, *outcome_rows)
             if _clean(row.get("alert_type")) not in {_SIGNAL_CONFIRMED_TYPE, NA}
         )
-        levels = _levels_for_watchlist(connection, signal_row, outcome_rows)
-        latest_row = max((signal_row, *outcome_rows), key=_row_id)
-        lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
+        levels = _stored_trade_map_levels(signal_row)
         candidate_meta = _candidate_metadata(connection, latest_row)
         lifecycle_state = _first_non_na(
             lifecycle_row.get("current_state"),
@@ -850,8 +863,8 @@ def _active_signal_items_from_rows(
                 direction=direction,
                 updated_at=_first_non_na(_clean(latest_row.get("last_seen_at")), _clean(latest_row.get("sent_at"))),
                 status=_signal_status_from_outcomes(hit_alert_types),
-                grade=_first_non_na(_clean(signal_row.get("setup_quality_score")), NA),
-                rr=_first_non_na(_clean(signal_row.get("rr_planned")), candidate_meta.get("rr")),
+                grade=_active_quality_text(signal_row),
+                rr=_active_rr_text(signal_row),
                 invalidation=_first_non_na(lifecycle_row.get("invalidation_reason"), candidate_meta.get("invalidation")),
                 lifecycle_state=lifecycle_state,
                 hit_alert_types=hit_alert_types,
@@ -861,6 +874,70 @@ def _active_signal_items_from_rows(
         )
     items.sort(key=lambda item: item.sort_id, reverse=True)
     return tuple(items)
+
+
+def _active_signal_base_row(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    base_rows = [row for row in rows if _clean(row.get("alert_type")) in _ACTIVE_SIGNAL_BASE_TYPES]
+    if not base_rows:
+        return None
+    confirmed_rows = [row for row in base_rows if _clean(row.get("alert_type")) == _SIGNAL_CONFIRMED_TYPE]
+    if confirmed_rows:
+        return max(confirmed_rows, key=_row_id)
+    return max(base_rows, key=_row_id)
+
+
+def _active_signal_outcome_rows(
+    rows: Sequence[Mapping[str, Any]],
+    base_row: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    return tuple(row for row in rows if _row_id(row) != _row_id(base_row))
+
+
+def _active_signal_group_is_closed(
+    rows: Sequence[Mapping[str, Any]],
+    lifecycle_row: Mapping[str, Any],
+) -> bool:
+    values: list[Any] = [
+        lifecycle_row.get("current_state"),
+        *(row.get("alert_type") for row in rows),
+        *(row.get("new_state") for row in rows),
+        *(row.get("lifecycle_state") for row in rows),
+    ]
+    keys = {_status_key(value) for value in values if _status_key(value)}
+    return bool(keys & (_TERMINAL_ALERT_TYPE_KEYS | _ACTIVE_SIGNAL_CLOSED_OUTCOME_KEYS | _COOLDOWN_STATE_KEYS))
+
+
+def _active_signal_row_has_complete_trade_map(row: Mapping[str, Any]) -> bool:
+    if _clean(row.get("signal_id")) == NA:
+        return False
+    if _symbol_text(row.get("symbol")) == NA:
+        return False
+    if _direction_text(row.get("direction")) not in {"LONG", "SHORT"}:
+        return False
+    if not _public_alert_quality_passes(row):
+        return False
+    if format_telegram_rr(row.get("rr_planned")) == NA:
+        return False
+    return all(_price_text(row.get(column)) != NA for column in _LEVEL_COLUMNS)
+
+
+def _stored_trade_map_levels(row: Mapping[str, Any]) -> dict[str, str]:
+    levels = {column: _price_text(row.get(column)) for column in _LEVEL_COLUMNS}
+    _normalize_single_level_zone(levels)
+    return levels
+
+
+def _active_quality_text(row: Mapping[str, Any]) -> str:
+    quality = _clean(row.get("setup_quality_score"))
+    grade = normalize_grade(quality)
+    if grade != NA:
+        return grade
+    grade = grade_from_score(quality)
+    return grade if grade != NA else quality
+
+
+def _active_rr_text(row: Mapping[str, Any]) -> str:
+    return format_telegram_rr(row.get("rr_planned"))
 
 
 def _group_has_confirmed_signal(rows: Sequence[Mapping[str, Any]]) -> bool:
@@ -1529,6 +1606,8 @@ def _sequence_item(value: Any, index: int) -> Any:
 
 
 def _status_from_outcomes(alert_types: frozenset[str]) -> str:
+    if _TP3_TYPE in alert_types:
+        return WATCHLIST_STATUS_TP3_HIT
     if _TP2_TYPE in alert_types:
         return WATCHLIST_STATUS_TP2_HIT
     if _TP1_TYPE in alert_types:
@@ -1539,6 +1618,8 @@ def _status_from_outcomes(alert_types: frozenset[str]) -> str:
 
 
 def _signal_status_from_outcomes(alert_types: frozenset[str]) -> str:
+    if _TP3_TYPE in alert_types:
+        return WATCHLIST_STATUS_TP3_HIT
     if _TP2_TYPE in alert_types:
         return WATCHLIST_STATUS_TP2_HIT
     if _TP1_TYPE in alert_types:

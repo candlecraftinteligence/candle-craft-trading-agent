@@ -11,19 +11,21 @@ from app.formatters.telegram_signal_detail import TelegramSignalDetail, lifecycl
 from app.formatters.telegram_signal_formatter import PUBLIC_STATUS_BY_ALERT_TYPE, TelegramAlertType, safe_invalidation_text
 from app.telegram_admin.active_watchlists import (
     UNVERIFIED,
-    _SIGNAL_CONFIRMED_TYPE,
     _SIGNAL_QUERY_TYPES,
-    _TERMINAL_OUTCOME_TYPES,
+    _active_quality_text,
+    _active_signal_base_row,
+    _active_signal_group_is_closed,
+    _active_signal_outcome_rows,
+    _active_signal_row_has_complete_trade_map,
     _clean,
     _connect_readonly,
     _first_non_na,
     _json_mapping,
     _latest_runtime_database,
-    _levels_for_watchlist,
-    _public_alert_quality_passes,
     _row_id,
     _select_or_na,
     _sent_alert_attempt_rows,
+    _stored_trade_map_levels,
     _status_key,
     _symbol_result_for_attempt,
     _table_columns,
@@ -79,19 +81,24 @@ def _detail_from_rows(
 
     details: list[tuple[int, TelegramSignalDetail]] = []
     for signal_id, signal_rows in by_signal.items():
-        confirmed_rows = [row for row in signal_rows if _clean(row.get("alert_type")) == _SIGNAL_CONFIRMED_TYPE]
-        if not confirmed_rows:
+        signal_row = _active_signal_base_row(signal_rows)
+        if signal_row is None:
             continue
-        signal_row = max(confirmed_rows, key=_row_id)
-        outcome_rows = [row for row in signal_rows if _clean(row.get("alert_type")) != _SIGNAL_CONFIRMED_TYPE]
-        if any(_clean(row.get("alert_type")) in _TERMINAL_OUTCOME_TYPES for row in outcome_rows):
+        outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
+        latest_row = max((signal_row, *outcome_rows), key=_row_id)
+        lifecycle_row = _lifecycle_row(connection, signal_id, latest_row)
+        if _active_signal_group_is_closed((signal_row, *outcome_rows), lifecycle_row):
             continue
-        if not _public_alert_quality_passes(signal_row):
+        if not _active_signal_row_has_complete_trade_map(signal_row):
             continue
         if not _row_matches_selector(signal_id, signal_row, selected):
             continue
-        latest_row = max((signal_row, *outcome_rows), key=_row_id)
-        details.append((_row_id(latest_row), _detail_from_group(connection, signal_id, signal_row, outcome_rows, latest_row)))
+        details.append(
+            (
+                _row_id(latest_row),
+                _detail_from_group(connection, signal_id, signal_row, outcome_rows, latest_row, lifecycle_row),
+            )
+        )
 
     if not details:
         return None
@@ -104,14 +111,14 @@ def _detail_from_group(
     signal_row: Mapping[str, Any],
     outcome_rows: Sequence[Mapping[str, Any]],
     latest_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
 ) -> TelegramSignalDetail:
     symbol_row = _symbol_result_for_attempt(connection, latest_row)
     raw_result = _json_mapping(symbol_row.get("raw_result_json"))
     candidate = _candidate_detail(connection, signal_row)
     candidate_raw = _json_mapping(candidate.get("raw_candidate_json"))
-    lifecycle_row = _lifecycle_row(connection, signal_id, latest_row)
     lifecycle_events = _lifecycle_events(connection, _first_text(lifecycle_row.get("lifecycle_id"), signal_id))
-    levels = _levels_for_watchlist(connection, signal_row, outcome_rows)
+    levels = _stored_trade_map_levels(signal_row)
 
     trade_idea = _mapping(raw_result.get("trade_idea"))
     confirmed_facts = _confirmed_facts(trade_idea, raw_result, candidate_raw)
@@ -124,6 +131,7 @@ def _detail_from_group(
         bias=_first_text(signal_row.get("direction"), trade_idea.get("direction"), candidate.get("direction")),
         status=_status_for_latest_row(latest_row),
         quality=_quality_text(signal_row, raw_result, candidate, candidate_raw),
+        rr=_first_text(signal_row.get("rr_planned")),
         lifecycle=lifecycle_chain,
         entry_low=levels.get("entry_low", NA),
         entry_high=levels.get("entry_high", NA),
@@ -151,6 +159,7 @@ def _detail_from_group(
         confirmed_facts=confirmed_facts,
         confirmed_gates=confirmed_gates,
         lifecycle_reason=lifecycle_reason,
+        updated_at=_first_text(latest_row.get("last_seen_at"), latest_row.get("sent_at")),
     )
 
 
@@ -404,7 +413,7 @@ def _quality_text(
         _enum_text(_mapping(raw_result.get("trade_idea")).get("grade")),
         candidate.get("quality_grade"),
         candidate_raw.get("quality_grade"),
-        signal_row.get("setup_quality_score"),
+        _active_quality_text(signal_row),
     )
 
 

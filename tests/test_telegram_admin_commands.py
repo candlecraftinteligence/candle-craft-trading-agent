@@ -29,8 +29,6 @@ from app.telegram_admin.commands import (
     PUBLIC_MENU_BUTTON_ROWS,
     SCREEN_FOOTER,
     SCREEN_HEADER,
-    SIGNAL_DETAIL_BACK_BUTTON_LABEL,
-    SIGNAL_DETAIL_REFRESH_BUTTON_LABEL,
     WATCHLIST_BACK_BUTTON_LABEL,
     WATCHLIST_REFRESH_BUTTON_LABEL,
     WOLF_BRIEFING_PUBLISH_BUTTON_LABEL,
@@ -157,6 +155,7 @@ def _insert_runtime_attempt(
     status: str = "sent",
     direction: str = "long",
     setup_quality_score: str = "B+",
+    rr_planned: str = "N/A",
     entry_low: str = "N/A",
     entry_high: str = "N/A",
     stop_loss: str = "N/A",
@@ -171,8 +170,8 @@ def _insert_runtime_attempt(
             INSERT INTO telegram_alert_attempts (
                 signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
                 sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score,
-                entry_low, entry_high, stop_loss, tp1, tp2, tp3
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rr_planned, entry_low, entry_high, stop_loss, tp1, tp2, tp3
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal_id,
@@ -186,6 +185,7 @@ def _insert_runtime_attempt(
                 f"hash-{signal_id}-{alert_type}",
                 "run-46c",
                 setup_quality_score,
+                rr_planned,
                 entry_low,
                 entry_high,
                 stop_loss,
@@ -1131,11 +1131,13 @@ def test_public_active_signals_only_include_confirmed_signal_rows(tmp_path) -> N
         symbol="ALERTUSDT",
         alert_type="SIGNAL_CONFIRMED",
         setup_quality_score="91",
+        rr_planned="3",
         entry_low="100",
         entry_high="102",
         stop_loss="95",
         tp1="112",
         tp2="120",
+        tp3="130",
     )
     _insert_runtime_attempt(db_path, signal_id="sig-watch", symbol="NEARUSDT", alert_type="WATCHLIST", entry_low="90", entry_high="91")
     _insert_runtime_attempt(
@@ -1153,24 +1155,15 @@ def test_public_active_signals_only_include_confirmed_signal_rows(tmp_path) -> N
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
     _assert_inline_markup(response.reply_markup)
-    assert _button_labels(response.reply_markup) == [
-        "ALERTUSDT",
-        SIGNAL_DETAIL_REFRESH_BUTTON_LABEL,
-        SIGNAL_DETAIL_BACK_BUTTON_LABEL,
-    ]
-    assert _callback_data_values(response.reply_markup) == ["public:signal:ALERTUSDT", "public:signals", "public:menu"]
+    assert _button_labels(response.reply_markup) == ["ALERTUSDT"]
+    assert _callback_data_values(response.reply_markup) == ["public:signal:ALERTUSDT"]
     _assert_no_execution_buttons(response.reply_markup)
     assert response.text.startswith(f"{SCREEN_HEADER} Active Signals")
-    assert "Confirmed Candle Craft setups." in response.text
-    assert "Filtered by the signal engine." in response.text
+    assert "Current active signal records." in response.text
+    assert "Select a symbol for details." in response.text
     assert "Manual execution only." not in response.text
-    assert "Symbol: ALERTUSDT" in response.text
-    assert "Direction: Long" in response.text
-    assert "Grade: 91" in response.text
-    assert "Entry: 100 – 102" in response.text
-    assert "Stop: 95" in response.text
-    assert "Targets: 112, 120" in response.text
-    assert "Status: Confirmed setup" in response.text
+    assert "Active signals: 1" in response.text
+    assert "Symbol: ALERTUSDT" not in response.text
     assert "NEARUSDT" not in response.text
     assert "TARGETUSDT" not in response.text
     assert "REJECTUSDT" not in response.text

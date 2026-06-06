@@ -22,7 +22,6 @@ from app.telegram_admin.active_watchlists import (
     ACTIVE_WATCHLIST_DISPLAY_LIMIT,
     ActiveSignalItem,
     WATCHLIST_STAGE_DISPLAY_LIMIT,
-    format_active_signal_lines,
     format_watchlist_stage_dashboard,
     load_active_public_signals,
     load_active_public_watchlists,
@@ -836,12 +835,23 @@ class TelegramAdminCommandService:
             limit=self._max_rows,
         )
         lines: list[str] = [
-            "Confirmed Candle Craft setups.",
-            "Filtered by the signal engine.",
+            "Current active signal records.",
+            "Select a symbol for details.",
             "",
             SCREEN_DIVIDER,
         ]
-        lines.extend(format_active_signal_lines(result))
+        if not result.source_available or result.total == 0:
+            lines.extend(
+                (
+                    "No active confirmed signals right now.",
+                    "",
+                    "The engine is waiting for clean structure.",
+                )
+            )
+        else:
+            lines.append(f"Active signals: {result.total}")
+            if result.total > len(result.items):
+                lines.append(f"Showing {len(result.items)}.")
         lines.append(SCREEN_DIVIDER)
         return _public_response(
             "/signals",
@@ -1349,13 +1359,21 @@ def _signal_detail_response_suffix(command: str) -> str:
 
 def _signal_detail_missing_text(selector: str, *, source_available: bool) -> str:
     symbol = _display(selector)
-    status = "No active signal detail found." if source_available else "No local active signal source found."
+    if source_available:
+        status_lines = (
+            "Status: This setup is no longer active.",
+            "It may have been closed, invalidated, or expired.",
+        )
+    else:
+        status_lines = (
+            "Status: No local active signal source found.",
+            "The scanner has not published an active signal record yet.",
+        )
     return "\n".join(
         (
             f"{SIGNAL_HEADER_PREFIX} {symbol} \u2014 SIGNAL DETAIL",
             "",
-            f"Status: {status}",
-            "No data was changed.",
+            *status_lines,
             "",
             SIGNAL_FOOTER,
         )
@@ -1487,14 +1505,7 @@ def public_watchlists_inline_markup(config: Any | None = None) -> Mapping[str, A
 
 
 def public_active_signals_inline_markup(items: Sequence[ActiveSignalItem]) -> Mapping[str, Any]:
-    keyboard = _signal_button_rows(items, scope="public")
-    keyboard.extend(
-        [
-            [{"text": SIGNAL_DETAIL_REFRESH_BUTTON_LABEL, "callback_data": "public:signals"}],
-            [{"text": SIGNAL_DETAIL_BACK_BUTTON_LABEL, "callback_data": "public:menu"}],
-        ]
-    )
-    return {"inline_keyboard": keyboard}
+    return {"inline_keyboard": _signal_button_rows(items, scope="public")}
 
 
 def signal_detail_inline_markup(symbol: str, *, scope: str) -> Mapping[str, Any]:

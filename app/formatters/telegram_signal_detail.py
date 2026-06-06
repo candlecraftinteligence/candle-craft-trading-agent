@@ -5,7 +5,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.data.dtos import NA
-from app.formatters.telegram_signal_formatter import FOOTER, HEADER_PREFIX, RANGE_DASH, format_direction, format_price, format_symbol
+from app.formatters.telegram_signal_formatter import (
+    FOOTER,
+    HEADER_PREFIX,
+    RANGE_DASH,
+    format_direction,
+    format_price,
+    format_rr,
+    format_symbol,
+)
 
 EM_DASH = "\u2014"
 ARROW = " \u2192 "
@@ -18,6 +26,7 @@ class TelegramSignalDetail:
     bias: Any = NA
     status: Any = NA
     quality: Any = NA
+    rr: Any = NA
     lifecycle: Any = NA
     entry_low: Any = NA
     entry_high: Any = NA
@@ -30,6 +39,7 @@ class TelegramSignalDetail:
     confirmed_facts: tuple[Any, ...] = ()
     confirmed_gates: tuple[Any, ...] = ()
     lifecycle_reason: Any = NA
+    updated_at: Any = NA
 
 
 def format_signal_detail(detail: TelegramSignalDetail, *, detail_type: str = "SIGNAL") -> str:
@@ -41,10 +51,11 @@ def format_signal_detail(detail: TelegramSignalDetail, *, detail_type: str = "SI
             f"Bias: {_bias_display(detail.bias)}",
             f"Status: {_status_display(detail.status)}",
             f"Quality: {_text(detail.quality)}",
+            f"RR: {format_rr(detail.rr)}",
             f"Lifecycle: {_lifecycle_display(detail.lifecycle)}",
             "",
             "\U0001F3AF Trade Map",
-            f"Entry: {_entry_text(detail.entry_low, detail.entry_high)}",
+            f"Entry Zone: {_entry_text(detail.entry_low, detail.entry_high)}",
             f"Stop: {_price_or_text(detail.stop_loss)}",
             f"TP1: {_price_or_text(detail.tp1)}",
             f"TP2: {_price_or_text(detail.tp2)}",
@@ -55,6 +66,8 @@ def format_signal_detail(detail: TelegramSignalDetail, *, detail_type: str = "SI
             "",
             "\U0001F6AB Invalid if",
             _public_text(detail.invalid_if),
+            "",
+            f"Updated: {_text(detail.updated_at)}",
             "",
             FOOTER,
         )

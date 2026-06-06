@@ -55,7 +55,7 @@ def test_valid_scalp_signal_renders_premium_format() -> None:
     assert "Bias: LONG" in text
     assert "Status: CONFIRMED" in text
     assert "Quality: A" in text
-    assert "RR: 2.9R" in text
+    assert "RR: 2.92R" in text
     assert "🎯 Trade Map" in text
     assert "Entry Zone: 100 – 102" in text
     assert "TP1: 110" in text
@@ -72,7 +72,7 @@ def test_watchlist_renders_stalking_language_and_not_confirmed() -> None:
     assert "🐺🟠 WATCHLIST — BTCUSDT" in text
     assert "The wolf is stalking this one." in text
     assert "Status: WATCHLIST" in text
-    assert "Potential RR: 2.9R" in text
+    assert "Potential RR: 2.92R" in text
     assert "👀 What we want to see" in text
     assert "No confirmation = no trade." in text
     assert "CONFIRMED SIGNAL" not in text
@@ -98,18 +98,19 @@ def test_limit_zone_hit_renders_hunting_zone_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.LIMIT_HIT, _message())
 
     assert "🐺🟠 SCALP SIGNAL — BTCUSDT" in text
-    assert "Entry Zone Touched." in text
+    assert "The wolf found liquidity." in text
+    assert "Bias: LONG" in text
     assert "Status: LIMIT ZONE HIT" in text
     assert "Entry Zone: 100 – 102" in text
     assert "TP1: 110" in text
     assert "Manual execution only. Manage risk." in text
-    assert "TP1 HIT" not in text
+    assert "TAKE PROFIT HIT" not in text
 
 
 def test_tp1_renders_partial_win_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.TP1_HIT, _message())
 
-    assert "🐺🟠 TP1 HIT — BTCUSDT" in text
+    assert "🐺🟠 TAKE PROFIT HIT — BTCUSDT" in text
     assert "First target secured." in text
     assert "Status: PARTIAL WIN" in text
     assert "Risk should now be reduced according to your own plan." in text
@@ -119,7 +120,7 @@ def test_tp1_renders_partial_win_language() -> None:
 def test_tp2_renders_strong_follow_through_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.TP2_HIT, _message())
 
-    assert "🐺🟠 TP2 HIT — BTCUSDT" in text
+    assert "🐺🟠 TAKE PROFIT HIT — BTCUSDT" in text
     assert "The move is developing cleanly." in text
     assert "Status: STRONG FOLLOW-THROUGH" in text
     assert "Remaining target:\nTP3: 120" in text
@@ -128,7 +129,7 @@ def test_tp2_renders_strong_follow_through_language() -> None:
 def test_tp3_renders_trade_complete_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.TP3_HIT, _message())
 
-    assert "🐺🟠 TP3 HIT — BTCUSDT" in text
+    assert "🐺🟠 TAKE PROFIT HIT — BTCUSDT" in text
     assert "Full target sequence completed." in text
     assert "Final Target: 120" in text
     assert "Status: TRADE COMPLETE" in text
@@ -223,8 +224,8 @@ def test_price_display_formats_clean_public_values() -> None:
 
 
 def test_rr_display_formats_clean_public_values() -> None:
-    assert format_telegram_rr(Decimal("2.91918017")) == "2.9R"
-    assert format_telegram_rr(Decimal("3.000000")) == "3R"
-    assert format_telegram_rr(Decimal("3.246")) == "3.2R"
+    assert format_telegram_rr(Decimal("2.91918017")) == "2.92R"
+    assert format_telegram_rr(Decimal("3.000000")) == "3.00R"
+    assert format_telegram_rr(Decimal("3.246")) == "3.25R"
     assert format_telegram_rr(NA) == NA
     assert format_telegram_rr("not numeric") == NA
