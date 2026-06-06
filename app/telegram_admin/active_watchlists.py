@@ -78,25 +78,15 @@ _WATCHLIST_STAGE_QUERY_TYPES = tuple(
     dict.fromkeys((*_WATCHLIST_QUERY_TYPES, _SIGNAL_CONFIRMED_TYPE))
 )
 _LEVEL_COLUMNS = ("entry_low", "entry_high", "stop_loss", "tp1", "tp2", "tp3")
-_ACTIVE_SIGNAL_STATE_KEYS = {"confirmed", "executing", "managing"}
-_ACTIVE_SIGNAL_STATE_KEYS |= {
-    "triggered",
-    "limit_zone_hit",
-    "tp1_hit",
-    "tp2_hit",
-    "tp3_hit",
-    "tp_hit",
-}
+_ACTIVE_SIGNAL_STATE_KEYS = {"active", "confirmed", "executing", "limit_hit", "limit_zone_hit", "managing"}
 _ACTIVE_SIGNAL_ALLOWED_STATE_KEYS = {
+    "active",
     "confirmed",
     "confirmed_setup",
     "signal_confirmed",
     "executing",
     "limit_hit",
     "limit_zone_hit",
-    "tp1_hit",
-    "tp2_hit",
-    "tp3_hit",
 }
 _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS = {
     "reject",
@@ -111,7 +101,6 @@ _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS = {
     "watch_only",
     "a_grade_watch",
     "stalking",
-    "triggered",
     "discovered",
     "near_miss",
     "monitoring",
@@ -125,11 +114,12 @@ _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS = {
     "canceled",
     "closed",
     "archived",
+    "tp_hit",
     "sl_hit",
     "stop_hit",
 }
-_WATCH_STATE_KEYS = {"a_grade_watch", "watch", "watching_limit_zone", "watchlist", "watchlisted"}
-_STALKING_STATE_KEYS = {"stalking", "triggered"}
+_WATCH_STATE_KEYS = {"watch", "watching_limit_zone", "watchlist", "watchlisted"}
+_STALKING_STATE_KEYS = {"stalking"}
 _COOLDOWN_STATE_KEYS = {
     "cooldown",
     "cooled_down",
@@ -152,7 +142,7 @@ _TERMINAL_ALERT_TYPE_KEYS = {
     "stop_hit",
 }
 _COMPLETED_OUTCOME_ALERT_TYPE_KEYS = {"sl_hit", "tp3_hit"}
-_ACTIVE_SIGNAL_CLOSED_OUTCOME_KEYS = {"sl_hit"}
+_ACTIVE_SIGNAL_CLOSED_OUTCOME_KEYS = {"sl_hit", "tp3_hit"}
 _STALKING_ALERT_TYPE_KEYS = {
     "limit_hit",
     "tp1_hit",
@@ -183,6 +173,45 @@ _GATE_REASON_MAP = {
     "derivatives_conflict": "structure not ready yet",
     "funding_oi_guard": "structure not ready yet",
 }
+_PUBLIC_WATCHLIST_BLOCKED_KEYS = {
+    "body_acceptance_failure",
+    "cancelled",
+    "canceled",
+    "closed",
+    "cooldown",
+    "cooled_down",
+    "expired",
+    "failed",
+    "failed_quality_gates",
+    "invalid",
+    "invalidated",
+    "no_longer_tracking",
+    "no_setup",
+    "no_trade",
+    "no_valid_liquidity_grab_pullback_setup",
+    "no_valid_setup",
+    "quality_gate_failed",
+    "quality_gates_failed",
+    "reject",
+    "rejected",
+    "rejected_by_derivatives",
+    "rejected_by_regime",
+    "rejected_by_risk",
+    "rejected_by_scoring",
+    "rejected_by_technical",
+    "removed",
+    "scan_error",
+    "scanned_no_setup",
+    "sl_hit",
+    "stop_hit",
+    "tp3_hit",
+}
+_PUBLIC_WATCHLIST_BLOCKED_TEXT = (
+    "no valid liquidity-grab pullback setup",
+    "no valid setup",
+    "failed quality gates",
+    "quality gates failed",
+)
 
 
 @dataclass(frozen=True)
@@ -286,7 +315,7 @@ class WatchlistStageDashboardResult:
 
     @property
     def total(self) -> int:
-        return self.stalking_total + self.watch_total + self.cooldown_total
+        return self.stalking_total + self.watch_total
 
 
 def load_active_public_watchlists(
@@ -431,47 +460,36 @@ def format_watchlist_stage_dashboard(result: WatchlistStageDashboardResult) -> s
     lines: list[str] = [
         "🐺🟠 WATCHLISTS",
         "",
-        "The wolf is stalking liquidity.",
-        "",
     ]
-    for title, items, total in (
-        ("🔥 STALKING", result.stalking_items, result.stalking_total),
-        ("👀 WATCH", result.watch_items, result.watch_total),
-        ("❄️ COOLDOWN", result.cooldown_items, result.cooldown_total),
+    for title, description, empty_state, items, total in (
+        (
+            "🔥 STALKING",
+            "Setup is developing. Liquidity/structure is forming, but confirmation is not complete yet.",
+            "None right now. The wolf is waiting for cleaner structure.",
+            result.stalking_items,
+            result.stalking_total,
+        ),
+        (
+            "👀 WATCH",
+            "Early idea only. Waiting for stronger structure before it can become stalked.",
+            "None right now. No early ideas passed quality filters.",
+            result.watch_items,
+            result.watch_total,
+        ),
     ):
         lines.append(title)
+        lines.append(description)
         if total == 0:
-            lines.append("None right now.")
+            lines.append(empty_state)
         else:
             for item in items:
-                if _status_key(item.lifecycle_state) == "a_grade_watch":
-                    lines.extend(_a_grade_watch_stage_lines(item))
-                else:
-                    lines.append(f"{item.symbol} — {item.reason}")
+                lines.append(f"{item.symbol} — {item.reason}")
             if total > len(items):
                 lines.append(f"+ {total - len(items)} more")
         lines.append("")
 
-    if result.total == 0:
-        lines.append("No forced trades.")
     lines.append(WATCHLIST_DASHBOARD_FOOTER)
     return "\n".join(lines)
-
-
-def _a_grade_watch_stage_lines(item: WatchlistStageItem) -> list[str]:
-    targets = ", ".join(target for target in (item.tp1, item.tp2, item.tp3) if target != NA) or NA
-    return [
-        f"{item.symbol}",
-        "Status: A-GRADE WATCH — Waiting Limit Zone",
-        f"Direction: {_title_text(item.direction)}",
-        f"Entry Zone: {_zone_text(item.entry_low, item.entry_high)}",
-        f"Stop: {item.stop_loss}",
-        f"Targets: {targets}",
-        f"RR: {item.rr}",
-        f"Quality: {item.grade}",
-        f"Invalidation: {item.invalidation}",
-        f"Reason: {item.reason}",
-    ]
 
 
 def _latest_runtime_database(
@@ -561,7 +579,7 @@ def _has_watchlist_lifecycle_records(path: Path) -> bool:
             columns = _table_columns(connection, "setup_lifecycle_records")
             if not {"current_state", "symbol"} <= columns:
                 return False
-            placeholders = ",".join("?" for _ in (*_WATCH_STATE_KEYS, *_STALKING_STATE_KEYS, *_COOLDOWN_STATE_KEYS))
+            placeholders = ",".join("?" for _ in (*_WATCH_STATE_KEYS, *_STALKING_STATE_KEYS))
             row = connection.execute(
                 f"""
                 SELECT 1
@@ -569,7 +587,7 @@ def _has_watchlist_lifecycle_records(path: Path) -> bool:
                 WHERE LOWER(REPLACE(REPLACE(current_state, '-', '_'), ' ', '_')) IN ({placeholders})
                 LIMIT 1
                 """,
-                tuple((*_WATCH_STATE_KEYS, *_STALKING_STATE_KEYS, *_COOLDOWN_STATE_KEYS)),
+                tuple((*_WATCH_STATE_KEYS, *_STALKING_STATE_KEYS)),
             ).fetchone()
             return row is not None
     except (OSError, sqlite3.Error):
@@ -665,6 +683,10 @@ def _stage_items_from_alert_rows(
         if _is_completed_outcome_not_retained(latest_row, lifecycle_row):
             continue
         stage = _stage_for_alert_group(latest_row, watch_row, outcome_rows, lifecycle_row, symbol_row, raw_result)
+        if stage == NA:
+            continue
+        if _public_watchlist_stage_blocked((latest_row, watch_row, *outcome_rows), lifecycle_row, symbol_row, raw_result, lifecycle_event):
+            continue
         if _expired_public_view_row((latest_row, watch_row, *outcome_rows), lifecycle_row):
             continue
         if stage != WATCHLIST_STAGE_COOLDOWN and _watchlist_row_expired(watch_row, outcome_rows):
@@ -748,10 +770,12 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
         stage = _stage_for_lifecycle_row(row)
         if stage == NA:
             continue
+        event = _latest_lifecycle_event(connection, row)
+        if _public_watchlist_stage_blocked((row,), row, {}, {}, event):
+            continue
         symbol = _symbol_text(row.get("symbol"))
         if symbol == NA:
             continue
-        event = _latest_lifecycle_event(connection, row)
         levels = _candidate_levels(connection, row)
         candidate_meta = _candidate_metadata(connection, row)
         reason = _stage_reason(
@@ -795,10 +819,10 @@ def _stage_dashboard_result(
     buckets = {
         WATCHLIST_STAGE_STALKING: [],
         WATCHLIST_STAGE_WATCH: [],
-        WATCHLIST_STAGE_COOLDOWN: [],
     }
     for item in items:
-        buckets.setdefault(item.stage, []).append(item)
+        if item.stage in buckets:
+            buckets[item.stage].append(item)
 
     sorted_buckets: dict[str, tuple[WatchlistStageItem, ...]] = {}
     for stage, stage_items in buckets.items():
@@ -814,8 +838,8 @@ def _stage_dashboard_result(
         stalking_total=len(sorted_buckets[WATCHLIST_STAGE_STALKING]),
         watch_items=sorted_buckets[WATCHLIST_STAGE_WATCH][:limit],
         watch_total=len(sorted_buckets[WATCHLIST_STAGE_WATCH]),
-        cooldown_items=sorted_buckets[WATCHLIST_STAGE_COOLDOWN][:limit],
-        cooldown_total=len(sorted_buckets[WATCHLIST_STAGE_COOLDOWN]),
+        cooldown_items=(),
+        cooldown_total=0,
         bucket_limit=limit,
     )
 
@@ -1004,6 +1028,42 @@ def _expired_public_view_row(rows: Sequence[Mapping[str, Any]], lifecycle_row: M
     if _lifecycle_row_matches_rows(rows, lifecycle_row):
         values.extend((lifecycle_row.get("current_state"), lifecycle_row.get("failed_gate")))
     return "expired" in {_status_key(value) for value in values if _status_key(value)}
+
+
+def _public_watchlist_stage_blocked(
+    rows: Sequence[Mapping[str, Any]],
+    lifecycle_row: Mapping[str, Any],
+    symbol_row: Mapping[str, Any],
+    raw_result: Mapping[str, Any],
+    lifecycle_event: Mapping[str, Any],
+) -> bool:
+    status_values: list[Any] = [
+        *(row.get("alert_type") for row in rows),
+        *(row.get("new_state") for row in rows),
+        *(row.get("lifecycle_state") for row in rows),
+        *(row.get("blocked_reason") for row in rows),
+        *(row.get("error_message") for row in rows),
+        *(row.get("last_error_message") for row in rows),
+        lifecycle_row.get("current_state"),
+        lifecycle_row.get("failed_gate"),
+        lifecycle_event.get("to_state"),
+        lifecycle_event.get("failed_gate"),
+        symbol_row.get("status"),
+        symbol_row.get("display_bucket"),
+        symbol_row.get("failed_gate"),
+        symbol_row.get("rejection_reason"),
+        raw_result.get("status"),
+        raw_result.get("display_status"),
+        raw_result.get("display_bucket"),
+        raw_result.get("first_failed_gate"),
+        raw_result.get("rejection_reason"),
+    ]
+    keys = {_status_key(value) for value in status_values if _status_key(value)}
+    if keys & _PUBLIC_WATCHLIST_BLOCKED_KEYS:
+        return True
+
+    text_values = [str(value).lower() for value in status_values if _clean(value) != NA]
+    return any(fragment in value for value in text_values for fragment in _PUBLIC_WATCHLIST_BLOCKED_TEXT)
 
 
 def _active_signal_group_is_eligible(
@@ -1430,23 +1490,18 @@ def _stage_for_alert_group(
     )
     latest_alert_key = _status_key(latest_row.get("alert_type"))
     if latest_alert_key in _TERMINAL_ALERT_TYPE_KEYS or any(key in _COOLDOWN_STATE_KEYS for key in state_keys):
-        return WATCHLIST_STAGE_COOLDOWN
+        return NA
     if any(key in _STALKING_STATE_KEYS for key in state_keys):
         return WATCHLIST_STAGE_STALKING
-    if latest_alert_key in _STALKING_ALERT_TYPE_KEYS:
-        return WATCHLIST_STAGE_STALKING
-    if any(_status_key(row.get("alert_type")) in _STALKING_ALERT_TYPE_KEYS for row in outcome_rows):
-        return WATCHLIST_STAGE_STALKING
-    gate_key = _status_key(_first_text(symbol_row.get("failed_gate"), raw_result.get("first_failed_gate")))
-    if gate_key == "missing_confirmation_structure_shift":
-        return WATCHLIST_STAGE_STALKING
-    return WATCHLIST_STAGE_WATCH
+    if any(key in _WATCH_STATE_KEYS for key in state_keys):
+        return WATCHLIST_STAGE_WATCH
+    return NA
 
 
 def _stage_for_lifecycle_row(row: Mapping[str, Any]) -> str:
     key = _status_key(row.get("current_state"))
     if key in _COOLDOWN_STATE_KEYS:
-        return WATCHLIST_STAGE_COOLDOWN
+        return NA
     if key in _STALKING_STATE_KEYS:
         return WATCHLIST_STAGE_STALKING
     if key in _WATCH_STATE_KEYS:

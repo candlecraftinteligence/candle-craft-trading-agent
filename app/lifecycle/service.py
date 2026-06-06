@@ -285,6 +285,7 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
     entry_low, entry_high = _entry_zone_values(symbol_result, diagnostics)
     stop_loss = _stop_value(symbol_result, diagnostics)
     targets = _target_values(symbol_result, diagnostics)
+    latest_high, latest_low = _latest_observed_range_values(symbol_result, diagnostics)
 
     return LifecycleObservation(
         symbol=symbol_result.symbol,
@@ -301,6 +302,9 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
         tp2=_display(targets[1]),
         tp3=_display(targets[2]),
         rr=_display(rr),
+        current_price=_display(_current_price_value(symbol_result, diagnostics)),
+        latest_high=_display(latest_high),
+        latest_low=_display(latest_low),
         edge_score=_display(edge_score),
         failed_gate=failed_gate,
         regime_state=_first_non_na(symbol_result.regime_state, symbol_result.regime_diagnostics.get("state")),
@@ -874,6 +878,24 @@ def _latest_range_candidates(
         candidates.append((current_price, current_price))
 
     return tuple(candidates)
+
+
+def _latest_observed_range_values(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> tuple[Any, Any]:
+    candidates = _latest_range_candidates(symbol_result, diagnostics)
+    return candidates[0] if candidates else (NA, NA)
+
+
+def _current_price_value(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Any:
+    return _first_non_na(
+        diagnostics.get("current_price"),
+        diagnostics.get("price"),
+        diagnostics.get("last_price"),
+        symbol_result.current_price,
+        symbol_result.latest_close,
+    )
 
 
 def _range_from_value(value: Any) -> tuple[Any, Any]:

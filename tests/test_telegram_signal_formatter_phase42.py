@@ -98,12 +98,15 @@ def test_limit_zone_hit_renders_hunting_zone_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.LIMIT_HIT, _message())
 
     assert "🐺🟠 SCALP SIGNAL — BTCUSDT" in text
-    assert "The wolf found liquidity." in text
-    assert "Bias: LONG" in text
-    assert "Status: LIMIT ZONE HIT" in text
+    assert "Entry Zone Touched." in text
+    assert "Status: LIMIT HIT" in text
+    assert "Direction: LONG" in text
+    assert "Quality: A" in text
     assert "Entry Zone: 100 – 102" in text
-    assert "TP1: 110" in text
-    assert "Manual execution only. Manage risk." in text
+    assert "Invalidation: Invalid if price accepts below 95." in text
+    assert "The setup is now active for manual execution." in text
+    assert "No confirmation = no chase." in text
+    assert "TP1: 110" not in text
     assert "TAKE PROFIT HIT" not in text
 
 
