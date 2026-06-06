@@ -494,9 +494,14 @@ def _outcome_scan_symbol(
     direction: str = "long",
     high: Decimal = Decimal("101"),
     low: Decimal = Decimal("99"),
+    current_price: object = NA,
+    price_symbol: str | None = None,
+    price_stale: bool = False,
     diagnostics: dict[str, object] | None = None,
 ) -> ScannerSymbolResult:
-    payload = diagnostics or (
+    payload = dict(
+        diagnostics
+        or (
         _public_ready_watchlist_diagnostics()
         if direction == "long"
         else _public_ready_watchlist_diagnostics(
@@ -511,6 +516,13 @@ def _outcome_scan_symbol(
             rr_to_tp2=Decimal("3"),
         )
     )
+    )
+    if current_price != NA:
+        payload["current_price"] = current_price
+    if price_symbol is not None:
+        payload["current_price_symbol"] = price_symbol
+    if price_stale:
+        payload["current_price_stale"] = True
     return _symbol(
         SetupLifecycleState.WATCHLISTED,
         signal_id=signal_id,
@@ -522,6 +534,7 @@ def _outcome_scan_symbol(
             "lifecycle_transition": None,
             "latest_high": high,
             "latest_low": low,
+            "current_price": current_price,
         }
     )
 
@@ -3126,6 +3139,15 @@ def test_each_alert_type_is_not_sent_twice(tmp_path: Path) -> None:
         signal_id = symbol_result.lifecycle_state.lifecycle_id
         if needs_prior_active:
             _seed_prior_active_alert(db_path, signal_id=signal_id)
+        if alert_type in {TelegramAlertType.TP1_HIT, TelegramAlertType.TP2_HIT, TelegramAlertType.TP3_HIT}:
+            tp_price = {
+                TelegramAlertType.TP1_HIT: Decimal("110"),
+                TelegramAlertType.TP2_HIT: Decimal("115"),
+                TelegramAlertType.TP3_HIT: Decimal("120"),
+            }[alert_type]
+            symbol_result = symbol_result.model_copy(update={"current_price": tp_price})
+        if alert_type == TelegramAlertType.SL_HIT:
+            symbol_result = symbol_result.model_copy(update={"current_price": Decimal("95")})
         service = TelegramLifecycleDeliveryService(
             database_path=db_path,
             settings=Settings(_env_file=None),
@@ -3363,6 +3385,333 @@ def test_watchlist_stop_touch_rules_are_direction_aware() -> None:
     assert _stop_touched(short_exact_sl, side="short", stop_loss=Decimal("105"))
 
 
+def _watchlist_service_after_limit_hit(
+    db_path: Path,
+    *,
+    signal_id: str,
+    direction: str = "long",
+    symbol: str = "BTCUSDT",
+) -> tuple[FakeSender, TelegramLifecycleDeliveryService]:
+    _seed_prior_active_alert(
+        db_path,
+        signal_id=signal_id,
+        alert_type=TelegramAlertType.WATCHLIST,
+        symbol=symbol,
+        direction=direction,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+    limit = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    symbol=symbol,
+                    direction=direction,
+                    high=Decimal("101"),
+                    low=Decimal("99"),
+                )
+            ),
+            scan_run_id=f"{signal_id}-limit",
+        )
+    )
+    assert limit.sent == 1
+    return sender, service
+
+
+def test_short_tp_does_not_trigger_when_current_price_is_above_tp(tmp_path: Path) -> None:
+    db_path = tmp_path / "short-tp-current-above.db"
+    signal_id = "short-tp-current-above"
+    sender, service = _watchlist_service_after_limit_hit(db_path, signal_id=signal_id, direction="short")
+
+    attempt = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    direction="short",
+                    high=Decimal("99"),
+                    low=Decimal("94"),
+                    current_price=Decimal("96"),
+                )
+            ),
+            scan_run_id="short-tp-current-above",
+        )
+    )
+
+    assert attempt.sent == 0
+    assert len(sender.messages) == 1
+    rows = _watchlist_outcome_rows(db_path)
+    assert any(
+        row[1] == "blocked"
+        and row[2] == TelegramAlertType.TP1_HIT.value
+        and "tp_sl_price_condition_false" in row[3]
+        for row in rows
+    )
+
+
+def test_long_tp_does_not_trigger_when_current_price_is_below_tp(tmp_path: Path) -> None:
+    db_path = tmp_path / "long-tp-current-below.db"
+    signal_id = "long-tp-current-below"
+    sender, service = _watchlist_service_after_limit_hit(db_path, signal_id=signal_id)
+
+    attempt = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("111"),
+                    low=Decimal("103"),
+                    current_price=Decimal("109"),
+                )
+            ),
+            scan_run_id="long-tp-current-below",
+        )
+    )
+
+    assert attempt.sent == 0
+    assert len(sender.messages) == 1
+    rows = _watchlist_outcome_rows(db_path)
+    assert any(
+        row[1] == "blocked"
+        and row[2] == TelegramAlertType.TP1_HIT.value
+        and "tp_sl_price_condition_false" in row[3]
+        for row in rows
+    )
+
+
+def test_short_sl_does_not_trigger_when_current_price_is_below_sl(tmp_path: Path) -> None:
+    db_path = tmp_path / "short-sl-current-below.db"
+    signal_id = "short-sl-current-below"
+    sender, service = _watchlist_service_after_limit_hit(db_path, signal_id=signal_id, direction="short")
+
+    attempt = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    direction="short",
+                    high=Decimal("106"),
+                    low=Decimal("100"),
+                    current_price=Decimal("104"),
+                )
+            ),
+            scan_run_id="short-sl-current-below",
+        )
+    )
+
+    assert attempt.sent == 0
+    assert len(sender.messages) == 1
+    rows = _watchlist_outcome_rows(db_path)
+    assert any(
+        row[1] == "blocked"
+        and row[2] == TelegramAlertType.SL_HIT.value
+        and "tp_sl_price_condition_false" in row[3]
+        for row in rows
+    )
+
+
+def test_long_sl_does_not_trigger_when_current_price_is_above_sl(tmp_path: Path) -> None:
+    db_path = tmp_path / "long-sl-current-above.db"
+    signal_id = "long-sl-current-above"
+    sender, service = _watchlist_service_after_limit_hit(db_path, signal_id=signal_id)
+
+    attempt = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("101"),
+                    low=Decimal("94"),
+                    current_price=Decimal("96"),
+                )
+            ),
+            scan_run_id="long-sl-current-above",
+        )
+    )
+
+    assert attempt.sent == 0
+    assert len(sender.messages) == 1
+    rows = _watchlist_outcome_rows(db_path)
+    assert any(
+        row[1] == "blocked"
+        and row[2] == TelegramAlertType.SL_HIT.value
+        and "tp_sl_price_condition_false" in row[3]
+        for row in rows
+    )
+
+
+def test_watchlist_current_price_at_tp_cannot_send_tp_before_entry_zone_touched(tmp_path: Path) -> None:
+    db_path = tmp_path / "watchlist-tp-before-entry.db"
+    signal_id = "watchlist-tp-before-entry"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+
+    attempt = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("111"),
+                    low=Decimal("105"),
+                    current_price=Decimal("111"),
+                )
+            ),
+            scan_run_id="watchlist-tp-before-entry",
+        )
+    )
+
+    assert attempt.sent == 0
+    assert sender.messages == []
+    rows = _watchlist_outcome_rows(db_path)
+    assert not any(row[2] == TelegramAlertType.TP1_HIT.value and row[1] == "sent" for row in rows)
+    assert any(row[3] == "outcome_tracking_not_limit_hit_yet" for row in rows)
+
+
+def test_tp_sl_symbol_mismatch_blocks_watchlist_alert(tmp_path: Path) -> None:
+    db_path = tmp_path / "tp-symbol-mismatch.db"
+    signal_id = "opus-symbol-mismatch"
+    sender, service = _watchlist_service_after_limit_hit(
+        db_path,
+        signal_id=signal_id,
+        symbol="OPUSDT",
+    )
+
+    attempt = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    symbol="OPUSDT",
+                    high=Decimal("111"),
+                    low=Decimal("103"),
+                    current_price=Decimal("110"),
+                    price_symbol="BTCUSDT",
+                )
+            ),
+            scan_run_id="tp-symbol-mismatch",
+        )
+    )
+
+    assert attempt.sent == 0
+    assert len(sender.messages) == 1
+    rows = _watchlist_outcome_rows(db_path)
+    assert any(
+        row[1] == "blocked"
+        and row[2] == TelegramAlertType.TP1_HIT.value
+        and "tp_sl_symbol_mismatch" in row[3]
+        for row in rows
+    )
+
+
+def test_missing_or_stale_live_price_blocks_watchlist_tp_alert(tmp_path: Path) -> None:
+    missing_db_path = tmp_path / "missing-live-price.db"
+    missing_signal_id = "missing-live-price"
+    missing_sender, missing_service = _watchlist_service_after_limit_hit(missing_db_path, signal_id=missing_signal_id)
+
+    missing = run(
+        missing_service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=missing_signal_id,
+                    high=Decimal("111"),
+                    low=Decimal("103"),
+                )
+            ),
+            scan_run_id="missing-live-price",
+        )
+    )
+
+    stale_db_path = tmp_path / "stale-live-price.db"
+    stale_signal_id = "stale-live-price"
+    stale_sender, stale_service = _watchlist_service_after_limit_hit(stale_db_path, signal_id=stale_signal_id)
+    stale = run(
+        stale_service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=stale_signal_id,
+                    high=Decimal("111"),
+                    low=Decimal("103"),
+                    current_price=Decimal("110"),
+                    price_stale=True,
+                )
+            ),
+            scan_run_id="stale-live-price",
+        )
+    )
+
+    assert missing.sent == 0
+    assert stale.sent == 0
+    assert len(missing_sender.messages) == 1
+    assert len(stale_sender.messages) == 1
+    missing_rows = _watchlist_outcome_rows(missing_db_path)
+    stale_rows = _watchlist_outcome_rows(stale_db_path)
+    assert any(row[1] == "blocked" and row[2] == TelegramAlertType.TP1_HIT.value and "tp_sl_missing_live_price" in row[3] for row in missing_rows)
+    assert any(row[1] == "blocked" and row[2] == TelegramAlertType.TP1_HIT.value and "tp_sl_stale_live_price" in row[3] for row in stale_rows)
+
+
+def test_valid_short_tp_triggers_only_when_current_price_is_at_or_below_tp(tmp_path: Path) -> None:
+    db_path = tmp_path / "valid-short-tp-current.db"
+    signal_id = "valid-short-tp-current"
+    sender, service = _watchlist_service_after_limit_hit(db_path, signal_id=signal_id, direction="short")
+
+    attempt = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    direction="short",
+                    high=Decimal("99"),
+                    low=Decimal("95"),
+                    current_price=Decimal("95"),
+                )
+            ),
+            scan_run_id="valid-short-tp-current",
+        )
+    )
+
+    assert attempt.sent == 1
+    assert len(sender.messages) == 2
+    assert "TAKE PROFIT HIT" in sender.messages[1]
+    rows = _watchlist_outcome_rows(db_path)
+    assert any(row[0] == TelegramAlertType.TP1_HIT.value and row[1] == "sent" for row in rows)
+
+
+def test_valid_long_tp_triggers_only_when_current_price_is_at_or_above_tp(tmp_path: Path) -> None:
+    db_path = tmp_path / "valid-long-tp-current.db"
+    signal_id = "valid-long-tp-current"
+    sender, service = _watchlist_service_after_limit_hit(db_path, signal_id=signal_id)
+
+    attempt = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("110"),
+                    low=Decimal("103"),
+                    current_price=Decimal("110"),
+                )
+            ),
+            scan_run_id="valid-long-tp-current",
+        )
+    )
+
+    assert attempt.sent == 1
+    assert len(sender.messages) == 2
+    assert "TAKE PROFIT HIT" in sender.messages[1]
+    rows = _watchlist_outcome_rows(db_path)
+    assert any(row[0] == TelegramAlertType.TP1_HIT.value and row[1] == "sent" for row in rows)
+
+
 def test_short_watchlist_uses_stored_tp1_not_recalculated_current_target(tmp_path: Path) -> None:
     db_path = tmp_path / "ondo-short-target.db"
     signal_id = "ondo-watch-short"
@@ -3424,6 +3773,7 @@ def test_short_watchlist_uses_stored_tp1_not_recalculated_current_target(tmp_pat
                     direction="short",
                     high=Decimal("0.359"),
                     low=Decimal("0.356"),
+                    current_price=Decimal("0.356"),
                     diagnostics=current_recalculated,
                 )
             ),
@@ -3451,25 +3801,53 @@ def test_long_watchlist_tracks_tp_sequence_after_limit_hit(tmp_path: Path) -> No
     run(service.deliver_for_run(_run_result(_outcome_scan_symbol(signal_id=signal_id)), scan_run_id="limit"))
     tp1 = run(
         service.deliver_for_run(
-            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("110"), low=Decimal("103"))),
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("110"),
+                    low=Decimal("103"),
+                    current_price=Decimal("110"),
+                )
+            ),
             scan_run_id="tp1",
         )
     )
     tp2 = run(
         service.deliver_for_run(
-            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("116"), low=Decimal("103"))),
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("116"),
+                    low=Decimal("103"),
+                    current_price=Decimal("116"),
+                )
+            ),
             scan_run_id="tp2",
         )
     )
     tp3 = run(
         service.deliver_for_run(
-            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("121"), low=Decimal("103"))),
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("121"),
+                    low=Decimal("103"),
+                    current_price=Decimal("121"),
+                )
+            ),
             scan_run_id="tp3",
         )
     )
     repeat = run(
         service.deliver_for_run(
-            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("121"), low=Decimal("103"))),
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("121"),
+                    low=Decimal("103"),
+                    current_price=Decimal("121"),
+                )
+            ),
             scan_run_id="tp3-repeat",
         )
     )
@@ -3499,13 +3877,27 @@ def test_long_watchlist_tracks_sl_after_limit_hit_even_when_terminal_updates_dis
     run(service.deliver_for_run(_run_result(_outcome_scan_symbol(signal_id=signal_id)), scan_run_id="limit"))
     sl = run(
         service.deliver_for_run(
-            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("101"), low=Decimal("94"))),
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("101"),
+                    low=Decimal("94"),
+                    current_price=Decimal("94"),
+                )
+            ),
             scan_run_id="sl",
         )
     )
     repeat = run(
         service.deliver_for_run(
-            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("101"), low=Decimal("94"))),
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("101"),
+                    low=Decimal("94"),
+                    current_price=Decimal("94"),
+                )
+            ),
             scan_run_id="sl-repeat",
         )
     )
@@ -3540,7 +3932,15 @@ def test_short_watchlist_tracks_tp_and_sl_rules_after_limit_hit(tmp_path: Path) 
     )
     tp = run(
         service.deliver_for_run(
-            _run_result(_outcome_scan_symbol(signal_id=tp_signal, direction="short", high=Decimal("99"), low=Decimal("94"))),
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=tp_signal,
+                    direction="short",
+                    high=Decimal("99"),
+                    low=Decimal("94"),
+                    current_price=Decimal("94"),
+                )
+            ),
             scan_run_id="short-tp1",
         )
     )
@@ -3567,7 +3967,15 @@ def test_short_watchlist_tracks_tp_and_sl_rules_after_limit_hit(tmp_path: Path) 
     )
     sl = run(
         sl_service.deliver_for_run(
-            _run_result(_outcome_scan_symbol(signal_id=sl_signal, direction="short", high=Decimal("106"), low=Decimal("100"))),
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=sl_signal,
+                    direction="short",
+                    high=Decimal("106"),
+                    low=Decimal("100"),
+                    current_price=Decimal("106"),
+                )
+            ),
             scan_run_id="short-sl",
         )
     )
@@ -3610,6 +4018,7 @@ def test_missing_targets_do_not_break_limit_or_sl_tracking(tmp_path: Path) -> No
                     signal_id=signal_id,
                     high=Decimal("101"),
                     low=Decimal("94"),
+                    current_price=Decimal("94"),
                     diagnostics=diagnostics,
                 )
             ),

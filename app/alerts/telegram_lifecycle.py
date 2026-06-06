@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,12 @@ WATCHLIST_OUTCOME_TERMINAL_ALERT_TYPES = {
     TelegramAlertType.TP3_HIT,
     TelegramAlertType.SL_HIT,
 }
+TP_SL_ALERT_TYPES = {
+    TelegramAlertType.TP1_HIT,
+    TelegramAlertType.TP2_HIT,
+    TelegramAlertType.TP3_HIT,
+    TelegramAlertType.SL_HIT,
+}
 WATCHLIST_OUTCOME_TRACKING_ATTEMPT = "WATCHLIST_OUTCOME_TRACKING"
 WATCHLIST_TERMINAL_SUPPRESSION_ATTEMPT = "WATCHLIST_TERMINAL_SUPPRESSION"
 WATCHLIST_EXPIRY_ATTEMPT = "WATCHLIST_EXPIRY"
@@ -76,6 +83,78 @@ SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguo
 SOFT_FAILED_CONFIRMATION_ATTEMPT = "SOFT_FAILED_CONFIRMATION"
 SOFT_FAILED_CONFIRMATION_MIN_OBSERVATIONS = 3
 SOFT_FAILED_CONFIRMATION_REMOVAL_REASON = "Watchlist removed because final confirmation conditions did not improve."
+MAX_TP_SL_EVENT_DISTANCE_PCT = Decimal("0.25")
+MAX_LIVE_PRICE_AGE_SECONDS = Decimal("300")
+TP_SL_TRACKING_ACTIVE_STATE_KEYS = {
+    "active",
+    "executing",
+    "limit_hit",
+    "limit_zone_hit",
+    "managing",
+    "sl_hit",
+    "tp_hit",
+    "tp1_hit",
+    "tp2_hit",
+    "tp3_hit",
+}
+TP_SL_ENTRY_TOUCHED_STATE_KEYS = {
+    "active",
+    "executing",
+    "limit_hit",
+    "limit_zone_hit",
+    "managing",
+}
+LIVE_PRICE_STALE_FLAG_KEYS = (
+    "current_price_stale",
+    "price_stale",
+    "ticker_stale",
+    "live_price_stale",
+    "is_stale",
+)
+LIVE_PRICE_STATUS_KEYS = (
+    "current_price_status",
+    "price_status",
+    "ticker_status",
+    "live_price_status",
+)
+LIVE_PRICE_AGE_KEYS = (
+    "current_price_age_seconds",
+    "price_age_seconds",
+    "ticker_age_seconds",
+    "live_price_age_seconds",
+)
+LIVE_PRICE_TIMESTAMP_KEYS = (
+    "current_price_timestamp",
+    "price_timestamp",
+    "ticker_timestamp",
+    "live_price_timestamp",
+    "last_price_timestamp",
+)
+LIVE_PRICE_SYMBOL_KEYS = (
+    "current_price_symbol",
+    "price_symbol",
+    "ticker_symbol",
+    "live_price_symbol",
+    "last_price_symbol",
+)
+LIVE_PRICE_VALUE_KEYS = (
+    "current_price",
+    "ticker_price",
+    "live_price",
+    "mark_price",
+    "last_price",
+)
+LIVE_PRICE_BLOCKED_STATUS_KEYS = {
+    "expired",
+    "invalid",
+    "missing",
+    "nan",
+    "stale",
+    "unavailable",
+    "unreliable",
+    "unverified",
+    "zero",
+}
 TERMINAL_IDENTITY_BLOCK_REASONS = {
     "terminal_update_no_prior_public_alert",
     "terminal_update_identity_ambiguous",
@@ -235,6 +314,14 @@ class WatchlistCandleSnapshot:
     high: Decimal
     low: Decimal
     identity: str = NA
+
+
+@dataclass(frozen=True)
+class WatchlistLivePriceSnapshot:
+    symbol: str
+    price: Decimal
+    source: str = NA
+    timestamp: str = NA
 
 
 class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegramAlertAttemptRepository"]):
@@ -817,6 +904,37 @@ class TelegramLifecycleDeliveryService:
                 _message_with_prior_public_identity(message, prior_active_alert),
                 upgraded_from_watchlist=prior_active_alert.alert_type == TelegramAlertType.WATCHLIST.value,
             )
+        elif decision.alert_type in TP_SL_ALERT_TYPES:
+            prior_tp_sl_alert = repository.get_prior_public_alert(signal_ids=(signal_id,))
+            if prior_tp_sl_alert is not None:
+                signal_id = prior_tp_sl_alert.signal_id
+                message = _message_with_prior_public_plan(message, prior_tp_sl_alert)
+
+        if decision.alert_type in TP_SL_ALERT_TYPES:
+            blockers = _tp_sl_delivery_blockers(
+                repository,
+                symbol_result=symbol_result,
+                signal_id=signal_id,
+                alert_type=decision.alert_type,
+                message=message,
+            )
+            if blockers:
+                reason = f"blocked:{'; '.join(blockers)}"
+                blocked_decision = replace(decision, eligible=False, reason=reason, message=message)
+                _log_lifecycle_alert_audit(
+                    symbol_result=symbol_result,
+                    message=message,
+                    alert_type=decision.alert_type,
+                    decision="blocked",
+                    reason=reason,
+                )
+                return _persist_blocked_attempt(
+                    repository,
+                    symbol_result,
+                    decision=blocked_decision,
+                    scan_run_id=scan_run_id,
+                    eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                )
 
         if repository.has_attempt(signal_id=signal_id, alert_type=decision.alert_type):
             repository.compact_existing_attempt(
@@ -877,6 +995,13 @@ class TelegramLifecycleDeliveryService:
                 message_hash=message_hash,
             )
 
+        _log_lifecycle_alert_audit(
+            symbol_result=symbol_result,
+            message=message,
+            alert_type=decision.alert_type,
+            decision=send_result.status,
+            reason=send_result.error_message or send_result.detail,
+        )
         logger.info(
             "Telegram signal alert attempt persisted: symbol=%s alert_type=%s status=%s message_hash=%s",
             symbol_result.symbol,
@@ -1150,6 +1275,13 @@ class TelegramLifecycleDeliveryService:
             alert_type.value,
             send_result.status,
             message_hash,
+        )
+        _log_lifecycle_alert_audit(
+            symbol_result=current_result,
+            message=message,
+            alert_type=alert_type,
+            decision=send_result.status,
+            reason=send_result.error_message or send_result.detail,
         )
         return TelegramLifecycleDelivery(
             symbol=prior_alert.symbol,
@@ -2748,6 +2880,8 @@ def _explicit_watchlist_candidate(symbol_result: ScannerSymbolResult) -> bool:
 def _persist_blocked_decision(decision: TelegramAlertDecision) -> bool:
     if decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES:
         return decision.reason in TERMINAL_IDENTITY_BLOCK_REASONS or decision.reason.startswith("blocked:")
+    if decision.alert_type in TP_SL_ALERT_TYPES:
+        return decision.reason.startswith("blocked:")
     return decision.alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED} and decision.reason.startswith(
         "blocked:"
     )
@@ -3126,7 +3260,7 @@ def _watchlist_outcome_for_current_result(
     current_result: ScannerSymbolResult,
     eligibility_context: TelegramEligibilityContext,
     scan_run_id: str | None,
-) -> tuple[TelegramAlertType, TelegramSignalMessage] | None:
+) -> tuple[TelegramAlertType, TelegramSignalMessage] | TelegramLifecycleDelivery | None:
     if prior_alert.alert_type != TelegramAlertType.WATCHLIST.value or prior_alert.telegram_status != "sent":
         _persist_watchlist_outcome_audit(
             repository,
@@ -3232,9 +3366,43 @@ def _watchlist_outcome_for_current_result(
         )
         return None
 
-    sl_hit = stop_loss is not None and _stop_touched(candle, side=side, stop_loss=stop_loss)
     tracked_targets = () if target_tracking_unresolved else targets
-    next_tp = _next_touched_watchlist_tp(repository, prior_alert.signal_id, candle, side=side, targets=tracked_targets)
+    legacy_sl_hit = stop_loss is not None and _stop_touched(candle, side=side, stop_loss=stop_loss)
+    legacy_next_tp = _next_touched_watchlist_tp(
+        repository,
+        prior_alert.signal_id,
+        candle,
+        side=side,
+        targets=tracked_targets,
+    )
+    live_price, live_price_reason = _live_price_snapshot(current_result)
+    if live_price is None:
+        legacy_alert_type = TelegramAlertType.SL_HIT if legacy_sl_hit else legacy_next_tp
+        if legacy_alert_type is None:
+            return None
+        return _persist_blocked_watchlist_tp_sl_attempt(
+            repository,
+            prior_alert,
+            symbol_result=current_result,
+            alert_type=legacy_alert_type,
+            message=message,
+            reason=f"blocked:{live_price_reason}",
+            scan_run_id=scan_run_id,
+        )
+
+    sl_hit = stop_loss is not None and _tp_sl_price_condition(
+        live_price.price,
+        TelegramAlertType.SL_HIT,
+        side=side,
+        level=stop_loss,
+    )
+    next_tp = _next_touched_watchlist_tp_from_price(
+        repository,
+        prior_alert.signal_id,
+        live_price.price,
+        side=side,
+        targets=tracked_targets,
+    )
     if sl_hit and next_tp is not None:
         _persist_watchlist_outcome_audit(
             repository,
@@ -3246,21 +3414,473 @@ def _watchlist_outcome_for_current_result(
             price_level=_price_level_for_alert(next_tp, message),
         )
         return None
+    legacy_alert_type = TelegramAlertType.SL_HIT if legacy_sl_hit else legacy_next_tp
+    if not sl_hit and next_tp is None and legacy_alert_type is not None:
+        blockers = _watchlist_tp_sl_blockers(
+            repository,
+            prior_alert=prior_alert,
+            symbol_result=current_result,
+            alert_type=legacy_alert_type,
+            message=message,
+            live_price=live_price,
+            require_limit_hit=True,
+        )
+        reason = f"blocked:{'; '.join(blockers or ('tp_sl_price_condition_false',))}"
+        return _persist_blocked_watchlist_tp_sl_attempt(
+            repository,
+            prior_alert,
+            symbol_result=current_result,
+            alert_type=legacy_alert_type,
+            message=message,
+            reason=reason,
+            scan_run_id=scan_run_id,
+        )
     if sl_hit:
-        return TelegramAlertType.SL_HIT, _message_with_observed_watchlist_price(
-            message,
+        blockers = _watchlist_tp_sl_blockers(
+            repository,
+            prior_alert=prior_alert,
+            symbol_result=current_result,
             alert_type=TelegramAlertType.SL_HIT,
-            candle=candle,
-            side=side,
+            message=message,
+            live_price=live_price,
+            require_limit_hit=True,
+        )
+        if blockers:
+            return _persist_blocked_watchlist_tp_sl_attempt(
+                repository,
+                prior_alert,
+                symbol_result=current_result,
+                alert_type=TelegramAlertType.SL_HIT,
+                message=message,
+                reason=f"blocked:{'; '.join(blockers)}",
+                scan_run_id=scan_run_id,
+            )
+        return TelegramAlertType.SL_HIT, replace(
+            message,
+            price_level=live_price.price,
         )
     if next_tp is not None:
-        return next_tp, _message_with_observed_watchlist_price(
-            message,
+        blockers = _watchlist_tp_sl_blockers(
+            repository,
+            prior_alert=prior_alert,
+            symbol_result=current_result,
             alert_type=next_tp,
-            candle=candle,
-            side=side,
+            message=message,
+            live_price=live_price,
+            require_limit_hit=True,
+        )
+        if blockers:
+            return _persist_blocked_watchlist_tp_sl_attempt(
+                repository,
+                prior_alert,
+                symbol_result=current_result,
+                alert_type=next_tp,
+                message=message,
+                reason=f"blocked:{'; '.join(blockers)}",
+                scan_run_id=scan_run_id,
+            )
+        return next_tp, replace(
+            message,
+            price_level=live_price.price,
         )
     return None
+
+
+def _tp_sl_delivery_blockers(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    symbol_result: ScannerSymbolResult,
+    signal_id: str,
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage,
+) -> tuple[str, ...]:
+    prior_public_alert = repository.get_prior_public_alert(signal_ids=(signal_id,))
+    return _tp_sl_common_blockers(
+        repository,
+        symbol_result=symbol_result,
+        signal_id=signal_id,
+        alert_type=alert_type,
+        message=message,
+        prior_public_alert=prior_public_alert,
+        require_limit_hit=False,
+    )
+
+
+def _watchlist_tp_sl_blockers(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    prior_alert: TelegramAlertAttemptRecord,
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage,
+    live_price: WatchlistLivePriceSnapshot | None = None,
+    require_limit_hit: bool,
+) -> tuple[str, ...]:
+    return _tp_sl_common_blockers(
+        repository,
+        symbol_result=symbol_result,
+        signal_id=prior_alert.signal_id,
+        alert_type=alert_type,
+        message=message,
+        prior_public_alert=prior_alert,
+        live_price=live_price,
+        require_limit_hit=require_limit_hit,
+    )
+
+
+def _tp_sl_common_blockers(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    symbol_result: ScannerSymbolResult,
+    signal_id: str,
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage,
+    prior_public_alert: TelegramAlertAttemptRecord | None,
+    live_price: WatchlistLivePriceSnapshot | None = None,
+    require_limit_hit: bool,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    expected_symbol = _symbol(message.symbol)
+    result_symbol = _symbol(symbol_result.symbol)
+    prior_symbol = _symbol(prior_public_alert.symbol) if prior_public_alert is not None else NA
+    if expected_symbol == NA:
+        blockers.append("tp_sl_missing_symbol")
+    if expected_symbol != NA and result_symbol != NA and result_symbol != expected_symbol:
+        blockers.append("tp_sl_symbol_mismatch")
+    if expected_symbol != NA and prior_symbol != NA and prior_symbol != expected_symbol:
+        blockers.append("tp_sl_symbol_mismatch")
+
+    blockers.extend(
+        _tp_sl_tracking_state_blockers(
+            repository,
+            signal_id=signal_id,
+            symbol_result=symbol_result,
+            prior_public_alert=prior_public_alert,
+            require_limit_hit=require_limit_hit,
+        )
+    )
+
+    snapshot = live_price
+    live_price_reason = NA
+    if snapshot is None:
+        snapshot, live_price_reason = _live_price_snapshot(symbol_result)
+    if snapshot is None:
+        blockers.append(live_price_reason)
+        return tuple(dict.fromkeys(blocker for blocker in blockers if blocker != NA))
+    if expected_symbol != NA and _symbol(snapshot.symbol) != expected_symbol:
+        blockers.append("tp_sl_symbol_mismatch")
+
+    side = _status_key(message.direction)
+    if side not in {"long", "short"}:
+        blockers.append("tp_sl_missing_direction")
+    level = _tp_sl_level(alert_type, message)
+    if level is None:
+        blockers.append("tp_sl_missing_level")
+    if side in {"long", "short"} and level is not None:
+        blockers.extend(_tp_sl_price_blockers(snapshot.price, alert_type=alert_type, side=side, level=level))
+    return tuple(dict.fromkeys(blocker for blocker in blockers if blocker != NA))
+
+
+def _tp_sl_tracking_state_blockers(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    signal_id: str,
+    symbol_result: ScannerSymbolResult,
+    prior_public_alert: TelegramAlertAttemptRecord | None,
+    require_limit_hit: bool,
+) -> tuple[str, ...]:
+    has_limit_hit = repository.has_attempt(signal_id=signal_id, alert_type=TelegramAlertType.LIMIT_HIT)
+    state_keys = set(_tp_sl_lifecycle_state_keys(symbol_result))
+    active_evidence = has_limit_hit or bool(state_keys & TP_SL_TRACKING_ACTIVE_STATE_KEYS)
+    entry_touched_evidence = has_limit_hit or bool(state_keys & TP_SL_ENTRY_TOUCHED_STATE_KEYS)
+    blockers: list[str] = []
+    if require_limit_hit and not has_limit_hit:
+        blockers.append("tp_sl_before_entry_zone_touched")
+    if not active_evidence:
+        blockers.append("tp_sl_not_active")
+    if not entry_touched_evidence or (
+        prior_public_alert is not None
+        and prior_public_alert.alert_type == TelegramAlertType.WATCHLIST.value
+        and not has_limit_hit
+    ):
+        blockers.append("tp_sl_before_entry_zone_touched")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _tp_sl_lifecycle_state_keys(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    values: list[Any] = [_lifecycle_state_text(symbol_result)]
+    transition = symbol_result.lifecycle_transition
+    if transition is not None:
+        values.extend(
+            (
+                transition.from_state.value if transition.from_state is not None else NA,
+                transition.to_state.value if transition.to_state is not None else NA,
+            )
+        )
+    previous = _previous_transition_state(symbol_result)
+    if previous is not None:
+        values.append(previous.value)
+    return tuple(dict.fromkeys(_status_key(value) for value in values if _status_key(value)))
+
+
+def _tp_sl_price_blockers(
+    current_price: Decimal,
+    *,
+    alert_type: TelegramAlertType,
+    side: str,
+    level: Decimal,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    if not _tp_sl_price_condition(current_price, alert_type, side=side, level=level):
+        blockers.append("tp_sl_price_condition_false")
+    if _tp_sl_price_distance_unrealistic(current_price, level):
+        blockers.append("tp_sl_price_distance_unrealistic")
+    return tuple(blockers)
+
+
+def _tp_sl_price_condition(
+    current_price: Decimal,
+    alert_type: TelegramAlertType,
+    *,
+    side: str,
+    level: Decimal,
+) -> bool:
+    if alert_type in {TelegramAlertType.TP1_HIT, TelegramAlertType.TP2_HIT, TelegramAlertType.TP3_HIT}:
+        if side == "long":
+            return current_price >= level
+        if side == "short":
+            return current_price <= level
+    if alert_type == TelegramAlertType.SL_HIT:
+        if side == "long":
+            return current_price <= level
+        if side == "short":
+            return current_price >= level
+    return False
+
+
+def _tp_sl_price_distance_unrealistic(current_price: Decimal, level: Decimal) -> bool:
+    if level == 0:
+        return True
+    return abs(current_price - level) / abs(level) > MAX_TP_SL_EVENT_DISTANCE_PCT
+
+
+def _tp_sl_level(alert_type: TelegramAlertType, message: TelegramSignalMessage) -> Decimal | None:
+    if alert_type == TelegramAlertType.TP1_HIT:
+        return _decimal_or_none(message.tp1)
+    if alert_type == TelegramAlertType.TP2_HIT:
+        return _decimal_or_none(message.tp2)
+    if alert_type == TelegramAlertType.TP3_HIT:
+        return _decimal_or_none(message.tp3)
+    if alert_type == TelegramAlertType.SL_HIT:
+        return _decimal_or_none(message.stop_loss)
+    return None
+
+
+def _next_touched_watchlist_tp_from_price(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    signal_id: str,
+    current_price: Decimal,
+    *,
+    side: str,
+    targets: Sequence[tuple[TelegramAlertType, Decimal]],
+) -> TelegramAlertType | None:
+    for alert_type, target in targets:
+        if repository.has_attempt(signal_id=signal_id, alert_type=alert_type):
+            continue
+        if _tp_sl_price_condition(current_price, alert_type, side=side, level=target):
+            return alert_type
+    return None
+
+
+def _live_price_snapshot(symbol_result: ScannerSymbolResult) -> tuple[WatchlistLivePriceSnapshot | None, str]:
+    diagnostics = _representative_diagnostics(symbol_result)
+    status_reason = _live_price_status_reason(diagnostics)
+    if status_reason != NA:
+        return None, status_reason
+    raw_price = _live_price_candidate_value(symbol_result, diagnostics)
+    price = _decimal_or_none(raw_price)
+    if price is None:
+        reason = "tp_sl_invalid_live_price" if _text(raw_price) != NA else "tp_sl_missing_live_price"
+        return None, reason
+    if price <= 0:
+        return None, "tp_sl_invalid_live_price"
+    source_symbol = _symbol(
+        _first_non_na(
+            *(diagnostics.get(key) for key in LIVE_PRICE_SYMBOL_KEYS),
+            symbol_result.symbol,
+        )
+    )
+    timestamp = _text(_first_non_na(*(diagnostics.get(key) for key in LIVE_PRICE_TIMESTAMP_KEYS)))
+    return WatchlistLivePriceSnapshot(symbol=source_symbol, price=price, source="scanner_current_price", timestamp=timestamp), NA
+
+
+def _live_price_candidate_value(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Any:
+    return _first_non_na(
+        *(diagnostics.get(key) for key in LIVE_PRICE_VALUE_KEYS),
+        getattr(symbol_result, "current_price", NA),
+    )
+
+
+def _live_price_status_reason(diagnostics: Mapping[str, Any]) -> str:
+    for key in LIVE_PRICE_STALE_FLAG_KEYS:
+        if _truthy_live_price_flag(diagnostics.get(key)):
+            return "tp_sl_stale_live_price"
+    for key in LIVE_PRICE_STATUS_KEYS:
+        status = _status_key(diagnostics.get(key))
+        if status in LIVE_PRICE_BLOCKED_STATUS_KEYS:
+            if status in {"missing", "unavailable"}:
+                return "tp_sl_missing_live_price"
+            if status in {"invalid", "nan", "zero"}:
+                return "tp_sl_invalid_live_price"
+            return "tp_sl_stale_live_price"
+    for key in LIVE_PRICE_AGE_KEYS:
+        age = _decimal_or_none(diagnostics.get(key))
+        if age is not None and age > MAX_LIVE_PRICE_AGE_SECONDS:
+            return "tp_sl_stale_live_price"
+    for key in LIVE_PRICE_TIMESTAMP_KEYS:
+        raw_timestamp = diagnostics.get(key)
+        if _text(raw_timestamp) == NA:
+            continue
+        timestamp = _parse_live_price_timestamp(raw_timestamp)
+        if timestamp is None:
+            return "tp_sl_stale_live_price"
+        age_seconds = Decimal(str((datetime.now(timezone.utc) - timestamp).total_seconds()))
+        if age_seconds > MAX_LIVE_PRICE_AGE_SECONDS:
+            return "tp_sl_stale_live_price"
+    return NA
+
+
+def _truthy_live_price_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    key = _status_key(value)
+    return key in {"1", "true", "yes", "y", "stale", "expired"}
+
+
+def _parse_live_price_timestamp(value: Any) -> datetime | None:
+    text = _text(value)
+    if text == NA:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def _persist_blocked_watchlist_tp_sl_attempt(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    prior_alert: TelegramAlertAttemptRecord,
+    *,
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage,
+    reason: str,
+    scan_run_id: str | None,
+) -> TelegramLifecycleDelivery:
+    _log_lifecycle_alert_audit(
+        symbol_result=symbol_result,
+        message=message,
+        alert_type=alert_type,
+        decision="blocked",
+        reason=reason,
+    )
+    seen_at = now_utc_iso()
+    transition = symbol_result.lifecycle_transition
+    previous_state = transition.from_state.value if transition and transition.from_state else NA
+    new_state = transition.to_state.value if transition else _lifecycle_state_text(symbol_result)
+    message_hash = hashlib.sha256(f"{prior_alert.signal_id}|{alert_type.value}|{reason}".encode("utf-8")).hexdigest()
+    record = TelegramAlertAttemptRecord(
+        signal_id=prior_alert.signal_id,
+        symbol=prior_alert.symbol,
+        direction=prior_alert.direction,
+        previous_state=previous_state,
+        new_state=new_state,
+        alert_type=_blocked_alert_type(alert_type, reason),
+        lifecycle_state=_lifecycle_state_text(symbol_result),
+        sent_at=seen_at,
+        telegram_status="blocked",
+        message_hash=message_hash,
+        scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        attempted_alert_type=alert_type.value,
+        setup_quality_score=_quality_score(symbol_result),
+        rr_planned=_text(message.planned_rr),
+        min_rr=_text(message.min_rr),
+        opportunity_score=_opportunity_score_text(symbol_result),
+        min_score_for_idea=NA,
+        technical_score=_technical_score_text(symbol_result),
+        price_level=_price_level_for_alert(alert_type, message),
+        **_message_level_metadata(message),
+        blocked_reason=reason,
+        invalid_target_fields=NA,
+        error_message=reason,
+        first_seen_at=seen_at,
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        last_error_message=reason,
+    )
+    inserted = repository.insert_attempt(record)
+    if not inserted:
+        compacted = repository.compact_repeated_attempt(record)
+        status = "blocked_repeat" if compacted else "duplicate"
+        detail = (
+            "Repeated blocked Telegram watchlist TP/SL attempt compacted."
+            if compacted
+            else "Duplicate blocked Telegram watchlist TP/SL attempt prevented."
+        )
+        return TelegramLifecycleDelivery(
+            symbol=prior_alert.symbol,
+            signal_id=prior_alert.signal_id,
+            alert_type=alert_type.value,
+            status=status,
+            detail=detail,
+            message_hash=message_hash,
+            error_message=reason,
+        )
+    return TelegramLifecycleDelivery(
+        symbol=prior_alert.symbol,
+        signal_id=prior_alert.signal_id,
+        alert_type=alert_type.value,
+        status="blocked",
+        detail="Telegram watchlist TP/SL lifecycle update blocked by live price guard.",
+        message_hash=message_hash,
+        error_message=reason,
+    )
+
+
+def _log_lifecycle_alert_audit(
+    *,
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+    alert_type: TelegramAlertType,
+    decision: str,
+    reason: str | None,
+) -> None:
+    diagnostics = _representative_diagnostics(symbol_result)
+    current_price = _text(_live_price_candidate_value(symbol_result, diagnostics))
+    log = logger.warning if _status_key(decision) in {"blocked", "blocked_repeat"} else logger.info
+    log(
+        (
+            "Telegram lifecycle alert audit: symbol=%s lifecycle_state=%s direction=%s "
+            "current_price=%s entry_low=%s entry_high=%s tp1=%s tp2=%s tp3=%s stop_loss=%s "
+            "alert_type=%s decision=%s reason=%s"
+        ),
+        _symbol(message.symbol),
+        _lifecycle_state_text(symbol_result),
+        _text(message.direction),
+        current_price,
+        format_telegram_price(message.entry_low),
+        format_telegram_price(message.entry_high),
+        format_telegram_price(message.tp1),
+        format_telegram_price(message.tp2),
+        format_telegram_price(message.tp3),
+        format_telegram_price(message.stop_loss),
+        alert_type.value,
+        decision,
+        _text(reason),
+    )
 
 
 def _apply_soft_failed_confirmation_grace_to_decision(
@@ -4155,6 +4775,8 @@ def _lifecycle_record_state_key(record: SetupLifecycleRecord) -> str:
 def _blocked_delivery_detail(alert_type: TelegramAlertType) -> str:
     if alert_type == TelegramAlertType.WATCHLIST:
         return "Telegram watchlist alert blocked by public readiness guard."
+    if alert_type in TP_SL_ALERT_TYPES:
+        return "Telegram TP/SL lifecycle update blocked by live price guard."
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
         return "Telegram terminal lifecycle update blocked by public alert identity guard."
     return "Telegram confirmed alert blocked by defensive eligibility guard."
