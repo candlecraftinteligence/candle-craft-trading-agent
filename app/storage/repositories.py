@@ -203,6 +203,7 @@ def _scan_run_record(
     counts = _bucket_counts(raw_payload)
     data_issues = _data_issues(result)
     watch_data_issues = watch_iteration.data_issues if watch_iteration is not None else counts["data_issue"]
+    summary = _scan_summary_metadata(result, watch_iteration=watch_iteration)
     return ScanRunRecord(
         run_id=run_id,
         timestamp=timestamp,
@@ -238,13 +239,13 @@ def _scan_run_record(
         watch_iteration_number=watch_iteration.iteration_number if watch_iteration is not None else None,
         started_at=watch_iteration.started_at if watch_iteration is not None else None,
         completed_at=watch_iteration.completed_at if watch_iteration is not None else None,
-        symbols_requested=watch_iteration.symbols_requested if watch_iteration is not None else 0,
-        symbols_queued=watch_iteration.symbols_queued if watch_iteration is not None else 0,
-        symbols_completed=watch_iteration.symbols_completed if watch_iteration is not None else 0,
+        symbols_requested=summary["symbols_requested"],
+        symbols_queued=summary["symbols_queued"],
+        symbols_completed=summary["symbols_completed"],
         valid_activations=watch_iteration.valid_activations if watch_iteration is not None else 0,
         still_watching=watch_iteration.still_watching if watch_iteration is not None else 0,
         rejected_no_edge=watch_iteration.rejected_no_edge if watch_iteration is not None else 0,
-        runtime_sec=watch_iteration.runtime_sec if watch_iteration is not None else None,
+        runtime_sec=summary["runtime_sec"],
         portfolio_summary_json=_json_dump(watch_iteration.portfolio_summary or {})
         if watch_iteration is not None
         else "{}",
@@ -252,6 +253,56 @@ def _scan_run_record(
         if watch_iteration is not None
         else "{}",
     )
+
+
+def _scan_summary_metadata(
+    result: ScannerRunResult,
+    *,
+    watch_iteration: WatchIterationMetadata | None,
+) -> dict[str, int | float]:
+    metadata = result.resume_metadata if isinstance(result.resume_metadata, Mapping) else {}
+    requested = _metadata_symbol_count(metadata, "watchlist_symbols")
+    queued = _metadata_symbol_count(metadata, "symbols_to_scan")
+
+    if requested is None:
+        requested = len(result.config.symbols)
+    if queued is None:
+        queued = len(result.config.symbols)
+
+    if watch_iteration is not None:
+        requested = _non_negative_int(watch_iteration.symbols_requested)
+        queued = _non_negative_int(watch_iteration.symbols_queued)
+
+    runtime = result.runtime_stats
+    return {
+        "symbols_requested": _non_negative_int(requested),
+        "symbols_queued": _non_negative_int(queued),
+        "symbols_completed": _non_negative_int(runtime.completed_symbols),
+        "runtime_sec": _non_negative_float(runtime.total_runtime_seconds),
+    }
+
+
+def _metadata_symbol_count(metadata: Mapping[str, Any], key: str) -> int | None:
+    value = metadata.get(key)
+    if isinstance(value, str):
+        return None
+    if isinstance(value, Sequence):
+        return len(value)
+    return None
+
+
+def _non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _non_negative_float(value: Any) -> float:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _storage_payload(

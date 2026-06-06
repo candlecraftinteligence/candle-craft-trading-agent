@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from decimal import Decimal
 
 import pytest
@@ -15,7 +16,13 @@ from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE, VolumeProfileRes
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, display_fields, filter_ranked_results, rank_scan_results
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
-from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
+from app.pipeline.scanner_runner import (
+    ScannerPipelineStatus,
+    ScannerRunConfig,
+    ScannerRunResult,
+    ScannerRuntimeStats,
+    ScannerSymbolResult,
+)
 from app.storage.models import ScanHistorySummary
 from scripts import audit_scan_row_visibility
 from scripts import run_scan
@@ -176,6 +183,20 @@ class FakeScannerRunner:
             trade_ideas_created=0,
             dry_run_alerts_created=0,
             journal_entries_created=0,
+        )
+
+
+class RuntimeStatsScannerRunner(FakeScannerRunner):
+    async def run(self, config):
+        result = await super().run(config)
+        return result.model_copy(
+            update={
+                "runtime_stats": ScannerRuntimeStats(
+                    total_runtime_seconds=1.25,
+                    average_seconds_per_symbol=1.25,
+                    completed_symbols=1,
+                )
+            }
         )
 
 
@@ -723,6 +744,34 @@ def test_store_scan_prints_run_id_and_database(tmp_path, monkeypatch, capsys) ->
     captured = capsys.readouterr()
     assert "Stored scan run: run_123" in captured.out
     assert f"Database: {db_path}" in captured.out
+
+
+def test_store_scan_persists_normal_scan_summary_metadata(tmp_path, monkeypatch, capsys) -> None:
+    db_path = tmp_path / "history.db"
+    monkeypatch.setattr(run_scan, "ScannerRunner", RuntimeStatsScannerRunner)
+
+    asyncio.run(run_scan.main(["--symbols", "BTCUSDT", "--store-scan", "--database-path", str(db_path)]))
+
+    _ = capsys.readouterr()
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT runtime_stats_json, symbols_requested, symbols_queued,
+                   symbols_completed, runtime_sec
+            FROM scan_runs
+            """
+        ).fetchone()
+
+    runtime_stats = json.loads(row["runtime_stats_json"])
+    assert runtime_stats["completed_symbols"] == 1
+    assert runtime_stats["total_runtime_seconds"] == 1.25
+    assert row["symbols_requested"] > 0
+    assert row["symbols_queued"] > 0
+    assert row["symbols_completed"] > 0
+    assert row["runtime_sec"] is not None
+    assert row["symbols_completed"] == runtime_stats["completed_symbols"]
+    assert row["runtime_sec"] == runtime_stats["total_runtime_seconds"]
 
 
 def test_show_history_displays_recent_runs_without_scanning(tmp_path, monkeypatch, capsys) -> None:

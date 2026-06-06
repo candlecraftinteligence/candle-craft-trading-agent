@@ -10,7 +10,13 @@ import pytest
 
 from app.agents.trade_idea import TradeIdeaAgent
 from app.analytics.setup_quality import SetupQualityState, validate_setup_quality
-from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
+from app.pipeline.scanner_runner import (
+    ScannerPipelineStatus,
+    ScannerRunConfig,
+    ScannerRunResult,
+    ScannerRuntimeStats,
+    ScannerSymbolResult,
+)
 from app.watch_mode import (
     WatchSymbolState,
     WatchState,
@@ -46,6 +52,11 @@ class SequenceWatchRunner:
             trade_ideas_created=sum(1 for result in results if result.trade_idea is not None),
             dry_run_alerts_created=0,
             journal_entries_created=0,
+            runtime_stats=ScannerRuntimeStats(
+                total_runtime_seconds=round(0.25 * len(results), 3),
+                average_seconds_per_symbol=0.25 if results else 0.0,
+                completed_symbols=len(results),
+            ),
         )
 
 
