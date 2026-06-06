@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from decimal import Decimal
 
@@ -16,8 +17,15 @@ from app.backtesting import (
     ReplayTradeResult,
 )
 from app.data.dtos import NA
-from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
+from app.pipeline.scanner_runner import (
+    ScannerPipelineStatus,
+    ScannerRunConfig,
+    ScannerRunResult,
+    ScannerRuntimeStats,
+    ScannerSymbolResult,
+)
 from app.storage.database import StorageError, open_initialized_database
+from app.storage.models import WatchIterationMetadata
 from app.storage.repositories import export_history_payload, list_scan_history, store_scan_result
 
 
@@ -137,7 +145,11 @@ def _rejected_symbol() -> ScannerSymbolResult:
     )
 
 
-def _scan_result() -> ScannerRunResult:
+def _scan_result(
+    *,
+    runtime_stats: ScannerRuntimeStats | None = None,
+    resume_metadata: dict[str, object] | None = None,
+) -> ScannerRunResult:
     config = _scanner_config()
     return ScannerRunResult(
         config=config,
@@ -147,6 +159,8 @@ def _scan_result() -> ScannerRunResult:
         trade_ideas_created=1,
         dry_run_alerts_created=0,
         journal_entries_created=0,
+        resume_metadata=resume_metadata or {},
+        runtime_stats=runtime_stats or ScannerRuntimeStats(),
     )
 
 
@@ -434,6 +448,103 @@ def test_scan_run_insert(tmp_path) -> None:
         row = connection.execute("SELECT run_id, command_preset, total_valid_setups FROM scan_runs").fetchone()
 
     assert row == (run_id, "daily", 1)
+
+
+def test_normal_scan_run_persists_summary_metadata_from_runtime_stats(tmp_path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    runtime_stats = ScannerRuntimeStats(
+        total_runtime_seconds=1.234,
+        average_seconds_per_symbol=0.411,
+        completed_symbols=3,
+    )
+    result = _scan_result(
+        runtime_stats=runtime_stats,
+        resume_metadata={
+            "watchlist_symbols": ["BTCUSDT", "ETHUSDT", "XRPUSDT"],
+            "symbols_to_scan": ["BTCUSDT", "ETHUSDT", "XRPUSDT"],
+        },
+    )
+
+    run_id = store_scan_result(db_path, result)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT runtime_stats_json, symbols_requested, symbols_queued,
+                   symbols_completed, symbols_scanned, runtime_sec
+            FROM scan_runs
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+    stored_runtime = json.loads(row["runtime_stats_json"])
+    assert stored_runtime["total_runtime_seconds"] == 1.234
+    assert row["symbols_requested"] == 3
+    assert row["symbols_queued"] == 3
+    assert row["symbols_completed"] == 3
+    assert row["symbols_scanned"] == 3
+    assert row["runtime_sec"] == 1.234
+    assert row["symbols_completed"] == stored_runtime["completed_symbols"]
+    assert row["runtime_sec"] == stored_runtime["total_runtime_seconds"]
+
+
+def test_watch_scan_run_persists_summary_metadata_from_runtime_stats(tmp_path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    runtime_stats = ScannerRuntimeStats(
+        total_runtime_seconds=2.5,
+        average_seconds_per_symbol=0.833,
+        completed_symbols=3,
+    )
+    result = _scan_result(
+        runtime_stats=runtime_stats,
+        resume_metadata={
+            "watchlist_symbols": ["BTCUSDT", "ETHUSDT", "XRPUSDT"],
+            "symbols_to_scan": ["BTCUSDT", "ETHUSDT", "XRPUSDT"],
+            "watch_mode": True,
+            "watch_iteration": 4,
+        },
+    )
+    watch_iteration = WatchIterationMetadata(
+        iteration_number=4,
+        started_at="2026-06-06T10:00:00+00:00",
+        completed_at="2026-06-06T10:00:03+00:00",
+        symbols_requested=3,
+        symbols_queued=3,
+        symbols_completed=1,
+        valid_activations=1,
+        still_watching=1,
+        rejected_no_edge=0,
+        data_issues=0,
+        runtime_sec=99.0,
+    )
+
+    run_id = store_scan_result(db_path, result, watch_iteration=watch_iteration)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT runtime_stats_json, is_watch_iteration, watch_iteration_number,
+                   symbols_requested, symbols_queued, symbols_completed,
+                   valid_activations, still_watching, rejected_no_edge, runtime_sec
+            FROM scan_runs
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+    stored_runtime = json.loads(row["runtime_stats_json"])
+    assert row["is_watch_iteration"] == 1
+    assert row["watch_iteration_number"] == 4
+    assert row["symbols_requested"] == 3
+    assert row["symbols_queued"] == 3
+    assert row["symbols_completed"] == stored_runtime["completed_symbols"] == 3
+    assert row["runtime_sec"] == stored_runtime["total_runtime_seconds"] == 2.5
+    assert row["valid_activations"] == 1
+    assert row["still_watching"] == 1
+    assert row["rejected_no_edge"] == 0
 
 
 def test_symbol_result_insert(tmp_path) -> None:
