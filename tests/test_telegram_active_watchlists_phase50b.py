@@ -367,6 +367,92 @@ def _insert_candidate(
         connection.close()
 
 
+def _insert_planned_watchlist(
+    db_path: Path,
+    *,
+    signal_id: str,
+    symbol: str,
+    direction: str = "long",
+    scan_run_id: str = "run-active",
+    new_state: str | None = None,
+    lifecycle_state: str | None = None,
+    sent_at: str | None = None,
+    first_seen_at: str | None = None,
+    setup_quality_score: str = "B+",
+    entry_low: str | None = None,
+    entry_high: str | None = None,
+    stop: str | None = None,
+    tp1: str | None = None,
+    tp2: str | None = None,
+    tp3: str | None = None,
+    invalidation: str | None = None,
+    raw_candidate: dict[str, Any] | None = None,
+    blocked_reason: str = NA,
+) -> None:
+    if direction.lower() == "short":
+        defaults = {
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop": "105",
+            "tp1": "95",
+            "tp2": "90",
+            "tp3": "85",
+            "invalidation": "Invalid if price accepts above 105.",
+        }
+    else:
+        defaults = {
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop": "95",
+            "tp1": "110",
+            "tp2": "115",
+            "tp3": "120",
+            "invalidation": "Invalid if price accepts below 95.",
+        }
+    plan = {
+        "entry_low": entry_low or defaults["entry_low"],
+        "entry_high": entry_high or defaults["entry_high"],
+        "stop": stop or defaults["stop"],
+        "tp1": tp1 or defaults["tp1"],
+        "tp2": tp2 or defaults["tp2"],
+        "tp3": tp3 or defaults["tp3"],
+        "invalidation": invalidation or defaults["invalidation"],
+    }
+    _insert_attempt(
+        db_path,
+        signal_id=signal_id,
+        symbol=symbol,
+        direction=direction,
+        scan_run_id=scan_run_id,
+        new_state=new_state,
+        lifecycle_state=lifecycle_state,
+        sent_at=sent_at,
+        first_seen_at=first_seen_at,
+        setup_quality_score=setup_quality_score,
+        entry_low=plan["entry_low"],
+        entry_high=plan["entry_high"],
+        stop_loss=plan["stop"],
+        tp1=plan["tp1"],
+        tp2=plan["tp2"],
+        tp3=plan["tp3"],
+        blocked_reason=blocked_reason,
+    )
+    _insert_candidate(
+        db_path,
+        run_id=scan_run_id,
+        symbol=symbol,
+        direction=direction,
+        entry=f'{plan["entry_low"]}-{plan["entry_high"]}',
+        stop=plan["stop"],
+        tp1=plan["tp1"],
+        tp2=plan["tp2"],
+        tp3=plan["tp3"],
+        invalidation=plan["invalidation"],
+        quality_grade=setup_quality_score,
+        raw_candidate=raw_candidate,
+    )
+
+
 def _service(tmp_path: Path, db_path: Path | None = None) -> TelegramAdminCommandService:
     return TelegramAdminCommandService(project_root=tmp_path, database_path=db_path or tmp_path / "missing.db")
 
@@ -452,15 +538,22 @@ def test_grouped_watchlist_formatter_orders_buckets_and_empty_rows() -> None:
                 WatchlistStageItem(signal_id="sig-watch", symbol="WATCHUSDT", stage="WATCH", reason=NA),
             ),
             watch_total=1,
+            cooldown_items=(
+                WatchlistStageItem(signal_id="sig-cooldown", symbol="COOLUSDT", stage="COOLDOWN", reason="invalidated, waiting reset"),
+            ),
+            cooldown_total=1,
         )
     )
 
     assert text.startswith("🐺🟠 WATCHLISTS")
     assert text.endswith(WATCHLIST_DASHBOARD_FOOTER)
     assert text.index("🔥 STALKING") < text.index("👀 WATCH")
-    assert "❄️ COOLDOWN" not in text
+    assert text.index("👀 WATCH") < text.index("❄️ COOLDOWN")
+    assert "The wolf is stalking liquidity." in text
     assert "STALKUSDT — pullback forming" in text
     assert "WATCHUSDT — N/A" in text
+    assert "COOLUSDT — invalidated, waiting reset" in text
+    assert "No forced trades." in text
     assert "SOLUSDT.P" not in text
     assert "LINKUSDT.P" not in text
 
@@ -468,9 +561,23 @@ def test_grouped_watchlist_formatter_orders_buckets_and_empty_rows() -> None:
 def test_grouped_watchlist_formatter_empty_state() -> None:
     text = format_watchlist_stage_dashboard(WatchlistStageDashboardResult(source_available=False))
 
-    assert "None right now. The wolf is waiting for cleaner structure." in text
-    assert "None right now. No early ideas passed quality filters." in text
-    assert "❄️ COOLDOWN" not in text
+    assert text == (
+        "🐺🟠 WATCHLISTS\n"
+        "\n"
+        "The wolf is stalking liquidity.\n"
+        "\n"
+        "🔥 STALKING\n"
+        "None right now.\n"
+        "\n"
+        "👀 WATCH\n"
+        "None right now.\n"
+        "\n"
+        "❄️ COOLDOWN\n"
+        "None right now.\n"
+        "\n"
+        "No forced trades.\n"
+        f"{WATCHLIST_DASHBOARD_FOOTER}"
+    )
     assert text.endswith(WATCHLIST_DASHBOARD_FOOTER)
 
 
@@ -479,8 +586,24 @@ def test_active_watchlists_find_newest_scan_runs_sqlite_with_alert_attempts(tmp_
     scan_dir.mkdir()
     old_db = scan_dir / "old.sqlite"
     new_db = scan_dir / "new.sqlite"
-    _insert_attempt(old_db, signal_id="sig-old", symbol="BTCUSDT", entry_low="104250", entry_high="104800")
-    _insert_attempt(new_db, signal_id="sig-new", symbol="ENAUSDT", entry_low="0.09402", entry_high="0.09497")
+    _insert_planned_watchlist(
+        old_db,
+        signal_id="sig-old",
+        symbol="BTCUSDT",
+        entry_low="104250",
+        entry_high="104800",
+        stop="103000",
+        tp1="107000",
+    )
+    _insert_planned_watchlist(
+        new_db,
+        signal_id="sig-new",
+        symbol="ENAUSDT",
+        entry_low="0.09402",
+        entry_high="0.09497",
+        stop="0.09230",
+        tp1="0.10000",
+    )
     os.utime(old_db, (1, 1))
     os.utime(new_db, (2, 2))
 
@@ -497,8 +620,7 @@ def test_active_watchlists_empty_state_when_no_scan_database_exists(tmp_path: Pa
     response = TelegramAdminCommandService(project_root=tmp_path).public_response_for("/watchlists")
 
     assert response.text.startswith("🐺🟠 WATCHLISTS")
-    assert "None right now. The wolf is waiting for cleaner structure." in response.text
-    assert "None right now. No early ideas passed quality filters." in response.text
+    assert response.text.count("None right now.") == 3
     assert "scan_runs" not in response.text
 
 
@@ -963,7 +1085,7 @@ def test_watchlists_hide_attempt_rows_without_real_lifecycle_objects(tmp_path: P
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
     assert "BTCUSDT" not in response.text
-    assert "None right now. No early ideas passed quality filters." in response.text
+    assert response.text.count("None right now.") == 3
 
 
 def test_expired_lifecycle_watchlist_is_hidden_from_public_active_output(tmp_path: Path) -> None:
@@ -1172,8 +1294,7 @@ def test_watchlists_hide_a_grade_waiting_candidate_from_lifecycle_fallback(tmp_p
     signal_response = _service(tmp_path, db_path).public_response_for("/signals")
 
     assert "ETHUSDT" not in watch_response.text
-    assert "None right now. The wolf is waiting for cleaner structure." in watch_response.text
-    assert "None right now. No early ideas passed quality filters." in watch_response.text
+    assert watch_response.text.count("None right now.") == 3
     assert "ETHUSDT" not in signal_response.text
 
 
@@ -1273,7 +1394,7 @@ def test_active_signals_find_scan_run_sqlite_when_default_runtime_db_is_empty(tm
 
 def test_watchlists_dashboard_groups_only_real_stalking_and_watch_data(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
-    _insert_attempt(
+    _insert_planned_watchlist(
         db_path,
         signal_id="sig-watch",
         symbol="WATCHUSDT",
@@ -1285,7 +1406,7 @@ def test_watchlists_dashboard_groups_only_real_stalking_and_watch_data(tmp_path:
         symbol="WATCHUSDT",
         failed_gate="missing_confirmed_sweep",
     )
-    _insert_attempt(
+    _insert_planned_watchlist(
         db_path,
         signal_id="sig-stalk",
         symbol="STALKUSDT",
@@ -1300,7 +1421,7 @@ def test_watchlists_dashboard_groups_only_real_stalking_and_watch_data(tmp_path:
         failed_gate="missing_confirmation_structure_shift",
         setup_quality_score="A",
     )
-    _insert_attempt(
+    _insert_planned_watchlist(
         db_path,
         signal_id="sig-cool",
         symbol="COOLUSDT",
@@ -1314,13 +1435,13 @@ def test_watchlists_dashboard_groups_only_real_stalking_and_watch_data(tmp_path:
         new_state="INVALIDATED",
         sent_at="2026-06-04T12:15:00Z",
     )
-    _insert_attempt(
+    _insert_planned_watchlist(
         db_path,
         signal_id="sig-unverified",
         symbol="UNVERIFIEDUSDT",
         blocked_reason="Unverified",
     )
-    _insert_attempt(
+    _insert_planned_watchlist(
         db_path,
         signal_id="sig-missing",
         symbol="MISSINGUSDT",
@@ -1357,12 +1478,12 @@ def test_watchlists_dashboard_groups_only_real_stalking_and_watch_data(tmp_path:
 
     assert response.text.startswith("🐺🟠 WATCHLISTS")
     assert response.text.index("🔥 STALKING") < response.text.index("👀 WATCH")
-    assert "❄️ COOLDOWN" not in response.text
+    assert response.text.index("👀 WATCH") < response.text.index("❄️ COOLDOWN")
     assert "STALKUSDT — sweep done, waiting BOS/CHoCH" in response.text
     assert "WATCHUSDT — waiting liquidity sweep" in response.text
     assert "UNVERIFIEDUSDT — Unverified" in response.text
     assert "MISSINGUSDT — N/A" in response.text
-    assert "COOLUSDT" not in response.text
+    assert "COOLUSDT — invalidated, waiting reset" in response.text
     assert "ACTIVEUSDT" not in response.text
     assert "ADAUSDT" not in response.text
     assert "DOGEUSDT" not in response.text
@@ -1379,7 +1500,145 @@ def test_watchlists_dashboard_groups_only_real_stalking_and_watch_data(tmp_path:
     assert "automatic execution" not in response.text.lower()
 
 
-def test_watchlists_dashboard_hides_invalidated_rows_instead_of_public_cooldown(tmp_path: Path) -> None:
+def test_watchlists_dashboard_excludes_rejected_and_scanned_no_setup_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_planned_watchlist(db_path, signal_id="sig-no-setup", symbol="NOSETUPUSDT", scan_run_id="run-no-setup")
+    _insert_symbol_result(
+        db_path,
+        run_id="run-no-setup",
+        symbol="NOSETUPUSDT",
+        status="scanned_no_setup",
+        display_bucket="no_setup",
+        rejection_reason="No valid Liquidity-Grab Pullback setup.",
+        raw_result={"status": "scanned_no_setup", "rejection_reason": "No valid Liquidity-Grab Pullback setup."},
+    )
+    _insert_planned_watchlist(db_path, signal_id="sig-rejected", symbol="REJECTUSDT", scan_run_id="run-rejected")
+    _insert_symbol_result(
+        db_path,
+        run_id="run-rejected",
+        symbol="REJECTUSDT",
+        status="Rejected",
+        display_bucket="rejected",
+        rejection_reason="strategy rejected",
+        raw_result={"status": "rejected", "display_reason": "strategy rejected"},
+    )
+    _insert_planned_watchlist(db_path, signal_id="sig-candles", symbol="CANDLEUSDT", scan_run_id="run-candles")
+    _insert_symbol_result(
+        db_path,
+        run_id="run-candles",
+        symbol="CANDLEUSDT",
+        rejection_reason="Not enough candles: received 193, required at least 200",
+        raw_result={"error_message": "Not enough candles: received 193, required at least 200"},
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert response.text.count("None right now.") == 3
+    assert "NOSETUPUSDT" not in response.text
+    assert "REJECTUSDT" not in response.text
+    assert "CANDLEUSDT" not in response.text
+    assert "scanned_no_setup" not in response.text
+    assert "No valid Liquidity-Grab Pullback setup" not in response.text
+    assert "Not enough candles" not in response.text
+    assert "strategy rejected" not in response.text
+
+
+def test_watchlists_dashboard_excludes_rows_missing_required_trade_plan_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    cases = (
+        ("sig-no-entry", "NOENTRYUSDT", NA, "95", "110", "Invalid if price accepts below 95."),
+        ("sig-no-stop", "NOSTOPUSDT", "100-102", NA, "110", "Invalid if price accepts below 95."),
+        ("sig-no-tp1", "NOTPUSDT", "100-102", "95", NA, "Invalid if price accepts below 95."),
+        ("sig-no-invalidation", "NOINVALIDUSDT", "100-102", "95", "110", NA),
+    )
+    for signal_id, symbol, entry, stop, tp1, invalidation in cases:
+        run_id = f"run-{symbol.lower()}"
+        _insert_attempt(db_path, signal_id=signal_id, symbol=symbol, scan_run_id=run_id)
+        _insert_candidate(
+            db_path,
+            run_id=run_id,
+            symbol=symbol,
+            direction="long",
+            entry=entry,
+            stop=stop,
+            tp1=tp1,
+            invalidation=invalidation,
+        )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert response.text.count("None right now.") == 3
+    for _, symbol, *_ in cases:
+        assert symbol not in response.text
+
+
+def test_watchlists_dashboard_full_trade_map_appears_with_safe_reason(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_planned_watchlist(
+        db_path,
+        signal_id="sig-plan",
+        symbol="PLANUSDT",
+        raw_candidate={"reason_for_trade": "Liquidity swept and pullback is mapped."},
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert "PLANUSDT — Liquidity swept and pullback is mapped" in response.text
+    assert "None right now." in response.text.split("❄️ COOLDOWN", 1)[1]
+
+
+def test_watchlists_dashboard_excludes_confirmed_and_executing_candidates(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_planned_watchlist(
+        db_path,
+        signal_id="sig-confirmed-watch",
+        symbol="CONFIRMEDUSDT",
+        new_state="CONFIRMED",
+        lifecycle_state="CONFIRMED",
+    )
+    _insert_planned_watchlist(
+        db_path,
+        signal_id="sig-executing-watch",
+        symbol="EXECUSDT",
+        new_state="EXECUTING",
+        lifecycle_state="EXECUTING",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert response.text.count("None right now.") == 3
+    assert "CONFIRMEDUSDT" not in response.text
+    assert "EXECUSDT" not in response.text
+
+
+def test_watchlists_dashboard_cooldown_requires_prior_trade_plan(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_planned_watchlist(db_path, signal_id="sig-planned-cooldown", symbol="COOLPLANUSDT")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-planned-cooldown",
+        symbol="COOLPLANUSDT",
+        alert_type="INVALIDATED",
+        lifecycle_state="INVALIDATED",
+        new_state="INVALIDATED",
+    )
+    _insert_attempt(db_path, signal_id="sig-raw-cooldown", symbol="RAWCOOLUSDT", entry_low="100", entry_high="102")
+    _insert_attempt(
+        db_path,
+        signal_id="sig-raw-cooldown",
+        symbol="RAWCOOLUSDT",
+        alert_type="INVALIDATED",
+        lifecycle_state="INVALIDATED",
+        new_state="INVALIDATED",
+    )
+
+    response = _service(tmp_path, db_path).public_response_for("/watchlists")
+
+    assert "COOLPLANUSDT — invalidated, waiting reset" in response.text
+    assert "RAWCOOLUSDT" not in response.text
+
+
+def test_watchlists_dashboard_hides_cooldown_rows_without_prior_trade_plan(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_attempt(db_path, signal_id="sig-invalidated", symbol="BTCUSDT", entry_low="100", entry_high="102")
     _insert_attempt(
@@ -1393,7 +1652,8 @@ def test_watchlists_dashboard_hides_invalidated_rows_instead_of_public_cooldown(
 
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
-    assert "❄️ COOLDOWN" not in response.text
+    assert "❄️ COOLDOWN" in response.text
+    assert "None right now." in response.text.split("❄️ COOLDOWN", 1)[1]
     assert "BTCUSDT" not in response.text
 
 
@@ -1412,22 +1672,19 @@ def test_active_watchlist_older_than_48h_expires_from_public_output(tmp_path: Pa
 
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
-    assert "None right now. The wolf is waiting for cleaner structure." in response.text
-    assert "None right now. No early ideas passed quality filters." in response.text
+    assert response.text.count("None right now.") == 3
     assert "OLDUSDT" not in response.text
 
 
 def test_active_watchlist_younger_than_48h_remains_visible(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     fresh_seen = (datetime.now(UTC) - timedelta(hours=47)).isoformat().replace("+00:00", "Z")
-    _insert_attempt(
+    _insert_planned_watchlist(
         db_path,
         signal_id="sig-fresh-watch",
         symbol="FRESHUSDT",
         first_seen_at=fresh_seen,
         sent_at=fresh_seen,
-        entry_low="100",
-        entry_high="102",
     )
 
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
@@ -1454,7 +1711,7 @@ def test_triggered_watchlist_does_not_expire_due_to_watch_ttl(tmp_path: Path) ->
 
     assert "🔥 STALKING" in response.text
     assert "TRIGGERUSDT" not in response.text
-    assert "None right now. The wolf is waiting for cleaner structure." in response.text.split("🔥 STALKING", 1)[1].split("👀 WATCH", 1)[0]
+    assert "None right now." in response.text.split("🔥 STALKING", 1)[1].split("👀 WATCH", 1)[0]
 
 
 def test_old_confirmed_active_signal_expires_from_public_output(tmp_path: Path) -> None:
@@ -1500,8 +1757,7 @@ def test_grade_b_is_hidden_from_public_active_watchlist_output(tmp_path: Path) -
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
     assert "LOWGRADEUSDT" not in response.text
-    assert "None right now. The wolf is waiting for cleaner structure." in response.text
-    assert "None right now. No early ideas passed quality filters." in response.text
+    assert response.text.count("None right now.") == 3
 
 
 def test_watchlists_dashboard_missing_reason_displays_na(tmp_path: Path) -> None:
@@ -1530,7 +1786,7 @@ def test_watchlists_dashboard_limits_each_bucket_to_eight_rows(tmp_path: Path) -
     db_path = tmp_path / "candle_craft.db"
     fresh_seen = _fresh_timestamp()
     for index in range(11):
-        _insert_attempt(
+        _insert_planned_watchlist(
             db_path,
             signal_id=f"sig-{index:02d}",
             symbol=f"SYM{index:02d}USDT",
@@ -1538,6 +1794,8 @@ def test_watchlists_dashboard_limits_each_bucket_to_eight_rows(tmp_path: Path) -
             first_seen_at=fresh_seen,
             entry_low=str(100 + index),
             entry_high=str(101 + index),
+            stop=str(95 + index),
+            tp1=str(110 + index),
         )
 
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
@@ -1551,7 +1809,15 @@ def test_watchlists_dashboard_limits_each_bucket_to_eight_rows(tmp_path: Path) -
 
 def test_public_watchlist_commands_and_refresh_back_buttons_route_safely(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
-    _insert_attempt(db_path, signal_id="sig-btc", symbol="BTCUSDT", entry_low="104250", entry_high="104800")
+    _insert_planned_watchlist(
+        db_path,
+        signal_id="sig-btc",
+        symbol="BTCUSDT",
+        entry_low="104250",
+        entry_high="104800",
+        stop="103000",
+        tp1="107000",
+    )
     service = _service(tmp_path, db_path)
     transport = FakeCommandTransport()
     updates = (
