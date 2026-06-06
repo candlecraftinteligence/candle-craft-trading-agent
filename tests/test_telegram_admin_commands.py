@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -162,7 +163,9 @@ def _insert_runtime_attempt(
     tp1: str = "N/A",
     tp2: str = "N/A",
     tp3: str = "N/A",
+    sent_at: str | None = None,
 ) -> None:
+    effective_sent_at = sent_at or datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
     connection = open_initialized_database(db_path)
     try:
         connection.execute(
@@ -180,7 +183,7 @@ def _insert_runtime_attempt(
                 "CONFIRMED",
                 alert_type,
                 "CONFIRMED",
-                "2026-06-01T12:00:00+00:00",
+                effective_sent_at,
                 status,
                 f"hash-{signal_id}-{alert_type}",
                 "run-46c",

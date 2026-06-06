@@ -14,14 +14,14 @@ from app.telegram_admin.active_watchlists import (
     _SIGNAL_QUERY_TYPES,
     _active_quality_text,
     _active_signal_base_row,
-    _active_signal_group_is_closed,
+    _active_signal_group_is_eligible,
     _active_signal_outcome_rows,
-    _active_signal_row_has_complete_trade_map,
     _clean,
     _connect_readonly,
     _first_non_na,
     _json_mapping,
     _latest_runtime_database,
+    _latest_symbol_result_for_attempt,
     _row_id,
     _select_or_na,
     _sent_alert_attempt_rows,
@@ -87,9 +87,13 @@ def _detail_from_rows(
         outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
         lifecycle_row = _lifecycle_row(connection, signal_id, latest_row)
-        if _active_signal_group_is_closed((signal_row, *outcome_rows), lifecycle_row):
-            continue
-        if not _active_signal_row_has_complete_trade_map(signal_row):
+        if not _active_signal_group_is_eligible(
+            connection,
+            signal_row=signal_row,
+            outcome_rows=outcome_rows,
+            latest_row=latest_row,
+            lifecycle_row=lifecycle_row,
+        ):
             continue
         if not _row_matches_selector(signal_id, signal_row, selected):
             continue
@@ -113,7 +117,9 @@ def _detail_from_group(
     latest_row: Mapping[str, Any],
     lifecycle_row: Mapping[str, Any],
 ) -> TelegramSignalDetail:
-    symbol_row = _symbol_result_for_attempt(connection, latest_row)
+    symbol_row = _latest_symbol_result_for_attempt(connection, latest_row)
+    if not symbol_row:
+        symbol_row = _symbol_result_for_attempt(connection, latest_row)
     raw_result = _json_mapping(symbol_row.get("raw_result_json"))
     candidate = _candidate_detail(connection, signal_row)
     candidate_raw = _json_mapping(candidate.get("raw_candidate_json"))
