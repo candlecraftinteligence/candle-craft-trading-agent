@@ -939,7 +939,7 @@ def test_active_signals_empty_state_does_not_promote_watchlists(tmp_path: Path) 
     assert "The engine is waiting for clean structure." in response.text
     assert "BTCUSDT" not in response.text
 
-def test_watchlists_dedupe_same_symbol_bias_rows(tmp_path: Path) -> None:
+def test_watchlists_hide_attempt_rows_without_real_lifecycle_objects(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_attempt(
         db_path,
@@ -962,8 +962,8 @@ def test_watchlists_dedupe_same_symbol_bias_rows(tmp_path: Path) -> None:
 
     response = _service(tmp_path, db_path).public_response_for("/watchlists")
 
-    assert response.text.count("BTCUSDT") == 1
-    assert "👀 WATCH" in response.text
+    assert "BTCUSDT" not in response.text
+    assert "None right now. No early ideas passed quality filters." in response.text
 
 
 def test_expired_lifecycle_watchlist_is_hidden_from_public_active_output(tmp_path: Path) -> None:
