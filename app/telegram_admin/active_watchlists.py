@@ -13,6 +13,7 @@ from app.analytics.public_signal_quality import grade_from_score, normalize_grad
 from app.alerts.watchlist_expiry import parse_utc_timestamp, watchlist_expiry_decision
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import RANGE_DASH, TelegramAlertType, format_telegram_price, format_telegram_rr
+from app.lifecycle.eligibility import active_signal_eligible, public_watchlist_eligible
 
 ACTIVE_WATCHLIST_DISPLAY_LIMIT = 10
 WATCHLIST_STAGE_DISPLAY_LIMIT = 8
@@ -580,7 +581,7 @@ def _has_sent_alert_attempt(path: Path, *, alert_types: Sequence[str]) -> bool:
             if not _table_exists(connection, "telegram_alert_attempts"):
                 return False
             columns = _table_columns(connection, "telegram_alert_attempts")
-            if not {"alert_type", "telegram_status"} <= columns:
+            if not {"alert_type", "telegram_status", "sent_at"} <= columns:
                 return False
             placeholders = ",".join("?" for _ in alert_types)
             row = connection.execute(
@@ -588,6 +589,8 @@ def _has_sent_alert_attempt(path: Path, *, alert_types: Sequence[str]) -> bool:
                 SELECT 1
                 FROM telegram_alert_attempts
                 WHERE telegram_status = 'sent'
+                  AND sent_at IS NOT NULL
+                  AND sent_at NOT IN ('', 'N/A')
                   AND alert_type IN ({placeholders})
                 LIMIT 1
                 """,
@@ -646,6 +649,7 @@ def _sent_alert_attempt_rows(
         "direction",
         "alert_type",
         "sent_at",
+        _select_or_na("attempted_at", columns),
         "telegram_status",
         _select_or_na("scan_run_id", columns),
         _select_or_na("setup_quality_score", columns),
@@ -671,6 +675,8 @@ def _sent_alert_attempt_rows(
         SELECT {", ".join(select_columns)}
         FROM telegram_alert_attempts
         WHERE telegram_status = 'sent'
+          AND sent_at IS NOT NULL
+          AND sent_at NOT IN ('', 'N/A')
           AND alert_type IN ({placeholders})
         ORDER BY id ASC
         """,
@@ -955,9 +961,8 @@ def _active_items_from_rows(
             continue
         watch_row = max(watch_rows, key=_row_id)
         outcome_rows = [row for row in signal_rows if _clean(row.get("alert_type")) != _WATCHLIST_TYPE]
-        if any(_clean(row.get("alert_type")) in _TERMINAL_OUTCOME_TYPES for row in outcome_rows):
+        if outcome_rows:
             continue
-        hit_alert_types = frozenset(_clean(row.get("alert_type")) for row in outcome_rows)
         if _watchlist_row_expired(watch_row, outcome_rows):
             continue
         if not _public_alert_quality_passes(watch_row):
@@ -970,14 +975,26 @@ def _active_items_from_rows(
         symbol_row = _symbol_result_for_attempt(connection, watch_row)
         raw_result = _json_mapping(symbol_row.get("raw_result_json"))
         levels = _levels_for_watchlist(connection, watch_row, outcome_rows, lifecycle_row, raw_result)
+        metadata = _candidate_metadata(connection, watch_row)
+        if not public_watchlist_eligible(
+            _watchlist_eligibility_record(
+                watch_row=watch_row,
+                lifecycle_row=lifecycle_row,
+                symbol_row=symbol_row,
+                raw_result=raw_result,
+                levels=levels,
+                metadata=metadata,
+            )
+        ):
+            continue
         items.append(
             ActiveWatchlistItem(
                 signal_id=signal_id,
                 symbol=symbol,
                 direction=direction,
                 sent_at=_clean(watch_row.get("sent_at")),
-                status=_status_from_outcomes(hit_alert_types),
-                hit_alert_types=hit_alert_types,
+                status=WATCHLIST_STATUS_WAITING,
+                hit_alert_types=frozenset(),
                 sort_id=_row_id(watch_row),
                 **levels,
             )
@@ -1155,6 +1172,9 @@ def _active_signal_group_is_eligible(
         return False
     if not _active_signal_row_has_complete_trade_map(signal_row):
         return False
+    matched_lifecycle_row = lifecycle_row if _lifecycle_row_matches_rows(rows, lifecycle_row) else {}
+    if not active_signal_eligible(_active_signal_eligibility_record(signal_row, matched_lifecycle_row)):
+        return False
 
     latest_symbol_row = _latest_symbol_result_for_attempt(connection, latest_row)
     if _latest_symbol_row_blocks_active(latest_symbol_row):
@@ -1167,6 +1187,56 @@ def _active_signal_group_is_eligible(
     ):
         return False
     return True
+
+
+def _watchlist_eligibility_record(
+    *,
+    watch_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+    symbol_row: Mapping[str, Any],
+    raw_result: Mapping[str, Any],
+    levels: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        **raw_result,
+        **symbol_row,
+        **lifecycle_row,
+        **watch_row,
+        **levels,
+        "current_state": _first_non_na(
+            lifecycle_row.get("current_state"),
+            watch_row.get("lifecycle_state"),
+            watch_row.get("new_state"),
+        ),
+        "quality_grade_current": _first_non_na(
+            lifecycle_row.get("quality_grade_current"),
+            watch_row.get("setup_quality_score"),
+            metadata.get("quality_grade"),
+        ),
+        "rr": _first_non_na(lifecycle_row.get("rr"), watch_row.get("rr_planned"), metadata.get("rr")),
+        "invalidation_reason": _first_non_na(lifecycle_row.get("invalidation_reason"), raw_result.get("invalidation_reason")),
+        "failed_gate": _first_non_na(lifecycle_row.get("failed_gate"), symbol_row.get("failed_gate"), raw_result.get("failed_gate")),
+        "rejection_reason": _first_non_na(symbol_row.get("rejection_reason"), raw_result.get("rejection_reason")),
+        "blocked_reason": _first_non_na(watch_row.get("blocked_reason"), raw_result.get("blocked_reason")),
+    }
+
+
+def _active_signal_eligibility_record(
+    signal_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        **lifecycle_row,
+        **signal_row,
+        "current_state": _first_non_na(
+            lifecycle_row.get("current_state"),
+            signal_row.get("lifecycle_state"),
+            signal_row.get("new_state"),
+        ),
+        "quality_grade_current": _first_non_na(lifecycle_row.get("quality_grade_current"), signal_row.get("setup_quality_score")),
+        "rr": _first_non_na(lifecycle_row.get("rr"), signal_row.get("rr_planned")),
+    }
 
 
 def _active_signal_state_is_allowed(
@@ -1935,7 +2005,11 @@ def _lifecycle_row_for_attempt(connection: sqlite3.Connection, row: Mapping[str,
         _select_or_na("action_label", columns),
         _select_or_na("invalidation_reason", columns),
         _select_or_na("invalidation_logic", columns),
+        _select_or_na("cooldown_until", columns),
+        _select_or_na("archived_at", columns),
         _select_or_na("rr", columns),
+        _select_or_na("quality_grade_current", columns),
+        _select_or_na("quality_grade_confirmed", columns),
         *(_select_or_na(column, columns) for column in _LEVEL_COLUMNS),
     ]
     signal_id = _clean(row.get("signal_id"))

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.data.dtos import NA
 from app.agents.trade_idea import TradeIdeaAgent
 from app.analytics.setup_quality import SetupQualityState, validate_setup_quality
 from app.pipeline.scanner_runner import (
@@ -17,9 +18,11 @@ from app.pipeline.scanner_runner import (
     ScannerRuntimeStats,
     ScannerSymbolResult,
 )
+from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
 from app.watch_mode import (
     WatchSymbolState,
     WatchState,
+    build_watch_iteration_summary,
     current_result_is_valid_activation,
     format_watch_activation_alert,
     load_symbols_from_run,
@@ -151,6 +154,38 @@ def _valid_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
     )
 
 
+def _watch_lifecycle_record(state: SetupLifecycleState = SetupLifecycleState.WATCHLISTED, **updates) -> SetupLifecycleRecord:
+    data = {
+        "lifecycle_id": f"life-{updates.get('symbol', 'WATCHUSDT')}",
+        "symbol": updates.get("symbol", "WATCHUSDT"),
+        "mode": "swing",
+        "direction": "long",
+        "current_state": state,
+        "previous_state": None,
+        "first_seen_at": "2026-06-07T00:00:00+00:00",
+        "last_seen_at": "2026-06-07T00:00:00+00:00",
+        "last_transition_at": "2026-06-07T00:00:00+00:00",
+        "entry_low": "100",
+        "entry_high": "102",
+        "stop_loss": "95",
+        "tp1": "110",
+        "tp2": "115",
+        "tp3": "120",
+        "rr": "3",
+        "quality_grade_current": "B+",
+        "failed_gate": NA,
+        "invalidation_reason": NA,
+    }
+    data.update(updates)
+    return SetupLifecycleRecord.model_validate(data)
+
+
+def _watch_symbol(symbol: str = "WATCHUSDT", **record_updates) -> ScannerSymbolResult:
+    return _valid_symbol(symbol).model_copy(
+        update={"lifecycle_state": _watch_lifecycle_record(symbol=symbol, **record_updates)}
+    )
+
+
 def _near_miss_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
     return ScannerSymbolResult(
         symbol=symbol,
@@ -260,6 +295,53 @@ def test_no_alert_for_rejected() -> None:
     previous = _prior_state(status="no_setup", readiness="REJECTED").symbols["BTCUSDT"]
 
     assert should_trigger_activation_alert(_rejected_symbol(), previous) is False
+
+
+def _watch_summary_for(*results: ScannerSymbolResult):
+    return build_watch_iteration_summary(
+        iteration=1,
+        result=ScannerRunResult(
+            config=_scanner_config([result.symbol for result in results] or ["BTCUSDT"]),
+            results=results,
+            scanned_symbols=len(results),
+            failed_symbols=0,
+            trade_ideas_created=sum(1 for result in results if result.trade_idea is not None),
+            dry_run_alerts_created=0,
+            journal_entries_created=0,
+        ),
+        activations=(),
+        next_scan_seconds=None,
+        scanned_at="2026-06-07T00:00:00+00:00",
+    )
+
+
+def test_watch_iteration_still_watching_counts_only_public_watchable_lifecycle_rows() -> None:
+    summary = _watch_summary_for(_watch_symbol())
+
+    assert summary.still_watching == 1
+    assert summary.valid_activations == 0
+
+
+def test_watch_iteration_still_watching_excludes_reject_grade_direction_na_and_na_trade_map() -> None:
+    summary = _watch_summary_for(
+        _watch_symbol("REJECTUSDT", quality_grade_current="Reject"),
+        _watch_symbol("DIRNAUSDT", direction="n/a"),
+        _watch_symbol("ENTRYNAUSDT", entry_low=NA, entry_high=NA),
+        _watch_symbol("STOPNAUSDT", stop_loss=NA),
+        _watch_symbol("TPNAUSDT", tp1=NA),
+    )
+
+    assert summary.still_watching == 0
+
+
+def test_watch_iteration_still_watching_excludes_terminal_lifecycle_rows() -> None:
+    summary = _watch_summary_for(
+        _watch_symbol("COOLUSDT", current_state=SetupLifecycleState.COOLDOWN),
+        _watch_symbol("INVALIDUSDT", current_state=SetupLifecycleState.INVALIDATED),
+        _watch_symbol("TP2USDT", current_state=SetupLifecycleState.TP_HIT),
+    )
+
+    assert summary.still_watching == 0
 
 
 def test_dry_run_default_does_not_call_telegram(tmp_path, monkeypatch, capsys) -> None:

@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from app.formatters.telegram_wolf_briefing import (
     WOLF_BRIEFING_SIGNATURE,
     WolfBriefingFocusItem,
@@ -170,11 +172,120 @@ def test_wolf_briefing_builder_uses_scan_rows_without_promoting_rejections() -> 
     text = format_wolf_briefing(snapshot)
 
     assert "Market Mood: Mixed" in text
-    assert "Active signals: 1" in text
+    assert "Active signals: 0" in text
+    assert "Watchlist: 0" in text
     assert "Near misses: 1" in text
     assert "Rejected setups: 1" in text
     assert "NEARUSDT — Near miss: Trust meter is below minimum." in text
     assert "REJECTUSDT —" not in text
+
+
+def _wolf_watch_row(**overrides: Any) -> dict[str, Any]:
+    row = {
+        "symbol": "VALIDUSDT",
+        "display_rank": 1,
+        "lifecycle_current_state": "WATCHLISTED",
+        "direction": "long",
+        "entry_low": "100",
+        "entry_high": "102",
+        "stop_loss": "95",
+        "tp1": "110",
+        "tp2": "115",
+        "tp3": "120",
+        "rr": "3",
+        "quality_grade_current": "B+",
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"lifecycle_current_state": "COOLDOWN"},
+        {"lifecycle_current_state": "INVALIDATED"},
+        {"lifecycle_current_state": "ARCHIVED"},
+        {"quality_grade_current": "Reject"},
+        {"direction": "n/a"},
+        {"entry_low": "N/A"},
+        {"entry_high": "N/A"},
+        {"stop_loss": "N/A"},
+        {"tp1": "N/A"},
+        {"lifecycle_current_state": "TP1_HIT"},
+        {"lifecycle_current_state": "TP2_HIT"},
+        {"lifecycle_current_state": "TP3_HIT"},
+        {"lifecycle_current_state": "SL_HIT"},
+    ),
+)
+def test_wolf_briefing_excludes_non_watchable_lifecycle_rows_from_watchlist(overrides: dict[str, Any]) -> None:
+    snapshot = build_wolf_briefing_snapshot(
+        scan_payload={"results": [_wolf_watch_row(**overrides)]},
+        active_signal_count=None,
+        watchlist_count=None,
+    )
+
+    text = format_wolf_briefing(snapshot)
+
+    assert "Watchlist: 0" in text
+    assert "VALIDUSDT" not in text
+
+
+def test_wolf_briefing_includes_valid_public_watchlist_row_in_count() -> None:
+    snapshot = build_wolf_briefing_snapshot(
+        scan_payload={"results": [_wolf_watch_row()]},
+        active_signal_count=None,
+        watchlist_count=None,
+    )
+
+    text = format_wolf_briefing(snapshot)
+
+    assert "Active signals: 0" in text
+    assert "Watchlist: 1" in text
+
+
+@pytest.mark.parametrize("state", ("LIMIT_HIT", "CONFIRMED", "EXECUTING", "MANAGING"))
+def test_wolf_briefing_counts_valid_active_signal_states(state: str) -> None:
+    snapshot = build_wolf_briefing_snapshot(
+        scan_payload={"results": [_wolf_watch_row(symbol=f"{state}USDT", lifecycle_current_state=state)]},
+        active_signal_count=None,
+        watchlist_count=None,
+    )
+
+    text = format_wolf_briefing(snapshot)
+
+    assert "Active signals: 1" in text
+    assert "Watchlist: 0" in text
+
+
+@pytest.mark.parametrize("state", ("REJECTED", "COOLDOWN", "INVALIDATED"))
+def test_wolf_briefing_excludes_rejected_cooldown_invalidated_from_active_signals(state: str) -> None:
+    snapshot = build_wolf_briefing_snapshot(
+        scan_payload={"results": [_wolf_watch_row(lifecycle_current_state=state)]},
+        active_signal_count=None,
+        watchlist_count=None,
+    )
+
+    text = format_wolf_briefing(snapshot)
+
+    assert "Active signals: 0" in text
+    assert "Watchlist: 0" in text
+
+
+def test_wolf_briefing_filters_terminal_watchlist_focus_items() -> None:
+    snapshot = build_wolf_briefing_snapshot(
+        watchlist_items=(
+            WolfBriefingFocusItem("AVAXUSDT", "Watchlist", "TP2 HIT"),
+            WolfBriefingFocusItem("BTCUSDT", "Watchlist", "Waiting for Limit Zone"),
+        ),
+        active_signal_count=0,
+        watchlist_count=None,
+    )
+
+    text = format_wolf_briefing(snapshot)
+
+    assert "AVAXUSDT" not in text
+    assert "BTCUSDT" in text
+    assert "TP2 HIT" not in text
 
 
 def test_wolf_command_disabled_records_audit_without_sending(tmp_path: Path) -> None:

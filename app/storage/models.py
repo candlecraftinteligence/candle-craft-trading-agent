@@ -129,10 +129,11 @@ class TelegramAlertAttemptRecord:
     new_state: str
     alert_type: str
     lifecycle_state: str
-    sent_at: str
+    sent_at: str | None
     telegram_status: str
     message_hash: str
     scan_run_id: str | None = None
+    attempted_at: str = "N/A"
     attempted_alert_type: str = "N/A"
     setup_quality_score: str = "N/A"
     rr_planned: str = "N/A"
