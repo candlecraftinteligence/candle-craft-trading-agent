@@ -226,7 +226,7 @@ def _scan_run_record(
             {mode: item.model_dump(mode="json") for mode, item in result.market_regime.compatibility_scores.items()}
         ),
         environment_notes_json=_json_dump(result.market_regime.environment_notes),
-        runtime_stats_json=_json_dump(result.runtime_stats.model_dump(mode="json")),
+        runtime_stats_json=_json_dump(_runtime_stats_payload(result)),
         command_preset=_display(command_preset),
         command_used=_display(command_used),
         total_valid_setups=counts["valid"],
@@ -280,6 +280,15 @@ def _scan_summary_metadata(
         "symbols_completed": _non_negative_int(runtime.completed_symbols),
         "runtime_sec": _non_negative_float(runtime.total_runtime_seconds),
     }
+
+
+def _runtime_stats_payload(result: ScannerRunResult) -> dict[str, Any]:
+    payload = result.runtime_stats.model_dump(mode="json")
+    metadata = result.resume_metadata if isinstance(result.resume_metadata, Mapping) else {}
+    queue_diagnostics = metadata.get("symbol_queue")
+    if isinstance(queue_diagnostics, Mapping):
+        payload["symbol_queue"] = dict(queue_diagnostics)
+    return payload
 
 
 def _metadata_symbol_count(metadata: Mapping[str, Any], key: str) -> int | None:

@@ -1149,7 +1149,7 @@ def test_watch_mode_lifecycle_prioritization(tmp_path) -> None:
         database_path=db_path,
     )
 
-    assert symbols == ("STALKUSDT", "TRIGGERUSDT", "CONFIRMUSDT", "WATCHUSDT", "NEWUSDT")
+    assert symbols == ("STALKUSDT", "TRIGGERUSDT", "CONFIRMUSDT", "WATCHUSDT", "OLDUSDT", "NEWUSDT")
 
 
 def test_research_lifecycle_queries(tmp_path) -> None:
