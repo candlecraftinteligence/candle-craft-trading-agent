@@ -757,7 +757,7 @@ def test_status_loads_latest_manifest_and_formats_core_counts(tmp_path) -> None:
     assert "Regime confidence: 72" in response.text
     assert "Symbols scanned: 3" in response.text
     assert "Confirmed setups: 1" in response.text
-    assert "Watch candidates: 1" in response.text
+    assert "Research candidates: 1" in response.text
     assert "Alerts created: 0" in response.text
     assert "target-integrity" not in response.text
     assert "scan_runs/latest_scan.json" not in response.text
@@ -786,7 +786,7 @@ def test_lastscan_uses_near_misses_when_no_valid_setups(tmp_path) -> None:
     response = service.response_for("/lastscan")
 
     _assert_shell_screen(response.text)
-    assert "Top Watch Candidates" in response.text
+    assert "Top Near-Miss Candidates" in response.text
     assert "NEARUSDT" in response.text
     assert "Status: Monitoring" in response.text
 
@@ -1120,7 +1120,7 @@ def test_public_lastscan_shows_summary_without_admin_internals(tmp_path) -> None
     assert "Last scan: 2026-06-01T12:00:00+00:00" in response.text
     assert "Symbols scanned: 4" in response.text
     assert "Confirmed setups: 1" in response.text
-    assert "Watchlist setups: 1" in response.text
+    assert "Near-miss candidates: 1" in response.text
     assert "Market Climate: Mixed" in response.text
     assert "The engine only promotes setups that pass the filters." in response.text
     assert "ALERTUSDT" not in response.text

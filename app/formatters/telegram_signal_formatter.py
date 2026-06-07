@@ -17,6 +17,7 @@ DEFAULT_MIN_RR_DISPLAY = Decimal("3")
 
 
 class TelegramAlertType(str, Enum):
+    RESEARCH_WATCH = "RESEARCH_WATCH"
     WATCHLIST = "WATCHLIST"
     SIGNAL_CONFIRMED = "SIGNAL_CONFIRMED"
     LIMIT_HIT = "LIMIT_HIT"
@@ -30,6 +31,7 @@ class TelegramAlertType(str, Enum):
 
 
 PUBLIC_STATUS_BY_ALERT_TYPE = {
+    TelegramAlertType.RESEARCH_WATCH: "RESEARCH WATCH",
     TelegramAlertType.WATCHLIST: "WATCHLIST",
     TelegramAlertType.SIGNAL_CONFIRMED: "CONFIRMED",
     TelegramAlertType.LIMIT_HIT: "LIMIT ZONE HIT",
@@ -71,6 +73,10 @@ class TelegramSignalMessage:
     derivatives_status: Any = NA
     price_level: Any = NA
     min_rr: Any = NA
+    readiness_score: Any = NA
+    regime_state: Any = NA
+    regime_compatibility_label: Any = NA
+    regime_confidence: Any = NA
     watchlist_outcome: bool = False
     upgraded_from_watchlist: bool = False
     was_watchlist: bool = False
@@ -81,6 +87,8 @@ def format_telegram_signal_message(
     message: TelegramSignalMessage,
 ) -> str:
     normalized = alert_type if isinstance(alert_type, TelegramAlertType) else TelegramAlertType(str(alert_type))
+    if normalized == TelegramAlertType.RESEARCH_WATCH:
+        return format_research_watch_message(message)
     if normalized == TelegramAlertType.WATCHLIST:
         return format_premium_watchlist_message(message)
     if normalized == TelegramAlertType.SIGNAL_CONFIRMED:
@@ -102,6 +110,29 @@ def format_telegram_signal_message(
     if normalized == TelegramAlertType.NO_LONGER_TRACKING:
         return format_no_longer_tracking_update(message)
     raise ValueError(f"Unsupported Telegram alert type: {alert_type}")
+
+
+def format_research_watch_message(message: TelegramSignalMessage) -> str:
+    return _join(
+        f"{HEADER_PREFIX} Research Watch {EM_DASH} {format_symbol(message.symbol)}",
+        "",
+        f"Quality: {_display(message.quality)}",
+        f"Readiness: {_display(message.readiness_score)}",
+        f"Regime: {_title_display(message.regime_state)}",
+        f"Regime fit: {_title_display(message.regime_compatibility_label)}",
+        f"Confidence: {_confidence_display(message.regime_confidence)}",
+        "",
+        "Why watching:",
+        "Regime blocked the setup, but structure is close enough to monitor.",
+        "",
+        "Next trigger:",
+        _research_next_trigger(message),
+        "",
+        "Trade map:",
+        *_research_trade_map_lines(message),
+        "",
+        FOOTER,
+    )
 
 
 def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
@@ -517,6 +548,71 @@ def _quality_display(value: Any) -> str:
     return text.upper() if text != NA else NA
 
 
+def _title_display(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    return " ".join(part.capitalize() for part in text.replace("_", " ").split())
+
+
+def _confidence_display(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return NA
+    if text.endswith("/10"):
+        return text
+    return f"{text}/10"
+
+
+def _research_next_trigger(message: TelegramSignalMessage) -> str:
+    text = _display(message.confirmation_needed)
+    if text != NA:
+        return text
+    values = message.needs_next
+    if isinstance(values, Sequence) and not isinstance(values, (str, bytes, bytearray)):
+        for value in values:
+            text = _display(value)
+            if text != NA:
+                return text
+    return NA
+
+
+def _research_trade_map_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    if not _research_trade_map_valid(message):
+        return (f"{NA} {EM_DASH} waiting for clean confirmation.",)
+    lines = [
+        f"Direction: {format_direction(message.direction)}",
+        f"Entry Zone: {format_entry_zone(message)}",
+        f"Stop: {format_price(message.stop_loss)}",
+    ]
+    for label, value in (("TP1", message.tp1), ("TP2", message.tp2), ("TP3", message.tp3)):
+        price = format_price(value)
+        if price != NA:
+            lines.append(f"{label}: {price}")
+    return tuple(lines)
+
+
+def _research_trade_map_valid(message: TelegramSignalMessage) -> bool:
+    direction = _direction_key(message.direction)
+    if direction not in {"long", "short"}:
+        return False
+    entry_low = _decimal_value(message.entry_low)
+    entry_high = _decimal_value(message.entry_high)
+    stop = _decimal_value(message.stop_loss)
+    tp1 = _decimal_value(message.tp1)
+    if None in (entry_low, entry_high, stop, tp1):
+        return False
+    assert entry_low is not None
+    assert entry_high is not None
+    assert stop is not None
+    assert tp1 is not None
+    if entry_low > entry_high:
+        return False
+    if direction == "long":
+        return stop < entry_low and tp1 > entry_high
+    return stop > entry_high and tp1 < entry_low
+
+
 def _confirmation_requirements(message: TelegramSignalMessage) -> str:
     lines = _needs_next_lines(message)
     if lines:
@@ -746,6 +842,7 @@ __all__ = [
     "format_premium_watchlist_message",
     "format_price",
     "format_public_no_trade_message",
+    "format_research_watch_message",
     "format_signal_confirmed_alert",
     "format_sl_hit_update",
     "format_symbol",

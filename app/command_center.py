@@ -291,7 +291,7 @@ def format_watchlist_export(
         f"- Continued symbols: {_sequence_text(continued)}",
         f"- Promoted symbols: {_sequence_text(promoted)}",
         "",
-        "Watch candidates:",
+        "Tracked candidates:",
     ]
     candidate_symbols = set(promoted) | set(continued)
     if not candidate_symbols:
