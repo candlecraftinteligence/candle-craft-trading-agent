@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 class StorageError(RuntimeError):
@@ -235,7 +235,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 new_state TEXT NOT NULL,
                 alert_type TEXT NOT NULL,
                 lifecycle_state TEXT NOT NULL,
-                sent_at TEXT NOT NULL,
+                sent_at TEXT,
+                attempted_at TEXT NOT NULL DEFAULT 'N/A',
                 telegram_status TEXT NOT NULL,
                 message_hash TEXT NOT NULL,
                 scan_run_id TEXT,
@@ -377,6 +378,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "setup_lifecycle_records", "setup_identity", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "setup_lifecycle_events", "scan_run_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "scan_run_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "attempted_at", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "attempted_alert_type", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "setup_quality_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "rr_planned", "TEXT NOT NULL DEFAULT 'N/A'")
@@ -399,6 +401,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "seen_count", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(connection, "telegram_alert_attempts", "last_scan_run_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "last_error_message", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_nullable_telegram_sent_at(connection)
         _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_health", "last_priority_rank", "INTEGER")
         _ensure_column(connection, "symbol_health", "last_prioritized_at", "TEXT")
@@ -444,3 +447,127 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
     }
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
+    columns = connection.execute("PRAGMA table_info(telegram_alert_attempts)").fetchall()
+    sent_at = next((row for row in columns if row[1] == "sent_at"), None)
+    if sent_at is None or int(sent_at[3]) == 0:
+        return
+
+    legacy_columns = [str(row[1]) for row in columns]
+    connection.execute("DROP INDEX IF EXISTS ix_telegram_alert_attempts_signal")
+    connection.execute("DROP INDEX IF EXISTS ix_telegram_alert_attempts_scan_run")
+    connection.execute("ALTER TABLE telegram_alert_attempts RENAME TO telegram_alert_attempts_legacy_sent_at")
+    connection.execute(
+        """
+        CREATE TABLE telegram_alert_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            previous_state TEXT NOT NULL DEFAULT 'N/A',
+            new_state TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            lifecycle_state TEXT NOT NULL,
+            sent_at TEXT,
+            attempted_at TEXT NOT NULL DEFAULT 'N/A',
+            telegram_status TEXT NOT NULL,
+            message_hash TEXT NOT NULL,
+            scan_run_id TEXT,
+            attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
+            setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+            rr_planned TEXT NOT NULL DEFAULT 'N/A',
+            min_rr TEXT NOT NULL DEFAULT 'N/A',
+            opportunity_score TEXT NOT NULL DEFAULT 'N/A',
+            min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+            technical_score TEXT NOT NULL DEFAULT 'N/A',
+            price_level TEXT NOT NULL DEFAULT 'N/A',
+            entry_low TEXT NOT NULL DEFAULT 'N/A',
+            entry_high TEXT NOT NULL DEFAULT 'N/A',
+            stop_loss TEXT NOT NULL DEFAULT 'N/A',
+            tp1 TEXT NOT NULL DEFAULT 'N/A',
+            tp2 TEXT NOT NULL DEFAULT 'N/A',
+            tp3 TEXT NOT NULL DEFAULT 'N/A',
+            blocked_reason TEXT NOT NULL DEFAULT 'N/A',
+            invalid_target_fields TEXT NOT NULL DEFAULT 'N/A',
+            error_message TEXT NOT NULL DEFAULT 'N/A',
+            first_seen_at TEXT NOT NULL DEFAULT 'N/A',
+            last_seen_at TEXT NOT NULL DEFAULT 'N/A',
+            seen_count INTEGER NOT NULL DEFAULT 1,
+            last_scan_run_id TEXT,
+            last_error_message TEXT NOT NULL DEFAULT 'N/A',
+            UNIQUE(signal_id, alert_type)
+        )
+        """
+    )
+    target_columns = [
+        "id",
+        "signal_id",
+        "symbol",
+        "direction",
+        "previous_state",
+        "new_state",
+        "alert_type",
+        "lifecycle_state",
+        "sent_at",
+        "attempted_at",
+        "telegram_status",
+        "message_hash",
+        "scan_run_id",
+        "attempted_alert_type",
+        "setup_quality_score",
+        "rr_planned",
+        "min_rr",
+        "opportunity_score",
+        "min_score_for_idea",
+        "technical_score",
+        "price_level",
+        "entry_low",
+        "entry_high",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "tp3",
+        "blocked_reason",
+        "invalid_target_fields",
+        "error_message",
+        "first_seen_at",
+        "last_seen_at",
+        "seen_count",
+        "last_scan_run_id",
+        "last_error_message",
+    ]
+    common_columns = [column for column in target_columns if column in legacy_columns]
+    column_list = ", ".join(common_columns)
+    connection.execute(
+        f"""
+        INSERT INTO telegram_alert_attempts ({column_list})
+        SELECT {column_list}
+        FROM telegram_alert_attempts_legacy_sent_at
+        """
+    )
+    if "sent_at" in legacy_columns:
+        connection.execute(
+            """
+            UPDATE telegram_alert_attempts
+            SET attempted_at = sent_at
+            WHERE telegram_status IN ('blocked', 'skipped', 'failed')
+              AND (attempted_at IS NULL OR attempted_at = 'N/A' OR attempted_at = '')
+              AND sent_at IS NOT NULL
+              AND sent_at NOT IN ('', 'N/A')
+            """
+        )
+    connection.execute("DROP TABLE telegram_alert_attempts_legacy_sent_at")
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_signal
+            ON telegram_alert_attempts(signal_id, alert_type)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_scan_run
+            ON telegram_alert_attempts(scan_run_id)
+        """
+    )

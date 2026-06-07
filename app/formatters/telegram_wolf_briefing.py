@@ -6,13 +6,23 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.data.dtos import NA
+from app.lifecycle.eligibility import active_signal_eligible, public_watchlist_eligible
 
 UNVERIFIED = "Unverified"
 WOLF_BRIEFING_SIGNATURE = "Candle Craft | Signal. Structure. Execution."
 WOLF_FOCUS_DASH = " — "
 WOLF_FOCUS_LIMIT = 5
 
-_WATCH_STATE_KEYS = {"stalking", "triggered", "watchlisted", "watchlist", "monitoring"}
+_WATCHLIST_FOCUS_BLOCKED_KEYS = {
+    "cooldown",
+    "invalidated",
+    "reject",
+    "rejected",
+    "sl_hit",
+    "tp1_hit",
+    "tp2_hit",
+    "tp3_hit",
+}
 
 
 @dataclass(frozen=True)
@@ -83,23 +93,25 @@ def build_wolf_briefing_snapshot(
     near_rows = _near_rows(rows)
     rejected_rows = _rejected_rows(rows)
     scan_watch_rows = _scan_watchlist_rows(rows)
+    scan_active_rows = _scan_active_signal_rows(rows)
+    focus_watchlist_items = _safe_watchlist_items(watchlist_items)
 
     active_count = (
         _safe_count(active_signal_count)
         if active_signal_count is not None
-        else _safe_count(_first_value(manifest.get("active_signal_count"), manifest.get("valid_setup_count"), len(valid_rows)))
+        else _safe_count(len(active_signal_items) if active_signal_items else len(scan_active_rows))
     )
     watch_count = (
         _safe_count(watchlist_count)
         if watchlist_count is not None
-        else _safe_count(_first_value(manifest.get("watchlist_count"), len(scan_watch_rows)))
+        else _safe_count(len(focus_watchlist_items) if focus_watchlist_items else len(scan_watch_rows))
     )
-    near_count = _safe_count(_first_value(manifest.get("near_miss_count"), len(near_rows)))
-    rejected_count = _safe_count(_first_value(manifest.get("rejected_count"), len(rejected_rows)))
+    near_count = _safe_count(len(near_rows) if rows else manifest.get("near_miss_count"))
+    rejected_count = _safe_count(len(rejected_rows) if rows else manifest.get("rejected_count"))
 
     focus = _focus_items(
         active_signal_items=active_signal_items,
-        watchlist_items=watchlist_items,
+        watchlist_items=focus_watchlist_items,
         near_rows=near_rows,
         max_focus=max_focus,
     )
@@ -217,8 +229,8 @@ def _best_action(
     if watch_count > 0 or near_count > 0:
         return "Wait for confirmation"
     if rejected_count > 0:
-        return "Stand down"
-    return NA
+        return "Wait"
+    return "Wait"
 
 
 def _result_rows(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
@@ -250,13 +262,30 @@ def _rejected_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any]
 
 
 def _scan_watchlist_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
-    return _ranked_rows(
-        row
-        for row in rows
-        if _status_key(row.get("lifecycle_current_state")) in _WATCH_STATE_KEYS
-        or _status_key(row.get("display_status")) == "watchlist"
-        or _status_key(row.get("display_bucket")) == "watchlist"
-    )
+    return _ranked_rows(row for row in rows if public_watchlist_eligible(row))
+
+
+def _scan_active_signal_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    return _ranked_rows(row for row in rows if active_signal_eligible(row))
+
+
+def _safe_watchlist_items(items: Sequence[Any]) -> tuple[Any, ...]:
+    safe: list[Any] = []
+    for item in items:
+        if _watchlist_item_blocked(item):
+            continue
+        safe.append(item)
+    return tuple(safe)
+
+
+def _watchlist_item_blocked(item: Any) -> bool:
+    for value in (_attr(item, "status"), _attr(item, "reason")):
+        status_key = _status_key(value)
+        if status_key in _WATCHLIST_FOCUS_BLOCKED_KEYS:
+            return True
+        if any(fragment in status_key for fragment in ("hit", "cooldown", "invalidated", "reject")):
+            return True
+    return False
 
 
 def _ranked_rows(rows: Any) -> tuple[Mapping[str, Any], ...]:

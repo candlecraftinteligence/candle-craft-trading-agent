@@ -475,6 +475,130 @@ def _telegram_attempt_rows(db_path: Path) -> list[tuple[str, str, str]]:
         ).fetchall()
 
 
+def _attempt_timestamp_rows(db_path: Path) -> list[tuple[str, str | None, str]]:
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT telegram_status, sent_at, attempted_at
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+
+
+def _insert_attempt_record(
+    db_path: Path,
+    *,
+    signal_id: str,
+    alert_type: str,
+    status: str,
+    attempted_alert_type: str | None = None,
+    sent_at: str | None = "2026-06-07T00:00:00Z",
+) -> None:
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        repository.insert_attempt(
+            TelegramAlertAttemptRecord(
+                signal_id=signal_id,
+                symbol="BTCUSDT",
+                direction="long",
+                previous_state=NA,
+                new_state="WATCHLISTED",
+                alert_type=alert_type,
+                lifecycle_state="WATCHLISTED",
+                sent_at=sent_at,
+                telegram_status=status,
+                message_hash=f"hash-{signal_id}-{alert_type}",
+                attempted_alert_type=attempted_alert_type or alert_type,
+                setup_quality_score="B+",
+                rr_planned="3",
+                entry_low="100",
+                entry_high="102",
+                stop_loss="95",
+                tp1="110",
+                tp2="115",
+                tp3="120",
+            )
+        )
+
+
+def test_prior_public_delivery_ignores_blocked_skipped_and_failed_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "prior-status.db"
+    for status in ("blocked", "skipped", "failed"):
+        _insert_attempt_record(
+            db_path,
+            signal_id=f"sig-{status}",
+            alert_type=f"WATCHLIST_{status.upper()}",
+            status=status,
+            attempted_alert_type=TelegramAlertType.WATCHLIST.value,
+        )
+
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        for status in ("blocked", "skipped", "failed"):
+            assert repository.get_prior_public_alert(signal_ids=(f"sig-{status}",)) is None
+        assert repository.has_prior_public_alert_for_symbol(symbol="BTCUSDT") is False
+
+
+def test_blocked_skipped_and_failed_attempt_writes_do_not_populate_sent_at(tmp_path: Path) -> None:
+    db_path = tmp_path / "attempt-timestamps.db"
+    for status in ("blocked", "skipped", "failed"):
+        _insert_attempt_record(
+            db_path,
+            signal_id=f"sig-{status}",
+            alert_type=f"WATCHLIST_{status.upper()}",
+            status=status,
+            attempted_alert_type=TelegramAlertType.WATCHLIST.value,
+        )
+
+    rows = _attempt_timestamp_rows(db_path)
+
+    assert {row[0] for row in rows} == {"blocked", "skipped", "failed"}
+    assert all(row[1] is None for row in rows)
+    assert all(row[2] == "2026-06-07T00:00:00Z" for row in rows)
+
+
+def test_sent_attempt_writes_delivery_sent_at(tmp_path: Path) -> None:
+    db_path = tmp_path / "sent-timestamp.db"
+    _insert_attempt_record(
+        db_path,
+        signal_id="sig-sent",
+        alert_type=TelegramAlertType.WATCHLIST.value,
+        status="sent",
+    )
+
+    assert _attempt_timestamp_rows(db_path) == [("sent", "2026-06-07T00:00:00Z", "2026-06-07T00:00:00Z")]
+
+
+def test_future_valid_watchlist_alert_is_not_suppressed_by_blocked_attempt(tmp_path: Path) -> None:
+    db_path = tmp_path / "blocked-then-valid.db"
+    signal_id = "sig-blocked-then-valid"
+    _insert_attempt_record(
+        db_path,
+        signal_id=signal_id,
+        alert_type="WATCHLIST_BLOCKED_abc123",
+        status="blocked",
+        attempted_alert_type=TelegramAlertType.WATCHLIST.value,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=AppSettings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=_public_ready_watchlist_diagnostics(),
+        signal_id=signal_id,
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="blocked-then-valid"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    rows = _telegram_attempt_rows(db_path)
+    assert (signal_id, "WATCHLIST_BLOCKED_abc123", "blocked") in rows
+    assert (signal_id, TelegramAlertType.WATCHLIST.value, "sent") in rows
+
+
 def _soft_failed_confirmation_rows(db_path: Path) -> list[tuple[str, str, str, int]]:
     with sqlite3.connect(db_path) as connection:
         return connection.execute(
@@ -613,15 +737,56 @@ def test_watchlist_near_miss_routes_to_watchlist_not_confirmed() -> None:
     assert unchanged.reason == "unchanged_lifecycle_state"
 
 
-def test_watchlist_alert_allows_na_rr_when_setup_is_not_fully_formed() -> None:
+def test_watchlist_alert_blocks_na_rr_when_setup_is_not_fully_formed() -> None:
     weak = telegram_alert_decision_for_symbol(
         _symbol(SetupLifecycleState.STALKING, diagnostics=_public_ready_watchlist_diagnostics(rr_to_tp2=NA))
     )
 
-    assert weak.eligible is True
+    assert weak.eligible is False
     assert weak.alert_type == TelegramAlertType.WATCHLIST
-    assert weak.message is not None
-    assert weak.message.planned_rr == NA
+    assert "missing_public_fields=planned_rr" in weak.reason
+
+
+def test_invalidated_transition_cannot_produce_tp2_hit_alert_type() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.INVALIDATED,
+            previous=SetupLifecycleState.CONFIRMED,
+            diagnostics=_diagnostics(outcome_status="tp2_hit", highest_tp_hit=2),
+        ),
+        previously_active_sent=True,
+    )
+
+    assert decision.alert_type == TelegramAlertType.INVALIDATED
+    assert decision.alert_type != TelegramAlertType.TP2_HIT
+
+
+def test_triggered_transition_cannot_produce_tp_hit_alert_type() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.TRIGGERED,
+            diagnostics=_public_ready_watchlist_diagnostics(outcome_status="tp1_hit", highest_tp_hit=1),
+        )
+    )
+
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.alert_type not in {
+        TelegramAlertType.TP1_HIT,
+        TelegramAlertType.TP2_HIT,
+        TelegramAlertType.TP3_HIT,
+    }
+
+
+def test_confirmed_to_stalking_transition_cannot_produce_sl_hit_alert_type() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.STALKING,
+            previous=SetupLifecycleState.CONFIRMED,
+            diagnostics=_public_ready_watchlist_diagnostics(outcome_status="sl_hit"),
+        )
+    )
+
+    assert decision.alert_type != TelegramAlertType.SL_HIT
 
 
 def test_grade_b_is_blocked_from_public_watchlist() -> None:
@@ -835,9 +1000,9 @@ def test_hype_style_public_ready_watchlist_sends_watchlist_not_confirmed() -> No
         ).model_copy(update={"symbol": "HYPEUSDT"})
     )
 
-    assert decision.eligible is True
+    assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert decision.message is not None
+    assert "planned_rr_below_min:2.9<3" in decision.reason
     text = format_telegram_signal_message(decision.alert_type, decision.message)
     assert "WATCHLIST — HYPEUSDT" in text
     assert "Bias: LONG" in text
@@ -884,12 +1049,9 @@ def test_rr_below_min_watchlist_never_routes_to_signal_confirmed() -> None:
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
 
-    assert decision.eligible is True
+    assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert decision.message is not None
-    text = format_telegram_signal_message(decision.alert_type, decision.message)
-    assert "CONFIRMED SIGNAL" not in text
-    assert "WATCHLIST" in text
+    assert "planned_rr_below_min:2.9<3" in decision.reason
 
 
 def test_rejected_action_watchlist_only_is_not_public_below_min_grade() -> None:

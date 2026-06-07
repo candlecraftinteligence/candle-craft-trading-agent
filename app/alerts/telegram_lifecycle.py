@@ -388,6 +388,8 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 WHERE signal_id IN ({placeholders})
                   AND alert_type IN ({type_placeholders})
                   AND telegram_status = 'sent'
+                  AND sent_at IS NOT NULL
+                  AND sent_at NOT IN ('', 'N/A')
                 ORDER BY id ASC
                 """,
                 (*candidates, *sorted(PRIOR_ACTIVE_ALERT_TYPES)),
@@ -424,11 +426,15 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             WHERE prior.symbol = ?
               AND prior.alert_type IN ({type_placeholders})
               AND prior.telegram_status = 'sent'
+              AND prior.sent_at IS NOT NULL
+              AND prior.sent_at NOT IN ('', 'N/A')
               AND NOT EXISTS (
                   SELECT 1 FROM telegram_alert_attempts AS terminal
                   WHERE terminal.signal_id = prior.signal_id
                     AND terminal.alert_type IN ({terminal_placeholders})
                     AND terminal.telegram_status = 'sent'
+                    AND terminal.sent_at IS NOT NULL
+                    AND terminal.sent_at NOT IN ('', 'N/A')
               )
               {direction_clause}
             ORDER BY prior.id ASC
@@ -459,6 +465,8 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             WHERE symbol = ?
               AND alert_type IN ({type_placeholders})
               AND telegram_status = 'sent'
+              AND sent_at IS NOT NULL
+              AND sent_at NOT IN ('', 'N/A')
               {direction_clause}
             ORDER BY id ASC
             """,
@@ -474,6 +482,8 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             WHERE symbol = ?
               AND alert_type IN ({type_placeholders})
               AND telegram_status = 'sent'
+              AND sent_at IS NOT NULL
+              AND sent_at NOT IN ('', 'N/A')
             LIMIT 1
             """,
             (_symbol(symbol), *sorted(PRIOR_ACTIVE_ALERT_TYPES)),
@@ -488,6 +498,8 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             WHERE signal_id = ?
               AND alert_type IN ({placeholders})
               AND telegram_status = 'sent'
+              AND sent_at IS NOT NULL
+              AND sent_at NOT IN ('', 'N/A')
             LIMIT 1
             """,
             (_identity(signal_id), *sorted(TERMINAL_COMPLETION_ALERT_TYPES)),
@@ -501,11 +513,15 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             SELECT watch.* FROM telegram_alert_attempts AS watch
             WHERE watch.alert_type = ?
               AND watch.telegram_status = 'sent'
+              AND watch.sent_at IS NOT NULL
+              AND watch.sent_at NOT IN ('', 'N/A')
               AND NOT EXISTS (
                   SELECT 1 FROM telegram_alert_attempts AS terminal
                   WHERE terminal.signal_id = watch.signal_id
                     AND terminal.alert_type IN ({terminal_placeholders})
                     AND terminal.telegram_status = 'sent'
+                    AND terminal.sent_at IS NOT NULL
+                    AND terminal.sent_at NOT IN ('', 'N/A')
               )
             ORDER BY watch.id ASC
             """,
@@ -514,16 +530,29 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         return tuple(_record_from_row(row) for row in rows)
 
     def insert_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
+        telegram_status = _text(record.telegram_status)
+        attempted_at = _text(record.attempted_at)
+        if attempted_at == NA:
+            attempted_at = _text(record.sent_at)
+        if attempted_at == NA:
+            attempted_at = now_utc_iso()
+        sent_at: str | None
+        if telegram_status == "sent":
+            sent_at = _text(record.sent_at)
+            if sent_at == NA:
+                sent_at = attempted_at
+        else:
+            sent_at = None
         first_seen_at = _text(record.first_seen_at)
         if first_seen_at == NA:
-            first_seen_at = _text(record.sent_at)
+            first_seen_at = _text(sent_at)
         if first_seen_at == NA:
-            first_seen_at = now_utc_iso()
+            first_seen_at = attempted_at
         last_seen_at = _text(record.last_seen_at)
         if last_seen_at == NA:
-            last_seen_at = _text(record.sent_at)
+            last_seen_at = _text(sent_at)
         if last_seen_at == NA:
-            last_seen_at = now_utc_iso()
+            last_seen_at = attempted_at
         last_error_message = _text(record.last_error_message)
         if last_error_message == NA:
             last_error_message = _text(record.error_message)
@@ -532,14 +561,14 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 """
                 INSERT INTO telegram_alert_attempts (
                     signal_id, symbol, direction, previous_state, new_state,
-                    alert_type, lifecycle_state, sent_at, telegram_status,
+                    alert_type, lifecycle_state, sent_at, attempted_at, telegram_status,
                     message_hash, scan_run_id, attempted_alert_type, setup_quality_score,
                     rr_planned, min_rr, opportunity_score, min_score_for_idea,
                     technical_score, price_level, entry_low, entry_high, stop_loss,
                     tp1, tp2, tp3, blocked_reason, error_message,
                     invalid_target_fields, first_seen_at, last_seen_at, seen_count, last_scan_run_id,
                     last_error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _identity(record.signal_id),
@@ -549,8 +578,9 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     _text(record.new_state),
                     _text(record.alert_type),
                     _text(record.lifecycle_state),
-                    _text(record.sent_at),
-                    _text(record.telegram_status),
+                    sent_at,
+                    attempted_at,
+                    telegram_status,
                     _text(record.message_hash),
                     record.scan_run_id,
                     _text(record.attempted_alert_type),
@@ -590,9 +620,14 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             """
             UPDATE telegram_alert_attempts
             SET
+                attempted_at = CASE
+                    WHEN attempted_at IS NULL OR attempted_at = 'N/A' OR attempted_at = ''
+                        THEN ?
+                    ELSE attempted_at
+                END,
                 first_seen_at = CASE
                     WHEN first_seen_at IS NULL OR first_seen_at = 'N/A'
-                        THEN COALESCE(NULLIF(sent_at, 'N/A'), ?)
+                        THEN COALESCE(NULLIF(attempted_at, 'N/A'), NULLIF(sent_at, 'N/A'), ?)
                     ELSE first_seen_at
                 END,
                 last_seen_at = ?,
@@ -609,6 +644,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
               AND error_message = ?
             """,
             (
+                now,
                 now,
                 now,
                 record.last_scan_run_id,
@@ -642,6 +678,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             alert_type=existing.alert_type,
             lifecycle_state=existing.lifecycle_state,
             sent_at=existing.sent_at,
+            attempted_at=existing.attempted_at,
             telegram_status=existing.telegram_status,
             message_hash=existing.message_hash,
             scan_run_id=existing.scan_run_id,
@@ -959,6 +996,7 @@ class TelegramLifecycleDeliveryService:
         transition = decision.lifecycle_transition
         previous_state = transition.from_state.value if transition and transition.from_state else NA
         new_state = transition.to_state.value if transition else _lifecycle_state_text(symbol_result)
+        attempted_at = now_utc_iso()
         record = TelegramAlertAttemptRecord(
             signal_id=signal_id,
             symbol=symbol_result.symbol,
@@ -967,7 +1005,8 @@ class TelegramLifecycleDeliveryService:
             new_state=new_state,
             alert_type=decision.alert_type.value,
             lifecycle_state=_lifecycle_state_text(symbol_result),
-            sent_at=now_utc_iso(),
+            sent_at=attempted_at if send_result.status == "sent" else None,
+            attempted_at=attempted_at,
             telegram_status=send_result.status,
             message_hash=message_hash,
             scan_run_id=scan_run_id or _transition_scan_run_id(transition),
@@ -1234,6 +1273,7 @@ class TelegramLifecycleDeliveryService:
         transition = current_result.lifecycle_transition
         previous_state = transition.from_state.value if transition and transition.from_state else prior_alert.new_state
         new_state = transition.to_state.value if transition else _lifecycle_state_text(current_result)
+        attempted_at = now_utc_iso()
         record = TelegramAlertAttemptRecord(
             signal_id=prior_alert.signal_id,
             symbol=_symbol(message.symbol),
@@ -1242,7 +1282,8 @@ class TelegramLifecycleDeliveryService:
             new_state=new_state,
             alert_type=alert_type.value,
             lifecycle_state=_lifecycle_state_text(current_result),
-            sent_at=now_utc_iso(),
+            sent_at=attempted_at if send_result.status == "sent" else None,
+            attempted_at=attempted_at,
             telegram_status=send_result.status,
             message_hash=message_hash,
             scan_run_id=scan_run_id or _transition_scan_run_id(transition),
@@ -1311,6 +1352,7 @@ class TelegramLifecycleDeliveryService:
         transition = outcome.symbol_result.lifecycle_transition
         previous_state = transition.from_state.value if transition and transition.from_state else NA
         new_state = transition.to_state.value if transition else _lifecycle_state_text(outcome.symbol_result)
+        attempted_at = now_utc_iso()
         record = TelegramAlertAttemptRecord(
             signal_id=prior_alert.signal_id,
             symbol=_symbol(outcome.message.symbol),
@@ -1319,7 +1361,8 @@ class TelegramLifecycleDeliveryService:
             new_state=new_state,
             alert_type=outcome.alert_type.value,
             lifecycle_state=_lifecycle_state_text(outcome.symbol_result),
-            sent_at=now_utc_iso(),
+            sent_at=attempted_at if send_result.status == "sent" else None,
+            attempted_at=attempted_at,
             telegram_status=send_result.status,
             message_hash=message_hash,
             scan_run_id=scan_run_id or _transition_scan_run_id(transition),
@@ -2624,6 +2667,15 @@ def _watchlist_public_readiness_blockers(
     missing_public = _watchlist_missing_public_sections(message)
     if missing_public:
         blockers.append(f"watchlist_not_public_ready:missing_public_fields={','.join(missing_public)}")
+    missing_trade_map: list[str] = []
+    if _decimal_pair_values(message.entry_low, message.entry_high) is None:
+        missing_trade_map.append("entry_zone")
+    if _decimal_or_none(message.stop_loss) is None:
+        missing_trade_map.append("stop_loss")
+    if _decimal_or_none(message.tp1) is None:
+        missing_trade_map.append("tp1")
+    if missing_trade_map:
+        blockers.append(f"watchlist_not_public_ready:missing_public_fields={','.join(missing_trade_map)}")
 
     if _watchlist_plan_all_na(message):
         blockers.append("watchlist_missing_trackable_plan:all_plan_fields_na")
@@ -2634,8 +2686,10 @@ def _watchlist_public_readiness_blockers(
         blockers.append("watchlist_not_public_ready:mostly_na_message")
 
     planned_rr = _decimal_or_none(message.planned_rr)
-    if planned_rr is not None and planned_rr < context.min_rr and not _watchlist_rr_warning_present(message):
-        blockers.append("watchlist_not_public_ready:rr_warning_missing")
+    if planned_rr is None:
+        blockers.append("watchlist_not_public_ready:missing_public_fields=planned_rr")
+    elif planned_rr < context.min_rr:
+        blockers.append(f"watchlist_not_public_ready:planned_rr_below_min:{_text(planned_rr)}<{_text(context.min_rr)}")
 
     return tuple(dict.fromkeys(blockers))
 
@@ -2923,7 +2977,8 @@ def _persist_blocked_attempt(
         new_state=new_state,
         alert_type=blocked_alert_type,
         lifecycle_state=_lifecycle_state_text(symbol_result),
-        sent_at=seen_at,
+        sent_at=None,
+        attempted_at=seen_at,
         telegram_status="blocked",
         message_hash=message_hash,
         scan_run_id=scan_run_id or _transition_scan_run_id(transition),
@@ -2993,7 +3048,8 @@ def _persist_sent_watchlist_reconciliation_block(
         new_state=NA,
         alert_type=blocked_alert_type,
         lifecycle_state=NA,
-        sent_at=seen_at,
+        sent_at=None,
+        attempted_at=seen_at,
         telegram_status="blocked",
         message_hash=message_hash,
         scan_run_id=scan_run_id,
@@ -3068,7 +3124,8 @@ def _persist_watchlist_outcome_audit(
         new_state=new_state,
         alert_type=alert_type,
         lifecycle_state=_lifecycle_state_text(symbol_result) if symbol_result is not None else NA,
-        sent_at=seen_at,
+        sent_at=None,
+        attempted_at=seen_at,
         telegram_status="skipped",
         message_hash=message_hash,
         scan_run_id=scan_run_id or _transition_scan_run_id(transition),
@@ -3120,7 +3177,8 @@ def _persist_suppressed_watchlist_terminal_update(
         new_state=new_state,
         alert_type=skipped_alert_type,
         lifecycle_state=_lifecycle_state_text(symbol_result),
-        sent_at=seen_at,
+        sent_at=None,
+        attempted_at=seen_at,
         telegram_status="skipped",
         message_hash=message_hash,
         scan_run_id=scan_run_id or _transition_scan_run_id(transition),
@@ -3205,7 +3263,8 @@ def _persist_watchlist_expiry_audit(
         new_state=prior_alert.new_state,
         alert_type=alert_type,
         lifecycle_state=prior_alert.lifecycle_state,
-        sent_at=seen_at,
+        sent_at=None,
+        attempted_at=seen_at,
         telegram_status="skipped",
         message_hash=message_hash,
         scan_run_id=scan_run_id,
@@ -3275,6 +3334,16 @@ def _watchlist_outcome_for_current_result(
             repository,
             prior_alert,
             reason="outcome_tracking_already_closed",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+        )
+        return None
+    terminal_state_reason = _watchlist_outcome_terminal_state_reason(current_result)
+    if terminal_state_reason is not None:
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason=terminal_state_reason,
             scan_run_id=scan_run_id,
             symbol_result=current_result,
         )
@@ -3360,6 +3429,18 @@ def _watchlist_outcome_for_current_result(
             repository,
             prior_alert,
             reason="outcome_tracking_already_closed",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+            message=message,
+        )
+        return None
+
+    tp_sl_state_reason = _watchlist_tp_sl_state_block_reason(current_result)
+    if tp_sl_state_reason is not None:
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason=tp_sl_state_reason,
             scan_run_id=scan_run_id,
             symbol_result=current_result,
             message=message,
@@ -3483,6 +3564,26 @@ def _watchlist_outcome_for_current_result(
             message,
             price_level=live_price.price,
         )
+    return None
+
+
+def _watchlist_outcome_terminal_state_reason(symbol_result: ScannerSymbolResult) -> str | None:
+    state_key = _status_key(_lifecycle_state_text(symbol_result))
+    if state_key in {"invalidated", "cooldown", "cooled_down", "expired", "no_longer_tracking", "rejected", "archived"}:
+        return f"outcome_tracking_terminal_lifecycle_state:{state_key}"
+    return None
+
+
+def _watchlist_tp_sl_state_block_reason(symbol_result: ScannerSymbolResult) -> str | None:
+    blocked_keys = {"watch", "watchlist", "watchlisted", "stalking", "triggered", "rejected", "invalidated", "cooldown"}
+    candidates = [_lifecycle_state_text(symbol_result)]
+    transition = symbol_result.lifecycle_transition
+    if transition is not None:
+        candidates.append(transition.to_state.value if transition.to_state is not None else NA)
+    for value in candidates:
+        key = _status_key(value)
+        if key in blocked_keys:
+            return f"outcome_tracking_tp_sl_lifecycle_state_blocked:{key}"
     return None
 
 
@@ -3800,7 +3901,8 @@ def _persist_blocked_watchlist_tp_sl_attempt(
         new_state=new_state,
         alert_type=_blocked_alert_type(alert_type, reason),
         lifecycle_state=_lifecycle_state_text(symbol_result),
-        sent_at=seen_at,
+        sent_at=None,
+        attempted_at=seen_at,
         telegram_status="blocked",
         message_hash=message_hash,
         scan_run_id=scan_run_id or _transition_scan_run_id(transition),
@@ -4004,7 +4106,8 @@ def _record_soft_failed_confirmation_observation(
         new_state=new_state,
         alert_type=alert_type,
         lifecycle_state=_lifecycle_state_text(symbol_result),
-        sent_at=seen_at,
+        sent_at=None,
+        attempted_at=seen_at,
         telegram_status="skipped",
         message_hash=message_hash,
         scan_run_id=scan_run_id or _transition_scan_run_id(transition),
@@ -5409,6 +5512,7 @@ def _record_from_row(row: sqlite3.Row) -> TelegramAlertAttemptRecord:
         alert_type=row["alert_type"],
         lifecycle_state=row["lifecycle_state"],
         sent_at=row["sent_at"],
+        attempted_at=row["attempted_at"],
         telegram_status=row["telegram_status"],
         message_hash=row["message_hash"],
         scan_run_id=row["scan_run_id"],

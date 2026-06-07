@@ -413,9 +413,15 @@ def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -
             row[1]
             for row in connection.execute("PRAGMA table_info(telegram_alert_attempts)").fetchall()
         }
+        sent_at_info = next(
+            row
+            for row in connection.execute("PRAGMA table_info(telegram_alert_attempts)").fetchall()
+            if row[1] == "sent_at"
+        )
         row = connection.execute(
             """
             SELECT seen_count, first_seen_at, last_seen_at, last_scan_run_id, last_error_message, invalid_target_fields,
+                   attempted_at,
                    entry_low, entry_high, stop_loss, tp1, tp2, tp3
             FROM telegram_alert_attempts
             WHERE signal_id = 'sig-legacy'
@@ -429,6 +435,7 @@ def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -
         "last_scan_run_id",
         "last_error_message",
         "invalid_target_fields",
+        "attempted_at",
         "entry_low",
         "entry_high",
         "stop_loss",
@@ -436,7 +443,22 @@ def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -
         "tp2",
         "tp3",
     } <= columns
-    assert row == (1, "N/A", "N/A", None, "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A")
+    assert sent_at_info[3] == 0
+    assert row == (
+        1,
+        "N/A",
+        "N/A",
+        None,
+        "N/A",
+        "N/A",
+        "2026-06-02T00:00:00+00:00",
+        "N/A",
+        "N/A",
+        "N/A",
+        "N/A",
+        "N/A",
+        "N/A",
+    )
 
 
 def test_scan_run_insert(tmp_path) -> None:

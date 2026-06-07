@@ -16,6 +16,7 @@ from app.analytics.setup_quality import SetupQualityState
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display
 from app.formatters.telegram_signal_formatter import TelegramSignalMessage, format_watchlist_upgraded_message
+from app.lifecycle.eligibility import public_watchlist_eligible
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
 
 DEFAULT_WATCH_STATE_PATH = Path("scan_runs/watch_state.json")
@@ -454,7 +455,7 @@ def build_watch_iteration_summary(
             continue
         if symbol_result.symbol in activated:
             continue
-        if display.display_status == "near_miss" or display.readiness_label in WATCH_READINESS_LABELS:
+        if public_watchlist_eligible(symbol_result):
             still_watching += 1
             continue
         if display.display_status == "no_setup" or quality_state == SetupQualityState.REJECTED_NO_EDGE.value:
