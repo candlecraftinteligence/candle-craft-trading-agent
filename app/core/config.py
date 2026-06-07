@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     telegram_public_ui_enabled: bool | None = None
     telegram_watchlist_outcome_tracking_enabled: bool = True
     telegram_public_watchlist_terminal_updates_enabled: bool = False
+    telegram_research_watch_enabled: bool = False
+    telegram_research_watch_to_public: bool = False
+    telegram_research_min_quality: int = 60
+    telegram_research_min_readiness: int = 50
+    telegram_research_alert_cooldown_minutes: int = 60
+    telegram_research_max_per_scan: int = 5
     telegram_wolf_briefing_enabled: bool = False
     telegram_wolf_briefing_public_enabled: bool = False
     telegram_wolf_briefing_channel_publish_enabled: bool = False
@@ -66,6 +72,16 @@ class Settings(BaseSettings):
     @classmethod
     def validate_scanner_setup_merge_tolerance_pct(cls, value: float) -> float:
         return max(0.0, float(value))
+
+    @field_validator(
+        "telegram_research_min_quality",
+        "telegram_research_min_readiness",
+        "telegram_research_alert_cooldown_minutes",
+        "telegram_research_max_per_scan",
+    )
+    @classmethod
+    def validate_telegram_research_non_negative(cls, value: int) -> int:
+        return max(0, int(value))
 
     @model_validator(mode="after")
     def enforce_manual_only_phase(self) -> Settings:

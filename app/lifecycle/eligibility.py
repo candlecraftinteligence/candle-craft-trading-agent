@@ -109,6 +109,12 @@ class LifecycleEligibilityConfig:
     min_public_grade: str = MIN_PUBLIC_SIGNAL_GRADE
 
 
+@dataclass(frozen=True)
+class ResearchWatchEligibilityConfig:
+    min_quality: int = 60
+    min_readiness: int = 50
+
+
 def is_numeric_trade_value(value: Any) -> bool:
     return _decimal_or_none(value) is not None
 
@@ -231,6 +237,34 @@ def active_signal_eligible(record: Any, config: LifecycleEligibilityConfig | Non
     )
 
 
+def research_watch_eligible(record: Any, config: ResearchWatchEligibilityConfig | None = None) -> bool:
+    eligibility = config or ResearchWatchEligibilityConfig()
+    if _has_archived_at(record) or _cooldown_active(record):
+        return False
+    if _display(_first_field(record, "invalidated_at", "no_longer_tracking_at")) != NA:
+        return False
+    state = _current_state(record)
+    if _display(state) != NA and is_terminal_state(state):
+        return False
+    if _status_key(_first_field(record, "status")) != "rejected_by_regime":
+        return False
+    if _status_key(_first_field(record, "display_bucket", "display_status")) != "near_miss":
+        return False
+    if _symbol_text(_first_field(record, "symbol")) == NA:
+        return False
+    if _display(_first_field(record, "next_trigger_needed", "action_label", ("setup_quality", "action_label"))) == NA:
+        return False
+    if _display(_first_field(record, "regime_state")) == NA:
+        return False
+    if _display(_first_field(record, "regime_compatibility_label")) == NA:
+        return False
+    quality = _integer_score(_first_field(record, "setup_quality_score", "quality_score", ("setup_quality", "quality_score")))
+    readiness = _integer_score(_first_field(record, "readiness_score"))
+    if quality < eligibility.min_quality or readiness < eligibility.min_readiness:
+        return False
+    return _research_regime_block_reason_present(record)
+
+
 def admin_research_visible(record: Any) -> bool:
     state = _status_key(_current_state(record))
     display = _status_key(_first_field(record, "display_status", "display_bucket"))
@@ -335,6 +369,40 @@ def _cooldown_active(record: Any) -> bool:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC) > datetime.now(UTC)
+
+
+def _research_regime_block_reason_present(record: Any) -> bool:
+    values = (
+        _first_field(record, "rejection_reason"),
+        _first_field(record, "failed_gate"),
+        _first_field(record, "blocked_reason"),
+        _first_field(record, ("setup_quality", "decision_reason")),
+        *_sequence_fields(record, "rejection_reasons", "regime_notes", "environment_notes"),
+    )
+    for value in values:
+        text = _display(value).lower()
+        key = _status_key(value)
+        if key in {"rejected_by_regime", "regime_compatibility", "regime_blocked"}:
+            return True
+        if text == NA.lower():
+            continue
+        if "hostile" in text:
+            return True
+        if "regime" in text and any(fragment in text for fragment in ("block", "weak", "hostile", "compatib", "reject")):
+            return True
+    return False
+
+
+def _integer_score(value: Any) -> int:
+    number = _decimal_or_none(value)
+    if number is None:
+        return 0
+    return int(number)
+
+
+def _symbol_text(value: Any) -> str:
+    text = _display(value)
+    return text.upper() if text != NA else NA
 
 
 def _grade_candidates(record: Any) -> tuple[Any, ...]:
@@ -581,6 +649,7 @@ def _display(value: Any) -> str:
 __all__ = [
     "ACTIVE_SIGNAL_STATE_KEYS",
     "LifecycleEligibilityConfig",
+    "ResearchWatchEligibilityConfig",
     "TERMINAL_STATE_KEYS",
     "WATCH_STATE_KEYS",
     "active_signal_eligible",
@@ -595,4 +664,5 @@ __all__ = [
     "is_terminal_state",
     "is_watch_state",
     "public_watchlist_eligible",
+    "research_watch_eligible",
 ]

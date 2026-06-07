@@ -67,6 +67,7 @@ def test_wolf_briefing_formatter_with_normal_data() -> None:
         best_action="Wait for confirmation",
         active_signal_count=1,
         watchlist_count=2,
+        research_watch_count=1,
         near_miss_count=3,
         rejected_setup_count=4,
         focus_items=(
@@ -84,6 +85,7 @@ def test_wolf_briefing_formatter_with_normal_data() -> None:
     assert "Best action: Wait for confirmation" in text
     assert "Active signals: 1" in text
     assert "Watchlist: 2" in text
+    assert "Research watch: 1" in text
     assert "Near misses: 3" in text
     assert "Rejected setups: 4" in text
     assert "BTCUSDT — Active signal: Confirmed setup" in text
@@ -105,6 +107,7 @@ def test_wolf_briefing_formatter_with_no_active_signals() -> None:
 
     assert "Active signals: 0" in text
     assert "Watchlist: 0" in text
+    assert "Research watch: 0" in text
     assert "Focus:\nN/A" in text
     assert "No forced trades." in text
 
@@ -174,6 +177,7 @@ def test_wolf_briefing_builder_uses_scan_rows_without_promoting_rejections() -> 
     assert "Market Mood: Mixed" in text
     assert "Active signals: 0" in text
     assert "Watchlist: 0" in text
+    assert "Research watch: 0" in text
     assert "Near misses: 1" in text
     assert "Rejected setups: 1" in text
     assert "NEARUSDT — Near miss: Trust meter is below minimum." in text
@@ -197,6 +201,41 @@ def _wolf_watch_row(**overrides: Any) -> dict[str, Any]:
     }
     row.update(overrides)
     return row
+
+
+def _wolf_research_row(**overrides: Any) -> dict[str, Any]:
+    row = {
+        "symbol": "FILUSDT",
+        "display_rank": 2,
+        "status": "rejected_by_regime",
+        "display_status": "near_miss",
+        "display_bucket": "near_miss",
+        "setup_quality_score": 70,
+        "readiness_score": 55,
+        "next_trigger_needed": "Wait for failed gate to clear / 5m BOS/CHoCH.",
+        "regime_state": "HIGH_VOLATILITY",
+        "regime_compatibility_label": "Hostile",
+        "regime_confidence": 9,
+        "rejection_reason": "Setup rejected by regime weakness; scalp compatibility Hostile.",
+        "short_reason": "Setup rejected by market mood weakness.",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_wolf_briefing_shows_research_watch_separately_from_public_watchlist() -> None:
+    snapshot = build_wolf_briefing_snapshot(
+        scan_payload={"results": [_wolf_watch_row(), _wolf_research_row()]},
+        active_signal_count=None,
+        watchlist_count=None,
+    )
+
+    text = format_wolf_briefing(snapshot)
+
+    assert "Watchlist: 1" in text
+    assert "Research watch: 1" in text
+    assert "Near misses: 0" in text
+    assert "FILUSDT — Research watch" in text
 
 
 @pytest.mark.parametrize(
@@ -241,6 +280,7 @@ def test_wolf_briefing_includes_valid_public_watchlist_row_in_count() -> None:
 
     assert "Active signals: 0" in text
     assert "Watchlist: 1" in text
+    assert "Research watch: 0" in text
 
 
 @pytest.mark.parametrize("state", ("LIMIT_HIT", "CONFIRMED", "EXECUTING", "MANAGING"))

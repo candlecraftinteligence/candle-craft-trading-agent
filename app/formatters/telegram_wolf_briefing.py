@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.data.dtos import NA
-from app.lifecycle.eligibility import active_signal_eligible, public_watchlist_eligible
+from app.lifecycle.eligibility import (
+    ResearchWatchEligibilityConfig,
+    active_signal_eligible,
+    public_watchlist_eligible,
+    research_watch_eligible,
+)
 
 UNVERIFIED = "Unverified"
 WOLF_BRIEFING_SIGNATURE = "Candle Craft | Signal. Structure. Execution."
@@ -39,6 +44,7 @@ class WolfBriefingSnapshot:
     best_action: str = NA
     active_signal_count: int = 0
     watchlist_count: int = 0
+    research_watch_count: int = 0
     near_miss_count: int = 0
     rejected_setup_count: int = 0
     focus_items: tuple[WolfBriefingFocusItem, ...] = ()
@@ -62,6 +68,7 @@ def format_wolf_briefing(snapshot: WolfBriefingSnapshot, *, max_focus: int = WOL
         "",
         f"Active signals: {_count_text(snapshot.active_signal_count)}",
         f"Watchlist: {_count_text(snapshot.watchlist_count)}",
+        f"Research watch: {_count_text(snapshot.research_watch_count)}",
         f"Near misses: {_count_text(snapshot.near_miss_count)}",
         f"Rejected setups: {_count_text(snapshot.rejected_setup_count)}",
         "",
@@ -91,6 +98,9 @@ def build_wolf_briefing_snapshot(
     rows = _result_rows(payload)
     valid_rows = _valid_rows(rows)
     near_rows = _near_rows(rows)
+    research_rows = _research_watch_rows(rows)
+    research_symbols = {_symbol_text(row.get("symbol")) for row in research_rows}
+    non_research_near_rows = tuple(row for row in near_rows if _symbol_text(row.get("symbol")) not in research_symbols)
     rejected_rows = _rejected_rows(rows)
     scan_watch_rows = _scan_watchlist_rows(rows)
     scan_active_rows = _scan_active_signal_rows(rows)
@@ -106,22 +116,25 @@ def build_wolf_briefing_snapshot(
         if watchlist_count is not None
         else _safe_count(len(focus_watchlist_items) if focus_watchlist_items else len(scan_watch_rows))
     )
-    near_count = _safe_count(len(near_rows) if rows else manifest.get("near_miss_count"))
+    research_count = _safe_count(len(research_rows) if rows else manifest.get("research_watch_count"))
+    near_count = _safe_count(len(non_research_near_rows) if rows else manifest.get("near_miss_count"))
     rejected_count = _safe_count(len(rejected_rows) if rows else manifest.get("rejected_count"))
 
     focus = _focus_items(
         active_signal_items=active_signal_items,
         watchlist_items=focus_watchlist_items,
-        near_rows=near_rows,
+        research_rows=research_rows,
+        near_rows=non_research_near_rows,
         max_focus=max_focus,
     )
 
     return WolfBriefingSnapshot(
         market_mood=_market_mood(manifest, payload),
-        signal_quality=_signal_quality(manifest, payload, active_count, watch_count, near_count, rejected_count),
-        best_action=_best_action(manifest, payload, active_count, watch_count, near_count, rejected_count),
+        signal_quality=_signal_quality(manifest, payload, active_count, watch_count, near_count + research_count, rejected_count),
+        best_action=_best_action(manifest, payload, active_count, watch_count, near_count + research_count, rejected_count),
         active_signal_count=active_count,
         watchlist_count=watch_count,
+        research_watch_count=research_count,
         near_miss_count=near_count,
         rejected_setup_count=rejected_count,
         focus_items=focus,
@@ -133,6 +146,7 @@ def _focus_items(
     *,
     active_signal_items: Sequence[Any],
     watchlist_items: Sequence[Any],
+    research_rows: Sequence[Mapping[str, Any]],
     near_rows: Sequence[Mapping[str, Any]],
     max_focus: int,
 ) -> tuple[WolfBriefingFocusItem, ...]:
@@ -154,6 +168,21 @@ def _focus_items(
         if symbol == NA or symbol in seen:
             continue
         output.append(WolfBriefingFocusItem(symbol=symbol, status="Watchlist", reason=_display(_attr(item, "status"))))
+        seen.add(symbol)
+        if len(output) >= limit:
+            return tuple(output)
+
+    for row in research_rows:
+        symbol = _symbol_text(row.get("symbol"))
+        if symbol == NA or symbol in seen:
+            continue
+        output.append(
+            WolfBriefingFocusItem(
+                symbol=symbol,
+                status="Research watch",
+                reason=_short_reason(row),
+            )
+        )
         seen.add(symbol)
         if len(output) >= limit:
             return tuple(output)
@@ -263,6 +292,11 @@ def _rejected_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any]
 
 def _scan_watchlist_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
     return _ranked_rows(row for row in rows if public_watchlist_eligible(row))
+
+
+def _research_watch_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:
+    config = ResearchWatchEligibilityConfig()
+    return _ranked_rows(row for row in rows if research_watch_eligible(row, config))
 
 
 def _scan_active_signal_rows(rows: Sequence[Mapping[str, Any]]) -> tuple[Mapping[str, Any], ...]:

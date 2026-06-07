@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,8 @@ from app.formatters.telegram_signal_formatter import (
     format_telegram_price,
     format_telegram_signal_message,
 )
+from app.formatters.scanner_display import build_symbol_display
+from app.lifecycle.eligibility import ResearchWatchEligibilityConfig, research_watch_eligible
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
@@ -77,6 +79,9 @@ TP_SL_ALERT_TYPES = {
 WATCHLIST_OUTCOME_TRACKING_ATTEMPT = "WATCHLIST_OUTCOME_TRACKING"
 WATCHLIST_TERMINAL_SUPPRESSION_ATTEMPT = "WATCHLIST_TERMINAL_SUPPRESSION"
 WATCHLIST_EXPIRY_ATTEMPT = "WATCHLIST_EXPIRY"
+RESEARCH_WATCH_DISABLED_REASON = "research_watch_disabled"
+RESEARCH_WATCH_PUBLIC_DISABLED_REASON = "research_watch_public_delivery_disabled"
+RESEARCH_WATCH_DUPLICATE_REASON = "research_watch_duplicate_cooldown"
 SENT_WATCHLIST_RECONCILIATION_ATTEMPT = "SENT_WATCHLIST_RECONCILIATION"
 SENT_WATCHLIST_RECONCILIATION_NO_MATCH = "sent_watchlist_reconciliation_no_lifecycle_match"
 SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguous"
@@ -288,6 +293,21 @@ class TelegramLifecycleDeliverySummary:
     duplicate: int = 0
     ineligible: int = 0
     deliveries: tuple[TelegramLifecycleDelivery, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResearchWatchCandidate:
+    symbol_result: ScannerSymbolResult
+    message: TelegramSignalMessage
+    signal_id_prefix: str
+    quality_score: int
+    readiness_score: int
+    regime_state: str
+    regime_compatibility_label: str
+    regime_confidence: str = NA
+    next_trigger: str = NA
+    action_label: str = NA
+    rejection_reason: str = NA
 
 
 @dataclass(frozen=True)
@@ -529,6 +549,23 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
 
+    def has_recent_research_watch(self, *, signal_id_prefix: str, since: str) -> bool:
+        prefix = _identity(signal_id_prefix)
+        if prefix == NA:
+            return False
+        row = self._connection.execute(
+            """
+            SELECT 1 FROM telegram_alert_attempts
+            WHERE alert_type = ?
+              AND telegram_status = 'sent'
+              AND signal_id LIKE ?
+              AND COALESCE(NULLIF(sent_at, ''), NULLIF(attempted_at, ''), NULLIF(last_seen_at, '')) >= ?
+            LIMIT 1
+            """,
+            (TelegramAlertType.RESEARCH_WATCH.value, f"{prefix}%", _text(since)),
+        ).fetchone()
+        return row is not None
+
     def insert_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
         telegram_status = _text(record.telegram_status)
         attempted_at = _text(record.attempted_at)
@@ -758,6 +795,30 @@ class TelegramLifecycleDeliveryService:
     def public_watchlist_terminal_updates_enabled(self) -> bool:
         return bool(getattr(self.settings, "telegram_public_watchlist_terminal_updates_enabled", False))
 
+    @property
+    def research_watch_enabled(self) -> bool:
+        return bool(getattr(self.settings, "telegram_research_watch_enabled", False))
+
+    @property
+    def research_watch_to_public(self) -> bool:
+        return bool(getattr(self.settings, "telegram_research_watch_to_public", False))
+
+    @property
+    def research_min_quality(self) -> int:
+        return max(0, int(getattr(self.settings, "telegram_research_min_quality", 60)))
+
+    @property
+    def research_min_readiness(self) -> int:
+        return max(0, int(getattr(self.settings, "telegram_research_min_readiness", 50)))
+
+    @property
+    def research_alert_cooldown_minutes(self) -> int:
+        return max(0, int(getattr(self.settings, "telegram_research_alert_cooldown_minutes", 60)))
+
+    @property
+    def research_max_per_scan(self) -> int:
+        return max(0, int(getattr(self.settings, "telegram_research_max_per_scan", 5)))
+
     async def deliver_for_run(
         self,
         result: ScannerRunResult,
@@ -826,6 +887,12 @@ class TelegramLifecycleDeliveryService:
                     eligibility_context=eligibility_context,
                     current_run_attempts=frozenset(current_run_attempts),
                     current_run_identity_blocked_symbols=frozenset(current_run_identity_blocked_symbols),
+                ):
+                    record_delivery(delivery)
+                for delivery in await self.maybe_send_research_watch_alerts(
+                    result,
+                    repository=repository,
+                    scan_run_id=scan_run_id,
                 ):
                     record_delivery(delivery)
 
@@ -1057,6 +1124,124 @@ class TelegramLifecycleDeliveryService:
             message_hash=message_hash,
             error_message=send_result.error_message,
         )
+
+    async def maybe_send_research_watch_alerts(
+        self,
+        result: ScannerRunResult,
+        *,
+        repository: SQLiteTelegramAlertAttemptRepository,
+        scan_run_id: str | None = None,
+    ) -> tuple[TelegramLifecycleDelivery, ...]:
+        max_per_scan = self.research_max_per_scan
+        if max_per_scan <= 0:
+            return ()
+        eligibility = ResearchWatchEligibilityConfig(
+            min_quality=self.research_min_quality,
+            min_readiness=self.research_min_readiness,
+        )
+        candidates = tuple(
+            candidate
+            for candidate in (
+                _research_watch_candidate(symbol_result, eligibility)
+                for symbol_result in result.results
+            )
+            if candidate is not None
+        )
+        if not candidates:
+            return ()
+        selected = tuple(
+            sorted(
+                candidates,
+                key=lambda candidate: (
+                    -candidate.quality_score,
+                    -candidate.readiness_score,
+                    candidate.symbol_result.symbol,
+                ),
+            )[:max_per_scan]
+        )
+
+        deliveries: list[TelegramLifecycleDelivery] = []
+        for candidate in selected:
+            attempted_at = now_utc_iso()
+            signal_id = _research_watch_signal_id(candidate.signal_id_prefix, attempted_at)
+            message_candidate = replace(candidate, message=replace(candidate.message, signal_id=signal_id))
+            message_text = format_research_watch_alert(message_candidate)
+            message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
+
+            if not self.research_watch_enabled:
+                deliveries.append(
+                    _persist_research_watch_attempt(
+                        repository,
+                        message_candidate,
+                        signal_id=signal_id,
+                        scan_run_id=scan_run_id,
+                        attempted_at=attempted_at,
+                        status="skipped",
+                        detail="Research Watch alerts are disabled.",
+                        message_hash=message_hash,
+                        blocked_reason=RESEARCH_WATCH_DISABLED_REASON,
+                        error_message=RESEARCH_WATCH_DISABLED_REASON,
+                    )
+                )
+                continue
+
+            if not self.research_watch_to_public:
+                deliveries.append(
+                    _persist_research_watch_attempt(
+                        repository,
+                        message_candidate,
+                        signal_id=signal_id,
+                        scan_run_id=scan_run_id,
+                        attempted_at=attempted_at,
+                        status="blocked",
+                        detail="Research Watch public delivery is disabled.",
+                        message_hash=message_hash,
+                        blocked_reason=RESEARCH_WATCH_PUBLIC_DISABLED_REASON,
+                        error_message=RESEARCH_WATCH_PUBLIC_DISABLED_REASON,
+                    )
+                )
+                continue
+
+            cooldown_minutes = self.research_alert_cooldown_minutes
+            if cooldown_minutes > 0:
+                cutoff = _research_watch_cooldown_cutoff(attempted_at, cooldown_minutes)
+                if repository.has_recent_research_watch(signal_id_prefix=candidate.signal_id_prefix, since=cutoff):
+                    deliveries.append(
+                        _persist_research_watch_attempt(
+                            repository,
+                            message_candidate,
+                            signal_id=signal_id,
+                            scan_run_id=scan_run_id,
+                            attempted_at=attempted_at,
+                            status="skipped",
+                            detail="Duplicate Research Watch inside cooldown window.",
+                            message_hash=message_hash,
+                            blocked_reason=RESEARCH_WATCH_DUPLICATE_REASON,
+                            error_message=RESEARCH_WATCH_DUPLICATE_REASON,
+                        )
+                    )
+                    continue
+
+            send_result = await self.sender.send_text(
+                message_text,
+                message_type=TelegramMessageType.RESEARCH_WATCH,
+            )
+            reason = NA if send_result.status == "sent" else _first_non_na(send_result.error_message, send_result.detail)
+            deliveries.append(
+                _persist_research_watch_attempt(
+                    repository,
+                    message_candidate,
+                    signal_id=signal_id,
+                    scan_run_id=scan_run_id,
+                    attempted_at=attempted_at,
+                    status=send_result.status,
+                    detail=send_result.detail,
+                    message_hash=message_hash,
+                    blocked_reason=reason,
+                    error_message=send_result.error_message,
+                )
+            )
+        return tuple(deliveries)
 
     async def reconcile_sent_watchlists(
         self,
@@ -1623,6 +1808,234 @@ def _telegram_signal_message_for_alert(
     return message
 
 
+def format_research_watch_alert(candidate: ResearchWatchCandidate) -> str:
+    return format_telegram_signal_message(TelegramAlertType.RESEARCH_WATCH, candidate.message)
+
+
+def _research_watch_candidate(
+    symbol_result: ScannerSymbolResult,
+    eligibility: ResearchWatchEligibilityConfig,
+) -> ResearchWatchCandidate | None:
+    display = build_symbol_display(symbol_result)
+    diagnostics = _representative_diagnostics(symbol_result)
+    quality_score = _integer_or_zero(getattr(symbol_result.setup_quality, "quality_score", NA))
+    readiness_score = _integer_or_zero(display.readiness_score)
+    next_trigger = _first_non_na(
+        diagnostics.get("next_trigger_needed"),
+        display.next_trigger_needed,
+        diagnostics.get("confirmation_needed"),
+    )
+    action_label = _first_non_na(
+        diagnostics.get("action_label"),
+        getattr(symbol_result.setup_quality, "action_label", NA),
+        display.action_label,
+    )
+    regime_state = _first_non_na(
+        symbol_result.regime_state,
+        diagnostics.get("regime_state"),
+        _mapping_value(symbol_result.regime_diagnostics, "state"),
+    )
+    regime_compatibility_label = _first_non_na(
+        symbol_result.regime_compatibility_label,
+        diagnostics.get("regime_compatibility_label"),
+        _mapping_value(symbol_result.regime_diagnostics, "compatibility_label"),
+    )
+    regime_confidence = _first_non_na(
+        symbol_result.regime_confidence_score,
+        diagnostics.get("regime_confidence"),
+        diagnostics.get("regime_confidence_score"),
+        _mapping_value(symbol_result.regime_diagnostics, "confidence_score"),
+    )
+    rejection_reason = _first_non_na(
+        symbol_result.rejection_reason,
+        diagnostics.get("rejection_reason"),
+        diagnostics.get("regime_compatibility_reason"),
+        display.short_reason,
+    )
+    row = {
+        "symbol": symbol_result.symbol,
+        "status": getattr(symbol_result.status, "value", symbol_result.status),
+        "display_bucket": display.display_bucket,
+        "setup_quality_score": quality_score,
+        "readiness_score": readiness_score,
+        "next_trigger_needed": next_trigger,
+        "action_label": action_label,
+        "regime_state": regime_state,
+        "regime_confidence": regime_confidence,
+        "regime_compatibility_label": regime_compatibility_label,
+        "regime_blocked": symbol_result.regime_blocked,
+        "rejection_reason": rejection_reason,
+        "rejection_reasons": symbol_result.rejection_reasons,
+        "failed_gate": display.failed_gate,
+        "lifecycle_state": symbol_result.lifecycle_state,
+    }
+    if not research_watch_eligible(row, eligibility):
+        return None
+    signal_id_prefix = _research_watch_signal_id_prefix(
+        symbol_result,
+        regime_state=regime_state,
+        next_trigger=next_trigger,
+        action_label=action_label,
+    )
+    message = replace(
+        telegram_signal_message_from_symbol(symbol_result),
+        signal_id=signal_id_prefix,
+        quality=quality_score,
+        readiness_score=readiness_score,
+        regime_state=regime_state,
+        regime_compatibility_label=regime_compatibility_label,
+        regime_confidence=regime_confidence,
+        confirmation_needed=next_trigger,
+    )
+    return ResearchWatchCandidate(
+        symbol_result=symbol_result,
+        message=message,
+        signal_id_prefix=signal_id_prefix,
+        quality_score=quality_score,
+        readiness_score=readiness_score,
+        regime_state=_text(regime_state),
+        regime_compatibility_label=_text(regime_compatibility_label),
+        regime_confidence=_text(regime_confidence),
+        next_trigger=_text(next_trigger),
+        action_label=_text(action_label),
+        rejection_reason=_text(rejection_reason),
+    )
+
+
+def _persist_research_watch_attempt(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    candidate: ResearchWatchCandidate,
+    *,
+    signal_id: str,
+    scan_run_id: str | None,
+    attempted_at: str,
+    status: str,
+    detail: str,
+    message_hash: str,
+    blocked_reason: str = NA,
+    error_message: str = NA,
+) -> TelegramLifecycleDelivery:
+    message = candidate.message
+    symbol_result = candidate.symbol_result
+    record = TelegramAlertAttemptRecord(
+        signal_id=signal_id,
+        symbol=symbol_result.symbol,
+        direction=_text(message.direction),
+        previous_state=NA,
+        new_state=TelegramAlertType.RESEARCH_WATCH.value,
+        alert_type=TelegramAlertType.RESEARCH_WATCH.value,
+        lifecycle_state=NA,
+        sent_at=attempted_at if status == "sent" else None,
+        attempted_at=attempted_at,
+        telegram_status=status,
+        message_hash=message_hash,
+        scan_run_id=scan_run_id,
+        attempted_alert_type=TelegramAlertType.RESEARCH_WATCH.value,
+        setup_quality_score=_text(candidate.quality_score),
+        rr_planned=_text(message.planned_rr),
+        min_rr=NA,
+        opportunity_score=_opportunity_score_text(symbol_result),
+        min_score_for_idea=NA,
+        technical_score=_technical_score_text(symbol_result),
+        price_level=_price_level_for_alert(TelegramAlertType.RESEARCH_WATCH, message),
+        **_message_level_metadata(message),
+        blocked_reason=_text(blocked_reason),
+        invalid_target_fields=NA,
+        error_message=_text(error_message),
+    )
+    inserted = repository.insert_attempt(record)
+    if not inserted and status in {"blocked", "skipped"} and repository.compact_repeated_attempt(record):
+        return TelegramLifecycleDelivery(
+            symbol=symbol_result.symbol,
+            signal_id=signal_id,
+            alert_type=TelegramAlertType.RESEARCH_WATCH.value,
+            status=status,
+            detail=detail,
+            message_hash=message_hash,
+            error_message=_text(error_message),
+        )
+    if not inserted:
+        return TelegramLifecycleDelivery(
+            symbol=symbol_result.symbol,
+            signal_id=signal_id,
+            alert_type=TelegramAlertType.RESEARCH_WATCH.value,
+            status="duplicate",
+            detail="Duplicate Research Watch alert prevented.",
+            message_hash=message_hash,
+            error_message=_text(error_message),
+        )
+    return TelegramLifecycleDelivery(
+        symbol=symbol_result.symbol,
+        signal_id=signal_id,
+        alert_type=TelegramAlertType.RESEARCH_WATCH.value,
+        status=status,
+        detail=detail,
+        message_hash=message_hash,
+        error_message=_text(error_message),
+    )
+
+
+def _research_watch_signal_id_prefix(
+    symbol_result: ScannerSymbolResult,
+    *,
+    regime_state: Any,
+    next_trigger: Any,
+    action_label: Any,
+) -> str:
+    diagnostics = _representative_diagnostics(symbol_result)
+    stable_parts = (
+        symbol_result.symbol,
+        TelegramAlertType.RESEARCH_WATCH.value,
+        regime_state,
+        _first_non_na(next_trigger, action_label),
+        _research_setup_fingerprint(symbol_result, diagnostics),
+    )
+    digest = hashlib.sha256("|".join(_text(part) for part in stable_parts).encode("utf-8")).hexdigest()[:20]
+    return f"{symbol_result.symbol}-RESEARCH-{digest}"
+
+
+def _research_watch_signal_id(signal_id_prefix: str, attempted_at: str) -> str:
+    digest = hashlib.sha256(f"{signal_id_prefix}|{attempted_at}".encode("utf-8")).hexdigest()[:10]
+    return f"{signal_id_prefix}-{digest}"
+
+
+def _research_setup_fingerprint(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    setup = _selected_setup(symbol_result, diagnostics)
+    return _first_non_na(
+        diagnostics.get("setup_fingerprint"),
+        diagnostics.get("setup_identity"),
+        diagnostics.get("fingerprint"),
+        _field(setup, "setup_fingerprint"),
+        _field(setup, "setup_identity"),
+        _fallback_signal_id(symbol_result),
+    )
+
+
+def _research_watch_cooldown_cutoff(attempted_at: str, cooldown_minutes: int) -> str:
+    parsed = _parse_iso_datetime(attempted_at)
+    return (parsed - timedelta(minutes=max(0, int(cooldown_minutes)))).isoformat()
+
+
+def _parse_iso_datetime(value: Any) -> datetime:
+    text = _text(value)
+    if text == NA:
+        return datetime.now(timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _integer_or_zero(value: Any) -> int:
+    number = _decimal_or_none(value)
+    if number is None:
+        return 0
+    return int(number)
+
+
 def _watch_zone_text(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
     return _first_non_na(
         diagnostics.get("watch_zone"),
@@ -2001,6 +2414,8 @@ def _telegram_message_type_for_alert(
     alert_type: TelegramAlertType,
     message: TelegramSignalMessage | None = None,
 ) -> TelegramMessageType:
+    if alert_type == TelegramAlertType.RESEARCH_WATCH:
+        return TelegramMessageType.RESEARCH_WATCH
     if alert_type == TelegramAlertType.SIGNAL_CONFIRMED and message is not None and message.upgraded_from_watchlist:
         return TelegramMessageType.WATCHLIST_CONFIRMED
     if alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED}:
@@ -5608,6 +6023,7 @@ def _text(value: Any) -> str:
 
 
 __all__ = [
+    "ResearchWatchCandidate",
     "SQLiteTelegramAlertAttemptRepository",
     "TelegramAlertDecision",
     "TelegramAlertType",
@@ -5615,6 +6031,7 @@ __all__ = [
     "TelegramLifecycleDelivery",
     "TelegramLifecycleDeliveryService",
     "TelegramLifecycleDeliverySummary",
+    "format_research_watch_alert",
     "telegram_alert_decision_for_symbol",
     "telegram_signal_message_from_symbol",
 ]

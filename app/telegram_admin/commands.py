@@ -491,7 +491,7 @@ class TelegramAdminCommandService:
             "Public UI: " + _enabled_disabled_na(public_config, "public_command_ui_enabled"),
             "Latest scan: " + (_display(manifest_row.get("timestamp")) if manifest_row is not None else NA),
             "Confirmed setups: " + (_display(manifest_row.get("valid_setup_count")) if manifest_row is not None else NA),
-            "Watchlist setups: " + (_display(manifest_row.get("near_miss_count")) if manifest_row is not None else NA),
+            "Near-miss candidates: " + (_display(manifest_row.get("near_miss_count")) if manifest_row is not None else NA),
             SCREEN_DIVIDER,
             "",
             "The engine only posts filtered lifecycle alerts.",
@@ -619,7 +619,7 @@ class TelegramAdminCommandService:
                 f"Regime confidence: {_display(manifest_row.get('regime_confidence'))}",
                 f"Symbols scanned: {_display(manifest_row.get('symbols_scanned'))}",
                 f"Confirmed setups: {_display(manifest_row.get('valid_setup_count'))}",
-                f"Watch candidates: {_display(manifest_row.get('near_miss_count'))}",
+                f"Research candidates: {_display(manifest_row.get('near_miss_count'))}",
                 f"Alerts created: {_display(manifest_row.get('alerts_created'))}",
                 SCREEN_DIVIDER,
                 "",
@@ -796,7 +796,7 @@ class TelegramAdminCommandService:
                     "Last scan: N/A",
                     "Symbols scanned: N/A",
                     "Confirmed setups: N/A",
-                    "Watchlist setups: N/A",
+                    "Near-miss candidates: N/A",
                     "Market Climate: N/A",
                     SCREEN_DIVIDER,
                     "",
@@ -814,7 +814,7 @@ class TelegramAdminCommandService:
                 f"Last scan: {_display(artifacts.manifest_row.get('timestamp'))}",
                 f"Symbols scanned: {_display(artifacts.manifest_row.get('symbols_scanned'))}",
                 f"Confirmed setups: {_display(artifacts.manifest_row.get('valid_setup_count'))}",
-                f"Watchlist setups: {_display(artifacts.manifest_row.get('near_miss_count'))}",
+                f"Near-miss candidates: {_display(artifacts.manifest_row.get('near_miss_count'))}",
                 f"Market Climate: {_title_text(artifacts.manifest_row.get('market_regime'))}",
                 SCREEN_DIVIDER,
                 "",
@@ -943,7 +943,7 @@ class TelegramAdminCommandService:
         valid_rows = _valid_rows(rows)
         near_rows = _near_rows(rows)
         summary_rows = valid_rows if valid_rows else near_rows
-        section_title = "Top Confirmed Setups" if valid_rows else "Top Watch Candidates"
+        section_title = "Top Confirmed Setups" if valid_rows else "Top Near-Miss Candidates"
         lines = (
             "Latest scan summary.",
             "Manual execution only.",
@@ -955,7 +955,7 @@ class TelegramAdminCommandService:
             f"Market Climate: {_title_text(_first_text(manifest_row.get('market_regime'), _nested_value(payload, 'market_regime', 'state')))}",
             f"Symbols scanned: {_first_text(manifest_row.get('symbols_scanned'), payload.get('scanned_symbols'), len(rows))}",
             f"Confirmed setups: {_first_text(manifest_row.get('valid_setup_count'), len(valid_rows))}",
-            f"Watch candidates: {_first_text(manifest_row.get('near_miss_count'), len(near_rows))}",
+            f"Research candidates: {_first_text(manifest_row.get('near_miss_count'), len(near_rows))}",
             f"Rejected: {_first_text(manifest_row.get('rejected_count'), _rejected_count(rows))}",
             "",
             section_title,
@@ -978,7 +978,7 @@ class TelegramAdminCommandService:
                 "/near",
                 "near",
                 f"No scan manifest rows found at {self._manifest_path}.",
-                title="Watch Candidates",
+                title="Near-Miss Candidates",
             )
         if artifacts.scan_payload is None:
             return _missing_scan_response(
@@ -986,11 +986,11 @@ class TelegramAdminCommandService:
                 "near",
                 f"Latest scan file unavailable: {_display(artifacts.scan_path)}.",
                 run_id=_display(artifacts.manifest_row.get("run_id")),
-                title="Watch Candidates",
+                title="Near-Miss Candidates",
             )
         rows = _near_rows(_result_rows(artifacts.scan_payload))
         lines = (
-            "Watch candidates are monitored, not promoted.",
+            "Near-miss candidates are monitored separately from the public watchlist.",
             "Manual execution only.",
             "",
             SCREEN_DIVIDER,
@@ -1005,7 +1005,7 @@ class TelegramAdminCommandService:
         return _admin_response(
             "/near",
             "near",
-            _screen("Watch Candidates", lines),
+            _screen("Near-Miss Candidates", lines),
             run_id=_first_text(artifacts.manifest_row.get("run_id"), artifacts.scan_payload.get("run_id")),
         )
 
@@ -1787,7 +1787,7 @@ def _setup_lines(rows: Sequence[Mapping[str, Any]], *, max_rows: int) -> list[st
 
 def _near_lines(rows: Sequence[Mapping[str, Any]], *, max_rows: int) -> list[str]:
     if not rows:
-        return ["No watch candidates in the latest scan."]
+        return ["No near-miss candidates in the latest scan."]
     lines: list[str] = []
     for row in rows[:max_rows]:
         if lines:

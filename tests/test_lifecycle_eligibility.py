@@ -3,11 +3,13 @@ from __future__ import annotations
 from decimal import Decimal
 
 from app.lifecycle.eligibility import (
+    ResearchWatchEligibilityConfig,
     active_signal_eligible,
     has_valid_rr,
     is_numeric_trade_value,
     is_terminal_state,
     public_watchlist_eligible,
+    research_watch_eligible,
 )
 
 
@@ -76,3 +78,40 @@ def test_active_signal_eligible_accepts_only_active_lifecycle_states() -> None:
     assert active_signal_eligible(_watch_record(current_state="MANAGING")) is True
     assert active_signal_eligible(_watch_record(current_state="WATCHLISTED")) is False
     assert active_signal_eligible(_watch_record(current_state="INVALIDATED")) is False
+
+
+def _research_record(**overrides):
+    record = {
+        "symbol": "FILUSDT",
+        "status": "rejected_by_regime",
+        "display_bucket": "near_miss",
+        "setup_quality_score": "70",
+        "readiness_score": "55",
+        "next_trigger_needed": "Wait for failed gate to clear / 5m BOS/CHoCH.",
+        "regime_state": "HIGH_VOLATILITY",
+        "regime_compatibility_label": "Hostile",
+        "regime_confidence": "9",
+        "rejection_reason": "Setup rejected by regime weakness; scalp compatibility Hostile.",
+        "archived_at": None,
+        "cooldown_until": None,
+        "current_state": "N/A",
+    }
+    record.update(overrides)
+    return record
+
+
+def test_research_watch_accepts_regime_blocked_near_miss_without_public_watchlist_promotion() -> None:
+    record = _research_record()
+
+    assert research_watch_eligible(record) is True
+    assert public_watchlist_eligible(record) is False
+
+
+def test_research_watch_respects_quality_readiness_and_terminal_guards() -> None:
+    config = ResearchWatchEligibilityConfig(min_quality=60, min_readiness=50)
+
+    assert research_watch_eligible(_research_record(setup_quality_score="59"), config) is False
+    assert research_watch_eligible(_research_record(readiness_score="49"), config) is False
+    assert research_watch_eligible(_research_record(current_state="INVALIDATED"), config) is False
+    assert research_watch_eligible(_research_record(cooldown_until="2999-01-01T00:00:00+00:00"), config) is False
+    assert research_watch_eligible(_research_record(rejection_reason="No valid setup."), config) is False

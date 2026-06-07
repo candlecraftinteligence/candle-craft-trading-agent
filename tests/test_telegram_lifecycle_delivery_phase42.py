@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
@@ -40,9 +42,11 @@ class FakeSender:
     def __init__(self, status: str = "sent") -> None:
         self.status = status
         self.messages: list[str] = []
+        self.calls: list[dict[str, object]] = []
 
     async def send_text(self, text: str, **kwargs: object) -> TelegramSendResult:
         self.messages.append(text)
+        self.calls.append(kwargs)
         return TelegramSendResult(status=self.status, detail=f"{self.status}.")
 
 
@@ -267,6 +271,83 @@ def _symbol(
     )
 
 
+def _research_settings(
+    *,
+    enabled: bool = True,
+    to_public: bool = True,
+    min_quality: int = 60,
+    min_readiness: int = 50,
+    cooldown_minutes: int = 60,
+    max_per_scan: int = 5,
+) -> AppSettings:
+    return Settings(
+        _env_file=None,
+        telegram_signals_enabled=True,
+        telegram_research_watch_enabled=enabled,
+        telegram_research_watch_to_public=to_public,
+        telegram_research_min_quality=min_quality,
+        telegram_research_min_readiness=min_readiness,
+        telegram_research_alert_cooldown_minutes=cooldown_minutes,
+        telegram_research_max_per_scan=max_per_scan,
+    )
+
+
+def _research_symbol(
+    *,
+    symbol: str = "FILUSDT",
+    quality_score: int = 70,
+    missing_trade_map: bool = True,
+    next_trigger: str = "Wait for failed gate to clear / 5m BOS/CHoCH.",
+    signal_id: str = "research-src",
+) -> ScannerSymbolResult:
+    diagnostics = _public_ready_watchlist_diagnostics(
+        next_trigger_needed=next_trigger,
+        action_label="Wait for cleaner regime",
+        regime_compatibility_label="Hostile",
+        regime_compatibility_reason="Setup rejected by regime weakness; scalp compatibility Hostile.",
+        setup_fingerprint=f"{symbol}-fingerprint",
+    )
+    if missing_trade_map:
+        diagnostics.update(
+            {
+                "entry_low": NA,
+                "entry_high": NA,
+                "entry_zone": NA,
+                "watch_zone": NA,
+                "stop": NA,
+                "tp1": NA,
+                "tp2": NA,
+                "tp3": NA,
+                "rr_to_tp2": NA,
+            }
+        )
+    base = _symbol(
+        SetupLifecycleState.REJECTED,
+        diagnostics=diagnostics,
+        signal_id=signal_id,
+        trade_idea=None,
+        status=ScannerPipelineStatus.REJECTED_BY_REGIME,
+        rejection_reason="Setup rejected by regime weakness; scalp compatibility Hostile; volatility/execution suitability weak.",
+        rejection_reasons=("Setup rejected by regime weakness; scalp compatibility Hostile.",),
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=quality_score),
+    )
+    return base.model_copy(
+        update={
+            "symbol": symbol,
+            "status_history": (ScannerPipelineStatus.REJECTED_BY_REGIME,),
+            "valid_strategy_modes": (),
+            "rejected_strategy_modes": ("swing",),
+            "lifecycle_state": None,
+            "lifecycle_transition": None,
+            "regime_state": "HIGH_VOLATILITY",
+            "regime_confidence_score": 9,
+            "regime_compatibility_label": "Hostile",
+            "regime_blocked": True,
+            "regime_penalty": 10,
+        }
+    )
+
+
 def _run_result(symbol_result: ScannerSymbolResult) -> ScannerRunResult:
     return ScannerRunResult(
         config=_config(),
@@ -486,6 +567,18 @@ def _attempt_timestamp_rows(db_path: Path) -> list[tuple[str, str | None, str]]:
         ).fetchall()
 
 
+def _research_attempt_rows(db_path: Path) -> list[tuple[str, str, str | None, str, str]]:
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute(
+            """
+            SELECT alert_type, telegram_status, sent_at, attempted_at, blocked_reason
+            FROM telegram_alert_attempts
+            WHERE alert_type = 'RESEARCH_WATCH'
+            ORDER BY id
+            """
+        ).fetchall()
+
+
 def _insert_attempt_record(
     db_path: Path,
     *,
@@ -566,6 +659,257 @@ def test_sent_attempt_writes_delivery_sent_at(tmp_path: Path) -> None:
     )
 
     assert _attempt_timestamp_rows(db_path) == [("sent", "2026-06-07T00:00:00Z", "2026-06-07T00:00:00Z")]
+
+
+def test_research_watch_sends_enabled_regime_blocked_near_miss_without_official_alert(tmp_path: Path) -> None:
+    db_path = tmp_path / "research-watch.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=_research_settings(enabled=True, to_public=True),
+        sender=sender,
+    )
+
+    summary = run(service.deliver_for_run(_run_result(_research_symbol()), scan_run_id="research-001"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    message = sender.messages[0]
+    assert f"{HEADER_PREFIX} Research Watch — FILUSDT" in message
+    assert "Quality: 70" in message
+    assert "Readiness: 55" in message
+    assert "Regime: High Volatility" in message
+    assert "Regime fit: Hostile" in message
+    assert "Confidence: 9/10" in message
+    assert "Trade map:\nN/A — waiting for clean confirmation." in message
+    assert "SCALP SIGNAL" not in message
+    assert "WATCHLIST" not in message
+    assert "CONFIRMED" not in message
+    assert "LIMIT HIT" not in message
+    rows = _telegram_attempt_rows(db_path)
+    assert (rows[0][1], rows[0][2]) == (TelegramAlertType.RESEARCH_WATCH.value, "sent")
+    assert not any(row[1] in {TelegramAlertType.WATCHLIST.value, TelegramAlertType.SIGNAL_CONFIRMED.value} for row in rows)
+
+
+def test_research_watch_does_not_send_when_disabled_or_public_delivery_disabled(tmp_path: Path) -> None:
+    cases = (
+        ("disabled.db", _research_settings(enabled=False, to_public=True), "skipped", "research_watch_disabled"),
+        (
+            "public-disabled.db",
+            _research_settings(enabled=True, to_public=False),
+            "blocked",
+            "research_watch_public_delivery_disabled",
+        ),
+    )
+
+    for filename, settings, expected_status, expected_reason in cases:
+        db_path = tmp_path / filename
+        sender = FakeSender()
+        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=settings, sender=sender)
+
+        summary = run(service.deliver_for_run(_run_result(_research_symbol()), scan_run_id=filename))
+
+        assert getattr(summary, expected_status) == 1
+        assert sender.messages == []
+        rows = _research_attempt_rows(db_path)
+        assert len(rows) == 1
+        assert rows[0][0] == TelegramAlertType.RESEARCH_WATCH.value
+        assert rows[0][1] == expected_status
+        assert rows[0][2] is None
+        assert rows[0][4] == expected_reason
+
+
+def test_research_watch_respects_quality_and_readiness_thresholds(tmp_path: Path) -> None:
+    cases = (
+        ("quality.db", _research_symbol(quality_score=59), _research_settings(min_quality=60, min_readiness=0)),
+        ("readiness.db", _research_symbol(), _research_settings(min_quality=0, min_readiness=56)),
+    )
+
+    for filename, symbol_result, settings in cases:
+        db_path = tmp_path / filename
+        sender = FakeSender()
+        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=settings, sender=sender)
+
+        summary = run(service.deliver_for_run(_run_result(symbol_result), scan_run_id=filename))
+
+        assert summary.attempted == 0
+        assert sender.messages == []
+        assert _research_attempt_rows(db_path) == []
+
+
+def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "research-cooldown.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=_research_settings(cooldown_minutes=60),
+        sender=sender,
+    )
+    times = iter(
+        (
+            "2026-06-07T00:00:00+00:00",
+            "2026-06-07T00:30:00+00:00",
+            "2026-06-07T01:01:00+00:00",
+        )
+    )
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
+    result = _run_result(_research_symbol())
+
+    first = run(service.deliver_for_run(result, scan_run_id="research-1"))
+    second = run(service.deliver_for_run(result, scan_run_id="research-2"))
+    third = run(service.deliver_for_run(result, scan_run_id="research-3"))
+
+    assert first.sent == 1
+    assert second.skipped == 1
+    assert third.sent == 1
+    assert len(sender.messages) == 2
+    rows = _research_attempt_rows(db_path)
+    assert [row[1] for row in rows] == ["sent", "skipped", "sent"]
+    assert rows[1][2] is None
+    assert rows[1][4] == "research_watch_duplicate_cooldown"
+
+
+def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path: Path) -> None:
+    sent_db = tmp_path / "research-sent-at.db"
+    sent_sender = FakeSender(status="sent")
+    sent_service = TelegramLifecycleDeliveryService(
+        database_path=sent_db,
+        settings=_research_settings(),
+        sender=sent_sender,
+    )
+    run(sent_service.deliver_for_run(_run_result(_research_symbol()), scan_run_id="sent"))
+    sent_row = _research_attempt_rows(sent_db)[0]
+
+    failed_db = tmp_path / "research-failed-at.db"
+    failed_sender = FakeSender(status="failed")
+    failed_service = TelegramLifecycleDeliveryService(
+        database_path=failed_db,
+        settings=_research_settings(),
+        sender=failed_sender,
+    )
+    run(failed_service.deliver_for_run(_run_result(_research_symbol()), scan_run_id="failed"))
+    failed_row = _research_attempt_rows(failed_db)[0]
+
+    assert sent_row[1] == "sent"
+    assert sent_row[2] == sent_row[3]
+    assert failed_row[1] == "failed"
+    assert failed_row[2] is None
+
+
+def test_research_watch_respects_per_scan_cap_and_quality_sort(tmp_path: Path) -> None:
+    db_path = tmp_path / "research-cap.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=_research_settings(max_per_scan=2),
+        sender=sender,
+    )
+    result = ScannerRunResult(
+        config=_config(),
+        results=(
+            _research_symbol(symbol="LOWUSDT", quality_score=61, signal_id="research-low"),
+            _research_symbol(symbol="HIGHUSDT", quality_score=80, signal_id="research-high"),
+            _research_symbol(symbol="MIDUSDT", quality_score=70, signal_id="research-mid"),
+        ),
+        scanned_symbols=3,
+        failed_symbols=0,
+        trade_ideas_created=0,
+        dry_run_alerts_created=0,
+        journal_entries_created=0,
+    )
+
+    summary = run(service.deliver_for_run(result, scan_run_id="research-cap"))
+
+    assert summary.sent == 2
+    assert "HIGHUSDT" in sender.messages[0]
+    assert "MIDUSDT" in sender.messages[1]
+    assert all("LOWUSDT" not in message for message in sender.messages)
+
+
+def test_research_watch_valid_trade_map_renders_but_remains_research_watch(tmp_path: Path) -> None:
+    db_path = tmp_path / "research-valid-map.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=_research_settings(),
+        sender=sender,
+    )
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_research_symbol(missing_trade_map=False)),
+            scan_run_id="research-map",
+        )
+    )
+
+    assert summary.sent == 1
+    message = sender.messages[0]
+    assert f"{HEADER_PREFIX} Research Watch — FILUSDT" in message
+    assert "Trade map:\nDirection: LONG" in message
+    assert "Entry Zone: 100 – 102" in message
+    assert "TP1: 110" in message
+    assert "SCALP SIGNAL" not in message
+    assert "CONFIRMED" not in message
+
+
+@pytest.mark.parametrize(
+    ("symbol_result", "blocked_alert_types"),
+    (
+        (
+            _symbol(SetupLifecycleState.TP_HIT, previous=SetupLifecycleState.MANAGING, diagnostics=_diagnostics(outcome_status="tp1_hit")).model_copy(
+                update={"current_price": Decimal("110")}
+            ),
+            {TelegramAlertType.TP1_HIT.value},
+        ),
+        (
+            _symbol(SetupLifecycleState.SL_HIT, previous=SetupLifecycleState.MANAGING).model_copy(
+                update={"current_price": Decimal("95")}
+            ),
+            {TelegramAlertType.SL_HIT.value},
+        ),
+        (
+            _symbol(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.CONFIRMED),
+            {TelegramAlertType.INVALIDATED.value},
+        ),
+    ),
+)
+def test_research_watch_prior_does_not_unlock_tp_sl_or_invalidated_updates(
+    tmp_path: Path,
+    symbol_result: ScannerSymbolResult,
+    blocked_alert_types: set[str],
+) -> None:
+    db_path = tmp_path / f"{next(iter(blocked_alert_types)).lower()}-research-prior.db"
+    assert symbol_result.lifecycle_state is not None
+    _seed_prior_active_alert(
+        db_path,
+        signal_id=symbol_result.lifecycle_state.lifecycle_id,
+        alert_type=TelegramAlertType.RESEARCH_WATCH,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+        min_rr=Decimal("3"),
+        min_score_for_idea=Decimal("80"),
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol_result), scan_run_id="terminal-research-prior"))
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        sent_outcomes = connection.execute(
+            """
+            SELECT alert_type
+            FROM telegram_alert_attempts
+            WHERE telegram_status = 'sent'
+            """
+        ).fetchall()
+    assert not any(row[0] in blocked_alert_types for row in sent_outcomes)
 
 
 def test_future_valid_watchlist_alert_is_not_suppressed_by_blocked_attempt(tmp_path: Path) -> None:
