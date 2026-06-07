@@ -178,6 +178,12 @@ class WatchlistResolution:
     symbols: tuple[str, ...]
     source_label: str
     universe: SymbolUniverse
+    explicit_excluded_symbols: tuple[str, ...] = ()
+    pre_cap_symbols_count: int | None = None
+    queue_cap_applied: bool = False
+    lifecycle_priority_promoted_symbols: tuple[str, ...] = ()
+    lifecycle_priority_added_symbols: tuple[str, ...] = ()
+    lifecycle_priority_dropped_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -702,9 +708,11 @@ async def main(argv: Sequence[str] | None = None) -> None:
         )
         return
 
+    queued_symbols = _queued_symbols_for_scan(args, watchlist, symbol_priority_plan)
     print(_format_universe_header(watchlist.universe))
     print(f"Watchlist: {watchlist.source_label}")
-    print(f"Symbols queued: {len(watchlist.symbols)}")
+    print(f"Symbols queued: {len(queued_symbols)}")
+    _print_symbol_queue_diagnostics(args, watchlist, symbol_priority_plan, queued_symbols)
     for warning in _startup_warnings(args, effective_candle_limit):
         print(f"Warning: {warning}")
     print("")
@@ -719,8 +727,8 @@ async def main(argv: Sequence[str] | None = None) -> None:
         else None
     )
     latest_results_by_symbol = dict(resume_state.results_by_symbol)
-    queued_symbols = _queued_symbols_for_scan(args, watchlist, symbol_priority_plan)
     symbols_to_scan = tuple(symbol for symbol in queued_symbols if symbol not in resume_state.skipped_symbols)
+    symbol_queue_diagnostics = _symbol_queue_diagnostics(args, watchlist, symbol_priority_plan, queued_symbols)
     scan_config = (
         ScannerRunConfig.model_validate({**config.model_dump(), "symbols": list(symbols_to_scan)})
         if symbols_to_scan
@@ -728,7 +736,14 @@ async def main(argv: Sequence[str] | None = None) -> None:
     )
     scan_run_id = uuid4().hex
     resume_metadata = {
-        **_resume_metadata(args, watchlist.symbols, resume_state, symbols_to_scan, watchlist.universe),
+        **_resume_metadata(
+            args,
+            watchlist.symbols,
+            resume_state,
+            symbols_to_scan,
+            watchlist.universe,
+            symbol_queue_diagnostics=symbol_queue_diagnostics,
+        ),
         "run_id": scan_run_id,
         "scan_run_id": scan_run_id,
     }
@@ -1212,12 +1227,30 @@ def _extend_watchlist_for_continue_watch(
         return watchlist
 
     combined = dedupe_symbols((*watchlist.symbols, *continued_symbols))
-    if combined == watchlist.symbols:
+    pre_cap_count = len(combined)
+    if args.max_symbols is not None:
+        if args.max_symbols < 1:
+            raise SystemExit("--max-symbols must be at least 1.")
+        combined = combined[: args.max_symbols]
+    cap_applied = len(combined) < pre_cap_count
+    if combined == watchlist.symbols and not cap_applied:
         return watchlist
+    if combined == watchlist.symbols:
+        return WatchlistResolution(
+            symbols=watchlist.symbols,
+            source_label=watchlist.source_label,
+            universe=watchlist.universe,
+            explicit_excluded_symbols=watchlist.explicit_excluded_symbols,
+            pre_cap_symbols_count=pre_cap_count,
+            queue_cap_applied=True,
+        )
     return WatchlistResolution(
         symbols=combined,
         source_label=f"{watchlist.source_label} + continued watch candidates",
         universe=manual_symbol_universe(combined, requested_size=len(combined)),
+        explicit_excluded_symbols=watchlist.explicit_excluded_symbols,
+        pre_cap_symbols_count=pre_cap_count,
+        queue_cap_applied=cap_applied,
     )
 
 
@@ -1233,7 +1266,9 @@ def _watch_resolution_from_symbols(
     except WatchlistPresetError as exc:
         raise SystemExit(str(exc)) from exc
 
-    resolved_symbols = tuple(symbol for symbol in dedupe_symbols(normalized_symbols) if symbol not in exclude_symbols)
+    excluded_cli_symbols = tuple(symbol for symbol in normalized_symbols if symbol in exclude_symbols)
+    pre_cap_symbols = tuple(symbol for symbol in dedupe_symbols(normalized_symbols) if symbol not in exclude_symbols)
+    resolved_symbols = pre_cap_symbols
     if args.max_symbols is not None:
         if args.max_symbols < 1:
             raise SystemExit("--max-symbols must be at least 1.")
@@ -1244,10 +1279,17 @@ def _watch_resolution_from_symbols(
     universe = manual_symbol_universe(
         resolved_symbols,
         requested_size=len(resolved_symbols),
-        excluded_symbols=tuple(symbol for symbol in normalized_symbols if symbol in exclude_symbols),
+        excluded_symbols=excluded_cli_symbols,
         min_quote_volume=args.min_quote_volume,
     )
-    return WatchlistResolution(symbols=resolved_symbols, source_label=source_label, universe=universe)
+    return WatchlistResolution(
+        symbols=resolved_symbols,
+        source_label=source_label,
+        universe=universe,
+        explicit_excluded_symbols=excluded_cli_symbols,
+        pre_cap_symbols_count=len(pre_cap_symbols),
+        queue_cap_applied=len(resolved_symbols) < len(pre_cap_symbols),
+    )
 
 
 def _resolve_watchlist(args: argparse.Namespace) -> WatchlistResolution:
@@ -1286,6 +1328,7 @@ def _resolve_watchlist(args: argparse.Namespace) -> WatchlistResolution:
     resolved_symbols = pre_exclude_symbols
     if exclude_symbols:
         resolved_symbols = tuple(symbol for symbol in resolved_symbols if symbol not in exclude_symbols)
+    pre_cap_symbols = resolved_symbols
 
     if args.max_symbols is not None:
         if args.max_symbols < 1:
@@ -1303,7 +1346,14 @@ def _resolve_watchlist(args: argparse.Namespace) -> WatchlistResolution:
         excluded_symbols=excluded_cli_symbols,
         min_quote_volume=args.min_quote_volume,
     )
-    return WatchlistResolution(symbols=resolved_symbols, source_label=source_label, universe=universe)
+    return WatchlistResolution(
+        symbols=resolved_symbols,
+        source_label=source_label,
+        universe=universe,
+        explicit_excluded_symbols=excluded_cli_symbols,
+        pre_cap_symbols_count=len(pre_cap_symbols),
+        queue_cap_applied=len(resolved_symbols) < len(pre_cap_symbols),
+    )
 
 
 async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistResolution:
@@ -1332,6 +1382,7 @@ async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistReso
     resolved_symbols = pre_exclude_symbols
     if exclude_symbols:
         resolved_symbols = tuple(symbol for symbol in resolved_symbols if symbol not in exclude_symbols)
+    pre_cap_symbols = resolved_symbols
 
     if args.max_symbols is not None:
         if args.max_symbols < 1:
@@ -1348,6 +1399,9 @@ async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistReso
         symbols=resolved_symbols,
         source_label=f"universe {args.universe}",
         universe=universe,
+        explicit_excluded_symbols=excluded_cli_symbols,
+        pre_cap_symbols_count=len(pre_cap_symbols),
+        queue_cap_applied=len(resolved_symbols) < len(pre_cap_symbols),
     )
 
 
@@ -1406,8 +1460,10 @@ def _resume_metadata(
     resume_state: ResumeState,
     symbols_to_scan: Sequence[str],
     universe: SymbolUniverse,
+    *,
+    symbol_queue_diagnostics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    metadata = {
         "resume_from": str(args.resume_from) if args.resume_from is not None else None,
         "save_run": str(args.save_run) if args.save_run is not None else None,
         "resume_skip_enabled": not args.no_resume_skip,
@@ -1417,6 +1473,9 @@ def _resume_metadata(
         "watchlist_symbols": list(watchlist_symbols),
         "universe": universe.to_json(),
     }
+    if symbol_queue_diagnostics is not None:
+        metadata["symbol_queue"] = dict(symbol_queue_diagnostics)
+    return metadata
 
 
 def _combined_run_result(
@@ -1654,6 +1713,9 @@ def _scan_run_manifest_row(
     }
     if watch_iteration is not None:
         row["watch_iteration"] = watch_iteration
+    queue_diagnostics = result.resume_metadata.get("symbol_queue") if isinstance(result.resume_metadata, Mapping) else None
+    if isinstance(queue_diagnostics, Mapping):
+        row["symbol_queue"] = dict(queue_diagnostics)
     if output_scan_path is not None:
         row["output_scan_path"] = str(output_scan_path)
     if latest_scan_path is not None:
@@ -1913,18 +1975,38 @@ def _watchlist_with_lifecycle_priority(
 ) -> WatchlistResolution:
     if not _lifecycle_enabled(args):
         return watchlist
+    original_symbols = watchlist.symbols
     try:
-        prioritized = prioritize_watch_symbols(watchlist.symbols, database_path=args.database_path)
+        prioritized = prioritize_watch_symbols(original_symbols, database_path=args.database_path)
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc
     if not prioritized:
         return watchlist
-    if prioritized == watchlist.symbols:
+    original_set = set(original_symbols)
+    prioritized_set = set(prioritized)
+    dropped_symbols = tuple(symbol for symbol in original_symbols if symbol not in prioritized_set)
+    if dropped_symbols:
+        prioritized = dedupe_symbols((*prioritized, *dropped_symbols))
+        prioritized_set = set(prioritized)
+    added_symbols = tuple(symbol for symbol in prioritized if symbol not in original_set)
+    original_index = {symbol: index for index, symbol in enumerate(original_symbols)}
+    promoted_symbols = tuple(
+        symbol
+        for index, symbol in enumerate(prioritized)
+        if symbol in original_index and index < original_index[symbol]
+    )
+    if prioritized == original_symbols:
         return watchlist
     return WatchlistResolution(
         symbols=prioritized,
         source_label=f"{watchlist.source_label} + lifecycle priority",
         universe=watchlist.universe,
+        explicit_excluded_symbols=watchlist.explicit_excluded_symbols,
+        pre_cap_symbols_count=watchlist.pre_cap_symbols_count,
+        queue_cap_applied=watchlist.queue_cap_applied,
+        lifecycle_priority_promoted_symbols=promoted_symbols,
+        lifecycle_priority_added_symbols=added_symbols,
+        lifecycle_priority_dropped_symbols=dropped_symbols,
     )
 
 
@@ -1989,6 +2071,93 @@ def _queued_symbols_for_scan(
     if symbol_priority_plan.enabled:
         return symbol_priority_plan.symbols_to_scan
     return watchlist.symbols
+
+
+def _symbol_queue_diagnostics(
+    args: argparse.Namespace,
+    watchlist: WatchlistResolution,
+    symbol_priority_plan: SymbolPriorityPlan,
+    queued_symbols: Sequence[str],
+) -> dict[str, Any]:
+    requested_symbols = watchlist.symbols
+    queued = tuple(queued_symbols)
+    queued_set = set(queued)
+    health_excluded = tuple(symbol_priority_plan.skipped_symbols) if symbol_priority_plan.enabled else ()
+    health_excluded_set = set(health_excluded)
+    adaptive_excluded = tuple(
+        symbol
+        for symbol in requested_symbols
+        if symbol_priority_plan.enabled and symbol not in queued_set and symbol not in health_excluded_set
+    )
+    explicit_excluded = tuple(watchlist.explicit_excluded_symbols)
+    pre_cap_count = watchlist.pre_cap_symbols_count
+    return {
+        "universe_requested_count": int(watchlist.universe.requested_size),
+        "universe_resolved_count": len(watchlist.universe.resolved_symbols),
+        "requested_symbol_count": len(requested_symbols),
+        "pre_cap_symbol_count": pre_cap_count if pre_cap_count is not None else len(requested_symbols),
+        "explicit_user_excluded_count": len(explicit_excluded),
+        "symbol_health_excluded_count": len(health_excluded),
+        "lifecycle_priority_additions_count": len(watchlist.lifecycle_priority_added_symbols),
+        "lifecycle_priority_promoted_count": len(watchlist.lifecycle_priority_promoted_symbols),
+        "lifecycle_priority_dropped_count": len(watchlist.lifecycle_priority_dropped_symbols),
+        "adaptive_priority_enabled": bool(symbol_priority_plan.enabled),
+        "adaptive_priority_excluded_count": len(adaptive_excluded),
+        "queue_cap_applied": bool(watchlist.queue_cap_applied),
+        "queue_cap": args.max_symbols,
+        "final_queued_count": len(queued),
+        "first_resolved_symbols": list(watchlist.universe.resolved_symbols[:20]),
+        "first_queued_symbols": list(queued[:20]),
+        "exclusion_examples": {
+            "explicit_user_excluded": list(explicit_excluded[:20]),
+            "symbol_health_cooldown": list(health_excluded[:20]),
+            "adaptive_priority_excluded": list(adaptive_excluded[:20]),
+            "lifecycle_priority_dropped_then_restored": list(watchlist.lifecycle_priority_dropped_symbols[:20]),
+        },
+    }
+
+
+def _should_print_symbol_queue_diagnostics(args: argparse.Namespace) -> bool:
+    return bool(args.show_symbol_health or args.diagnostics_level in {"normal", "full"})
+
+
+def _print_symbol_queue_diagnostics(
+    args: argparse.Namespace,
+    watchlist: WatchlistResolution,
+    symbol_priority_plan: SymbolPriorityPlan,
+    queued_symbols: Sequence[str],
+) -> None:
+    if not _should_print_symbol_queue_diagnostics(args):
+        return
+    print(_format_symbol_queue_diagnostics(_symbol_queue_diagnostics(args, watchlist, symbol_priority_plan, queued_symbols)))
+
+
+def _format_symbol_queue_diagnostics(diagnostics: Mapping[str, Any]) -> str:
+    examples = diagnostics.get("exclusion_examples")
+    example_map = examples if isinstance(examples, Mapping) else {}
+    cap_text = "yes" if diagnostics.get("queue_cap_applied") else "no"
+    lines = [
+        "Symbol queue diagnostics:",
+        f"- Universe requested count: {diagnostics.get('universe_requested_count', 0)}",
+        f"- Universe resolved count: {diagnostics.get('universe_resolved_count', 0)}",
+        f"- Explicit user excluded count: {diagnostics.get('explicit_user_excluded_count', 0)}",
+        f"- Symbol health excluded count: {diagnostics.get('symbol_health_excluded_count', 0)}",
+        f"- Lifecycle priority additions count: {diagnostics.get('lifecycle_priority_additions_count', 0)}",
+        f"- Lifecycle priority promoted count: {diagnostics.get('lifecycle_priority_promoted_count', 0)}",
+        f"- Adaptive priority excluded count: {diagnostics.get('adaptive_priority_excluded_count', 0)}",
+        f"- Queue cap applied: {cap_text}",
+        f"- Final queued count: {diagnostics.get('final_queued_count', 0)}",
+    ]
+    for reason in (
+        "explicit_user_excluded",
+        "symbol_health_cooldown",
+        "adaptive_priority_excluded",
+        "lifecycle_priority_dropped_then_restored",
+    ):
+        values = example_map.get(reason, ())
+        if values:
+            lines.append(f"- {reason} examples: {_sequence_text(values)}")
+    return "\n".join(lines)
 
 
 def _apply_symbol_health_if_enabled(
@@ -2147,10 +2316,13 @@ async def _run_watch_mode(
             raise SystemExit(str(exc)) from exc
 
     watchlist = _watchlist_with_lifecycle_priority(args, watchlist)
+    startup_priority_plan = _symbol_priority_plan_for_watchlist(args, watchlist)
+    startup_queued_symbols = _queued_symbols_for_scan(args, watchlist, startup_priority_plan)
 
     print(_format_universe_header(watchlist.universe))
     print(f"Watchlist: {watchlist.source_label}")
-    print(f"Symbols queued: {len(watchlist.symbols)}")
+    print(f"Symbols queued: {len(startup_queued_symbols)}")
+    _print_symbol_queue_diagnostics(args, watchlist, startup_priority_plan, startup_queued_symbols)
     print("Watch mode: enabled")
     print(f"Telegram manual lifecycle alerts: {_telegram_manual_lifecycle_status_label(args)}")
     print(f"Telegram admin drafts: {_telegram_admin_draft_status_label()}")
@@ -2168,9 +2340,10 @@ async def _run_watch_mode(
             iteration_started_at = _watch_iteration_timestamp()
             iteration_started_monotonic = time.monotonic()
             previous_state = state
+            iteration_watchlist = await _watchlist_for_watch_iteration(args, watchlist)
             execution = await _run_watch_scan_iteration(
                 args,
-                watchlist=watchlist,
+                watchlist=iteration_watchlist,
                 config=config,
                 iteration=iteration,
             )
@@ -2257,7 +2430,7 @@ async def _run_watch_mode(
                 print(f"Run ID: {stored_manifest_run_id}")
             manifest_row = _append_scan_run_manifest(
                 execution.result,
-                watchlist=watchlist,
+                watchlist=iteration_watchlist,
                 ranked_results=execution.ranked_results,
                 manifest_path=SCAN_RUN_MANIFEST_PATH,
                 nightly_history_path=NIGHTLY_SCAN_HISTORY_PATH,
@@ -2286,6 +2459,25 @@ async def _run_watch_mode(
         return
 
 
+async def _watchlist_for_watch_iteration(
+    args: argparse.Namespace,
+    startup_watchlist: WatchlistResolution,
+) -> WatchlistResolution:
+    if _watch_mode_refreshes_universe(args):
+        watchlist = await _resolve_watchlist_for_scan(args)
+    else:
+        watchlist = startup_watchlist
+    return _watchlist_with_lifecycle_priority(args, watchlist)
+
+
+def _watch_mode_refreshes_universe(args: argparse.Namespace) -> bool:
+    return bool(
+        args.universe != MANUAL_UNIVERSE_MODE
+        and not args.watch_symbols_from_latest_run
+        and not args.watch_only_near_misses
+    )
+
+
 async def _run_watch_scan_iteration(
     args: argparse.Namespace,
     *,
@@ -2298,18 +2490,27 @@ async def _run_watch_scan_iteration(
         if args.cache_enabled
         else None
     )
+    iteration_config = ScannerRunConfig.model_validate({**config.model_dump(), "symbols": list(watchlist.symbols)})
     latest_results_by_symbol: dict[str, ScannerSymbolResult] = {}
     symbol_priority_plan = _symbol_priority_plan_for_watchlist(args, watchlist)
     queued_symbols = _queued_symbols_for_scan(args, watchlist, symbol_priority_plan)
+    symbol_queue_diagnostics = _symbol_queue_diagnostics(args, watchlist, symbol_priority_plan, queued_symbols)
     scan_config = (
-        ScannerRunConfig.model_validate({**config.model_dump(), "symbols": list(queued_symbols)})
+        ScannerRunConfig.model_validate({**iteration_config.model_dump(), "symbols": list(queued_symbols)})
         if queued_symbols
-        else config
+        else iteration_config
     )
     resume_state = ResumeState(results_by_symbol={}, skipped_symbols=(), loaded_symbols=())
     scan_run_id = uuid4().hex
     resume_metadata = {
-        **_resume_metadata(args, watchlist.symbols, resume_state, queued_symbols, watchlist.universe),
+        **_resume_metadata(
+            args,
+            watchlist.symbols,
+            resume_state,
+            queued_symbols,
+            watchlist.universe,
+            symbol_queue_diagnostics=symbol_queue_diagnostics,
+        ),
         "run_id": scan_run_id,
         "scan_run_id": scan_run_id,
         "watch_mode": True,
@@ -2322,7 +2523,7 @@ async def _run_watch_scan_iteration(
             print(_progress_line(symbol_result, completed=completed, total=total))
         if args.save_run is not None:
             partial_result = _combined_run_result(
-                config=config,
+                config=iteration_config,
                 watchlist_symbols=watchlist.symbols,
                 results_by_symbol=latest_results_by_symbol,
                 cache=cache,
@@ -2354,7 +2555,7 @@ async def _run_watch_scan_iteration(
             latest_results_by_symbol[symbol_result.symbol] = symbol_result
 
         result = _combined_run_result(
-            config=config,
+            config=iteration_config,
             watchlist_symbols=watchlist.symbols,
             results_by_symbol=latest_results_by_symbol,
             cache=cache,
@@ -2370,7 +2571,7 @@ async def _run_watch_scan_iteration(
         )
     else:
         result = _combined_run_result(
-            config=config,
+            config=iteration_config,
             watchlist_symbols=watchlist.symbols,
             results_by_symbol=latest_results_by_symbol,
             cache=cache,

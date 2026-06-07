@@ -356,6 +356,7 @@ def prioritize_watch_symbols(
             continue
         watchable = [record for record in symbol_records if is_watchable_lifecycle_state(record, now=now)]
         if not watchable:
+            passthrough.append((original_index, symbol))
             continue
         best = min(
             watchable,
