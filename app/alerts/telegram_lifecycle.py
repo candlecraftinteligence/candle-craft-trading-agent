@@ -81,7 +81,7 @@ WATCHLIST_TERMINAL_SUPPRESSION_ATTEMPT = "WATCHLIST_TERMINAL_SUPPRESSION"
 WATCHLIST_EXPIRY_ATTEMPT = "WATCHLIST_EXPIRY"
 RESEARCH_WATCH_DISABLED_REASON = "research_watch_disabled"
 RESEARCH_WATCH_PUBLIC_DISABLED_REASON = "research_watch_public_delivery_disabled"
-RESEARCH_WATCH_DUPLICATE_REASON = "research_watch_duplicate_cooldown"
+RESEARCH_WATCH_COOLDOWN_REASON = "research_watch_cooldown_active"
 SENT_WATCHLIST_RECONCILIATION_ATTEMPT = "SENT_WATCHLIST_RECONCILIATION"
 SENT_WATCHLIST_RECONCILIATION_NO_MATCH = "sent_watchlist_reconciliation_no_lifecycle_match"
 SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguous"
@@ -549,22 +549,27 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
 
-    def has_recent_research_watch(self, *, signal_id_prefix: str, since: str) -> bool:
-        prefix = _identity(signal_id_prefix)
-        if prefix == NA:
+    def has_recent_research_watch_alert(self, *, symbol: str, since: str) -> bool:
+        normalized_symbol = _research_cooldown_symbol(symbol)
+        if normalized_symbol == NA:
             return False
-        row = self._connection.execute(
+        cutoff = _parse_iso_datetime(since)
+        rows = self._connection.execute(
             """
-            SELECT 1 FROM telegram_alert_attempts
+            SELECT symbol, sent_at FROM telegram_alert_attempts
             WHERE alert_type = ?
               AND telegram_status = 'sent'
-              AND signal_id LIKE ?
-              AND COALESCE(NULLIF(sent_at, ''), NULLIF(attempted_at, ''), NULLIF(last_seen_at, '')) >= ?
-            LIMIT 1
+              AND sent_at IS NOT NULL
+              AND sent_at NOT IN ('', 'N/A')
             """,
-            (TelegramAlertType.RESEARCH_WATCH.value, f"{prefix}%", _text(since)),
-        ).fetchone()
-        return row is not None
+            (TelegramAlertType.RESEARCH_WATCH.value,),
+        ).fetchall()
+        for row in rows:
+            if _research_cooldown_symbol(row["symbol"]) != normalized_symbol:
+                continue
+            if _parse_iso_datetime(row["sent_at"]) >= cutoff:
+                return True
+        return False
 
     def insert_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
         telegram_status = _text(record.telegram_status)
@@ -813,7 +818,7 @@ class TelegramLifecycleDeliveryService:
 
     @property
     def research_alert_cooldown_minutes(self) -> int:
-        return max(0, int(getattr(self.settings, "telegram_research_alert_cooldown_minutes", 60)))
+        return max(0, int(getattr(self.settings, "telegram_research_alert_cooldown_minutes", 1440)))
 
     @property
     def research_max_per_scan(self) -> int:
@@ -1157,11 +1162,16 @@ class TelegramLifecycleDeliveryService:
                     -candidate.readiness_score,
                     candidate.symbol_result.symbol,
                 ),
-            )[:max_per_scan]
+            )
         )
 
         deliveries: list[TelegramLifecycleDelivery] = []
+        sent_this_scan = 0
+        send_attempts = 0
+        cooldown_skip_audits = 0
         for candidate in selected:
+            if sent_this_scan >= max_per_scan:
+                break
             attempted_at = now_utc_iso()
             signal_id = _research_watch_signal_id(candidate.signal_id_prefix, attempted_at)
             message_candidate = replace(candidate, message=replace(candidate.message, signal_id=signal_id))
@@ -1183,6 +1193,8 @@ class TelegramLifecycleDeliveryService:
                         error_message=RESEARCH_WATCH_DISABLED_REASON,
                     )
                 )
+                if len(deliveries) >= max_per_scan:
+                    break
                 continue
 
             if not self.research_watch_to_public:
@@ -1200,28 +1212,36 @@ class TelegramLifecycleDeliveryService:
                         error_message=RESEARCH_WATCH_PUBLIC_DISABLED_REASON,
                     )
                 )
+                if len(deliveries) >= max_per_scan:
+                    break
                 continue
 
             cooldown_minutes = self.research_alert_cooldown_minutes
             if cooldown_minutes > 0:
                 cutoff = _research_watch_cooldown_cutoff(attempted_at, cooldown_minutes)
-                if repository.has_recent_research_watch(signal_id_prefix=candidate.signal_id_prefix, since=cutoff):
-                    deliveries.append(
-                        _persist_research_watch_attempt(
-                            repository,
-                            message_candidate,
-                            signal_id=signal_id,
-                            scan_run_id=scan_run_id,
-                            attempted_at=attempted_at,
-                            status="skipped",
-                            detail="Duplicate Research Watch inside cooldown window.",
-                            message_hash=message_hash,
-                            blocked_reason=RESEARCH_WATCH_DUPLICATE_REASON,
-                            error_message=RESEARCH_WATCH_DUPLICATE_REASON,
+                if repository.has_recent_research_watch_alert(symbol=candidate.symbol_result.symbol, since=cutoff):
+                    if cooldown_skip_audits < max_per_scan:
+                        cooldown_signal_id = _research_watch_cooldown_signal_id(candidate.symbol_result.symbol)
+                        deliveries.append(
+                            _persist_research_watch_attempt(
+                                repository,
+                                message_candidate,
+                                signal_id=cooldown_signal_id,
+                                scan_run_id=scan_run_id,
+                                attempted_at=attempted_at,
+                                status="skipped",
+                                detail="Research Watch cooldown is active for this symbol.",
+                                message_hash=message_hash,
+                                blocked_reason=RESEARCH_WATCH_COOLDOWN_REASON,
+                                error_message=RESEARCH_WATCH_COOLDOWN_REASON,
+                            )
                         )
-                    )
+                        cooldown_skip_audits += 1
                     continue
 
+            if send_attempts >= max_per_scan:
+                break
+            send_attempts += 1
             send_result = await self.sender.send_text(
                 message_text,
                 message_type=TelegramMessageType.RESEARCH_WATCH,
@@ -1241,6 +1261,8 @@ class TelegramLifecycleDeliveryService:
                     error_message=send_result.error_message,
                 )
             )
+            if send_result.status == "sent":
+                sent_this_scan += 1
         return tuple(deliveries)
 
     async def reconcile_sent_watchlists(
@@ -1930,6 +1952,9 @@ def _persist_research_watch_attempt(
         telegram_status=status,
         message_hash=message_hash,
         scan_run_id=scan_run_id,
+        first_seen_at=attempted_at,
+        last_seen_at=attempted_at,
+        last_scan_run_id=scan_run_id,
         attempted_alert_type=TelegramAlertType.RESEARCH_WATCH.value,
         setup_quality_score=_text(candidate.quality_score),
         rr_planned=_text(message.planned_rr),
@@ -1997,6 +2022,21 @@ def _research_watch_signal_id_prefix(
 def _research_watch_signal_id(signal_id_prefix: str, attempted_at: str) -> str:
     digest = hashlib.sha256(f"{signal_id_prefix}|{attempted_at}".encode("utf-8")).hexdigest()[:10]
     return f"{signal_id_prefix}-{digest}"
+
+
+def _research_cooldown_symbol(value: Any) -> str:
+    symbol = _symbol(value)
+    if symbol.endswith(".P"):
+        return symbol[:-2]
+    return symbol
+
+
+def _research_watch_cooldown_signal_id(symbol: Any) -> str:
+    normalized_symbol = _research_cooldown_symbol(symbol)
+    digest = hashlib.sha256(
+        f"{normalized_symbol}|{TelegramAlertType.RESEARCH_WATCH.value}|cooldown".encode("utf-8")
+    ).hexdigest()[:12]
+    return f"{normalized_symbol}-RESEARCH-COOLDOWN-{digest}"
 
 
 def _research_setup_fingerprint(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:

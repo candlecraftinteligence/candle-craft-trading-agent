@@ -277,7 +277,7 @@ def _research_settings(
     to_public: bool = True,
     min_quality: int = 60,
     min_readiness: int = 50,
-    cooldown_minutes: int = 60,
+    cooldown_minutes: int = 1440,
     max_per_scan: int = 5,
 ) -> AppSettings:
     return Settings(
@@ -614,6 +614,37 @@ def _insert_attempt_record(
         )
 
 
+def _insert_research_attempt_record(
+    db_path: Path,
+    *,
+    symbol: str = "LINKUSDT",
+    status: str = "sent",
+    sent_at: str | None = "2026-06-07T00:00:00+00:00",
+    signal_id: str = "research-link",
+) -> None:
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        repository.insert_attempt(
+            TelegramAlertAttemptRecord(
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=NA,
+                previous_state=NA,
+                new_state=TelegramAlertType.RESEARCH_WATCH.value,
+                alert_type=TelegramAlertType.RESEARCH_WATCH.value,
+                lifecycle_state=NA,
+                sent_at=sent_at,
+                attempted_at=sent_at or "2026-06-07T00:00:00+00:00",
+                telegram_status=status,
+                message_hash=f"research-hash-{signal_id}-{status}",
+                attempted_alert_type=TelegramAlertType.RESEARCH_WATCH.value,
+                setup_quality_score="70",
+                rr_planned=NA,
+                blocked_reason=NA,
+                error_message=NA,
+            )
+        )
+
+
 def test_prior_public_delivery_ignores_blocked_skipped_and_failed_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "prior-status.db"
     for status in ("blocked", "skipped", "failed"):
@@ -745,31 +776,184 @@ def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldo
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,
-        settings=_research_settings(cooldown_minutes=60),
+        settings=_research_settings(),
         sender=sender,
     )
     times = iter(
         (
             "2026-06-07T00:00:00+00:00",
-            "2026-06-07T00:30:00+00:00",
-            "2026-06-07T01:01:00+00:00",
+            "2026-06-07T00:05:00+00:00",
+            "2026-06-07T23:59:00+00:00",
+            "2026-06-08T00:01:00+00:00",
         )
     )
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
-    result = _run_result(_research_symbol())
+    result = _run_result(_research_symbol(symbol="LINKUSDT"))
 
     first = run(service.deliver_for_run(result, scan_run_id="research-1"))
     second = run(service.deliver_for_run(result, scan_run_id="research-2"))
     third = run(service.deliver_for_run(result, scan_run_id="research-3"))
+    fourth = run(service.deliver_for_run(result, scan_run_id="research-4"))
+
+    assert first.sent == 1
+    assert second.skipped == 1
+    assert third.skipped == 1
+    assert fourth.sent == 1
+    assert len(sender.messages) == 2
+    rows = _research_attempt_rows(db_path)
+    assert [row[1] for row in rows] == ["sent", "skipped", "sent"]
+    assert rows[1][2] is None
+    assert rows[1][4] == "research_watch_cooldown_active"
+
+
+def test_research_watch_cooldown_uses_config_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "research-cooldown-override.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=_research_settings(cooldown_minutes=10),
+        sender=sender,
+    )
+    times = iter(
+        (
+            "2026-06-07T00:00:00+00:00",
+            "2026-06-07T00:05:00+00:00",
+            "2026-06-07T00:11:00+00:00",
+        )
+    )
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
+    result = _run_result(_research_symbol(symbol="LINKUSDT"))
+
+    first = run(service.deliver_for_run(result, scan_run_id="research-override-1"))
+    second = run(service.deliver_for_run(result, scan_run_id="research-override-2"))
+    third = run(service.deliver_for_run(result, scan_run_id="research-override-3"))
 
     assert first.sent == 1
     assert second.skipped == 1
     assert third.sent == 1
     assert len(sender.messages) == 2
+
+
+def test_research_watch_cooldown_normalizes_perp_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "research-cooldown-symbol-normalized.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=_research_settings(),
+        sender=sender,
+    )
+    times = iter(("2026-06-07T00:00:00+00:00", "2026-06-07T00:05:00+00:00"))
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
+
+    first = run(service.deliver_for_run(_run_result(_research_symbol(symbol="LINKUSDT")), scan_run_id="research-link"))
+    second = run(
+        service.deliver_for_run(
+            _run_result(_research_symbol(symbol="LINKUSDT.P")),
+            scan_run_id="research-link-perp",
+        )
+    )
+
+    assert first.sent == 1
+    assert second.skipped == 1
+    assert len(sender.messages) == 1
     rows = _research_attempt_rows(db_path)
-    assert [row[1] for row in rows] == ["sent", "skipped", "sent"]
+    assert [row[1] for row in rows] == ["sent", "skipped"]
     assert rows[1][2] is None
-    assert rows[1][4] == "research_watch_duplicate_cooldown"
+    assert rows[1][4] == "research_watch_cooldown_active"
+
+
+@pytest.mark.parametrize("status", ("blocked", "skipped", "failed"))
+def test_research_watch_cooldown_ignores_unsent_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    db_path = tmp_path / f"research-cooldown-{status}.db"
+    _insert_research_attempt_record(
+        db_path,
+        symbol="LINKUSDT",
+        status=status,
+        sent_at="2026-06-07T00:00:00+00:00",
+        signal_id=f"research-link-{status}",
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=_research_settings(),
+        sender=sender,
+    )
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: "2026-06-07T00:05:00+00:00")
+
+    summary = run(service.deliver_for_run(_run_result(_research_symbol(symbol="LINKUSDT")), scan_run_id="research-after-unsent"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+
+
+def test_research_watch_cooldown_only_sent_rows_suppress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "research-cooldown-sent-only.db"
+    _insert_research_attempt_record(db_path, symbol="LINKUSDT", status="sent", signal_id="research-link-sent")
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=_research_settings(),
+        sender=sender,
+    )
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: "2026-06-07T00:05:00+00:00")
+
+    summary = run(service.deliver_for_run(_run_result(_research_symbol(symbol="LINKUSDT")), scan_run_id="research-after-sent"))
+
+    assert summary.skipped == 1
+    assert sender.messages == []
+    rows = _research_attempt_rows(db_path)
+    assert rows[-1][1] == "skipped"
+    assert rows[-1][2] is None
+    assert rows[-1][4] == "research_watch_cooldown_active"
+
+
+def test_research_watch_cooldown_skips_do_not_consume_send_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "research-cooldown-cap.db"
+    _insert_research_attempt_record(db_path, symbol="LINKUSDT", status="sent", signal_id="research-link-sent")
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=_research_settings(max_per_scan=1),
+        sender=sender,
+    )
+    times = iter(("2026-06-07T00:05:00+00:00", "2026-06-07T00:05:01+00:00"))
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
+    result = ScannerRunResult(
+        config=_config(),
+        results=(
+            _research_symbol(symbol="LINKUSDT", quality_score=90, signal_id="research-link"),
+            _research_symbol(symbol="ETHUSDT", quality_score=80, signal_id="research-eth"),
+        ),
+        scanned_symbols=2,
+        failed_symbols=0,
+        trade_ideas_created=0,
+        dry_run_alerts_created=0,
+        journal_entries_created=0,
+    )
+
+    summary = run(service.deliver_for_run(result, scan_run_id="research-cap-after-cooldown"))
+
+    assert summary.skipped == 1
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "ETHUSDT" in sender.messages[0]
+    assert "LINKUSDT" not in sender.messages[0]
 
 
 def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path: Path) -> None:
