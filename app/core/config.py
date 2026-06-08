@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     telegram_research_watch_to_public: bool = False
     telegram_research_min_quality: int = 60
     telegram_research_min_readiness: int = 50
-    telegram_research_alert_cooldown_minutes: int = 60
+    telegram_research_alert_cooldown_minutes: int = 1440
     telegram_research_max_per_scan: int = 5
     telegram_wolf_briefing_enabled: bool = False
     telegram_wolf_briefing_public_enabled: bool = False

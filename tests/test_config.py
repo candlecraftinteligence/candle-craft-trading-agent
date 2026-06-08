@@ -24,7 +24,7 @@ def test_default_settings_are_safe() -> None:
     assert settings.telegram_research_watch_to_public is False
     assert settings.telegram_research_min_quality == 60
     assert settings.telegram_research_min_readiness == 50
-    assert settings.telegram_research_alert_cooldown_minutes == 60
+    assert settings.telegram_research_alert_cooldown_minutes == 1440
     assert settings.telegram_research_max_per_scan == 5
     assert settings.telegram_wolf_briefing_enabled is False
     assert settings.telegram_wolf_briefing_public_enabled is False
