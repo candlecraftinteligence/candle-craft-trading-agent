@@ -66,10 +66,17 @@ DECAY_GRADE_PATH = ("a+", "a", "a-", "b+")
 ENTRY_TOUCH_MONITOR_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
+    SetupLifecycleState.A_GRADE_WATCH,
+}
+ENTRY_TOUCH_REASON_REQUIRED_STATES = {
+    SetupLifecycleState.WATCHLISTED,
+    SetupLifecycleState.A_GRADE_WATCH,
 }
 PLAN_LOCK_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
+    SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.EXECUTING,
     SetupLifecycleState.MANAGING,
 }
@@ -87,9 +94,9 @@ ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
     },
     SetupLifecycleState.WATCHLISTED: {
         SetupLifecycleState.STALKING,
+        SetupLifecycleState.TRIGGERED,
         SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.A_GRADE_WATCH,
-        SetupLifecycleState.EXECUTING,
         SetupLifecycleState.REJECTED,
         SetupLifecycleState.EXPIRED,
     },
@@ -98,7 +105,6 @@ ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
         SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.WATCHLISTED,
         SetupLifecycleState.A_GRADE_WATCH,
-        SetupLifecycleState.EXECUTING,
         SetupLifecycleState.REJECTED,
         SetupLifecycleState.EXPIRED,
     },
@@ -116,7 +122,8 @@ ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
         SetupLifecycleState.EXPIRED,
     },
     SetupLifecycleState.A_GRADE_WATCH: {
-        SetupLifecycleState.EXECUTING,
+        SetupLifecycleState.TRIGGERED,
+        SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.INVALIDATED,
         SetupLifecycleState.EXPIRED,
         SetupLifecycleState.COOLDOWN,
@@ -431,7 +438,7 @@ def observed_state(observation: LifecycleObservation) -> SetupLifecycleState:
     if observation.expired:
         return SetupLifecycleState.EXPIRED
     if observation.a_grade_watch_candidate:
-        return SetupLifecycleState.EXECUTING if observation.entry_filled else SetupLifecycleState.A_GRADE_WATCH
+        return SetupLifecycleState.A_GRADE_WATCH
     if observation.valid_trade_idea or observation.pullback_and_rr_valid:
         return SetupLifecycleState.CONFIRMED
     if observation.sweep_detected and observation.structure_shift_detected:
@@ -503,8 +510,10 @@ def next_state_for_observation(
             return SetupLifecycleState.INVALIDATED
         if observation.expired:
             return SetupLifecycleState.EXPIRED
-        if observation.entry_filled and target in {SetupLifecycleState.A_GRADE_WATCH, SetupLifecycleState.EXECUTING}:
-            return SetupLifecycleState.EXECUTING
+        if observation.entry_filled:
+            return SetupLifecycleState.TRIGGERED
+        if target == SetupLifecycleState.CONFIRMED:
+            return SetupLifecycleState.CONFIRMED
         return current
     if current == SetupLifecycleState.REJECTED:
         if target == SetupLifecycleState.A_GRADE_WATCH:
@@ -522,7 +531,7 @@ def next_state_for_observation(
         return current
     if current == SetupLifecycleState.WATCHLISTED:
         if observation.entry_filled and not observation.invalidated and not observation.expired and target != SetupLifecycleState.REJECTED:
-            return SetupLifecycleState.EXECUTING
+            return SetupLifecycleState.TRIGGERED
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
         if target == SetupLifecycleState.A_GRADE_WATCH:
@@ -532,7 +541,7 @@ def next_state_for_observation(
         return current
     if current == SetupLifecycleState.STALKING:
         if observation.entry_filled and not observation.invalidated and not observation.expired and target != SetupLifecycleState.REJECTED:
-            return SetupLifecycleState.EXECUTING
+            return SetupLifecycleState.TRIGGERED
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
         if target == SetupLifecycleState.A_GRADE_WATCH:
@@ -779,8 +788,8 @@ def _entry_touch_transition_requires_touch_reason(
     reason: SetupTransitionReason,
 ) -> bool:
     return (
-        from_state in ENTRY_TOUCH_MONITOR_STATES
-        and to_state == SetupLifecycleState.EXECUTING
+        from_state in ENTRY_TOUCH_REASON_REQUIRED_STATES
+        and to_state == SetupLifecycleState.TRIGGERED
         and reason != SetupTransitionReason.ENTRY_ZONE_TOUCHED
     )
 
@@ -951,6 +960,8 @@ def _reason_for_state(
     if state == SetupLifecycleState.STALKING:
         return SetupTransitionReason.SWEEP_APPEARED
     if state == SetupLifecycleState.TRIGGERED:
+        if observation.entry_filled:
+            return SetupTransitionReason.ENTRY_ZONE_TOUCHED
         return SetupTransitionReason.STRUCTURE_SHIFT_CONFIRMED
     if state == SetupLifecycleState.CONFIRMED:
         return SetupTransitionReason.PULLBACK_RR_VALID

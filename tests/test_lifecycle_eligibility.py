@@ -6,10 +6,14 @@ from app.lifecycle.eligibility import (
     ResearchWatchEligibilityConfig,
     active_signal_eligible,
     has_valid_rr,
+    is_internal_touch_state,
+    is_public_active_state,
+    is_public_signal_eligible_state,
     is_numeric_trade_value,
     is_terminal_state,
     public_watchlist_eligible,
     research_watch_eligible,
+    requires_existing_public_signal_for_update,
 )
 
 
@@ -74,10 +78,21 @@ def test_public_watchlist_eligible_rejects_terminal_or_archived_states() -> None
 def test_active_signal_eligible_accepts_only_active_lifecycle_states() -> None:
     active = _watch_record(current_state="CONFIRMED")
     assert active_signal_eligible(active) is True
-    assert active_signal_eligible(_watch_record(current_state="LIMIT_HIT")) is True
+    assert active_signal_eligible(_watch_record(current_state="LIMIT_HIT")) is False
+    assert active_signal_eligible(_watch_record(current_state="limit_zone_hit")) is False
     assert active_signal_eligible(_watch_record(current_state="MANAGING")) is True
     assert active_signal_eligible(_watch_record(current_state="WATCHLISTED")) is False
     assert active_signal_eligible(_watch_record(current_state="INVALIDATED")) is False
+
+
+def test_public_signal_state_helpers_keep_limit_hit_internal() -> None:
+    assert is_public_signal_eligible_state("CONFIRMED") is True
+    assert is_public_signal_eligible_state("LIMIT_HIT") is False
+    assert is_public_active_state("limit_hit") is False
+    assert is_public_active_state("limit_zone_hit") is False
+    assert is_internal_touch_state("ENTRY_ZONE_TOUCHED") is True
+    assert is_internal_touch_state("limit_zone_hit") is True
+    assert requires_existing_public_signal_for_update("limit_hit") is True
 
 
 def _research_record(**overrides):

@@ -13,7 +13,25 @@ from app.data.dtos import NA
 _MISSING = object()
 
 WATCH_STATE_KEYS = frozenset({"watch", "watchlist", "watchlisted", "stalking", "triggered"})
-ACTIVE_SIGNAL_STATE_KEYS = frozenset({"limit_hit", "limit_zone_hit", "confirmed", "executing", "managing", "active"})
+INTERNAL_TOUCH_STATE_KEYS = frozenset(
+    {
+        "entry_hit",
+        "entry_touch",
+        "entry_touched",
+        "entry_zone_hit",
+        "entry_zone_touch",
+        "entry_zone_touched",
+        "limit_hit",
+        "limit_touch",
+        "limit_touched",
+        "limit_zone_hit",
+        "limit_zone_touch",
+        "limit_zone_touched",
+    }
+)
+PUBLIC_SIGNAL_ELIGIBLE_STATE_KEYS = frozenset({"confirmed"})
+PUBLIC_ACTIVE_STATE_KEYS = frozenset({"confirmed", "executing", "managing", "active"})
+ACTIVE_SIGNAL_STATE_KEYS = PUBLIC_ACTIVE_STATE_KEYS
 TERMINAL_STATE_KEYS = frozenset(
     {
         "invalidated",
@@ -199,6 +217,27 @@ def is_watch_state(state: Any) -> bool:
 def is_active_signal_state(state: Any) -> bool:
     key = _status_key(state)
     return key in ACTIVE_SIGNAL_STATE_KEYS and key not in TERMINAL_STATE_KEYS
+
+
+def is_public_signal_eligible_state(state: Any) -> bool:
+    key = _status_key(state)
+    return key in PUBLIC_SIGNAL_ELIGIBLE_STATE_KEYS and key not in TERMINAL_STATE_KEYS
+
+
+def is_public_active_state(state: Any) -> bool:
+    key = _status_key(state)
+    return key in PUBLIC_ACTIVE_STATE_KEYS and key not in TERMINAL_STATE_KEYS
+
+
+def is_internal_touch_state(state: Any) -> bool:
+    return _status_key(state) in INTERNAL_TOUCH_STATE_KEYS
+
+
+def requires_existing_public_signal_for_update(state: Any) -> bool:
+    key = _status_key(state)
+    if key in TERMINAL_STATE_KEYS:
+        return True
+    return key in PUBLIC_ACTIVE_STATE_KEYS or key in INTERNAL_TOUCH_STATE_KEYS
 
 
 def public_watchlist_eligible(record: Any, config: LifecycleEligibilityConfig | None = None) -> bool:
@@ -660,9 +699,13 @@ __all__ = [
     "has_valid_rr",
     "has_valid_trade_map",
     "is_active_signal_state",
+    "is_internal_touch_state",
     "is_numeric_trade_value",
+    "is_public_active_state",
+    "is_public_signal_eligible_state",
     "is_terminal_state",
     "is_watch_state",
     "public_watchlist_eligible",
     "research_watch_eligible",
+    "requires_existing_public_signal_for_update",
 ]

@@ -2,10 +2,38 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
-from app.analytics.market_regime import MarketRegimeInput, RegimeState, evaluate_market_regime
-from app.analytics.setup_quality import SetupQualityState, validate_setup_quality
+import pytest
+
+from app.analytics.market_regime import (
+    MarketRegimeInput,
+    MarketRegimeResult,
+    RegimeAdjustment,
+    RegimeCompatibility,
+    RegimeConfidenceBand,
+    RegimeRiskLevel,
+    RegimeState,
+    evaluate_market_regime,
+)
+from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState, validate_setup_quality
+from app.alerts.telegram_lifecycle import (
+    PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES,
+    REGIME_MARKET_CONDITION_PENDING,
+    TelegramAlertType,
+    TelegramEligibilityContext,
+    _public_signal_gate_result,
+    _public_watchlist_failed_gate_codes,
+    _public_watchlist_gate_result,
+    classify_failed_gate_code,
+    telegram_alert_decision_for_symbol,
+    telegram_signal_message_from_symbol,
+)
+from app.data.dtos import NA
+from app.formatters.telegram_signal_formatter import format_telegram_signal_message
+from app.lifecycle.eligibility import active_signal_eligible
+from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
     ScannerRunConfig,
@@ -97,6 +125,254 @@ def _valid_symbol() -> ScannerSymbolResult:
     )
 
 
+SCANNER_CONTRACT_MODES = ("challenge", "swing", "scalp")
+SCANNER_CONTRACT_NON_REGIME_FAILURES = (
+    ("liquidity", "missing_confirmed_sweep"),
+    ("reclaim", "wick_sweep_reclaim"),
+    ("structure", "missing_confirmation_structure_shift"),
+    ("pullback", "no_ob_or_fvg_zone"),
+    ("target_integrity", "target_integrity"),
+)
+
+
+def _scanner_contract_diagnostics(
+    mode: str,
+    *,
+    first_failed_gate: Any = NA,
+    gates_failed: tuple[Any, ...] = (),
+    rr: Decimal = Decimal("3.2"),
+    **overrides: Any,
+) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "mode": mode,
+        "is_valid": first_failed_gate == NA and not gates_failed,
+        "bias": "long",
+        "entry_low": Decimal("100"),
+        "entry_high": Decimal("102"),
+        "entry_zone": {"low": Decimal("100"), "high": Decimal("102")},
+        "watch_zone": "100 - 102",
+        "entry": Decimal("101"),
+        "stop": Decimal("95"),
+        "stop_loss": Decimal("95"),
+        "tp1": Decimal("110"),
+        "tp2": Decimal("115"),
+        "tp3": Decimal("120"),
+        "rr_to_tp2": rr,
+        "planned_rr": rr,
+        "invalidation": "Invalid if price accepts below 95.",
+        "invalidation_reason": "Invalid if price accepts below 95.",
+        "structure_reason": "Sweep, reclaim, BOS/CHoCH, pullback zone, target map, and RR are intact.",
+        "confirmation_needed": "Market regime must turn supportive.",
+        "execution_sweep_status": "passed",
+        "confirmation_structure_shift_status": "passed",
+        "pullback_zone_status": "valid",
+        "selected_zone_type": "OB valid",
+        "target_integrity_status": "passed",
+        "target_integrity_failed": False,
+        "trust_percentage": 88,
+        "quality_grade": "A",
+        "regime_state": "HIGH_VOLATILITY",
+        "regime_compatibility_label": "Hostile",
+        "regime_compatibility_reason": "Setup is structurally valid, but market regime is hostile.",
+        "gates_passed": ("sweep", "wick_reclaim", "bos_choch", "pullback_zone", "ob_fvg", "target_integrity", "rr"),
+        "first_failed_gate": first_failed_gate,
+        "gates_failed": gates_failed,
+    }
+    diagnostics.update(overrides)
+    return diagnostics
+
+
+def _scanner_contract_quality(
+    state: SetupQualityState = SetupQualityState.HIGH_QUALITY_TRADE,
+    *,
+    score: int = 88,
+) -> SetupQualityResult:
+    if score >= 90:
+        grade = SetupQualityGrade.A_PLUS
+    elif score >= 85:
+        grade = SetupQualityGrade.A
+    elif score >= 75:
+        grade = SetupQualityGrade.B_PLUS
+    else:
+        grade = SetupQualityGrade.B
+    return SetupQualityResult(
+        quality_state=state,
+        quality_grade=grade,
+        quality_score=score,
+        tradeability_score=score,
+        profitability_edge_score=score,
+        execution_risk_score=max(0, 100 - score),
+        strongest_factors=("structure", "target map"),
+        weakest_factors=(),
+        decision_reason="Synthetic scanner-mode contract setup quality.",
+        action_label="Valid setup" if state != SetupQualityState.WATCHLIST_NEAR_MISS else "Wait for cleaner regime",
+    )
+
+
+def _scanner_contract_symbol(
+    mode: str,
+    *,
+    diagnostics: dict[str, Any] | None = None,
+    rr: Decimal = Decimal("3.2"),
+    setup_quality: SetupQualityResult | None = None,
+    status: ScannerPipelineStatus = ScannerPipelineStatus.JOURNAL_ENTRY_CREATED,
+    rejection_stage: str = NA,
+) -> ScannerSymbolResult:
+    mode_diagnostics = diagnostics or _scanner_contract_diagnostics(mode, rr=rr)
+    return ScannerSymbolResult(
+        symbol="BTCUSDT",
+        status=status,
+        status_history=(ScannerPipelineStatus.IDEA_CREATED, status),
+        rejection_stage=rejection_stage,
+        current_price=Decimal("101"),
+        technical_score=Decimal("70"),
+        valid_strategy_modes=(mode,),
+        strategy_diagnostics={mode: mode_diagnostics},
+        setup_quality=setup_quality or _scanner_contract_quality(),
+    )
+
+
+def _blocking_regime() -> MarketRegimeResult:
+    compatibility = {
+        mode: RegimeCompatibility(
+            mode=mode,
+            score=20,
+            label="Hostile",
+            allowed=False,
+            regime_compatibility=20,
+            volatility_suitability=20,
+            trend_suitability=20,
+            execution_quality_suitability=20,
+            risk_multiplier=Decimal("1"),
+            notes=("Market/regime condition is not supportive yet.",),
+        )
+        for mode in SCANNER_CONTRACT_MODES
+    }
+    adjustment = RegimeAdjustment(
+        allow_challenge=False,
+        allow_swings=False,
+        allow_scalps=False,
+        min_quality_score_adjustment=0,
+        risk_multiplier=Decimal("1"),
+        regime_penalty=10,
+        compatibility_scores={mode: 20 for mode in SCANNER_CONTRACT_MODES},
+        explanation="Market/regime condition is pending.",
+    )
+    return MarketRegimeResult(
+        state=RegimeState.HIGH_VOLATILITY,
+        risk_level=RegimeRiskLevel.HIGH,
+        confidence_score=20,
+        confidence_band=RegimeConfidenceBand.HOSTILE,
+        compatibility_scores=compatibility,
+        adjustment=adjustment,
+        environment_notes=("Market/regime condition is pending.",),
+    )
+
+
+def _scanner_regime_blocked_symbol(
+    mode: str,
+    *,
+    diagnostics: dict[str, Any] | None = None,
+    rr: Decimal = Decimal("3.2"),
+) -> ScannerSymbolResult:
+    symbol = _scanner_contract_symbol(mode, diagnostics=diagnostics, rr=rr)
+    return _apply_market_regime_to_results((symbol,), _blocking_regime())[0]
+
+
+def _contract_lifecycle_record(
+    state: SetupLifecycleState,
+    *,
+    mode: str,
+    signal_id: str = "scanner-contract",
+    rr: Decimal = Decimal("3.2"),
+) -> SetupLifecycleRecord:
+    return SetupLifecycleRecord(
+        lifecycle_id=signal_id,
+        symbol="BTCUSDT",
+        mode=mode,
+        direction="long",
+        current_state=state,
+        previous_state=SetupLifecycleState.TRIGGERED if state == SetupLifecycleState.CONFIRMED else SetupLifecycleState.DISCOVERED,
+        first_seen_at="2026-06-02T00:00:00+00:00",
+        last_seen_at="2026-06-02T00:00:00+00:00",
+        last_transition_at="2026-06-02T00:00:00+00:00",
+        readiness_score=88,
+        quality_score=88,
+        regime_state="HIGH_VOLATILITY",
+        action_label="Wait for cleaner regime",
+        invalidation_reason="Invalid if price accepts below 95.",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+        tp2="115",
+        tp3="120",
+        rr=str(rr),
+        invalidation_logic="Invalid if price accepts below 95.",
+        quality_grade_current="A",
+    )
+
+
+def _symbol_mode(symbol: ScannerSymbolResult) -> str:
+    if symbol.valid_strategy_modes:
+        return symbol.valid_strategy_modes[0]
+    if symbol.rejected_strategy_modes:
+        return symbol.rejected_strategy_modes[0]
+    for diagnostics in symbol.strategy_diagnostics.values():
+        if isinstance(diagnostics, dict) and diagnostics.get("mode"):
+            return str(diagnostics["mode"])
+    return "swing"
+
+
+def _symbol_rr(symbol: ScannerSymbolResult) -> Decimal:
+    diagnostics = next(iter(symbol.strategy_diagnostics.values()), {})
+    if isinstance(diagnostics, dict):
+        value = diagnostics.get("rr_to_tp2", Decimal("3.2"))
+        if isinstance(value, Decimal):
+            return value
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return Decimal("3.2")
+    return Decimal("3.2")
+
+
+def _with_lifecycle(
+    symbol: ScannerSymbolResult,
+    *,
+    state: SetupLifecycleState = SetupLifecycleState.WATCHLISTED,
+    signal_id: str = "scanner-contract",
+) -> ScannerSymbolResult:
+    mode = _symbol_mode(symbol)
+    record = _contract_lifecycle_record(state, mode=mode, signal_id=signal_id, rr=_symbol_rr(symbol))
+    transition = SetupTransitionResult(
+        lifecycle_id=signal_id,
+        symbol=symbol.symbol,
+        from_state=record.previous_state,
+        to_state=state,
+        reason=SetupTransitionReason.READINESS_IMPROVED,
+        transitioned=True,
+        record=record,
+    )
+    return symbol.model_copy(update={"lifecycle_state": record, "lifecycle_transition": transition})
+
+
+def _with_regime_metadata(symbol: ScannerSymbolResult) -> ScannerSymbolResult:
+    return symbol.model_copy(
+        update={
+            "regime_state": "HIGH_VOLATILITY",
+            "regime_confidence_score": 20,
+            "regime_compatibility_label": "Hostile",
+            "regime_diagnostics": {"state": "HIGH_VOLATILITY", "compatibility_label": "Hostile"},
+        }
+    )
+
+
+def _public_watchlist_gate(symbol: ScannerSymbolResult):
+    message = telegram_signal_message_from_symbol(symbol)
+    return _public_watchlist_gate_result(symbol, message, TelegramEligibilityContext())
+
+
 def test_regime_confidence_and_compatibility_scores() -> None:
     result = evaluate_market_regime(
         MarketRegimeInput(
@@ -159,6 +435,170 @@ def test_weak_regime_blocks_high_confidence_setup_with_diagnostics() -> None:
     assert adjusted.setup_quality.quality_state == SetupQualityState.WATCHLIST_NEAR_MISS
     assert adjusted.regime_diagnostics["confidence_score"] == regime.confidence_score
     assert "penalty" in adjusted.rejection_reason
+
+
+@pytest.mark.parametrize("mode", SCANNER_CONTRACT_MODES)
+def test_strategy_mode_emits_regime_pending_when_only_regime_blocks(mode: str) -> None:
+    blocked = _scanner_regime_blocked_symbol(mode, rr=Decimal("2.5"))
+    candidate = _with_lifecycle(blocked, signal_id=f"{mode}-regime-only")
+    diagnostics = blocked.strategy_diagnostics[mode]
+    raw_codes = _public_watchlist_failed_gate_codes(candidate)
+    gate = _public_watchlist_gate(candidate)
+
+    assert blocked.status == ScannerPipelineStatus.REJECTED_BY_REGIME
+    assert blocked.rejected_strategy_modes == (mode,)
+    assert diagnostics["first_failed_gate"] == "regime_compatibility"
+    assert diagnostics["gates_failed"] == ("regime_compatibility",)
+    assert raw_codes == ("regime_compatibility",)
+    assert raw_codes[0] in PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES
+    assert {classify_failed_gate_code(code) for code in raw_codes} == {REGIME_MARKET_CONDITION_PENDING}
+    assert gate.allowed is True
+    assert gate.allowed_missing_gate == REGIME_MARKET_CONDITION_PENDING
+    assert gate.rr == 2.5
+
+
+@pytest.mark.parametrize(("failure_type", "gate_code"), SCANNER_CONTRACT_NON_REGIME_FAILURES)
+def test_strategy_mode_non_regime_failure_not_regime_pending(failure_type: str, gate_code: str) -> None:
+    diagnostics = _scanner_contract_diagnostics(
+        "swing",
+        first_failed_gate=gate_code,
+        gates_failed=(gate_code,),
+        target_integrity_status="blocked" if failure_type == "target_integrity" else "passed",
+        target_integrity_failed=failure_type == "target_integrity",
+        invalid_target_fields="tp1" if failure_type == "target_integrity" else NA,
+    )
+    candidate = _with_lifecycle(
+        _with_regime_metadata(_scanner_contract_symbol("swing", diagnostics=diagnostics)),
+        signal_id=f"non-regime-{failure_type}",
+    )
+    gate = _public_watchlist_gate(candidate)
+
+    assert classify_failed_gate_code(gate_code) != REGIME_MARKET_CONDITION_PENDING
+    assert REGIME_MARKET_CONDITION_PENDING not in gate.failed_gate_classes
+    assert gate.allowed is False
+    assert any(
+        reason.startswith("public_watchlist_non_regime_failed_gates=") or reason.startswith("target_integrity_failed")
+        for reason in gate.blocking_reasons
+    )
+
+
+def test_strategy_mode_mixed_failures_block_public_watchlist() -> None:
+    target_failure = _scanner_contract_diagnostics(
+        "swing",
+        first_failed_gate="target_integrity",
+        gates_failed=("target_integrity",),
+        target_integrity_status="blocked",
+        target_integrity_failed=True,
+        invalid_target_fields="tp1",
+    )
+    blocked = _scanner_regime_blocked_symbol("swing", diagnostics=target_failure)
+    candidate = _with_lifecycle(blocked, signal_id="mixed-regime-target")
+    gate = _public_watchlist_gate(candidate)
+
+    assert _public_watchlist_failed_gate_codes(candidate) == ("regime_compatibility", "target_integrity")
+    assert gate.failed_gate_classes == (REGIME_MARKET_CONDITION_PENDING, "NON_REGIME_FAILED_GATE")
+    assert gate.allowed is False
+    assert "public_watchlist_non_regime_failed_gates=target_integrity" in gate.blocking_reasons
+    assert any(reason.startswith("public_watchlist_conflicting_failed_gate_classes=") for reason in gate.blocking_reasons)
+
+
+def test_strategy_mode_rr_failure_blocks_public_watchlist() -> None:
+    blocked = _scanner_regime_blocked_symbol("swing", rr=Decimal("2.49"))
+    candidate = _with_lifecycle(blocked, signal_id="rr-below-watchlist")
+    gate = _public_watchlist_gate(candidate)
+
+    assert gate.allowed is False
+    assert gate.failed_gate_classes == (REGIME_MARKET_CONDITION_PENDING,)
+    assert "public_watchlist_rr_below_min:2.49<2.5" in gate.blocking_reasons
+
+
+def test_strategy_mode_missing_regime_data_blocks_public_watchlist() -> None:
+    blocked = _scanner_regime_blocked_symbol("swing")
+    diagnostics = dict(blocked.strategy_diagnostics["swing"])
+    diagnostics["regime_state"] = NA
+    diagnostics["regime_compatibility_label"] = NA
+    candidate = _with_lifecycle(
+        blocked.model_copy(update={"strategy_diagnostics": {"swing": diagnostics}}),
+        signal_id="missing-regime-data",
+    ).model_copy(
+        update={"regime_state": NA, "regime_compatibility_label": NA, "regime_diagnostics": {}}
+    )
+    gate = _public_watchlist_gate(candidate)
+
+    assert gate.allowed is False
+    assert "public_watchlist_regime_data_missing:regime_state,regime_compatibility_label" in gate.blocking_reasons
+
+
+@pytest.mark.parametrize(
+    ("label", "first_failed_gate", "gates_failed", "expected_reason"),
+    (
+        ("absent", NA, (), "public_watchlist_missing_explicit_regime_gate"),
+        ("none", None, (), "public_watchlist_missing_explicit_regime_gate"),
+        ("empty", "", (), "public_watchlist_missing_explicit_regime_gate"),
+        ("unknown", "mystery_gate", ("mystery_gate",), "public_watchlist_unknown_failed_gates=mystery_gate"),
+        ("malformed", {"bad": "gate"}, ({"bad": "gate"},), "public_watchlist_malformed_failed_gate_diagnostics"),
+    ),
+)
+def test_strategy_mode_missing_or_malformed_diagnostics_block_public_watchlist(
+    label: str,
+    first_failed_gate: Any,
+    gates_failed: tuple[Any, ...],
+    expected_reason: str,
+) -> None:
+    diagnostics = _scanner_contract_diagnostics("swing", first_failed_gate=first_failed_gate, gates_failed=gates_failed)
+    candidate = _with_lifecycle(
+        _with_regime_metadata(_scanner_contract_symbol("swing", diagnostics=diagnostics)),
+        signal_id=f"bad-diagnostics-{label}",
+    )
+    gate = _public_watchlist_gate(candidate)
+
+    assert gate.allowed is False
+    assert expected_reason in gate.blocking_reasons
+
+
+def test_strategy_mode_public_watchlist_copy_is_regime_pending_not_execution() -> None:
+    candidate = _with_lifecycle(_scanner_regime_blocked_symbol("scalp"), signal_id="scalp-copy")
+    decision = telegram_alert_decision_for_symbol(candidate)
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.message is not None
+    text = format_telegram_signal_message(decision.alert_type, decision.message)
+    lowered = text.lower()
+    assert "WATCHLIST" in text
+    assert "MARKET CONDITION PENDING" in text
+    assert "Not an active execution signal." in text
+    assert "SCALP SIGNAL" not in text
+    assert "active for manual execution" not in lowered
+    assert "confirmed" not in lowered
+    assert "executing" not in lowered
+    assert "enter now" not in lowered
+
+
+def test_strategy_mode_public_watchlist_does_not_create_active_execution_signal() -> None:
+    candidate = _with_lifecycle(_scanner_regime_blocked_symbol("challenge"), signal_id="watch-not-active")
+    decision = telegram_alert_decision_for_symbol(candidate)
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert candidate.lifecycle_transition is not None
+    assert candidate.lifecycle_transition.to_state == SetupLifecycleState.WATCHLISTED
+    assert candidate.lifecycle_state is not None
+    assert active_signal_eligible(candidate.lifecycle_state) is False
+
+
+def test_limit_hit_still_not_public_execution_eligible_after_scanner_contracts() -> None:
+    candidate = _with_lifecycle(
+        _with_regime_metadata(_scanner_contract_symbol("swing")),
+        state=SetupLifecycleState.MANAGING,
+        signal_id="limit-hit-contract",
+    )
+    message = telegram_signal_message_from_symbol(candidate)
+
+    gate = _public_signal_gate_result(candidate, TelegramAlertType.LIMIT_HIT, message)
+
+    assert gate.allowed is False
+    assert "limit_hit_requires_prior_public_signal" in gate.blocking_reasons
 
 
 def test_regime_metadata_is_persisted(tmp_path) -> None:

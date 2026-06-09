@@ -20,8 +20,8 @@ WATCHLIST_STAGE_DISPLAY_LIMIT = 8
 ACTIVE_SIGNAL_TTL_HOURS = 24
 ACTIVE_SIGNAL_TTL_AGE = timedelta(hours=ACTIVE_SIGNAL_TTL_HOURS)
 ACTIVE_SIGNAL_MIN_RR = Decimal("3")
-WATCHLIST_STATUS_WAITING = "Waiting for Limit Zone"
-WATCHLIST_STATUS_LIMIT_HIT = "LIMIT ZONE HIT"
+WATCHLIST_STATUS_WAITING = "Market condition pending"
+WATCHLIST_STATUS_LIMIT_HIT = "Entry zone touched"
 WATCHLIST_STATUS_TP1_HIT = "TP1 HIT"
 WATCHLIST_STATUS_TP2_HIT = "TP2 HIT"
 WATCHLIST_STATUS_TP3_HIT = "TP3 HIT"
@@ -42,7 +42,8 @@ _SL_TYPE = TelegramAlertType.SL_HIT.value
 _INVALIDATED_TYPE = TelegramAlertType.INVALIDATED.value
 _EXPIRED_TYPE = TelegramAlertType.EXPIRED.value
 _NO_LONGER_TRACKING_TYPE = TelegramAlertType.NO_LONGER_TRACKING.value
-_ACTIVE_SIGNAL_BASE_TYPES = (_SIGNAL_CONFIRMED_TYPE, _LIMIT_TYPE)
+_ACTIVE_SIGNAL_BASE_TYPES = (_SIGNAL_CONFIRMED_TYPE,)
+_RUNTIME_DATABASE_INFERENCE_BLOCKLIST = {"main_live_runtime.sqlite"}
 _TERMINAL_OUTCOME_TYPES = {
     _TP3_TYPE,
     _SL_TYPE,
@@ -84,8 +85,6 @@ _ACTIVE_SIGNAL_STATE_KEYS = {
     "active",
     "confirmed",
     "executing",
-    "limit_hit",
-    "limit_zone_hit",
     "managing",
     "tp1_hit",
     "tp2_hit",
@@ -97,8 +96,7 @@ _ACTIVE_SIGNAL_ALLOWED_STATE_KEYS = {
     "confirmed_setup",
     "signal_confirmed",
     "executing",
-    "limit_hit",
-    "limit_zone_hit",
+    "managing",
 }
 _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS = {
     "reject",
@@ -184,7 +182,9 @@ _GATE_REASON_MAP = {
     "structural_breakdown": "structure not ready yet",
     "trust_meter_below_minimum": "structure not ready yet",
     "challenge_trust_below_85": "structure not ready yet",
-    "regime_compatibility": "structure not ready yet",
+    "regime_compatibility": "market condition pending",
+    "regime_blocked": "market condition pending",
+    "rejected_by_regime": "market condition pending",
     "derivatives_conflict": "structure not ready yet",
     "funding_oi_guard": "structure not ready yet",
 }
@@ -442,6 +442,7 @@ def format_active_watchlist_lines(result: ActiveWatchlistQueryResult) -> list[st
                 f"Limit Zone: {item.limit_zone_text}",
                 f"SL: {item.stop_loss}",
                 f"Status: {item.status}",
+                "Not active execution signal",
             )
         )
         if item.status != WATCHLIST_STATUS_WAITING:
@@ -532,18 +533,14 @@ def _latest_runtime_database(
         return preferred_path
 
     scan_dir = project_root / "scan_runs"
-    candidates = sorted(scan_dir.glob("*.sqlite"), key=lambda path: path.stat().st_mtime, reverse=True) if scan_dir.exists() else []
+    candidates = _inferred_runtime_database_candidates(scan_dir, preferred_path)
     for candidate in candidates:
-        if candidate.resolve() == preferred_path.resolve():
-            continue
         if _has_sent_alert_attempt(candidate, alert_types=alert_types):
             return candidate
 
     if _has_telegram_alert_attempts(preferred_path):
         return preferred_path
     for candidate in candidates:
-        if candidate.resolve() == preferred_path.resolve():
-            continue
         if _has_telegram_alert_attempts(candidate):
             return candidate
     return None
@@ -554,13 +551,27 @@ def _latest_lifecycle_database(project_root: Path, preferred_path: Path) -> Path
         return preferred_path
 
     scan_dir = project_root / "scan_runs"
-    candidates = sorted(scan_dir.glob("*.sqlite"), key=lambda path: path.stat().st_mtime, reverse=True) if scan_dir.exists() else []
+    candidates = _inferred_runtime_database_candidates(scan_dir, preferred_path)
     for candidate in candidates:
-        if candidate.resolve() == preferred_path.resolve():
-            continue
         if _has_watchlist_lifecycle_records(candidate):
             return candidate
     return None
+
+
+def _inferred_runtime_database_candidates(scan_dir: Path, preferred_path: Path) -> tuple[Path, ...]:
+    if not scan_dir.exists():
+        return ()
+    preferred_resolved = preferred_path.resolve()
+    candidates = sorted(scan_dir.glob("*.sqlite"), key=lambda path: path.stat().st_mtime, reverse=True)
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate.resolve() != preferred_resolved and not _runtime_database_inference_blocked(candidate)
+    )
+
+
+def _runtime_database_inference_blocked(path: Path) -> bool:
+    return path.name.lower() in _RUNTIME_DATABASE_INFERENCE_BLOCKLIST
 
 
 def _has_telegram_alert_attempts(path: Path) -> bool:

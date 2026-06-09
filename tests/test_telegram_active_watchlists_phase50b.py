@@ -15,6 +15,7 @@ from app.telegram_admin.active_watchlists import (
     WatchlistStageDashboardResult,
     WatchlistStageItem,
     format_watchlist_stage_dashboard,
+    _latest_runtime_database,
 )
 from app.telegram_admin.commands import (
     SCREEN_HEADER,
@@ -714,7 +715,7 @@ def test_active_signals_dedupe_same_symbol_bias_and_hide_expired_duplicate(tmp_p
     assert _callback_data_values(response.reply_markup) == ["public:signal:BTCUSDT"]
 
 
-def test_active_signals_show_direct_limit_zone_hit_setups(tmp_path: Path) -> None:
+def test_active_signals_hide_direct_limit_zone_hit_setups(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_attempt(
         db_path,
@@ -742,25 +743,52 @@ def test_active_signals_show_direct_limit_zone_hit_setups(tmp_path: Path) -> Non
 
     response = _service(tmp_path, db_path).public_response_for("/signals")
 
-    assert "Active signals: 1" in response.text
-    assert _button_labels(response.reply_markup) == ["BTCUSDT"]
+    assert "No active confirmed signals right now." in response.text
+    assert all(not value.startswith("public:signal:") for value in _callback_data_values(response.reply_markup))
     assert "Symbol: BTCUSDT" not in response.text
 
     detail = _service(tmp_path, db_path).public_response_for("/signal BTCUSDT")
-    assert "Status: LIMIT ZONE HIT" in detail.text
-    assert "Quality: A+" in detail.text
-    assert "RR: 3.20R" in detail.text
-    assert "Entry Zone: 100 – 102" in detail.text
-    assert "Stop: 95" in detail.text
-    assert "TP1: 110" in detail.text
-    assert "TP2: 115" in detail.text
-    assert "TP3: 120" in detail.text
-    assert "Invalid if price accepts below 95." in detail.text
-    assert "Lifecycle: EXECUTING" in detail.text
+    assert "No active signal available for this symbol. Setup expired or invalidated." in detail.text
+    assert "LIMIT ZONE HIT" not in detail.text
+
+
+def test_runtime_database_auto_discovery_skips_main_live_runtime(tmp_path: Path) -> None:
+    scan_dir = tmp_path / "scan_runs"
+    scan_dir.mkdir()
+    live_path = scan_dir / "main_live_runtime.sqlite"
+    safe_path = scan_dir / "safe_scan.sqlite"
+    _insert_attempt(live_path, signal_id="live-sig", symbol="LIVEUSDT", alert_type="SIGNAL_CONFIRMED")
+    _insert_attempt(safe_path, signal_id="safe-sig", symbol="SAFEUSDT", alert_type="SIGNAL_CONFIRMED")
+    os.utime(safe_path, (1, 1))
+    os.utime(live_path, None)
+
+    selected = _latest_runtime_database(
+        tmp_path,
+        tmp_path / "missing.sqlite",
+        alert_types=("SIGNAL_CONFIRMED",),
+    )
+
+    assert selected == safe_path
 
 
 def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
+    _insert_attempt(
+        db_path,
+        signal_id="crcl-limit-zone-hit",
+        symbol="CRCLUSDT",
+        alert_type="SIGNAL_CONFIRMED",
+        new_state="CONFIRMED",
+        lifecycle_state="CONFIRMED",
+        setup_quality_score="A-",
+        rr_planned="3.1244673",
+        entry_low="42.123456",
+        entry_high="42.987654",
+        stop_loss="40.75",
+        tp1="45.25",
+        tp2="47.5",
+        tp3="50",
+    )
     _insert_attempt(
         db_path,
         signal_id="crcl-limit-zone-hit",
@@ -803,7 +831,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
     detail = service.public_response_for("/signal CRCLUSDT")
 
     assert detail.text.startswith("🐺🟠 CRCLUSDT — SIGNAL DETAIL")
-    assert "Status: LIMIT ZONE HIT" in detail.text
+    assert "Status: ENTRY ZONE TOUCHED" in detail.text
     assert "Quality: A-" in detail.text
     assert "RR: 3.12R" in detail.text
     assert "Lifecycle: CONFIRMED → LIMIT ZONE HIT" in detail.text
@@ -1234,7 +1262,7 @@ def test_quality_reject_cannot_coexist_with_active_lifecycle_display(tmp_path: P
     assert all(not value.startswith("public:signal:") for value in _callback_data_values(active.reply_markup))
     assert "No active signal available for this symbol. Setup expired or invalidated." in detail.text
     assert "Quality: Reject" not in detail.text
-    assert "Status: LIMIT ZONE HIT" not in detail.text
+    assert "Status: ENTRY ZONE TOUCHED" not in detail.text
     assert "Lifecycle: CONFIRMED" not in detail.text
 
 
@@ -1423,6 +1451,19 @@ def test_watchlists_dashboard_groups_only_real_stalking_and_watch_data(tmp_path:
     )
     _insert_planned_watchlist(
         db_path,
+        signal_id="sig-regime-watch",
+        symbol="REGIMEUSDT",
+        scan_run_id="run-regime-watch",
+    )
+    _insert_symbol_result(
+        db_path,
+        run_id="run-regime-watch",
+        symbol="REGIMEUSDT",
+        failed_gate="regime_compatibility",
+        setup_quality_score="A",
+    )
+    _insert_planned_watchlist(
+        db_path,
         signal_id="sig-cool",
         symbol="COOLUSDT",
     )
@@ -1481,6 +1522,7 @@ def test_watchlists_dashboard_groups_only_real_stalking_and_watch_data(tmp_path:
     assert response.text.index("👀 WATCH") < response.text.index("❄️ COOLDOWN")
     assert "STALKUSDT — sweep done, waiting BOS/CHoCH" in response.text
     assert "WATCHUSDT — waiting liquidity sweep" in response.text
+    assert "REGIMEUSDT — market condition pending" in response.text
     assert "UNVERIFIEDUSDT — Unverified" in response.text
     assert "MISSINGUSDT — N/A" in response.text
     assert "COOLUSDT — invalidated, waiting reset" in response.text

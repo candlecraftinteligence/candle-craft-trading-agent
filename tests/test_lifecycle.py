@@ -563,7 +563,7 @@ def test_a_plus_a_grade_watch_promotes_when_candle_overlaps_entry_zone(tmp_path)
 
     assert symbol_result.lifecycle_state is not None
     assert symbol_result.lifecycle_transition is not None
-    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.EXECUTING
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.TRIGGERED
     assert symbol_result.lifecycle_transition.from_state == SetupLifecycleState.A_GRADE_WATCH
     assert symbol_result.lifecycle_transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
 
@@ -582,7 +582,7 @@ def test_a_a_grade_watch_promotes_when_candle_overlaps_entry_zone(tmp_path) -> N
     )
 
     assert symbol_result.lifecycle_state is not None
-    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.EXECUTING
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.TRIGGERED
 
 
 def test_a_grade_watch_promotes_from_current_price_inside_zone_when_candle_range_unavailable(tmp_path) -> None:
@@ -599,7 +599,7 @@ def test_a_grade_watch_promotes_from_current_price_inside_zone_when_candle_range
     )
 
     assert symbol_result.lifecycle_state is not None
-    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.EXECUTING
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.TRIGGERED
 
 
 def test_watchlisted_setup_promotes_from_stored_entry_zone_touch_without_recalculating_levels(tmp_path) -> None:
@@ -637,7 +637,7 @@ def test_watchlisted_setup_promotes_from_stored_entry_zone_touch_without_recalcu
 
     assert lifecycle is not None
     assert transition is not None
-    assert lifecycle.current_state == SetupLifecycleState.EXECUTING
+    assert lifecycle.current_state == SetupLifecycleState.TRIGGERED
     assert transition.from_state == SetupLifecycleState.WATCHLISTED
     assert transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
     assert lifecycle.entry_low == "100"
@@ -729,12 +729,53 @@ def test_stalking_short_setup_promotes_from_stored_entry_zone_touch(tmp_path) ->
 
     assert lifecycle is not None
     assert transition is not None
-    assert lifecycle.current_state == SetupLifecycleState.EXECUTING
+    assert lifecycle.current_state == SetupLifecycleState.TRIGGERED
     assert transition.from_state == SetupLifecycleState.STALKING
     assert transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
     assert lifecycle.entry_low == "100"
     assert lifecycle.entry_high == "102"
     assert lifecycle.tp1 == "95"
+
+
+def test_plan_locking_includes_a_grade_watch_and_confirmed(tmp_path) -> None:
+    locked_levels = {
+        "entry_low": "100",
+        "entry_high": "102",
+        "stop_loss": "95",
+        "tp1": "110",
+        "tp2": "115",
+        "tp3": "120",
+        "rr": "3.2",
+        "invalidation_reason": "Invalid if price accepts below 95.",
+    }
+    for state in (SetupLifecycleState.A_GRADE_WATCH, SetupLifecycleState.CONFIRMED):
+        db_path = tmp_path / f"{state.value}.db"
+        stored = _record(state, lifecycle_id=f"life-{state.value}").model_copy(update=locked_levels)
+        with SQLiteSetupLifecycleRepository(db_path) as repository:
+            repository.upsert_record(stored)
+
+        current_scan = _confirmed_candidate_symbol(
+            entry_low=Decimal("200"),
+            entry_high=Decimal("202"),
+            stop=Decimal("190"),
+            rr=Decimal("4"),
+        )
+        result = apply_lifecycle_to_run_result(
+            _scan_result(current_scan),
+            database_path=db_path,
+            scan_run_id=f"run-{state.value}",
+            now="2026-05-18T09:10:00+00:00",
+        )
+        lifecycle = result.results[0].lifecycle_state
+
+        assert lifecycle is not None
+        assert lifecycle.entry_low == "100"
+        assert lifecycle.entry_high == "102"
+        assert lifecycle.stop_loss == "95"
+        assert lifecycle.tp1 == "110"
+        assert lifecycle.tp2 == "115"
+        assert lifecycle.tp3 == "120"
+        assert lifecycle.rr == "3.2"
 
 
 def test_lower_grade_setup_is_not_promoted_by_a_grade_watch_path(tmp_path) -> None:
@@ -869,7 +910,7 @@ def test_invalid_state_transition_rejected() -> None:
 
     assert result.allowed is False
     assert result.transitioned is False
-    assert "WATCHLISTED can move directly to EXECUTING only after entry zone touch" in result.notes
+    assert "WATCHLISTED cannot move directly to EXECUTING." in result.notes
 
 
 def test_cooldown_and_archive_behavior() -> None:

@@ -29,7 +29,13 @@ from app.formatters.telegram_signal_formatter import (
     format_telegram_signal_message,
 )
 from app.formatters.scanner_display import build_symbol_display
-from app.lifecycle.eligibility import ResearchWatchEligibilityConfig, research_watch_eligible
+from app.lifecycle.eligibility import (
+    ResearchWatchEligibilityConfig,
+    is_internal_touch_state,
+    is_public_active_state,
+    is_public_signal_eligible_state,
+    research_watch_eligible,
+)
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
@@ -42,16 +48,18 @@ logger = logging.getLogger(__name__)
 WATCH_ALERT_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
+    SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.TRIGGERED,
 }
 SIGNAL_ALERT_STATES = {
     SetupLifecycleState.CONFIRMED,
-    SetupLifecycleState.EXECUTING,
 }
 PRIOR_ACTIVE_ALERT_TYPES = {
     TelegramAlertType.WATCHLIST.value,
     TelegramAlertType.SIGNAL_CONFIRMED.value,
-    TelegramAlertType.LIMIT_HIT.value,
+}
+PRIOR_PUBLIC_SIGNAL_ALERT_TYPES = {
+    TelegramAlertType.SIGNAL_CONFIRMED.value,
 }
 TERMINAL_UPDATE_ALERT_TYPES = {
     TelegramAlertType.INVALIDATED,
@@ -93,8 +101,6 @@ MAX_LIVE_PRICE_AGE_SECONDS = Decimal("300")
 TP_SL_TRACKING_ACTIVE_STATE_KEYS = {
     "active",
     "executing",
-    "limit_hit",
-    "limit_zone_hit",
     "managing",
     "sl_hit",
     "tp_hit",
@@ -105,8 +111,6 @@ TP_SL_TRACKING_ACTIVE_STATE_KEYS = {
 TP_SL_ENTRY_TOUCHED_STATE_KEYS = {
     "active",
     "executing",
-    "limit_hit",
-    "limit_zone_hit",
     "managing",
 }
 LIVE_PRICE_STALE_FLAG_KEYS = (
@@ -168,7 +172,50 @@ TERMINAL_IDENTITY_BLOCK_REASONS = {
     "terminal_update_not_terminal_state",
 }
 DEFAULT_CONFIRMED_MIN_RR = Decimal("3")
+PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
 DEFAULT_MIN_TECHNICAL_SCORE = Decimal("50")
+PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS = {
+    "watch",
+    "watchlist",
+    "watchlisted",
+    "stalking",
+    "a_grade_watch",
+    "triggered",
+}
+PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS = {
+    "invalidated",
+    "expired",
+    "cooldown",
+    "cooled_down",
+    "rejected",
+    "reject",
+    "archived",
+    "no_longer_tracking",
+}
+REGIME_MARKET_CONDITION_PENDING = "REGIME_MARKET_CONDITION_PENDING"
+PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES = frozenset(
+    {
+        "regime_compatibility",
+        "regime_blocked",
+        "regime_not_confirmed",
+        "market_condition_blocked",
+        "market_condition_not_ready",
+        "btc_eth_regime_blocked",
+        "rejected_by_regime",
+    }
+)
+PUBLIC_WATCHLIST_MISSING_DATA_GATE_CODES = frozenset(
+    {
+        "missing_regime_data",
+        "regime_data_missing",
+        "missing_market_data",
+        "market_data_missing",
+    }
+)
+PUBLIC_WATCHLIST_MALFORMED_FAILED_GATE_CLASS = "MALFORMED_FAILED_GATE"
+PUBLIC_WATCHLIST_MISSING_DATA_FAILED_GATE_CLASS = "MISSING_REGIME_MARKET_DATA"
+PUBLIC_WATCHLIST_NON_REGIME_FAILED_GATE_CLASS = "NON_REGIME_FAILED_GATE"
+PUBLIC_WATCHLIST_UNKNOWN_FAILED_GATE_CLASS = "UNKNOWN_FAILED_GATE"
 CONFIRMED_REJECTED_STATUS_KEYS = {
     "scan_error",
     "scanned_no_setup",
@@ -182,16 +229,6 @@ CONFIRMED_REJECTED_STATUS_KEYS = {
     "no_setup",
     "rejected",
 }
-A_GRADE_PUBLIC_LIMIT_HARD_STATUS_KEYS = {
-    "failed",
-    "rejected_by_derivatives",
-    "rejected_by_regime",
-    "rejected_by_risk",
-    "rejected_by_scoring",
-    "rejected_by_technical",
-    "scan_error",
-}
-A_GRADE_PUBLIC_LIMIT_GRADES = {"a", "a+"}
 CONFIRMED_ALLOWED_QUALITY_STATE_KEYS = {
     "high_quality_trade",
     "valid_but_lower_quality",
@@ -234,6 +271,30 @@ WATCHLIST_RR_GATES = {
 WATCHLIST_CONFIRMATION_GATES = {
     "missing_confirmation_structure_shift",
 }
+PUBLIC_WATCHLIST_KNOWN_NON_REGIME_FAILED_GATES = frozenset(
+    {
+        "missing_confirmed_sweep",
+        "target_integrity",
+        "target_integrity_failed",
+        "limit_zone_not_touched",
+        "trust_meter_below_minimum",
+        "challenge_trust_below_85",
+        "derivatives_conflict",
+        "funding_oi_guard",
+        "quality_filter",
+        "challenge_illiquid_token",
+        "challenge_btc_abnormal",
+        "challenge_event_window",
+        "btc_volatility_guard",
+        "btc_d_guard",
+        "event_guard",
+        "wick_sweep_reclaim",
+    }
+    | WATCHLIST_STALE_OR_INCOMPLETE_GATES
+    | WATCHLIST_OB_FVG_GATES
+    | WATCHLIST_RR_GATES
+    | WATCHLIST_CONFIRMATION_GATES
+)
 INVALIDATION_REJECTION_FRAGMENTS = (
     "technical score",
     "opportunity score",
@@ -262,6 +323,29 @@ class TelegramAlertDecision:
     alert_type: TelegramAlertType | None = None
     message: TelegramSignalMessage | None = None
     lifecycle_transition: SetupTransitionResult | None = None
+
+
+@dataclass(frozen=True)
+class PublicSignalGateResult:
+    allowed: bool
+    reason_codes: tuple[str, ...] = ()
+    blocking_reasons: tuple[str, ...] = ()
+    state: str = NA
+    setup_id: str | None = None
+    symbol: str | None = None
+
+
+@dataclass(frozen=True)
+class PublicWatchlistGateResult:
+    allowed: bool
+    setup_id: str | None = None
+    symbol: str | None = None
+    state: str = NA
+    failed_gate_codes: tuple[str, ...] = ()
+    failed_gate_classes: tuple[str, ...] = ()
+    allowed_missing_gate: str | None = None
+    blocking_reasons: tuple[str, ...] = ()
+    rr: float | None = None
 
 
 @dataclass(frozen=True)
@@ -390,6 +474,36 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
 
     def has_prior_active_alert(self, *, signal_id: str) -> bool:
         return self.get_prior_public_alert(signal_ids=(signal_id,)) is not None
+
+    def has_prior_public_signal_alert(self, *, signal_id: str) -> bool:
+        return self.get_prior_public_signal_alert(signal_ids=(signal_id,)) is not None
+
+    def get_prior_public_signal_alert(
+        self,
+        *,
+        signal_ids: Sequence[str],
+    ) -> TelegramAlertAttemptRecord | None:
+        candidates = tuple(dict.fromkeys(_identity(signal_id) for signal_id in signal_ids if _identity(signal_id) != NA))
+        if not candidates:
+            return None
+        placeholders = ",".join("?" for _ in candidates)
+        type_placeholders = ",".join("?" for _ in PRIOR_PUBLIC_SIGNAL_ALERT_TYPES)
+        rows = self._connection.execute(
+            f"""
+            SELECT * FROM telegram_alert_attempts
+            WHERE signal_id IN ({placeholders})
+              AND alert_type IN ({type_placeholders})
+              AND telegram_status = 'sent'
+              AND sent_at IS NOT NULL
+              AND sent_at NOT IN ('', 'N/A')
+            ORDER BY id ASC
+            """,
+            (*candidates, *sorted(PRIOR_PUBLIC_SIGNAL_ALERT_TYPES)),
+        ).fetchall()
+        records = tuple(_record_from_row(row) for row in rows)
+        if not records:
+            return None
+        return _preferred_prior_active_record(records, candidates)
 
     def get_prior_public_alert(
         self,
@@ -934,9 +1048,16 @@ class TelegramLifecycleDeliveryService:
             else TerminalIdentityBridge()
         )
         prior_active_alert = terminal_bridge.prior_alert
+        prior_public_signal_alert = (
+            repository.get_prior_public_signal_alert(signal_ids=(_signal_id(symbol_result),))
+            if alert_type_hint == TelegramAlertType.LIMIT_HIT
+            else None
+        )
         previously_active_sent = (
             prior_active_alert is not None
             if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES
+            else prior_public_signal_alert is not None
+            if alert_type_hint == TelegramAlertType.LIMIT_HIT
             else repository.has_prior_active_alert(signal_id=_signal_id(symbol_result))
         )
         decision = telegram_alert_decision_for_symbol(
@@ -944,7 +1065,7 @@ class TelegramLifecycleDeliveryService:
             previously_active_sent=previously_active_sent,
             eligibility_context=eligibility_context,
             terminal_identity_failure_reason=terminal_bridge.blocked_reason,
-            prior_public_alert=prior_active_alert,
+            prior_public_alert=prior_public_signal_alert if alert_type_hint == TelegramAlertType.LIMIT_HIT else prior_active_alert,
         )
         if not decision.eligible or decision.alert_type is None or decision.message is None:
             if decision.alert_type is not None and decision.message is not None and _persist_blocked_decision(decision):
@@ -1008,6 +1129,20 @@ class TelegramLifecycleDeliveryService:
                 _message_with_prior_public_identity(message, prior_active_alert),
                 upgraded_from_watchlist=prior_active_alert.alert_type == TelegramAlertType.WATCHLIST.value,
             )
+        elif decision.alert_type == TelegramAlertType.LIMIT_HIT:
+            prior_limit_alert = prior_public_signal_alert or repository.get_prior_public_signal_alert(signal_ids=(signal_id,))
+            if prior_limit_alert is None:
+                reason = "blocked:limit_hit_requires_prior_public_signal"
+                blocked_decision = replace(decision, eligible=False, reason=reason, message=message)
+                return _persist_blocked_attempt(
+                    repository,
+                    symbol_result,
+                    decision=blocked_decision,
+                    scan_run_id=scan_run_id,
+                    eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                )
+            signal_id = prior_limit_alert.signal_id
+            message = _message_with_prior_public_plan(message, prior_limit_alert)
         elif decision.alert_type in TP_SL_ALERT_TYPES:
             prior_tp_sl_alert = repository.get_prior_public_alert(signal_ids=(signal_id,))
             if prior_tp_sl_alert is not None:
@@ -1080,7 +1215,7 @@ class TelegramLifecycleDeliveryService:
             attempted_alert_type=decision.alert_type.value,
             setup_quality_score=_quality_score(symbol_result),
             rr_planned=_text(message.planned_rr),
-            min_rr=_text((eligibility_context or TelegramEligibilityContext()).min_rr),
+            min_rr=_text(_min_rr_for_alert(decision.alert_type, eligibility_context or TelegramEligibilityContext())),
             opportunity_score=_opportunity_score_text(symbol_result),
             min_score_for_idea=_text((eligibility_context or TelegramEligibilityContext()).min_score_for_idea),
             technical_score=_technical_score_text(symbol_result),
@@ -1616,17 +1751,36 @@ def telegram_alert_decision_for_symbol(
             _message_with_prior_public_identity(message, prior_public_alert),
             was_watchlist=prior_public_alert.alert_type == TelegramAlertType.WATCHLIST.value,
         )
-    direct_limit_hit = _direct_a_grade_limit_hit_public_signal(symbol_result, alert_type)
-    if _requires_prior_active_alert(alert_type) and not previously_active_sent and not direct_limit_hit:
+    if alert_type == TelegramAlertType.LIMIT_HIT and prior_public_alert is not None:
+        message = _message_with_prior_public_plan(message, prior_public_alert)
+
+    public_gate = _public_signal_gate_result(
+        symbol_result,
+        alert_type,
+        message,
+        prior_public_alert=prior_public_alert,
+    )
+    if not public_gate.allowed:
+        return TelegramAlertDecision(
+            False,
+            "blocked:" + "; ".join(public_gate.blocking_reasons),
+            alert_type=alert_type,
+            message=message,
+            lifecycle_transition=transition,
+        )
+
+    if _requires_prior_active_alert(alert_type) and not previously_active_sent:
         if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
             reason = terminal_identity_failure_reason or "terminal_update_no_prior_public_alert"
+        elif alert_type == TelegramAlertType.LIMIT_HIT:
+            reason = "blocked:limit_hit_requires_prior_public_signal"
         else:
             reason = "missing_prior_active_telegram_alert"
         return TelegramAlertDecision(
             False,
             reason,
-            alert_type=alert_type if alert_type in TERMINAL_UPDATE_ALERT_TYPES else None,
-            message=message if alert_type in TERMINAL_UPDATE_ALERT_TYPES else None,
+            alert_type=alert_type if alert_type in TERMINAL_UPDATE_ALERT_TYPES or alert_type == TelegramAlertType.LIMIT_HIT else None,
+            message=message if alert_type in TERMINAL_UPDATE_ALERT_TYPES or alert_type == TelegramAlertType.LIMIT_HIT else None,
             lifecycle_transition=transition,
         )
 
@@ -1803,6 +1957,28 @@ def _telegram_signal_message_for_alert(
     context: TelegramEligibilityContext,
 ) -> TelegramSignalMessage:
     message = replace(telegram_signal_message_from_symbol(symbol_result), min_rr=context.min_rr)
+    if alert_type == TelegramAlertType.WATCHLIST:
+        diagnostics = _representative_diagnostics(symbol_result)
+        message = replace(
+            message,
+            min_rr=PUBLIC_WATCHLIST_MIN_RR,
+            regime_state=_first_non_na(
+                symbol_result.regime_state,
+                diagnostics.get("regime_state"),
+                _mapping_value(symbol_result.regime_diagnostics, "state"),
+            ),
+            regime_compatibility_label=_first_non_na(
+                symbol_result.regime_compatibility_label,
+                diagnostics.get("regime_compatibility_label"),
+                _mapping_value(symbol_result.regime_diagnostics, "compatibility_label"),
+            ),
+            regime_confidence=_first_non_na(
+                symbol_result.regime_confidence_score,
+                diagnostics.get("regime_confidence"),
+                diagnostics.get("regime_confidence_score"),
+                _mapping_value(symbol_result.regime_diagnostics, "confidence_score"),
+            ),
+        )
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
         return replace(message, invalidation_reason=_terminal_update_reason(symbol_result, alert_type))
     return message
@@ -2337,19 +2513,6 @@ def _alert_type_for_transition(
     transition: SetupTransitionResult,
 ) -> TelegramAlertType | None:
     state = transition.to_state
-    if state == SetupLifecycleState.A_GRADE_WATCH:
-        return None
-    if (
-        state == SetupLifecycleState.EXECUTING
-        and transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
-        and transition.from_state
-        in {
-            SetupLifecycleState.A_GRADE_WATCH,
-            SetupLifecycleState.WATCHLISTED,
-            SetupLifecycleState.STALKING,
-        }
-    ):
-        return TelegramAlertType.LIMIT_HIT
     if state in WATCH_ALERT_STATES:
         return TelegramAlertType.WATCHLIST
     if state in SIGNAL_ALERT_STATES:
@@ -2371,21 +2534,6 @@ def _alert_type_for_transition(
     if _explicit_watchlist_candidate(symbol_result):
         return TelegramAlertType.WATCHLIST
     return None
-
-
-def _direct_a_grade_limit_hit_public_signal(
-    symbol_result: ScannerSymbolResult,
-    alert_type: TelegramAlertType,
-) -> bool:
-    if alert_type != TelegramAlertType.LIMIT_HIT:
-        return False
-    transition = symbol_result.lifecycle_transition
-    if transition is None:
-        return False
-    return transition.from_state == SetupLifecycleState.A_GRADE_WATCH and transition.to_state in {
-        SetupLifecycleState.EXECUTING,
-        SetupLifecycleState.MANAGING,
-    }
 
 
 def _tp_alert_type(symbol_result: ScannerSymbolResult) -> TelegramAlertType | None:
@@ -2443,9 +2591,9 @@ def _terminal_transition_blockers(
         return ("terminal_transition_missing_previous_state",)
 
     if alert_type == TelegramAlertType.INVALIDATED:
-        allowed = WATCH_ALERT_STATES | SIGNAL_ALERT_STATES | {SetupLifecycleState.MANAGING}
+        allowed = WATCH_ALERT_STATES | SIGNAL_ALERT_STATES | {SetupLifecycleState.EXECUTING, SetupLifecycleState.MANAGING}
     elif alert_type == TelegramAlertType.EXPIRED:
-        allowed = WATCH_ALERT_STATES | SIGNAL_ALERT_STATES | {SetupLifecycleState.MANAGING}
+        allowed = WATCH_ALERT_STATES | SIGNAL_ALERT_STATES | {SetupLifecycleState.EXECUTING, SetupLifecycleState.MANAGING}
     elif alert_type == TelegramAlertType.NO_LONGER_TRACKING:
         allowed = WATCH_ALERT_STATES | {SetupLifecycleState.INVALIDATED, SetupLifecycleState.EXPIRED}
     else:
@@ -2726,6 +2874,361 @@ def _terminal_sentence(prefix: str, reason: str) -> str:
     return f"{prefix} {cleaned[:1].lower()}{cleaned[1:]}"
 
 
+def _public_signal_gate_result(
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage,
+    *,
+    prior_public_alert: TelegramAlertAttemptRecord | None = None,
+) -> PublicSignalGateResult:
+    if alert_type not in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}:
+        return PublicSignalGateResult(True)
+
+    state = _public_gate_state(symbol_result)
+    state_key = _status_key(state)
+    setup_id = _signal_id(symbol_result)
+    symbol = _symbol(message.symbol)
+    reasons: list[str] = []
+
+    if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
+        if not is_public_signal_eligible_state(state_key):
+            reasons.append(f"public_signal_state_not_confirmed:{state_key or 'missing'}")
+        if is_internal_touch_state(state_key):
+            reasons.append(f"internal_touch_state_not_public_signal:{state_key}")
+    elif alert_type == TelegramAlertType.LIMIT_HIT:
+        if prior_public_alert is None:
+            reasons.append("limit_hit_requires_prior_public_signal")
+        if not is_public_active_state(state_key):
+            reasons.append(f"limit_hit_state_not_public_active:{state_key or 'missing'}")
+        if is_internal_touch_state(state_key):
+            reasons.append(f"limit_hit_internal_touch_state:{state_key}")
+        if prior_public_alert is not None and setup_id != NA and prior_public_alert.signal_id != setup_id:
+            reasons.append("limit_hit_signal_id_mismatch")
+
+    missing = _missing_required_fields(alert_type, message)
+    if missing:
+        reasons.append(f"missing_required_fields:{','.join(missing)}")
+
+    if _text(symbol_result.rejection_reason) != NA:
+        reasons.append("rejection_reason_present")
+    if any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
+        reasons.append("rejection_reasons_present")
+
+    if _status_key(_first_non_na(_lifecycle_state_text(symbol_result), state)) in {
+        "invalidated",
+        "expired",
+        "cooldown",
+        "rejected",
+        "reject",
+    }:
+        reasons.append(f"terminal_or_rejected_state:{state_key or 'missing'}")
+
+    return PublicSignalGateResult(
+        allowed=not reasons,
+        reason_codes=tuple(_status_key(reason) for reason in reasons),
+        blocking_reasons=tuple(dict.fromkeys(reasons)),
+        state=state_key or NA,
+        setup_id=None if setup_id == NA else setup_id,
+        symbol=None if symbol == NA else symbol,
+    )
+
+
+def _public_watchlist_gate_result(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+    context: TelegramEligibilityContext,
+) -> PublicWatchlistGateResult:
+    state = _public_gate_state(symbol_result)
+    state_key = _status_key(state)
+    setup_id = _signal_id(symbol_result)
+    symbol = _symbol(message.symbol)
+    failed_gate_codes = _public_watchlist_failed_gate_codes(symbol_result)
+    failed_gate_classes = _public_watchlist_failed_gate_classes(failed_gate_codes)
+    failed_gate_class_set = frozenset(failed_gate_classes)
+    allowed_missing_gate = (
+        REGIME_MARKET_CONDITION_PENDING
+        if failed_gate_class_set == frozenset({REGIME_MARKET_CONDITION_PENDING})
+        else None
+    )
+    planned_rr = _decimal_or_none(message.planned_rr)
+    reasons: list[str] = []
+
+    if state_key not in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS:
+        reasons.append(f"public_watchlist_state_not_eligible:{state_key or 'missing'}")
+    if state_key in PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS:
+        reasons.append(f"public_watchlist_terminal_or_rejected_state:{state_key}")
+
+    expiry = _watchlist_candidate_expiry_decision(symbol_result)
+    if expiry.expired:
+        reasons.append(WATCHLIST_EXPIRY_REASON)
+
+    reasons.extend(_public_quality_gate_blockers(symbol_result))
+    reasons.extend(_public_watchlist_status_blockers(symbol_result))
+    reasons.extend(_public_watchlist_data_health_blockers(symbol_result))
+
+    quality_state = _setup_quality_state_key(symbol_result)
+    if quality_state == "data_issue" or quality_state in WATCHLIST_BLOCKED_QUALITY_STATE_KEYS:
+        reasons.append(f"setup_quality_blocked:{quality_state}")
+    if allowed_missing_gate is None and _text(symbol_result.rejection_reason) != NA:
+        reasons.append("rejection_reason_present")
+    if allowed_missing_gate is None and any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
+        reasons.append("rejection_reasons_present")
+
+    missing = _public_watchlist_missing_required_fields(message)
+    if missing:
+        reasons.append(f"public_watchlist_missing_required_fields:{','.join(missing)}")
+
+    readiness_context = replace(context, min_rr=PUBLIC_WATCHLIST_MIN_RR)
+    reasons.extend(_watchlist_public_readiness_blockers(symbol_result, message, readiness_context))
+    reasons.extend(_public_watchlist_target_integrity_blockers(symbol_result, message))
+
+    if planned_rr is None:
+        reasons.append("public_watchlist_rr_missing_or_invalid")
+    elif planned_rr < PUBLIC_WATCHLIST_MIN_RR:
+        reasons.append(
+            f"public_watchlist_rr_below_min:{_text(planned_rr)}<{_text(PUBLIC_WATCHLIST_MIN_RR)}"
+        )
+
+    regime_missing = _public_watchlist_missing_regime_fields(symbol_result)
+    if regime_missing:
+        reasons.append(f"public_watchlist_regime_data_missing:{','.join(regime_missing)}")
+
+    if not failed_gate_codes:
+        reasons.append("public_watchlist_missing_explicit_regime_gate")
+    elif allowed_missing_gate is None:
+        malformed_gates = tuple(
+            code
+            for code in failed_gate_codes
+            if classify_failed_gate_code(code) == PUBLIC_WATCHLIST_MALFORMED_FAILED_GATE_CLASS
+        )
+        missing_data_gates = tuple(
+            code
+            for code in failed_gate_codes
+            if classify_failed_gate_code(code) == PUBLIC_WATCHLIST_MISSING_DATA_FAILED_GATE_CLASS
+        )
+        non_regime_gates = tuple(
+            code
+            for code in failed_gate_codes
+            if classify_failed_gate_code(code) == PUBLIC_WATCHLIST_NON_REGIME_FAILED_GATE_CLASS
+        )
+        unknown_gates = tuple(
+            code
+            for code in failed_gate_codes
+            if classify_failed_gate_code(code) == PUBLIC_WATCHLIST_UNKNOWN_FAILED_GATE_CLASS
+        )
+        if malformed_gates:
+            reasons.append("public_watchlist_malformed_failed_gate_diagnostics")
+        if missing_data_gates:
+            reasons.append(f"public_watchlist_missing_data_failed_gates={','.join(missing_data_gates)}")
+        if non_regime_gates:
+            reasons.append(f"public_watchlist_non_regime_failed_gates={','.join(non_regime_gates)}")
+        if unknown_gates:
+            reasons.append(f"public_watchlist_unknown_failed_gates={','.join(unknown_gates)}")
+        if (
+            REGIME_MARKET_CONDITION_PENDING in failed_gate_class_set
+            and failed_gate_class_set != frozenset({REGIME_MARKET_CONDITION_PENDING})
+        ):
+            reasons.append(f"public_watchlist_conflicting_failed_gate_classes={','.join(failed_gate_classes)}")
+        elif not (malformed_gates or missing_data_gates or non_regime_gates or unknown_gates):
+            reasons.append(f"public_watchlist_failed_gate_class_not_allowed={','.join(failed_gate_classes)}")
+
+    return PublicWatchlistGateResult(
+        allowed=not reasons,
+        setup_id=None if setup_id == NA else setup_id,
+        symbol=None if symbol == NA else symbol,
+        state=state_key or NA,
+        failed_gate_codes=failed_gate_codes,
+        failed_gate_classes=failed_gate_classes,
+        allowed_missing_gate=allowed_missing_gate,
+        blocking_reasons=tuple(dict.fromkeys(reasons)),
+        rr=float(planned_rr) if planned_rr is not None else None,
+    )
+
+
+def _public_watchlist_failed_gate_codes(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    diagnostics = _representative_diagnostics(symbol_result)
+    intelligence = _near_miss_intelligence(symbol_result, diagnostics)
+    lifecycle = symbol_result.lifecycle_state
+    values: list[Any] = [
+        _field(intelligence, "primary_failed_gate"),
+        diagnostics.get("first_failed_gate"),
+        diagnostics.get("failed_gate"),
+        getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA,
+    ]
+    values.extend(_sequence_or_single(diagnostics.get("gates_failed")))
+    values.extend(_sequence_or_single(diagnostics.get("failed_gates")))
+
+    codes = tuple(dict.fromkeys(code for value in values if (code := normalize_failed_gate_code(value))))
+    stage_code = normalize_failed_gate_code(symbol_result.rejection_stage)
+    if stage_code and stage_code != "regime":
+        codes = tuple(dict.fromkeys((*codes, stage_code)))
+    return codes
+
+
+def _public_watchlist_failed_gate_classes(failed_gate_codes: Sequence[str]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            failed_gate_class
+            for code in failed_gate_codes
+            if (failed_gate_class := classify_failed_gate_code(code))
+        )
+    )
+
+
+def normalize_failed_gate_code(value: Any) -> str:
+    if _malformed_failed_gate_value(value):
+        return PUBLIC_WATCHLIST_MALFORMED_FAILED_GATE_CLASS.lower()
+    return _failed_gate_code(value)
+
+
+def classify_failed_gate_code(value: Any) -> str:
+    code = normalize_failed_gate_code(value)
+    if not code:
+        return ""
+    if code in PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES:
+        return REGIME_MARKET_CONDITION_PENDING
+    if code in PUBLIC_WATCHLIST_MISSING_DATA_GATE_CODES:
+        return PUBLIC_WATCHLIST_MISSING_DATA_FAILED_GATE_CLASS
+    if code == PUBLIC_WATCHLIST_MALFORMED_FAILED_GATE_CLASS.lower():
+        return PUBLIC_WATCHLIST_MALFORMED_FAILED_GATE_CLASS
+    if code in PUBLIC_WATCHLIST_KNOWN_NON_REGIME_FAILED_GATES:
+        return PUBLIC_WATCHLIST_NON_REGIME_FAILED_GATE_CLASS
+    return PUBLIC_WATCHLIST_UNKNOWN_FAILED_GATE_CLASS
+
+
+def _malformed_failed_gate_value(value: Any) -> bool:
+    if value is None or value == NA:
+        return False
+    if isinstance(value, Mapping):
+        return True
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _failed_gate_code(value: Any) -> str:
+    key = _status_key(value)
+    if key in {"", "na", "n_a", "none", "null", "nan", "pass", "passed", "true", "false"}:
+        return ""
+    return key
+
+
+def _public_watchlist_missing_required_fields(message: TelegramSignalMessage) -> tuple[str, ...]:
+    missing: list[str] = []
+    if _text(message.signal_id) == NA:
+        missing.append("signal_id")
+    if _text(message.symbol) == NA:
+        missing.append("symbol")
+    if _status_key(message.direction) not in {"long", "short"}:
+        missing.append("direction")
+    if _text(message.mode) == NA:
+        missing.append("setup_type")
+    if _decimal_pair_values(message.entry_low, message.entry_high) is None and _decimal_pair_text(message.watch_zone) is None:
+        missing.append("entry_zone")
+    if _decimal_or_none(message.stop_loss) is None:
+        missing.append("stop_loss")
+    if _decimal_or_none(message.tp1) is None:
+        missing.append("tp1")
+    if _decimal_or_none(message.planned_rr) is None:
+        missing.append("planned_rr")
+    if _text(_first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)) == NA:
+        missing.append("invalidation")
+    return tuple(missing)
+
+
+def _public_watchlist_status_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    blocked_status_keys = {
+        "scan_error",
+        "scanned_no_setup",
+        "rejected_by_technical",
+        "rejected_by_derivatives",
+        "rejected_by_risk",
+        "rejected_by_scoring",
+        "failed",
+        "no_setup",
+        "rejected",
+    }
+    return tuple(
+        dict.fromkeys(
+            f"public_watchlist_core_status_blocked:{status_key}"
+            for status_key in _status_keys(symbol_result)
+            if status_key in blocked_status_keys
+        )
+    )
+
+
+def _public_watchlist_data_health_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    blockers: list[str] = []
+    if symbol_result.timed_out or _status_key(symbol_result.timeout_status) not in {"", "none"}:
+        blockers.append("public_watchlist_data_health_blocked:timeout")
+    if _text(symbol_result.error_message) != NA:
+        blockers.append("public_watchlist_data_health_blocked:error_message")
+    for field_name in (
+        "missing_data",
+        "unverified_data",
+        "strategy_missing_data",
+        "strategy_unverified_data",
+        "derivatives_missing_data",
+        "derivatives_unverified_data",
+    ):
+        if _sequence_or_single(getattr(symbol_result, field_name, ())):
+            blockers.append(f"public_watchlist_data_health_blocked:{field_name}")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _public_watchlist_target_integrity_blockers(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+) -> tuple[str, ...]:
+    diagnostics = _representative_diagnostics(symbol_result)
+    blockers = list(_target_integrity_blockers(symbol_result, TelegramAlertType.WATCHLIST, message))
+    status = _status_key(diagnostics.get("target_integrity_status"))
+    if status in {"blocked", "failed", "fail", "invalid", "rejected"}:
+        blockers.append(f"target_integrity_failed:status={status}")
+    if _truthy_public_flag(diagnostics.get("target_integrity_failed")) or _truthy_public_flag(
+        diagnostics.get("target_integrity_blocked")
+    ):
+        blockers.append("target_integrity_failed:diagnostic_flag")
+    invalid_fields = _text(diagnostics.get("invalid_target_fields"))
+    if invalid_fields != NA:
+        blockers.append(f"target_integrity_failed:invalid_target_fields={invalid_fields}")
+    if any(code in {"target_integrity", "target_integrity_failed"} for code in _public_watchlist_failed_gate_codes(symbol_result)):
+        blockers.append("target_integrity_failed:failed_gate")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _public_watchlist_missing_regime_fields(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    diagnostics = _representative_diagnostics(symbol_result)
+    missing: list[str] = []
+    regime_state = _first_non_na(
+        symbol_result.regime_state,
+        diagnostics.get("regime_state"),
+        _mapping_value(symbol_result.regime_diagnostics, "state"),
+    )
+    regime_fit = _first_non_na(
+        symbol_result.regime_compatibility_label,
+        diagnostics.get("regime_compatibility_label"),
+        _mapping_value(symbol_result.regime_diagnostics, "compatibility_label"),
+    )
+    if _text(regime_state) == NA:
+        missing.append("regime_state")
+    if _text(regime_fit) == NA:
+        missing.append("regime_compatibility_label")
+    return tuple(missing)
+
+
+def _truthy_public_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    key = _status_key(value)
+    return key in {"1", "true", "yes", "y", "blocked", "failed", "fail", "invalid", "rejected"}
+
+
+def _public_gate_state(symbol_result: ScannerSymbolResult) -> str:
+    transition = symbol_result.lifecycle_transition
+    if transition is not None and transition.to_state is not None:
+        return transition.to_state.value
+    return _lifecycle_state_text(symbol_result)
+
+
 def _missing_required_fields(alert_type: TelegramAlertType, message: TelegramSignalMessage) -> tuple[str, ...]:
     required: list[tuple[str, Any]] = [
         ("signal_id", message.signal_id),
@@ -2757,9 +3260,7 @@ def _missing_required_fields(alert_type: TelegramAlertType, message: TelegramSig
     }:
         required.append(("invalidation_reason", message.invalidation_reason))
     if alert_type in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}:
-        required.extend((("tp1", message.tp1), ("tp2", message.tp2)))
-    if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
-        required.append(("tp3", message.tp3))
+        required.extend((("tp1", message.tp1), ("tp2", message.tp2), ("tp3", message.tp3)))
     if alert_type == TelegramAlertType.TP1_HIT:
         required.append(("tp1", message.tp1))
     if alert_type == TelegramAlertType.TP2_HIT:
@@ -2778,25 +3279,7 @@ def _defensive_delivery_blockers(
     context: TelegramEligibilityContext,
 ) -> tuple[str, ...]:
     if alert_type == TelegramAlertType.WATCHLIST:
-        blockers: list[str] = []
-        expiry = _watchlist_candidate_expiry_decision(symbol_result)
-        if expiry.expired:
-            blockers.append(WATCHLIST_EXPIRY_REASON)
-        blockers.extend(_public_quality_gate_blockers(symbol_result))
-        explicit_watchlist = _explicit_watchlist_candidate(symbol_result)
-        blockers.extend(_watchlist_status_blockers(symbol_result, explicit_watchlist=explicit_watchlist))
-        quality_state = _setup_quality_state_key(symbol_result)
-        if quality_state == "data_issue":
-            blockers.append(f"setup_quality_blocked:{quality_state}")
-        elif quality_state in WATCHLIST_BLOCKED_QUALITY_STATE_KEYS and not explicit_watchlist:
-            blockers.append(f"setup_quality_blocked:{quality_state}")
-        if _text(symbol_result.rejection_reason) != NA and not explicit_watchlist:
-            blockers.append("rejection_reason_present")
-        if any(_text(reason) != NA for reason in symbol_result.rejection_reasons) and not explicit_watchlist:
-            blockers.append("rejection_reasons_present")
-        blockers.extend(_watchlist_public_readiness_blockers(symbol_result, message, context))
-        blockers.extend(_target_integrity_blockers(symbol_result, alert_type, message))
-        return tuple(dict.fromkeys(blockers))
+        return _public_watchlist_gate_result(symbol_result, message, context).blocking_reasons
 
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
         blockers = list(_terminal_transition_blockers(symbol_result, alert_type))
@@ -2804,9 +3287,6 @@ def _defensive_delivery_blockers(
         if missing:
             blockers.append(f"missing_required_fields:{','.join(missing)}")
         return tuple(dict.fromkeys(blockers))
-
-    if alert_type == TelegramAlertType.LIMIT_HIT and _direct_a_grade_limit_hit_public_signal(symbol_result, alert_type):
-        return _a_grade_limit_hit_public_blockers(symbol_result, message, context)
 
     if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
         return ()
@@ -2863,94 +3343,6 @@ def _defensive_delivery_blockers(
 
     blockers.extend(_target_integrity_blockers(symbol_result, alert_type, message))
 
-    return tuple(dict.fromkeys(blockers))
-
-
-def _a_grade_limit_hit_public_blockers(
-    symbol_result: ScannerSymbolResult,
-    message: TelegramSignalMessage,
-    context: TelegramEligibilityContext,
-) -> tuple[str, ...]:
-    blockers: list[str] = []
-    blockers.extend(_public_quality_gate_blockers(symbol_result))
-
-    grade_key = _status_key(
-        _first_non_na(
-            message.quality,
-            getattr(getattr(symbol_result.setup_quality, "quality_grade", None), "value", NA),
-            _representative_diagnostics(symbol_result).get("quality_grade"),
-            _representative_diagnostics(symbol_result).get("trust_grade"),
-            _representative_diagnostics(symbol_result).get("grade"),
-        )
-    )
-    if grade_key not in A_GRADE_PUBLIC_LIMIT_GRADES:
-        blockers.append(f"quality_grade_not_a:{grade_key or 'missing'}")
-
-    status_keys = set(_status_keys(symbol_result))
-    for status_key in sorted(status_keys & A_GRADE_PUBLIC_LIMIT_HARD_STATUS_KEYS):
-        blockers.append(f"core_status_blocked:{status_key}")
-
-    missing = _missing_required_fields(TelegramAlertType.LIMIT_HIT, message)
-    if missing:
-        blockers.append(f"missing_required_fields:{','.join(missing)}")
-
-    planned_rr = _decimal_or_none(message.planned_rr)
-    if planned_rr is None:
-        blockers.append("planned_rr_missing_or_invalid")
-    elif planned_rr < context.min_rr:
-        blockers.append(f"planned_rr_below_min:{_text(planned_rr)}<{_text(context.min_rr)}")
-
-    raw_invalidation = _raw_invalidation_text(symbol_result)
-    if _text(message.invalidation_reason) == NA:
-        blockers.append("invalidation_missing")
-    if _looks_like_rejection_reason(raw_invalidation) or _looks_like_rejection_reason(message.invalidation_reason):
-        blockers.append("invalidation_contains_rejection_reason")
-
-    blockers.extend(_a_grade_limit_hit_status_blockers(symbol_result))
-    blockers.extend(_target_integrity_blockers(symbol_result, TelegramAlertType.LIMIT_HIT, message))
-    return tuple(dict.fromkeys(blockers))
-
-
-def _a_grade_limit_hit_status_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
-    diagnostics = _representative_diagnostics(symbol_result)
-    blockers: list[str] = []
-    if _text(symbol_result.error_message) != NA:
-        blockers.append("scanner_error_present")
-    risk_decision = symbol_result.risk_decision
-    if risk_decision is not None and getattr(risk_decision, "approved", True) is not True:
-        blockers.append("risk_validation_failed")
-    risk_approved = diagnostics.get("risk_approved")
-    if isinstance(risk_approved, bool) and risk_approved is False:
-        blockers.append("risk_validation_failed")
-    if _status_key(diagnostics.get("target_integrity_status")) in {"blocked", "failed", "fail", "rejected", "reject"}:
-        blockers.append("target_integrity")
-    failed_gate = _status_key(_first_non_na(diagnostics.get("first_failed_gate"), getattr(symbol_result.lifecycle_state, "failed_gate", NA)))
-    if failed_gate in {
-        "body_acceptance_failure",
-        "challenge_rr_below_3",
-        "derivatives_conflict",
-        "entry_window_expired",
-        "funding_oi_guard",
-        "missing_entry",
-        "missing_entry_zone",
-        "missing_invalidation",
-        "missing_rr",
-        "missing_stop",
-        "missing_target",
-        "missing_targets",
-        "no_ob_or_fvg_zone",
-        "pullback_beyond_786",
-        "pullback_too_deep",
-        "regime_compatibility",
-        "risk",
-        "risk_validation_failed",
-        "rr_below_minimum",
-        "rr_too_low",
-        "scanner_error",
-        "structural_breakdown",
-        "target_integrity",
-    }:
-        blockers.append(f"failed_gate_blocked:{failed_gate}")
     return tuple(dict.fromkeys(blockers))
 
 
@@ -3351,6 +3743,8 @@ def _persist_blocked_decision(decision: TelegramAlertDecision) -> bool:
         return decision.reason in TERMINAL_IDENTITY_BLOCK_REASONS or decision.reason.startswith("blocked:")
     if decision.alert_type in TP_SL_ALERT_TYPES:
         return decision.reason.startswith("blocked:")
+    if decision.alert_type == TelegramAlertType.LIMIT_HIT:
+        return decision.reason.startswith("blocked:")
     return decision.alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED} and decision.reason.startswith(
         "blocked:"
     )
@@ -3400,7 +3794,7 @@ def _persist_blocked_attempt(
         attempted_alert_type=decision.alert_type.value,
         setup_quality_score=_quality_score(symbol_result),
         rr_planned=_text(decision.message.planned_rr),
-        min_rr=_text(eligibility_context.min_rr),
+        min_rr=_text(_min_rr_for_alert(decision.alert_type, eligibility_context)),
         opportunity_score=_opportunity_score_text(symbol_result),
         min_score_for_idea=_text(eligibility_context.min_score_for_idea),
         technical_score=_technical_score_text(symbol_result),
@@ -3764,13 +4158,14 @@ def _watchlist_outcome_for_current_result(
         )
         return None
 
+    prior_signal_alert = repository.get_prior_public_signal_alert(signal_ids=(prior_alert.signal_id,))
     message = _message_with_prior_public_plan(
         replace(
             telegram_signal_message_from_symbol(current_result),
             min_rr=eligibility_context.min_rr,
             watchlist_outcome=True,
         ),
-        prior_alert,
+        prior_signal_alert or prior_alert,
     )
     side = _status_key(message.direction)
     limit_zone = _limit_zone_values(message)
@@ -3817,6 +4212,34 @@ def _watchlist_outcome_for_current_result(
                 repository,
                 prior_alert,
                 reason="outcome_tracking_not_limit_hit_yet",
+                scan_run_id=scan_run_id,
+                symbol_result=current_result,
+                message=message,
+                price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
+            )
+            return None
+        if prior_signal_alert is None:
+            _persist_watchlist_outcome_audit(
+                repository,
+                prior_alert,
+                reason="outcome_tracking_limit_hit_requires_prior_public_signal",
+                scan_run_id=scan_run_id,
+                symbol_result=current_result,
+                message=message,
+                price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
+            )
+            return None
+        public_gate = _public_signal_gate_result(
+            current_result,
+            TelegramAlertType.LIMIT_HIT,
+            message,
+            prior_public_alert=prior_signal_alert,
+        )
+        if not public_gate.allowed:
+            _persist_watchlist_outcome_audit(
+                repository,
+                prior_alert,
+                reason="outcome_tracking_public_gate_blocked:" + ",".join(public_gate.reason_codes),
                 scan_run_id=scan_run_id,
                 symbol_result=current_result,
                 message=message,
@@ -5293,6 +5716,8 @@ def _lifecycle_record_state_key(record: SetupLifecycleRecord) -> str:
 def _blocked_delivery_detail(alert_type: TelegramAlertType) -> str:
     if alert_type == TelegramAlertType.WATCHLIST:
         return "Telegram watchlist alert blocked by public readiness guard."
+    if alert_type == TelegramAlertType.LIMIT_HIT:
+        return "Telegram limit-hit update blocked by public signal gate."
     if alert_type in TP_SL_ALERT_TYPES:
         return "Telegram TP/SL lifecycle update blocked by live price guard."
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
@@ -5867,6 +6292,12 @@ def _take_profit(trade_idea: Any | None, target_number: int) -> Any:
     return getattr(targets[index], "price", NA)
 
 
+def _min_rr_for_alert(alert_type: TelegramAlertType, context: TelegramEligibilityContext) -> Decimal:
+    if alert_type == TelegramAlertType.WATCHLIST:
+        return PUBLIC_WATCHLIST_MIN_RR
+    return context.min_rr
+
+
 def _level_field(level: Any | None, name: str) -> Any:
     if level is None:
         return NA
@@ -6023,6 +6454,8 @@ def _text(value: Any) -> str:
 
 
 __all__ = [
+    "PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES",
+    "REGIME_MARKET_CONDITION_PENDING",
     "ResearchWatchCandidate",
     "SQLiteTelegramAlertAttemptRepository",
     "TelegramAlertDecision",
@@ -6031,7 +6464,9 @@ __all__ = [
     "TelegramLifecycleDelivery",
     "TelegramLifecycleDeliveryService",
     "TelegramLifecycleDeliverySummary",
+    "classify_failed_gate_code",
     "format_research_watch_alert",
+    "normalize_failed_gate_code",
     "telegram_alert_decision_for_symbol",
     "telegram_signal_message_from_symbol",
 ]
