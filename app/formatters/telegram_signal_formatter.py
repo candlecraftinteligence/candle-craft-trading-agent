@@ -34,7 +34,7 @@ PUBLIC_STATUS_BY_ALERT_TYPE = {
     TelegramAlertType.RESEARCH_WATCH: "RESEARCH WATCH",
     TelegramAlertType.WATCHLIST: "WATCHLIST",
     TelegramAlertType.SIGNAL_CONFIRMED: "CONFIRMED",
-    TelegramAlertType.LIMIT_HIT: "LIMIT ZONE HIT",
+    TelegramAlertType.LIMIT_HIT: "ENTRY ZONE TOUCHED",
     TelegramAlertType.TP1_HIT: "TP1 HIT",
     TelegramAlertType.TP2_HIT: "TP2 HIT",
     TelegramAlertType.TP3_HIT: "TP3 HIT",
@@ -170,26 +170,32 @@ def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
 
 def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
     requirements = _confirmation_requirements(message)
-    invalidation_level = _watchlist_invalidation_level(message)
     return _join(
-        f"{HEADER_PREFIX} WATCHLIST {EM_DASH} {format_symbol(message.symbol)}",
+        f"{HEADER_PREFIX} WATCHLIST {EM_DASH} MARKET CONDITION PENDING {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "The wolf is stalking this one.",
+        "Market condition pending.",
         "",
         f"Bias: {format_direction(message.direction)}",
-        "Status: WATCHLIST",
+        f"Setup: {_watchlist_setup_display(message.mode)}",
+        "Status: WATCHLIST - NOT ACTIVE EXECUTION SIGNAL",
+        "Blocked gate: market/regime condition only",
+        f"Market/regime: {_watchlist_market_condition_display(message)}",
         f"Quality: {_quality_display(message.quality)}",
         f"Potential RR: {format_rr(message.planned_rr)}",
         "",
-        "\U0001F440 What we want to see",
+        "\U0001F3AF Trade Map",
+        f"Entry/Limit Zone: {format_entry_zone(message)}",
+        f"SL: {format_price(message.stop_loss)}",
+        f"Invalidation: {safe_invalidation_text(message)}",
+        *_watchlist_tp_lines(message),
+        "",
+        "Passed setup checks",
+        "Liquidity sweep, reclaim, structure shift, pullback zone, target map, and RR are intact.",
+        "",
+        "Awaiting market/regime alignment",
         requirements,
         "",
-        "\U0001F4CD Area of Interest",
-        f"Zone: {format_entry_zone(message)}",
-        f"Invalid below/above: {invalidation_level}",
-        "",
-        "No confirmation = no trade.",
-        "We let the market come to us.",
+        "Not an active execution signal.",
         "",
         FOOTER,
     )
@@ -235,17 +241,17 @@ def format_premium_lifecycle_update_message(
 
 def format_limit_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} SCALP SIGNAL {EM_DASH} {format_symbol(message.symbol)}",
+        f"{HEADER_PREFIX} ENTRY ZONE TOUCHED {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        "Entry Zone Touched.",
+        "Entry zone touched.",
         "",
-        "Status: LIMIT HIT",
+        "Status: AWAITING FOLLOW-THROUGH",
         f"Direction: {format_direction(message.direction)}",
         f"Quality: {_quality_display(message.quality)}",
         f"Entry Zone: {format_entry_zone(message)}",
         f"Invalidation: {safe_invalidation_text(message)}",
         "",
-        "The setup is now active for manual execution.",
+        "Use the existing published plan only.",
         "No confirmation = no chase.",
         "",
         FOOTER,
@@ -465,6 +471,35 @@ def format_tp_lines(message: TelegramSignalMessage) -> tuple[str, str, str]:
         f"TP2: {format_price(message.tp2)}",
         f"TP3: {format_price(message.tp3)}",
     )
+
+
+def _watchlist_tp_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    lines: list[str] = []
+    for label, value in (("TP1", message.tp1), ("TP2", message.tp2), ("TP3", message.tp3)):
+        price = format_price(value)
+        if price != NA:
+            lines.append(f"{label}: {price}")
+    return tuple(lines)
+
+
+def _watchlist_setup_display(value: Any) -> str:
+    mode = _mode_display(value)
+    if mode != NA:
+        return mode
+    text = _display(value)
+    return _title_display(text) if text != NA else NA
+
+
+def _watchlist_market_condition_display(message: TelegramSignalMessage) -> str:
+    state = _title_display(message.regime_state)
+    fit = _title_display(message.regime_compatibility_label)
+    if state != NA and fit != NA:
+        return f"{state} / {fit}"
+    if state != NA:
+        return state
+    if fit != NA:
+        return fit
+    return NA
 
 
 def safe_reason_text(*values: Any) -> str:

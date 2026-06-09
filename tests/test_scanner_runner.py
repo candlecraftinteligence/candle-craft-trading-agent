@@ -382,6 +382,24 @@ def test_invalid_tp_sequence_blocks_before_alert(monkeypatch) -> None:
     assert build_symbol_display(symbol_result).short_reason == scanner_runner_module.INVALID_TP_SEQUENCE_WARNING
 
 
+def test_target_integrity_block_does_not_synthesize_passed_gates() -> None:
+    strategy_execution = scanner_runner_module._StrategyExecution(
+        strategy_diagnostics={"swing": {}},
+        rejected_strategy_modes=("swing",),
+    )
+
+    blocked = scanner_runner_module._strategy_execution_with_target_integrity_block(
+        strategy_execution,
+        reason="Clean target path is too compressed.",
+        warning="Clean target path is too compressed.",
+    )
+
+    diagnostics = blocked.strategy_diagnostics["swing"]
+    assert diagnostics["target_integrity_status"] == "blocked"
+    assert diagnostics["gates_passed"] == ()
+    assert diagnostics["gates_failed"] == ("target_integrity",)
+
+
 def test_tp_sequence_uses_absolute_reward_distance() -> None:
     assert scanner_runner_module._tp_sequence_valid(
         direction="long",

@@ -66,17 +66,26 @@ def test_valid_scalp_signal_renders_premium_format() -> None:
     assert "Signal ID" not in text
 
 
-def test_watchlist_renders_stalking_language_and_not_confirmed() -> None:
+def test_public_watchlist_copy_is_not_execution_signal() -> None:
     text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message())
 
-    assert "🐺🟠 WATCHLIST — BTCUSDT" in text
-    assert "The wolf is stalking this one." in text
-    assert "Status: WATCHLIST" in text
+    assert "🐺🟠 WATCHLIST — MARKET CONDITION PENDING — BTCUSDT" in text
+    assert "Market condition pending." in text
+    assert "Setup: SCALP" in text
+    assert "Status: WATCHLIST - NOT ACTIVE EXECUTION SIGNAL" in text
+    assert "Blocked gate: market/regime condition only" in text
     assert "Potential RR: 2.92R" in text
-    assert "👀 What we want to see" in text
-    assert "No confirmation = no trade." in text
-    assert "CONFIRMED SIGNAL" not in text
-    assert "Status: CONFIRMED" not in text
+    assert "🎯 Trade Map" in text
+    assert "Entry/Limit Zone: 100 – 102" in text
+    assert "SL: 95" in text
+    assert "TP1: 110" in text
+    assert "Not an active execution signal." in text
+    lowered = text.lower()
+    assert "scalp signal" not in lowered
+    assert "active for manual execution" not in lowered
+    assert "confirmed" not in lowered
+    assert "executing" not in lowered
+    assert "enter now" not in lowered
 
 
 def test_watchlist_upgraded_requires_upgrade_flag() -> None:
@@ -97,17 +106,22 @@ def test_watchlist_upgraded_requires_upgrade_flag() -> None:
 def test_limit_zone_hit_renders_hunting_zone_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.LIMIT_HIT, _message())
 
-    assert "🐺🟠 SCALP SIGNAL — BTCUSDT" in text
-    assert "Entry Zone Touched." in text
-    assert "Status: LIMIT HIT" in text
+    assert "🐺🟠 ENTRY ZONE TOUCHED — BTCUSDT" in text
+    assert "Entry zone touched." in text
+    assert "Status: AWAITING FOLLOW-THROUGH" in text
     assert "Direction: LONG" in text
     assert "Quality: A" in text
     assert "Entry Zone: 100 – 102" in text
     assert "Invalidation: Invalid if price accepts below 95." in text
-    assert "The setup is now active for manual execution." in text
+    assert "Use the existing published plan only." in text
     assert "No confirmation = no chase." in text
     assert "TP1: 110" not in text
     assert "TAKE PROFIT HIT" not in text
+    lowered = text.lower()
+    assert "scalp signal" not in lowered
+    assert "active for manual execution" not in lowered
+    assert "status: confirmed" not in lowered
+    assert "executing" not in lowered
 
 
 def test_tp1_renders_partial_win_language() -> None:

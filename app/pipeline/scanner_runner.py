@@ -1984,10 +1984,7 @@ def _strategy_execution_with_target_integrity_block(
         mode_diagnostics["target_integrity_reason"] = reason
         mode_diagnostics["target_integrity_warning"] = warning
         mode_diagnostics["pullback_zone_status"] = _first_non_na(mode_diagnostics.get("pullback_zone_status"), "valid")
-        gates_passed = _sequence_from_diagnostics(mode_diagnostics.get("gates_passed"))
-        if not gates_passed:
-            gates_passed = ("sweep", "bos_choch", "pullback_zone")
-        mode_diagnostics["gates_passed"] = gates_passed
+        mode_diagnostics["gates_passed"] = _sequence_from_diagnostics(mode_diagnostics.get("gates_passed"))
         gates_failed = _sequence_from_diagnostics(mode_diagnostics.get("gates_failed"))
         mode_diagnostics["gates_failed"] = _unique_strings((*gates_failed, TARGET_INTEGRITY_FAILED_GATE))
         warnings = _sequence_from_diagnostics(mode_diagnostics.get("warnings"))

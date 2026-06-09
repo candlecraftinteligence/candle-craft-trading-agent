@@ -72,7 +72,7 @@ def test_wolf_briefing_formatter_with_normal_data() -> None:
         rejected_setup_count=4,
         focus_items=(
             WolfBriefingFocusItem("BTCUSDT", "Active signal", "Confirmed setup"),
-            WolfBriefingFocusItem("ETHUSDT", "Watchlist", "Waiting for Limit Zone"),
+            WolfBriefingFocusItem("ETHUSDT", "Watchlist", "Market condition pending"),
             WolfBriefingFocusItem("SOLUSDT", "Near miss", "Trust meter below minimum"),
         ),
     )
@@ -283,7 +283,7 @@ def test_wolf_briefing_includes_valid_public_watchlist_row_in_count() -> None:
     assert "Research watch: 0" in text
 
 
-@pytest.mark.parametrize("state", ("LIMIT_HIT", "CONFIRMED", "EXECUTING", "MANAGING"))
+@pytest.mark.parametrize("state", ("CONFIRMED", "EXECUTING", "MANAGING"))
 def test_wolf_briefing_counts_valid_active_signal_states(state: str) -> None:
     snapshot = build_wolf_briefing_snapshot(
         scan_payload={"results": [_wolf_watch_row(symbol=f"{state}USDT", lifecycle_current_state=state)]},
@@ -294,6 +294,19 @@ def test_wolf_briefing_counts_valid_active_signal_states(state: str) -> None:
     text = format_wolf_briefing(snapshot)
 
     assert "Active signals: 1" in text
+    assert "Watchlist: 0" in text
+
+
+def test_wolf_briefing_does_not_count_limit_hit_as_active_signal() -> None:
+    snapshot = build_wolf_briefing_snapshot(
+        scan_payload={"results": [_wolf_watch_row(symbol="LIMITHITUSDT", lifecycle_current_state="LIMIT_HIT")]},
+        active_signal_count=None,
+        watchlist_count=None,
+    )
+
+    text = format_wolf_briefing(snapshot)
+
+    assert "Active signals: 0" in text
     assert "Watchlist: 0" in text
 
 
@@ -315,7 +328,7 @@ def test_wolf_briefing_filters_terminal_watchlist_focus_items() -> None:
     snapshot = build_wolf_briefing_snapshot(
         watchlist_items=(
             WolfBriefingFocusItem("AVAXUSDT", "Watchlist", "TP2 HIT"),
-            WolfBriefingFocusItem("BTCUSDT", "Watchlist", "Waiting for Limit Zone"),
+            WolfBriefingFocusItem("BTCUSDT", "Watchlist", "Market condition pending"),
         ),
         active_signal_count=0,
         watchlist_count=None,
