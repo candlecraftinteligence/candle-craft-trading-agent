@@ -20,6 +20,12 @@ def test_default_settings_are_safe() -> None:
     assert settings.telegram_dry_run is True
     assert settings.telegram_signals_enabled is False
     assert settings.telegram_signal_channel_invite_link is None
+    assert settings.telegram_public_watchlist_enabled is True
+    assert settings.public_watchlist_min_score == 80
+    assert str(settings.public_watchlist_min_rr) == "2.0"
+    assert settings.public_watchlist_max_per_scan == 3
+    assert settings.public_watchlist_cooldown_hours == 24
+    assert settings.public_watchlist_require_plan is True
     assert settings.telegram_research_watch_enabled is False
     assert settings.telegram_research_watch_to_public is False
     assert settings.telegram_research_min_quality == 60

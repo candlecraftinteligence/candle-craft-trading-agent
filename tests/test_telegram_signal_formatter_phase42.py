@@ -43,7 +43,7 @@ def test_all_public_signal_messages_end_with_candle_craft_footer() -> None:
     for alert_type in TelegramAlertType:
         text = format_telegram_signal_message(alert_type, _message())
 
-        assert text.startswith(HEADER_PREFIX)
+        assert text.startswith((HEADER_PREFIX, "\U0001F7E1"))
         assert text.endswith(FOOTER)
 
 
@@ -66,20 +66,21 @@ def test_valid_scalp_signal_renders_premium_format() -> None:
     assert "Signal ID" not in text
 
 
-def test_public_watchlist_copy_is_not_execution_signal() -> None:
+def test_public_watchlist_message_says_not_active_signal() -> None:
     text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message())
 
-    assert "🐺🟠 WATCHLIST — MARKET CONDITION PENDING — BTCUSDT" in text
-    assert "Market condition pending." in text
+    assert "\U0001F7E1 CANDLE CRAFT WATCHLIST — BTCUSDT" in text
+    assert "Near-miss setup — not triggered yet" in text
+    assert "Trigger/confirmation pending." in text
     assert "Setup: SCALP" in text
-    assert "Status: WATCHLIST - NOT ACTIVE EXECUTION SIGNAL" in text
-    assert "Blocked gate: market/regime condition only" in text
+    assert "Status: WATCHLIST - NOT ACTIVE SIGNAL" in text
+    assert "Pending: Trigger/confirmation" in text
     assert "Potential RR: 2.92R" in text
     assert "🎯 Trade Map" in text
     assert "Entry/Limit Zone: 100 – 102" in text
     assert "SL: 95" in text
     assert "TP1: 110" in text
-    assert "Not an active execution signal." in text
+    assert "This is a watchlist idea, not an active signal. Trade only after trigger/confirmation." in text
     lowered = text.lower()
     assert "scalp signal" not in lowered
     assert "active for manual execution" not in lowered
