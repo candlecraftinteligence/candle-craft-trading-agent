@@ -21,6 +21,7 @@ from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, S
 from app.alerts.telegram_lifecycle import (
     PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES,
     REGIME_MARKET_CONDITION_PENDING,
+    TIMING_CONFIRMATION_PENDING,
     TelegramAlertType,
     TelegramEligibilityContext,
     _public_signal_gate_result,
@@ -475,6 +476,10 @@ def test_strategy_mode_non_regime_failure_not_regime_pending(failure_type: str, 
 
     assert classify_failed_gate_code(gate_code) != REGIME_MARKET_CONDITION_PENDING
     assert REGIME_MARKET_CONDITION_PENDING not in gate.failed_gate_classes
+    if classify_failed_gate_code(gate_code) == TIMING_CONFIRMATION_PENDING:
+        assert gate.allowed is True
+        assert gate.allowed_missing_gate == TIMING_CONFIRMATION_PENDING
+        return
     assert gate.allowed is False
     assert any(
         reason.startswith("public_watchlist_non_regime_failed_gates=") or reason.startswith("target_integrity_failed")
@@ -503,13 +508,13 @@ def test_strategy_mode_mixed_failures_block_public_watchlist() -> None:
 
 
 def test_strategy_mode_rr_failure_blocks_public_watchlist() -> None:
-    blocked = _scanner_regime_blocked_symbol("swing", rr=Decimal("2.49"))
+    blocked = _scanner_regime_blocked_symbol("swing", rr=Decimal("1.99"))
     candidate = _with_lifecycle(blocked, signal_id="rr-below-watchlist")
     gate = _public_watchlist_gate(candidate)
 
     assert gate.allowed is False
     assert gate.failed_gate_classes == (REGIME_MARKET_CONDITION_PENDING,)
-    assert "public_watchlist_rr_below_min:2.49<2.5" in gate.blocking_reasons
+    assert "public_watchlist_rr_below_min:1.99<2" in gate.blocking_reasons
 
 
 def test_strategy_mode_missing_regime_data_blocks_public_watchlist() -> None:
@@ -565,9 +570,9 @@ def test_strategy_mode_public_watchlist_copy_is_regime_pending_not_execution() -
     assert decision.message is not None
     text = format_telegram_signal_message(decision.alert_type, decision.message)
     lowered = text.lower()
-    assert "WATCHLIST" in text
-    assert "MARKET CONDITION PENDING" in text
-    assert "Not an active execution signal." in text
+    assert "CANDLE CRAFT WATCHLIST" in text
+    assert "Near-miss setup" in text
+    assert "This is a watchlist idea, not an active signal. Trade only after trigger/confirmation." in text
     assert "SCALP SIGNAL" not in text
     assert "active for manual execution" not in lowered
     assert "confirmed" not in lowered

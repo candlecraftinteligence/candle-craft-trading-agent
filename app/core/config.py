@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -28,6 +29,12 @@ class Settings(BaseSettings):
     telegram_public_ui_enabled: bool | None = None
     telegram_watchlist_outcome_tracking_enabled: bool = True
     telegram_public_watchlist_terminal_updates_enabled: bool = False
+    telegram_public_watchlist_enabled: bool = True
+    public_watchlist_min_score: int = 80
+    public_watchlist_min_rr: Decimal = Decimal("2.0")
+    public_watchlist_max_per_scan: int = 3
+    public_watchlist_cooldown_hours: int = 24
+    public_watchlist_require_plan: bool = True
     telegram_research_watch_enabled: bool = False
     telegram_research_watch_to_public: bool = False
     telegram_research_min_quality: int = 60
@@ -78,10 +85,18 @@ class Settings(BaseSettings):
         "telegram_research_min_readiness",
         "telegram_research_alert_cooldown_minutes",
         "telegram_research_max_per_scan",
+        "public_watchlist_min_score",
+        "public_watchlist_max_per_scan",
+        "public_watchlist_cooldown_hours",
     )
     @classmethod
     def validate_telegram_research_non_negative(cls, value: int) -> int:
         return max(0, int(value))
+
+    @field_validator("public_watchlist_min_rr")
+    @classmethod
+    def validate_public_watchlist_min_rr(cls, value: Decimal) -> Decimal:
+        return max(Decimal("0"), Decimal(value))
 
     @model_validator(mode="after")
     def enforce_manual_only_phase(self) -> Settings:

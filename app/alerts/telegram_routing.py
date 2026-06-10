@@ -21,6 +21,7 @@ class TelegramDestination(str, Enum):
 class TelegramMessageType(str, Enum):
     WOLF_BRIEFING = "wolf_briefing"
     PUBLIC_SIGNAL = "public_signal"
+    PUBLIC_WATCHLIST = "public_watchlist"
     RESEARCH_WATCH = "research_watch"
     LIFECYCLE_UPDATE = "lifecycle_update"
     LIMIT_ZONE_HIT = "limit_zone_hit"
@@ -46,6 +47,7 @@ SIGNAL_CHANNEL_ALLOWED_MESSAGE_TYPES = frozenset(
     {
         TelegramMessageType.WOLF_BRIEFING,
         TelegramMessageType.PUBLIC_SIGNAL,
+        TelegramMessageType.PUBLIC_WATCHLIST,
         TelegramMessageType.RESEARCH_WATCH,
         TelegramMessageType.LIFECYCLE_UPDATE,
         TelegramMessageType.LIMIT_ZONE_HIT,

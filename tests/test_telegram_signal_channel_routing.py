@@ -16,6 +16,7 @@ def test_signal_channel_allows_only_signal_message_types() -> None:
     for message_type in (
         TelegramMessageType.WOLF_BRIEFING,
         TelegramMessageType.PUBLIC_SIGNAL,
+        TelegramMessageType.PUBLIC_WATCHLIST,
         TelegramMessageType.LIFECYCLE_UPDATE,
         TelegramMessageType.LIMIT_ZONE_HIT,
         TelegramMessageType.TP_HIT,
@@ -41,6 +42,12 @@ def test_signal_channel_allows_only_signal_message_types() -> None:
         decision = can_send_to_destination(TelegramDestination.SIGNAL_CHANNEL, message_type)
         assert decision.allowed is False
         assert decision.reason == "message_type_not_allowed_for_signal_channel"
+
+
+def test_public_hygiene_allows_public_watchlist_type() -> None:
+    decision = can_send_to_destination(TelegramDestination.SIGNAL_CHANNEL, TelegramMessageType.PUBLIC_WATCHLIST)
+
+    assert decision.allowed is True
 
 
 def test_start_welcome_update_cannot_send_to_signal_channel_id(tmp_path: Path) -> None:

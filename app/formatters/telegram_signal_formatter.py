@@ -171,15 +171,15 @@ def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
 def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
     requirements = _confirmation_requirements(message)
     return _join(
-        f"{HEADER_PREFIX} WATCHLIST {EM_DASH} MARKET CONDITION PENDING {EM_DASH} {format_symbol(message.symbol)}",
+        f"\U0001F7E1 CANDLE CRAFT WATCHLIST {EM_DASH} {format_symbol(message.symbol)}",
+        "Near-miss setup \u2014 not triggered yet",
         "",
-        "Market condition pending.",
+        _watchlist_pending_summary(message),
         "",
         f"Bias: {format_direction(message.direction)}",
         f"Setup: {_watchlist_setup_display(message.mode)}",
-        "Status: WATCHLIST - NOT ACTIVE EXECUTION SIGNAL",
-        "Blocked gate: market/regime condition only",
-        f"Market/regime: {_watchlist_market_condition_display(message)}",
+        "Status: WATCHLIST - NOT ACTIVE SIGNAL",
+        f"Pending: {_watchlist_pending_label(message)}",
         f"Quality: {_quality_display(message.quality)}",
         f"Potential RR: {format_rr(message.planned_rr)}",
         "",
@@ -192,10 +192,10 @@ def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
         "Passed setup checks",
         "Liquidity sweep, reclaim, structure shift, pullback zone, target map, and RR are intact.",
         "",
-        "Awaiting market/regime alignment",
+        "Awaiting trigger/confirmation",
         requirements,
         "",
-        "Not an active execution signal.",
+        "This is a watchlist idea, not an active signal. Trade only after trigger/confirmation.",
         "",
         FOOTER,
     )
@@ -500,6 +500,25 @@ def _watchlist_market_condition_display(message: TelegramSignalMessage) -> str:
     if fit != NA:
         return fit
     return NA
+
+
+def _watchlist_pending_summary(message: TelegramSignalMessage) -> str:
+    label = _watchlist_pending_label(message)
+    if label == "Market/regime condition":
+        return "Market condition pending."
+    return "Trigger/confirmation pending."
+
+
+def _watchlist_pending_label(message: TelegramSignalMessage) -> str:
+    requirements = _confirmation_requirements(message).lower()
+    market = _watchlist_market_condition_display(message)
+    timing_tokens = ("confirmation", "trigger", "pullback", "entry", "limit zone", "fvg", "ob", "sweep", "bos", "choch")
+    if market != NA and (
+        any(token in requirements for token in ("market", "regime", "btc", "eth"))
+        or not any(token in requirements for token in timing_tokens)
+    ):
+        return "Market/regime condition"
+    return "Trigger/confirmation"
 
 
 def safe_reason_text(*values: Any) -> str:

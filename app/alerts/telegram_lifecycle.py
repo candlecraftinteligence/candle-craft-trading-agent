@@ -172,7 +172,10 @@ TERMINAL_IDENTITY_BLOCK_REASONS = {
     "terminal_update_not_terminal_state",
 }
 DEFAULT_CONFIRMED_MIN_RR = Decimal("3")
-PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
+PUBLIC_WATCHLIST_MIN_RR = Decimal("2.0")
+PUBLIC_WATCHLIST_MIN_SCORE = Decimal("80")
+PUBLIC_WATCHLIST_MAX_PER_SCAN = 3
+PUBLIC_WATCHLIST_COOLDOWN_HOURS = 24
 DEFAULT_MIN_TECHNICAL_SCORE = Decimal("50")
 PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS = {
     "watch",
@@ -193,6 +196,7 @@ PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS = {
     "no_longer_tracking",
 }
 REGIME_MARKET_CONDITION_PENDING = "REGIME_MARKET_CONDITION_PENDING"
+TIMING_CONFIRMATION_PENDING = "TIMING_CONFIRMATION_PENDING"
 PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES = frozenset(
     {
         "regime_compatibility",
@@ -204,6 +208,25 @@ PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES = frozenset(
         "rejected_by_regime",
     }
 )
+PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES = frozenset(
+    {
+        "waiting_for_confirmation",
+        "missing_confirmation",
+        "missing_confirmation_structure_shift",
+        "trigger_not_hit",
+        "limit_zone_not_hit",
+        "limit_zone_not_touched",
+        "entry_zone_not_hit",
+        "entry_zone_not_touched",
+        "pullback_pending",
+        "fvg_not_tapped",
+        "ob_retest_pending",
+        "liquidity_sweep_pending",
+        "bos_body_close_pending",
+        "choch_confirmation_pending",
+        "stalking_not_triggered",
+    }
+)
 PUBLIC_WATCHLIST_MISSING_DATA_GATE_CODES = frozenset(
     {
         "missing_regime_data",
@@ -212,8 +235,36 @@ PUBLIC_WATCHLIST_MISSING_DATA_GATE_CODES = frozenset(
         "market_data_missing",
     }
 )
+PUBLIC_WATCHLIST_FATAL_GATE_CODES = frozenset(
+    {
+        "invalid_rr",
+        "below_min_rr",
+        "rr_below_minimum",
+        "rr_too_low",
+        "challenge_rr_below_3",
+        "missing_rr",
+        "missing_stop",
+        "missing_sl",
+        "missing_stop_loss",
+        "missing_target",
+        "missing_entry",
+        "no_trade_plan",
+        "bad_data",
+        "stale_data",
+        "untradable_symbol",
+        "low_liquidity",
+        "wide_spread",
+        "hard_regime_block",
+        "cooldown",
+        "blacklisted_symbol",
+        "structural_contradiction",
+        "already_invalidated",
+        "too_close_to_invalidation",
+    }
+)
 PUBLIC_WATCHLIST_MALFORMED_FAILED_GATE_CLASS = "MALFORMED_FAILED_GATE"
 PUBLIC_WATCHLIST_MISSING_DATA_FAILED_GATE_CLASS = "MISSING_REGIME_MARKET_DATA"
+PUBLIC_WATCHLIST_FATAL_FAILED_GATE_CLASS = "FATAL_PUBLIC_WATCHLIST_GATE"
 PUBLIC_WATCHLIST_NON_REGIME_FAILED_GATE_CLASS = "NON_REGIME_FAILED_GATE"
 PUBLIC_WATCHLIST_UNKNOWN_FAILED_GATE_CLASS = "UNKNOWN_FAILED_GATE"
 CONFIRMED_REJECTED_STATUS_KEYS = {
@@ -353,6 +404,10 @@ class TelegramEligibilityContext:
     min_rr: Decimal = DEFAULT_CONFIRMED_MIN_RR
     min_score_for_idea: Decimal | None = None
     min_technical_score: Decimal = DEFAULT_MIN_TECHNICAL_SCORE
+    public_watchlist_enabled: bool = True
+    public_watchlist_min_score: Decimal = PUBLIC_WATCHLIST_MIN_SCORE
+    public_watchlist_min_rr: Decimal = PUBLIC_WATCHLIST_MIN_RR
+    public_watchlist_require_plan: bool = True
 
 
 @dataclass(frozen=True)
@@ -685,6 +740,40 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 return True
         return False
 
+    def has_recent_public_watchlist_alert(
+        self,
+        *,
+        symbol: str,
+        direction: Any,
+        cooldown_key: str,
+        since: str,
+    ) -> bool:
+        normalized_symbol = _symbol(symbol)
+        normalized_direction = _status_key(direction)
+        if normalized_symbol == NA or normalized_direction not in {"long", "short"} or _text(cooldown_key) == NA:
+            return False
+        cutoff = _parse_iso_datetime(since)
+        rows = self._connection.execute(
+            """
+            SELECT signal_id, symbol, direction, entry_low, entry_high, stop_loss, tp1, tp2, tp3, sent_at
+            FROM telegram_alert_attempts
+            WHERE alert_type = ?
+              AND telegram_status = 'sent'
+              AND symbol = ?
+              AND sent_at IS NOT NULL
+              AND sent_at NOT IN ('', 'N/A')
+            """,
+            (TelegramAlertType.WATCHLIST.value, normalized_symbol),
+        ).fetchall()
+        for row in rows:
+            if _status_key(row["direction"]) != normalized_direction:
+                continue
+            if _parse_iso_datetime(row["sent_at"]) < cutoff:
+                continue
+            if _public_watchlist_cooldown_key_from_row(row) == cooldown_key:
+                return True
+        return False
+
     def insert_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
         telegram_status = _text(record.telegram_status)
         attempted_at = _text(record.attempted_at)
@@ -915,6 +1004,30 @@ class TelegramLifecycleDeliveryService:
         return bool(getattr(self.settings, "telegram_public_watchlist_terminal_updates_enabled", False))
 
     @property
+    def public_watchlist_enabled(self) -> bool:
+        return bool(getattr(self.settings, "telegram_public_watchlist_enabled", True))
+
+    @property
+    def public_watchlist_min_score(self) -> Decimal:
+        return _decimal_or_default(getattr(self.settings, "public_watchlist_min_score", PUBLIC_WATCHLIST_MIN_SCORE), PUBLIC_WATCHLIST_MIN_SCORE)
+
+    @property
+    def public_watchlist_min_rr(self) -> Decimal:
+        return _decimal_or_default(getattr(self.settings, "public_watchlist_min_rr", PUBLIC_WATCHLIST_MIN_RR), PUBLIC_WATCHLIST_MIN_RR)
+
+    @property
+    def public_watchlist_max_per_scan(self) -> int:
+        return max(0, int(getattr(self.settings, "public_watchlist_max_per_scan", PUBLIC_WATCHLIST_MAX_PER_SCAN)))
+
+    @property
+    def public_watchlist_cooldown_hours(self) -> int:
+        return max(0, int(getattr(self.settings, "public_watchlist_cooldown_hours", PUBLIC_WATCHLIST_COOLDOWN_HOURS)))
+
+    @property
+    def public_watchlist_require_plan(self) -> bool:
+        return bool(getattr(self.settings, "public_watchlist_require_plan", True))
+
+    @property
     def research_watch_enabled(self) -> bool:
         return bool(getattr(self.settings, "telegram_research_watch_enabled", False))
 
@@ -985,18 +1098,26 @@ class TelegramLifecycleDeliveryService:
                     min_rr=self.min_rr,
                     min_score_for_idea=min_score_for_idea,
                     min_technical_score=self.min_technical_score,
+                    public_watchlist_enabled=self.public_watchlist_enabled,
+                    public_watchlist_min_score=self.public_watchlist_min_score,
+                    public_watchlist_min_rr=self.public_watchlist_min_rr,
+                    public_watchlist_require_plan=self.public_watchlist_require_plan,
                 )
+                public_watchlist_sent_this_scan = 0
                 for symbol_result in result.results:
                     delivery = await self.deliver_for_symbol(
                         symbol_result,
                         repository=repository,
                         scan_run_id=scan_run_id,
                         eligibility_context=eligibility_context,
+                        allow_public_watchlist=public_watchlist_sent_this_scan < self.public_watchlist_max_per_scan,
                     )
                     if delivery is None:
                         ineligible += 1
                         continue
                     record_delivery(delivery)
+                    if delivery.alert_type == TelegramAlertType.WATCHLIST.value and delivery.status == "sent":
+                        public_watchlist_sent_this_scan += 1
                 for delivery in await self.reconcile_sent_watchlists(
                     repository=repository,
                     lifecycle_repository=lifecycle_repository,
@@ -1034,6 +1155,7 @@ class TelegramLifecycleDeliveryService:
         repository: SQLiteTelegramAlertAttemptRepository,
         scan_run_id: str | None = None,
         eligibility_context: TelegramEligibilityContext | None = None,
+        allow_public_watchlist: bool = True,
     ) -> TelegramLifecycleDelivery | None:
         alert_type_hint = (
             _alert_type_for_transition(symbol_result, symbol_result.lifecycle_transition)
@@ -1093,6 +1215,36 @@ class TelegramLifecycleDeliveryService:
         )
         if decision is None:
             return None
+        if decision.alert_type == TelegramAlertType.WATCHLIST:
+            if not allow_public_watchlist:
+                return _persist_skipped_public_watchlist_attempt(
+                    repository,
+                    symbol_result,
+                    decision=decision,
+                    reason="public_watchlist_max_per_scan_reached",
+                    scan_run_id=scan_run_id,
+                    eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                )
+            message_for_cooldown = decision.message
+            if (
+                message_for_cooldown is not None
+                and self.public_watchlist_cooldown_hours > 0
+                and not repository.has_attempt(signal_id=_signal_id(symbol_result), alert_type=TelegramAlertType.WATCHLIST)
+                and repository.has_recent_public_watchlist_alert(
+                    symbol=symbol_result.symbol,
+                    direction=message_for_cooldown.direction,
+                    cooldown_key=_public_watchlist_cooldown_key(symbol_result, message_for_cooldown),
+                    since=_public_watchlist_cooldown_cutoff(now_utc_iso(), self.public_watchlist_cooldown_hours),
+                )
+            ):
+                return _persist_skipped_public_watchlist_attempt(
+                    repository,
+                    symbol_result,
+                    decision=decision,
+                    reason="public_watchlist_cooldown_active",
+                    scan_run_id=scan_run_id,
+                    eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                )
         if (
             decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES
             and prior_active_alert is not None
@@ -1983,7 +2135,7 @@ def _telegram_signal_message_for_alert(
         diagnostics = _representative_diagnostics(symbol_result)
         message = replace(
             message,
-            min_rr=PUBLIC_WATCHLIST_MIN_RR,
+            min_rr=context.public_watchlist_min_rr,
             regime_state=_first_non_na(
                 symbol_result.regime_state,
                 diagnostics.get("regime_state"),
@@ -2230,6 +2382,70 @@ def _research_setup_fingerprint(symbol_result: ScannerSymbolResult, diagnostics:
 def _research_watch_cooldown_cutoff(attempted_at: str, cooldown_minutes: int) -> str:
     parsed = _parse_iso_datetime(attempted_at)
     return (parsed - timedelta(minutes=max(0, int(cooldown_minutes)))).isoformat()
+
+
+def _public_watchlist_cooldown_cutoff(attempted_at: str, cooldown_hours: int) -> str:
+    parsed = _parse_iso_datetime(attempted_at)
+    return (parsed - timedelta(hours=max(0, int(cooldown_hours)))).isoformat()
+
+
+def _public_watchlist_cooldown_key(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+) -> str:
+    levels = _message_level_metadata(message)
+    return _public_watchlist_cooldown_key_from_parts(
+        symbol=_first_non_na(message.symbol, symbol_result.symbol),
+        direction=message.direction,
+        entry_low=levels.get("entry_low", NA),
+        entry_high=levels.get("entry_high", NA),
+        stop_loss=levels.get("stop_loss", NA),
+        tp1=levels.get("tp1", NA),
+        tp2=levels.get("tp2", NA),
+        tp3=levels.get("tp3", NA),
+    )
+
+
+def _public_watchlist_cooldown_key_from_row(row: sqlite3.Row) -> str:
+    return _public_watchlist_cooldown_key_from_parts(
+        symbol=row["symbol"],
+        direction=row["direction"],
+        entry_low=row["entry_low"],
+        entry_high=row["entry_high"],
+        stop_loss=row["stop_loss"],
+        tp1=row["tp1"],
+        tp2=row["tp2"],
+        tp3=row["tp3"],
+    )
+
+
+def _public_watchlist_cooldown_key_from_parts(
+    *,
+    symbol: Any,
+    direction: Any,
+    entry_low: Any,
+    entry_high: Any,
+    stop_loss: Any,
+    tp1: Any,
+    tp2: Any,
+    tp3: Any,
+) -> str:
+    normalized_symbol = _symbol(symbol)
+    normalized_direction = _status_key(direction)
+    if normalized_symbol == NA or normalized_direction not in {"long", "short"}:
+        return NA
+    plan_parts = (
+        entry_low,
+        entry_high,
+        stop_loss,
+        tp1,
+        tp2,
+        tp3,
+    )
+    if all(_text(part) == NA for part in plan_parts):
+        return NA
+    plan_hash = hashlib.sha256("|".join(_text(part) for part in plan_parts).encode("utf-8")).hexdigest()[:20]
+    return f"{normalized_symbol}|{normalized_direction}|{plan_hash}"
 
 
 def _parse_iso_datetime(value: Any) -> datetime:
@@ -2606,7 +2822,9 @@ def _telegram_message_type_for_alert(
         return TelegramMessageType.RESEARCH_WATCH
     if alert_type == TelegramAlertType.SIGNAL_CONFIRMED and message is not None and message.upgraded_from_watchlist:
         return TelegramMessageType.WATCHLIST_CONFIRMED
-    if alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED}:
+    if alert_type == TelegramAlertType.WATCHLIST:
+        return TelegramMessageType.PUBLIC_WATCHLIST
+    if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
         return TelegramMessageType.PUBLIC_SIGNAL
     if alert_type == TelegramAlertType.LIMIT_HIT:
         return TelegramMessageType.LIMIT_ZONE_HIT
@@ -2988,11 +3206,17 @@ def _public_watchlist_gate_result(
     allowed_missing_gate = (
         REGIME_MARKET_CONDITION_PENDING
         if failed_gate_class_set == frozenset({REGIME_MARKET_CONDITION_PENDING})
+        else TIMING_CONFIRMATION_PENDING
+        if failed_gate_class_set == frozenset({TIMING_CONFIRMATION_PENDING})
         else None
     )
     planned_rr = _decimal_or_none(message.planned_rr)
+    min_rr = _decimal_or_default(context.public_watchlist_min_rr, PUBLIC_WATCHLIST_MIN_RR)
+    min_score = _decimal_or_default(context.public_watchlist_min_score, PUBLIC_WATCHLIST_MIN_SCORE)
     reasons: list[str] = []
 
+    if not context.public_watchlist_enabled:
+        reasons.append("public_watchlist_disabled")
     if state_key not in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS:
         reasons.append(f"public_watchlist_state_not_eligible:{state_key or 'missing'}")
     if state_key in PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS:
@@ -3014,22 +3238,30 @@ def _public_watchlist_gate_result(
     if allowed_missing_gate is None and any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
         reasons.append("rejection_reasons_present")
 
-    missing = _public_watchlist_missing_required_fields(message)
+    score = _public_watchlist_score_decimal(symbol_result)
+    if score is None:
+        reasons.append("public_watchlist_score_missing")
+    elif score < min_score:
+        reasons.append(f"public_watchlist_score_below_min:{_text(score)}<{_text(min_score)}")
+
+    missing = (
+        _public_watchlist_missing_required_fields(message)
+        if context.public_watchlist_require_plan
+        else _public_watchlist_missing_identity_fields(message)
+    )
     if missing:
         reasons.append(f"public_watchlist_missing_required_fields:{','.join(missing)}")
 
-    readiness_context = replace(context, min_rr=PUBLIC_WATCHLIST_MIN_RR)
+    readiness_context = replace(context, min_rr=min_rr)
     reasons.extend(_watchlist_public_readiness_blockers(symbol_result, message, readiness_context))
     reasons.extend(_public_watchlist_target_integrity_blockers(symbol_result, message))
 
     if planned_rr is None:
         reasons.append("public_watchlist_rr_missing_or_invalid")
-    elif planned_rr < PUBLIC_WATCHLIST_MIN_RR:
-        reasons.append(
-            f"public_watchlist_rr_below_min:{_text(planned_rr)}<{_text(PUBLIC_WATCHLIST_MIN_RR)}"
-        )
+    elif planned_rr < min_rr:
+        reasons.append(f"public_watchlist_rr_below_min:{_text(planned_rr)}<{_text(min_rr)}")
 
-    regime_missing = _public_watchlist_missing_regime_fields(symbol_result)
+    regime_missing = _public_watchlist_missing_regime_fields(symbol_result) if allowed_missing_gate == REGIME_MARKET_CONDITION_PENDING else ()
     if regime_missing:
         reasons.append(f"public_watchlist_regime_data_missing:{','.join(regime_missing)}")
 
@@ -3046,6 +3278,16 @@ def _public_watchlist_gate_result(
             for code in failed_gate_codes
             if classify_failed_gate_code(code) == PUBLIC_WATCHLIST_MISSING_DATA_FAILED_GATE_CLASS
         )
+        fatal_gates = tuple(
+            code
+            for code in failed_gate_codes
+            if classify_failed_gate_code(code) == PUBLIC_WATCHLIST_FATAL_FAILED_GATE_CLASS
+        )
+        timing_gates = tuple(
+            code
+            for code in failed_gate_codes
+            if classify_failed_gate_code(code) == TIMING_CONFIRMATION_PENDING
+        )
         non_regime_gates = tuple(
             code
             for code in failed_gate_codes
@@ -3060,6 +3302,8 @@ def _public_watchlist_gate_result(
             reasons.append("public_watchlist_malformed_failed_gate_diagnostics")
         if missing_data_gates:
             reasons.append(f"public_watchlist_missing_data_failed_gates={','.join(missing_data_gates)}")
+        if fatal_gates:
+            reasons.append(f"public_watchlist_fatal_failed_gates={','.join(fatal_gates)}")
         if non_regime_gates:
             reasons.append(f"public_watchlist_non_regime_failed_gates={','.join(non_regime_gates)}")
         if unknown_gates:
@@ -3069,7 +3313,12 @@ def _public_watchlist_gate_result(
             and failed_gate_class_set != frozenset({REGIME_MARKET_CONDITION_PENDING})
         ):
             reasons.append(f"public_watchlist_conflicting_failed_gate_classes={','.join(failed_gate_classes)}")
-        elif not (malformed_gates or missing_data_gates or non_regime_gates or unknown_gates):
+        elif (
+            TIMING_CONFIRMATION_PENDING in failed_gate_class_set
+            and failed_gate_class_set != frozenset({TIMING_CONFIRMATION_PENDING})
+        ):
+            reasons.append(f"public_watchlist_conflicting_failed_gate_classes={','.join(failed_gate_classes)}")
+        elif not (malformed_gates or missing_data_gates or fatal_gates or timing_gates or non_regime_gates or unknown_gates):
             reasons.append(f"public_watchlist_failed_gate_class_not_allowed={','.join(failed_gate_classes)}")
 
     return PublicWatchlistGateResult(
@@ -3127,10 +3376,14 @@ def classify_failed_gate_code(value: Any) -> str:
         return ""
     if code in PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES:
         return REGIME_MARKET_CONDITION_PENDING
+    if code in PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES:
+        return TIMING_CONFIRMATION_PENDING
     if code in PUBLIC_WATCHLIST_MISSING_DATA_GATE_CODES:
         return PUBLIC_WATCHLIST_MISSING_DATA_FAILED_GATE_CLASS
     if code == PUBLIC_WATCHLIST_MALFORMED_FAILED_GATE_CLASS.lower():
         return PUBLIC_WATCHLIST_MALFORMED_FAILED_GATE_CLASS
+    if code in PUBLIC_WATCHLIST_FATAL_GATE_CODES:
+        return PUBLIC_WATCHLIST_FATAL_FAILED_GATE_CLASS
     if code in PUBLIC_WATCHLIST_KNOWN_NON_REGIME_FAILED_GATES:
         return PUBLIC_WATCHLIST_NON_REGIME_FAILED_GATE_CLASS
     return PUBLIC_WATCHLIST_UNKNOWN_FAILED_GATE_CLASS
@@ -3172,6 +3425,37 @@ def _public_watchlist_missing_required_fields(message: TelegramSignalMessage) ->
     if _text(_first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)) == NA:
         missing.append("invalidation")
     return tuple(missing)
+
+
+def _public_watchlist_missing_identity_fields(message: TelegramSignalMessage) -> tuple[str, ...]:
+    missing: list[str] = []
+    if _text(message.signal_id) == NA:
+        missing.append("signal_id")
+    if _text(message.symbol) == NA:
+        missing.append("symbol")
+    if _status_key(message.direction) not in {"long", "short"}:
+        missing.append("direction")
+    if _text(message.mode) == NA:
+        missing.append("setup_type")
+    if _text(_first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)) == NA:
+        missing.append("invalidation")
+    return tuple(missing)
+
+
+def _public_watchlist_score_decimal(symbol_result: ScannerSymbolResult) -> Decimal | None:
+    diagnostics = _representative_diagnostics(symbol_result)
+    trade_idea = symbol_result.trade_idea
+    setup_quality = symbol_result.setup_quality
+    score_result = symbol_result.score_result
+    return _first_decimal(
+        getattr(setup_quality, "quality_score", NA),
+        diagnostics.get("setup_quality_score"),
+        diagnostics.get("quality_score"),
+        getattr(score_result, "total_score", NA) if score_result is not None else NA,
+        getattr(trade_idea, "confidence_score", NA) if trade_idea is not None else NA,
+        diagnostics.get("opportunity_score"),
+        diagnostics.get("total_score"),
+    )
 
 
 def _public_watchlist_status_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
@@ -3874,6 +4158,77 @@ def _persist_blocked_attempt(
         detail=_blocked_delivery_detail(decision.alert_type),
         message_hash=message_hash,
         error_message=decision.reason,
+    )
+
+
+def _persist_skipped_public_watchlist_attempt(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    symbol_result: ScannerSymbolResult,
+    *,
+    decision: TelegramAlertDecision,
+    reason: str,
+    scan_run_id: str | None,
+    eligibility_context: TelegramEligibilityContext,
+) -> TelegramLifecycleDelivery:
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.message is not None
+    signal_id = _signal_id(symbol_result)
+    skipped_alert_type = _blocked_alert_type(decision.alert_type, reason)
+    transition = decision.lifecycle_transition
+    previous_state = transition.from_state.value if transition and transition.from_state else NA
+    new_state = transition.to_state.value if transition else _lifecycle_state_text(symbol_result)
+    seen_at = now_utc_iso()
+    message_hash = hashlib.sha256(f"{signal_id}|{decision.alert_type.value}|{reason}".encode("utf-8")).hexdigest()
+    record = TelegramAlertAttemptRecord(
+        signal_id=signal_id,
+        symbol=symbol_result.symbol,
+        direction=decision.message.direction,
+        previous_state=previous_state,
+        new_state=new_state,
+        alert_type=skipped_alert_type,
+        lifecycle_state=_lifecycle_state_text(symbol_result),
+        sent_at=None,
+        attempted_at=seen_at,
+        telegram_status="skipped",
+        message_hash=message_hash,
+        scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        attempted_alert_type=decision.alert_type.value,
+        setup_quality_score=_quality_score(symbol_result),
+        rr_planned=_text(decision.message.planned_rr),
+        min_rr=_text(_min_rr_for_alert(decision.alert_type, eligibility_context)),
+        opportunity_score=_opportunity_score_text(symbol_result),
+        min_score_for_idea=_text(eligibility_context.min_score_for_idea),
+        technical_score=_technical_score_text(symbol_result),
+        price_level=_price_level_for_alert(decision.alert_type, decision.message),
+        **_message_level_metadata(decision.message),
+        blocked_reason=reason,
+        invalid_target_fields=NA,
+        error_message=reason,
+        first_seen_at=seen_at,
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        last_error_message=reason,
+    )
+    inserted = repository.insert_attempt(record)
+    if not inserted:
+        compacted = repository.compact_repeated_attempt(record)
+        status = "skipped" if compacted else "duplicate"
+        detail = (
+            "Repeated skipped public watchlist attempt compacted."
+            if compacted
+            else "Duplicate skipped public watchlist attempt prevented."
+        )
+    else:
+        status = "skipped"
+        detail = "Public watchlist alert skipped by cooldown or scan throttle."
+    return TelegramLifecycleDelivery(
+        symbol=symbol_result.symbol,
+        signal_id=signal_id,
+        alert_type=decision.alert_type.value,
+        status=status,
+        detail=detail,
+        message_hash=message_hash,
+        error_message=reason,
     )
 
 
@@ -6334,7 +6689,7 @@ def _take_profit(trade_idea: Any | None, target_number: int) -> Any:
 
 def _min_rr_for_alert(alert_type: TelegramAlertType, context: TelegramEligibilityContext) -> Decimal:
     if alert_type == TelegramAlertType.WATCHLIST:
-        return PUBLIC_WATCHLIST_MIN_RR
+        return context.public_watchlist_min_rr
     return context.min_rr
 
 
@@ -6495,7 +6850,9 @@ def _text(value: Any) -> str:
 
 __all__ = [
     "PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES",
+    "PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES",
     "REGIME_MARKET_CONDITION_PENDING",
+    "TIMING_CONFIRMATION_PENDING",
     "ResearchWatchCandidate",
     "SQLiteTelegramAlertAttemptRepository",
     "TelegramAlertDecision",
