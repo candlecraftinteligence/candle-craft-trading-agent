@@ -66,27 +66,43 @@ def test_valid_scalp_signal_renders_premium_format() -> None:
     assert "Signal ID" not in text
 
 
-def test_public_watchlist_message_says_not_active_signal() -> None:
+def test_old_public_watchlist_formatter_matches_expected_shape() -> None:
     text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message())
 
-    assert "\U0001F7E1 CANDLE CRAFT WATCHLIST — BTCUSDT" in text
-    assert "Near-miss setup — not triggered yet" in text
-    assert "Trigger/confirmation pending." in text
-    assert "Setup: SCALP" in text
-    assert "Status: WATCHLIST - NOT ACTIVE SIGNAL" in text
-    assert "Pending: Trigger/confirmation" in text
-    assert "Potential RR: 2.92R" in text
-    assert "🎯 Trade Map" in text
-    assert "Entry/Limit Zone: 100 – 102" in text
-    assert "SL: 95" in text
-    assert "TP1: 110" in text
-    assert "This is a watchlist idea, not an active signal. Trade only after trigger/confirmation." in text
+    assert "🐺🟠 WATCHLIST — BTCUSDT" in text
+    assert "The wolf is stalking this one." in text
+    assert "Bias: LONG" in text
+    assert "Status: WATCHLIST" in text
+    assert "Quality: A" in text
+    assert "Potential RR: 2.9R" in text
+    assert "👀 What we want to see" in text
+    assert "📍 Area of Interest" in text
+    assert "Zone: 100 – 102" in text
+    assert "Invalid below/above: 95" in text
+    assert "Limit Zone must hold as support after the pullback." in text
+    assert "Bullish structure must remain valid above the invalidation level." in text
+    assert "No confirmation = no trade." in text
+    assert "We let the market come to us." in text
+    assert "Candle Craft | Signal. Structure. Execution." in text
+    assert "Research Watch" not in text
+    assert "Trade map: N/A" not in text
+    assert "Wait for RR expansion above minimum" not in text
+    assert "Regime blocked the setup" not in text
+    assert "Regime fit: Weak" not in text
     lowered = text.lower()
     assert "scalp signal" not in lowered
     assert "active for manual execution" not in lowered
-    assert "confirmed" not in lowered
     assert "executing" not in lowered
     assert "enter now" not in lowered
+
+
+def test_old_public_watchlist_formatter_uses_short_side_wording() -> None:
+    text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message(direction="short", stop_loss=Decimal("105")))
+
+    assert "Bias: SHORT" in text
+    assert "Limit Zone must hold as resistance after the pullback." in text
+    assert "Bearish structure must remain valid below the invalidation level." in text
+    assert "Invalid below/above: 105" in text
 
 
 def test_watchlist_upgraded_requires_upgrade_flag() -> None:

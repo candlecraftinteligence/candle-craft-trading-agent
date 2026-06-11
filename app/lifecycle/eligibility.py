@@ -12,7 +12,7 @@ from app.data.dtos import NA
 
 _MISSING = object()
 
-WATCH_STATE_KEYS = frozenset({"watch", "watchlist", "watchlisted", "stalking", "triggered"})
+WATCH_STATE_KEYS = frozenset({"watch", "watchlist", "watchlisted", "stalking", "a_grade_watch"})
 INTERNAL_TOUCH_STATE_KEYS = frozenset(
     {
         "entry_hit",
@@ -88,6 +88,21 @@ PUBLIC_BLOCKER_KEYS = frozenset(
         "rejected_by_technical",
         "rejected_no_edge",
         "regime_blocked",
+        "weak_regime_fit",
+        "hard_regime_block",
+        "rr_expansion_needed",
+        "wait_for_rr_expansion_above_minimum",
+        "invalid_rr",
+        "below_min_rr",
+        "missing_stop",
+        "missing_sl",
+        "missing_target",
+        "missing_entry",
+        "missing_entry_zone",
+        "missing_limit_zone",
+        "missing_invalidation",
+        "no_trade_plan",
+        "trade_map_na",
         "rr_below_minimum",
         "rr_too_low",
         "scan_error",
@@ -114,6 +129,10 @@ PUBLIC_BLOCKER_TEXT = (
     "rejected_by_regime",
     "rejected_by_technical",
     "rejected_no_edge",
+    "regime blocked",
+    "regime fit: weak",
+    "trade map: n/a",
+    "wait for rr expansion",
     "scanned_no_setup",
     "setup_quality_blocked",
     "target_integrity_failed",
@@ -188,21 +207,26 @@ def has_no_public_blockers(record: Any) -> bool:
 
 
 def _has_no_public_blockers(record: Any, *, reject_invalidation_reason: bool) -> bool:
+    return not _public_blocker_reasons(record, reject_invalidation_reason=reject_invalidation_reason)
+
+
+def _public_blocker_reasons(record: Any, *, reject_invalidation_reason: bool) -> tuple[str, ...]:
+    reasons: list[str] = []
     if _boolish(_first_field(record, "target_integrity_failed")):
-        return False
+        reasons.append("target_integrity_failed")
     if _boolish(_first_field(record, "regime_blocked")):
-        return False
+        reasons.append("regime_blocked")
     invalidation_reason = _display(_first_field(record, "invalidation_reason"))
     if reject_invalidation_reason and invalidation_reason != NA:
-        return False
+        reasons.append("invalidation_reason_present")
     for value in _blocker_values(record):
         key = _status_key(value)
         if key and (key in PUBLIC_BLOCKER_KEYS or key in TERMINAL_STATE_KEYS):
-            return False
+            reasons.append(key)
         text = _display(value).lower()
         if text != NA.lower() and any(fragment in text for fragment in PUBLIC_BLOCKER_TEXT):
-            return False
-    return True
+            reasons.append(key or text)
+    return tuple(dict.fromkeys(reasons))
 
 
 def is_terminal_state(state: Any) -> bool:
@@ -241,21 +265,47 @@ def requires_existing_public_signal_for_update(state: Any) -> bool:
 
 
 def public_watchlist_eligible(record: Any, config: LifecycleEligibilityConfig | None = None) -> bool:
+    allowed, _ = is_public_watchlist_candidate(record, config)
+    return allowed
+
+
+def is_public_watchlist_candidate(
+    candidate: Any,
+    config: LifecycleEligibilityConfig | None = None,
+) -> tuple[bool, list[str]]:
     eligibility = config or LifecycleEligibilityConfig()
-    if _has_archived_at(record):
-        return False
-    state = _current_state(record)
+    reasons: list[str] = []
+    if _has_archived_at(candidate):
+        reasons.append("archived")
+    state = _current_state(candidate)
     if not is_watch_state(state) or is_terminal_state(state):
-        return False
-    if _cooldown_active(record):
-        return False
-    return (
-        has_valid_direction(record)
-        and has_valid_trade_map(record)
-        and has_valid_rr(record, eligibility.min_rr)
-        and has_public_quality(record, eligibility.min_public_grade)
-        and has_no_public_blockers(record)
+        reasons.append(f"lifecycle_state_not_eligible:{_status_key(state) or 'missing'}")
+    if _cooldown_active(candidate):
+        reasons.append("cooldown")
+    if not has_valid_direction(candidate):
+        reasons.append("missing_direction")
+    if not has_valid_trade_map(candidate):
+        reasons.append("invalid_or_missing_trade_map")
+
+    rr_value = _trusted_rr(candidate)
+    if rr_value is None:
+        rr_value = _computed_rr_to_tp1(candidate)
+    minimum_rr = _decimal_or_none(eligibility.min_rr) or Decimal("3")
+    if rr_value is None:
+        reasons.append("missing_rr")
+    elif rr_value < minimum_rr:
+        reasons.append(f"below_min_rr:{_display(rr_value)}<{_display(minimum_rr)}")
+
+    quality = public_quality_decision(
+        grade_candidates=_grade_candidates(candidate),
+        score_candidates=_score_candidates(candidate),
+        min_grade=eligibility.min_public_grade,
     )
+    if not quality.passed:
+        reasons.append(quality.reason)
+
+    reasons.extend(_public_blocker_reasons(candidate, reject_invalidation_reason=True))
+    return (not reasons, list(dict.fromkeys(reasons)))
 
 
 def active_signal_eligible(record: Any, config: LifecycleEligibilityConfig | None = None) -> bool:
@@ -703,6 +753,7 @@ __all__ = [
     "is_numeric_trade_value",
     "is_public_active_state",
     "is_public_signal_eligible_state",
+    "is_public_watchlist_candidate",
     "is_terminal_state",
     "is_watch_state",
     "public_watchlist_eligible",

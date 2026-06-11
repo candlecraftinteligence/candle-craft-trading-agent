@@ -48,7 +48,6 @@ SIGNAL_CHANNEL_ALLOWED_MESSAGE_TYPES = frozenset(
         TelegramMessageType.WOLF_BRIEFING,
         TelegramMessageType.PUBLIC_SIGNAL,
         TelegramMessageType.PUBLIC_WATCHLIST,
-        TelegramMessageType.RESEARCH_WATCH,
         TelegramMessageType.LIFECYCLE_UPDATE,
         TelegramMessageType.LIMIT_ZONE_HIT,
         TelegramMessageType.TP_HIT,

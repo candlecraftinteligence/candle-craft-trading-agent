@@ -20,7 +20,6 @@ from app.analytics.market_regime import (
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState, validate_setup_quality
 from app.alerts.telegram_lifecycle import (
     PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES,
-    REGIME_MARKET_CONDITION_PENDING,
     TIMING_CONFIRMATION_PENDING,
     TelegramAlertType,
     TelegramEligibilityContext,
@@ -32,7 +31,6 @@ from app.alerts.telegram_lifecycle import (
     telegram_signal_message_from_symbol,
 )
 from app.data.dtos import NA
-from app.formatters.telegram_signal_formatter import format_telegram_signal_message
 from app.lifecycle.eligibility import active_signal_eligible
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
 from app.pipeline.scanner_runner import (
@@ -439,7 +437,7 @@ def test_weak_regime_blocks_high_confidence_setup_with_diagnostics() -> None:
 
 
 @pytest.mark.parametrize("mode", SCANNER_CONTRACT_MODES)
-def test_strategy_mode_emits_regime_pending_when_only_regime_blocks(mode: str) -> None:
+def test_strategy_mode_blocks_public_watchlist_when_only_regime_blocks(mode: str) -> None:
     blocked = _scanner_regime_blocked_symbol(mode, rr=Decimal("2.5"))
     candidate = _with_lifecycle(blocked, signal_id=f"{mode}-regime-only")
     diagnostics = blocked.strategy_diagnostics[mode]
@@ -451,10 +449,11 @@ def test_strategy_mode_emits_regime_pending_when_only_regime_blocks(mode: str) -
     assert diagnostics["first_failed_gate"] == "regime_compatibility"
     assert diagnostics["gates_failed"] == ("regime_compatibility",)
     assert raw_codes == ("regime_compatibility",)
-    assert raw_codes[0] in PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES
-    assert {classify_failed_gate_code(code) for code in raw_codes} == {REGIME_MARKET_CONDITION_PENDING}
-    assert gate.allowed is True
-    assert gate.allowed_missing_gate == REGIME_MARKET_CONDITION_PENDING
+    assert raw_codes[0] not in PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES
+    assert {classify_failed_gate_code(code) for code in raw_codes} == {"FATAL_PUBLIC_WATCHLIST_GATE"}
+    assert gate.allowed is False
+    assert gate.allowed_missing_gate is None
+    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in gate.blocking_reasons
     assert gate.rr == 2.5
 
 
@@ -474,8 +473,7 @@ def test_strategy_mode_non_regime_failure_not_regime_pending(failure_type: str, 
     )
     gate = _public_watchlist_gate(candidate)
 
-    assert classify_failed_gate_code(gate_code) != REGIME_MARKET_CONDITION_PENDING
-    assert REGIME_MARKET_CONDITION_PENDING not in gate.failed_gate_classes
+    assert "REGIME_MARKET_CONDITION_PENDING" not in gate.failed_gate_classes
     if classify_failed_gate_code(gate_code) == TIMING_CONFIRMATION_PENDING:
         assert gate.allowed is True
         assert gate.allowed_missing_gate == TIMING_CONFIRMATION_PENDING
@@ -501,10 +499,10 @@ def test_strategy_mode_mixed_failures_block_public_watchlist() -> None:
     gate = _public_watchlist_gate(candidate)
 
     assert _public_watchlist_failed_gate_codes(candidate) == ("regime_compatibility", "target_integrity")
-    assert gate.failed_gate_classes == (REGIME_MARKET_CONDITION_PENDING, "NON_REGIME_FAILED_GATE")
+    assert gate.failed_gate_classes == ("FATAL_PUBLIC_WATCHLIST_GATE", "NON_REGIME_FAILED_GATE")
     assert gate.allowed is False
+    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in gate.blocking_reasons
     assert "public_watchlist_non_regime_failed_gates=target_integrity" in gate.blocking_reasons
-    assert any(reason.startswith("public_watchlist_conflicting_failed_gate_classes=") for reason in gate.blocking_reasons)
 
 
 def test_strategy_mode_rr_failure_blocks_public_watchlist() -> None:
@@ -513,11 +511,12 @@ def test_strategy_mode_rr_failure_blocks_public_watchlist() -> None:
     gate = _public_watchlist_gate(candidate)
 
     assert gate.allowed is False
-    assert gate.failed_gate_classes == (REGIME_MARKET_CONDITION_PENDING,)
-    assert "public_watchlist_rr_below_min:1.99<2" in gate.blocking_reasons
+    assert gate.failed_gate_classes == ("FATAL_PUBLIC_WATCHLIST_GATE",)
+    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in gate.blocking_reasons
+    assert "public_watchlist_rr_below_min:1.99<2.5" in gate.blocking_reasons
 
 
-def test_strategy_mode_missing_regime_data_blocks_public_watchlist() -> None:
+def test_strategy_mode_missing_regime_data_still_blocks_as_regime_failure() -> None:
     blocked = _scanner_regime_blocked_symbol("swing")
     diagnostics = dict(blocked.strategy_diagnostics["swing"])
     diagnostics["regime_state"] = NA
@@ -531,15 +530,15 @@ def test_strategy_mode_missing_regime_data_blocks_public_watchlist() -> None:
     gate = _public_watchlist_gate(candidate)
 
     assert gate.allowed is False
-    assert "public_watchlist_regime_data_missing:regime_state,regime_compatibility_label" in gate.blocking_reasons
+    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in gate.blocking_reasons
 
 
 @pytest.mark.parametrize(
     ("label", "first_failed_gate", "gates_failed", "expected_reason"),
     (
-        ("absent", NA, (), "public_watchlist_missing_explicit_regime_gate"),
-        ("none", None, (), "public_watchlist_missing_explicit_regime_gate"),
-        ("empty", "", (), "public_watchlist_missing_explicit_regime_gate"),
+        ("absent", NA, (), "public_watchlist_missing_explicit_timing_gate"),
+        ("none", None, (), "public_watchlist_missing_explicit_timing_gate"),
+        ("empty", "", (), "public_watchlist_missing_explicit_timing_gate"),
         ("unknown", "mystery_gate", ("mystery_gate",), "public_watchlist_unknown_failed_gates=mystery_gate"),
         ("malformed", {"bad": "gate"}, ({"bad": "gate"},), "public_watchlist_malformed_failed_gate_diagnostics"),
     ),
@@ -561,30 +560,20 @@ def test_strategy_mode_missing_or_malformed_diagnostics_block_public_watchlist(
     assert expected_reason in gate.blocking_reasons
 
 
-def test_strategy_mode_public_watchlist_copy_is_regime_pending_not_execution() -> None:
+def test_strategy_mode_regime_blocked_candidate_is_not_public_watchlist_copy() -> None:
     candidate = _with_lifecycle(_scanner_regime_blocked_symbol("scalp"), signal_id="scalp-copy")
     decision = telegram_alert_decision_for_symbol(candidate)
 
-    assert decision.eligible is True
+    assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert decision.message is not None
-    text = format_telegram_signal_message(decision.alert_type, decision.message)
-    lowered = text.lower()
-    assert "CANDLE CRAFT WATCHLIST" in text
-    assert "Near-miss setup" in text
-    assert "This is a watchlist idea, not an active signal. Trade only after trigger/confirmation." in text
-    assert "SCALP SIGNAL" not in text
-    assert "active for manual execution" not in lowered
-    assert "confirmed" not in lowered
-    assert "executing" not in lowered
-    assert "enter now" not in lowered
+    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in decision.reason
 
 
 def test_strategy_mode_public_watchlist_does_not_create_active_execution_signal() -> None:
     candidate = _with_lifecycle(_scanner_regime_blocked_symbol("challenge"), signal_id="watch-not-active")
     decision = telegram_alert_decision_for_symbol(candidate)
 
-    assert decision.eligible is True
+    assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert candidate.lifecycle_transition is not None
     assert candidate.lifecycle_transition.to_state == SetupLifecycleState.WATCHLISTED
