@@ -38,6 +38,7 @@ def test_signal_channel_allows_only_signal_message_types() -> None:
         TelegramMessageType.REJECTED_SETUP,
         TelegramMessageType.NO_VALID_SETUP,
         TelegramMessageType.KEYBOARD_MENU,
+        TelegramMessageType.RESEARCH_WATCH,
     ):
         decision = can_send_to_destination(TelegramDestination.SIGNAL_CHANNEL, message_type)
         assert decision.allowed is False
@@ -48,6 +49,13 @@ def test_public_hygiene_allows_public_watchlist_type() -> None:
     decision = can_send_to_destination(TelegramDestination.SIGNAL_CHANNEL, TelegramMessageType.PUBLIC_WATCHLIST)
 
     assert decision.allowed is True
+
+
+def test_public_hygiene_blocks_research_watch_to_public_by_default() -> None:
+    decision = can_send_to_destination(TelegramDestination.SIGNAL_CHANNEL, TelegramMessageType.RESEARCH_WATCH)
+
+    assert decision.allowed is False
+    assert decision.reason == "message_type_not_allowed_for_signal_channel"
 
 
 def test_start_welcome_update_cannot_send_to_signal_channel_id(tmp_path: Path) -> None:

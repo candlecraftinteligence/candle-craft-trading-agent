@@ -30,11 +30,14 @@ class Settings(BaseSettings):
     telegram_watchlist_outcome_tracking_enabled: bool = True
     telegram_public_watchlist_terminal_updates_enabled: bool = False
     telegram_public_watchlist_enabled: bool = True
+    public_watchlist_min_grade: str = "B+"
     public_watchlist_min_score: int = 80
-    public_watchlist_min_rr: Decimal = Decimal("2.0")
+    public_watchlist_min_rr: Decimal = Decimal("2.5")
     public_watchlist_max_per_scan: int = 3
     public_watchlist_cooldown_hours: int = 24
     public_watchlist_require_plan: bool = True
+    public_watchlist_require_entry_zone: bool = True
+    public_watchlist_require_invalidation: bool = True
     telegram_research_watch_enabled: bool = False
     telegram_research_watch_to_public: bool = False
     telegram_research_min_quality: int = 60
@@ -97,6 +100,11 @@ class Settings(BaseSettings):
     @classmethod
     def validate_public_watchlist_min_rr(cls, value: Decimal) -> Decimal:
         return max(Decimal("0"), Decimal(value))
+
+    @field_validator("public_watchlist_min_grade", mode="before")
+    @classmethod
+    def normalize_public_watchlist_min_grade(cls, value: str) -> str:
+        return str(value).strip().upper()
 
     @model_validator(mode="after")
     def enforce_manual_only_phase(self) -> Settings:

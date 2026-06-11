@@ -169,33 +169,33 @@ def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
 
 
 def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
-    requirements = _confirmation_requirements(message)
+    side = _direction_key(message.direction)
+    hold_level = "support" if side == "long" else "resistance" if side == "short" else "support/resistance"
+    structure = "Bullish" if side == "long" else "Bearish" if side == "short" else "Directional"
+    valid_side = "above" if side == "long" else "below" if side == "short" else "around"
     return _join(
-        f"\U0001F7E1 CANDLE CRAFT WATCHLIST {EM_DASH} {format_symbol(message.symbol)}",
-        "Near-miss setup \u2014 not triggered yet",
+        f"{HEADER_PREFIX} WATCHLIST {EM_DASH} {format_symbol(message.symbol)}",
         "",
-        _watchlist_pending_summary(message),
+        "The wolf is stalking this one.",
         "",
         f"Bias: {format_direction(message.direction)}",
-        f"Setup: {_watchlist_setup_display(message.mode)}",
-        "Status: WATCHLIST - NOT ACTIVE SIGNAL",
-        f"Pending: {_watchlist_pending_label(message)}",
+        "Status: WATCHLIST",
         f"Quality: {_quality_display(message.quality)}",
-        f"Potential RR: {format_rr(message.planned_rr)}",
+        f"Potential RR: {_watchlist_rr_with_unit(message.planned_rr)}",
         "",
-        "\U0001F3AF Trade Map",
-        f"Entry/Limit Zone: {format_entry_zone(message)}",
-        f"SL: {format_price(message.stop_loss)}",
-        f"Invalidation: {safe_invalidation_text(message)}",
-        *_watchlist_tp_lines(message),
+        "\U0001F440 What we want to see",
+        f"{BULLET} Price must trade into the Limit Zone.",
+        f"{BULLET} Limit Zone must hold as {hold_level} after the pullback.",
+        f"{BULLET} {structure} structure must remain valid {valid_side} the invalidation level.",
         "",
-        "Passed setup checks",
-        "Liquidity sweep, reclaim, structure shift, pullback zone, target map, and RR are intact.",
+        "\U0001F4CD Area of Interest",
+        f"Zone: {format_entry_zone(message)}",
+        f"Invalid below/above: {_watchlist_invalidation_level(message)}",
         "",
-        "Awaiting trigger/confirmation",
-        requirements,
+        "No confirmation = no trade.",
+        "We let the market come to us.",
         "",
-        "This is a watchlist idea, not an active signal. Trade only after trigger/confirmation.",
+        "\u26A0\ufe0f Manual execution only. Manage risk.",
         "",
         FOOTER,
     )
@@ -859,6 +859,14 @@ def _rr_display(value: Any) -> str:
 def _rr_with_unit(value: Any) -> str:
     text = _rr_display(value)
     return NA if text == NA else f"{text}R"
+
+
+def _watchlist_rr_with_unit(value: Any) -> str:
+    number = _decimal_value(value)
+    if number is None:
+        return NA
+    rounded = number.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return f"{format(rounded, 'f')}R"
 
 
 def _direction_key(value: Any) -> str:

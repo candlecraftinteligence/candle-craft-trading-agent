@@ -172,7 +172,8 @@ TERMINAL_IDENTITY_BLOCK_REASONS = {
     "terminal_update_not_terminal_state",
 }
 DEFAULT_CONFIRMED_MIN_RR = Decimal("3")
-PUBLIC_WATCHLIST_MIN_RR = Decimal("2.0")
+PUBLIC_WATCHLIST_MIN_GRADE = MIN_PUBLIC_SIGNAL_GRADE
+PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
 PUBLIC_WATCHLIST_MIN_SCORE = Decimal("80")
 PUBLIC_WATCHLIST_MAX_PER_SCAN = 3
 PUBLIC_WATCHLIST_COOLDOWN_HOURS = 24
@@ -183,7 +184,6 @@ PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS = {
     "watchlisted",
     "stalking",
     "a_grade_watch",
-    "triggered",
 }
 PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS = {
     "invalidated",
@@ -197,17 +197,7 @@ PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS = {
 }
 REGIME_MARKET_CONDITION_PENDING = "REGIME_MARKET_CONDITION_PENDING"
 TIMING_CONFIRMATION_PENDING = "TIMING_CONFIRMATION_PENDING"
-PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES = frozenset(
-    {
-        "regime_compatibility",
-        "regime_blocked",
-        "regime_not_confirmed",
-        "market_condition_blocked",
-        "market_condition_not_ready",
-        "btc_eth_regime_blocked",
-        "rejected_by_regime",
-    }
-)
+PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES = frozenset()
 PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES = frozenset(
     {
         "waiting_for_confirmation",
@@ -225,6 +215,8 @@ PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES = frozenset(
         "bos_body_close_pending",
         "choch_confirmation_pending",
         "stalking_not_triggered",
+        "limit_zone_hold_pending",
+        "pullback_hold_pending",
     }
 )
 PUBLIC_WATCHLIST_MISSING_DATA_GATE_CODES = frozenset(
@@ -239,6 +231,8 @@ PUBLIC_WATCHLIST_FATAL_GATE_CODES = frozenset(
     {
         "invalid_rr",
         "below_min_rr",
+        "rr_expansion_needed",
+        "wait_for_rr_expansion_above_minimum",
         "rr_below_minimum",
         "rr_too_low",
         "challenge_rr_below_3",
@@ -248,13 +242,25 @@ PUBLIC_WATCHLIST_FATAL_GATE_CODES = frozenset(
         "missing_stop_loss",
         "missing_target",
         "missing_entry",
+        "missing_entry_zone",
+        "missing_limit_zone",
+        "missing_invalidation",
         "no_trade_plan",
+        "trade_map_na",
         "bad_data",
         "stale_data",
         "untradable_symbol",
         "low_liquidity",
         "wide_spread",
         "hard_regime_block",
+        "regime_compatibility",
+        "regime_blocked",
+        "regime_not_confirmed",
+        "market_condition_blocked",
+        "market_condition_not_ready",
+        "btc_eth_regime_blocked",
+        "rejected_by_regime",
+        "weak_regime_fit",
         "cooldown",
         "blacklisted_symbol",
         "structural_contradiction",
@@ -405,9 +411,12 @@ class TelegramEligibilityContext:
     min_score_for_idea: Decimal | None = None
     min_technical_score: Decimal = DEFAULT_MIN_TECHNICAL_SCORE
     public_watchlist_enabled: bool = True
+    public_watchlist_min_grade: str = PUBLIC_WATCHLIST_MIN_GRADE
     public_watchlist_min_score: Decimal = PUBLIC_WATCHLIST_MIN_SCORE
     public_watchlist_min_rr: Decimal = PUBLIC_WATCHLIST_MIN_RR
     public_watchlist_require_plan: bool = True
+    public_watchlist_require_entry_zone: bool = True
+    public_watchlist_require_invalidation: bool = True
 
 
 @dataclass(frozen=True)
@@ -1012,6 +1021,11 @@ class TelegramLifecycleDeliveryService:
         return _decimal_or_default(getattr(self.settings, "public_watchlist_min_score", PUBLIC_WATCHLIST_MIN_SCORE), PUBLIC_WATCHLIST_MIN_SCORE)
 
     @property
+    def public_watchlist_min_grade(self) -> str:
+        grade = _text(getattr(self.settings, "public_watchlist_min_grade", PUBLIC_WATCHLIST_MIN_GRADE))
+        return grade if grade != NA else PUBLIC_WATCHLIST_MIN_GRADE
+
+    @property
     def public_watchlist_min_rr(self) -> Decimal:
         return _decimal_or_default(getattr(self.settings, "public_watchlist_min_rr", PUBLIC_WATCHLIST_MIN_RR), PUBLIC_WATCHLIST_MIN_RR)
 
@@ -1026,6 +1040,14 @@ class TelegramLifecycleDeliveryService:
     @property
     def public_watchlist_require_plan(self) -> bool:
         return bool(getattr(self.settings, "public_watchlist_require_plan", True))
+
+    @property
+    def public_watchlist_require_entry_zone(self) -> bool:
+        return bool(getattr(self.settings, "public_watchlist_require_entry_zone", True))
+
+    @property
+    def public_watchlist_require_invalidation(self) -> bool:
+        return bool(getattr(self.settings, "public_watchlist_require_invalidation", True))
 
     @property
     def research_watch_enabled(self) -> bool:
@@ -1099,9 +1121,12 @@ class TelegramLifecycleDeliveryService:
                     min_score_for_idea=min_score_for_idea,
                     min_technical_score=self.min_technical_score,
                     public_watchlist_enabled=self.public_watchlist_enabled,
+                    public_watchlist_min_grade=self.public_watchlist_min_grade,
                     public_watchlist_min_score=self.public_watchlist_min_score,
                     public_watchlist_min_rr=self.public_watchlist_min_rr,
                     public_watchlist_require_plan=self.public_watchlist_require_plan,
+                    public_watchlist_require_entry_zone=self.public_watchlist_require_entry_zone,
+                    public_watchlist_require_invalidation=self.public_watchlist_require_invalidation,
                 )
                 public_watchlist_sent_this_scan = 0
                 for symbol_result in result.results:
@@ -3212,7 +3237,6 @@ def _public_watchlist_gate_result(
     )
     planned_rr = _decimal_or_none(message.planned_rr)
     min_rr = _decimal_or_default(context.public_watchlist_min_rr, PUBLIC_WATCHLIST_MIN_RR)
-    min_score = _decimal_or_default(context.public_watchlist_min_score, PUBLIC_WATCHLIST_MIN_SCORE)
     reasons: list[str] = []
 
     if not context.public_watchlist_enabled:
@@ -3226,7 +3250,7 @@ def _public_watchlist_gate_result(
     if expiry.expired:
         reasons.append(WATCHLIST_EXPIRY_REASON)
 
-    reasons.extend(_public_quality_gate_blockers(symbol_result))
+    reasons.extend(_public_quality_gate_blockers(symbol_result, min_grade=context.public_watchlist_min_grade))
     reasons.extend(_public_watchlist_status_blockers(symbol_result))
     reasons.extend(_public_watchlist_data_health_blockers(symbol_result))
 
@@ -3238,16 +3262,17 @@ def _public_watchlist_gate_result(
     if allowed_missing_gate is None and any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
         reasons.append("rejection_reasons_present")
 
-    score = _public_watchlist_score_decimal(symbol_result)
-    if score is None:
-        reasons.append("public_watchlist_score_missing")
-    elif score < min_score:
-        reasons.append(f"public_watchlist_score_below_min:{_text(score)}<{_text(min_score)}")
-
     missing = (
-        _public_watchlist_missing_required_fields(message)
+        _public_watchlist_missing_required_fields(
+            message,
+            require_entry_zone=context.public_watchlist_require_entry_zone,
+            require_invalidation=context.public_watchlist_require_invalidation,
+        )
         if context.public_watchlist_require_plan
-        else _public_watchlist_missing_identity_fields(message)
+        else _public_watchlist_missing_identity_fields(
+            message,
+            require_invalidation=context.public_watchlist_require_invalidation,
+        )
     )
     if missing:
         reasons.append(f"public_watchlist_missing_required_fields:{','.join(missing)}")
@@ -3261,12 +3286,8 @@ def _public_watchlist_gate_result(
     elif planned_rr < min_rr:
         reasons.append(f"public_watchlist_rr_below_min:{_text(planned_rr)}<{_text(min_rr)}")
 
-    regime_missing = _public_watchlist_missing_regime_fields(symbol_result) if allowed_missing_gate == REGIME_MARKET_CONDITION_PENDING else ()
-    if regime_missing:
-        reasons.append(f"public_watchlist_regime_data_missing:{','.join(regime_missing)}")
-
     if not failed_gate_codes:
-        reasons.append("public_watchlist_missing_explicit_regime_gate")
+        reasons.append("public_watchlist_missing_explicit_timing_gate")
     elif allowed_missing_gate is None:
         malformed_gates = tuple(
             code
@@ -3404,7 +3425,12 @@ def _failed_gate_code(value: Any) -> str:
     return key
 
 
-def _public_watchlist_missing_required_fields(message: TelegramSignalMessage) -> tuple[str, ...]:
+def _public_watchlist_missing_required_fields(
+    message: TelegramSignalMessage,
+    *,
+    require_entry_zone: bool = True,
+    require_invalidation: bool = True,
+) -> tuple[str, ...]:
     missing: list[str] = []
     if _text(message.signal_id) == NA:
         missing.append("signal_id")
@@ -3414,7 +3440,7 @@ def _public_watchlist_missing_required_fields(message: TelegramSignalMessage) ->
         missing.append("direction")
     if _text(message.mode) == NA:
         missing.append("setup_type")
-    if _decimal_pair_values(message.entry_low, message.entry_high) is None and _decimal_pair_text(message.watch_zone) is None:
+    if require_entry_zone and _decimal_pair_values(message.entry_low, message.entry_high) is None and _decimal_pair_text(message.watch_zone) is None:
         missing.append("entry_zone")
     if _decimal_or_none(message.stop_loss) is None:
         missing.append("stop_loss")
@@ -3422,12 +3448,16 @@ def _public_watchlist_missing_required_fields(message: TelegramSignalMessage) ->
         missing.append("tp1")
     if _decimal_or_none(message.planned_rr) is None:
         missing.append("planned_rr")
-    if _text(_first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)) == NA:
+    if require_invalidation and _text(_first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)) == NA:
         missing.append("invalidation")
     return tuple(missing)
 
 
-def _public_watchlist_missing_identity_fields(message: TelegramSignalMessage) -> tuple[str, ...]:
+def _public_watchlist_missing_identity_fields(
+    message: TelegramSignalMessage,
+    *,
+    require_invalidation: bool = True,
+) -> tuple[str, ...]:
     missing: list[str] = []
     if _text(message.signal_id) == NA:
         missing.append("signal_id")
@@ -3437,7 +3467,7 @@ def _public_watchlist_missing_identity_fields(message: TelegramSignalMessage) ->
         missing.append("direction")
     if _text(message.mode) == NA:
         missing.append("setup_type")
-    if _text(_first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)) == NA:
+    if require_invalidation and _text(_first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)) == NA:
         missing.append("invalidation")
     return tuple(missing)
 
@@ -3987,7 +4017,7 @@ def _setup_quality_state_key(symbol_result: ScannerSymbolResult) -> str:
     return _status_key(getattr(quality_state, "value", quality_state))
 
 
-def _public_quality_gate_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+def _public_quality_gate_blockers(symbol_result: ScannerSymbolResult, *, min_grade: str = MIN_PUBLIC_SIGNAL_GRADE) -> tuple[str, ...]:
     diagnostics = _representative_diagnostics(symbol_result)
     trade_idea = symbol_result.trade_idea
     setup_quality = symbol_result.setup_quality
@@ -4010,12 +4040,13 @@ def _public_quality_gate_blockers(symbol_result: ScannerSymbolResult) -> tuple[s
             diagnostics.get("trust_percentage"),
             diagnostics.get("readiness_score"),
         ),
+        min_grade=min_grade,
     )
     if decision.passed:
         return ()
     grade = decision.grade if _text(decision.grade) != NA else NA
     source = decision.source if _text(decision.source) != NA else NA
-    return (f"{decision.reason}:grade={grade}:min={MIN_PUBLIC_SIGNAL_GRADE}:source={source}",)
+    return (f"{decision.reason}:grade={grade}:min={min_grade}:source={source}",)
 
 
 def _watchlist_candidate_expiry_decision(symbol_result: ScannerSymbolResult):

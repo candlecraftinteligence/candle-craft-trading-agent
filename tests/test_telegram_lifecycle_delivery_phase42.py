@@ -13,7 +13,6 @@ from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
     PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES,
-    REGIME_MARKET_CONDITION_PENDING,
     SQLiteTelegramAlertAttemptRepository,
     TelegramAlertType,
     TelegramEligibilityContext,
@@ -166,19 +165,19 @@ def _diagnostics(**overrides: object) -> dict[str, object]:
 
 def _public_ready_watchlist_diagnostics(**overrides: object) -> dict[str, object]:
     data = _diagnostics(
-        first_failed_gate="regime_compatibility",
+        first_failed_gate="missing_confirmation",
         gates_passed=("sweep", "wick_reclaim", "bos_choch", "pullback_zone", "ob_fvg", "target_integrity", "rr"),
-        gates_failed=("regime_compatibility",),
+        gates_failed=("missing_confirmation",),
         execution_sweep_status="passed",
         confirmation_structure_shift_status="passed",
-        regime_state="HIGH_VOLATILITY",
-        regime_compatibility_label="Hostile",
-        regime_compatibility_reason="Setup is structurally valid, but market regime is hostile.",
-        pullback_failure_reason="Setup is structurally valid, but market regime is hostile.",
+        regime_state="TRENDING",
+        regime_compatibility_label="Supportive",
+        regime_compatibility_reason="Regime supports the planned side.",
+        pullback_failure_reason="Setup is structurally valid and waiting for confirmation.",
         next_required_conditions=(
-            "Market regime must turn supportive.",
-            "BTC/ETH conditions must stop blocking this direction.",
-            "Entry zone and invalidation must remain intact.",
+            "Price must trade into the Limit Zone.",
+            "Limit Zone must hold after the pullback.",
+            "Confirmation must print before activation.",
         ),
     )
     data.update(overrides)
@@ -311,6 +310,10 @@ def _research_symbol(
     signal_id: str = "research-src",
 ) -> ScannerSymbolResult:
     diagnostics = _public_ready_watchlist_diagnostics(
+        first_failed_gate="regime_compatibility",
+        gates_failed=("regime_compatibility",),
+        display_bucket="near_miss",
+        readiness_score=55,
         next_trigger_needed=next_trigger,
         action_label="Wait for cleaner regime",
         regime_compatibility_label="Hostile",
@@ -1228,32 +1231,39 @@ def test_confirmed_and_watchlist_lifecycle_states_are_eligible() -> None:
     assert watchlist.alert_type == "WATCHLIST"
 
 
-def test_public_watchlist_allowed_when_only_regime_gate_fails() -> None:
+def test_public_watchlist_rejects_regime_blocked_or_weak_fit() -> None:
     decision = telegram_alert_decision_for_symbol(
         _symbol(
             SetupLifecycleState.WATCHLISTED,
-            diagnostics=_public_ready_watchlist_diagnostics(),
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="regime_blocked",
+                gates_failed=("regime_blocked",),
+                regime_state="HIGH_VOLATILITY",
+                regime_compatibility_label="Weak",
+                regime_compatibility_reason="Regime blocked the setup.",
+                pullback_failure_reason="Regime blocked the setup.",
+            ),
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
         )
     )
 
-    assert decision.eligible is True
+    assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert decision.message is not None
-    assert decision.message.regime_state == "HIGH_VOLATILITY"
+    assert "public_watchlist_fatal_failed_gates=regime_blocked" in decision.reason
 
 
-def test_normalizes_regime_pending_failed_gate_codes() -> None:
-    for code in PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES:
-        assert classify_failed_gate_code(code) == REGIME_MARKET_CONDITION_PENDING
+def test_regime_failed_gate_codes_are_fatal_for_public_watchlist() -> None:
+    assert not PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES
+    for code in ("regime_blocked", "weak_regime_fit", "rejected_by_regime"):
+        assert classify_failed_gate_code(code) == "FATAL_PUBLIC_WATCHLIST_GATE"
 
 
-def test_public_watchlist_requires_exactly_one_regime_pending_failure() -> None:
+def test_public_watchlist_allows_exactly_timing_pending_failure() -> None:
     symbol = _symbol(
         SetupLifecycleState.WATCHLISTED,
         diagnostics=_public_ready_watchlist_diagnostics(
-            first_failed_gate="regime_blocked",
-            gates_failed=("regime_compatibility", "regime_blocked"),
+            first_failed_gate="limit_zone_hold_pending",
+            gates_failed=("limit_zone_hold_pending",),
         ),
         setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
     )
@@ -1262,17 +1272,18 @@ def test_public_watchlist_requires_exactly_one_regime_pending_failure() -> None:
     gate = _public_watchlist_gate_result(symbol, message, TelegramEligibilityContext())
 
     assert gate.allowed is True
-    assert gate.allowed_missing_gate == REGIME_MARKET_CONDITION_PENDING
-    assert gate.failed_gate_classes == (REGIME_MARKET_CONDITION_PENDING,)
+    assert gate.allowed_missing_gate == "TIMING_CONFIRMATION_PENDING"
+    assert gate.failed_gate_classes == ("TIMING_CONFIRMATION_PENDING",)
 
 
-def test_public_watchlist_blocks_regime_plus_non_regime_failure() -> None:
+def test_public_watchlist_rejects_wait_for_rr_expansion() -> None:
     decision = telegram_alert_decision_for_symbol(
         _symbol(
             SetupLifecycleState.WATCHLISTED,
             diagnostics=_public_ready_watchlist_diagnostics(
-                first_failed_gate="regime_compatibility",
-                gates_failed=("regime_compatibility", "rr_below_minimum"),
+                first_failed_gate="wait_for_rr_expansion_above_minimum",
+                gates_failed=("wait_for_rr_expansion_above_minimum",),
+                next_trigger_needed="Wait for RR expansion above minimum",
             ),
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
         )
@@ -1280,18 +1291,21 @@ def test_public_watchlist_blocks_regime_plus_non_regime_failure() -> None:
 
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "public_watchlist_fatal_failed_gates=rr_below_minimum" in decision.reason
-    assert "public_watchlist_conflicting_failed_gate_classes" in decision.reason
+    assert "public_watchlist_fatal_failed_gates=wait_for_rr_expansion_above_minimum" in decision.reason
 
 
-def test_public_watchlist_blocks_missing_regime_data() -> None:
+def test_public_watchlist_rejects_trade_map_na() -> None:
     decision = telegram_alert_decision_for_symbol(
         _symbol(
             SetupLifecycleState.WATCHLISTED,
             diagnostics=_public_ready_watchlist_diagnostics(
-                regime_state=NA,
-                regime_compatibility_label=NA,
-                regime_compatibility_reason=NA,
+                first_failed_gate="trade_map_na",
+                gates_failed=("trade_map_na",),
+                entry_low=NA,
+                entry_high=NA,
+                stop=NA,
+                tp1=NA,
+                rr_to_tp2=NA,
             ),
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
         )
@@ -1299,7 +1313,8 @@ def test_public_watchlist_blocks_missing_regime_data() -> None:
 
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "public_watchlist_regime_data_missing:regime_state,regime_compatibility_label" in decision.reason
+    assert "public_watchlist_fatal_failed_gates=trade_map_na" in decision.reason
+    assert "public_watchlist_missing_required_fields:entry_zone,stop_loss,tp1,planned_rr" in decision.reason
 
 
 def test_public_watchlist_blocks_missing_regime_data_gate_code() -> None:
@@ -1457,7 +1472,7 @@ def test_watchlist_near_miss_routes_to_watchlist_not_confirmed() -> None:
     assert unchanged.reason == "unchanged_lifecycle_state"
 
 
-def test_watchlist_alert_blocks_na_rr_when_setup_is_not_fully_formed() -> None:
+def test_public_watchlist_requires_potential_rr() -> None:
     weak = telegram_alert_decision_for_symbol(
         _symbol(SetupLifecycleState.STALKING, diagnostics=_public_ready_watchlist_diagnostics(rr_to_tp2=NA))
     )
@@ -1509,7 +1524,7 @@ def test_confirmed_to_stalking_transition_cannot_produce_sl_hit_alert_type() -> 
     assert decision.alert_type != TelegramAlertType.SL_HIT
 
 
-def test_grade_b_is_blocked_from_public_watchlist() -> None:
+def test_public_watchlist_requires_b_plus_or_better() -> None:
     symbol = _symbol(
         SetupLifecycleState.WATCHLISTED,
         diagnostics=_public_ready_watchlist_diagnostics(),
@@ -1702,7 +1717,7 @@ def test_action_watchlist_only_with_all_plan_fields_na_is_blocked() -> None:
     assert "watchlist_missing_trackable_plan:all_plan_fields_na" in decision.reason
 
 
-def test_hype_style_public_ready_watchlist_sends_market_pending_watchlist() -> None:
+def test_hype_style_public_ready_watchlist_sends_confirmation_pending_watchlist() -> None:
     decision = telegram_alert_decision_for_symbol(
         _symbol(
             SetupLifecycleState.WATCHLISTED,
@@ -1723,19 +1738,19 @@ def test_hype_style_public_ready_watchlist_sends_market_pending_watchlist() -> N
     assert decision.eligible is True
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     text = format_telegram_signal_message(decision.alert_type, decision.message)
-    assert "CANDLE CRAFT WATCHLIST — HYPEUSDT" in text
+    assert "🐺🟠 WATCHLIST — HYPEUSDT" in text
+    assert "The wolf is stalking this one." in text
     assert "Bias: LONG" in text
     assert "CONFIRMED SIGNAL" not in text
-    assert "Entry/Limit Zone: 71.41 \u2013 71.68" in text
-    assert "Potential RR: 2.90R" in text
-    assert "Trade Map" in text
-    assert "Market condition pending." in text
-    assert "This is a watchlist idea, not an active signal. Trade only after trigger/confirmation." in text
+    assert "Zone: 71.41 \u2013 71.68" in text
+    assert "Potential RR: 2.9R" in text
+    assert "👀 What we want to see" in text
+    assert "No confirmation = no trade." in text
     assert "71.407944" not in text
     assert "70.77" in text
     assert "70.77363571" not in text
     assert "WATCHLIST" in text
-    assert "Invalidation:" in text
+    assert "Invalid below/above:" in text
 
 
 def test_near_miss_with_only_missing_confirmation_can_publish_as_watchlist() -> None:
@@ -1770,7 +1785,7 @@ def test_near_miss_below_rr_is_rejected_from_public_watchlist() -> None:
 
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "public_watchlist_rr_below_min:1.99<2" in decision.reason
+    assert "public_watchlist_rr_below_min:1.99<2.5" in decision.reason
 
 
 def test_near_miss_missing_stop_is_rejected_from_public_watchlist() -> None:
@@ -1793,14 +1808,14 @@ def test_near_miss_missing_stop_is_rejected_from_public_watchlist() -> None:
     assert "public_watchlist_missing_required_fields:stop_loss" in decision.reason
 
 
-def test_public_watchlist_allows_rr_exactly_2_0() -> None:
+def test_public_watchlist_allows_rr_exactly_2_5() -> None:
     decision = telegram_alert_decision_for_symbol(
         _symbol(
             SetupLifecycleState.WATCHLISTED,
             diagnostics=_public_ready_watchlist_diagnostics(
                 first_failed_gate="missing_confirmation",
                 gates_failed=("missing_confirmation",),
-                rr_to_tp2=Decimal("2.0"),
+                rr_to_tp2=Decimal("2.5"),
             ),
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
         ),
@@ -1810,7 +1825,7 @@ def test_public_watchlist_allows_rr_exactly_2_0() -> None:
     assert decision.eligible is True
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert decision.message is not None
-    assert decision.message.planned_rr == Decimal("2.0")
+    assert decision.message.planned_rr == Decimal("2.5")
 
 
 def test_rejected_action_watchlist_only_is_not_public_below_min_grade() -> None:
@@ -1971,7 +1986,7 @@ def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> N
     assert watchlist.sent == 1
     assert confirmed.sent == 1
     assert duplicate_confirmed.duplicate == 1
-    assert "CANDLE CRAFT WATCHLIST — BTCUSDT" in sender.messages[0]
+    assert "WATCHLIST — BTCUSDT" in sender.messages[0]
     assert "WATCHLIST UPGRADED — BTCUSDT" in sender.messages[1]
 
 
@@ -2086,7 +2101,7 @@ def test_public_watchlist_dedupes_by_setup_id(tmp_path: Path) -> None:
     assert [attempt.alert_type for attempt in attempts] == [TelegramAlertType.WATCHLIST.value]
 
 
-def test_public_watchlist_respects_symbol_side_cooldown(tmp_path: Path) -> None:
+def test_public_watchlist_respects_symbol_side_plan_cooldown(tmp_path: Path) -> None:
     db_path = tmp_path / "watchlist-cooldown.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -2229,8 +2244,8 @@ def test_phase42k_watchlist_transition_matrix_preserves_original_id_rows_and_ded
         assert transitioned.sent == 1
         assert duplicate.duplicate == 1
         assert len(sender.messages) == 2
-        assert "CANDLE CRAFT WATCHLIST — BTCUSDT" in sender.messages[0]
-        assert "CANDLE CRAFT WATCHLIST — BTCUSDT" not in sender.messages[1]
+        assert "WATCHLIST — BTCUSDT" in sender.messages[0]
+        assert "WATCHLIST — BTCUSDT" not in sender.messages[1]
         if expected_alert_type == TelegramAlertType.NO_LONGER_TRACKING:
             assert "CONFIRMED SIGNAL" not in sender.messages[1]
         _assert_transition_message_clean(sender.messages[1], signal_id=signal_id, status=expected_status)
@@ -2998,7 +3013,7 @@ def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> Non
     assert watchlist.sent == 1
     assert invalidated.sent == 1
     assert duplicate_invalidated.duplicate == 1
-    assert "CANDLE CRAFT WATCHLIST — BTCUSDT" in sender.messages[0]
+    assert "WATCHLIST — BTCUSDT" in sender.messages[0]
     assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[1]
     assert sender.messages[1].startswith(HEADER_PREFIX)
     assert sender.messages[1].endswith(FOOTER)
