@@ -55,7 +55,7 @@ def test_public_watchlist_eligible_requires_complete_public_trade_map() -> None:
     assert public_watchlist_eligible(_watch_record(entry_low="N/A")) is False
     assert public_watchlist_eligible(_watch_record(entry_high="N/A")) is False
     assert public_watchlist_eligible(_watch_record(stop_loss="N/A")) is False
-    assert public_watchlist_eligible(_watch_record(tp1="N/A")) is False
+    assert public_watchlist_eligible(_watch_record(tp1="N/A")) is True
 
 
 def test_public_watchlist_eligible_rejects_quality_rr_regime_and_no_edge_blockers() -> None:
@@ -66,11 +66,17 @@ def test_public_watchlist_eligible_rejects_quality_rr_regime_and_no_edge_blocker
     assert has_valid_rr(_watch_record(rr="2.9"), Decimal("3")) is False
     assert public_watchlist_eligible(_watch_record(failed_gate="rejected_by_regime")) is False
     assert public_watchlist_eligible(_watch_record(rejection_reason="rejected_no_edge")) is False
-    assert public_watchlist_eligible(_watch_record(rejection_reason="scanned_no_setup")) is False
+    assert public_watchlist_eligible(_watch_record(rejection_reason="scanned_no_setup")) is True
 
 
 def test_public_watchlist_eligible_allows_rr_below_confirmed_minimum_gate() -> None:
     record = _watch_record(rr="2.6", failed_gate="rr_below_minimum")
+
+    assert public_watchlist_eligible(record) is True
+
+
+def test_public_watchlist_eligible_allows_first_seen_triggered_confirmation_pending() -> None:
+    record = _watch_record(current_state="TRIGGERED", failed_gate="missing_confirmation")
 
     assert public_watchlist_eligible(record) is True
 

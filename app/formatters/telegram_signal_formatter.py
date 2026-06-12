@@ -77,6 +77,7 @@ class TelegramSignalMessage:
     regime_state: Any = NA
     regime_compatibility_label: Any = NA
     regime_confidence: Any = NA
+    watchlist_status: Any = NA
     watchlist_outcome: bool = False
     upgraded_from_watchlist: bool = False
     was_watchlist: bool = False
@@ -173,27 +174,45 @@ def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
     hold_level = "support" if side == "long" else "resistance" if side == "short" else "support/resistance"
     structure = "Bullish" if side == "long" else "Bearish" if side == "short" else "Directional"
     valid_side = "above" if side == "long" else "below" if side == "short" else "around"
+    limit_zone_hit = _status_key(message.watchlist_status) in {
+        "limit_zone_hit_waiting_confirmation",
+        "limit_zone_hit_waiting_confirm",
+        "limit_zone_hit",
+    }
+    status = "LIMIT ZONE HIT — WAITING CONFIRMATION" if limit_zone_hit else "WATCHLIST"
+    watch_lines = (
+        (
+            f"{BULLET} Price is in or near the Limit Zone.",
+            f"{BULLET} Limit Zone must hold as {hold_level}.",
+            f"{BULLET} Wait for clean confirmation before any trade.",
+        )
+        if limit_zone_hit
+        else (
+            f"{BULLET} Price must trade into the Limit Zone.",
+            f"{BULLET} Limit Zone must hold as {hold_level} after the pullback.",
+            f"{BULLET} {structure} structure must remain valid {valid_side} the invalidation level.",
+        )
+    )
+    closing = "We let the market prove it." if limit_zone_hit else "We let the market come to us."
     return _join(
         f"{HEADER_PREFIX} WATCHLIST {EM_DASH} {format_symbol(message.symbol)}",
         "",
         "The wolf is stalking this one.",
         "",
         f"Bias: {format_direction(message.direction)}",
-        "Status: WATCHLIST",
+        f"Status: {status}",
         f"Quality: {_quality_display(message.quality)}",
         f"Potential RR: {_watchlist_rr_with_unit(message.planned_rr)}",
         "",
         "\U0001F440 What we want to see",
-        f"{BULLET} Price must trade into the Limit Zone.",
-        f"{BULLET} Limit Zone must hold as {hold_level} after the pullback.",
-        f"{BULLET} {structure} structure must remain valid {valid_side} the invalidation level.",
+        *watch_lines,
         "",
         "\U0001F4CD Area of Interest",
         f"Zone: {format_entry_zone(message)}",
         f"Invalid below/above: {_watchlist_invalidation_level(message)}",
         "",
         "No confirmation = no trade.",
-        "We let the market come to us.",
+        closing,
         "",
         "\u26A0\ufe0f Manual execution only. Manage risk.",
         "",
