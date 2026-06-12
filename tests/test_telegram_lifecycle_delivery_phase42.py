@@ -1482,6 +1482,183 @@ def test_public_watchlist_requires_potential_rr() -> None:
     assert "missing_public_fields=planned_rr" in weak.reason
 
 
+def test_public_watchlist_allows_rr_below_valid_min_when_potential_rr_above_public_min() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="rr_below_minimum",
+                gates_failed=("rr_below_minimum",),
+                rr_to_tp2=Decimal("2.6"),
+            ),
+            setup_quality=_setup_quality_with_grade(
+                SetupQualityGrade.B_PLUS,
+                quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+                quality_score=88,
+            ),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.message is not None
+    assert decision.message.planned_rr == Decimal("2.6")
+
+
+def test_public_watchlist_rejects_rr_below_public_min() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="rr_below_minimum",
+                gates_failed=("rr_below_minimum",),
+                rr_to_tp2=Decimal("2.49"),
+            ),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "public_watchlist_rr_below_min:2.49<2.5" in decision.reason
+
+
+def test_public_watchlist_rejects_rr_na() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="rr_below_minimum",
+                gates_failed=("rr_below_minimum",),
+                rr_to_tp2=NA,
+            ),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        )
+    )
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "missing_public_fields=planned_rr" in decision.reason
+
+
+def test_public_watchlist_rejects_missing_entry_zone() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="rr_below_minimum",
+                gates_failed=("rr_below_minimum",),
+                rr_to_tp2=Decimal("2.6"),
+                entry_low=NA,
+                entry_high=NA,
+                entry_zone=NA,
+                watch_zone=NA,
+            ),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        )
+    )
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "entry_zone" in decision.reason
+
+
+def test_public_watchlist_rejects_missing_invalidation() -> None:
+    symbol = _with_lifecycle_fields(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="missing_stop",
+                gates_failed=("missing_stop",),
+                stop=NA,
+                invalidation=NA,
+            ),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        ),
+        invalidation_reason=NA,
+        invalidation_logic=NA,
+    )
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "stop_loss" in decision.reason
+    assert "invalidation" in decision.reason
+
+
+def test_public_watchlist_allows_missing_confirmation_when_complete_plan_exists() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.STALKING,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="missing_confirmation_structure_shift",
+                gates_failed=("missing_confirmation_structure_shift",),
+                rr_to_tp2=Decimal("2.6"),
+                confirmation_needed="Wait for 5m BOS/CHoCH before activation.",
+            ),
+            setup_quality=_setup_quality_with_grade(
+                SetupQualityGrade.B_PLUS,
+                quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+                quality_score=88,
+            ),
+        )
+    )
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+
+
+def test_public_watchlist_rejects_missing_confirmation_without_trade_map() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.STALKING,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="missing_confirmation_structure_shift",
+                gates_failed=("missing_confirmation_structure_shift",),
+                entry_low=NA,
+                entry_high=NA,
+                stop=NA,
+                tp1=NA,
+                tp2=NA,
+                tp3=NA,
+                rr_to_tp2=NA,
+            ),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        )
+    )
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "missing_public_fields" in decision.reason
+
+
+def test_public_watchlist_blocks_no_ob_or_fvg_without_zone() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                first_failed_gate="no_ob_or_fvg_zone",
+                gates_failed=("no_ob_or_fvg_zone",),
+                entry_low=NA,
+                entry_high=NA,
+                stop=NA,
+                tp1=NA,
+                tp2=NA,
+                tp3=NA,
+                rr_to_tp2=NA,
+            ),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        )
+    )
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "no_ob_or_fvg_zone" in decision.reason
+    assert "entry_zone" in decision.reason
+
+
 def test_invalidated_transition_cannot_produce_tp2_hit_alert_type() -> None:
     decision = telegram_alert_decision_for_symbol(
         _symbol(
@@ -2135,6 +2312,46 @@ def test_public_watchlist_respects_symbol_side_plan_cooldown(tmp_path: Path) -> 
     assert second.deliveries[0].error_message == "public_watchlist_cooldown_active"
 
 
+def test_public_watchlist_routing_creates_send_attempt_or_skip_reason(tmp_path: Path) -> None:
+    db_path = tmp_path / "watchlist-max-skip.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None, public_watchlist_max_per_scan=0),
+        sender=sender,
+    )
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        signal_id="watch-max-skip",
+        diagnostics=_public_ready_watchlist_diagnostics(
+            first_failed_gate="rr_below_minimum",
+            gates_failed=("rr_below_minimum",),
+            rr_to_tp2=Decimal("2.6"),
+        ),
+        setup_quality=_setup_quality_with_grade(
+            SetupQualityGrade.B_PLUS,
+            quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+            quality_score=88,
+        ),
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="watch-max-skip"))
+
+    assert summary.skipped == 1
+    assert summary.sent == 0
+    assert summary.public_watchlist_audit.candidates_considered == 1
+    assert summary.public_watchlist_audit.eligible == 1
+    assert summary.public_watchlist_audit.sent == 0
+    assert summary.public_watchlist_audit.skipped_by_reason == {"public_watchlist_max_per_scan_reached": 1}
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts(signal_id="watch-max-skip")
+    assert len(attempts) == 1
+    assert attempts[0].telegram_status == "skipped"
+    assert attempts[0].attempted_alert_type == TelegramAlertType.WATCHLIST.value
+    assert attempts[0].blocked_reason == "public_watchlist_max_per_scan_reached"
+    assert sender.messages == []
+
+
 def test_confirmed_signal_gates_are_unchanged() -> None:
     blocked = telegram_alert_decision_for_symbol(
         _symbol(
@@ -2155,6 +2372,37 @@ def test_confirmed_signal_gates_are_unchanged() -> None:
     assert "planned_rr_below_min" in blocked.reason
     assert allowed.eligible is True
     assert allowed.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+
+
+def test_confirmed_signal_rr_gate_unchanged() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.6")),
+            trade_idea=_trade_idea(best_rr=Decimal("2.6")),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+    assert "planned_rr_below_min:2.6<3" in decision.reason
+
+
+def test_confirmed_signal_quality_gates_unchanged() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            setup_quality=_setup_quality_with_grade(SetupQualityGrade.B, quality_score=70),
+            trade_idea=_trade_idea(opportunity_grade="B", opportunity_score=Decimal("88")),
+        )
+    )
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+    assert "below_min_public_grade" in decision.reason
 
 
 def test_phase42k_watchlist_transition_matrix_preserves_original_id_rows_and_dedupes(

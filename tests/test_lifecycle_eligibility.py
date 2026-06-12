@@ -61,11 +61,24 @@ def test_public_watchlist_eligible_requires_complete_public_trade_map() -> None:
 def test_public_watchlist_eligible_rejects_quality_rr_regime_and_no_edge_blockers() -> None:
     assert public_watchlist_eligible(_watch_record(quality_grade_current="Reject")) is False
     assert public_watchlist_eligible(_watch_record(quality_grade_current="N/A")) is False
-    assert public_watchlist_eligible(_watch_record(rr="2.9")) is False
+    assert public_watchlist_eligible(_watch_record(rr="2.9")) is True
+    assert public_watchlist_eligible(_watch_record(rr="2.4")) is False
     assert has_valid_rr(_watch_record(rr="2.9"), Decimal("3")) is False
     assert public_watchlist_eligible(_watch_record(failed_gate="rejected_by_regime")) is False
     assert public_watchlist_eligible(_watch_record(rejection_reason="rejected_no_edge")) is False
     assert public_watchlist_eligible(_watch_record(rejection_reason="scanned_no_setup")) is False
+
+
+def test_public_watchlist_eligible_allows_rr_below_confirmed_minimum_gate() -> None:
+    record = _watch_record(rr="2.6", failed_gate="rr_below_minimum")
+
+    assert public_watchlist_eligible(record) is True
+
+
+def test_public_watchlist_eligible_rejects_rr_below_public_minimum_gate() -> None:
+    record = _watch_record(rr="2.49", failed_gate="rr_below_minimum")
+
+    assert public_watchlist_eligible(record) is False
 
 
 def test_public_watchlist_eligible_rejects_terminal_or_archived_states() -> None:

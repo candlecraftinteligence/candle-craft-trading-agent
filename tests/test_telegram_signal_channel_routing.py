@@ -58,6 +58,13 @@ def test_public_hygiene_blocks_research_watch_to_public_by_default() -> None:
     assert decision.reason == "message_type_not_allowed_for_signal_channel"
 
 
+def test_research_watch_still_blocked_from_public() -> None:
+    decision = can_send_to_destination(TelegramDestination.SIGNAL_CHANNEL, TelegramMessageType.RESEARCH_WATCH)
+
+    assert decision.allowed is False
+    assert decision.reason == "message_type_not_allowed_for_signal_channel"
+
+
 def test_start_welcome_update_cannot_send_to_signal_channel_id(tmp_path: Path) -> None:
     transport = FakeCommandTransport()
 

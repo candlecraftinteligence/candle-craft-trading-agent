@@ -49,6 +49,7 @@ WATCH_PRIORITY_STATES = (
 DEFAULT_COOLDOWN_HOURS = 24
 DEFAULT_CONFIRMATION_CYCLES = 2
 DEFAULT_SETUP_MERGE_TOLERANCE_PCT = Decimal("0.5")
+PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
 MIN_CONFIRMATION_GRADES = {"a+", "a", "a-", "b+"}
 CONFIRMATION_GATED_STATES = {
     SetupLifecycleState.CONFIRMED,
@@ -80,6 +81,22 @@ PLAN_LOCK_STATES = {
     SetupLifecycleState.EXECUTING,
     SetupLifecycleState.MANAGING,
 }
+INITIAL_PUBLIC_WATCHLIST_PENDING_GATES = frozenset(
+    {
+        "below_min_rr",
+        "challenge_rr_below_3",
+        "clean_trigger_pending",
+        "confirmation_pending",
+        "limit_zone_hold_pending",
+        "limit_zone_not_touched",
+        "missing_confirmation",
+        "missing_confirmation_structure_shift",
+        "pullback_confirmation_pending",
+        "rr_below_minimum",
+        "rr_too_low",
+        "waiting_for_confirmation",
+    }
+)
 
 ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
     SetupLifecycleState.DISCOVERED: {
@@ -311,7 +328,7 @@ def evaluate_lifecycle_transition(
         initial_state = initial_state_for_observation(observation)
         confirmation_count = 1 if _confirmation_countable(observation) else 0
         if _target_requires_confirmation(initial_state) and confirmation_count < required_cycles:
-            initial_state = _pre_confirmation_state(observation)
+            initial_state = _initial_pre_confirmation_state(observation)
         quality_grade = _quality_grade_or_score(observation)
         confirmed_at = timestamp if initial_state in CONFIRMATION_GATED_STATES and confirmation_count >= required_cycles else None
         new_record = SetupLifecycleRecord(
@@ -425,6 +442,8 @@ def initial_state_for_observation(observation: LifecycleObservation) -> SetupLif
         return SetupLifecycleState.A_GRADE_WATCH
     if target in {SetupLifecycleState.EXECUTING, SetupLifecycleState.MANAGING}:
         return SetupLifecycleState.CONFIRMED
+    if target == SetupLifecycleState.TRIGGERED and _initial_trigger_blocked(observation):
+        return _initial_non_trigger_state(observation)
     return target
 
 
@@ -737,6 +756,82 @@ def _pre_confirmation_state(observation: LifecycleObservation) -> SetupLifecycle
     if _is_watch_ready(observation):
         return SetupLifecycleState.WATCHLISTED
     return SetupLifecycleState.DISCOVERED
+
+
+def _initial_pre_confirmation_state(observation: LifecycleObservation) -> SetupLifecycleState:
+    state = _pre_confirmation_state(observation)
+    if state == SetupLifecycleState.TRIGGERED and _initial_trigger_blocked(observation):
+        return _initial_non_trigger_state(observation)
+    return state
+
+
+def _initial_trigger_blocked(observation: LifecycleObservation) -> bool:
+    if observation.entry_filled:
+        return False
+    if _text(observation.failed_gate) == NA and _confirmation_countable(observation):
+        return False
+    if _text(observation.failed_gate) != NA:
+        return True
+    if _decimal_or_none(observation.rr) is None:
+        return True
+    if _initial_reject_quality(observation):
+        return True
+    if not _initial_complete_trade_map(observation):
+        return True
+    if not (observation.rr_valid or observation.valid_trade_idea or observation.pullback_and_rr_valid):
+        return True
+    return False
+
+
+def _initial_non_trigger_state(observation: LifecycleObservation) -> SetupLifecycleState:
+    if observation.invalidated:
+        return SetupLifecycleState.INVALIDATED
+    if observation.expired:
+        return SetupLifecycleState.EXPIRED
+    if _initial_public_watchlist_candidate(observation):
+        return SetupLifecycleState.STALKING if observation.sweep_detected else SetupLifecycleState.WATCHLISTED
+    if _text(observation.failed_gate) != NA or _initial_incomplete_or_rejected_plan(observation):
+        return SetupLifecycleState.REJECTED
+    if observation.sweep_detected:
+        return SetupLifecycleState.STALKING
+    if _is_watch_ready(observation):
+        return SetupLifecycleState.WATCHLISTED
+    return SetupLifecycleState.DISCOVERED
+
+
+def _initial_public_watchlist_candidate(observation: LifecycleObservation) -> bool:
+    failed_gate = _status_key(observation.failed_gate)
+    if failed_gate and failed_gate not in INITIAL_PUBLIC_WATCHLIST_PENDING_GATES:
+        return False
+    if _status_key(observation.direction) not in {"long", "short"}:
+        return False
+    if not _initial_complete_trade_map(observation):
+        return False
+    rr = _decimal_or_none(observation.rr)
+    if rr is None or rr < PUBLIC_WATCHLIST_MIN_RR:
+        return False
+    if not _quality_at_least_b_plus(observation.quality_grade, observation.quality_score):
+        return False
+    return _text(observation.invalidation_reason) != NA
+
+
+def _initial_complete_trade_map(observation: LifecycleObservation) -> bool:
+    return all(
+        _decimal_or_none(value) is not None
+        for value in (observation.entry_low, observation.entry_high, observation.stop_loss, observation.tp1)
+    )
+
+
+def _initial_incomplete_or_rejected_plan(observation: LifecycleObservation) -> bool:
+    return (
+        _decimal_or_none(observation.rr) is None
+        or _initial_reject_quality(observation)
+        or not _initial_complete_trade_map(observation)
+    )
+
+
+def _initial_reject_quality(observation: LifecycleObservation) -> bool:
+    return not _quality_at_least_b_plus(observation.quality_grade, observation.quality_score)
 
 
 def _next_confirmation_count(

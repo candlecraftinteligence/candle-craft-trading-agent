@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -12,6 +12,7 @@ from app.data.dtos import NA
 
 _MISSING = object()
 
+PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
 WATCH_STATE_KEYS = frozenset({"watch", "watchlist", "watchlisted", "stalking", "a_grade_watch"})
 INTERNAL_TOUCH_STATE_KEYS = frozenset(
     {
@@ -115,6 +116,16 @@ PUBLIC_BLOCKER_KEYS = frozenset(
         "watchlist_not_public_ready",
     }
 )
+PUBLIC_WATCHLIST_ALLOWED_PENDING_BLOCKER_KEYS = frozenset(
+    {
+        "below_min_rr",
+        "challenge_rr_below_3",
+        "missing_confirmation",
+        "missing_confirmation_structure_shift",
+        "rr_below_minimum",
+        "rr_too_low",
+    }
+)
 
 PUBLIC_BLOCKER_TEXT = (
     "below_min_public_grade",
@@ -143,6 +154,7 @@ PUBLIC_BLOCKER_TEXT = (
 @dataclass(frozen=True)
 class LifecycleEligibilityConfig:
     min_rr: Decimal = Decimal("3")
+    public_watchlist_min_rr: Decimal = PUBLIC_WATCHLIST_MIN_RR
     min_public_grade: str = MIN_PUBLIC_SIGNAL_GRADE
 
 
@@ -210,8 +222,14 @@ def _has_no_public_blockers(record: Any, *, reject_invalidation_reason: bool) ->
     return not _public_blocker_reasons(record, reject_invalidation_reason=reject_invalidation_reason)
 
 
-def _public_blocker_reasons(record: Any, *, reject_invalidation_reason: bool) -> tuple[str, ...]:
+def _public_blocker_reasons(
+    record: Any,
+    *,
+    reject_invalidation_reason: bool,
+    allowed_keys: Collection[str] = (),
+) -> tuple[str, ...]:
     reasons: list[str] = []
+    allowed = frozenset(_status_key(value) for value in allowed_keys)
     if _boolish(_first_field(record, "target_integrity_failed")):
         reasons.append("target_integrity_failed")
     if _boolish(_first_field(record, "regime_blocked")):
@@ -221,6 +239,8 @@ def _public_blocker_reasons(record: Any, *, reject_invalidation_reason: bool) ->
         reasons.append("invalidation_reason_present")
     for value in _blocker_values(record):
         key = _status_key(value)
+        if key in allowed:
+            continue
         if key and (key in PUBLIC_BLOCKER_KEYS or key in TERMINAL_STATE_KEYS):
             reasons.append(key)
         text = _display(value).lower()
@@ -282,15 +302,18 @@ def is_public_watchlist_candidate(
         reasons.append(f"lifecycle_state_not_eligible:{_status_key(state) or 'missing'}")
     if _cooldown_active(candidate):
         reasons.append("cooldown")
-    if not has_valid_direction(candidate):
+    direction_ok = has_valid_direction(candidate)
+    if not direction_ok:
         reasons.append("missing_direction")
-    if not has_valid_trade_map(candidate):
+    trade_map_ok = has_valid_trade_map(candidate)
+    if not trade_map_ok:
         reasons.append("invalid_or_missing_trade_map")
 
     rr_value = _trusted_rr(candidate)
     if rr_value is None:
         rr_value = _computed_rr_to_tp1(candidate)
-    minimum_rr = _decimal_or_none(eligibility.min_rr) or Decimal("3")
+    minimum_rr = _decimal_or_none(eligibility.public_watchlist_min_rr) or PUBLIC_WATCHLIST_MIN_RR
+    rr_ok = rr_value is not None and rr_value >= minimum_rr
     if rr_value is None:
         reasons.append("missing_rr")
     elif rr_value < minimum_rr:
@@ -304,7 +327,18 @@ def is_public_watchlist_candidate(
     if not quality.passed:
         reasons.append(quality.reason)
 
-    reasons.extend(_public_blocker_reasons(candidate, reject_invalidation_reason=True))
+    allowed_blocker_keys = (
+        PUBLIC_WATCHLIST_ALLOWED_PENDING_BLOCKER_KEYS
+        if direction_ok and trade_map_ok and rr_ok and quality.passed
+        else frozenset()
+    )
+    reasons.extend(
+        _public_blocker_reasons(
+            candidate,
+            reject_invalidation_reason=False,
+            allowed_keys=allowed_blocker_keys,
+        )
+    )
     return (not reasons, list(dict.fromkeys(reasons)))
 
 
@@ -738,6 +772,7 @@ def _display(value: Any) -> str:
 __all__ = [
     "ACTIVE_SIGNAL_STATE_KEYS",
     "LifecycleEligibilityConfig",
+    "PUBLIC_WATCHLIST_MIN_RR",
     "ResearchWatchEligibilityConfig",
     "TERMINAL_STATE_KEYS",
     "WATCH_STATE_KEYS",
