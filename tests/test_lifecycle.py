@@ -430,6 +430,50 @@ def _confirmed_candidate_symbol(
     )
 
 
+def _public_watchlist_candidate_symbol(
+    *,
+    symbol: str = "BTCUSDT",
+    failed_gate: str = "rr_below_minimum",
+    rr: object = Decimal("2.6"),
+    entry_low: object = Decimal("100"),
+    entry_high: object = Decimal("102"),
+    stop: object = Decimal("95"),
+    tp1: object = Decimal("110"),
+    quality_grade: SetupQualityGrade = SetupQualityGrade.B_PLUS,
+) -> ScannerSymbolResult:
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        latest_high=Decimal("110"),
+        latest_low=Decimal("108"),
+        rejected_strategy_modes=("swing",),
+        strategy_diagnostics={
+            "swing": {
+                "mode": "swing",
+                "bias": "long",
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "valid",
+                "first_failed_gate": failed_gate,
+                "gates_passed": ("sweep", "bos_choch", "pullback_zone"),
+                "gates_failed": (failed_gate,),
+                "entry_low": entry_low,
+                "entry_high": entry_high,
+                "stop": stop,
+                "tp1": tp1,
+                "tp2": Decimal("117") if tp1 != NA else NA,
+                "tp3": Decimal("124") if tp1 != NA else NA,
+                "rr_to_tp2": rr,
+                "invalidation": "Invalid if price accepts below 95." if stop != NA else NA,
+                "quality_grade": quality_grade.value,
+                "confirmation_needed": "Wait for clean structure confirmation.",
+            }
+        },
+        setup_quality=_setup_quality_result(quality_grade, score=82),
+    )
+
+
 def _apply_single_lifecycle(symbol_result: ScannerSymbolResult, tmp_path, *, now: str):
     return apply_lifecycle_to_run_result(
         _scan_result(symbol_result),
@@ -998,6 +1042,44 @@ def test_one_scan_candidate_does_not_become_confirmed_or_active(tmp_path) -> Non
     assert lifecycle.required_confirmation_cycles == 2
     assert lifecycle.confirmed_at is None
     assert result.scanner_process_summary["confirmation_pending"] == 1
+
+
+def test_rejected_result_never_initializes_as_triggered(tmp_path) -> None:
+    result = apply_lifecycle_to_run_result(
+        _scan_result(
+            _public_watchlist_candidate_symbol(
+                failed_gate="no_ob_or_fvg_zone",
+                rr=NA,
+                entry_low=NA,
+                entry_high=NA,
+                stop=NA,
+                tp1=NA,
+                quality_grade=SetupQualityGrade.REJECT,
+            )
+        ),
+        database_path=tmp_path / "rejected.db",
+        scan_run_id="run-rejected",
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    lifecycle = result.results[0].lifecycle_state
+    assert lifecycle is not None
+    assert lifecycle.current_state != SetupLifecycleState.TRIGGERED
+    assert lifecycle.current_state == SetupLifecycleState.REJECTED
+
+
+def test_public_watchlist_candidate_initializes_as_watch_or_stalking(tmp_path) -> None:
+    result = apply_lifecycle_to_run_result(
+        _scan_result(_public_watchlist_candidate_symbol(failed_gate="rr_below_minimum", rr=Decimal("2.6"))),
+        database_path=tmp_path / "public-watch.db",
+        scan_run_id="run-public-watch",
+        now="2026-05-18T09:00:00+00:00",
+    )
+
+    lifecycle = result.results[0].lifecycle_state
+    assert lifecycle is not None
+    assert lifecycle.current_state in {SetupLifecycleState.WATCHLISTED, SetupLifecycleState.STALKING}
+    assert lifecycle.current_state != SetupLifecycleState.TRIGGERED
 
 
 def test_candidate_becomes_confirmed_after_required_consecutive_scans(tmp_path) -> None:
