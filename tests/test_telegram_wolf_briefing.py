@@ -249,7 +249,7 @@ def test_wolf_briefing_shows_research_watch_separately_from_public_watchlist() -
         {"entry_low": "N/A"},
         {"entry_high": "N/A"},
         {"stop_loss": "N/A"},
-        {"tp1": "N/A"},
+        {"stop_loss": "N/A", "invalidation_reason": "N/A"},
         {"lifecycle_current_state": "TP1_HIT"},
         {"lifecycle_current_state": "TP2_HIT"},
         {"lifecycle_current_state": "TP3_HIT"},

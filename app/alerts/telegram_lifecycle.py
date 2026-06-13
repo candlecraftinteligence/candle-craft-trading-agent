@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from app.analytics.public_signal_quality import MIN_PUBLIC_SIGNAL_GRADE, public_quality_decision
+from app.analytics.public_signal_quality import MIN_PUBLIC_SIGNAL_GRADE, normalize_grade, public_quality_decision
 from app.alerts.telegram_sender import TelegramSender
 from app.alerts.telegram_routing import TelegramMessageType
 from app.alerts.watchlist_expiry import (
@@ -185,6 +185,7 @@ PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS = {
     "stalking",
     "a_grade_watch",
 }
+PUBLIC_WATCHLIST_FIRST_SEEN_TRIGGERED_STATE_KEY = "triggered"
 PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS = {
     "invalidated",
     "expired",
@@ -201,9 +202,12 @@ CONFIRMED_SIGNAL_RR_PENDING = "CONFIRMED_SIGNAL_RR_PENDING"
 PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES = frozenset()
 PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES = frozenset(
     {
+        "clean_confirmation_pending",
+        "confirmation_pending",
         "waiting_for_confirmation",
         "missing_confirmation",
         "missing_confirmation_structure_shift",
+        "first_seen_triggered_pre_confirmation",
         "trigger_not_hit",
         "limit_zone_not_hit",
         "limit_zone_not_touched",
@@ -250,6 +254,7 @@ PUBLIC_WATCHLIST_FATAL_GATE_CODES = frozenset(
         "low_liquidity",
         "wide_spread",
         "hard_regime_block",
+        "late_pullback",
         "regime_compatibility",
         "regime_blocked",
         "regime_not_confirmed",
@@ -263,6 +268,8 @@ PUBLIC_WATCHLIST_FATAL_GATE_CODES = frozenset(
         "structural_contradiction",
         "already_invalidated",
         "too_close_to_invalidation",
+        "target_inside_chop",
+        "no_edge",
     }
 )
 PUBLIC_WATCHLIST_CONFIRMED_RR_GATE_CODES = frozenset(
@@ -411,6 +418,35 @@ class PublicWatchlistGateResult:
 
 
 @dataclass(frozen=True)
+class PublicWatchlistCandidate:
+    symbol: str = NA
+    side: str = NA
+    mode: str = NA
+    strategy: str = NA
+    watchlist_grade: str = NA
+    quality_grade_current: str = NA
+    grade: str = NA
+    readiness_label: str = NA
+    readiness_score: str = NA
+    potential_rr: Any = NA
+    entry_zone_low: Any = NA
+    entry_zone_high: Any = NA
+    stop_loss: Any = NA
+    invalidation_level: Any = NA
+    pending_confirmation_reason: str = NA
+    failed_gate: str = NA
+    lifecycle_state: str = NA
+    plan_complete: bool = False
+    first_seen_triggered_pre_confirmation: bool = False
+
+
+@dataclass(frozen=True)
+class PublicWatchlistPrefilterResult:
+    passed: bool
+    blocking_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TelegramEligibilityContext:
     min_rr: Decimal = DEFAULT_CONFIRMED_MIN_RR
     min_score_for_idea: Decimal | None = None
@@ -453,6 +489,9 @@ class TelegramLifecycleDeliverySummary:
 class PublicWatchlistCandidateAudit:
     symbol: str
     eligible: bool
+    field_prefilter_passed: bool = False
+    first_seen_triggered_pre_confirmation: bool = False
+    state: str = NA
     reject_reasons: tuple[str, ...] = ()
     rr: str = NA
     grade: str = NA
@@ -464,6 +503,13 @@ class PublicWatchlistCandidateAudit:
 
 @dataclass(frozen=True)
 class PublicWatchlistAuditSummary:
+    source_candidates_seen: int = 0
+    field_prefilter_passed: int = 0
+    eligible_watch_or_stalking: int = 0
+    eligible_first_seen_triggered_pre_confirmation: int = 0
+    blocked_before_attempt: int = 0
+    blocked_after_attempt: int = 0
+    blocked_by_reason: Mapping[str, int] = field(default_factory=dict)
     candidates_considered: int = 0
     eligible: int = 0
     sent: int = 0
@@ -806,6 +852,36 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             if _status_key(row["direction"]) != normalized_direction:
                 continue
             if _parse_iso_datetime(row["sent_at"]) < cutoff:
+                continue
+            if _public_watchlist_cooldown_key_from_row(row) == cooldown_key:
+                return True
+        return False
+
+    def has_prior_public_watchlist_plan_alert(
+        self,
+        *,
+        symbol: str,
+        direction: Any,
+        cooldown_key: str,
+    ) -> bool:
+        normalized_symbol = _symbol(symbol)
+        normalized_direction = _status_key(direction)
+        if normalized_symbol == NA or normalized_direction not in {"long", "short"} or _text(cooldown_key) == NA:
+            return False
+        rows = self._connection.execute(
+            """
+            SELECT signal_id, symbol, direction, entry_low, entry_high, stop_loss, tp1, tp2, tp3, sent_at
+            FROM telegram_alert_attempts
+            WHERE alert_type = ?
+              AND telegram_status = 'sent'
+              AND symbol = ?
+              AND sent_at IS NOT NULL
+              AND sent_at NOT IN ('', 'N/A')
+            """,
+            (TelegramAlertType.WATCHLIST.value, normalized_symbol),
+        ).fetchall()
+        for row in rows:
+            if _status_key(row["direction"]) != normalized_direction:
                 continue
             if _public_watchlist_cooldown_key_from_row(row) == cooldown_key:
                 return True
@@ -1268,6 +1344,14 @@ class TelegramLifecycleDeliveryService:
             prior_public_alert=prior_public_signal_alert if alert_type_hint == TelegramAlertType.LIMIT_HIT else prior_active_alert,
         )
         if not decision.eligible or decision.alert_type is None or decision.message is None:
+            if decision.alert_type == TelegramAlertType.WATCHLIST and decision.message is not None:
+                prefilter = _public_watchlist_attempt_prefilter(
+                    symbol_result,
+                    decision.message,
+                    eligibility_context or TelegramEligibilityContext(),
+                )
+                if not prefilter.passed:
+                    return None
             if decision.alert_type is not None and decision.message is not None and _persist_blocked_decision(decision):
                 return _persist_blocked_attempt(
                     repository,
@@ -1289,6 +1373,26 @@ class TelegramLifecycleDeliveryService:
         if decision is None:
             return None
         if decision.alert_type == TelegramAlertType.WATCHLIST:
+            watchlist_candidate = _public_watchlist_candidate_from_symbol(symbol_result)
+            message_for_plan = decision.message
+            if (
+                watchlist_candidate.first_seen_triggered_pre_confirmation
+                and message_for_plan is not None
+            ):
+                cooldown_key = _public_watchlist_cooldown_key(symbol_result, message_for_plan)
+                if repository.has_prior_public_watchlist_plan_alert(
+                    symbol=symbol_result.symbol,
+                    direction=message_for_plan.direction,
+                    cooldown_key=cooldown_key,
+                ):
+                    return _persist_skipped_public_watchlist_attempt(
+                        repository,
+                        symbol_result,
+                        decision=decision,
+                        reason="public_watchlist_prior_plan_alert_exists",
+                        scan_run_id=scan_run_id,
+                        eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                    )
             if not allow_public_watchlist:
                 return _persist_skipped_public_watchlist_attempt(
                     repository,
@@ -2198,6 +2302,279 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
     )
 
 
+def _public_watchlist_candidate_from_symbol(symbol_result: ScannerSymbolResult) -> PublicWatchlistCandidate:
+    diagnostics = _representative_diagnostics(symbol_result)
+    setup = _selected_setup(symbol_result, diagnostics)
+    trade_idea = symbol_result.trade_idea
+    lifecycle = symbol_result.lifecycle_state
+    side = _status_key(
+        _first_non_na(
+            getattr(lifecycle, "direction", NA) if lifecycle is not None else NA,
+            diagnostics.get("side"),
+            diagnostics.get("bias"),
+            diagnostics.get("direction"),
+            _field(setup, "side"),
+            _field(setup, "bias"),
+            getattr(trade_idea, "direction", NA) if trade_idea is not None else NA,
+        )
+    )
+    mode = _first_non_na(
+        getattr(lifecycle, "mode", NA) if lifecycle is not None else NA,
+        diagnostics.get("mode"),
+        _field(setup, "mode"),
+        symbol_result.valid_strategy_modes[0] if symbol_result.valid_strategy_modes else NA,
+        symbol_result.rejected_strategy_modes[0] if symbol_result.rejected_strategy_modes else NA,
+        getattr(trade_idea, "setup_type", NA) if trade_idea is not None else NA,
+    )
+    strategy = _first_non_na(
+        symbol_result.strategy_name,
+        diagnostics.get("strategy"),
+        diagnostics.get("strategy_name"),
+        _field(setup, "strategy"),
+        getattr(trade_idea, "setup_type", NA) if trade_idea is not None else NA,
+    )
+    watchlist_grade = _first_normalized_grade(
+        diagnostics.get("watchlist_grade"),
+        diagnostics.get("public_watchlist_grade"),
+        diagnostics.get("candidate_grade"),
+        _field(setup, "watchlist_grade"),
+    )
+    quality_grade_current = _first_normalized_grade(
+        diagnostics.get("quality_grade_current"),
+        diagnostics.get("current_quality_grade"),
+        diagnostics.get("quality_grade"),
+        diagnostics.get("opportunity_grade"),
+        diagnostics.get("grade"),
+        _field(setup, "quality_grade_current"),
+        _field(setup, "quality_grade"),
+        _field(getattr(setup, "trust_meter", None), "grade"),
+        getattr(trade_idea, "grade", NA) if trade_idea is not None else NA,
+        getattr(getattr(symbol_result.setup_quality, "quality_grade", None), "value", NA),
+    )
+    grade = _first_non_na(watchlist_grade, quality_grade_current)
+    entry_low = _first_non_na(
+        getattr(lifecycle, "entry_low", NA) if lifecycle is not None else NA,
+        diagnostics.get("entry_zone_low"),
+        diagnostics.get("limit_zone_low"),
+        diagnostics.get("entry_low"),
+        _mapping_value(diagnostics.get("entry_zone"), "low"),
+        _mapping_value(diagnostics.get("watch_zone"), "low"),
+        _field(setup, "entry_zone_low"),
+        _field(setup, "entry_low"),
+        _level_field(getattr(trade_idea, "entry_zone", None), "low"),
+        _level_field(getattr(trade_idea, "entry_zone", None), "price"),
+        diagnostics.get("entry"),
+    )
+    entry_high = _first_non_na(
+        getattr(lifecycle, "entry_high", NA) if lifecycle is not None else NA,
+        diagnostics.get("entry_zone_high"),
+        diagnostics.get("limit_zone_high"),
+        diagnostics.get("entry_high"),
+        _mapping_value(diagnostics.get("entry_zone"), "high"),
+        _mapping_value(diagnostics.get("watch_zone"), "high"),
+        _field(setup, "entry_zone_high"),
+        _field(setup, "entry_high"),
+        _level_field(getattr(trade_idea, "entry_zone", None), "high"),
+        _level_field(getattr(trade_idea, "entry_zone", None), "price"),
+        diagnostics.get("entry"),
+    )
+    parsed_zone = _first_decimal_pair_text(
+        diagnostics.get("entry_zone"),
+        diagnostics.get("watch_zone"),
+        _field(setup, "entry_zone"),
+        _field(setup, "watch_zone"),
+    )
+    if _decimal_pair_values(entry_low, entry_high) is None and parsed_zone is not None:
+        entry_low, entry_high = parsed_zone
+    invalidation_level = _first_non_na(
+        diagnostics.get("invalidation_level"),
+        diagnostics.get("invalid_below"),
+        diagnostics.get("invalid_above"),
+        _field(setup, "invalidation_level"),
+        getattr(lifecycle, "invalidation_level", NA) if lifecycle is not None else NA,
+        diagnostics.get("invalidation"),
+        _field(setup, "invalidation"),
+        getattr(lifecycle, "invalidation_reason", NA) if lifecycle is not None else NA,
+        getattr(lifecycle, "invalidation_logic", NA) if lifecycle is not None else NA,
+    )
+    stop_loss = _first_non_na(
+        getattr(lifecycle, "stop_loss", NA) if lifecycle is not None else NA,
+        diagnostics.get("stop_loss"),
+        diagnostics.get("stop"),
+        diagnostics.get("stop_price"),
+        _field(setup, "stop_loss"),
+        _field(setup, "stop"),
+        _level_field(getattr(trade_idea, "stop_loss", None), "price"),
+        invalidation_level if _decimal_or_none(invalidation_level) is not None else NA,
+    )
+    potential_rr = _first_non_na(
+        diagnostics.get("potential_rr"),
+        diagnostics.get("public_watchlist_rr"),
+        diagnostics.get("rr"),
+        getattr(lifecycle, "rr", NA) if lifecycle is not None else NA,
+        _field(setup, "rr"),
+        _field(setup, "rr_to_tp2"),
+        diagnostics.get("rr_to_tp2"),
+        getattr(trade_idea, "best_rr", NA) if trade_idea is not None else NA,
+    )
+    failed_gate = _failed_gate_code(
+        _first_non_na(
+            _field(_near_miss_intelligence(symbol_result, diagnostics), "primary_failed_gate"),
+            diagnostics.get("first_failed_gate"),
+            diagnostics.get("failed_gate"),
+            getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA,
+        )
+    )
+    lifecycle_state = _status_key(_public_gate_state(symbol_result))
+    pending_confirmation = _first_non_na(
+        diagnostics.get("pending_confirmation_reason"),
+        diagnostics.get("confirmation_needed"),
+        diagnostics.get("next_trigger_needed"),
+        _confirmation_needed(diagnostics),
+        failed_gate,
+    )
+    candidate = PublicWatchlistCandidate(
+        symbol=_symbol(symbol_result.symbol),
+        side=side if side in {"long", "short"} else NA,
+        mode=_text(mode),
+        strategy=_text(strategy),
+        watchlist_grade=watchlist_grade,
+        quality_grade_current=quality_grade_current,
+        grade=_text(grade),
+        readiness_label=_text(_first_non_na(diagnostics.get("readiness_label"), diagnostics.get("readiness_state"))),
+        readiness_score=_text(
+            _first_non_na(
+                diagnostics.get("readiness_score"),
+                getattr(lifecycle, "readiness_score", NA) if lifecycle is not None else NA,
+                getattr(symbol_result.setup_quality, "quality_score", NA),
+            )
+        ),
+        potential_rr=potential_rr,
+        entry_zone_low=entry_low,
+        entry_zone_high=entry_high,
+        stop_loss=stop_loss,
+        invalidation_level=invalidation_level,
+        pending_confirmation_reason=_text(pending_confirmation),
+        failed_gate=failed_gate or NA,
+        lifecycle_state=lifecycle_state or NA,
+    )
+    return replace(
+        candidate,
+        plan_complete=_public_watchlist_candidate_plan_complete(candidate),
+        first_seen_triggered_pre_confirmation=_is_first_seen_triggered_pre_confirmation(candidate, symbol_result),
+    )
+
+
+def _message_with_public_watchlist_candidate(
+    message: TelegramSignalMessage,
+    candidate: PublicWatchlistCandidate,
+) -> TelegramSignalMessage:
+    invalidation = _first_non_na(
+        candidate.invalidation_level,
+        candidate.stop_loss,
+        message.watchlist_invalidation_reason,
+        message.invalidation_reason,
+    )
+    return replace(
+        message,
+        symbol=candidate.symbol if candidate.symbol != NA else message.symbol,
+        direction=candidate.side if candidate.side != NA else message.direction,
+        mode=candidate.mode if candidate.mode != NA else message.mode,
+        quality=candidate.grade if candidate.grade != NA else message.quality,
+        entry_low=candidate.entry_zone_low if _text(candidate.entry_zone_low) != NA else message.entry_low,
+        entry_high=candidate.entry_zone_high if _text(candidate.entry_zone_high) != NA else message.entry_high,
+        watch_zone=_first_non_na(
+            _entry_zone_text(candidate.entry_zone_low, candidate.entry_zone_high),
+            message.watch_zone,
+        ),
+        stop_loss=candidate.stop_loss if _text(candidate.stop_loss) != NA else message.stop_loss,
+        planned_rr=candidate.potential_rr if _text(candidate.potential_rr) != NA else message.planned_rr,
+        confirmation_needed=(
+            candidate.pending_confirmation_reason
+            if candidate.pending_confirmation_reason != NA
+            else message.confirmation_needed
+        ),
+        watchlist_invalidation_reason=_as_watchlist_invalidation(invalidation),
+        watchlist_status=(
+            "LIMIT_ZONE_HIT_WAITING_CONFIRMATION"
+            if candidate.first_seen_triggered_pre_confirmation
+            else message.watchlist_status
+        ),
+    )
+
+
+def _public_watchlist_candidate_plan_complete(candidate: PublicWatchlistCandidate) -> bool:
+    return not _public_watchlist_candidate_missing_fields(candidate)
+
+
+def _public_watchlist_candidate_missing_fields(candidate: PublicWatchlistCandidate) -> tuple[str, ...]:
+    missing: list[str] = []
+    if candidate.symbol == NA:
+        missing.append("missing_symbol")
+    if candidate.side not in {"long", "short"}:
+        missing.append("missing_side")
+    if _text(candidate.grade) == NA:
+        missing.append("missing_grade")
+    if _decimal_or_none(candidate.potential_rr) is None:
+        missing.append("missing_rr")
+    if _decimal_pair_values(candidate.entry_zone_low, candidate.entry_zone_high) is None:
+        missing.append("missing_entry_zone")
+    if not _public_watchlist_candidate_has_invalidation(candidate):
+        missing.append("missing_invalidation")
+    return tuple(missing)
+
+
+def _public_watchlist_candidate_has_invalidation(candidate: PublicWatchlistCandidate) -> bool:
+    return _text(_first_non_na(candidate.stop_loss, candidate.invalidation_level)) != NA
+
+
+def _public_watchlist_candidate_has_zone(candidate: PublicWatchlistCandidate) -> bool:
+    return _decimal_pair_values(candidate.entry_zone_low, candidate.entry_zone_high) is not None
+
+
+def _is_first_seen_triggered_pre_confirmation(
+    candidate: PublicWatchlistCandidate,
+    symbol_result: ScannerSymbolResult,
+) -> bool:
+    if candidate.lifecycle_state != PUBLIC_WATCHLIST_FIRST_SEEN_TRIGGERED_STATE_KEY:
+        return False
+    if candidate.lifecycle_state in PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS:
+        return False
+    if candidate.failed_gate in {
+        "confirmed",
+        "confirmation_complete",
+        "executing",
+        "invalidated",
+        "expired",
+        "cooldown",
+    }:
+        return False
+    if _status_key(getattr(symbol_result.status, "value", symbol_result.status)) in {"confirmed", "executing"}:
+        return False
+    pending_key = _status_key(candidate.pending_confirmation_reason)
+    return (
+        candidate.failed_gate in PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES
+        or "confirmation" in pending_key
+        or "confirm" in pending_key
+    )
+
+
+def _first_normalized_grade(*values: Any) -> str:
+    for value in values:
+        grade = normalize_grade(value)
+        if grade != NA:
+            return grade
+    return NA
+
+
+def _first_decimal_pair_text(*values: Any) -> tuple[Decimal, Decimal] | None:
+    for value in values:
+        pair = _decimal_pair_text(value)
+        if pair is not None:
+            return pair
+    return None
+
+
 def _telegram_signal_message_for_alert(
     symbol_result: ScannerSymbolResult,
     alert_type: TelegramAlertType,
@@ -2206,6 +2583,8 @@ def _telegram_signal_message_for_alert(
     message = replace(telegram_signal_message_from_symbol(symbol_result), min_rr=context.min_rr)
     if alert_type == TelegramAlertType.WATCHLIST:
         diagnostics = _representative_diagnostics(symbol_result)
+        candidate = _public_watchlist_candidate_from_symbol(symbol_result)
+        message = _message_with_public_watchlist_candidate(message, candidate)
         message = replace(
             message,
             min_rr=context.public_watchlist_min_rr,
@@ -2842,8 +3221,6 @@ def _alert_type_for_transition(
     if state in WATCH_ALERT_STATES:
         return TelegramAlertType.WATCHLIST
     if state in SIGNAL_ALERT_STATES:
-        if _explicit_watchlist_candidate(symbol_result):
-            return TelegramAlertType.WATCHLIST
         return TelegramAlertType.SIGNAL_CONFIRMED
     if state == SetupLifecycleState.MANAGING:
         return TelegramAlertType.LIMIT_HIT
@@ -3266,11 +3643,12 @@ def _public_watchlist_gate_result(
     message: TelegramSignalMessage,
     context: TelegramEligibilityContext,
 ) -> PublicWatchlistGateResult:
+    candidate = _public_watchlist_candidate_from_symbol(symbol_result)
     state = _public_gate_state(symbol_result)
     state_key = _status_key(state)
     setup_id = _signal_id(symbol_result)
     symbol = _symbol(message.symbol)
-    failed_gate_codes = _public_watchlist_failed_gate_codes(symbol_result)
+    failed_gate_codes = _public_watchlist_failed_gate_codes(symbol_result, candidate=candidate)
     failed_gate_classes = _public_watchlist_failed_gate_classes(failed_gate_codes)
     failed_gate_class_set = frozenset(failed_gate_classes)
     allowed_public_watchlist_gate_classes = frozenset(
@@ -3292,13 +3670,13 @@ def _public_watchlist_gate_result(
         and CONFIRMED_SIGNAL_RR_PENDING in failed_gate_class_set
         else None
     )
-    planned_rr = _decimal_or_none(message.planned_rr)
+    planned_rr = _decimal_or_none(candidate.potential_rr)
     min_rr = _decimal_or_default(context.public_watchlist_min_rr, PUBLIC_WATCHLIST_MIN_RR)
     reasons: list[str] = []
 
     if not context.public_watchlist_enabled:
         reasons.append("public_watchlist_disabled")
-    if state_key not in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS:
+    if state_key not in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS and not candidate.first_seen_triggered_pre_confirmation:
         reasons.append(f"public_watchlist_state_not_eligible:{state_key or 'missing'}")
     if state_key in PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS:
         reasons.append(f"public_watchlist_terminal_or_rejected_state:{state_key}")
@@ -3307,30 +3685,20 @@ def _public_watchlist_gate_result(
     if expiry.expired:
         reasons.append(WATCHLIST_EXPIRY_REASON)
 
-    reasons.extend(_public_quality_gate_blockers(symbol_result, min_grade=context.public_watchlist_min_grade))
-    reasons.extend(_public_watchlist_status_blockers(symbol_result))
-    reasons.extend(_public_watchlist_data_health_blockers(symbol_result))
+    reasons.extend(_public_watchlist_quality_gate_blockers(candidate, min_grade=context.public_watchlist_min_grade))
+    reasons.extend(_public_watchlist_status_blockers(symbol_result, candidate=candidate))
+    reasons.extend(_public_watchlist_data_health_blockers(symbol_result, candidate=candidate))
 
-    quality_state = _setup_quality_state_key(symbol_result)
-    if quality_state == "data_issue" or quality_state in WATCHLIST_BLOCKED_QUALITY_STATE_KEYS:
-        reasons.append(f"setup_quality_blocked:{quality_state}")
-    if allowed_missing_gate is None and _text(symbol_result.rejection_reason) != NA:
+    if not candidate.plan_complete and allowed_missing_gate is None and _text(symbol_result.rejection_reason) != NA:
         reasons.append("rejection_reason_present")
-    if allowed_missing_gate is None and any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
+    if (
+        not candidate.plan_complete
+        and allowed_missing_gate is None
+        and any(_text(reason) != NA for reason in symbol_result.rejection_reasons)
+    ):
         reasons.append("rejection_reasons_present")
 
-    missing = (
-        _public_watchlist_missing_required_fields(
-            message,
-            require_entry_zone=context.public_watchlist_require_entry_zone,
-            require_invalidation=context.public_watchlist_require_invalidation,
-        )
-        if context.public_watchlist_require_plan
-        else _public_watchlist_missing_identity_fields(
-            message,
-            require_invalidation=context.public_watchlist_require_invalidation,
-        )
-    )
+    missing = _public_watchlist_candidate_missing_fields(candidate) if context.public_watchlist_require_plan else ()
     if missing:
         reasons.append(f"public_watchlist_missing_required_fields:{','.join(missing)}")
 
@@ -3425,6 +3793,56 @@ def _public_watchlist_gate_result(
     )
 
 
+def _public_watchlist_attempt_prefilter(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+    context: TelegramEligibilityContext,
+) -> PublicWatchlistPrefilterResult:
+    candidate = _public_watchlist_candidate_from_symbol(symbol_result)
+    reasons: list[str] = []
+    if not context.public_watchlist_enabled:
+        reasons.append("telegram_disabled")
+    reasons.extend(_public_watchlist_candidate_missing_fields(candidate))
+
+    state_key = candidate.lifecycle_state
+    if state_key in PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS or state_key in {
+        "confirmed",
+        "executing",
+        "managing",
+        "active",
+    }:
+        reasons.append("terminal_state")
+    elif state_key not in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS and not candidate.first_seen_triggered_pre_confirmation:
+        reasons.append("terminal_state")
+
+    expiry = _watchlist_candidate_expiry_decision(symbol_result)
+    if expiry.expired:
+        reasons.append("expired_or_stale")
+
+    status_keys = set(_status_keys(symbol_result))
+    if status_keys & {"scanned_no_setup", "rejected_by_scoring", "no_setup"} and not candidate.plan_complete:
+        reasons.append("scanned_no_setup_without_candidate")
+
+    data_health_flags = any(
+        _sequence_or_single(getattr(symbol_result, field_name, ()))
+        for field_name in (
+            "missing_data",
+            "unverified_data",
+            "strategy_missing_data",
+            "strategy_unverified_data",
+            "derivatives_missing_data",
+            "derivatives_unverified_data",
+        )
+    )
+    if data_health_flags and _public_watchlist_candidate_missing_fields(candidate):
+        reasons.append("data_health_required_field_missing")
+
+    return PublicWatchlistPrefilterResult(
+        passed=not reasons,
+        blocking_reasons=tuple(dict.fromkeys(reasons)),
+    )
+
+
 def _public_watchlist_candidate_audit(
     symbol_result: ScannerSymbolResult,
     context: TelegramEligibilityContext,
@@ -3436,13 +3854,18 @@ def _public_watchlist_candidate_audit(
     if alert_type != TelegramAlertType.WATCHLIST:
         return None
     message = _telegram_signal_message_for_alert(symbol_result, TelegramAlertType.WATCHLIST, context)
+    candidate = _public_watchlist_candidate_from_symbol(symbol_result)
+    prefilter = _public_watchlist_attempt_prefilter(symbol_result, message, context)
     gate = _public_watchlist_gate_result(symbol_result, message, context)
     return PublicWatchlistCandidateAudit(
         symbol=_symbol(message.symbol),
-        eligible=gate.allowed,
-        reject_reasons=gate.blocking_reasons,
-        rr=_text(message.planned_rr),
-        grade=_text(message.quality),
+        eligible=prefilter.passed and gate.allowed,
+        field_prefilter_passed=prefilter.passed,
+        first_seen_triggered_pre_confirmation=candidate.first_seen_triggered_pre_confirmation,
+        state=candidate.lifecycle_state,
+        reject_reasons=gate.blocking_reasons if prefilter.passed else prefilter.blocking_reasons,
+        rr=_text(candidate.potential_rr),
+        grade=_text(candidate.grade),
         has_zone=_public_watchlist_has_zone(message),
         has_invalidation=_public_watchlist_has_invalidation(message),
     )
@@ -3460,19 +3883,42 @@ def _public_watchlist_audit_summary(
     audits: Sequence[PublicWatchlistCandidateAudit],
 ) -> PublicWatchlistAuditSummary:
     candidates = tuple(audits)
-    skipped_by_reason: dict[str, int] = {}
+    blocked_by_reason: dict[str, int] = {}
     for audit in candidates:
         reasons = audit.reject_reasons if not audit.eligible else ()
         if audit.eligible and audit.delivery_status not in {"", NA, "sent"}:
             reasons = (audit.skip_reason if audit.skip_reason != NA else audit.delivery_status,)
         for reason in reasons:
             bucket = _public_watchlist_skip_bucket(reason)
-            skipped_by_reason[bucket] = skipped_by_reason.get(bucket, 0) + 1
+            blocked_by_reason[bucket] = blocked_by_reason.get(bucket, 0) + 1
+    field_prefilter_passed = sum(1 for audit in candidates if audit.field_prefilter_passed)
+    eligible_first_seen = sum(
+        1
+        for audit in candidates
+        if audit.eligible and audit.first_seen_triggered_pre_confirmation
+    )
+    eligible_watch_or_stalking = sum(
+        1
+        for audit in candidates
+        if audit.eligible and not audit.first_seen_triggered_pre_confirmation
+    )
     return PublicWatchlistAuditSummary(
+        source_candidates_seen=len(candidates),
+        field_prefilter_passed=field_prefilter_passed,
+        eligible_watch_or_stalking=eligible_watch_or_stalking,
+        eligible_first_seen_triggered_pre_confirmation=eligible_first_seen,
+        blocked_before_attempt=sum(1 for audit in candidates if not audit.field_prefilter_passed),
+        blocked_after_attempt=sum(
+            1
+            for audit in candidates
+            if audit.field_prefilter_passed
+            and not audit.eligible
+        ),
+        blocked_by_reason=dict(sorted(blocked_by_reason.items())),
         candidates_considered=len(candidates),
-        eligible=sum(1 for audit in candidates if audit.eligible),
+        eligible=eligible_watch_or_stalking + eligible_first_seen,
         sent=sum(1 for audit in candidates if audit.delivery_status == "sent"),
-        skipped_by_reason=dict(sorted(skipped_by_reason.items())),
+        skipped_by_reason=dict(sorted(blocked_by_reason.items())),
         candidates=candidates,
     )
 
@@ -3480,6 +3926,12 @@ def _public_watchlist_audit_summary(
 def _public_watchlist_skip_bucket(reason: Any) -> str:
     key = _status_key(reason)
     text = _text(reason).lower()
+    if "missing_side" in key or "missing_direction" in key:
+        return "missing_side"
+    if "missing_grade" in key:
+        return "missing_grade"
+    if "below_min_public_grade" in key or "grade_below" in key:
+        return "below_min_public_grade"
     if any(token in key for token in ("missing_rr", "planned_rr_missing", "rr_missing")) or "planned_rr" in text and "missing" in text:
         return "missing_rr"
     if "rr_below" in key or "planned_rr_below_min" in key or "rr_below" in text:
@@ -3488,8 +3940,14 @@ def _public_watchlist_skip_bucket(reason: Any) -> str:
         return "missing_entry_zone"
     if "invalidation" in key or "stop_loss" in key or "missing_stop" in key or "missing_sl" in key:
         return "missing_invalidation"
-    if "below_min_public_grade" in key or "grade_below" in key:
-        return "grade_below_b_plus"
+    if "terminal_state" in key or "terminal_or_rejected" in key or "state_not_eligible" in key:
+        return "terminal_state"
+    if "expired" in key or "stale" in key or key == _status_key(WATCHLIST_EXPIRY_REASON):
+        return "expired_or_stale"
+    if "scanned_no_setup_without_candidate" in key:
+        return "scanned_no_setup_without_candidate"
+    if "data_health_required_field_missing" in key:
+        return "data_health_required_field_missing"
     if "cooldown" in key:
         return "cooldown"
     if "disabled" in key:
@@ -3502,18 +3960,27 @@ def _public_watchlist_skip_bucket(reason: Any) -> str:
 
 
 def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
-    if summary.candidates_considered == 0:
+    if summary.source_candidates_seen == 0:
         return
     logger.info(
-        "public_watchlist_audit candidates_considered=%s eligible=%s sent=%s skipped_by_reason=%s candidates=%s",
-        summary.candidates_considered,
-        summary.eligible,
+        "public_watchlist_audit source_candidates_seen=%s field_prefilter_passed=%s "
+        "eligible_watch_or_stalking=%s eligible_first_seen_triggered_pre_confirmation=%s sent=%s "
+        "blocked_before_attempt=%s blocked_after_attempt=%s blocked_by_reason=%s candidates=%s",
+        summary.source_candidates_seen,
+        summary.field_prefilter_passed,
+        summary.eligible_watch_or_stalking,
+        summary.eligible_first_seen_triggered_pre_confirmation,
         summary.sent,
-        dict(summary.skipped_by_reason),
+        summary.blocked_before_attempt,
+        summary.blocked_after_attempt,
+        dict(summary.blocked_by_reason),
         tuple(
             {
                 "symbol": audit.symbol,
                 "public_watchlist_eligible": audit.eligible,
+                "public_watchlist_field_prefilter_passed": audit.field_prefilter_passed,
+                "public_watchlist_first_seen_triggered_pre_confirmation": audit.first_seen_triggered_pre_confirmation,
+                "public_watchlist_state": audit.state,
                 "public_watchlist_reject_reasons": audit.reject_reasons,
                 "public_watchlist_rr": audit.rr,
                 "public_watchlist_grade": audit.grade,
@@ -3527,7 +3994,11 @@ def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
     )
 
 
-def _public_watchlist_failed_gate_codes(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+def _public_watchlist_failed_gate_codes(
+    symbol_result: ScannerSymbolResult,
+    *,
+    candidate: PublicWatchlistCandidate | None = None,
+) -> tuple[str, ...]:
     diagnostics = _representative_diagnostics(symbol_result)
     intelligence = _near_miss_intelligence(symbol_result, diagnostics)
     lifecycle = symbol_result.lifecycle_state
@@ -3543,7 +4014,29 @@ def _public_watchlist_failed_gate_codes(symbol_result: ScannerSymbolResult) -> t
     codes = tuple(dict.fromkeys(code for value in values if (code := normalize_failed_gate_code(value))))
     stage_code = normalize_failed_gate_code(symbol_result.rejection_stage)
     if stage_code and stage_code != "regime":
-        codes = tuple(dict.fromkeys((*codes, stage_code)))
+        candidate_complete = candidate is not None and candidate.plan_complete
+        stage_is_final_scanner_status = stage_code in {
+            "no_setup",
+            "rejected_by_scoring",
+            "scanned_no_setup",
+            "scoring",
+        }
+        if not (candidate_complete and stage_is_final_scanner_status and codes):
+            codes = tuple(dict.fromkeys((*codes, stage_code)))
+    if candidate is not None:
+        if candidate.first_seen_triggered_pre_confirmation and not codes:
+            codes = ("first_seen_triggered_pre_confirmation",)
+        has_allowed_source_with_zone = _public_watchlist_candidate_has_zone(candidate) and any(
+            code in PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES or code in PUBLIC_WATCHLIST_CONFIRMED_RR_GATE_CODES
+            for code in codes
+            if code not in {"no_ob_or_fvg_zone", "challenge_limit_entry_missing"}
+        )
+        if has_allowed_source_with_zone:
+            codes = tuple(
+                code
+                for code in codes
+                if code not in {"no_ob_or_fvg_zone", "challenge_limit_entry_missing"}
+            )
     return codes
 
 
@@ -3662,43 +4155,60 @@ def _public_watchlist_score_decimal(symbol_result: ScannerSymbolResult) -> Decim
     )
 
 
-def _public_watchlist_status_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+def _public_watchlist_status_blockers(
+    symbol_result: ScannerSymbolResult,
+    *,
+    candidate: PublicWatchlistCandidate,
+) -> tuple[str, ...]:
     blocked_status_keys = {
         "scan_error",
-        "scanned_no_setup",
         "rejected_by_technical",
         "rejected_by_derivatives",
         "rejected_by_risk",
-        "rejected_by_scoring",
+        "rejected_by_regime",
         "failed",
-        "no_setup",
         "rejected",
     }
-    return tuple(
-        dict.fromkeys(
-            f"public_watchlist_core_status_blocked:{status_key}"
-            for status_key in _status_keys(symbol_result)
-            if status_key in blocked_status_keys
-        )
-    )
+    complete_candidate_allowed_status_keys = {
+        "near_miss",
+        "no_setup",
+        "rejected_by_scoring",
+        "scanned_no_setup",
+    }
+    blockers: list[str] = []
+    for status_key in _status_keys(symbol_result):
+        if status_key in complete_candidate_allowed_status_keys:
+            if not candidate.plan_complete:
+                blockers.append("public_watchlist_core_status_blocked:scanned_no_setup_without_candidate")
+            continue
+        if status_key in blocked_status_keys:
+            blockers.append(f"public_watchlist_core_status_blocked:{status_key}")
+    return tuple(dict.fromkeys(blockers))
 
 
-def _public_watchlist_data_health_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+def _public_watchlist_data_health_blockers(
+    symbol_result: ScannerSymbolResult,
+    *,
+    candidate: PublicWatchlistCandidate,
+) -> tuple[str, ...]:
     blockers: list[str] = []
     if symbol_result.timed_out or _status_key(symbol_result.timeout_status) not in {"", "none"}:
         blockers.append("public_watchlist_data_health_blocked:timeout")
     if _text(symbol_result.error_message) != NA:
         blockers.append("public_watchlist_data_health_blocked:error_message")
-    for field_name in (
-        "missing_data",
-        "unverified_data",
-        "strategy_missing_data",
-        "strategy_unverified_data",
-        "derivatives_missing_data",
-        "derivatives_unverified_data",
-    ):
-        if _sequence_or_single(getattr(symbol_result, field_name, ())):
-            blockers.append(f"public_watchlist_data_health_blocked:{field_name}")
+    data_health_flags = any(
+        _sequence_or_single(getattr(symbol_result, field_name, ()))
+        for field_name in (
+            "missing_data",
+            "unverified_data",
+            "strategy_missing_data",
+            "strategy_unverified_data",
+            "derivatives_missing_data",
+            "derivatives_unverified_data",
+        )
+    )
+    if data_health_flags and _public_watchlist_candidate_missing_fields(candidate):
+        blockers.append("public_watchlist_data_health_required_field_missing")
     return tuple(dict.fromkeys(blockers))
 
 
@@ -4005,10 +4515,10 @@ def _watchlist_public_readiness_blockers(
     missing_trade_map: list[str] = []
     if _decimal_pair_values(message.entry_low, message.entry_high) is None:
         missing_trade_map.append("entry_zone")
-    if _decimal_or_none(message.stop_loss) is None:
-        missing_trade_map.append("stop_loss")
-    if _decimal_or_none(message.tp1) is None:
-        missing_trade_map.append("tp1")
+    if _decimal_or_none(message.stop_loss) is None and _text(
+        _first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)
+    ) == NA:
+        missing_trade_map.append("invalidation")
     if missing_trade_map:
         blockers.append(f"watchlist_not_public_ready:missing_public_fields={','.join(missing_trade_map)}")
 
@@ -4214,6 +4724,23 @@ def _public_quality_gate_blockers(symbol_result: ScannerSymbolResult, *, min_gra
             diagnostics.get("trust_percentage"),
             diagnostics.get("readiness_score"),
         ),
+        min_grade=min_grade,
+    )
+    if decision.passed:
+        return ()
+    grade = decision.grade if _text(decision.grade) != NA else NA
+    source = decision.source if _text(decision.source) != NA else NA
+    return (f"{decision.reason}:grade={grade}:min={min_grade}:source={source}",)
+
+
+def _public_watchlist_quality_gate_blockers(
+    candidate: PublicWatchlistCandidate,
+    *,
+    min_grade: str = MIN_PUBLIC_SIGNAL_GRADE,
+) -> tuple[str, ...]:
+    decision = public_quality_decision(
+        grade_candidates=(candidate.grade,),
+        score_candidates=(),
         min_grade=min_grade,
     )
     if decision.passed:

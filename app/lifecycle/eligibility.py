@@ -14,6 +14,7 @@ _MISSING = object()
 
 PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
 WATCH_STATE_KEYS = frozenset({"watch", "watchlist", "watchlisted", "stalking", "a_grade_watch"})
+FIRST_SEEN_TRIGGERED_STATE_KEY = "triggered"
 INTERNAL_TOUCH_STATE_KEYS = frozenset(
     {
         "entry_hit",
@@ -120,10 +121,22 @@ PUBLIC_WATCHLIST_ALLOWED_PENDING_BLOCKER_KEYS = frozenset(
     {
         "below_min_rr",
         "challenge_rr_below_3",
+        "clean_confirmation_pending",
+        "confirmation_pending",
+        "entry_zone_not_hit",
+        "entry_zone_not_touched",
+        "first_seen_triggered_pre_confirmation",
+        "limit_zone_not_hit",
+        "limit_zone_not_touched",
         "missing_confirmation",
         "missing_confirmation_structure_shift",
+        "no_setup",
+        "pullback_pending",
+        "rejected_by_scoring",
         "rr_below_minimum",
         "rr_too_low",
+        "scanned_no_setup",
+        "trigger_not_hit",
     }
 )
 
@@ -193,6 +206,32 @@ def has_valid_trade_map(record: Any) -> bool:
     if levels.stop_loss <= levels.entry_high or levels.tp1 >= levels.entry_low:
         return False
     return _short_optional_target_order(levels.tp1, levels.tp2, levels.tp3)
+
+
+def _has_public_watchlist_plan(record: Any) -> bool:
+    levels = _trade_levels(record)
+    direction = _direction(record)
+    if direction not in {"long", "short"}:
+        return False
+    if levels.entry_low is None or levels.entry_high is None:
+        return False
+    if levels.entry_low > levels.entry_high:
+        return False
+    invalidation = _first_field(
+        record,
+        "invalidation_level",
+        "invalid_below",
+        "invalid_above",
+        "invalidation",
+        "invalidation_reason",
+    )
+    if levels.stop_loss is None and _display(invalidation) == NA:
+        return False
+    if levels.stop_loss is None:
+        return True
+    if direction == "long":
+        return levels.stop_loss < levels.entry_low
+    return levels.stop_loss > levels.entry_high
 
 
 def has_valid_rr(record: Any, min_rr: Decimal | str | int | float = Decimal("3")) -> bool:
@@ -284,6 +323,38 @@ def requires_existing_public_signal_for_update(state: Any) -> bool:
     return key in PUBLIC_ACTIVE_STATE_KEYS or key in INTERNAL_TOUCH_STATE_KEYS
 
 
+def _first_seen_triggered_pre_confirmation(record: Any) -> bool:
+    state = _status_key(_current_state(record))
+    if state != FIRST_SEEN_TRIGGERED_STATE_KEY:
+        return False
+    failed_gate = _status_key(_first_field(record, "failed_gate"))
+    diagnostics = _representative_diagnostics(record)
+    pending = _status_key(
+        _first_field(
+            record,
+            "pending_confirmation_reason",
+            "confirmation_needed",
+            "next_trigger_needed",
+        )
+    )
+    diagnostic_pending = ""
+    for diagnostic_value in (
+        diagnostics.get("first_failed_gate", _MISSING),
+        diagnostics.get("failed_gate", _MISSING),
+        diagnostics.get("confirmation_needed", _MISSING),
+        diagnostics.get("next_trigger_needed", _MISSING),
+    ):
+        diagnostic_pending = _status_key(diagnostic_value)
+        if diagnostic_pending:
+            break
+    values = {failed_gate, pending, diagnostic_pending}
+    return any(
+        value in PUBLIC_WATCHLIST_ALLOWED_PENDING_BLOCKER_KEYS or "confirm" in value
+        for value in values
+        if value
+    )
+
+
 def public_watchlist_eligible(record: Any, config: LifecycleEligibilityConfig | None = None) -> bool:
     allowed, _ = is_public_watchlist_candidate(record, config)
     return allowed
@@ -298,16 +369,17 @@ def is_public_watchlist_candidate(
     if _has_archived_at(candidate):
         reasons.append("archived")
     state = _current_state(candidate)
-    if not is_watch_state(state) or is_terminal_state(state):
+    first_seen_triggered = _first_seen_triggered_pre_confirmation(candidate)
+    if (not is_watch_state(state) and not first_seen_triggered) or is_terminal_state(state):
         reasons.append(f"lifecycle_state_not_eligible:{_status_key(state) or 'missing'}")
     if _cooldown_active(candidate):
         reasons.append("cooldown")
     direction_ok = has_valid_direction(candidate)
     if not direction_ok:
         reasons.append("missing_direction")
-    trade_map_ok = has_valid_trade_map(candidate)
-    if not trade_map_ok:
-        reasons.append("invalid_or_missing_trade_map")
+    public_plan_ok = _has_public_watchlist_plan(candidate)
+    if not public_plan_ok:
+        reasons.append("invalid_or_missing_public_watchlist_plan")
 
     rr_value = _trusted_rr(candidate)
     if rr_value is None:
@@ -329,7 +401,7 @@ def is_public_watchlist_candidate(
 
     allowed_blocker_keys = (
         PUBLIC_WATCHLIST_ALLOWED_PENDING_BLOCKER_KEYS
-        if direction_ok and trade_map_ok and rr_ok and quality.passed
+        if direction_ok and public_plan_ok and rr_ok and quality.passed
         else frozenset()
     )
     reasons.extend(
