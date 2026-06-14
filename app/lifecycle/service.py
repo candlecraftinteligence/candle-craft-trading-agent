@@ -134,6 +134,7 @@ class SetupLifecycleService:
                     scan_run_id=scan_run_id,
                     now=timestamp,
                     symbol_health_record=health_records.get(symbol_result.symbol),
+                    min_score_for_idea=result.config.min_score_for_idea,
                 )
                 updated_results.append(updated)
                 _add_process_meta(process_summary, meta)
@@ -153,6 +154,7 @@ class SetupLifecycleService:
             scan_run_id=scan_run_id,
             now=now,
             symbol_health_record=None,
+            min_score_for_idea=Decimal("80"),
         )
         return updated
 
@@ -164,8 +166,9 @@ class SetupLifecycleService:
         scan_run_id: str | None,
         now: str,
         symbol_health_record: Any | None,
+        min_score_for_idea: Any,
     ) -> tuple[ScannerSymbolResult, dict[str, Any]]:
-        observation = observation_from_symbol_result(symbol_result)
+        observation = observation_from_symbol_result(symbol_result, min_score_for_idea=min_score_for_idea)
         existing = repository.get_record(
             symbol=observation.symbol,
             mode=observation.mode,
@@ -226,7 +229,11 @@ def apply_lifecycle_to_run_result(
     ).apply_to_run_result(result, scan_run_id=scan_run_id, now=now)
 
 
-def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> LifecycleObservation:
+def observation_from_symbol_result(
+    symbol_result: ScannerSymbolResult,
+    *,
+    min_score_for_idea: Any = Decimal("80"),
+) -> LifecycleObservation:
     display = build_symbol_display(symbol_result)
     diagnostics = representative_strategy_diagnostics(symbol_result)
     gates_passed = _sequence_values(diagnostics.get("gates_passed"))
@@ -258,6 +265,7 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
     )
     quality_score = _int_or_zero(getattr(symbol_result.setup_quality, "quality_score", 0))
     quality_grade = _quality_grade_text(symbol_result, diagnostics)
+    quality_state = _setup_quality_state_text(symbol_result)
     edge_score = _first_non_na(
         getattr(symbol_result.setup_quality, "profitability_edge_score", NA),
         symbol_result.historical_expectancy,
@@ -321,6 +329,21 @@ def observation_from_symbol_result(symbol_result: ScannerSymbolResult) -> Lifecy
         pullback_valid=pullback_valid,
         rr_valid=rr_valid,
         valid_trade_idea=valid_trade_idea,
+        core_status=_display(getattr(symbol_result.status, "value", symbol_result.status)),
+        setup_quality_state=quality_state,
+        technical_score=_display(symbol_result.technical_score),
+        opportunity_score=_display(_opportunity_score(symbol_result, diagnostics)),
+        min_technical_score="50",
+        min_opportunity_score=_display(min_score_for_idea),
+        active_rejection_reason=_first_non_na(
+            diagnostics.get("active_rejection_reason"),
+            diagnostics.get("current_rejection_reason"),
+        ),
+        active_invalidation_reason=_first_non_na(
+            diagnostics.get("active_invalidation_reason"),
+            diagnostics.get("current_invalidation_reason"),
+        ),
+        data_health_failed=_data_health_failed(symbol_result, diagnostics),
         limit_fill_required=requires_limit_fill,
         a_grade_watch_candidate=a_grade_watch_candidate,
         entry_filled=_entry_zone_touched_for_result(symbol_result, diagnostics),
@@ -694,6 +717,47 @@ def _quality_grade_text(symbol_result: ScannerSymbolResult, diagnostics: Mapping
         diagnostics.get("quality_grade"),
         diagnostics.get("trust_grade"),
         diagnostics.get("grade"),
+    )
+
+
+def _setup_quality_state_text(symbol_result: ScannerSymbolResult) -> str:
+    quality_state = getattr(symbol_result.setup_quality, "quality_state", NA)
+    return _display(getattr(quality_state, "value", quality_state))
+
+
+def _opportunity_score(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Any:
+    score_result = symbol_result.score_result
+    trade_idea = symbol_result.trade_idea
+    return _first_non_na(
+        getattr(score_result, "total_score", NA) if score_result is not None else NA,
+        getattr(trade_idea, "confidence_score", NA) if trade_idea is not None else NA,
+        diagnostics.get("opportunity_score"),
+        diagnostics.get("total_score"),
+    )
+
+
+def _data_health_failed(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> bool:
+    if any(
+        _sequence_values(value)
+        for value in (
+            symbol_result.missing_data,
+            symbol_result.unverified_data,
+            symbol_result.strategy_missing_data,
+            symbol_result.strategy_unverified_data,
+            symbol_result.derivatives_missing_data,
+            symbol_result.derivatives_unverified_data,
+            diagnostics.get("missing_data"),
+            diagnostics.get("unverified_data"),
+        )
+    ):
+        return True
+    score_result = symbol_result.score_result
+    return bool(
+        score_result is not None
+        and (
+            _sequence_values(getattr(score_result, "missing_data", ()))
+            or _sequence_values(getattr(score_result, "unverified_data", ()))
+        )
     )
 
 
