@@ -2281,6 +2281,60 @@ def test_confirmed_signal_route_not_dependent_on_prior_watchlist_alert(tmp_path:
     assert row == (TelegramAlertType.SIGNAL_CONFIRMED.value,)
 
 
+def test_confirmed_signal_creates_send_attempt_when_valid_and_telegram_enabled(tmp_path: Path) -> None:
+    db_path = tmp_path / "confirmed-stale-rejection-send.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(),
+        sender=sender,
+        min_rr=Decimal("2.5"),
+    )
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        signal_id="dydx-confirmed",
+        rejection_reason="Opportunity score was below scanner minimum on a previous scan.",
+        diagnostics=_diagnostics(rr_to_tp2=Decimal("2.91")),
+        trade_idea=_trade_idea(symbol="DYDXUSDT", best_rr=Decimal("2.91")),
+    ).model_copy(update={"symbol": "DYDXUSDT"})
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-stale-rejection"))
+
+    assert summary.sent == 1
+    assert "CONFIRMED" in sender.messages[0]
+    assert "DYDXUSDT" in sender.messages[0]
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT symbol, attempted_alert_type, telegram_status, blocked_reason, error_message
+            FROM telegram_alert_attempts
+            WHERE signal_id = ?
+            """,
+            ("dydx-confirmed",),
+        ).fetchone()
+    assert row == ("DYDXUSDT", TelegramAlertType.SIGNAL_CONFIRMED.value, "sent", "N/A", "N/A")
+
+
+def test_confirmed_signal_does_not_call_order_execution(tmp_path: Path) -> None:
+    db_path = tmp_path / "confirmed-no-orders.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None, order_execution_enabled=False),
+        sender=sender,
+    )
+    symbol = _symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED, signal_id="confirmed-no-orders")
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-no-orders"))
+
+    assert summary.sent == 1
+    assert sender.calls == [{"message_type": TelegramMessageType.PUBLIC_SIGNAL}]
+    source = Path("app/alerts/telegram_lifecycle.py").read_text(encoding="utf-8").lower()
+    for forbidden in ("execute_order", "place_order", "create_order"):
+        assert forbidden not in source
+
+
 def test_watch_state_b_plus_complete_plan_sends_old_watchlist(tmp_path: Path) -> None:
     db_path = tmp_path / "watch-old-card.db"
     sender = FakeSender()
@@ -2381,6 +2435,34 @@ def test_research_watch_still_blocked_from_public(tmp_path: Path) -> None:
     assert summary.sent == 1
     assert sender.calls[0]["message_type"] == TelegramMessageType.RESEARCH_WATCH
     assert "WATCHLIST —" not in sender.messages[0]
+
+
+def test_public_watchlist_rules_unchanged() -> None:
+    below_grade = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(watchlist_grade="B", rr_to_tp2=Decimal("2.6")),
+        )
+    )
+    below_rr = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(watchlist_grade="B+", rr_to_tp2=Decimal("2.49")),
+        )
+    )
+    valid = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(watchlist_grade="B+", rr_to_tp2=Decimal("2.5")),
+        )
+    )
+
+    assert below_grade.eligible is False
+    assert "below_min_public_grade" in below_grade.reason
+    assert below_rr.eligible is False
+    assert "public_watchlist_rr_below_min:2.49<2.5" in below_rr.reason
+    assert valid.eligible is True
+    assert valid.alert_type == TelegramAlertType.WATCHLIST
 
 
 def test_confirmed_signal_gates_unchanged() -> None:
@@ -4628,20 +4710,50 @@ def test_confirmed_alert_is_blocked_when_technical_score_below_threshold() -> No
     assert "technical_score_below_min" in decision.reason
 
 
-def test_confirmed_alert_is_blocked_when_rejection_fields_are_present() -> None:
+def test_confirmed_signal_not_blocked_by_stale_rejection_reason() -> None:
     decision = telegram_alert_decision_for_symbol(
         _symbol(
             SetupLifecycleState.CONFIRMED,
             previous=SetupLifecycleState.TRIGGERED,
             rejection_reason="Opportunity score is below scanner minimum.",
-            rejection_reasons=("Technical score is below 50.",),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+    assert "rejection_reason_present" not in decision.reason
+
+
+def test_confirmed_signal_not_blocked_by_historical_rejection_reasons() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            rejection_reasons=("Technical score is below 50.", "Opportunity score is below scanner minimum."),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+    assert "rejection_reasons_present" not in decision.reason
+
+
+def test_confirmed_signal_blocks_active_rejection_reason() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(active_rejection_reason="structural_breakdown"),
         ),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
 
     assert decision.eligible is False
-    assert "rejection_reason_present" in decision.reason
-    assert "rejection_reasons_present" in decision.reason
+    assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+    assert "confirmed_active_rejection_reason" in decision.reason
+    assert "rejection_reason_present" not in decision.reason
 
 
 def test_confirmed_alert_is_blocked_when_trade_idea_missing() -> None:
@@ -4658,7 +4770,7 @@ def test_confirmed_alert_is_blocked_when_trade_idea_missing() -> None:
     assert "trade_idea_missing" in decision.reason
 
 
-def test_confirmed_alert_is_blocked_when_invalidation_is_rejection_text() -> None:
+def test_confirmed_signal_blocks_active_invalidation() -> None:
     bad_text = "Technical score is below 50.; Opportunity score 79.00000000 is below scanner minimum 80."
     decision = telegram_alert_decision_for_symbol(
         _symbol(
@@ -4671,7 +4783,71 @@ def test_confirmed_alert_is_blocked_when_invalidation_is_rejection_text() -> Non
     )
 
     assert decision.eligible is False
+    assert "confirmed_active_invalidation" in decision.reason
     assert "invalidation_contains_rejection_reason" in decision.reason
+
+
+def test_confirmed_alert_is_blocked_when_invalidation_is_rejection_text() -> None:
+    test_confirmed_signal_blocks_active_invalidation()
+
+
+def test_confirmed_signal_blocks_reject_grade() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            setup_quality=_setup_quality(SetupQualityState.REJECTED_NO_EDGE, quality_score=40),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is False
+    assert "confirmed_grade_below_min" in decision.reason
+
+
+def test_confirmed_signal_blocks_rr_below_min() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(rr_to_tp2=Decimal("2.49")),
+            trade_idea=_trade_idea(best_rr=Decimal("2.49")),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("2.5"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is False
+    assert "confirmed_rr_below_min:2.49<2.5" in decision.reason
+
+
+def test_confirmed_signal_blocks_missing_entry_zone() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(entry_low=NA, entry_high=NA, entry_zone=NA, watch_zone=NA, entry=NA),
+            trade_idea=_trade_idea(entry_low=None, entry_high=None),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is False
+    assert "confirmed_missing_entry_zone" in decision.reason
+
+
+def test_confirmed_signal_blocks_missing_stop() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(stop=NA, stop_loss=NA),
+            trade_idea=_trade_idea(stop_loss=None),
+        ),
+        eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
+    )
+
+    assert decision.eligible is False
+    assert "confirmed_missing_stop" in decision.reason
 
 
 def test_allousdt_style_contradictory_confirmed_alert_is_blocked() -> None:

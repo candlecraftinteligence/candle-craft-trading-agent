@@ -1113,6 +1113,107 @@ def test_candidate_becomes_confirmed_after_required_consecutive_scans(tmp_path) 
     assert result.scanner_process_summary["confirmed_after_multi_scan"] == 1
 
 
+def test_confirmed_signal_clears_stale_failed_gate_on_promotion() -> None:
+    record = _record(SetupLifecycleState.TRIGGERED).model_copy(
+        update={
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "95",
+            "tp1": "110",
+            "tp2": "117",
+            "tp3": "124",
+            "rr": "3.2",
+            "confirmation_count": 1,
+            "required_confirmation_cycles": 2,
+            "quality_grade_current": "B+",
+            "failed_gate": "missing_confirmation_structure_shift",
+            "invalidation_reason": "Invalid if price accepts below 95.",
+            "invalidation_logic": "Invalid if price accepts below 95.",
+        }
+    )
+    observation = _observation(
+        failed_gate=NA,
+        quality_grade="B+",
+        quality_score=82,
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+        tp2="117",
+        tp3="124",
+        rr="3.2",
+        invalidation_reason="Invalid if price accepts below 95.",
+        sweep_detected=True,
+        structure_shift_detected=True,
+        pullback_valid=True,
+        rr_valid=True,
+        valid_trade_idea=True,
+    )
+
+    result = evaluate_lifecycle_transition(
+        record,
+        observation,
+        lifecycle_id=record.lifecycle_id,
+        now="2026-05-18T09:05:00+00:00",
+        required_confirmation_cycles=2,
+    )
+
+    assert result.record.current_state == SetupLifecycleState.CONFIRMED
+    assert result.record.failed_gate == NA
+    assert result.event is not None
+    assert result.event.failed_gate == NA
+
+
+def test_confirmed_signal_clears_stale_invalidation_reason_on_valid_promotion() -> None:
+    record = _record(SetupLifecycleState.TRIGGERED).model_copy(
+        update={
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "95",
+            "tp1": "110",
+            "tp2": "117",
+            "tp3": "124",
+            "rr": "3.2",
+            "confirmation_count": 1,
+            "required_confirmation_cycles": 2,
+            "quality_grade_current": "B+",
+            "failed_gate": "regime_compatibility",
+            "invalidation_reason": "Setup rejected by regime weakness.",
+            "invalidation_logic": "Invalid if price accepts below 95.",
+        }
+    )
+    observation = _observation(
+        failed_gate=NA,
+        quality_grade="B+",
+        quality_score=82,
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+        tp2="117",
+        tp3="124",
+        rr="3.2",
+        invalidation_reason="Invalid if price accepts below 95.",
+        sweep_detected=True,
+        structure_shift_detected=True,
+        pullback_valid=True,
+        rr_valid=True,
+        valid_trade_idea=True,
+    )
+
+    result = evaluate_lifecycle_transition(
+        record,
+        observation,
+        lifecycle_id=record.lifecycle_id,
+        now="2026-05-18T09:05:00+00:00",
+        required_confirmation_cycles=2,
+    )
+
+    assert result.record.current_state == SetupLifecycleState.CONFIRMED
+    assert result.record.invalidation_reason == "Invalid if price accepts below 95."
+    assert result.record.failed_gate == NA
+
+
 def test_contradictory_second_scan_resets_confirmation_count(tmp_path) -> None:
     db_path = tmp_path / "life.db"
     apply_lifecycle_to_run_result(

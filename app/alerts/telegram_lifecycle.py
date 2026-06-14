@@ -383,6 +383,52 @@ INVALIDATION_REJECTION_FRAGMENTS = (
     "gate failed",
     "hard rejection",
 )
+CONFIRMED_TERMINAL_OR_REJECTED_STATES = frozenset(
+    {
+        "rejected",
+        "reject",
+        "invalidated",
+        "expired",
+        "cooldown",
+        "cooled_down",
+        "no_longer_tracking",
+        "removed",
+        "cancelled",
+        "canceled",
+        "archived",
+    }
+)
+ACTIVE_REJECTION_REASON_KEYS = ("active_rejection_reason", "current_rejection_reason")
+ACTIVE_REJECTION_REASONS_KEYS = ("active_rejection_reasons", "current_rejection_reasons")
+ACTIVE_FAILED_GATE_KEYS = ("active_failed_gate", "current_failed_gate")
+ACTIVE_INVALIDATION_REASON_KEYS = ("active_invalidation_reason", "current_invalidation_reason")
+HISTORICAL_REJECTION_REASON_KEYS = ("historical_rejection_reason", "previous_rejection_reason")
+HISTORICAL_REJECTION_REASONS_KEYS = ("historical_rejection_reasons", "previous_rejection_reasons")
+CONFIRMED_ACTIVE_FAILED_GATE_KEYS = frozenset(
+    {
+        "regime_compatibility",
+        "rejected_by_regime",
+        "rr_below_minimum",
+        "rr_below_min",
+        "low_rr",
+        "target_integrity",
+        "target_integrity_failed",
+        "target_expansion",
+        "technical_score",
+        "technical_quality",
+        "opportunity_score",
+        "score_below_min",
+        "quality_gate",
+        "setup_rejected",
+        "structural_breakdown",
+        "body_acceptance_failure",
+        "pullback_too_deep",
+        "pullback_beyond_786",
+        "entry_window_expired",
+        "late_pullback",
+        "target_inside_chop",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -402,6 +448,16 @@ class PublicSignalGateResult:
     state: str = NA
     setup_id: str | None = None
     symbol: str | None = None
+
+
+@dataclass(frozen=True)
+class ConfirmedSignalRejectionContext:
+    active_rejection_reasons: tuple[str, ...] = ()
+    historical_rejection_reasons: tuple[str, ...] = ()
+    active_failed_gate: str = NA
+    historical_failed_gate: str = NA
+    active_invalidation_reason: str = NA
+    historical_invalidation_reason: str = NA
 
 
 @dataclass(frozen=True)
@@ -3319,6 +3375,163 @@ def _previous_transition_state(symbol_result: ScannerSymbolResult) -> SetupLifec
     return None
 
 
+def _confirmed_rejection_context(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage | None = None,
+) -> ConfirmedSignalRejectionContext:
+    diagnostics = _representative_diagnostics(symbol_result)
+    lifecycle = symbol_result.lifecycle_state
+    active_reasons: list[str] = []
+    historical_reasons: list[str] = []
+
+    active_reasons.extend(_diagnostic_texts(diagnostics, ACTIVE_REJECTION_REASON_KEYS))
+    active_reasons.extend(_diagnostic_sequence_texts(diagnostics, ACTIVE_REJECTION_REASONS_KEYS))
+    historical_reasons.extend(_diagnostic_texts(diagnostics, HISTORICAL_REJECTION_REASON_KEYS))
+    historical_reasons.extend(_diagnostic_sequence_texts(diagnostics, HISTORICAL_REJECTION_REASONS_KEYS))
+
+    direct_reasons = [
+        _text(symbol_result.rejection_reason),
+        *(_text(reason) for reason in symbol_result.rejection_reasons),
+    ]
+    direct_reasons = [reason for reason in direct_reasons if reason != NA]
+    if _confirmed_currently_rejected(symbol_result):
+        active_reasons.extend(direct_reasons)
+    else:
+        historical_reasons.extend(direct_reasons)
+
+    explicit_failed_gate = _first_non_na(*_diagnostic_texts(diagnostics, ACTIVE_FAILED_GATE_KEYS))
+    lifecycle_failed_gate = getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA
+    active_failed_gate = _first_non_na(explicit_failed_gate)
+    historical_failed_gate = NA
+    if _text(active_failed_gate) == NA and _confirmed_lifecycle_failed_gate_active(symbol_result, lifecycle_failed_gate):
+        active_failed_gate = _text(lifecycle_failed_gate)
+    elif _text(lifecycle_failed_gate) != NA:
+        historical_failed_gate = _text(lifecycle_failed_gate)
+
+    active_invalidation = _confirmed_active_invalidation_reason(symbol_result, message, active_failed_gate=active_failed_gate)
+    historical_invalidation = NA
+    lifecycle_invalidation = getattr(lifecycle, "invalidation_reason", NA) if lifecycle is not None else NA
+    if _text(active_invalidation) == NA and _text(lifecycle_invalidation) != NA:
+        historical_invalidation = _text(lifecycle_invalidation)
+
+    return ConfirmedSignalRejectionContext(
+        active_rejection_reasons=tuple(dict.fromkeys(active_reasons)),
+        historical_rejection_reasons=tuple(dict.fromkeys(historical_reasons)),
+        active_failed_gate=_text(active_failed_gate),
+        historical_failed_gate=_text(historical_failed_gate),
+        active_invalidation_reason=_text(active_invalidation),
+        historical_invalidation_reason=_text(historical_invalidation),
+    )
+
+
+def _confirmed_currently_rejected(symbol_result: ScannerSymbolResult) -> bool:
+    current_status = _status_key(getattr(symbol_result.status, "value", symbol_result.status))
+    if current_status in CONFIRMED_REJECTED_STATUS_KEYS:
+        return True
+    return _status_key(_lifecycle_state_text(symbol_result)) in CONFIRMED_TERMINAL_OR_REJECTED_STATES
+
+
+def _confirmed_lifecycle_failed_gate_active(symbol_result: ScannerSymbolResult, failed_gate: Any) -> bool:
+    gate_key = _status_key(failed_gate)
+    if not gate_key:
+        return False
+    if _confirmed_currently_rejected(symbol_result):
+        return True
+
+    diagnostics = _representative_diagnostics(symbol_result)
+    if _diagnostic_texts(diagnostics, ACTIVE_FAILED_GATE_KEYS + ACTIVE_REJECTION_REASON_KEYS):
+        return True
+    if _diagnostic_sequence_texts(diagnostics, ACTIVE_REJECTION_REASONS_KEYS):
+        return True
+
+    lifecycle = symbol_result.lifecycle_state
+    action_label = _status_key(getattr(lifecycle, "action_label", NA) if lifecycle is not None else NA)
+    invalidation = _text(getattr(lifecycle, "invalidation_reason", NA) if lifecycle is not None else NA)
+    invalidation_key = _status_key(invalidation)
+    if any(token in action_label for token in ("reject", "no_trade", "removed", "cooldown")):
+        return True
+    if "wait" in action_label and (
+        gate_key in CONFIRMED_ACTIVE_FAILED_GATE_KEYS
+        or _looks_like_rejection_reason(invalidation)
+        or "regime" in gate_key
+    ):
+        return True
+    if _looks_like_rejection_reason(invalidation) and (
+        gate_key in CONFIRMED_ACTIVE_FAILED_GATE_KEYS or any(token in gate_key for token in ("regime", "score", "rr"))
+    ):
+        return True
+    if gate_key in {
+        "structural_breakdown",
+        "body_acceptance_failure",
+        "pullback_too_deep",
+        "pullback_beyond_786",
+    } and any(token in invalidation_key for token in ("broke", "broken", "failed", "invalidated", "accepted_beyond")):
+        return True
+    return False
+
+
+def _confirmed_active_invalidation_reason(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage | None = None,
+    *,
+    active_failed_gate: Any = NA,
+) -> str:
+    diagnostics = _representative_diagnostics(symbol_result)
+    setup = _selected_setup(symbol_result, diagnostics)
+    trade_idea = symbol_result.trade_idea
+    lifecycle = symbol_result.lifecycle_state
+
+    explicit = _first_non_na(*_diagnostic_texts(diagnostics, ACTIVE_INVALIDATION_REASON_KEYS))
+    if _text(explicit) != NA:
+        return _text(explicit)
+
+    for value in (
+        getattr(trade_idea, "invalidation", NA) if trade_idea is not None else NA,
+        _field(setup, "invalidation"),
+    ):
+        if _looks_like_rejection_reason(value):
+            return _text(value)
+
+    lifecycle_invalidation = getattr(lifecycle, "invalidation_reason", NA) if lifecycle is not None else NA
+    if _text(active_failed_gate) != NA and _text(lifecycle_invalidation) != NA:
+        return _text(lifecycle_invalidation)
+
+    if _confirmed_currently_rejected(symbol_result):
+        diagnostic_invalidation = _first_non_na(diagnostics.get("invalidation"), diagnostics.get("invalidation_reason"))
+        if _looks_like_rejection_reason(diagnostic_invalidation):
+            return _text(diagnostic_invalidation)
+
+    if message is not None and _looks_like_rejection_reason(message.invalidation_reason):
+        message_text = _text(message.invalidation_reason)
+        source_values = (
+            getattr(trade_idea, "invalidation", NA) if trade_idea is not None else NA,
+            _field(setup, "invalidation"),
+            *_diagnostic_texts(diagnostics, ACTIVE_INVALIDATION_REASON_KEYS),
+        )
+        if any(_text(value) == message_text for value in source_values):
+            return message_text
+    return NA
+
+
+def _diagnostic_texts(diagnostics: Mapping[str, Any], keys: Sequence[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    for key in keys:
+        text = _text(diagnostics.get(key))
+        if text != NA:
+            values.append(text)
+    return tuple(values)
+
+
+def _diagnostic_sequence_texts(diagnostics: Mapping[str, Any], keys: Sequence[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    for key in keys:
+        for value in _sequence_or_single(diagnostics.get(key)):
+            text = _text(value)
+            if text != NA:
+                values.append(text)
+    return tuple(values)
+
+
 def _failed_confirmation_terminal_decision(
     symbol_result: ScannerSymbolResult,
     *,
@@ -3371,12 +3584,12 @@ def _failed_confirmation_terminal_decision(
 
 def _failed_confirmation_core_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
     blockers: list[str] = []
-    lifecycle = symbol_result.lifecycle_state
-    failed_gate = _status_key(getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA)
+    context = _confirmed_rejection_context(symbol_result)
+    failed_gate = _status_key(context.active_failed_gate)
     if failed_gate:
         blockers.append(f"failed_confirmation_gate:{failed_gate}")
 
-    text = _failed_confirmation_haystack(symbol_result)
+    text = _failed_confirmation_haystack(symbol_result, active_only=True)
     text_key = _status_key(text)
     if "rejected_by_regime" in text_key or "regime_compatibility" in text_key or "regime_weakness" in text_key:
         blockers.append("failed_confirmation_text:regime_compatibility")
@@ -3391,8 +3604,9 @@ def _failed_confirmation_core_blockers(symbol_result: ScannerSymbolResult) -> tu
     if "setup_rejected" in text_key or "not_public_ready" in text_key:
         blockers.append("failed_confirmation_text:setup_rejected")
 
+    lifecycle = symbol_result.lifecycle_state
     action_label = _status_key(getattr(lifecycle, "action_label", NA) if lifecycle is not None else NA)
-    if action_label and any(token in action_label for token in ("reject", "wait", "no_trade", "removed")):
+    if failed_gate and action_label and any(token in action_label for token in ("reject", "wait", "no_trade", "removed")):
         blockers.append(f"failed_confirmation_action:{action_label}")
     return tuple(dict.fromkeys(blockers))
 
@@ -3403,7 +3617,7 @@ def _failed_confirmation_evidence(
 ) -> bool:
     if any(str(blocker).startswith("failed_confirmation_") for blocker in blockers):
         return True
-    if _text(getattr(symbol_result.lifecycle_state, "failed_gate", NA)) != NA:
+    if _text(_confirmed_rejection_context(symbol_result).active_failed_gate) != NA:
         return True
     return bool(blockers)
 
@@ -3414,7 +3628,7 @@ def _failed_confirmation_is_structural_invalidation(
 ) -> bool:
     haystack = " ".join(
         (
-            _failed_confirmation_haystack(symbol_result),
+            _failed_confirmation_haystack(symbol_result, active_only=True),
             " ".join(str(blocker) for blocker in blockers),
         )
     )
@@ -3440,7 +3654,9 @@ def _failed_confirmation_reason(
     if alert_type == TelegramAlertType.INVALIDATED:
         return "Watchlist invalidated because the sweep/BOS/CHoCH structure failed before confirmation."
 
-    haystack = " ".join((_failed_confirmation_haystack(symbol_result), " ".join(str(blocker) for blocker in blockers)))
+    haystack = " ".join(
+        (_failed_confirmation_haystack(symbol_result, active_only=True), " ".join(str(blocker) for blocker in blockers))
+    )
     key = _status_key(haystack)
     if "regime_compatibility" in key or "regime_weakness" in key or "rejected_by_regime" in key:
         return "Watchlist removed because market conditions failed before confirmation."
@@ -3459,10 +3675,21 @@ def _failed_confirmation_reason(
     return "Watchlist removed because the setup failed final confirmation gates."
 
 
-def _failed_confirmation_haystack(symbol_result: ScannerSymbolResult) -> str:
+def _failed_confirmation_haystack(symbol_result: ScannerSymbolResult, *, active_only: bool = False) -> str:
     diagnostics = _representative_diagnostics(symbol_result)
     lifecycle = symbol_result.lifecycle_state
     transition = symbol_result.lifecycle_transition
+    if active_only:
+        context = _confirmed_rejection_context(symbol_result)
+        action_label = getattr(lifecycle, "action_label", NA) if _text(context.active_failed_gate) != NA else NA
+        parts = [
+            context.active_failed_gate,
+            context.active_invalidation_reason,
+            action_label,
+            getattr(transition, "notes", NA) if _confirmed_currently_rejected(symbol_result) else NA,
+            *context.active_rejection_reasons,
+        ]
+        return " ".join(_text(part) for part in parts if _text(part) != NA)
     parts = [
         getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA,
         getattr(lifecycle, "invalidation_reason", NA) if lifecycle is not None else NA,
@@ -3613,11 +3840,21 @@ def _public_signal_gate_result(
     missing = _missing_required_fields(alert_type, message)
     if missing:
         reasons.append(f"missing_required_fields:{','.join(missing)}")
+        if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
+            if "direction" in missing:
+                reasons.append("confirmed_missing_side")
+            if "entry_low" in missing or "entry_high" in missing:
+                reasons.append("confirmed_missing_entry_zone")
+            if "stop_loss" in missing:
+                reasons.append("confirmed_missing_stop")
+            if "invalidation_reason" in missing:
+                reasons.append("confirmed_missing_invalidation")
 
-    if _text(symbol_result.rejection_reason) != NA:
-        reasons.append("rejection_reason_present")
-    if any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
-        reasons.append("rejection_reasons_present")
+    if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
+        if _text(symbol_result.rejection_reason) != NA:
+            reasons.append("rejection_reason_present")
+        if any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
+            reasons.append("rejection_reasons_present")
 
     if _status_key(_first_non_na(_lifecycle_state_text(symbol_result), state)) in {
         "invalidated",
@@ -4330,13 +4567,18 @@ def _defensive_delivery_blockers(
         return ()
 
     blockers: list[str] = []
-    blockers.extend(_public_quality_gate_blockers(symbol_result))
-    blockers.extend(_core_status_blockers(symbol_result))
+    rejection_context = _confirmed_rejection_context(symbol_result, message)
+    quality_blockers = _public_quality_gate_blockers(symbol_result)
+    blockers.extend(quality_blockers)
+    if quality_blockers:
+        blockers.append("confirmed_grade_below_min")
+    blockers.extend(_core_status_blockers(symbol_result, current_only=True))
     blockers.extend(_failed_confirmation_core_blockers(symbol_result))
 
     quality_state = _setup_quality_state_key(symbol_result)
     if quality_state not in CONFIRMED_ALLOWED_QUALITY_STATE_KEYS:
         blockers.append(f"setup_quality_not_confirmed:{quality_state or 'missing'}")
+        blockers.append("confirmed_grade_below_min")
 
     if symbol_result.trade_idea is None:
         blockers.append("trade_idea_missing")
@@ -4345,16 +4587,19 @@ def _defensive_delivery_blockers(
         if quality_gate is not None and getattr(quality_gate, "passed", True) is not True:
             blockers.append("quality_gate_failed")
 
-    if _text(symbol_result.rejection_reason) != NA:
-        blockers.append("rejection_reason_present")
-    if any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
-        blockers.append("rejection_reasons_present")
+    for reason in rejection_context.active_rejection_reasons:
+        reason_key = _status_key(reason)
+        blockers.append(f"confirmed_active_rejection_reason:{reason_key or 'present'}")
+    if _text(rejection_context.active_failed_gate) != NA:
+        blockers.append(f"confirmed_current_failed_gate:{_status_key(rejection_context.active_failed_gate)}")
 
     planned_rr = _decimal_or_none(message.planned_rr)
     if planned_rr is None:
         blockers.append("planned_rr_missing_or_invalid")
+        blockers.append("confirmed_missing_rr")
     elif planned_rr < context.min_rr:
         blockers.append(f"planned_rr_below_min:{_text(planned_rr)}<{_text(context.min_rr)}")
+        blockers.append(f"confirmed_rr_below_min:{_text(planned_rr)}<{_text(context.min_rr)}")
 
     opportunity_score = _opportunity_score_decimal(symbol_result)
     if context.min_score_for_idea is not None:
@@ -4372,11 +4617,20 @@ def _defensive_delivery_blockers(
     missing = _missing_required_fields(alert_type, message)
     if missing:
         blockers.append(f"missing_required_fields:{','.join(missing)}")
+        if "direction" in missing:
+            blockers.append("confirmed_missing_side")
+        if "entry_low" in missing or "entry_high" in missing:
+            blockers.append("confirmed_missing_entry_zone")
+        if "stop_loss" in missing:
+            blockers.append("confirmed_missing_stop")
+        if "invalidation_reason" in missing:
+            blockers.append("confirmed_missing_invalidation")
 
-    raw_invalidation = _raw_invalidation_text(symbol_result)
     if _text(message.invalidation_reason) == NA:
         blockers.append("invalidation_missing")
-    if _looks_like_rejection_reason(raw_invalidation) or _looks_like_rejection_reason(message.invalidation_reason):
+        blockers.append("confirmed_missing_invalidation")
+    if _text(rejection_context.active_invalidation_reason) != NA:
+        blockers.append("confirmed_active_invalidation")
         blockers.append("invalidation_contains_rejection_reason")
 
     blockers.extend(_target_integrity_blockers(symbol_result, alert_type, message))
@@ -4470,9 +4724,14 @@ def _entry_reference(symbol_result: ScannerSymbolResult, message: TelegramSignal
     )
 
 
-def _core_status_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+def _core_status_blockers(symbol_result: ScannerSymbolResult, *, current_only: bool = False) -> tuple[str, ...]:
     blockers: list[str] = []
-    for status_key in _status_keys(symbol_result):
+    status_keys = (
+        (_status_key(getattr(symbol_result.status, "value", symbol_result.status)),)
+        if current_only
+        else _status_keys(symbol_result)
+    )
+    for status_key in status_keys:
         if status_key in CONFIRMED_REJECTED_STATUS_KEYS:
             blockers.append(f"core_status_blocked:{status_key}")
     return tuple(dict.fromkeys(blockers))
@@ -6143,8 +6402,7 @@ def _soft_failed_confirmation_blocker_key(
 ) -> str:
     if not blockers or _hard_failed_confirmation_blockers(symbol_result, blockers):
         return NA
-    lifecycle = symbol_result.lifecycle_state
-    failed_gate = _status_key(getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA)
+    failed_gate = _status_key(_confirmed_rejection_context(symbol_result).active_failed_gate)
     if "regime_compatibility" in failed_gate:
         return "regime_compatibility"
     if "rr_below" in failed_gate or "low_rr" in failed_gate:
@@ -6153,7 +6411,7 @@ def _soft_failed_confirmation_blocker_key(
         return "target_expansion"
     haystack = " ".join(
         (
-            _failed_confirmation_haystack(symbol_result),
+            _failed_confirmation_haystack(symbol_result, active_only=True),
             " ".join(str(blocker) for blocker in blockers),
         )
     )
@@ -6186,14 +6444,15 @@ def _soft_failed_confirmation_lifecycle_evidence(symbol_result: ScannerSymbolRes
     lifecycle = symbol_result.lifecycle_state
     if lifecycle is None:
         return False
+    rejection_context = _confirmed_rejection_context(symbol_result)
     haystack = _status_key(
         " ".join(
             _text(value)
             for value in (
-                lifecycle.failed_gate,
-                lifecycle.action_label,
-                lifecycle.invalidation_reason,
-                _failed_confirmation_haystack(symbol_result),
+                rejection_context.active_failed_gate,
+                lifecycle.action_label if _text(rejection_context.active_failed_gate) != NA else NA,
+                rejection_context.active_invalidation_reason,
+                _failed_confirmation_haystack(symbol_result, active_only=True),
             )
             if _text(value) != NA
         )
@@ -6225,7 +6484,7 @@ def _hard_failed_confirmation_blockers(
         return True
     haystack = " ".join(
         (
-            _failed_confirmation_haystack(symbol_result),
+            _failed_confirmation_haystack(symbol_result, active_only=True),
             " ".join(str(blocker) for blocker in blockers),
         )
     )
