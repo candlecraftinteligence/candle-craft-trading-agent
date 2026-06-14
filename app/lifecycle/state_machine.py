@@ -226,13 +226,14 @@ def transition_record(
     notes: str = NA,
 ) -> SetupTransitionResult:
     timestamp = now or now_utc_iso()
+    event_failed_gate = _transition_failed_gate(record, to_state, failed_gate)
     if record.current_state == to_state:
         updated = record.model_copy(
             update={
                 "last_seen_at": timestamp,
                 "readiness_score": _bounded_score(readiness_score, record.readiness_score),
                 "quality_score": _bounded_score(quality_score, record.quality_score),
-                "failed_gate": _text_or(failed_gate, record.failed_gate),
+                "failed_gate": event_failed_gate,
             }
         )
         return SetupTransitionResult(
@@ -281,7 +282,7 @@ def transition_record(
         scan_run_id=scan_run_id,
         readiness_score=_bounded_score(readiness_score, record.readiness_score),
         quality_score=_bounded_score(quality_score, record.quality_score),
-        failed_gate=_text_or(failed_gate, record.failed_gate),
+        failed_gate=event_failed_gate,
         notes=notes,
     )
     updated = record.model_copy(
@@ -331,6 +332,7 @@ def evaluate_lifecycle_transition(
             initial_state = _initial_pre_confirmation_state(observation)
         quality_grade = _quality_grade_or_score(observation)
         confirmed_at = timestamp if initial_state in CONFIRMATION_GATED_STATES and confirmation_count >= required_cycles else None
+        confirmed_snapshot_valid = confirmed_at is not None and _valid_confirmed_observation(observation)
         new_record = SetupLifecycleRecord(
             lifecycle_id=lifecycle_id,
             symbol=observation.symbol,
@@ -341,13 +343,15 @@ def evaluate_lifecycle_transition(
             first_seen_at=timestamp,
             last_seen_at=timestamp,
             last_transition_at=timestamp,
-            failed_gate=_text(observation.failed_gate),
+            failed_gate=NA if confirmed_snapshot_valid else _text(observation.failed_gate),
             readiness_score=_bounded_score(observation.readiness_score, 0),
             quality_score=_bounded_score(observation.quality_score, 0),
             edge_score=_text(observation.edge_score),
             regime_state=_text(observation.regime_state),
             action_label=_text(observation.action_label),
-            invalidation_reason=_invalidation_reason(observation),
+            invalidation_reason=_text(observation.invalidation_reason)
+            if confirmed_snapshot_valid
+            else _invalidation_reason(observation),
             cooldown_until=None,
             archived_at=timestamp if initial_state == SetupLifecycleState.ARCHIVED else None,
             entry_low=_text(observation.entry_low),
@@ -681,6 +685,7 @@ def _record_with_observation(
     current_grade = _current_quality_grade(record, quality_grade)
     confirmed_at = record.confirmed_at
     quality_grade_confirmed = record.quality_grade_confirmed
+    confirmed_snapshot_valid = _valid_confirmed_observation(observation)
     if (
         confirmation_count >= required_confirmation_cycles
         and record.confirmation_count < required_confirmation_cycles
@@ -697,7 +702,11 @@ def _record_with_observation(
             "edge_score": _text(observation.edge_score),
             "regime_state": _text(observation.regime_state),
             "action_label": _text(observation.action_label),
-            "invalidation_reason": _plan_or_observed_value(record, record.invalidation_reason, _invalidation_reason(observation)),
+            "invalidation_reason": _confirmed_invalidation_value(
+                record,
+                observation,
+                confirmed_snapshot_valid=confirmed_snapshot_valid,
+            ),
             "entry_low": _plan_or_observed_value(record, record.entry_low, observation.entry_low),
             "entry_high": _plan_or_observed_value(record, record.entry_high, observation.entry_high),
             "stop_loss": _plan_or_observed_value(record, record.stop_loss, observation.stop_loss),
@@ -705,7 +714,11 @@ def _record_with_observation(
             "tp2": _plan_or_observed_value(record, record.tp2, observation.tp2),
             "tp3": _plan_or_observed_value(record, record.tp3, observation.tp3),
             "rr": _plan_or_observed_value(record, record.rr, observation.rr),
-            "invalidation_logic": _plan_or_observed_value(record, record.invalidation_logic, observation.invalidation_reason),
+            "invalidation_logic": _confirmed_invalidation_logic(
+                record,
+                observation,
+                confirmed_snapshot_valid=confirmed_snapshot_valid,
+            ),
             "confirmation_count": confirmation_count,
             "required_confirmation_cycles": required_confirmation_cycles,
             "quality_grade_current": current_grade,
@@ -859,6 +872,10 @@ def _confirmation_countable(observation: LifecycleObservation) -> bool:
     )
 
 
+def _valid_confirmed_observation(observation: LifecycleObservation) -> bool:
+    return _confirmation_countable(observation) and not _terminal_observation(observation)
+
+
 def _setup_observable(observation: LifecycleObservation) -> bool:
     if observation.valid_trade_idea or observation.pullback_and_rr_valid or observation.a_grade_watch_candidate:
         return True
@@ -875,6 +892,70 @@ def _plan_or_observed_value(record: SetupLifecycleRecord, stored: Any, observed:
         if stored_text != NA:
             return stored_text
     return _text(observed)
+
+
+def _confirmed_invalidation_value(
+    record: SetupLifecycleRecord,
+    observation: LifecycleObservation,
+    *,
+    confirmed_snapshot_valid: bool,
+) -> str:
+    if confirmed_snapshot_valid and _stale_rejection_text(record.invalidation_reason, record.failed_gate):
+        return _text(observation.invalidation_reason)
+    return _plan_or_observed_value(record, record.invalidation_reason, _invalidation_reason(observation))
+
+
+def _confirmed_invalidation_logic(
+    record: SetupLifecycleRecord,
+    observation: LifecycleObservation,
+    *,
+    confirmed_snapshot_valid: bool,
+) -> str:
+    if confirmed_snapshot_valid and _stale_rejection_text(record.invalidation_logic, record.failed_gate):
+        return _text(observation.invalidation_reason)
+    return _plan_or_observed_value(record, record.invalidation_logic, observation.invalidation_reason)
+
+
+def _transition_failed_gate(
+    record: SetupLifecycleRecord,
+    to_state: SetupLifecycleState,
+    failed_gate: str | None,
+) -> str:
+    if to_state == SetupLifecycleState.CONFIRMED and _text(failed_gate) == NA:
+        return NA
+    return _text_or(failed_gate, record.failed_gate)
+
+
+def _stale_rejection_text(value: Any, failed_gate: Any = NA) -> bool:
+    text = _text(value)
+    if text == NA:
+        return False
+    failed_gate_text = _text(failed_gate)
+    if failed_gate_text != NA and _status_key(text) == _status_key(failed_gate_text):
+        return True
+    lowered = text.lower()
+    return any(
+        fragment in lowered
+        for fragment in (
+            "technical score",
+            "opportunity score",
+            "scanner minimum",
+            "below scanner",
+            "below minimum",
+            "rr below",
+            "risk/reward below",
+            "missing required",
+            "missing field",
+            "no valid setup",
+            "no setup",
+            "near miss",
+            "rejected setup",
+            "setup rejected",
+            "failed gate",
+            "gate failed",
+            "hard rejection",
+        )
+    )
 
 
 def _entry_touch_transition_requires_touch_reason(
