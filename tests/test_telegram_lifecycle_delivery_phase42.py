@@ -2316,6 +2316,219 @@ def test_confirmed_signal_creates_send_attempt_when_valid_and_telegram_enabled(t
     assert row == ("DYDXUSDT", TelegramAlertType.SIGNAL_CONFIRMED.value, "sent", "N/A", "N/A")
 
 
+def _attempt_count(db_path: Path, attempted_alert_type: str = TelegramAlertType.SIGNAL_CONFIRMED.value) -> int:
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM telegram_alert_attempts WHERE attempted_alert_type = ?",
+            (attempted_alert_type,),
+        ).fetchone()[0]
+
+
+def test_signal_confirmed_attempt_not_created_for_rejected_by_scoring(tmp_path: Path) -> None:
+    db_path = tmp_path / "rejected-confirmed.db"
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(),
+        sender=FakeSender(),
+        min_score_for_idea=Decimal("80"),
+    )
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        status=ScannerPipelineStatus.REJECTED_BY_SCORING,
+        signal_id="rejected-confirmed",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="rejected-confirmed"))
+
+    assert summary.sent == 0
+    assert summary.blocked == 0
+    assert _attempt_count(db_path) == 0
+    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason["rejected_by_scoring"] == 1
+
+
+def test_signal_confirmed_attempt_not_created_for_trade_idea_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing-trade-idea.db"
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(),
+        sender=FakeSender(),
+        min_score_for_idea=Decimal("80"),
+    )
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        trade_idea=None,
+        signal_id="missing-trade-idea",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="missing-trade-idea"))
+
+    assert summary.sent == 0
+    assert summary.blocked == 0
+    assert _attempt_count(db_path) == 0
+    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason["trade_idea_missing"] == 1
+
+
+def test_signal_confirmed_attempt_not_created_for_watchlist_near_miss(tmp_path: Path) -> None:
+    db_path = tmp_path / "near-miss-confirmed.db"
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(),
+        sender=FakeSender(),
+        min_score_for_idea=Decimal("80"),
+    )
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        signal_id="near-miss-confirmed",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="near-miss-confirmed"))
+
+    assert summary.sent == 0
+    assert summary.blocked == 0
+    assert _attempt_count(db_path) == 0
+    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason["watchlist_near_miss_not_confirmed"] == 1
+
+
+def test_signal_confirmed_attempt_created_for_true_confirmed_candidate(tmp_path: Path) -> None:
+    db_path = tmp_path / "true-confirmed.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(),
+        sender=sender,
+        min_score_for_idea=Decimal("80"),
+    )
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        diagnostics=_diagnostics(rr_to_tp2=Decimal("3.1")),
+        trade_idea=_trade_idea(best_rr=Decimal("3.1"), opportunity_score=Decimal("88")),
+        signal_id="true-confirmed",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="true-confirmed"))
+
+    assert summary.sent == 1
+    assert summary.confirmed_alert_audit.confirmed_candidates_seen == 1
+    assert summary.confirmed_alert_audit.confirmed_prefilter_passed == 1
+    assert summary.confirmed_alert_audit.signal_confirmed_attempts_created == 1
+    assert summary.confirmed_alert_audit.signal_confirmed_sent == 1
+    assert _attempt_count(db_path) == 1
+    assert "CONFIRMED" in sender.messages[0]
+
+
+def test_true_confirmed_candidate_not_blocked_by_historical_rejection_reason(tmp_path: Path) -> None:
+    db_path = tmp_path / "historical-rejection-confirmed.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(),
+        sender=sender,
+        min_score_for_idea=Decimal("80"),
+    )
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        rejection_reason="Technical score was below 50 on a previous scan.",
+        diagnostics=_diagnostics(rr_to_tp2=Decimal("3.1")),
+        trade_idea=_trade_idea(best_rr=Decimal("3.1"), opportunity_score=Decimal("88")),
+        signal_id="historical-rejection-confirmed",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="historical-rejection-confirmed"))
+
+    assert summary.sent == 1
+    assert summary.confirmed_alert_audit.confirmed_prefilter_passed == 1
+    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason == {}
+    assert _attempt_count(db_path) == 1
+
+
+def test_true_confirmed_candidate_still_blocked_by_active_rejection_reason(tmp_path: Path) -> None:
+    db_path = tmp_path / "active-rejection-confirmed.db"
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(),
+        sender=FakeSender(),
+        min_score_for_idea=Decimal("80"),
+    )
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        diagnostics=_diagnostics(active_rejection_reason="technical_score_is_below_50", rr_to_tp2=Decimal("3.1")),
+        trade_idea=_trade_idea(best_rr=Decimal("3.1"), opportunity_score=Decimal("88")),
+        signal_id="active-rejection-confirmed",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="active-rejection-confirmed"))
+
+    assert summary.sent == 0
+    assert summary.blocked == 0
+    assert _attempt_count(db_path) == 0
+    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason["active_rejection_reason"] == 1
+
+
+def test_runtime_like_homeusdt_false_confirmed_creates_no_signal_confirmed_attempt(tmp_path: Path) -> None:
+    db_path = tmp_path / "homeusdt-false-confirmed.db"
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(),
+        sender=FakeSender(),
+        min_rr=Decimal("3"),
+        min_score_for_idea=Decimal("80"),
+    )
+    rejection_text = "Technical score is below 50.; Opportunity score 76 is below scanner minimum 80."
+    symbol = _with_lifecycle_fields(
+        _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            diagnostics=_diagnostics(
+                active_failed_gate="scoring",
+                active_rejection_reason="technical_score_is_below_50",
+                active_invalidation_reason=rejection_text,
+                first_failed_gate="scoring",
+                rr_to_tp2=Decimal("2.91"),
+                opportunity_score=Decimal("76"),
+                invalidation=rejection_text,
+            ),
+            status=ScannerPipelineStatus.REJECTED_BY_SCORING,
+            trade_idea=None,
+            technical_score=Decimal("30"),
+            setup_quality=_setup_quality_with_grade(
+                SetupQualityGrade.B,
+                quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+                quality_score=76,
+            ),
+            signal_id="homeusdt-false-confirmed",
+        ),
+        rr="2.91",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+        tp2="117",
+        tp3="124",
+        invalidation_reason=rejection_text,
+    ).model_copy(update={"symbol": "HOMEUSDT"})
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="homeusdt-runtime"))
+
+    assert summary.sent == 0
+    assert summary.blocked == 0
+    assert _attempt_count(db_path) == 0
+    reasons = summary.confirmed_alert_audit.blocked_before_attempt_by_reason
+    assert reasons["rejected_by_scoring"] == 1
+    assert reasons["failed_confirmation_gate_scoring"] == 1
+    assert reasons["trade_idea_missing"] == 1
+
+
+def test_order_execution_not_called_for_confirmed_signal(tmp_path: Path) -> None:
+    test_confirmed_signal_does_not_call_order_execution(tmp_path)
+
+
 def test_confirmed_signal_does_not_call_order_execution(tmp_path: Path) -> None:
     db_path = tmp_path / "confirmed-no-orders.db"
     sender = FakeSender()
@@ -4456,14 +4669,13 @@ def test_blocked_different_alert_type_creates_separate_audit_record(tmp_path: Pa
 
     assert watch_summary.blocked == 0
     assert watch_summary.public_watchlist_audit.blocked_before_attempt == 1
-    assert confirmed_summary.blocked == 1
+    assert confirmed_summary.blocked == 0
+    assert confirmed_summary.confirmed_alert_audit.blocked_before_attempt_by_reason == {"rr_below_min": 1}
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(
             "SELECT attempted_alert_type, telegram_status, seen_count FROM telegram_alert_attempts ORDER BY id"
         ).fetchall()
-    assert rows == [
-        (TelegramAlertType.SIGNAL_CONFIRMED.value, "blocked", 1),
-    ]
+    assert rows == []
 
 
 def test_sent_watchlist_and_blocked_watchlist_remain_separate_audit_records(tmp_path: Path) -> None:
@@ -4916,7 +5128,7 @@ def test_confluence_from_raw_derivatives_context_is_public_text() -> None:
         assert forbidden not in text
 
 
-def test_blocked_confirmed_alert_persists_safe_research_metadata(tmp_path: Path) -> None:
+def test_blocked_confirmed_alert_prefilter_records_summary_without_attempt(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -4937,21 +5149,15 @@ def test_blocked_confirmed_alert_persists_safe_research_metadata(tmp_path: Path)
 
     summary = run(service.deliver_for_run(result, scan_run_id="run-001"))
 
-    assert summary.blocked == 1
+    assert summary.blocked == 0
+    assert summary.confirmed_alert_audit.confirmed_candidates_seen == 1
+    assert summary.confirmed_alert_audit.confirmed_prefilter_passed == 0
+    assert summary.confirmed_alert_audit.signal_confirmed_attempts_created == 0
+    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason == {"rr_below_min": 1}
     assert sender.messages == []
     with sqlite3.connect(db_path) as connection:
-        row = connection.execute(
-            """
-            SELECT telegram_status, attempted_alert_type, rr_planned, min_rr, min_score_for_idea, blocked_reason
-            FROM telegram_alert_attempts
-            """
-        ).fetchone()
-    assert row[0] == "blocked"
-    assert row[1] == TelegramAlertType.SIGNAL_CONFIRMED.value
-    assert row[2] == "2.79"
-    assert row[3] == "3"
-    assert row[4] == "80"
-    assert "planned_rr_below_min" in row[5]
+        count = connection.execute("SELECT COUNT(*) FROM telegram_alert_attempts").fetchone()[0]
+    assert count == 0
 
 
 def test_each_alert_type_is_not_sent_twice(tmp_path: Path) -> None:

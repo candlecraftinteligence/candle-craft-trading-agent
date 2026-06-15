@@ -4,6 +4,7 @@ import asyncio
 import json
 from decimal import Decimal
 
+from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.analytics.symbol_health import SymbolHealthRecord
 from app.data.dtos import NA
@@ -205,6 +206,40 @@ def _observation(**overrides) -> LifecycleObservation:
     return LifecycleObservation(**data)
 
 
+def _confirmed_observation(**overrides) -> LifecycleObservation:
+    data = {
+        "symbol": "BTCUSDT",
+        "mode": "swing",
+        "direction": "long",
+        "readiness_score": 85,
+        "readiness_label": "VALID SETUP",
+        "quality_score": 82,
+        "quality_grade": "B+",
+        "entry_low": "100",
+        "entry_high": "102",
+        "stop_loss": "95",
+        "tp1": "110",
+        "tp2": "117",
+        "tp3": "124",
+        "rr": "3.2",
+        "failed_gate": NA,
+        "invalidation_reason": "Invalid if price accepts below 95.",
+        "sweep_detected": True,
+        "structure_shift_detected": True,
+        "pullback_valid": True,
+        "rr_valid": True,
+        "valid_trade_idea": True,
+        "core_status": "idea_created",
+        "setup_quality_state": "high_quality_trade",
+        "technical_score": "70",
+        "opportunity_score": "88",
+        "min_technical_score": "50",
+        "min_opportunity_score": "80",
+    }
+    data.update(overrides)
+    return LifecycleObservation(**data)
+
+
 def _scan_result(symbol_result: ScannerSymbolResult) -> ScannerRunResult:
     config = ScannerRunConfig.model_validate(
         {
@@ -346,6 +381,42 @@ def _setup_quality_result(grade: SetupQualityGrade, *, score: int = 90) -> Setup
     )
 
 
+def _trade_idea(
+    *,
+    symbol: str = "BTCUSDT",
+    direction: str = "long",
+    entry_low: Decimal = Decimal("100"),
+    entry_high: Decimal = Decimal("102"),
+    stop: Decimal = Decimal("95"),
+    rr: Decimal = Decimal("3.2"),
+    opportunity_score: Decimal = Decimal("88"),
+):
+    return create_trade_idea(
+        {
+            "symbol": symbol,
+            "exchange": "binance",
+            "market_type": "perpetual",
+            "direction": direction,
+            "timeframe": "15m",
+            "setup_type": "liquidity_grab_pullback_swing",
+            "entry_low": entry_low,
+            "entry_high": entry_high,
+            "stop_loss": stop,
+            "take_profit_targets": (Decimal("110"), Decimal("117"), Decimal("124")),
+            "invalidation": f"Invalid if price accepts beyond {stop}.",
+            "opportunity_score": opportunity_score,
+            "opportunity_grade": "A",
+            "opportunity_decision": "alert_candidate",
+            "risk_approved": True,
+            "best_rr": rr,
+            "technical_summary": "Sweep and reclaim into valid pullback.",
+            "derivatives_summary": "Funding normal while open interest is rising.",
+            "confirmed_facts": ("LTF BOS/CHoCH confirmed.",),
+            "cancel_condition": "Cancel if price accepts beyond invalidation.",
+        }
+    )
+
+
 def _a_grade_watch_symbol(
     *,
     grade: SetupQualityGrade = SetupQualityGrade.A,
@@ -398,14 +469,27 @@ def _confirmed_candidate_symbol(
     stop: Decimal = Decimal("95"),
     quality_grade: SetupQualityGrade = SetupQualityGrade.B_PLUS,
     rr: Decimal = Decimal("3.2"),
+    technical_score: object = 70,
+    opportunity_score: Decimal = Decimal("88"),
 ) -> ScannerSymbolResult:
     return ScannerSymbolResult(
         symbol=symbol,
-        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
-        status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+        status=ScannerPipelineStatus.IDEA_CREATED,
+        status_history=(ScannerPipelineStatus.IDEA_CREATED,),
         latest_high=Decimal("110"),
         latest_low=Decimal("108"),
-        rejected_strategy_modes=("swing",),
+        technical_score=technical_score,
+        trade_idea=_trade_idea(
+            symbol=symbol,
+            direction=direction,
+            entry_low=entry_low,
+            entry_high=entry_high,
+            stop=stop,
+            rr=rr,
+            opportunity_score=opportunity_score,
+        ),
+        valid_strategy_modes=("swing",),
+        rejected_strategy_modes=(),
         strategy_diagnostics={
             "swing": {
                 "mode": "swing",
@@ -422,6 +506,7 @@ def _confirmed_candidate_symbol(
                 "tp2": Decimal("117"),
                 "tp3": Decimal("124"),
                 "rr_to_tp2": rr,
+                "opportunity_score": opportunity_score,
                 "invalidation": f"Invalid if price accepts beyond {stop}.",
                 "quality_grade": quality_grade.value,
             }
@@ -512,15 +597,7 @@ def test_valid_state_progression() -> None:
 
     pending_confirmation = evaluate_lifecycle_transition(
         triggered.record,
-        _observation(
-            sweep_detected=True,
-            structure_shift_detected=True,
-            pullback_valid=True,
-            rr_valid=True,
-            quality_score=82,
-            quality_grade="B+",
-            invalidation_reason="Invalid below stop.",
-        ),
+        _confirmed_observation(invalidation_reason="Invalid below stop."),
         lifecycle_id="life_1",
         now="2026-05-18T09:15:00+00:00",
     )
@@ -530,15 +607,7 @@ def test_valid_state_progression() -> None:
 
     confirmed = evaluate_lifecycle_transition(
         pending_confirmation.record,
-        _observation(
-            sweep_detected=True,
-            structure_shift_detected=True,
-            pullback_valid=True,
-            rr_valid=True,
-            quality_score=82,
-            quality_grade="B+",
-            invalidation_reason="Invalid below stop.",
-        ),
+        _confirmed_observation(invalidation_reason="Invalid below stop."),
         lifecycle_id="life_1",
         now="2026-05-18T09:20:00+00:00",
     )
@@ -546,7 +615,7 @@ def test_valid_state_progression() -> None:
 
     executing = evaluate_lifecycle_transition(
         confirmed.record,
-        _observation(valid_trade_idea=True, pullback_valid=True, rr_valid=True, invalidation_reason="Invalid below stop."),
+        _confirmed_observation(invalidation_reason="Invalid below stop."),
         lifecycle_id="life_1",
         now="2026-05-18T09:25:00+00:00",
     )
@@ -1113,6 +1182,92 @@ def test_candidate_becomes_confirmed_after_required_consecutive_scans(tmp_path) 
     assert result.scanner_process_summary["confirmed_after_multi_scan"] == 1
 
 
+def _assert_observation_never_promotes_to_confirmed(observation: LifecycleObservation) -> SetupTransitionResult:
+    record = _record(SetupLifecycleState.TRIGGERED).model_copy(
+        update={
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "95",
+            "tp1": "110",
+            "tp2": "117",
+            "tp3": "124",
+            "rr": "3.2",
+            "confirmation_count": 1,
+            "required_confirmation_cycles": 2,
+            "quality_grade_current": "B+",
+            "invalidation_reason": "Invalid if price accepts below 95.",
+            "invalidation_logic": "Invalid if price accepts below 95.",
+        }
+    )
+    result = evaluate_lifecycle_transition(
+        record,
+        observation,
+        lifecycle_id=record.lifecycle_id,
+        now="2026-05-18T09:05:00+00:00",
+        required_confirmation_cycles=2,
+    )
+    assert result.record is not None
+    assert result.record.current_state != SetupLifecycleState.CONFIRMED
+    assert result.record.confirmed_at is None
+    return result
+
+
+def test_rejected_by_scoring_never_promotes_to_confirmed() -> None:
+    result = _assert_observation_never_promotes_to_confirmed(
+        _confirmed_observation(core_status="rejected_by_scoring")
+    )
+    assert result.record.current_state in {SetupLifecycleState.TRIGGERED, SetupLifecycleState.INVALIDATED}
+
+
+def test_failed_confirmation_gate_scoring_never_promotes_to_confirmed() -> None:
+    result = _assert_observation_never_promotes_to_confirmed(
+        _confirmed_observation(failed_gate="scoring")
+    )
+    assert result.record.current_state in {SetupLifecycleState.TRIGGERED, SetupLifecycleState.INVALIDATED}
+
+
+def test_watchlist_near_miss_never_promotes_to_signal_confirmed() -> None:
+    result = _assert_observation_never_promotes_to_confirmed(
+        _confirmed_observation(setup_quality_state="watchlist_near_miss")
+    )
+    assert result.record.current_state == SetupLifecycleState.TRIGGERED
+
+
+def test_confirmed_grade_below_min_never_promotes_to_confirmed() -> None:
+    result = _assert_observation_never_promotes_to_confirmed(
+        _confirmed_observation(quality_grade="B", quality_score=70)
+    )
+    assert result.record.current_state == SetupLifecycleState.TRIGGERED
+
+
+def test_trade_idea_missing_never_promotes_to_confirmed() -> None:
+    result = _assert_observation_never_promotes_to_confirmed(
+        _confirmed_observation(valid_trade_idea=False)
+    )
+    assert result.record.current_state == SetupLifecycleState.TRIGGERED
+
+
+def test_technical_score_below_min_never_promotes_to_confirmed() -> None:
+    result = _assert_observation_never_promotes_to_confirmed(
+        _confirmed_observation(technical_score="49")
+    )
+    assert result.record.current_state == SetupLifecycleState.TRIGGERED
+
+
+def test_opportunity_score_below_min_never_promotes_to_confirmed() -> None:
+    result = _assert_observation_never_promotes_to_confirmed(
+        _confirmed_observation(opportunity_score="79")
+    )
+    assert result.record.current_state == SetupLifecycleState.TRIGGERED
+
+
+def test_active_invalidation_never_promotes_to_confirmed() -> None:
+    result = _assert_observation_never_promotes_to_confirmed(
+        _confirmed_observation(active_invalidation_reason="technical_score_is_below_50")
+    )
+    assert result.record.current_state == SetupLifecycleState.INVALIDATED
+
+
 def test_confirmed_signal_clears_stale_failed_gate_on_promotion() -> None:
     record = _record(SetupLifecycleState.TRIGGERED).model_copy(
         update={
@@ -1131,7 +1286,7 @@ def test_confirmed_signal_clears_stale_failed_gate_on_promotion() -> None:
             "invalidation_logic": "Invalid if price accepts below 95.",
         }
     )
-    observation = _observation(
+    observation = _confirmed_observation(
         failed_gate=NA,
         quality_grade="B+",
         quality_score=82,
@@ -1182,7 +1337,7 @@ def test_confirmed_signal_clears_stale_invalidation_reason_on_valid_promotion() 
             "invalidation_logic": "Invalid if price accepts below 95.",
         }
     )
-    observation = _observation(
+    observation = _confirmed_observation(
         failed_gate=NA,
         quality_grade="B+",
         quality_score=82,
@@ -1401,30 +1556,14 @@ def test_research_lifecycle_queries(tmp_path) -> None:
     )
     pending_confirmation = evaluate_lifecycle_transition(
         triggered.record,
-        _observation(
-            sweep_detected=True,
-            structure_shift_detected=True,
-            pullback_valid=True,
-            rr_valid=True,
-            quality_score=82,
-            quality_grade="B+",
-            invalidation_reason="Invalid below stop.",
-        ),
+        _confirmed_observation(invalidation_reason="Invalid below stop."),
         lifecycle_id="life_1",
         now="2026-05-18T09:15:00+00:00",
         scan_run_id="run_4",
     )
     confirmed = evaluate_lifecycle_transition(
         pending_confirmation.record,
-        _observation(
-            sweep_detected=True,
-            structure_shift_detected=True,
-            pullback_valid=True,
-            rr_valid=True,
-            quality_score=82,
-            quality_grade="B+",
-            invalidation_reason="Invalid below stop.",
-        ),
+        _confirmed_observation(invalidation_reason="Invalid below stop."),
         lifecycle_id="life_1",
         now="2026-05-18T09:20:00+00:00",
         scan_run_id="run_5",

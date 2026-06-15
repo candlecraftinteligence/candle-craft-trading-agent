@@ -503,6 +503,13 @@ class PublicWatchlistPrefilterResult:
 
 
 @dataclass(frozen=True)
+class ConfirmedAlertPrefilterResult:
+    passed: bool
+    blocking_reasons: tuple[str, ...] = ()
+    reason_buckets: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TelegramEligibilityContext:
     min_rr: Decimal = DEFAULT_CONFIRMED_MIN_RR
     min_score_for_idea: Decimal | None = None
@@ -528,6 +535,15 @@ class TelegramLifecycleDelivery:
 
 
 @dataclass(frozen=True)
+class ConfirmedAlertAuditSummary:
+    confirmed_candidates_seen: int = 0
+    confirmed_prefilter_passed: int = 0
+    signal_confirmed_attempts_created: int = 0
+    signal_confirmed_sent: int = 0
+    blocked_before_attempt_by_reason: Mapping[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class TelegramLifecycleDeliverySummary:
     attempted: int = 0
     sent: int = 0
@@ -539,6 +555,7 @@ class TelegramLifecycleDeliverySummary:
     ineligible: int = 0
     deliveries: tuple[TelegramLifecycleDelivery, ...] = ()
     public_watchlist_audit: PublicWatchlistAuditSummary = field(default_factory=lambda: PublicWatchlistAuditSummary())
+    confirmed_alert_audit: ConfirmedAlertAuditSummary = field(default_factory=lambda: ConfirmedAlertAuditSummary())
 
 
 @dataclass(frozen=True)
@@ -1250,9 +1267,15 @@ class TelegramLifecycleDeliveryService:
         current_run_attempts: set[tuple[str, str]] = set()
         current_run_identity_blocked_symbols: set[str] = set()
         public_watchlist_audits: dict[str, PublicWatchlistCandidateAudit] = {}
+        confirmed_candidates_seen = 0
+        confirmed_prefilter_passed = 0
+        signal_confirmed_attempts_created = 0
+        signal_confirmed_sent = 0
+        confirmed_blocked_before_attempt: dict[str, int] = {}
 
         def record_delivery(delivery: TelegramLifecycleDelivery) -> None:
             nonlocal duplicate, sent, skipped, failed, blocked, blocked_repeat
+            nonlocal signal_confirmed_attempts_created, signal_confirmed_sent
             deliveries.append(delivery)
             if delivery.status in {"sent", "failed", "duplicate", "blocked", "blocked_repeat", "skipped"}:
                 current_run_attempts.add((delivery.signal_id, delivery.alert_type))
@@ -1270,6 +1293,11 @@ class TelegramLifecycleDeliveryService:
                 blocked_repeat += 1
             else:
                 skipped += 1
+            if delivery.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value:
+                if delivery.status in {"sent", "failed", "skipped", "blocked"}:
+                    signal_confirmed_attempts_created += 1
+                if delivery.status == "sent":
+                    signal_confirmed_sent += 1
 
         with SQLiteTelegramAlertAttemptRepository(self.database_path) as repository:
             with SQLiteSetupLifecycleRepository(self.database_path) as lifecycle_repository:
@@ -1295,6 +1323,30 @@ class TelegramLifecycleDeliveryService:
                     audit_key = _signal_id(symbol_result)
                     if audit is not None:
                         public_watchlist_audits[audit_key] = audit
+                    alert_type_hint = (
+                        _alert_type_for_transition(symbol_result, symbol_result.lifecycle_transition)
+                        if symbol_result.lifecycle_transition
+                        else None
+                    )
+                    if alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED:
+                        confirmed_candidates_seen += 1
+                        confirmed_message = _telegram_signal_message_for_alert(
+                            symbol_result,
+                            TelegramAlertType.SIGNAL_CONFIRMED,
+                            eligibility_context,
+                        )
+                        confirmed_prefilter = _confirmed_alert_attempt_prefilter(
+                            symbol_result,
+                            confirmed_message,
+                            eligibility_context,
+                        )
+                        if confirmed_prefilter.passed:
+                            confirmed_prefilter_passed += 1
+                        else:
+                            for reason in confirmed_prefilter.reason_buckets:
+                                confirmed_blocked_before_attempt[reason] = (
+                                    confirmed_blocked_before_attempt.get(reason, 0) + 1
+                                )
                     delivery = await self.deliver_for_symbol(
                         symbol_result,
                         repository=repository,
@@ -1339,7 +1391,15 @@ class TelegramLifecycleDeliveryService:
                     record_delivery(delivery)
 
         public_watchlist_audit = _public_watchlist_audit_summary(public_watchlist_audits.values())
+        confirmed_alert_audit = ConfirmedAlertAuditSummary(
+            confirmed_candidates_seen=confirmed_candidates_seen,
+            confirmed_prefilter_passed=confirmed_prefilter_passed,
+            signal_confirmed_attempts_created=signal_confirmed_attempts_created,
+            signal_confirmed_sent=signal_confirmed_sent,
+            blocked_before_attempt_by_reason=dict(sorted(confirmed_blocked_before_attempt.items())),
+        )
         _log_public_watchlist_audit(public_watchlist_audit)
+        _log_confirmed_alert_audit(confirmed_alert_audit)
         return TelegramLifecycleDeliverySummary(
             attempted=sent + skipped + failed + blocked + blocked_repeat,
             sent=sent,
@@ -1351,6 +1411,7 @@ class TelegramLifecycleDeliveryService:
             ineligible=ineligible,
             deliveries=tuple(deliveries),
             public_watchlist_audit=public_watchlist_audit,
+            confirmed_alert_audit=confirmed_alert_audit,
         )
 
     async def deliver_for_symbol(
@@ -1392,19 +1453,24 @@ class TelegramLifecycleDeliveryService:
             if alert_type_hint == TelegramAlertType.LIMIT_HIT
             else repository.has_prior_active_alert(signal_id=_signal_id(symbol_result))
         )
+        context = eligibility_context or TelegramEligibilityContext()
         decision = telegram_alert_decision_for_symbol(
             symbol_result,
             previously_active_sent=previously_active_sent,
-            eligibility_context=eligibility_context,
+            eligibility_context=context,
             terminal_identity_failure_reason=terminal_bridge.blocked_reason,
             prior_public_alert=prior_public_signal_alert if alert_type_hint == TelegramAlertType.LIMIT_HIT else prior_active_alert,
         )
         if not decision.eligible or decision.alert_type is None or decision.message is None:
+            if decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and decision.message is not None:
+                prefilter = _confirmed_alert_attempt_prefilter(symbol_result, decision.message, context)
+                if not prefilter.passed:
+                    return None
             if decision.alert_type == TelegramAlertType.WATCHLIST and decision.message is not None:
                 prefilter = _public_watchlist_attempt_prefilter(
                     symbol_result,
                     decision.message,
-                    eligibility_context or TelegramEligibilityContext(),
+                    context,
                 )
                 if not prefilter.passed:
                     return None
@@ -1414,7 +1480,7 @@ class TelegramLifecycleDeliveryService:
                     symbol_result,
                     decision=decision,
                     scan_run_id=scan_run_id,
-                    eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                    eligibility_context=context,
                 )
             return None
 
@@ -1424,10 +1490,14 @@ class TelegramLifecycleDeliveryService:
             decision=decision,
             prior_alert=prior_active_alert,
             scan_run_id=scan_run_id,
-            eligibility_context=eligibility_context or TelegramEligibilityContext(),
+            eligibility_context=context,
         )
         if decision is None:
             return None
+        if decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and decision.message is not None:
+            prefilter = _confirmed_alert_attempt_prefilter(symbol_result, decision.message, context)
+            if not prefilter.passed:
+                return None
         if decision.alert_type == TelegramAlertType.WATCHLIST:
             watchlist_candidate = _public_watchlist_candidate_from_symbol(symbol_result)
             message_for_plan = decision.message
@@ -1447,7 +1517,7 @@ class TelegramLifecycleDeliveryService:
                         decision=decision,
                         reason="public_watchlist_prior_plan_alert_exists",
                         scan_run_id=scan_run_id,
-                        eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                        eligibility_context=context,
                     )
             if not allow_public_watchlist:
                 return _persist_skipped_public_watchlist_attempt(
@@ -1456,7 +1526,7 @@ class TelegramLifecycleDeliveryService:
                     decision=decision,
                     reason="public_watchlist_max_per_scan_reached",
                     scan_run_id=scan_run_id,
-                    eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                    eligibility_context=context,
                 )
             message_for_cooldown = decision.message
             if (
@@ -1476,7 +1546,7 @@ class TelegramLifecycleDeliveryService:
                     decision=decision,
                     reason="public_watchlist_cooldown_active",
                     scan_run_id=scan_run_id,
-                    eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                    eligibility_context=context,
                 )
         if (
             decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES
@@ -1491,7 +1561,7 @@ class TelegramLifecycleDeliveryService:
                 alert_type=decision.alert_type,
                 message=decision.message,
                 scan_run_id=scan_run_id,
-                eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                eligibility_context=context,
             )
 
         signal_id = _signal_id(symbol_result)
@@ -1529,7 +1599,7 @@ class TelegramLifecycleDeliveryService:
                     symbol_result,
                     decision=blocked_decision,
                     scan_run_id=scan_run_id,
-                    eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                    eligibility_context=context,
                 )
             signal_id = prior_limit_alert.signal_id
             message = _message_with_prior_public_plan(message, prior_limit_alert)
@@ -1562,7 +1632,7 @@ class TelegramLifecycleDeliveryService:
                     symbol_result,
                     decision=blocked_decision,
                     scan_run_id=scan_run_id,
-                    eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                    eligibility_context=context,
                 )
 
         if repository.has_attempt(signal_id=signal_id, alert_type=decision.alert_type):
@@ -1605,9 +1675,9 @@ class TelegramLifecycleDeliveryService:
             attempted_alert_type=decision.alert_type.value,
             setup_quality_score=_quality_score(symbol_result),
             rr_planned=_text(message.planned_rr),
-            min_rr=_text(_min_rr_for_alert(decision.alert_type, eligibility_context or TelegramEligibilityContext())),
+            min_rr=_text(_min_rr_for_alert(decision.alert_type, context)),
             opportunity_score=_opportunity_score_text(symbol_result),
-            min_score_for_idea=_text((eligibility_context or TelegramEligibilityContext()).min_score_for_idea),
+            min_score_for_idea=_text(context.min_score_for_idea),
             technical_score=_technical_score_text(symbol_result),
             price_level=_price_level_for_alert(decision.alert_type, message),
             **_message_level_metadata(message),
@@ -4080,6 +4150,97 @@ def _public_watchlist_attempt_prefilter(
     )
 
 
+def _confirmed_alert_attempt_prefilter(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+    context: TelegramEligibilityContext,
+) -> ConfirmedAlertPrefilterResult:
+    reasons: list[str] = []
+    state_key = _status_key(_public_gate_state(symbol_result))
+    if state_key != "confirmed":
+        reasons.append(f"lifecycle_state_not_confirmed:{state_key or 'missing'}")
+
+    public_gate = _public_signal_gate_result(symbol_result, TelegramAlertType.SIGNAL_CONFIRMED, message)
+    reasons.extend(public_gate.blocking_reasons)
+    reasons.extend(
+        _defensive_delivery_blockers(
+            symbol_result,
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            message,
+            context,
+        )
+    )
+    reasons.extend(_confirmed_alert_data_health_blockers(symbol_result))
+
+    blocking_reasons = tuple(dict.fromkeys(reason for reason in reasons if _text(reason) != NA))
+    return ConfirmedAlertPrefilterResult(
+        passed=not blocking_reasons,
+        blocking_reasons=blocking_reasons,
+        reason_buckets=_confirmed_alert_prefilter_reason_buckets(blocking_reasons),
+    )
+
+
+def _confirmed_alert_data_health_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    score_result = symbol_result.score_result
+    direct_values = (
+        symbol_result.missing_data,
+        symbol_result.unverified_data,
+        symbol_result.strategy_missing_data,
+        symbol_result.strategy_unverified_data,
+        symbol_result.derivatives_missing_data,
+        symbol_result.derivatives_unverified_data,
+        getattr(score_result, "missing_data", ()) if score_result is not None else (),
+        getattr(score_result, "unverified_data", ()) if score_result is not None else (),
+    )
+    if any(_sequence_or_single(value) for value in direct_values):
+        return ("data_health_failed",)
+    diagnostics = _representative_diagnostics(symbol_result)
+    if any(_sequence_or_single(diagnostics.get(key)) for key in ("missing_data", "unverified_data")):
+        return ("data_health_failed",)
+    return ()
+
+
+def _confirmed_alert_prefilter_reason_buckets(reasons: Sequence[str]) -> tuple[str, ...]:
+    buckets: list[str] = []
+    for reason in reasons:
+        key = _status_key(reason)
+        if "rejected_by_scoring" in key:
+            buckets.append("rejected_by_scoring")
+        elif (
+            key.startswith("failed_confirmation_gate_scoring")
+            or key.startswith("confirmed_current_failed_gate_scoring")
+            or "failed_confirmation_gate_scoring" in key
+            or (
+                key.startswith(("failed_confirmation_gate:", "confirmed_current_failed_gate:"))
+                and any(token in key for token in ("scoring", "score"))
+            )
+        ):
+            buckets.append("failed_confirmation_gate_scoring")
+        elif "watchlist_near_miss" in key:
+            buckets.append("watchlist_near_miss_not_confirmed")
+        elif "confirmed_grade_below_min" in key or "below_min_public_grade" in key:
+            buckets.append("confirmed_grade_below_min")
+        elif "trade_idea_missing" in key:
+            buckets.append("trade_idea_missing")
+        elif "technical_score_below_min" in key:
+            buckets.append("technical_score_below_min")
+        elif "opportunity_score_below_min" in key:
+            buckets.append("opportunity_score_below_min")
+        elif "confirmed_active_rejection_reason" in key:
+            buckets.append("active_rejection_reason")
+        elif "confirmed_active_invalidation" in key or "invalidation_contains_rejection_reason" in key:
+            buckets.append("active_invalidation")
+        elif "confirmed_missing_entry_zone" in key or "missing_required_fields_entry" in key:
+            buckets.append("missing_entry_zone")
+        elif "confirmed_missing_stop" in key or "missing_required_fields_stop_loss" in key:
+            buckets.append("missing_stop")
+        elif "planned_rr_below_min" in key or "confirmed_rr_below_min" in key or "confirmed_missing_rr" in key:
+            buckets.append("rr_below_min")
+        elif "data_health_failed" in key:
+            buckets.append("data_health_failed")
+    return tuple(dict.fromkeys(buckets))
+
+
 def _public_watchlist_candidate_audit(
     symbol_result: ScannerSymbolResult,
     context: TelegramEligibilityContext,
@@ -4228,6 +4389,20 @@ def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
             }
             for audit in summary.candidates
         ),
+    )
+
+
+def _log_confirmed_alert_audit(summary: ConfirmedAlertAuditSummary) -> None:
+    if summary.confirmed_candidates_seen == 0:
+        return
+    logger.info(
+        "confirmed_alert_audit confirmed_candidates_seen=%s confirmed_prefilter_passed=%s "
+        "signal_confirmed_attempts_created=%s signal_confirmed_sent=%s blocked_before_attempt_by_reason=%s",
+        summary.confirmed_candidates_seen,
+        summary.confirmed_prefilter_passed,
+        summary.signal_confirmed_attempts_created,
+        summary.signal_confirmed_sent,
+        dict(summary.blocked_before_attempt_by_reason),
     )
 
 

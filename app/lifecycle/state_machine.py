@@ -50,7 +50,27 @@ DEFAULT_COOLDOWN_HOURS = 24
 DEFAULT_CONFIRMATION_CYCLES = 2
 DEFAULT_SETUP_MERGE_TOLERANCE_PCT = Decimal("0.5")
 PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
+CONFIRMED_MIN_RR = Decimal("3")
+MIN_TECHNICAL_SCORE = Decimal("50")
+DEFAULT_MIN_OPPORTUNITY_SCORE = Decimal("80")
 MIN_CONFIRMATION_GRADES = {"a+", "a", "a-", "b+"}
+CONFIRMED_ALLOWED_QUALITY_STATE_KEYS = {
+    "high_quality_trade",
+    "valid_but_lower_quality",
+}
+CONFIRMED_REJECTED_STATUS_KEYS = {
+    "scan_error",
+    "scanned_no_setup",
+    "rejected_by_technical",
+    "rejected_by_derivatives",
+    "rejected_by_risk",
+    "rejected_by_scoring",
+    "rejected_by_regime",
+    "failed",
+    "near_miss",
+    "no_setup",
+    "rejected",
+}
 CONFIRMATION_GATED_STATES = {
     SetupLifecycleState.CONFIRMED,
     SetupLifecycleState.EXECUTING,
@@ -190,6 +210,15 @@ class LifecycleObservation:
     pullback_valid: bool = False
     rr_valid: bool = False
     valid_trade_idea: bool = False
+    core_status: str = NA
+    setup_quality_state: str = NA
+    technical_score: str = NA
+    opportunity_score: str = NA
+    min_technical_score: str = "50"
+    min_opportunity_score: str = "80"
+    active_rejection_reason: str = NA
+    active_invalidation_reason: str = NA
+    data_health_failed: bool = False
     limit_fill_required: bool = False
     a_grade_watch_candidate: bool = False
     entry_filled: bool = False
@@ -366,7 +395,7 @@ def evaluate_lifecycle_transition(
             required_confirmation_cycles=required_cycles,
             quality_grade_first_seen=quality_grade,
             quality_grade_current=quality_grade,
-            quality_grade_confirmed=quality_grade if confirmed_at is not None else NA,
+            quality_grade_confirmed=quality_grade if confirmed_snapshot_valid else NA,
             confirmed_at=confirmed_at,
             decay_count=0,
             decay_reason=NA,
@@ -458,11 +487,13 @@ def observed_state(observation: LifecycleObservation) -> SetupLifecycleState:
         return SetupLifecycleState.SL_HIT
     if observation.invalidated:
         return SetupLifecycleState.INVALIDATED
+    if _text(observation.active_invalidation_reason) != NA:
+        return SetupLifecycleState.INVALIDATED
     if observation.expired:
         return SetupLifecycleState.EXPIRED
     if observation.a_grade_watch_candidate:
         return SetupLifecycleState.A_GRADE_WATCH
-    if observation.valid_trade_idea or observation.pullback_and_rr_valid:
+    if _confirmed_observation_ready(observation):
         return SetupLifecycleState.CONFIRMED
     if observation.sweep_detected and observation.structure_shift_detected:
         return SetupLifecycleState.TRIGGERED
@@ -515,7 +546,11 @@ def next_state_for_observation(
             return SetupLifecycleState.MANAGING
         return current
     if current == SetupLifecycleState.CONFIRMED:
-        if observation.invalidated or _active_setup_invalidated(current, target):
+        if (
+            observation.invalidated
+            or _active_setup_invalidated(current, target)
+            or _confirmed_observation_invalidates_active_signal(observation)
+        ):
             return SetupLifecycleState.INVALIDATED
         if observation.expired:
             return SetupLifecycleState.EXPIRED
@@ -689,7 +724,7 @@ def _record_with_observation(
     if (
         confirmation_count >= required_confirmation_cycles
         and record.confirmation_count < required_confirmation_cycles
-        and _confirmation_countable(observation)
+        and confirmed_snapshot_valid
     ):
         confirmed_at = timestamp
         quality_grade_confirmed = current_grade
@@ -752,7 +787,7 @@ def _confirmation_gated_target(
 ) -> SetupLifecycleState:
     if not _target_requires_confirmation(target):
         return target
-    if record.confirmation_count >= record.required_confirmation_cycles and _confirmation_countable(observation):
+    if record.confirmation_count >= record.required_confirmation_cycles and _confirmed_observation_ready(observation):
         return target
     return _pre_confirmation_state(observation)
 
@@ -864,16 +899,89 @@ def _next_confirmation_count(
 
 
 def _confirmation_countable(observation: LifecycleObservation) -> bool:
-    return (
-        _setup_observable(observation)
-        and observation.rr_valid
-        and _quality_at_least_b_plus(observation.quality_grade, observation.quality_score)
-        and _text(observation.invalidation_reason) != NA
-    )
+    return _confirmed_observation_ready(observation) or observation.a_grade_watch_candidate
 
 
 def _valid_confirmed_observation(observation: LifecycleObservation) -> bool:
-    return _confirmation_countable(observation) and not _terminal_observation(observation)
+    return _confirmed_observation_ready(observation) and not _terminal_observation(observation)
+
+
+def _confirmed_observation_ready(observation: LifecycleObservation) -> bool:
+    return not _confirmed_observation_blockers(observation)
+
+
+def _confirmed_observation_invalidates_active_signal(observation: LifecycleObservation) -> bool:
+    blockers = _confirmed_observation_blockers(observation)
+    active_blockers = {
+        "active_rejection_reason",
+        "active_invalidation",
+        "core_status_blocked",
+        "failed_confirmation_gate",
+        "data_health_failed",
+    }
+    return any(blocker.split(":", 1)[0] in active_blockers for blocker in blockers)
+
+
+def _confirmed_observation_blockers(observation: LifecycleObservation) -> tuple[str, ...]:
+    blockers: list[str] = []
+
+    core_status = _status_key(observation.core_status)
+    if core_status in CONFIRMED_REJECTED_STATUS_KEYS:
+        blockers.append(f"core_status_blocked:{core_status}")
+
+    failed_gate = _status_key(observation.failed_gate)
+    if failed_gate:
+        blockers.append(f"failed_confirmation_gate:{failed_gate}")
+
+    if _text(observation.active_rejection_reason) != NA:
+        blockers.append("active_rejection_reason")
+    if _text(observation.active_invalidation_reason) != NA:
+        blockers.append("active_invalidation")
+    if observation.data_health_failed:
+        blockers.append("data_health_failed")
+
+    if not observation.valid_trade_idea:
+        blockers.append("trade_idea_missing")
+
+    if _status_key(observation.direction) not in {"long", "short"}:
+        blockers.append("missing_side")
+    if _decimal_or_none(observation.entry_low) is None or _decimal_or_none(observation.entry_high) is None:
+        blockers.append("missing_entry_zone")
+    if _decimal_or_none(observation.stop_loss) is None:
+        blockers.append("missing_stop")
+    if _text(observation.invalidation_reason) == NA:
+        blockers.append("missing_invalidation")
+
+    rr_value = _decimal_or_none(observation.rr)
+    if rr_value is None:
+        blockers.append("rr_missing")
+    elif rr_value < CONFIRMED_MIN_RR:
+        blockers.append(f"rr_below_min:{_text(rr_value)}<{_text(CONFIRMED_MIN_RR)}")
+
+    if not _quality_at_least_b_plus(observation.quality_grade, observation.quality_score):
+        blockers.append("confirmed_grade_below_min")
+
+    quality_state = _status_key(observation.setup_quality_state)
+    if quality_state and quality_state not in CONFIRMED_ALLOWED_QUALITY_STATE_KEYS:
+        blockers.append(f"setup_quality_not_confirmed:{quality_state}")
+        if quality_state == "watchlist_near_miss":
+            blockers.append("watchlist_near_miss_not_confirmed")
+
+    technical_score = _decimal_or_none(observation.technical_score)
+    min_technical = _decimal_or_none(observation.min_technical_score) or MIN_TECHNICAL_SCORE
+    if technical_score is None:
+        blockers.append("technical_score_missing")
+    elif technical_score < min_technical:
+        blockers.append(f"technical_score_below_min:{_text(technical_score)}<{_text(min_technical)}")
+
+    opportunity_score = _decimal_or_none(observation.opportunity_score)
+    min_opportunity = _decimal_or_none(observation.min_opportunity_score) or DEFAULT_MIN_OPPORTUNITY_SCORE
+    if opportunity_score is None:
+        blockers.append("opportunity_score_missing")
+    elif opportunity_score < min_opportunity:
+        blockers.append(f"opportunity_score_below_min:{_text(opportunity_score)}<{_text(min_opportunity)}")
+
+    return tuple(dict.fromkeys(blockers))
 
 
 def _setup_observable(observation: LifecycleObservation) -> bool:
