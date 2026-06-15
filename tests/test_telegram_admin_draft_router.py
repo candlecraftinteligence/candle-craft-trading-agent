@@ -246,6 +246,54 @@ def test_disabled_admin_persists_local_drafts_without_network(tmp_path) -> None:
     assert {record["delivery_status"] for record in records} == {"skipped_disabled"}
 
 
+def test_admin_report_shows_public_watchlist_bridge_separate_from_admin_draft_delivery() -> None:
+    bridge = {
+        "near_miss_seen": 2,
+        "near_miss_plan_complete": 1,
+        "public_watchlist_trade_ideas_created": 1,
+        "public_watchlist_alerts_created": 1,
+        "public_watchlist_sent": 1,
+        "public_watchlist_blocked": 1,
+        "blocked_before_trade_idea_by_reason": {
+            "missing_rr": 1,
+            "missing_entry_zone": 1,
+            "missing_invalidation": 1,
+        },
+    }
+    result = _run_result((_near_result(),)).model_copy(
+        update={
+            "trade_ideas_created": 1,
+            "dry_run_alerts_created": 1,
+            "scanner_process_summary": {"public_watchlist_bridge": bridge},
+        }
+    )
+    manifest = {
+        **_manifest(),
+        "trade_ideas_created": 1,
+        "alerts_created": 1,
+        "public_watchlist_bridge": bridge,
+    }
+
+    report = format_admin_scan_report(result, manifest_row=manifest)
+    drafts = build_admin_drafts(
+        result,
+        manifest_row=manifest,
+        delivery_status="skipped_disabled",
+        created_at="2026-06-01T12:00:00Z",
+    )
+
+    assert "Trade ideas: 1" in report
+    assert "Alerts created: 1" in report
+    assert "public_watchlist_bridge:" in report
+    assert "- near_miss_seen: 2" in report
+    assert "- public_watchlist_trade_ideas_created: 1" in report
+    assert "admin_drafts_skipped_disabled is separate" in report
+    health = next(draft for draft in drafts if draft.draft_type == "scan_health")
+    assert health.delivery_status == "skipped_disabled"
+    assert health.source_row_summary["public_watchlist_bridge"] == bridge
+    assert health.source_row_summary["admin_drafts_skipped_disabled_separate"] is True
+
+
 def test_admin_report_sending_is_skipped_when_reports_flag_disabled(tmp_path) -> None:
     transport = FakeAdminTransport()
     result = _run_result((_valid_result(),))

@@ -856,7 +856,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
 
     lifecycle_scan_run_id = scan_run_id if _lifecycle_scan_run_id_enabled(args) else None
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=lifecycle_scan_run_id)
-    await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
+    result = await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
 
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
@@ -1711,6 +1711,9 @@ def _scan_run_manifest_row(
         "runtime_seconds": runtime.total_runtime_seconds,
         "average_seconds_per_symbol": runtime.average_seconds_per_symbol,
     }
+    public_watchlist_bridge = result.scanner_process_summary.get("public_watchlist_bridge")
+    if isinstance(public_watchlist_bridge, Mapping):
+        row["public_watchlist_bridge"] = dict(public_watchlist_bridge)
     if watch_iteration is not None:
         row["watch_iteration"] = watch_iteration
     queue_diagnostics = result.resume_metadata.get("symbol_queue") if isinstance(result.resume_metadata, Mapping) else None
@@ -1944,9 +1947,9 @@ async def _deliver_telegram_manual_signals_if_enabled(
     result: ScannerRunResult,
     *,
     scan_run_id: str | None,
-) -> None:
+) -> ScannerRunResult:
     if not _telegram_manual_signals_enabled(args):
-        return
+        return result
     settings = _telegram_manual_signal_settings()
     try:
         summary = await TelegramLifecycleDeliveryService(
@@ -1954,10 +1957,12 @@ async def _deliver_telegram_manual_signals_if_enabled(
             settings=settings,
             min_rr=args.min_rr,
             min_score_for_idea=Decimal(args.min_score_for_idea),
+            public_watchlist_bridge_enabled=bool(getattr(args, "telegram_live_alerts", False)),
         ).deliver_for_run(result, scan_run_id=scan_run_id)
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc
     _print_telegram_manual_lifecycle_summary(summary)
+    return _result_with_public_watchlist_bridge_summary(result, summary)
 
 
 def _print_telegram_manual_lifecycle_summary(summary: TelegramLifecycleDeliverySummary) -> None:
@@ -1967,6 +1972,38 @@ def _print_telegram_manual_lifecycle_summary(summary: TelegramLifecycleDeliveryS
     print(f"- blocked: {summary.blocked}")
     print(f"- blocked repeats compacted: {summary.blocked_repeat}")
     print(f"- failed: {summary.failed}")
+    bridge = _public_watchlist_bridge_summary(summary)
+    print(f"- public watchlist bridge trade ideas: {bridge['public_watchlist_trade_ideas_created']}")
+    print(f"- public watchlist bridge alerts: {bridge['public_watchlist_alerts_created']}")
+
+
+def _result_with_public_watchlist_bridge_summary(
+    result: ScannerRunResult,
+    summary: TelegramLifecycleDeliverySummary,
+) -> ScannerRunResult:
+    bridge = _public_watchlist_bridge_summary(summary)
+    process_summary = dict(result.scanner_process_summary)
+    process_summary["public_watchlist_bridge"] = bridge
+    return result.model_copy(
+        update={
+            "trade_ideas_created": result.trade_ideas_created + int(bridge["public_watchlist_trade_ideas_created"]),
+            "dry_run_alerts_created": result.dry_run_alerts_created + int(bridge["public_watchlist_alerts_created"]),
+            "scanner_process_summary": process_summary,
+        }
+    )
+
+
+def _public_watchlist_bridge_summary(summary: TelegramLifecycleDeliverySummary) -> dict[str, Any]:
+    audit = summary.public_watchlist_audit
+    return {
+        "near_miss_seen": audit.near_miss_seen,
+        "near_miss_plan_complete": audit.near_miss_plan_complete,
+        "public_watchlist_trade_ideas_created": audit.public_watchlist_trade_ideas_created,
+        "public_watchlist_alerts_created": audit.public_watchlist_alerts_created,
+        "public_watchlist_sent": audit.public_watchlist_sent,
+        "public_watchlist_blocked": audit.public_watchlist_blocked,
+        "blocked_before_trade_idea_by_reason": dict(audit.blocked_before_trade_idea_by_reason),
+    }
 
 
 def _watchlist_with_lifecycle_priority(
@@ -2582,7 +2619,7 @@ async def _run_watch_scan_iteration(
         )
     storage_run_id = scan_run_id
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=storage_run_id)
-    await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=storage_run_id)
+    result = await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=storage_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None

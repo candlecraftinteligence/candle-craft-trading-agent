@@ -263,6 +263,7 @@ def format_admin_scan_report(
         summary for summary in summaries if summary["lifecycle_integrity_status"] == "STALE_OR_DEGRADED"
     ]
     counts = _report_counts(result, ranked, manifest_row=manifest_row)
+    bridge = _public_watchlist_bridge_summary(result, manifest_row=manifest_row)
 
     lines = [
         "Candle Craft Admin Scan Report",
@@ -279,6 +280,15 @@ def format_admin_scan_report(
         f"Alerts created: {counts['alerts_created']}",
         f"Trade ideas: {counts['trade_ideas']}",
         f"Journals: {counts['journals']}",
+        "public_watchlist_bridge:",
+        f"- near_miss_seen: {bridge['near_miss_seen']}",
+        f"- near_miss_plan_complete: {bridge['near_miss_plan_complete']}",
+        f"- public_watchlist_trade_ideas_created: {bridge['public_watchlist_trade_ideas_created']}",
+        f"- public_watchlist_alerts_created: {bridge['public_watchlist_alerts_created']}",
+        f"- public_watchlist_sent: {bridge['public_watchlist_sent']}",
+        f"- public_watchlist_blocked: {bridge['public_watchlist_blocked']}",
+        f"- blocked_before_trade_idea_by_reason: {_bridge_reason_text(bridge['blocked_before_trade_idea_by_reason'])}",
+        "admin_drafts_skipped_disabled is separate from public WATCHLIST delivery.",
         f"Runtime: {_runtime_seconds(result, manifest_row)}s",
         f"Draft artifact: {_display(draft_artifact_path)}",
         "",
@@ -436,6 +446,7 @@ def _scan_health_summary(
     timestamp: str,
 ) -> dict[str, Any]:
     counts = _report_counts(result, _ranked(result, None), manifest_row=manifest_row)
+    bridge = _public_watchlist_bridge_summary(result, manifest_row=manifest_row)
     return {
         "run_id": _run_id(result, manifest_row),
         "timestamp": timestamp,
@@ -461,6 +472,8 @@ def _scan_health_summary(
         "alerts_created": counts["alerts_created"],
         "trade_ideas": counts["trade_ideas"],
         "journals": counts["journals"],
+        "public_watchlist_bridge": bridge,
+        "admin_drafts_skipped_disabled_separate": True,
     }
 
 
@@ -576,6 +589,39 @@ def _report_counts(
         "trade_ideas": _manifest_value(manifest_row, "trade_ideas_created", result.trade_ideas_created),
         "journals": _manifest_value(manifest_row, "journal_entries_created", result.journal_entries_created),
     }
+
+
+def _public_watchlist_bridge_summary(
+    result: ScannerRunResult,
+    *,
+    manifest_row: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    source = None
+    if manifest_row is not None:
+        maybe_source = manifest_row.get("public_watchlist_bridge")
+        if isinstance(maybe_source, Mapping):
+            source = maybe_source
+    if source is None:
+        maybe_source = result.scanner_process_summary.get("public_watchlist_bridge")
+        if isinstance(maybe_source, Mapping):
+            source = maybe_source
+    source = source or {}
+    blocked = source.get("blocked_before_trade_idea_by_reason") if isinstance(source, Mapping) else {}
+    return {
+        "near_miss_seen": int(source.get("near_miss_seen", 0)),
+        "near_miss_plan_complete": int(source.get("near_miss_plan_complete", 0)),
+        "public_watchlist_trade_ideas_created": int(source.get("public_watchlist_trade_ideas_created", 0)),
+        "public_watchlist_alerts_created": int(source.get("public_watchlist_alerts_created", 0)),
+        "public_watchlist_sent": int(source.get("public_watchlist_sent", 0)),
+        "public_watchlist_blocked": int(source.get("public_watchlist_blocked", 0)),
+        "blocked_before_trade_idea_by_reason": dict(blocked) if isinstance(blocked, Mapping) else {},
+    }
+
+
+def _bridge_reason_text(reasons: Mapping[str, Any]) -> str:
+    if not reasons:
+        return "{}"
+    return ", ".join(f"{key}={value}" for key, value in sorted(reasons.items()))
 
 
 def _dedupe_records(records: Sequence[AdminDraftRecord]) -> tuple[AdminDraftRecord, ...]:

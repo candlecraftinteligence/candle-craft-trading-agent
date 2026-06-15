@@ -416,6 +416,240 @@ def _empty_run_result() -> ScannerRunResult:
     )
 
 
+def _admin_near_miss_symbol(
+    *,
+    symbol: str = "ENAUSDT",
+    side: str = "short",
+    grade: SetupQualityGrade = SetupQualityGrade.B_PLUS,
+    quality_score: int = 80,
+    plan_complete: bool = True,
+    failed_gate: str = "limit_zone_not_hit",
+    signal_variant: str = "base",
+) -> ScannerSymbolResult:
+    short = side == "short"
+    diagnostics = _public_ready_watchlist_diagnostics(
+        draft_type="near_miss",
+        bias=side,
+        direction=side,
+        watchlist_grade=grade.value,
+        quality_grade=grade.value,
+        first_failed_gate=failed_gate,
+        gates_failed=(failed_gate,),
+        readiness_label="WATCH",
+        readiness_score=80,
+        setup_fingerprint=f"{symbol}-{signal_variant}",
+        pullback_failure_reason=f"Plan-complete admin near miss waiting for {failed_gate}: {signal_variant}.",
+        confirmation_needed="Wait for clean confirmation before any trade.",
+        next_trigger_needed="Price must trade into the Limit Zone and confirm.",
+        entry_low=Decimal("0.09528"),
+        entry_high=Decimal("0.09599"),
+        entry_zone_low=Decimal("0.09528"),
+        entry_zone_high=Decimal("0.09599"),
+        limit_zone_low=Decimal("0.09528"),
+        limit_zone_high=Decimal("0.09599"),
+        stop=Decimal("0.09751") if short else Decimal("0.09351"),
+        stop_loss=Decimal("0.09751") if short else Decimal("0.09351"),
+        invalidation_level=Decimal("0.09751") if short else Decimal("0.09351"),
+        invalidation="Invalid if price accepts above 0.09751." if short else "Invalid if price accepts below 0.09351.",
+        potential_rr=Decimal("2.6"),
+        rr_to_tp2=Decimal("2.6"),
+        tp1=Decimal("0.09200") if short else Decimal("0.09900"),
+        tp2=Decimal("0.09000") if short else Decimal("0.10100"),
+        tp3=Decimal("0.08800") if short else Decimal("0.10300"),
+        message_preview="BOS/CHoCH confirmed; waiting final quality gate.",
+        display_bucket="near_miss",
+    )
+    if not plan_complete:
+        diagnostics.update(
+            {
+                "entry_low": NA,
+                "entry_high": NA,
+                "entry_zone_low": NA,
+                "entry_zone_high": NA,
+                "limit_zone_low": NA,
+                "limit_zone_high": NA,
+                "watch_zone": NA,
+                "stop": NA,
+                "stop_loss": NA,
+                "invalidation": NA,
+                "invalidation_level": NA,
+                "potential_rr": NA,
+                "rr_to_tp2": NA,
+                "tp1": NA,
+                "tp2": NA,
+                "tp3": NA,
+            }
+        )
+    base = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=diagnostics,
+        trade_idea=None,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        setup_quality=_setup_quality_with_grade(
+            grade,
+            quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+            quality_score=quality_score,
+        ),
+    )
+    return base.model_copy(
+        update={
+            "symbol": symbol,
+            "status_history": (ScannerPipelineStatus.SCANNED_NO_SETUP,),
+            "valid_strategy_modes": (),
+            "rejected_strategy_modes": ("swing",),
+            "lifecycle_state": None,
+            "lifecycle_transition": None,
+        }
+    )
+
+
+def test_near_miss_admin_draft_does_not_send_without_plan_fields(tmp_path: Path) -> None:
+    db_path = tmp_path / "admin-near-miss-missing-plan.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    symbol = _admin_near_miss_symbol(
+        symbol="RENDERUSDT",
+        side="short",
+        grade=SetupQualityGrade.A_MINUS,
+        plan_complete=False,
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="runtime-missing-plan"))
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    bridge = summary.public_watchlist_audit
+    assert bridge.near_miss_seen == 1
+    assert bridge.near_miss_plan_complete == 0
+    assert bridge.public_watchlist_trade_ideas_created == 0
+    assert bridge.public_watchlist_alerts_created == 0
+    assert bridge.blocked_before_trade_idea_by_reason["missing_rr"] >= 1
+    assert bridge.blocked_before_trade_idea_by_reason["missing_entry_zone"] >= 1
+    assert bridge.blocked_before_trade_idea_by_reason["missing_invalidation"] >= 1
+    with sqlite3.connect(db_path) as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM telegram_alert_attempts WHERE attempted_alert_type = 'WATCHLIST'"
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_near_miss_admin_draft_b_plus_complete_plan_creates_public_watchlist_trade_idea(tmp_path: Path) -> None:
+    db_path = tmp_path / "admin-near-miss-b-plus.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    symbol = _admin_near_miss_symbol(symbol="ENAUSDT", grade=SetupQualityGrade.B_PLUS)
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="runtime-b-plus-plan"))
+
+    assert summary.sent == 1
+    assert summary.public_watchlist_audit.near_miss_seen == 1
+    assert summary.public_watchlist_audit.near_miss_plan_complete == 1
+    assert summary.public_watchlist_audit.public_watchlist_trade_ideas_created == 1
+    assert summary.public_watchlist_audit.public_watchlist_alerts_created == 1
+    assert summary.public_watchlist_audit.public_watchlist_sent == 1
+    assert "🐺🟠 WATCHLIST — ENAUSDT" in sender.messages[0]
+    assert "The wolf is stalking this one." in sender.messages[0]
+    assert "Potential RR: 2.6R" in sender.messages[0]
+    assert "No confirmation = no trade." in sender.messages[0]
+    assert sender.calls[0]["message_type"] == TelegramMessageType.PUBLIC_WATCHLIST
+
+
+def test_near_miss_admin_draft_a_grade_complete_plan_creates_public_watchlist_trade_idea(tmp_path: Path) -> None:
+    db_path = tmp_path / "admin-near-miss-a.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    symbol = _admin_near_miss_symbol(
+        symbol="QCOMUSDT",
+        side="long",
+        grade=SetupQualityGrade.A,
+        quality_score=88,
+        failed_gate="confirmation_pending",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="runtime-a-plan"))
+
+    assert summary.sent == 1
+    assert summary.public_watchlist_audit.public_watchlist_trade_ideas_created == 1
+    assert "🐺🟠 WATCHLIST — QCOMUSDT" in sender.messages[0]
+    assert "Quality: A" in sender.messages[0]
+
+
+def test_live_scanner_alerts_false_does_not_send_public_watchlist(tmp_path: Path) -> None:
+    db_path = tmp_path / "admin-near-miss-bridge-disabled.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(),
+        sender=sender,
+        public_watchlist_bridge_enabled=False,
+    )
+    symbol = _admin_near_miss_symbol(symbol="ENAUSDT", grade=SetupQualityGrade.B_PLUS)
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="runtime-bridge-disabled"))
+
+    assert summary.sent == 0
+    assert summary.public_watchlist_audit.near_miss_seen == 0
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM telegram_alert_attempts").fetchone()[0]
+    assert count == 0
+
+
+def test_public_watchlist_attempt_persisted_as_sent_when_delivery_mock_succeeds(tmp_path: Path) -> None:
+    db_path = tmp_path / "admin-near-miss-sent-attempt.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    symbol = _admin_near_miss_symbol(symbol="ENAUSDT", grade=SetupQualityGrade.B_PLUS)
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="runtime-sent-attempt"))
+
+    assert summary.sent == 1
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts()
+    assert len(attempts) == 1
+    assert attempts[0].telegram_status == "sent"
+    assert attempts[0].attempted_alert_type == TelegramAlertType.WATCHLIST.value
+    assert attempts[0].symbol == "ENAUSDT"
+
+
+def test_public_watchlist_attempt_persisted_as_blocked_with_precise_reason(tmp_path: Path) -> None:
+    db_path = tmp_path / "admin-near-miss-blocked-attempt.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    symbol = _admin_near_miss_symbol(symbol="ENAUSDT", grade=SetupQualityGrade.B)
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="runtime-blocked-attempt"))
+
+    assert summary.blocked == 1
+    assert sender.messages == []
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts()
+    assert len(attempts) == 1
+    assert attempts[0].telegram_status == "blocked"
+    assert attempts[0].attempted_alert_type == TelegramAlertType.WATCHLIST.value
+    assert "below_min_public_grade" in attempts[0].blocked_reason
+
+
+def test_public_watchlist_cooldown_dedupes_symbol_side_zone(tmp_path: Path) -> None:
+    db_path = tmp_path / "admin-near-miss-cooldown.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None, public_watchlist_cooldown_hours=24),
+        sender=sender,
+    )
+    first_symbol = _admin_near_miss_symbol(symbol="ENAUSDT", signal_variant="first")
+    repeated_symbol = _admin_near_miss_symbol(symbol="ENAUSDT", signal_variant="second")
+
+    first = run(service.deliver_for_run(_run_result(first_symbol), scan_run_id="runtime-cooldown-1"))
+    second = run(service.deliver_for_run(_run_result(repeated_symbol), scan_run_id="runtime-cooldown-2"))
+
+    assert first.sent == 1
+    assert second.skipped == 1
+    assert len(sender.messages) == 1
+    assert second.deliveries[0].error_message == "public_watchlist_cooldown_active"
+
+
 def test_a_grade_watch_waiting_state_can_send_public_watchlist_when_candidate_complete() -> None:
     decision = telegram_alert_decision_for_symbol(
         _symbol(

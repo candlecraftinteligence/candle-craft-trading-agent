@@ -204,6 +204,7 @@ PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES = frozenset(
     {
         "clean_confirmation_pending",
         "confirmation_pending",
+        "final_quality_gate_pending",
         "waiting_for_confirmation",
         "missing_confirmation",
         "missing_confirmation_structure_shift",
@@ -497,6 +498,14 @@ class PublicWatchlistCandidate:
 
 
 @dataclass(frozen=True)
+class PublicWatchlistTradeIdea:
+    candidate: PublicWatchlistCandidate
+    message: TelegramSignalMessage
+    signal_id: str
+    source: str = "near_miss"
+
+
+@dataclass(frozen=True)
 class PublicWatchlistPrefilterResult:
     passed: bool
     blocking_reasons: tuple[str, ...] = ()
@@ -572,6 +581,10 @@ class PublicWatchlistCandidateAudit:
     has_invalidation: bool = False
     delivery_status: str = NA
     skip_reason: str = NA
+    near_miss_source: bool = False
+    plan_complete: bool = False
+    trade_idea_created: bool = False
+    alert_created: bool = False
 
 
 @dataclass(frozen=True)
@@ -588,6 +601,13 @@ class PublicWatchlistAuditSummary:
     sent: int = 0
     skipped_by_reason: Mapping[str, int] = field(default_factory=dict)
     candidates: tuple[PublicWatchlistCandidateAudit, ...] = ()
+    near_miss_seen: int = 0
+    near_miss_plan_complete: int = 0
+    public_watchlist_trade_ideas_created: int = 0
+    public_watchlist_alerts_created: int = 0
+    public_watchlist_sent: int = 0
+    public_watchlist_blocked: int = 0
+    blocked_before_trade_idea_by_reason: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1173,6 +1193,7 @@ class TelegramLifecycleDeliveryService:
         min_rr: Decimal | str | None = None,
         min_score_for_idea: Decimal | str | None = None,
         min_technical_score: Decimal | str = DEFAULT_MIN_TECHNICAL_SCORE,
+        public_watchlist_bridge_enabled: bool = True,
     ) -> None:
         self.database_path = Path(database_path)
         self.settings = settings or Settings()
@@ -1180,6 +1201,7 @@ class TelegramLifecycleDeliveryService:
         self.min_rr = _decimal_or_default(min_rr, DEFAULT_CONFIRMED_MIN_RR)
         self.min_score_for_idea = _decimal_or_none(min_score_for_idea)
         self.min_technical_score = _decimal_or_default(min_technical_score, DEFAULT_MIN_TECHNICAL_SCORE)
+        self.public_watchlist_bridge_enabled = bool(public_watchlist_bridge_enabled)
 
     @property
     def watchlist_outcome_tracking_enabled(self) -> bool:
@@ -1319,7 +1341,11 @@ class TelegramLifecycleDeliveryService:
                 )
                 public_watchlist_sent_this_scan = 0
                 for symbol_result in result.results:
-                    audit = _public_watchlist_candidate_audit(symbol_result, eligibility_context)
+                    audit = _public_watchlist_candidate_audit(
+                        symbol_result,
+                        eligibility_context,
+                        bridge_enabled=self.public_watchlist_bridge_enabled,
+                    )
                     audit_key = _signal_id(symbol_result)
                     if audit is not None:
                         public_watchlist_audits[audit_key] = audit
@@ -1369,6 +1395,7 @@ class TelegramLifecycleDeliveryService:
                             audit,
                             delivery_status=delivery.status,
                             skip_reason=delivery.error_message if delivery.status != "sent" else NA,
+                            alert_created=delivery.status in {"sent", "failed", "skipped", "blocked", "blocked_repeat"},
                         )
                     if delivery.alert_type == TelegramAlertType.WATCHLIST.value and delivery.status == "sent":
                         public_watchlist_sent_this_scan += 1
@@ -1461,6 +1488,10 @@ class TelegramLifecycleDeliveryService:
             terminal_identity_failure_reason=terminal_bridge.blocked_reason,
             prior_public_alert=prior_public_signal_alert if alert_type_hint == TelegramAlertType.LIMIT_HIT else prior_active_alert,
         )
+        if self.public_watchlist_bridge_enabled and _can_try_public_watchlist_bridge(decision, alert_type_hint):
+            bridge_decision = _public_watchlist_bridge_decision_for_symbol(symbol_result, context)
+            if bridge_decision is not None:
+                decision = bridge_decision
         if not decision.eligible or decision.alert_type is None or decision.message is None:
             if decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and decision.message is not None:
                 prefilter = _confirmed_alert_attempt_prefilter(symbol_result, decision.message, context)
@@ -2736,6 +2767,153 @@ def _telegram_signal_message_for_alert(
     return message
 
 
+def _can_try_public_watchlist_bridge(
+    decision: TelegramAlertDecision,
+    alert_type_hint: TelegramAlertType | None,
+) -> bool:
+    if decision.eligible and decision.alert_type is not None:
+        return False
+    if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES or alert_type_hint in {
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        TelegramAlertType.LIMIT_HIT,
+        TelegramAlertType.TP1_HIT,
+        TelegramAlertType.TP2_HIT,
+        TelegramAlertType.TP3_HIT,
+        TelegramAlertType.SL_HIT,
+    }:
+        return False
+    return decision.reason in {
+        "missing_lifecycle_transition",
+        "unchanged_lifecycle_state",
+        "lifecycle_state_not_eligible",
+    } or decision.alert_type is None
+
+
+def _public_watchlist_bridge_decision_for_symbol(
+    symbol_result: ScannerSymbolResult,
+    context: TelegramEligibilityContext,
+) -> TelegramAlertDecision | None:
+    trade_idea = _public_watchlist_bridge_trade_idea(symbol_result, context)
+    if trade_idea is None:
+        return None
+    transition = _public_watchlist_bridge_transition(symbol_result, trade_idea.candidate)
+    prefilter = _public_watchlist_attempt_prefilter(symbol_result, trade_idea.message, context)
+    if not prefilter.passed:
+        return None
+    gate = _public_watchlist_gate_result(symbol_result, trade_idea.message, context)
+    if not gate.allowed:
+        return TelegramAlertDecision(
+            False,
+            "blocked:" + "; ".join(gate.blocking_reasons),
+            alert_type=TelegramAlertType.WATCHLIST,
+            message=trade_idea.message,
+            lifecycle_transition=transition,
+        )
+    return TelegramAlertDecision(
+        True,
+        "eligible_public_watchlist_bridge",
+        alert_type=TelegramAlertType.WATCHLIST,
+        message=trade_idea.message,
+        lifecycle_transition=transition,
+    )
+
+
+def _public_watchlist_bridge_trade_idea(
+    symbol_result: ScannerSymbolResult,
+    context: TelegramEligibilityContext,
+) -> PublicWatchlistTradeIdea | None:
+    candidate = _public_watchlist_candidate_from_symbol(symbol_result)
+    if not _public_watchlist_bridge_source(symbol_result, candidate):
+        return None
+    message = _telegram_signal_message_for_alert(symbol_result, TelegramAlertType.WATCHLIST, context)
+    if not candidate.plan_complete:
+        return None
+    return PublicWatchlistTradeIdea(
+        candidate=candidate,
+        message=message,
+        signal_id=_signal_id(symbol_result),
+    )
+
+
+def _public_watchlist_bridge_transition(
+    symbol_result: ScannerSymbolResult,
+    candidate: PublicWatchlistCandidate,
+) -> SetupTransitionResult:
+    lifecycle = symbol_result.lifecycle_state
+    previous_state = lifecycle.current_state if lifecycle is not None else None
+    return SetupTransitionResult(
+        lifecycle_id=_signal_id(symbol_result),
+        symbol=candidate.symbol if candidate.symbol != NA else symbol_result.symbol,
+        from_state=previous_state,
+        to_state=SetupLifecycleState.WATCHLISTED,
+        reason=SetupTransitionReason.READINESS_IMPROVED,
+        transitioned=True,
+        record=lifecycle,
+    )
+
+
+def _public_watchlist_bridge_source(
+    symbol_result: ScannerSymbolResult,
+    candidate: PublicWatchlistCandidate | None = None,
+) -> bool:
+    diagnostics = _representative_diagnostics(symbol_result)
+    intelligence = _near_miss_intelligence(symbol_result, diagnostics)
+    display_statuses = _symbol_display_statuses(symbol_result)
+    status_keys = set(_status_keys(symbol_result))
+    if symbol_result.regime_blocked:
+        return False
+    if _status_key(diagnostics.get("draft_type")) == "near_miss":
+        return True
+    if intelligence is not None:
+        return True
+    if display_statuses & {"near_miss", "watchlist_near_miss"}:
+        return True
+    if status_keys & {"near_miss"}:
+        return True
+    if status_keys & {"scanned_no_setup", "rejected_by_scoring", "no_setup"}:
+        candidate = candidate or _public_watchlist_candidate_from_symbol(symbol_result)
+        failed_gate_codes = _public_watchlist_failed_gate_codes(symbol_result, candidate=candidate)
+        return bool(
+            failed_gate_codes
+            and (
+                candidate.grade != NA
+                or candidate.readiness_score != NA
+                or _text(diagnostics.get("message_preview")) != NA
+            )
+        )
+    return False
+
+
+def _public_watchlist_bridge_state_exempt(
+    symbol_result: ScannerSymbolResult,
+    candidate: PublicWatchlistCandidate,
+) -> bool:
+    state_key = _status_key(_public_gate_state(symbol_result))
+    if state_key in PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS or state_key in {
+        "confirmed",
+        "executing",
+        "managing",
+        "active",
+    }:
+        return False
+    return _public_watchlist_bridge_source(symbol_result, candidate)
+
+
+def _symbol_display_statuses(symbol_result: ScannerSymbolResult) -> set[str]:
+    try:
+        display = build_symbol_display(symbol_result)
+    except Exception:
+        return set()
+    values = (
+        getattr(display, "display_status", NA),
+        getattr(display, "display_bucket", NA),
+        getattr(display, "readiness_label", NA),
+        getattr(display, "failed_stage", NA),
+        getattr(display, "failed_gate", NA),
+    )
+    return {_status_key(value) for value in values if _status_key(value)}
+
+
 def format_research_watch_alert(candidate: ResearchWatchCandidate) -> str:
     return format_telegram_signal_message(TelegramAlertType.RESEARCH_WATCH, candidate.message)
 
@@ -3980,10 +4158,15 @@ def _public_watchlist_gate_result(
     planned_rr = _decimal_or_none(candidate.potential_rr)
     min_rr = _decimal_or_default(context.public_watchlist_min_rr, PUBLIC_WATCHLIST_MIN_RR)
     reasons: list[str] = []
+    bridge_state_exempt = _public_watchlist_bridge_state_exempt(symbol_result, candidate)
 
     if not context.public_watchlist_enabled:
         reasons.append("public_watchlist_disabled")
-    if state_key not in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS and not candidate.first_seen_triggered_pre_confirmation:
+    if (
+        state_key not in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS
+        and not candidate.first_seen_triggered_pre_confirmation
+        and not bridge_state_exempt
+    ):
         reasons.append(f"public_watchlist_state_not_eligible:{state_key or 'missing'}")
     if state_key in PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS:
         reasons.append(f"public_watchlist_terminal_or_rejected_state:{state_key}")
@@ -3995,6 +4178,7 @@ def _public_watchlist_gate_result(
     reasons.extend(_public_watchlist_quality_gate_blockers(candidate, min_grade=context.public_watchlist_min_grade))
     reasons.extend(_public_watchlist_status_blockers(symbol_result, candidate=candidate))
     reasons.extend(_public_watchlist_data_health_blockers(symbol_result, candidate=candidate))
+    reasons.extend(_public_watchlist_active_invalidation_blockers(symbol_result))
 
     if not candidate.plan_complete and allowed_missing_gate is None and _text(symbol_result.rejection_reason) != NA:
         reasons.append("rejection_reason_present")
@@ -4112,6 +4296,7 @@ def _public_watchlist_attempt_prefilter(
     reasons.extend(_public_watchlist_candidate_missing_fields(candidate))
 
     state_key = candidate.lifecycle_state
+    bridge_state_exempt = _public_watchlist_bridge_state_exempt(symbol_result, candidate)
     if state_key in PUBLIC_WATCHLIST_BLOCKED_STATE_KEYS or state_key in {
         "confirmed",
         "executing",
@@ -4119,7 +4304,11 @@ def _public_watchlist_attempt_prefilter(
         "active",
     }:
         reasons.append("terminal_state")
-    elif state_key not in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS and not candidate.first_seen_triggered_pre_confirmation:
+    elif (
+        state_key not in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS
+        and not candidate.first_seen_triggered_pre_confirmation
+        and not bridge_state_exempt
+    ):
         reasons.append("terminal_state")
 
     expiry = _watchlist_candidate_expiry_decision(symbol_result)
@@ -4244,20 +4433,24 @@ def _confirmed_alert_prefilter_reason_buckets(reasons: Sequence[str]) -> tuple[s
 def _public_watchlist_candidate_audit(
     symbol_result: ScannerSymbolResult,
     context: TelegramEligibilityContext,
+    *,
+    bridge_enabled: bool = True,
 ) -> PublicWatchlistCandidateAudit | None:
+    candidate = _public_watchlist_candidate_from_symbol(symbol_result)
+    bridge_source = bool(bridge_enabled and _public_watchlist_bridge_source(symbol_result, candidate))
     transition = symbol_result.lifecycle_transition
-    if transition is None:
+    if transition is None and not bridge_source:
         return None
-    alert_type = _alert_type_for_transition(symbol_result, transition)
-    if alert_type != TelegramAlertType.WATCHLIST:
+    alert_type = _alert_type_for_transition(symbol_result, transition) if transition is not None else None
+    if alert_type != TelegramAlertType.WATCHLIST and not bridge_source:
         return None
     message = _telegram_signal_message_for_alert(symbol_result, TelegramAlertType.WATCHLIST, context)
-    candidate = _public_watchlist_candidate_from_symbol(symbol_result)
     prefilter = _public_watchlist_attempt_prefilter(symbol_result, message, context)
     gate = _public_watchlist_gate_result(symbol_result, message, context)
+    eligible = prefilter.passed and gate.allowed
     return PublicWatchlistCandidateAudit(
         symbol=_symbol(message.symbol),
-        eligible=prefilter.passed and gate.allowed,
+        eligible=eligible,
         field_prefilter_passed=prefilter.passed,
         first_seen_triggered_pre_confirmation=candidate.first_seen_triggered_pre_confirmation,
         state=candidate.lifecycle_state,
@@ -4266,6 +4459,9 @@ def _public_watchlist_candidate_audit(
         grade=_text(candidate.grade),
         has_zone=_public_watchlist_has_zone(message),
         has_invalidation=_public_watchlist_has_invalidation(message),
+        near_miss_source=bridge_source,
+        plan_complete=candidate.plan_complete,
+        trade_idea_created=bridge_source and eligible,
     )
 
 
@@ -4282,6 +4478,19 @@ def _public_watchlist_audit_summary(
 ) -> PublicWatchlistAuditSummary:
     candidates = tuple(audits)
     blocked_by_reason: dict[str, int] = {}
+    blocked_before_trade_idea_by_reason: dict[str, int] = {
+        "missing_rr": 0,
+        "missing_entry_zone": 0,
+        "missing_invalidation": 0,
+        "grade_below_b_plus": 0,
+        "rr_below_public_min": 0,
+        "stale_or_expired": 0,
+        "target_inside_chop": 0,
+        "late_pullback": 0,
+        "no_edge": 0,
+        "active_invalidation": 0,
+        "no_candidate_plan": 0,
+    }
     for audit in candidates:
         reasons = audit.reject_reasons if not audit.eligible else ()
         if audit.eligible and audit.delivery_status not in {"", NA, "sent"}:
@@ -4289,6 +4498,15 @@ def _public_watchlist_audit_summary(
         for reason in reasons:
             bucket = _public_watchlist_skip_bucket(reason)
             blocked_by_reason[bucket] = blocked_by_reason.get(bucket, 0) + 1
+            if audit.near_miss_source and not audit.trade_idea_created:
+                bridge_bucket = _public_watchlist_bridge_block_bucket(reason)
+                blocked_before_trade_idea_by_reason[bridge_bucket] = (
+                    blocked_before_trade_idea_by_reason.get(bridge_bucket, 0) + 1
+                )
+        if audit.near_miss_source and not audit.plan_complete:
+            blocked_before_trade_idea_by_reason["no_candidate_plan"] = (
+                blocked_before_trade_idea_by_reason.get("no_candidate_plan", 0) + 1
+            )
     field_prefilter_passed = sum(1 for audit in candidates if audit.field_prefilter_passed)
     eligible_first_seen = sum(
         1
@@ -4318,6 +4536,21 @@ def _public_watchlist_audit_summary(
         sent=sum(1 for audit in candidates if audit.delivery_status == "sent"),
         skipped_by_reason=dict(sorted(blocked_by_reason.items())),
         candidates=candidates,
+        near_miss_seen=sum(1 for audit in candidates if audit.near_miss_source),
+        near_miss_plan_complete=sum(1 for audit in candidates if audit.near_miss_source and audit.plan_complete),
+        public_watchlist_trade_ideas_created=sum(1 for audit in candidates if audit.trade_idea_created),
+        public_watchlist_alerts_created=sum(1 for audit in candidates if audit.alert_created),
+        public_watchlist_sent=sum(1 for audit in candidates if audit.delivery_status == "sent"),
+        public_watchlist_blocked=sum(
+            1
+            for audit in candidates
+            if audit.near_miss_source
+            and (
+                not audit.trade_idea_created
+                or audit.delivery_status in {"blocked", "blocked_repeat", "skipped", "failed", "duplicate"}
+            )
+        ),
+        blocked_before_trade_idea_by_reason=dict(sorted(blocked_before_trade_idea_by_reason.items())),
     )
 
 
@@ -4329,7 +4562,7 @@ def _public_watchlist_skip_bucket(reason: Any) -> str:
     if "missing_grade" in key:
         return "missing_grade"
     if "below_min_public_grade" in key or "grade_below" in key:
-        return "below_min_public_grade"
+        return "grade_below_b_plus"
     if any(token in key for token in ("missing_rr", "planned_rr_missing", "rr_missing")) or "planned_rr" in text and "missing" in text:
         return "missing_rr"
     if "rr_below" in key or "planned_rr_below_min" in key or "rr_below" in text:
@@ -4341,20 +4574,53 @@ def _public_watchlist_skip_bucket(reason: Any) -> str:
     if "terminal_state" in key or "terminal_or_rejected" in key or "state_not_eligible" in key:
         return "terminal_state"
     if "expired" in key or "stale" in key or key == _status_key(WATCHLIST_EXPIRY_REASON):
-        return "expired_or_stale"
+        return "stale_or_expired"
+    if "target_inside_chop" in key:
+        return "target_inside_chop"
+    if "late_pullback" in key:
+        return "late_pullback"
+    if "entry_window_expired" in key:
+        return "entry_window_expired"
+    if "no_edge" in key:
+        return "no_edge"
+    if "active_invalidation" in key or "already_invalidated" in key:
+        return "active_invalidation"
+    if "target_integrity" in key or "target_blocked" in key:
+        return "target_inside_chop" if "chop" in key else "target_blocked"
     if "scanned_no_setup_without_candidate" in key:
-        return "scanned_no_setup_without_candidate"
+        return "no_candidate_plan"
     if "data_health_required_field_missing" in key:
         return "data_health_required_field_missing"
     if "cooldown" in key:
-        return "cooldown"
+        return "public_watchlist_cooldown"
     if "disabled" in key:
         return "telegram_disabled"
     if "dry_run" in key:
-        return "dry_run"
+        return "telegram_dry_run"
     if "channel" in key or "chat" in key:
-        return "channel_missing"
+        return "telegram_channel_missing"
     return key or "unknown"
+
+
+def _public_watchlist_bridge_block_bucket(reason: Any) -> str:
+    bucket = _public_watchlist_skip_bucket(reason)
+    if bucket in {
+        "missing_rr",
+        "missing_entry_zone",
+        "missing_invalidation",
+        "grade_below_b_plus",
+        "rr_below_public_min",
+        "stale_or_expired",
+        "target_inside_chop",
+        "late_pullback",
+        "no_edge",
+        "active_invalidation",
+        "no_candidate_plan",
+    }:
+        return bucket
+    if bucket in {"missing_grade", "missing_side", "terminal_state", "data_health_required_field_missing"}:
+        return "no_candidate_plan"
+    return bucket or "unknown"
 
 
 def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
@@ -4363,7 +4629,10 @@ def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
     logger.info(
         "public_watchlist_audit source_candidates_seen=%s field_prefilter_passed=%s "
         "eligible_watch_or_stalking=%s eligible_first_seen_triggered_pre_confirmation=%s sent=%s "
-        "blocked_before_attempt=%s blocked_after_attempt=%s blocked_by_reason=%s candidates=%s",
+        "blocked_before_attempt=%s blocked_after_attempt=%s blocked_by_reason=%s "
+        "bridge_near_miss_seen=%s bridge_plan_complete=%s bridge_trade_ideas_created=%s "
+        "bridge_alerts_created=%s bridge_sent=%s bridge_blocked=%s "
+        "bridge_blocked_before_trade_idea_by_reason=%s candidates=%s",
         summary.source_candidates_seen,
         summary.field_prefilter_passed,
         summary.eligible_watch_or_stalking,
@@ -4372,6 +4641,13 @@ def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
         summary.blocked_before_attempt,
         summary.blocked_after_attempt,
         dict(summary.blocked_by_reason),
+        summary.near_miss_seen,
+        summary.near_miss_plan_complete,
+        summary.public_watchlist_trade_ideas_created,
+        summary.public_watchlist_alerts_created,
+        summary.public_watchlist_sent,
+        summary.public_watchlist_blocked,
+        dict(summary.blocked_before_trade_idea_by_reason),
         tuple(
             {
                 "symbol": audit.symbol,
@@ -4386,6 +4662,10 @@ def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
                 "public_watchlist_has_invalidation": audit.has_invalidation,
                 "public_watchlist_delivery_status": audit.delivery_status,
                 "public_watchlist_skip_reason": audit.skip_reason,
+                "public_watchlist_bridge_near_miss_source": audit.near_miss_source,
+                "public_watchlist_bridge_plan_complete": audit.plan_complete,
+                "public_watchlist_bridge_trade_idea_created": audit.trade_idea_created,
+                "public_watchlist_bridge_alert_created": audit.alert_created,
             }
             for audit in summary.candidates
         ),
@@ -4622,6 +4902,22 @@ def _public_watchlist_data_health_blockers(
     if data_health_flags and _public_watchlist_candidate_missing_fields(candidate):
         blockers.append("public_watchlist_data_health_required_field_missing")
     return tuple(dict.fromkeys(blockers))
+
+
+def _public_watchlist_active_invalidation_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    diagnostics = _representative_diagnostics(symbol_result)
+    explicit = _first_non_na(*_diagnostic_texts(diagnostics, ACTIVE_INVALIDATION_REASON_KEYS))
+    if _text(explicit) != NA:
+        return ("public_watchlist_active_invalidation",)
+
+    active_gate = _status_key(_first_non_na(*_diagnostic_texts(diagnostics, ACTIVE_FAILED_GATE_KEYS)))
+    if active_gate in {
+        "already_invalidated",
+        "body_acceptance_failure",
+        "structural_breakdown",
+    }:
+        return ("public_watchlist_active_invalidation",)
+    return ()
 
 
 def _public_watchlist_target_integrity_blockers(
@@ -8020,6 +8316,7 @@ __all__ = [
     "CONFIRMED_SIGNAL_RR_PENDING",
     "REGIME_MARKET_CONDITION_PENDING",
     "TIMING_CONFIRMATION_PENDING",
+    "PublicWatchlistTradeIdea",
     "ResearchWatchCandidate",
     "SQLiteTelegramAlertAttemptRepository",
     "TelegramAlertDecision",
