@@ -20,6 +20,7 @@ from app.alerts.telegram_lifecycle import (
     WatchlistCandleSnapshot,
     classify_failed_gate_code,
     _public_signal_gate_result,
+    _public_watchlist_candidate_from_symbol,
     _public_watchlist_gate_result,
     _signal_id,
     _stop_touched,
@@ -1313,7 +1314,8 @@ def test_public_watchlist_rejects_trade_map_na() -> None:
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert "public_watchlist_fatal_failed_gates=trade_map_na" in decision.reason
-    assert "public_watchlist_missing_required_fields:missing_rr,missing_entry_zone" in decision.reason
+    assert "public_watchlist_missing_rr" in decision.reason
+    assert "public_watchlist_missing_entry_zone" in decision.reason
 
 
 def test_public_watchlist_blocks_missing_regime_data_gate_code() -> None:
@@ -1478,7 +1480,7 @@ def test_public_watchlist_requires_potential_rr() -> None:
 
     assert weak.eligible is False
     assert weak.alert_type == TelegramAlertType.WATCHLIST
-    assert "missing_public_fields=planned_rr" in weak.reason
+    assert "public_watchlist_missing_rr" in weak.reason
 
 
 def test_public_watchlist_allows_rr_below_valid_min_when_potential_rr_above_public_min() -> None:
@@ -1539,7 +1541,7 @@ def test_public_watchlist_rejects_rr_na() -> None:
 
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "missing_public_fields=planned_rr" in decision.reason
+    assert "public_watchlist_missing_rr" in decision.reason
 
 
 def test_public_watchlist_rejects_missing_entry_zone() -> None:
@@ -1629,7 +1631,8 @@ def test_public_watchlist_rejects_missing_confirmation_without_trade_map() -> No
 
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "missing_public_fields" in decision.reason
+    assert "public_watchlist_missing_rr" in decision.reason
+    assert "public_watchlist_missing_entry_zone" in decision.reason
 
 
 def test_public_watchlist_blocks_no_ob_or_fvg_without_zone() -> None:
@@ -1926,6 +1929,394 @@ def test_hype_style_public_ready_watchlist_sends_confirmation_pending_watchlist(
     assert "70.77363571" not in text
     assert "WATCHLIST" in text
     assert "Invalid below/above:" in text
+
+
+def _near_miss_watchlist_symbol(
+    *,
+    symbol: str = "ENAUSDT",
+    side: str = "short",
+    grade: str = "B+",
+    score: int = 80,
+    potential_rr: object = Decimal("2.6"),
+    entry_low: object = Decimal("0.09528"),
+    entry_high: object = Decimal("0.09599"),
+    invalidation: object = Decimal("0.09751"),
+    pending_reason: str = "confirmation_pending",
+    signal_id: str = "near-miss-plan-complete",
+    historical_rejection: bool = True,
+) -> ScannerSymbolResult:
+    short = side.lower() == "short"
+    tp1 = Decimal("0.09300") if short else Decimal("0.09800")
+    tp2 = Decimal("0.09150") if short else Decimal("0.10000")
+    tp3 = Decimal("0.09000") if short else Decimal("0.10200")
+    diagnostics = _public_ready_watchlist_diagnostics(
+        bias=side,
+        direction=side,
+        grade=grade,
+        readiness_score=score,
+        potential_rr=potential_rr,
+        entry_zone_low=entry_low,
+        entry_zone_high=entry_high,
+        stop=invalidation,
+        stop_loss=invalidation,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        invalidation_level=invalidation,
+        first_failed_gate=pending_reason,
+        pending_reason=pending_reason,
+        pending_confirmation_reason=pending_reason,
+        gates_failed=(pending_reason,),
+        historical_rejection_reasons=("Previous scanner rejection was retained for audit.",) if historical_rejection else (),
+        next_required_conditions=(
+            "Price must trade into the Limit Zone.",
+            "Limit Zone must hold after the pullback.",
+            "Confirmation must print before activation.",
+        ),
+    )
+    rejection_reason = "Historical research rejection retained for audit." if historical_rejection else None
+    rejection_reasons = ("Historical scanner rejection retained for audit.",) if historical_rejection else ()
+    if potential_rr == NA:
+        diagnostics.update(
+            {
+                "potential_rr": NA,
+                "rr": NA,
+                "rr_to_tp1": NA,
+                "rr_to_tp2": NA,
+                "planned_rr": NA,
+                "rr_planned": NA,
+            }
+        )
+    if entry_low == NA or entry_high == NA:
+        diagnostics.update(
+            {
+                "entry_low": NA,
+                "entry_high": NA,
+                "entry_zone_low": NA,
+                "entry_zone_high": NA,
+                "entry_zone": NA,
+                "watch_zone": NA,
+                "limit_zone": NA,
+                "pullback_zone": NA,
+                "zone": NA,
+            }
+        )
+    if invalidation == NA:
+        diagnostics.update(
+            {
+                "stop": NA,
+                "stop_loss": NA,
+                "invalidation": NA,
+                "invalidation_level": NA,
+                "invalid_below": NA,
+                "invalid_above": NA,
+                "protective_stop": NA,
+                "atr_stop": NA,
+            }
+        )
+    result = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=diagnostics,
+        signal_id=signal_id,
+        trade_idea=None,
+        status=ScannerPipelineStatus.REJECTED_BY_SCORING,
+        rejection_reason=rejection_reason,
+        rejection_reasons=rejection_reasons,
+        setup_quality=_setup_quality_with_grade(
+            SetupQualityGrade.REJECT,
+            quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+            quality_score=score,
+        ),
+    ).model_copy(update={"symbol": symbol})
+    return _with_lifecycle_fields(
+        result,
+        direction=side,
+        rr=NA if potential_rr == NA else str(potential_rr),
+        entry_low=entry_low,
+        entry_high=entry_high,
+        stop_loss=invalidation,
+        invalidation_reason=NA if invalidation == NA else f"Invalid if price accepts beyond {invalidation}.",
+        invalidation_logic=NA if invalidation == NA else f"Invalid if price accepts beyond {invalidation}.",
+    )
+
+
+def test_near_miss_maps_rr_alias_into_public_watchlist_candidate() -> None:
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=_public_ready_watchlist_diagnostics(
+            potential_rr=NA,
+            rr=NA,
+            rr_to_tp1=NA,
+            rr_to_tp2=NA,
+            planned_rr=Decimal("2.6"),
+            watchlist_grade="B+",
+        ),
+        trade_idea=None,
+    )
+
+    candidate = _public_watchlist_candidate_from_symbol(symbol)
+
+    assert candidate.potential_rr == Decimal("2.6")
+
+
+def test_near_miss_maps_entry_zone_alias_into_public_watchlist_candidate() -> None:
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=_public_ready_watchlist_diagnostics(
+            entry_low=NA,
+            entry_high=NA,
+            entry_zone=NA,
+            watch_zone=NA,
+            limit_zone=NA,
+            pullback_zone_low=Decimal("99"),
+            pullback_zone_high=Decimal("101"),
+            watchlist_grade="B+",
+        ),
+        trade_idea=None,
+    )
+
+    candidate = _public_watchlist_candidate_from_symbol(symbol)
+
+    assert candidate.entry_zone_low == Decimal("99")
+    assert candidate.entry_zone_high == Decimal("101")
+
+
+def test_near_miss_maps_invalidation_alias_into_public_watchlist_candidate() -> None:
+    symbol = _with_lifecycle_fields(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=_public_ready_watchlist_diagnostics(
+                stop=NA,
+                stop_loss=NA,
+                invalidation=NA,
+                invalidation_level=NA,
+                protective_stop=Decimal("95"),
+                watchlist_grade="B+",
+            ),
+            trade_idea=None,
+        ),
+        stop_loss=NA,
+        invalidation_reason=NA,
+        invalidation_logic=NA,
+    )
+
+    candidate = _public_watchlist_candidate_from_symbol(symbol)
+
+    assert candidate.stop_loss == Decimal("95")
+
+
+def test_near_miss_with_b_plus_rr_zone_stop_creates_public_watchlist_trade_idea(tmp_path: Path) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / "b-plus-watch.db", settings=Settings(), sender=sender)
+
+    summary = run(service.deliver_for_run(_run_result(_near_miss_watchlist_symbol(grade="B+")), scan_run_id="b-plus-watch"))
+
+    assert summary.public_watchlist_audit.public_watchlist_bridge["public_watchlist_trade_ideas_created"] == 1
+    assert summary.sent == 1
+    assert sender.calls == [{"message_type": TelegramMessageType.PUBLIC_WATCHLIST}]
+
+
+def test_near_miss_with_a_minus_rr_zone_stop_creates_public_watchlist_trade_idea(tmp_path: Path) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / "a-minus-watch.db", settings=Settings(), sender=sender)
+
+    summary = run(service.deliver_for_run(_run_result(_near_miss_watchlist_symbol(grade="A-")), scan_run_id="a-minus-watch"))
+
+    assert summary.public_watchlist_audit.public_watchlist_bridge["public_watchlist_trade_ideas_created"] == 1
+    assert summary.sent == 1
+
+
+def test_near_miss_with_missing_rr_does_not_create_trade_idea(tmp_path: Path) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / "missing-rr.db", settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_near_miss_watchlist_symbol(symbol="RENDERUSDT", grade="A-", potential_rr=NA)),
+            scan_run_id="missing-rr",
+        )
+    )
+
+    assert summary.sent == 0
+    assert summary.public_watchlist_audit.public_watchlist_bridge["public_watchlist_trade_ideas_created"] == 0
+    assert summary.public_watchlist_audit.blocked_by_reason["missing_rr"] == 1
+    assert sender.messages == []
+
+
+def test_near_miss_with_missing_entry_zone_does_not_create_trade_idea(tmp_path: Path) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / "missing-entry.db", settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_near_miss_watchlist_symbol(symbol="RENDERUSDT", grade="A-", entry_low=NA, entry_high=NA)),
+            scan_run_id="missing-entry",
+        )
+    )
+
+    assert summary.sent == 0
+    assert summary.public_watchlist_audit.blocked_by_reason["missing_entry_zone"] == 1
+    assert sender.messages == []
+
+
+def test_near_miss_with_missing_invalidation_does_not_create_trade_idea(tmp_path: Path) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / "missing-invalidation.db", settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_near_miss_watchlist_symbol(symbol="RENDERUSDT", grade="A-", invalidation=NA)),
+            scan_run_id="missing-invalidation",
+        )
+    )
+
+    assert summary.sent == 0
+    assert summary.public_watchlist_audit.blocked_by_reason["missing_invalidation"] == 1
+    assert sender.messages == []
+
+
+def test_historical_rejection_reasons_do_not_block_plan_complete_watchlist_candidate() -> None:
+    decision = telegram_alert_decision_for_symbol(_near_miss_watchlist_symbol())
+
+    assert decision.eligible is True
+    assert "rejection_reason_present" not in decision.reason
+    assert "rejection_reasons_present" not in decision.reason
+
+
+def test_active_structural_breakdown_blocks_watchlist_candidate() -> None:
+    symbol = _near_miss_watchlist_symbol(historical_rejection=False).model_copy(
+        update={
+            "strategy_diagnostics": {
+                "swing": _public_ready_watchlist_diagnostics(
+                    bias="short",
+                    direction="short",
+                    grade="B+",
+                    potential_rr=Decimal("2.6"),
+                    entry_zone_low=Decimal("0.09528"),
+                    entry_zone_high=Decimal("0.09599"),
+                    stop=Decimal("0.09751"),
+                    stop_loss=Decimal("0.09751"),
+                    invalidation_level=Decimal("0.09751"),
+                    first_failed_gate="confirmation_pending",
+                    gates_failed=("confirmation_pending",),
+                    active_failed_gate="structural_breakdown",
+                )
+            }
+        }
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is False
+    assert "public_watchlist_active_rejection:structural_breakdown" in decision.reason
+
+
+def test_entry_window_expired_blocks_watchlist_candidate() -> None:
+    test_entry_window_expired_late_pullback_and_target_inside_chop_remain_blocked("entry_window_expired")
+
+
+def test_target_inside_chop_blocks_watchlist_candidate() -> None:
+    test_entry_window_expired_late_pullback_and_target_inside_chop_remain_blocked("target_inside_chop")
+
+
+def test_rr_below_minimum_allowed_when_candidate_rr_above_public_min() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _near_miss_watchlist_symbol(pending_reason="rr_below_minimum", potential_rr=Decimal("2.6"))
+    )
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+
+
+def test_rr_below_public_min_blocks_watchlist_candidate() -> None:
+    decision = telegram_alert_decision_for_symbol(_near_miss_watchlist_symbol(potential_rr=Decimal("2.49")))
+
+    assert decision.eligible is False
+    assert "public_watchlist_rr_below_min:2.49<2.5" in decision.reason
+
+
+def test_admin_draft_delivery_disabled_does_not_block_public_watchlist_trade_idea(tmp_path: Path) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / "admin-disabled-watch.db", settings=Settings(), sender=sender)
+
+    summary = run(service.deliver_for_run(_run_result(_near_miss_watchlist_symbol()), scan_run_id="admin-disabled-watch"))
+
+    assert summary.sent == 1
+    assert "WATCHLIST — ENAUSDT" in sender.messages[0]
+
+
+def test_live_scanner_alerts_true_creates_public_watchlist_alert(tmp_path: Path) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / "live-enabled.db", settings=Settings(), sender=sender)
+
+    summary = run(service.deliver_for_run(_run_result(_near_miss_watchlist_symbol()), scan_run_id="live-enabled"))
+
+    assert summary.public_watchlist_audit.public_watchlist_bridge["public_watchlist_alerts_created"] == 1
+    assert summary.sent == 1
+
+
+def test_live_scanner_alerts_false_does_not_send_public_watchlist(tmp_path: Path) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=tmp_path / "live-disabled.db",
+        settings=Settings(telegram_public_watchlist_enabled=False),
+        sender=sender,
+    )
+
+    summary = run(service.deliver_for_run(_run_result(_near_miss_watchlist_symbol()), scan_run_id="live-disabled"))
+
+    assert summary.sent == 0
+    assert sender.messages == []
+
+
+def test_public_watchlist_old_wolf_formatter_shape() -> None:
+    decision = telegram_alert_decision_for_symbol(_near_miss_watchlist_symbol())
+
+    assert decision.message is not None
+    text = format_telegram_signal_message(decision.alert_type, decision.message)
+    assert "🐺🟠 WATCHLIST — ENAUSDT" in text
+    assert "The wolf is stalking this one." in text
+    assert "Bias: SHORT" in text
+    assert "Status: WATCHLIST" in text
+    assert "Quality: B+" in text
+    assert "Potential RR: 2.6R" in text
+    assert "Price must trade into the Limit Zone." in text
+    assert "Zone: 0.09528 – 0.09599" in text
+    assert "Invalid below/above: 0.09751" in text
+    assert "No confirmation = no trade." in text
+    assert text.endswith(FOOTER)
+
+
+def test_false_confirmed_fix_unchanged(tmp_path: Path) -> None:
+    test_runtime_like_homeusdt_false_confirmed_creates_no_signal_confirmed_attempt(tmp_path)
+
+
+def test_runtime_like_incomplete_render_near_miss_does_not_send_and_diagnoses_missing_fields(tmp_path: Path) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / "render-incomplete.db", settings=Settings(), sender=sender)
+    symbol = _near_miss_watchlist_symbol(
+        symbol="RENDERUSDT",
+        grade="A-",
+        potential_rr=NA,
+        entry_low=NA,
+        entry_high=NA,
+        invalidation=NA,
+        signal_id="render-incomplete",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="render-incomplete"))
+
+    assert summary.sent == 0
+    bridge = summary.public_watchlist_audit.public_watchlist_bridge
+    assert bridge["near_miss_seen"] == 1
+    assert bridge["near_miss_with_rr"] == 0
+    assert bridge["near_miss_with_entry_zone"] == 0
+    assert bridge["near_miss_with_invalidation"] == 0
+    assert bridge["public_watchlist_trade_ideas_created"] == 0
+    assert summary.public_watchlist_audit.blocked_by_reason["missing_rr"] == 1
+    assert summary.public_watchlist_audit.blocked_by_reason["missing_entry_zone"] == 1
+    assert summary.public_watchlist_audit.blocked_by_reason["missing_invalidation"] == 1
+    assert sender.messages == []
 
 
 def test_near_miss_with_only_missing_confirmation_can_publish_as_watchlist() -> None:
