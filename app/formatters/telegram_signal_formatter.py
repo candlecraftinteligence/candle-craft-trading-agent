@@ -214,8 +214,6 @@ def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
         "No confirmation = no trade.",
         closing,
         "",
-        "\u26A0\ufe0f Manual execution only. Manage risk.",
-        "",
         FOOTER,
     )
 

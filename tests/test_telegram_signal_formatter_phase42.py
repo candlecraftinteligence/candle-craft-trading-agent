@@ -105,6 +105,23 @@ def test_old_public_watchlist_formatter_uses_short_side_wording() -> None:
     assert "Invalid below/above: 105" in text
 
 
+
+def test_old_watchlist_formatter_shape() -> None:
+    test_old_public_watchlist_formatter_matches_expected_shape()
+
+
+def test_triggered_waiting_confirmation_formatter_shape() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(watchlist_status="LIMIT_ZONE_HIT_WAITING_CONFIRMATION"),
+    )
+
+    assert "Status: LIMIT ZONE HIT" in text
+    assert "Price is in or near the Limit Zone." in text
+    assert "Wait for clean confirmation before any trade." in text
+    assert "No confirmation = no trade." in text
+    assert "We let the market prove it." in text
+    assert "CONFIRMED SIGNAL" not in text
 def test_watchlist_upgraded_requires_upgrade_flag() -> None:
     plain = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, _message())
     upgraded = format_telegram_signal_message(
