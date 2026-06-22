@@ -480,7 +480,9 @@ def test_strategy_mode_non_regime_failure_not_regime_pending(failure_type: str, 
         return
     assert gate.allowed is False
     assert any(
-        reason.startswith("public_watchlist_non_regime_failed_gates=") or reason.startswith("target_integrity_failed")
+        reason.startswith("public_watchlist_non_regime_failed_gates=")
+        or reason.startswith("public_watchlist_fatal_failed_gates=")
+        or reason.startswith("target_integrity_failed")
         for reason in gate.blocking_reasons
     )
 
@@ -499,10 +501,9 @@ def test_strategy_mode_mixed_failures_block_public_watchlist() -> None:
     gate = _public_watchlist_gate(candidate)
 
     assert _public_watchlist_failed_gate_codes(candidate) == ("regime_compatibility", "target_integrity")
-    assert gate.failed_gate_classes == ("FATAL_PUBLIC_WATCHLIST_GATE", "NON_REGIME_FAILED_GATE")
+    assert gate.failed_gate_classes == ("FATAL_PUBLIC_WATCHLIST_GATE",)
     assert gate.allowed is False
-    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in gate.blocking_reasons
-    assert "public_watchlist_non_regime_failed_gates=target_integrity" in gate.blocking_reasons
+    assert "public_watchlist_fatal_failed_gates=regime_compatibility,target_integrity" in gate.blocking_reasons
 
 
 def test_strategy_mode_rr_failure_blocks_public_watchlist() -> None:

@@ -2040,6 +2040,300 @@ def _near_miss_watchlist_symbol(
     )
 
 
+
+def _runtime_public_watchlist_snapshot(
+    *,
+    symbol: str = "INTUSDT",
+    state: SetupLifecycleState = SetupLifecycleState.TRIGGERED,
+    side: str = "long",
+    grade: str = "B+",
+    potential_rr: object = Decimal("2.615"),
+    entry_low: object = Decimal("125.70246"),
+    entry_high: object = Decimal("125.74"),
+    invalidation: object = Decimal("125.452"),
+    failed_gate: str = "technical_score_below_confirmed_minimum",
+    signal_id: str = "int-runtime-watchlist",
+    status: ScannerPipelineStatus = ScannerPipelineStatus.REJECTED_BY_SCORING,
+) -> ScannerSymbolResult:
+    short = side.lower() == "short"
+    tp1 = Decimal("124.8") if short else Decimal("126.5")
+    tp2 = Decimal("124.0") if short else Decimal("127.2")
+    tp3 = Decimal("123.2") if short else Decimal("128.0")
+    diagnostics = _public_ready_watchlist_diagnostics(
+        bias=side,
+        direction=side,
+        grade=grade,
+        watchlist_grade=grade,
+        quality_label="WATCHLIST_NEAR_MISS",
+        quality_state="WATCHLIST_NEAR_MISS",
+        potential_rr=potential_rr,
+        rr=potential_rr,
+        rr_to_tp2=potential_rr,
+        planned_rr=potential_rr,
+        entry_zone_low=entry_low,
+        entry_zone_high=entry_high,
+        entry_low=entry_low,
+        entry_high=entry_high,
+        stop=invalidation,
+        stop_loss=invalidation,
+        invalidation_level=invalidation,
+        invalidation=invalidation,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        first_failed_gate=failed_gate,
+        failed_gate=failed_gate,
+        gates_failed=(failed_gate,),
+        pending_reason=failed_gate,
+        pending_confirmation_reason=failed_gate,
+        technical_score=Decimal("49"),
+        opportunity_score=Decimal("79"),
+        trust_meter=Decimal("74"),
+    )
+    result = _symbol(
+        state,
+        diagnostics=diagnostics,
+        signal_id=signal_id,
+        trade_idea=None,
+        status=status,
+        rejection_reason="Technical score is below confirmed minimum 50.",
+        rejection_reasons=("Opportunity score is below scanner confirmed minimum 80.",),
+        technical_score=Decimal("49"),
+        setup_quality=_setup_quality_with_grade(
+            SetupQualityGrade.B_PLUS,
+            quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+            quality_score=80,
+        ),
+    ).model_copy(update={"symbol": symbol})
+    assert result.lifecycle_state is not None
+    record = result.lifecycle_state.model_copy(
+        update={
+            "current_state": state,
+            "direction": side,
+            "failed_gate": failed_gate,
+            "rr": NA if potential_rr == NA else str(potential_rr),
+            "entry_low": entry_low,
+            "entry_high": entry_high,
+            "stop_loss": invalidation,
+            "invalidation_reason": NA if invalidation == NA else f"Invalid if price accepts beyond {invalidation}.",
+            "invalidation_logic": NA if invalidation == NA else f"Invalid if price accepts beyond {invalidation}.",
+        }
+    )
+    return result.model_copy(
+        update={
+            "lifecycle_state": record,
+            "lifecycle_transition": None,
+            "status_history": (status,),
+            "valid_strategy_modes": (),
+            "rejected_strategy_modes": ("swing",),
+        }
+    )
+
+
+def _deliver_public_watchlist_snapshot(tmp_path: Path, symbol_result: ScannerSymbolResult, run_id: str):
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / f"{run_id}.db", settings=Settings(), sender=sender)
+    summary = run(service.deliver_for_run(_run_result(symbol_result), scan_run_id=run_id))
+    return sender, summary
+
+
+def test_confirmed_scoring_failure_does_not_block_b_plus_complete_public_watchlist(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(failed_gate="scoring"),
+        "scoring-watchlist",
+    )
+
+    assert summary.sent == 1
+    assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit["eligible_by_watchlist_policy"] == 1
+    assert "WATCHLIST" in sender.messages[0]
+
+
+def test_confirmed_technical_min_failure_does_not_automatically_block_watchlist(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(failed_gate="technical_score_below_confirmed_minimum"),
+        "technical-watchlist",
+    )
+
+    assert summary.sent == 1
+    assert "CONFIRMED SIGNAL" not in sender.messages[0]
+
+
+def test_confirmed_opportunity_min_failure_does_not_automatically_block_watchlist(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(failed_gate="opportunity_score_below_confirmed_minimum"),
+        "opportunity-watchlist",
+    )
+
+    assert summary.sent == 1
+    assert "WATCHLIST" in sender.messages[0]
+
+
+def test_trust_meter_below_confirmed_min_can_be_watchlist_when_watchlist_grade_passes(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(failed_gate="trust_meter_below_confirmed_minimum"),
+        "trust-watchlist",
+    )
+
+    assert summary.sent == 1
+    assert "Quality: B+" in sender.messages[0]
+
+
+def test_triggered_complete_candidate_sends_limit_zone_hit_watchlist(tmp_path: Path) -> None:
+    symbol = _runtime_public_watchlist_snapshot()
+    sender, summary = _deliver_public_watchlist_snapshot(tmp_path, symbol, "triggered-limit-zone")
+
+    assert symbol.lifecycle_state is not None
+    assert symbol.lifecycle_state.current_state == SetupLifecycleState.TRIGGERED
+    assert summary.sent == 1
+    assert "Status: LIMIT ZONE HIT" in sender.messages[0]
+    assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit[
+        "triggered_waiting_confirmation_candidates"
+    ] == 1
+
+
+def test_rejected_core_state_from_confirmed_scoring_can_derive_watchlist_state(tmp_path: Path) -> None:
+    symbol = _runtime_public_watchlist_snapshot(state=SetupLifecycleState.REJECTED, failed_gate="scoring")
+    sender, summary = _deliver_public_watchlist_snapshot(tmp_path, symbol, "rejected-scoring-watchlist")
+
+    assert symbol.lifecycle_state is not None
+    assert symbol.lifecycle_state.current_state == SetupLifecycleState.REJECTED
+    assert summary.sent == 1
+    assert "Status: WATCHLIST" in sender.messages[0]
+    assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit[
+        "rejected_core_but_watchlist_eligible"
+    ] == 1
+
+
+def test_rejected_core_state_with_structural_breakdown_remains_blocked(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(state=SetupLifecycleState.REJECTED, failed_gate="structural_breakdown"),
+        "rejected-structural-block",
+    )
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit["blocked_by_fatal_reason"] == 1
+
+
+def test_existing_eligible_candidate_without_new_transition_is_reconciled(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(signal_id="existing-no-transition"),
+        "existing-no-transition",
+    )
+
+    assert summary.sent == 1
+    assert sender.calls == [{"message_type": TelegramMessageType.PUBLIC_WATCHLIST}]
+
+
+def test_existing_eligible_candidate_without_prior_successful_alert_is_sent(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(signal_id="without-prior-success"),
+        "without-prior-success",
+    )
+
+    assert summary.sent == 1
+    assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit[
+        "candidates_without_prior_successful_alert"
+    ] == 1
+    assert sender.messages
+
+
+def test_existing_candidate_with_prior_blocked_attempt_can_be_retried_after_fix(tmp_path: Path) -> None:
+    db_path = tmp_path / "prior-blocked-retry.db"
+    _insert_attempt_record(
+        db_path,
+        signal_id="old-blocked-watchlist",
+        alert_type="WATCHLIST_BLOCKED_old",
+        status="blocked",
+        attempted_alert_type=TelegramAlertType.WATCHLIST.value,
+        sent_at=None,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_runtime_public_watchlist_snapshot(signal_id="prior-blocked-retry")),
+            scan_run_id="prior-blocked-retry",
+        )
+    )
+
+    assert summary.sent == 1
+    assert any(row[1] == TelegramAlertType.WATCHLIST.value and row[2] == "sent" for row in _telegram_attempt_rows(db_path))
+
+
+def test_existing_candidate_with_prior_successful_alert_is_deduped(tmp_path: Path) -> None:
+    db_path = tmp_path / "prior-success-dedupe.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    symbol = _runtime_public_watchlist_snapshot(signal_id="prior-success-dedupe")
+
+    first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="prior-success-first"))
+    second = run(service.deliver_for_run(_run_result(symbol), scan_run_id="prior-success-second"))
+
+    assert first.sent == 1
+    assert second.sent == 0
+    assert len(sender.messages) == 1
+    assert second.public_watchlist_audit.public_watchlist_reconciliation_audit["deduped"] == 1
+
+
+def test_plan_change_creates_new_watchlist_identity(tmp_path: Path) -> None:
+    db_path = tmp_path / "plan-change.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    first_symbol = _runtime_public_watchlist_snapshot(signal_id="same-lifecycle-plan")
+    changed_symbol = _runtime_public_watchlist_snapshot(
+        signal_id="same-lifecycle-plan",
+        entry_high=Decimal("125.88"),
+    )
+
+    first = run(service.deliver_for_run(_run_result(first_symbol), scan_run_id="plan-change-first"))
+    second = run(service.deliver_for_run(_run_result(changed_symbol), scan_run_id="plan-change-second"))
+    rows = [row for row in _telegram_attempt_rows(db_path) if row[1] == TelegramAlertType.WATCHLIST.value]
+
+    assert first.sent == 1
+    assert second.sent == 1
+    assert len(sender.messages) == 2
+    assert len({row[0] for row in rows}) == 2
+
+
+def test_missing_zone_remains_blocked(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(entry_low=NA, entry_high=NA),
+        "missing-zone-block",
+    )
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit["blocked_by_missing_zone"] == 1
+
+
+def test_missing_invalidation_remains_blocked(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(invalidation=NA),
+        "missing-invalidation-block",
+    )
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit["blocked_by_missing_invalidation"] == 1
+
+
+def test_research_watch_remains_blocked_from_public(tmp_path: Path) -> None:
+    test_research_watch_still_blocked_from_public(tmp_path)
+
+
+def test_order_execution_not_called(tmp_path: Path) -> None:
+    test_public_watchlist_does_not_call_order_execution(tmp_path)
 def test_near_miss_maps_rr_alias_into_public_watchlist_candidate() -> None:
     symbol = _symbol(
         SetupLifecycleState.WATCHLISTED,
