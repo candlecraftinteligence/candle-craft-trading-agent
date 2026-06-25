@@ -262,6 +262,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 seen_count INTEGER NOT NULL DEFAULT 1,
                 last_scan_run_id TEXT,
                 last_error_message TEXT NOT NULL DEFAULT 'N/A',
+                public_watchlist_plan_id TEXT NOT NULL DEFAULT 'N/A',
+                public_watchlist_event_key TEXT NOT NULL DEFAULT 'N/A',
                 UNIQUE(signal_id, alert_type)
             );
 
@@ -401,7 +403,10 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "seen_count", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(connection, "telegram_alert_attempts", "last_scan_run_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "last_error_message", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "public_watchlist_plan_id", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "public_watchlist_event_key", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_nullable_telegram_sent_at(connection)
+        _ensure_telegram_alert_attempt_indexes(connection)
         _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_health", "last_priority_rank", "INTEGER")
         _ensure_column(connection, "symbol_health", "last_prioritized_at", "TEXT")
@@ -449,6 +454,36 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _ensure_telegram_alert_attempt_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_signal
+            ON telegram_alert_attempts(signal_id, alert_type)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_scan_run
+            ON telegram_alert_attempts(scan_run_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_public_plan
+            ON telegram_alert_attempts(public_watchlist_plan_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_telegram_alert_attempts_public_event_sent
+            ON telegram_alert_attempts(public_watchlist_event_key)
+            WHERE telegram_status = 'sent'
+              AND public_watchlist_event_key IS NOT NULL
+              AND public_watchlist_event_key NOT IN ('', 'N/A')
+        """
+    )
+
+
 def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
     columns = connection.execute("PRAGMA table_info(telegram_alert_attempts)").fetchall()
     sent_at = next((row for row in columns if row[1] == "sent_at"), None)
@@ -458,6 +493,8 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
     legacy_columns = [str(row[1]) for row in columns]
     connection.execute("DROP INDEX IF EXISTS ix_telegram_alert_attempts_signal")
     connection.execute("DROP INDEX IF EXISTS ix_telegram_alert_attempts_scan_run")
+    connection.execute("DROP INDEX IF EXISTS ix_telegram_alert_attempts_public_plan")
+    connection.execute("DROP INDEX IF EXISTS ux_telegram_alert_attempts_public_event_sent")
     connection.execute("ALTER TABLE telegram_alert_attempts RENAME TO telegram_alert_attempts_legacy_sent_at")
     connection.execute(
         """
@@ -497,6 +534,8 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
             seen_count INTEGER NOT NULL DEFAULT 1,
             last_scan_run_id TEXT,
             last_error_message TEXT NOT NULL DEFAULT 'N/A',
+            public_watchlist_plan_id TEXT NOT NULL DEFAULT 'N/A',
+            public_watchlist_event_key TEXT NOT NULL DEFAULT 'N/A',
             UNIQUE(signal_id, alert_type)
         )
         """
@@ -537,6 +576,8 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
         "seen_count",
         "last_scan_run_id",
         "last_error_message",
+        "public_watchlist_plan_id",
+        "public_watchlist_event_key",
     ]
     common_columns = [column for column in target_columns if column in legacy_columns]
     column_list = ", ".join(common_columns)

@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -182,6 +182,9 @@ PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
 PUBLIC_WATCHLIST_MIN_SCORE = Decimal("80")
 PUBLIC_WATCHLIST_MAX_PER_SCAN = 3
 PUBLIC_WATCHLIST_COOLDOWN_HOURS = 24
+PUBLIC_WATCHLIST_PRICE_TOLERANCE_TICKS = Decimal("5")
+PUBLIC_WATCHLIST_PLAN_ID_VERSION = "public-watchlist-plan-v1"
+PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE = "initial_watchlist"
 DEFAULT_MIN_TECHNICAL_SCORE = Decimal("50")
 PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS = {
     "watch",
@@ -551,6 +554,25 @@ class PublicWatchlistCandidate:
 
 
 @dataclass(frozen=True)
+class PublicWatchlistPlanIdentity:
+    plan_id: str = NA
+    plan_hash: str = NA
+    symbol: str = NA
+    side: str = NA
+    setup_family: str = NA
+    source_modes: tuple[str, ...] = ()
+    structural_identity: tuple[tuple[str, str], ...] = ()
+    raw_entry_low: str = NA
+    raw_entry_high: str = NA
+    raw_invalidation: str = NA
+    normalized_entry_low: str = NA
+    normalized_entry_high: str = NA
+    normalized_invalidation: str = NA
+    tick_size: str = NA
+    material_change_reason: str = "same_plan_within_price_tolerance"
+
+
+@dataclass(frozen=True)
 class PublicWatchlistPrefilterResult:
     passed: bool
     blocking_reasons: tuple[str, ...] = ()
@@ -626,6 +648,17 @@ class PublicWatchlistCandidateAudit:
     confirmed_only_pending_reasons: tuple[str, ...] = ()
     watchlist_eligibility_result: str = NA
     plan_hash: str = NA
+    public_watchlist_plan_id: str = NA
+    side: str = NA
+    source_modes: tuple[str, ...] = ()
+    raw_zone: str = NA
+    normalized_zone: str = NA
+    raw_invalidation: str = NA
+    normalized_invalidation: str = NA
+    structural_identity_fields: Mapping[str, str] = field(default_factory=dict)
+    previous_successful_alert_id: str = NA
+    dedupe_decision: str = NA
+    material_change_reason: str = NA
     prior_public_alert_status: str = NA
     rr: str = NA
     grade: str = NA
@@ -716,6 +749,33 @@ class PublicWatchlistAuditSummary:
             "blocked_after_attempt": self.blocked_after_attempt,
             "deduped": self.deduped,
             "cooldown": self.cooldown,
+        }
+
+    @property
+    def public_watchlist_dedupe_audit(self) -> Mapping[str, Any]:
+        canonical_plan_ids = {
+            audit.public_watchlist_plan_id for audit in self.candidates if audit.public_watchlist_plan_id != NA
+        }
+        duplicate_sources_collapsed = max(0, len(self.candidates) - len(canonical_plan_ids))
+        return {
+            "eligible_candidates": self.eligible,
+            "canonical_plans": len(canonical_plan_ids),
+            "duplicate_candidate_sources_collapsed": duplicate_sources_collapsed,
+            "prior_successful_alert_found": self.candidates_with_prior_successful_alert,
+            "reconciliation_duplicates_skipped": sum(
+                1 for audit in self.candidates if audit.skip_reason == "skipped_duplicate_same_plan"
+            ),
+            "lifecycle_duplicates_skipped": sum(
+                1 for audit in self.candidates if audit.delivery_status == "duplicate"
+            ),
+            "cross_mode_duplicates_collapsed": duplicate_sources_collapsed,
+            "new_initial_watchlists_sent": self.sent,
+            "limit_hit_updates_sent": 0,
+            "material_plan_changes": sum(
+                1 for audit in self.candidates if audit.material_change_reason.startswith("material_")
+            ),
+            "blocked_attempts_retried": 0,
+            "cooldown_skips": self.cooldown,
         }
 
 
@@ -1044,7 +1104,8 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         cutoff = _parse_iso_datetime(since)
         rows = self._connection.execute(
             """
-            SELECT signal_id, symbol, direction, entry_low, entry_high, stop_loss, tp1, tp2, tp3, sent_at
+            SELECT signal_id, symbol, direction, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                   public_watchlist_plan_id, public_watchlist_event_key, sent_at
             FROM telegram_alert_attempts
             WHERE alert_type = ?
               AND telegram_status = 'sent'
@@ -1080,7 +1141,8 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             return False
         rows = self._connection.execute(
             """
-            SELECT signal_id, symbol, direction, entry_low, entry_high, stop_loss, tp1, tp2, tp3, sent_at
+            SELECT signal_id, symbol, direction, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                   public_watchlist_plan_id, public_watchlist_event_key, sent_at
             FROM telegram_alert_attempts
             WHERE alert_type = ?
               AND telegram_status = 'sent'
@@ -1115,6 +1177,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         rows = self._connection.execute(
             """
             SELECT signal_id, symbol, direction, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                   public_watchlist_plan_id, public_watchlist_event_key,
                    telegram_status, attempted_alert_type, alert_type, id
             FROM telegram_alert_attempts
             WHERE symbol = ?
@@ -1123,12 +1186,18 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             """,
             (normalized_symbol, TelegramAlertType.WATCHLIST.value, TelegramAlertType.WATCHLIST.value),
         ).fetchall()
+        matched_status: str = NA
         for row in rows:
             if _status_key(row["direction"]) != normalized_direction:
                 continue
-            if _public_watchlist_plan_row_matches(row, cooldown_key=cooldown_key, signal_id=normalized_signal_id):
-                return _text(row["telegram_status"])
-        return NA
+            if not _public_watchlist_plan_row_matches(row, cooldown_key=cooldown_key, signal_id=normalized_signal_id):
+                continue
+            status = _text(row["telegram_status"])
+            if status == "sent":
+                return status
+            if matched_status == NA:
+                matched_status = status
+        return matched_status
 
     def insert_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
         telegram_status = _text(record.telegram_status)
@@ -1166,10 +1235,10 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     message_hash, scan_run_id, attempted_alert_type, setup_quality_score,
                     rr_planned, min_rr, opportunity_score, min_score_for_idea,
                     technical_score, price_level, entry_low, entry_high, stop_loss,
-                    tp1, tp2, tp3, blocked_reason, error_message,
-                    invalid_target_fields, first_seen_at, last_seen_at, seen_count, last_scan_run_id,
-                    last_error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tp1, tp2, tp3, public_watchlist_plan_id, public_watchlist_event_key,
+                    blocked_reason, error_message, invalid_target_fields, first_seen_at, last_seen_at,
+                    seen_count, last_scan_run_id, last_error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _identity(record.signal_id),
@@ -1198,6 +1267,8 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     _text(record.tp1),
                     _text(record.tp2),
                     _text(record.tp3),
+                    _text(record.public_watchlist_plan_id),
+                    _text(record.public_watchlist_event_key),
                     _text(record.blocked_reason),
                     _text(record.error_message),
                     _text(record.invalid_target_fields),
@@ -1305,6 +1376,8 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             seen_count=existing.seen_count,
             last_scan_run_id=scan_run_id,
             last_error_message=existing.error_message,
+            public_watchlist_plan_id=existing.public_watchlist_plan_id,
+            public_watchlist_event_key=existing.public_watchlist_event_key,
             id=existing.id,
         )
         self.compact_repeated_attempt(record)
@@ -1383,6 +1456,10 @@ class TelegramLifecycleDeliveryService:
     @property
     def public_watchlist_cooldown_hours(self) -> int:
         return max(0, int(getattr(self.settings, "public_watchlist_cooldown_hours", PUBLIC_WATCHLIST_COOLDOWN_HOURS)))
+
+    @property
+    def public_watchlist_dedupe_across_modes(self) -> bool:
+        return bool(getattr(self.settings, "public_watchlist_dedupe_across_modes", True))
 
     @property
     def public_watchlist_require_plan(self) -> bool:
@@ -1679,13 +1756,8 @@ class TelegramLifecycleDeliveryService:
                 return None
         if decision.alert_type == TelegramAlertType.WATCHLIST:
             message_for_plan = decision.message
-            watchlist_plan_signal_id = (
-                _public_watchlist_signal_id(symbol_result, message_for_plan)
-                if message_for_plan is not None
-                else _signal_id(symbol_result)
-            )
             watchlist_delivery_signal_id = _delivery_signal_id_for_decision(symbol_result, decision)
-            canonical_watchlist_signal_id = _signal_id(symbol_result)
+            raw_watchlist_signal_id = _signal_id(symbol_result)
             cooldown_key = (
                 _public_watchlist_cooldown_key(symbol_result, message_for_plan)
                 if message_for_plan is not None
@@ -1694,26 +1766,25 @@ class TelegramLifecycleDeliveryService:
             if (
                 decision.reason == "eligible_public_watchlist_reconciliation"
                 and repository.has_attempt(
-                    signal_id=canonical_watchlist_signal_id,
+                    signal_id=raw_watchlist_signal_id,
                     alert_type=TelegramAlertType.WATCHLIST,
                 )
             ):
                 return None
             if (
-                decision.reason == "eligible_public_watchlist_reconciliation"
-                and message_for_plan is not None
+                message_for_plan is not None
                 and repository.has_prior_public_watchlist_plan_alert(
                     symbol=symbol_result.symbol,
                     direction=message_for_plan.direction,
                     cooldown_key=cooldown_key,
-                    signal_id=watchlist_plan_signal_id,
+                    signal_id=raw_watchlist_signal_id,
                 )
             ):
                 return _persist_skipped_public_watchlist_attempt(
                     repository,
                     symbol_result,
                     decision=decision,
-                    reason="public_watchlist_prior_plan_alert_exists",
+                    reason="skipped_duplicate_same_plan",
                     scan_run_id=scan_run_id,
                     eligibility_context=context,
                 )
@@ -1738,7 +1809,7 @@ class TelegramLifecycleDeliveryService:
                     symbol=symbol_result.symbol,
                     direction=message_for_cooldown.direction,
                     cooldown_key=cooldown_key,
-                    signal_id=watchlist_plan_signal_id,
+                    signal_id=raw_watchlist_signal_id,
                     since=_public_watchlist_cooldown_cutoff(now_utc_iso(), self.public_watchlist_cooldown_hours),
                 )
             ):
@@ -1883,6 +1954,7 @@ class TelegramLifecycleDeliveryService:
             technical_score=_technical_score_text(symbol_result),
             price_level=_price_level_for_alert(decision.alert_type, message),
             **_message_level_metadata(message),
+            **_public_watchlist_record_plan_fields(symbol_result, decision.alert_type, message),
             blocked_reason=NA,
             invalid_target_fields=NA,
             error_message=send_result.error_message,
@@ -3377,20 +3449,13 @@ def _public_watchlist_cooldown_key(
     symbol_result: ScannerSymbolResult,
     message: TelegramSignalMessage,
 ) -> str:
-    levels = _message_level_metadata(message)
-    return _public_watchlist_cooldown_key_from_parts(
-        symbol=_first_non_na(message.symbol, symbol_result.symbol),
-        direction=message.direction,
-        entry_low=levels.get("entry_low", NA),
-        entry_high=levels.get("entry_high", NA),
-        stop_loss=levels.get("stop_loss", NA),
-        tp1=levels.get("tp1", NA),
-        tp2=levels.get("tp2", NA),
-        tp3=levels.get("tp3", NA),
-    )
+    return _public_watchlist_plan_id(symbol_result, message)
 
 
 def _public_watchlist_cooldown_key_from_row(row: sqlite3.Row) -> str:
+    plan_id = _row_value(row, "public_watchlist_plan_id")
+    if _text(plan_id) != NA:
+        return _text(plan_id)
     return _public_watchlist_cooldown_key_from_parts(
         symbol=row["symbol"],
         direction=row["direction"],
@@ -3418,17 +3483,24 @@ def _public_watchlist_cooldown_key_from_parts(
     normalized_direction = _status_key(direction)
     if normalized_symbol == NA or normalized_direction not in {"long", "short"}:
         return NA
-    plan_parts = (
-        entry_low,
-        entry_high,
-        stop_loss,
-        tp1,
-        tp2,
-        tp3,
-    )
-    if all(_text(part) == NA for part in plan_parts):
+    low = _decimal_or_none(entry_low)
+    high = _decimal_or_none(entry_high)
+    invalidation = _decimal_or_none(stop_loss)
+    if low is None or high is None or invalidation is None:
         return NA
-    plan_hash = hashlib.sha256("|".join(_text(part) for part in plan_parts).encode("utf-8")).hexdigest()[:20]
+    if low > high:
+        low, high = high, low
+    tick_size = _public_watchlist_tick_size_from_prices((low, high, invalidation))
+    identity_parts = (
+        PUBLIC_WATCHLIST_PLAN_ID_VERSION,
+        normalized_symbol,
+        normalized_direction,
+        "liquidity_grab_pullback",
+        _public_watchlist_normalized_price(low, tick_size),
+        _public_watchlist_normalized_price(high, tick_size),
+        _public_watchlist_normalized_price(invalidation, tick_size),
+    )
+    plan_hash = hashlib.sha256("|".join(_text(part) for part in identity_parts).encode("utf-8")).hexdigest()[:20]
     return f"{normalized_symbol}|{normalized_direction}|{plan_hash}"
 
 
@@ -4675,16 +4747,17 @@ def _public_watchlist_candidate_audit(
     prefilter = _public_watchlist_attempt_prefilter(symbol_result, message, context)
     gate = _public_watchlist_gate_result(symbol_result, message, context)
     eligible = prefilter.passed and gate.allowed
-    plan_hash = _public_watchlist_plan_hash(symbol_result, message)
+    canonical_plan = _public_watchlist_canonical_plan(symbol_result, message)
+    plan_hash = canonical_plan.plan_hash
     watchlist_signal_id = _public_watchlist_signal_id(symbol_result, message)
-    cooldown_key = _public_watchlist_cooldown_key(symbol_result, message)
+    cooldown_key = canonical_plan.plan_id
     prior_status = NA
     if repository is not None:
         prior_status = repository.public_watchlist_plan_attempt_status(
             symbol=symbol_result.symbol,
             direction=message.direction,
             cooldown_key=cooldown_key,
-            signal_id=watchlist_signal_id,
+            signal_id=_signal_id(symbol_result),
         )
     failed_gate_codes = gate.failed_gate_codes
     active_fatal_reasons = _public_watchlist_fatal_reasons(
@@ -4707,6 +4780,25 @@ def _public_watchlist_candidate_audit(
         confirmed_only_pending_reasons=confirmed_only_pending_reasons,
         watchlist_eligibility_result="pass" if eligible else "blocked",
         plan_hash=plan_hash,
+        public_watchlist_plan_id=canonical_plan.plan_id,
+        side=canonical_plan.side,
+        source_modes=canonical_plan.source_modes,
+        raw_zone=f"{canonical_plan.raw_entry_low}-{canonical_plan.raw_entry_high}"
+        if canonical_plan.raw_entry_low != NA and canonical_plan.raw_entry_high != NA
+        else NA,
+        normalized_zone=f"{canonical_plan.normalized_entry_low}-{canonical_plan.normalized_entry_high}"
+        if canonical_plan.normalized_entry_low != NA and canonical_plan.normalized_entry_high != NA
+        else NA,
+        raw_invalidation=canonical_plan.raw_invalidation,
+        normalized_invalidation=canonical_plan.normalized_invalidation,
+        structural_identity_fields=dict(canonical_plan.structural_identity),
+        previous_successful_alert_id=NA,
+        dedupe_decision="prior_successful_alert_found"
+        if prior_status == "sent"
+        else "eligible_new_plan"
+        if eligible
+        else "blocked_before_send",
+        material_change_reason=canonical_plan.material_change_reason,
         prior_public_alert_status=prior_status,
         rr=_text(candidate.potential_rr),
         grade=_text(candidate.grade),
@@ -4764,7 +4856,7 @@ def _public_watchlist_audit_summary(
     deduped = sum(
         1
         for audit in candidates
-        if audit.skip_reason in {"public_watchlist_prior_plan_alert_exists", "duplicate"}
+        if audit.skip_reason in {"public_watchlist_prior_plan_alert_exists", "skipped_duplicate_same_plan", "duplicate"}
         or audit.delivery_status == "duplicate"
     )
     cooldown = sum(1 for audit in candidates if audit.skip_reason == "public_watchlist_cooldown_active")
@@ -4877,7 +4969,7 @@ def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
     logger.info(
         "public_watchlist_audit source_candidates_seen=%s field_prefilter_passed=%s "
         "eligible_watch_or_stalking=%s eligible_first_seen_triggered_pre_confirmation=%s sent=%s "
-        "blocked_before_attempt=%s blocked_after_attempt=%s blocked_by_reason=%s bridge=%s reconciliation=%s candidates=%s",
+        "blocked_before_attempt=%s blocked_after_attempt=%s blocked_by_reason=%s bridge=%s reconciliation=%s dedupe=%s candidates=%s",
         summary.source_candidates_seen,
         summary.field_prefilter_passed,
         summary.eligible_watch_or_stalking,
@@ -4888,6 +4980,7 @@ def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
         dict(summary.blocked_by_reason),
         dict(summary.public_watchlist_bridge),
         dict(summary.public_watchlist_reconciliation_audit),
+        dict(summary.public_watchlist_dedupe_audit),
         tuple(
             {
                 "symbol": audit.symbol,
@@ -4901,6 +4994,17 @@ def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
                 "public_watchlist_confirmed_only_pending_reasons": audit.confirmed_only_pending_reasons,
                 "public_watchlist_eligibility_result": audit.watchlist_eligibility_result,
                 "public_watchlist_plan_hash": audit.plan_hash,
+                "public_watchlist_plan_id": audit.public_watchlist_plan_id,
+                "public_watchlist_side": audit.side,
+                "public_watchlist_source_modes": audit.source_modes,
+                "public_watchlist_raw_zone": audit.raw_zone,
+                "public_watchlist_normalized_zone": audit.normalized_zone,
+                "public_watchlist_raw_invalidation": audit.raw_invalidation,
+                "public_watchlist_normalized_invalidation": audit.normalized_invalidation,
+                "public_watchlist_structural_identity_fields": dict(audit.structural_identity_fields),
+                "public_watchlist_previous_successful_alert_id": audit.previous_successful_alert_id,
+                "public_watchlist_dedupe_decision": audit.dedupe_decision,
+                "public_watchlist_material_change_reason": audit.material_change_reason,
                 "public_watchlist_prior_public_alert_status": audit.prior_public_alert_status,
                 "public_watchlist_explicit_source": audit.explicit_source,
                 "public_watchlist_reject_reasons": audit.reject_reasons,
@@ -5157,32 +5261,221 @@ def _public_watchlist_setup_type(symbol_result: ScannerSymbolResult, message: Te
     )
 
 
-def _public_watchlist_plan_hash(symbol_result: ScannerSymbolResult, message: TelegramSignalMessage) -> str:
-    levels = _message_level_metadata(message)
+PUBLIC_WATCHLIST_STRUCTURE_IDENTITY_KEYS = (
+    "sweep_structure_id",
+    "sweep_id",
+    "sweep_index",
+    "sweep_candle_index",
+    "pullback_sweep_candle_index",
+    "bos_structure_id",
+    "bos_id",
+    "bos_index",
+    "bos_candle_index",
+    "choch_structure_id",
+    "choch_id",
+    "choch_index",
+    "choch_candle_index",
+    "bos_choch_structure_id",
+    "bos_choch_id",
+    "bos_choch_index",
+    "bos_choch_candle_index",
+    "pullback_bos_choch_candle_index",
+    "displacement_start_index",
+    "displacement_end_index",
+    "pullback_zone_id",
+    "zone_id",
+    "ob_zone_id",
+    "fvg_zone_id",
+)
+
+
+def _public_watchlist_plan_id(symbol_result: ScannerSymbolResult, message: TelegramSignalMessage) -> str:
+    return _public_watchlist_canonical_plan(symbol_result, message).plan_id
+
+
+def _public_watchlist_event_key(plan_id: Any, event_type: Any = PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE) -> str:
+    normalized_plan_id = _text(plan_id)
+    normalized_event_type = _status_key(event_type) or PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE
+    if normalized_plan_id == NA:
+        return NA
+    return f"{normalized_plan_id}|{normalized_event_type}"
+
+
+def _public_watchlist_record_plan_fields(
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+    message: TelegramSignalMessage | None,
+) -> dict[str, str]:
+    if alert_type != TelegramAlertType.WATCHLIST or message is None:
+        return {}
+    plan = _public_watchlist_canonical_plan(symbol_result, message)
+    event_key = _public_watchlist_event_key(plan.plan_id, PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE)
+    return {
+        "public_watchlist_plan_id": plan.plan_id,
+        "public_watchlist_event_key": event_key,
+    }
+
+
+def _public_watchlist_canonical_plan(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+) -> PublicWatchlistPlanIdentity:
     symbol = _symbol(_first_non_na(message.symbol, symbol_result.symbol))
-    direction = _status_key(message.direction)
-    if symbol == NA or direction not in {"long", "short"}:
-        return NA
-    entry_low = levels.get("entry_low", NA)
-    entry_high = levels.get("entry_high", NA)
-    invalidation = _first_non_na(
-        levels.get("stop_loss", NA),
-        message.watchlist_invalidation_reason,
-        message.invalidation_reason,
+    side = _status_key(message.direction)
+    if symbol == NA or side not in {"long", "short"}:
+        return PublicWatchlistPlanIdentity()
+    entry_low = _decimal_or_none(message.entry_low)
+    entry_high = _decimal_or_none(message.entry_high)
+    invalidation = _first_decimal(message.stop_loss, message.watchlist_invalidation_reason, message.invalidation_reason)
+    if entry_low is None or entry_high is None or invalidation is None:
+        return PublicWatchlistPlanIdentity(symbol=symbol, side=side)
+    if entry_low > entry_high:
+        entry_low, entry_high = entry_high, entry_low
+    setup_family = _public_watchlist_setup_family(symbol_result, message)
+    if setup_family == NA:
+        return PublicWatchlistPlanIdentity(symbol=symbol, side=side)
+    tick_size = _public_watchlist_tick_size(symbol_result, message, (entry_low, entry_high, invalidation))
+    normalized_entry_low = _public_watchlist_normalized_price(entry_low, tick_size)
+    normalized_entry_high = _public_watchlist_normalized_price(entry_high, tick_size)
+    normalized_invalidation = _public_watchlist_normalized_price(invalidation, tick_size)
+    structural_identity = _public_watchlist_structural_identity(symbol_result, message)
+    identity_parts = (
+        PUBLIC_WATCHLIST_PLAN_ID_VERSION,
+        symbol,
+        side,
+        setup_family,
+        normalized_entry_low,
+        normalized_entry_high,
+        normalized_invalidation,
+        *(f"{key}={value}" for key, value in structural_identity),
     )
-    setup_type = _public_watchlist_setup_type(symbol_result, message)
-    plan_parts = (symbol, direction, entry_low, entry_high, invalidation, setup_type)
-    if any(_text(part) == NA for part in plan_parts):
-        return NA
-    return hashlib.sha256("|".join(_text(part) for part in plan_parts).encode("utf-8")).hexdigest()[:20]
+    plan_hash = hashlib.sha256("|".join(_text(part) for part in identity_parts).encode("utf-8")).hexdigest()[:20]
+    return PublicWatchlistPlanIdentity(
+        plan_id=f"{symbol}|{side}|{plan_hash}",
+        plan_hash=plan_hash,
+        symbol=symbol,
+        side=side,
+        setup_family=setup_family,
+        source_modes=_public_watchlist_source_modes(symbol_result, message),
+        structural_identity=structural_identity,
+        raw_entry_low=_text(entry_low),
+        raw_entry_high=_text(entry_high),
+        raw_invalidation=_text(invalidation),
+        normalized_entry_low=normalized_entry_low,
+        normalized_entry_high=normalized_entry_high,
+        normalized_invalidation=normalized_invalidation,
+        tick_size=_text(tick_size),
+        material_change_reason="same_plan_exact" if structural_identity else "same_plan_within_price_tolerance",
+    )
+
+
+def _public_watchlist_setup_family(symbol_result: ScannerSymbolResult, message: TelegramSignalMessage) -> str:
+    diagnostics = _representative_diagnostics(symbol_result)
+    setup = _selected_setup(symbol_result, diagnostics)
+    trade_idea = symbol_result.trade_idea
+    raw = _first_non_na(
+        diagnostics.get("setup_type"),
+        _field(setup, "setup_type"),
+        getattr(trade_idea, "setup_type", NA) if trade_idea is not None else NA,
+        symbol_result.strategy_name,
+        message.mode,
+        getattr(symbol_result.lifecycle_state, "mode", NA) if symbol_result.lifecycle_state is not None else NA,
+        diagnostics.get("mode"),
+        _field(setup, "mode"),
+    )
+    key = _status_key(raw)
+    if key in {"scalp", "swing", "challenge"}:
+        key = _status_key(symbol_result.strategy_name) or "liquidity_grab_pullback"
+    for suffix in ("_scalp", "_swing", "_challenge"):
+        if key.endswith(suffix):
+            key = key[: -len(suffix)]
+    return key or NA
+
+
+def _public_watchlist_source_modes(symbol_result: ScannerSymbolResult, message: TelegramSignalMessage) -> tuple[str, ...]:
+    values: list[Any] = [
+        message.mode,
+        getattr(symbol_result.lifecycle_state, "mode", NA) if symbol_result.lifecycle_state is not None else NA,
+        *symbol_result.valid_strategy_modes,
+        *symbol_result.rejected_strategy_modes,
+    ]
+    diagnostics = _representative_diagnostics(symbol_result)
+    values.append(diagnostics.get("mode"))
+    return tuple(dict.fromkeys(key for value in values if (key := _status_key(value))))
+
+
+def _public_watchlist_structural_identity(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+) -> tuple[tuple[str, str], ...]:
+    diagnostics = _representative_diagnostics(symbol_result)
+    setup = _selected_setup(symbol_result, diagnostics)
+    trade_idea = symbol_result.trade_idea
+    lifecycle = symbol_result.lifecycle_state
+    sources: tuple[Any, ...] = (diagnostics, setup, trade_idea, lifecycle, message)
+    pairs: list[tuple[str, str]] = []
+    for key in PUBLIC_WATCHLIST_STRUCTURE_IDENTITY_KEYS:
+        value = _first_non_na(*(_field(source, key) for source in sources))
+        text = _text(value)
+        if text != NA:
+            pairs.append((key, text))
+    return tuple(dict.fromkeys(pairs))
+
+
+def _public_watchlist_tick_size(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+    prices: Sequence[Decimal],
+) -> Decimal:
+    diagnostics = _representative_diagnostics(symbol_result)
+    setup = _selected_setup(symbol_result, diagnostics)
+    sources: tuple[Any, ...] = (diagnostics, setup, symbol_result.trade_idea, message)
+    for key in ("tick_size", "price_tick_size", "exchange_tick_size", "symbol_tick_size", "min_price_increment"):
+        value = _first_non_na(*(_field(source, key) for source in sources))
+        parsed = _decimal_or_none(value)
+        if parsed is not None and parsed > 0:
+            return parsed
+    for key in ("price_precision", "price_decimals", "quote_precision"):
+        value = _first_non_na(*(_field(source, key) for source in sources))
+        precision = _integer_or_none(value)
+        if precision is not None and precision >= 0:
+            return Decimal(1).scaleb(-precision)
+    return _public_watchlist_tick_size_from_prices(prices)
+
+
+def _public_watchlist_tick_size_from_prices(prices: Sequence[Decimal]) -> Decimal:
+    exponents = [price.as_tuple().exponent for price in prices if price.is_finite()]
+    if exponents:
+        return Decimal(1).scaleb(min(exponents))
+    return Decimal("0.00000001")
+
+
+def _public_watchlist_normalized_price(value: Decimal, tick_size: Decimal) -> str:
+    tick = tick_size if tick_size > 0 else Decimal("0.00000001")
+    quantum = tick * PUBLIC_WATCHLIST_PRICE_TOLERANCE_TICKS
+    normalized = (value / quantum).to_integral_value(rounding=ROUND_HALF_UP) * quantum
+    return _text(normalized)
+
+
+def _integer_or_none(value: Any) -> int | None:
+    number = _decimal_or_none(value)
+    if number is None:
+        return None
+    try:
+        return int(number)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _public_watchlist_plan_hash(symbol_result: ScannerSymbolResult, message: TelegramSignalMessage) -> str:
+    return _public_watchlist_canonical_plan(symbol_result, message).plan_hash
 
 
 def _public_watchlist_signal_id(symbol_result: ScannerSymbolResult, message: TelegramSignalMessage) -> str:
-    plan_hash = _public_watchlist_plan_hash(symbol_result, message)
-    symbol = _symbol(_first_non_na(message.symbol, symbol_result.symbol))
-    if plan_hash == NA or symbol == NA:
+    plan = _public_watchlist_canonical_plan(symbol_result, message)
+    if plan.plan_hash == NA or plan.symbol == NA:
         return _signal_id(symbol_result)
-    return f"{symbol}-WATCH-{plan_hash}"
+    return f"{plan.symbol}-WATCH-{plan.plan_hash}"
 
 
 def _signal_id_for_alert(
@@ -5190,6 +5483,8 @@ def _signal_id_for_alert(
     alert_type: TelegramAlertType,
     message: TelegramSignalMessage | None,
 ) -> str:
+    if alert_type == TelegramAlertType.WATCHLIST and message is not None:
+        return _public_watchlist_signal_id(symbol_result, message)
     return _signal_id(symbol_result)
 
 
@@ -5197,19 +5492,19 @@ def _delivery_signal_id_for_decision(
     symbol_result: ScannerSymbolResult,
     decision: TelegramAlertDecision,
 ) -> str:
-    if (
-        decision.alert_type == TelegramAlertType.WATCHLIST
-        and decision.message is not None
-        and decision.reason == "eligible_public_watchlist_reconciliation"
-    ):
-        return _public_watchlist_signal_id(symbol_result, decision.message)
     return _signal_id_for_alert(symbol_result, decision.alert_type, decision.message)
 
 def _public_watchlist_plan_row_matches(row: sqlite3.Row, *, cooldown_key: str, signal_id: str | None = None) -> bool:
     normalized_signal_id = _identity(signal_id)
     if normalized_signal_id != NA and _identity(row["signal_id"]) == normalized_signal_id:
         return True
-    return _text(cooldown_key) != NA and _public_watchlist_cooldown_key_from_row(row) == cooldown_key
+    normalized_key = _text(cooldown_key)
+    if normalized_key == NA:
+        return False
+    row_plan_id = _text(_row_value(row, "public_watchlist_plan_id"))
+    if row_plan_id != NA and row_plan_id == normalized_key:
+        return True
+    return _public_watchlist_cooldown_key_from_row(row) == normalized_key
 
 def normalize_failed_gate_code(value: Any) -> str:
     if _malformed_failed_gate_value(value):
@@ -6128,6 +6423,7 @@ def _persist_blocked_attempt(
         technical_score=_technical_score_text(symbol_result),
         price_level=_price_level_for_alert(decision.alert_type, decision.message),
         **_message_level_metadata(decision.message),
+        **_public_watchlist_record_plan_fields(symbol_result, decision.alert_type, decision.message),
         blocked_reason=decision.reason,
         invalid_target_fields=_invalid_target_fields_from_reason(decision.reason),
         error_message=decision.reason,
@@ -6205,6 +6501,7 @@ def _persist_skipped_public_watchlist_attempt(
         technical_score=_technical_score_text(symbol_result),
         price_level=_price_level_for_alert(decision.alert_type, decision.message),
         **_message_level_metadata(decision.message),
+        **_public_watchlist_record_plan_fields(symbol_result, decision.alert_type, decision.message),
         blocked_reason=reason,
         invalid_target_fields=NA,
         error_message=reason,
@@ -8746,6 +9043,10 @@ def _lower_first(value: Any) -> str:
     return text[:1].lower() + text[1:]
 
 
+def _row_value(row: sqlite3.Row, key: str, default: Any = NA) -> Any:
+    return row[key] if key in row.keys() else default
+
+
 def _record_from_row(row: sqlite3.Row) -> TelegramAlertAttemptRecord:
     return TelegramAlertAttemptRecord(
         id=int(row["id"]),
@@ -8783,6 +9084,8 @@ def _record_from_row(row: sqlite3.Row) -> TelegramAlertAttemptRecord:
         seen_count=int(row["seen_count"]),
         last_scan_run_id=row["last_scan_run_id"],
         last_error_message=row["last_error_message"],
+        public_watchlist_plan_id=_row_value(row, "public_watchlist_plan_id"),
+        public_watchlist_event_key=_row_value(row, "public_watchlist_event_key"),
     )
 
 
