@@ -2355,7 +2355,7 @@ def _duplicate_public_watchlist_records(db_path: Path) -> list[dict[str, object]
         for row in _public_watchlist_attempt_records(db_path)
         if row["attempted_alert_type"] == TelegramAlertType.WATCHLIST.value
         and row["telegram_status"] == "skipped"
-        and row["error_message"] == "skipped_duplicate_same_plan"
+        and row["error_message"] == "duplicate_successful_public_watchlist_event"
     ]
 
 
@@ -2376,6 +2376,145 @@ def _pepe_watchlist_snapshot(*, signal_id: str, invalidation: object = Decimal("
             "pullback_zone_id": "pepe-zone-1",
         },
     )
+
+
+def _syn_watchlist_snapshot(*, signal_id: str, invalidation: object = Decimal("0.35994")) -> ScannerSymbolResult:
+    return _runtime_public_watchlist_snapshot(
+        symbol="SYNUSDT",
+        side="long",
+        grade="A",
+        potential_rr=Decimal("2.8"),
+        entry_low=Decimal("0.39115"),
+        entry_high=Decimal("0.39218"),
+        invalidation=invalidation,
+        signal_id=signal_id,
+        extra_diagnostics={"tick_size": Decimal("0.00001")},
+    )
+
+
+def test_same_synusdt_plan_sends_once_across_iterations(tmp_path: Path) -> None:
+    db_path = tmp_path / "synusdt-hard-dedupe.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    first = run(service.deliver_for_run(_run_result(_syn_watchlist_snapshot(signal_id="syn-1")), scan_run_id="syn-1"))
+    second = run(
+        service.deliver_for_run(
+            _run_result(_syn_watchlist_snapshot(signal_id="syn-2", invalidation=Decimal("0.35988"))),
+            scan_run_id="syn-2",
+        )
+    )
+
+    assert first.sent == 1
+    assert second.skipped == 1
+    assert second.deliveries[0].error_message == "duplicate_successful_public_watchlist_event"
+    assert len(sender.messages) == 1
+    assert len(_sent_public_watchlist_records(db_path)) == 1
+
+
+def test_synusdt_invalidation_jitter_dedupes(tmp_path: Path) -> None:
+    test_same_synusdt_plan_sends_once_across_iterations(tmp_path)
+
+
+def test_1000pepe_tiny_invalidation_jitter_dedupes(tmp_path: Path) -> None:
+    db_path = tmp_path / "pepe-tiny-hard-dedupe.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    first = run(service.deliver_for_run(_run_result(_pepe_watchlist_snapshot(signal_id="pepe-hard-1")), scan_run_id="pepe-hard-1"))
+    second = run(
+        service.deliver_for_run(
+            _run_result(_pepe_watchlist_snapshot(signal_id="pepe-hard-2", invalidation=Decimal("0.00268869"))),
+            scan_run_id="pepe-hard-2",
+        )
+    )
+
+    assert first.sent == 1
+    assert second.skipped == 1
+    assert len(sender.messages) == 1
+    assert len(_sent_public_watchlist_records(db_path)) == 1
+
+
+def test_old_sent_row_without_plan_id_is_fallback_matched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "legacy-sent-row-hard-dedupe.db"
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: "2026-06-25T18:57:00+00:00")
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        repository.insert_attempt(
+            TelegramAlertAttemptRecord(
+                signal_id="legacy-synusdt-watchlist",
+                symbol="SYNUSDT",
+                direction="long",
+                previous_state=NA,
+                new_state="WATCHLISTED",
+                alert_type=TelegramAlertType.WATCHLIST.value,
+                lifecycle_state="WATCHLISTED",
+                sent_at="2026-06-25T18:48:00+00:00",
+                attempted_at="2026-06-25T18:48:00+00:00",
+                telegram_status="sent",
+                message_hash="legacy-syn-hash",
+                attempted_alert_type=TelegramAlertType.WATCHLIST.value,
+                setup_quality_score="A",
+                rr_planned="2.8",
+                entry_low="0.39115",
+                entry_high="0.39218",
+                stop_loss="0.35994",
+                tp1="0.41",
+                tp2="0.43",
+                tp3="0.45",
+            )
+        )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_syn_watchlist_snapshot(signal_id="legacy-syn-new-row", invalidation=Decimal("0.35988"))),
+            scan_run_id="legacy-syn-new-row",
+        )
+    )
+
+    assert summary.skipped == 1
+    assert summary.deliveries[0].error_message == "duplicate_successful_public_watchlist_event"
+    assert summary.public_watchlist_audit.public_watchlist_hard_dedupe_audit["fallback_matched_legacy_sent"] == 1
+    assert summary.public_watchlist_audit.public_watchlist_hard_dedupe_audit["jitter_matched_same_plan"] == 1
+    assert sender.messages == []
+    rows = _public_watchlist_attempt_records(db_path)
+    assert len([row for row in rows if row["telegram_status"] == "sent"]) == 1
+
+
+def test_muusdt_same_public_watchlist_plan_sends_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "muusdt-hard-dedupe.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    first_symbol = _runtime_public_watchlist_snapshot(
+        symbol="MUUSDT",
+        side="short",
+        grade="A",
+        potential_rr=Decimal("2.8"),
+        entry_low=Decimal("125.70"),
+        entry_high=Decimal("125.74"),
+        invalidation=Decimal("126.20"),
+        signal_id="mu-1",
+        extra_diagnostics={"tick_size": Decimal("0.00001")},
+    )
+    second_symbol = _runtime_public_watchlist_snapshot(
+        symbol="MUUSDT",
+        side="short",
+        grade="A",
+        potential_rr=Decimal("2.8"),
+        entry_low=Decimal("125.70"),
+        entry_high=Decimal("125.74"),
+        invalidation=Decimal("126.19996"),
+        signal_id="mu-2",
+        extra_diagnostics={"tick_size": Decimal("0.00001")},
+    )
+
+    first = run(service.deliver_for_run(_run_result(first_symbol), scan_run_id="mu-1"))
+    second = run(service.deliver_for_run(_run_result(second_symbol), scan_run_id="mu-2"))
+
+    assert first.sent == 1
+    assert second.skipped == 1
+    assert len(sender.messages) == 1
 
 
 def test_same_watchlist_candidate_across_ten_scans_sends_once(tmp_path: Path) -> None:
@@ -2430,7 +2569,7 @@ def test_invalidation_jitter_within_tick_tolerance_dedupes(tmp_path: Path) -> No
 
     assert first.sent == 1
     assert second.skipped == 1
-    assert second.deliveries[0].error_message == "skipped_duplicate_same_plan"
+    assert second.deliveries[0].error_message == "duplicate_successful_public_watchlist_event"
     assert len(sender.messages) == 1
     assert rows[0]["public_watchlist_plan_id"] == rows[1]["public_watchlist_plan_id"]
 
@@ -2580,7 +2719,7 @@ def test_reconciliation_is_idempotent_after_successful_send(tmp_path: Path) -> N
 
     assert first.sent == 1
     assert second.skipped == 1
-    assert second.deliveries[0].error_message == "skipped_duplicate_same_plan"
+    assert second.deliveries[0].error_message == "duplicate_successful_public_watchlist_event"
     assert len(sender.messages) == 1
 
 
@@ -2802,9 +2941,57 @@ def test_public_watchlist_cooldown_uses_canonical_plan_id(tmp_path: Path) -> Non
 
     assert first.sent == 1
     assert second.skipped == 1
-    assert second.deliveries[0].error_message == "skipped_duplicate_same_plan"
+    assert second.deliveries[0].error_message == "duplicate_successful_public_watchlist_event"
     assert rows[0]["public_watchlist_plan_id"] == rows[1]["public_watchlist_plan_id"]
     assert len(sender.messages) == 1
+
+
+def test_same_plan_reconciliation_sends_once(tmp_path: Path) -> None:
+    test_reconciliation_is_idempotent_after_successful_send(tmp_path)
+
+
+def test_scalp_and_swing_same_plan_send_once(tmp_path: Path) -> None:
+    test_same_plan_scalp_and_swing_collapsed_to_one_public_alert(tmp_path)
+
+
+def test_prior_successful_sent_attempt_blocks_repeat_initial_watchlist(tmp_path: Path) -> None:
+    test_successful_attempt_suppresses_repeat_send(tmp_path)
+
+
+def test_prior_blocked_attempt_does_not_block_retry(tmp_path: Path) -> None:
+    test_blocked_attempt_does_not_permanently_suppress_later_send(tmp_path)
+
+
+def test_watch_state_deleted_still_dedupes_from_database(tmp_path: Path) -> None:
+    test_dedupe_survives_watch_state_recreation(tmp_path)
+
+
+def test_restart_still_dedupes_from_database(tmp_path: Path) -> None:
+    test_dedupe_survives_process_restart_using_database(tmp_path)
+
+
+def test_different_side_can_send_new_plan(tmp_path: Path) -> None:
+    test_opposite_side_is_new_plan(tmp_path)
+
+
+def test_materially_new_zone_can_send_new_plan(tmp_path: Path) -> None:
+    test_material_zone_change_is_new_plan(tmp_path)
+
+
+def test_materially_new_invalidation_can_send_new_plan(tmp_path: Path) -> None:
+    test_material_invalidation_change_is_new_plan(tmp_path)
+
+
+def test_limit_zone_hit_update_sent_once_after_initial_watchlist(tmp_path: Path) -> None:
+    test_limit_zone_hit_update_sent_once(tmp_path)
+
+
+def test_initial_watchlist_not_resent_after_limit_zone_hit(tmp_path: Path) -> None:
+    test_limit_zone_hit_update_sent_once(tmp_path)
+
+
+def test_confirmed_signal_route_unchanged(tmp_path: Path) -> None:
+    test_confirmed_signal_sent_once_through_confirmed_route(tmp_path)
 
 
 def test_missing_zone_remains_blocked(tmp_path: Path) -> None:
@@ -4154,7 +4341,7 @@ def test_public_watchlist_dedupes_by_setup_id(tmp_path: Path) -> None:
 
     assert first.sent == 1
     assert second.skipped == 1
-    assert second.deliveries[0].error_message == "skipped_duplicate_same_plan"
+    assert second.deliveries[0].error_message == "duplicate_successful_public_watchlist_event"
     assert len(sender.messages) == 1
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts(signal_id=first.deliveries[0].signal_id)
@@ -4193,7 +4380,7 @@ def test_public_watchlist_respects_symbol_side_plan_cooldown(tmp_path: Path) -> 
     assert first.sent == 1
     assert second.skipped == 1
     assert len(sender.messages) == 1
-    assert second.deliveries[0].error_message == "skipped_duplicate_same_plan"
+    assert second.deliveries[0].error_message == "duplicate_successful_public_watchlist_event"
     assert second.public_watchlist_audit.public_watchlist_dedupe_audit["prior_successful_alert_found"] == 1
 
 
@@ -6464,7 +6651,7 @@ def test_each_alert_type_is_not_sent_twice(tmp_path: Path) -> None:
         assert first.sent == 1, alert_type
         if alert_type == TelegramAlertType.WATCHLIST:
             assert second.skipped == 1, alert_type
-            assert second.deliveries[0].error_message == "skipped_duplicate_same_plan"
+            assert second.deliveries[0].error_message == "duplicate_successful_public_watchlist_event"
         else:
             assert second.duplicate == 1, alert_type
         assert len(sender.messages) == 1, alert_type

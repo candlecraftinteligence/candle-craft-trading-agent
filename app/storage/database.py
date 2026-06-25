@@ -264,6 +264,12 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 last_error_message TEXT NOT NULL DEFAULT 'N/A',
                 public_watchlist_plan_id TEXT NOT NULL DEFAULT 'N/A',
                 public_watchlist_event_key TEXT NOT NULL DEFAULT 'N/A',
+                public_alert_event_type TEXT NOT NULL DEFAULT 'N/A',
+                normalized_entry_zone_low TEXT NOT NULL DEFAULT 'N/A',
+                normalized_entry_zone_high TEXT NOT NULL DEFAULT 'N/A',
+                normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
+                dedupe_status TEXT NOT NULL DEFAULT 'N/A',
+                dedupe_reason TEXT NOT NULL DEFAULT 'N/A',
                 UNIQUE(signal_id, alert_type)
             );
 
@@ -405,6 +411,12 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "last_error_message", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "public_watchlist_plan_id", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "public_watchlist_event_key", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "public_alert_event_type", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "normalized_entry_zone_low", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "normalized_entry_zone_high", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "normalized_invalidation", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "dedupe_status", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "dedupe_reason", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_nullable_telegram_sent_at(connection)
         _ensure_telegram_alert_attempt_indexes(connection)
         _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
@@ -482,6 +494,15 @@ def _ensure_telegram_alert_attempt_indexes(connection: sqlite3.Connection) -> No
               AND public_watchlist_event_key NOT IN ('', 'N/A')
         """
     )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_telegram_alert_attempts_public_event_active
+            ON telegram_alert_attempts(public_watchlist_event_key)
+            WHERE telegram_status IN ('reserved', 'sent')
+              AND public_watchlist_event_key IS NOT NULL
+              AND public_watchlist_event_key NOT IN ('', 'N/A')
+        """
+    )
 
 
 def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
@@ -495,6 +516,7 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
     connection.execute("DROP INDEX IF EXISTS ix_telegram_alert_attempts_scan_run")
     connection.execute("DROP INDEX IF EXISTS ix_telegram_alert_attempts_public_plan")
     connection.execute("DROP INDEX IF EXISTS ux_telegram_alert_attempts_public_event_sent")
+    connection.execute("DROP INDEX IF EXISTS ux_telegram_alert_attempts_public_event_active")
     connection.execute("ALTER TABLE telegram_alert_attempts RENAME TO telegram_alert_attempts_legacy_sent_at")
     connection.execute(
         """
@@ -536,6 +558,12 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
             last_error_message TEXT NOT NULL DEFAULT 'N/A',
             public_watchlist_plan_id TEXT NOT NULL DEFAULT 'N/A',
             public_watchlist_event_key TEXT NOT NULL DEFAULT 'N/A',
+            public_alert_event_type TEXT NOT NULL DEFAULT 'N/A',
+            normalized_entry_zone_low TEXT NOT NULL DEFAULT 'N/A',
+            normalized_entry_zone_high TEXT NOT NULL DEFAULT 'N/A',
+            normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
+            dedupe_status TEXT NOT NULL DEFAULT 'N/A',
+            dedupe_reason TEXT NOT NULL DEFAULT 'N/A',
             UNIQUE(signal_id, alert_type)
         )
         """
@@ -578,6 +606,12 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
         "last_error_message",
         "public_watchlist_plan_id",
         "public_watchlist_event_key",
+        "public_alert_event_type",
+        "normalized_entry_zone_low",
+        "normalized_entry_zone_high",
+        "normalized_invalidation",
+        "dedupe_status",
+        "dedupe_reason",
     ]
     common_columns = [column for column in target_columns if column in legacy_columns]
     column_list = ", ".join(common_columns)
