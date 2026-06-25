@@ -422,11 +422,16 @@ def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -
             """
             SELECT seen_count, first_seen_at, last_seen_at, last_scan_run_id, last_error_message, invalid_target_fields,
                    attempted_at,
-                   entry_low, entry_high, stop_loss, tp1, tp2, tp3
+                   entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                   public_watchlist_plan_id, public_watchlist_event_key
             FROM telegram_alert_attempts
             WHERE signal_id = 'sig-legacy'
             """
         ).fetchone()
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
+        }
 
     assert {
         "first_seen_at",
@@ -442,8 +447,14 @@ def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -
         "tp1",
         "tp2",
         "tp3",
+        "public_watchlist_plan_id",
+        "public_watchlist_event_key",
     } <= columns
     assert sent_at_info[3] == 0
+    assert {
+        "ix_telegram_alert_attempts_public_plan",
+        "ux_telegram_alert_attempts_public_event_sent",
+    } <= indexes
     assert row == (
         1,
         "N/A",
@@ -458,7 +469,13 @@ def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -
         "N/A",
         "N/A",
         "N/A",
+        "N/A",
+        "N/A",
     )
+
+
+def test_database_migration_preserves_existing_alert_history(tmp_path) -> None:
+    test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path)
 
 
 def test_scan_run_insert(tmp_path) -> None:

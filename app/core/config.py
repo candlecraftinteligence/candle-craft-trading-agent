@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     public_watchlist_min_rr: Decimal = Decimal("2.5")
     public_watchlist_max_per_scan: int = 3
     public_watchlist_cooldown_hours: int = 24
+    public_watchlist_dedupe_across_modes: bool = True
     public_watchlist_require_plan: bool = True
     public_watchlist_require_entry_zone: bool = True
     public_watchlist_require_invalidation: bool = True

@@ -156,6 +156,8 @@ class TelegramAlertAttemptRecord:
     seen_count: int = 1
     last_scan_run_id: str | None = None
     last_error_message: str = "N/A"
+    public_watchlist_plan_id: str = "N/A"
+    public_watchlist_event_key: str = "N/A"
     id: int | None = None
 
 
