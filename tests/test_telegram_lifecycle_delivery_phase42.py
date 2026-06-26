@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,7 @@ import pytest
 from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
+    PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
     PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES,
     SQLiteTelegramAlertAttemptRepository,
     TelegramAlertType,
@@ -19,8 +21,10 @@ from app.alerts.telegram_lifecycle import (
     TelegramLifecycleDeliveryService,
     WatchlistCandleSnapshot,
     classify_failed_gate_code,
+    reserve_public_watchlist_event,
     _public_signal_gate_result,
     _public_watchlist_candidate_from_symbol,
+    _public_watchlist_canonical_plan,
     _public_watchlist_gate_result,
     _signal_id,
     _stop_touched,
@@ -2314,7 +2318,9 @@ def test_plan_change_creates_new_watchlist_identity(tmp_path: Path) -> None:
     first_symbol = _runtime_public_watchlist_snapshot(signal_id="same-lifecycle-plan")
     changed_symbol = _runtime_public_watchlist_snapshot(
         signal_id="same-lifecycle-plan",
-        entry_high=Decimal("125.88"),
+        entry_low=Decimal("126.30"),
+        entry_high=Decimal("126.35"),
+        invalidation=Decimal("126.00"),
     )
 
     first = run(service.deliver_for_run(_run_result(first_symbol), scan_run_id="plan-change-first"))
@@ -2333,12 +2339,37 @@ def _public_watchlist_attempt_records(db_path: Path) -> list[dict[str, object]]:
         rows = connection.execute(
             """
             SELECT signal_id, alert_type, telegram_status, attempted_alert_type,
-                   public_watchlist_plan_id, public_watchlist_event_key, blocked_reason, error_message, seen_count
+                   public_watchlist_plan_id, public_watchlist_event_key, blocked_reason, error_message,
+                   dedupe_reason, seen_count
             FROM telegram_alert_attempts
             ORDER BY id
             """
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _public_alert_event_records(db_path: Path) -> list[dict[str, object]]:
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT id, canonical_plan_id, event_type, event_key, symbol, side, setup_family,
+                   normalized_zone_low, normalized_zone_high, normalized_invalidation,
+                   raw_entry_low, raw_entry_high, raw_stop_loss, status, matched_prior_alert_id,
+                   matched_prior_event_id, failure_reason
+            FROM public_alert_events
+            ORDER BY id
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _sent_public_alert_event_records(db_path: Path) -> list[dict[str, object]]:
+    return [row for row in _public_alert_event_records(db_path) if row["status"] == "SENT"]
+
+
+def _blocked_public_alert_event_records(db_path: Path) -> list[dict[str, object]]:
+    return [row for row in _public_alert_event_records(db_path) if row["status"] == "BLOCKED"]
 
 
 def _sent_public_watchlist_records(db_path: Path) -> list[dict[str, object]]:
@@ -2392,6 +2423,20 @@ def _syn_watchlist_snapshot(*, signal_id: str, invalidation: object = Decimal("0
     )
 
 
+def _mu_watchlist_snapshot(*, signal_id: str, invalidation: object = Decimal("1257.60")) -> ScannerSymbolResult:
+    return _runtime_public_watchlist_snapshot(
+        symbol="MUUSDT",
+        side="short",
+        grade="A",
+        potential_rr=Decimal("2.8"),
+        entry_low=Decimal("1234.05"),
+        entry_high=Decimal("1239.6"),
+        invalidation=invalidation,
+        signal_id=signal_id,
+        extra_diagnostics={"tick_size": Decimal("0.01")},
+    )
+
+
 def test_same_synusdt_plan_sends_once_across_iterations(tmp_path: Path) -> None:
     db_path = tmp_path / "synusdt-hard-dedupe.db"
     sender = FakeSender()
@@ -2410,10 +2455,44 @@ def test_same_synusdt_plan_sends_once_across_iterations(tmp_path: Path) -> None:
     assert second.deliveries[0].error_message == "duplicate_successful_public_watchlist_event"
     assert len(sender.messages) == 1
     assert len(_sent_public_watchlist_records(db_path)) == 1
+    assert len(_sent_public_alert_event_records(db_path)) == 1
 
 
 def test_synusdt_invalidation_jitter_dedupes(tmp_path: Path) -> None:
     test_same_synusdt_plan_sends_once_across_iterations(tmp_path)
+
+
+def test_synusdt_runtime_stop_drift_sends_one_initial_watchlist(tmp_path: Path) -> None:
+    db_path = tmp_path / "synusdt-runtime-drift.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    invalidations = (
+        Decimal("0.35994"),
+        Decimal("0.35988"),
+        Decimal("0.36007"),
+        Decimal("0.36032"),
+        Decimal("0.36055"),
+        Decimal("0.36084"),
+    )
+
+    summaries = [
+        run(
+            service.deliver_for_run(
+                _run_result(_syn_watchlist_snapshot(signal_id=f"syn-runtime-{index}", invalidation=invalidation)),
+                scan_run_id=f"syn-runtime-{index}",
+            )
+        )
+        for index, invalidation in enumerate(invalidations, start=1)
+    ]
+
+    assert summaries[0].sent == 1
+    assert all(summary.sent == 0 and summary.skipped == 1 for summary in summaries[1:])
+    assert len(sender.messages) == 1
+    assert len(_sent_public_watchlist_records(db_path)) == 1
+    events = _sent_public_alert_event_records(db_path)
+    assert len(events) == 1
+    assert events[0]["symbol"] == "SYNUSDT"
+    assert events[0]["event_type"] == PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE
 
 
 def test_1000pepe_tiny_invalidation_jitter_dedupes(tmp_path: Path) -> None:
@@ -2433,16 +2512,17 @@ def test_1000pepe_tiny_invalidation_jitter_dedupes(tmp_path: Path) -> None:
     assert second.skipped == 1
     assert len(sender.messages) == 1
     assert len(_sent_public_watchlist_records(db_path)) == 1
+    assert len(_sent_public_alert_event_records(db_path)) == 1
 
 
 def test_old_sent_row_without_plan_id_is_fallback_matched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    db_path = tmp_path / "legacy-sent-row-hard-dedupe.db"
+    db_path = tmp_path / "legacy-pepe-sent-row-hard-dedupe.db"
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: "2026-06-25T18:57:00+00:00")
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         repository.insert_attempt(
             TelegramAlertAttemptRecord(
-                signal_id="legacy-synusdt-watchlist",
-                symbol="SYNUSDT",
+                signal_id="legacy-pepe-watchlist",
+                symbol="1000PEPEUSDT",
                 direction="long",
                 previous_state=NA,
                 new_state="WATCHLISTED",
@@ -2451,16 +2531,16 @@ def test_old_sent_row_without_plan_id_is_fallback_matched(tmp_path: Path, monkey
                 sent_at="2026-06-25T18:48:00+00:00",
                 attempted_at="2026-06-25T18:48:00+00:00",
                 telegram_status="sent",
-                message_hash="legacy-syn-hash",
+                message_hash="legacy-pepe-hash",
                 attempted_alert_type=TelegramAlertType.WATCHLIST.value,
                 setup_quality_score="A",
-                rr_planned="2.8",
-                entry_low="0.39115",
-                entry_high="0.39218",
-                stop_loss="0.35994",
-                tp1="0.41",
-                tp2="0.43",
-                tp3="0.45",
+                rr_planned="2.9",
+                entry_low="0.00270433",
+                entry_high="0.0027082",
+                stop_loss="0.00268872",
+                tp1="0.00272",
+                tp2="0.00273",
+                tp3="0.00274",
             )
         )
     sender = FakeSender()
@@ -2468,8 +2548,8 @@ def test_old_sent_row_without_plan_id_is_fallback_matched(tmp_path: Path, monkey
 
     summary = run(
         service.deliver_for_run(
-            _run_result(_syn_watchlist_snapshot(signal_id="legacy-syn-new-row", invalidation=Decimal("0.35988"))),
-            scan_run_id="legacy-syn-new-row",
+            _run_result(_pepe_watchlist_snapshot(signal_id="legacy-pepe-new-row", invalidation=Decimal("0.00268869"))),
+            scan_run_id="legacy-pepe-new-row",
         )
     )
 
@@ -2480,41 +2560,47 @@ def test_old_sent_row_without_plan_id_is_fallback_matched(tmp_path: Path, monkey
     assert sender.messages == []
     rows = _public_watchlist_attempt_records(db_path)
     assert len([row for row in rows if row["telegram_status"] == "sent"]) == 1
+    duplicate_rows = _duplicate_public_watchlist_records(db_path)
+    assert len(duplicate_rows) == 1
+    assert "fallback_matched_legacy_sent" in duplicate_rows[0]["dedupe_reason"]
+    blocked_events = _blocked_public_alert_event_records(db_path)
+    assert len(blocked_events) == 1
+    assert blocked_events[0]["matched_prior_alert_id"] is not None
 
 
 def test_muusdt_same_public_watchlist_plan_sends_once(tmp_path: Path) -> None:
     db_path = tmp_path / "muusdt-hard-dedupe.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
-    first_symbol = _runtime_public_watchlist_snapshot(
-        symbol="MUUSDT",
-        side="short",
-        grade="A",
-        potential_rr=Decimal("2.8"),
-        entry_low=Decimal("125.70"),
-        entry_high=Decimal("125.74"),
-        invalidation=Decimal("126.20"),
-        signal_id="mu-1",
-        extra_diagnostics={"tick_size": Decimal("0.00001")},
-    )
-    second_symbol = _runtime_public_watchlist_snapshot(
-        symbol="MUUSDT",
-        side="short",
-        grade="A",
-        potential_rr=Decimal("2.8"),
-        entry_low=Decimal("125.70"),
-        entry_high=Decimal("125.74"),
-        invalidation=Decimal("126.19996"),
-        signal_id="mu-2",
-        extra_diagnostics={"tick_size": Decimal("0.00001")},
+    stops = (
+        Decimal("1257.60"),
+        Decimal("1257.73"),
+        Decimal("1257.49"),
+        Decimal("1257.53"),
+        Decimal("1257.02"),
+        Decimal("1256.79"),
+        Decimal("1256.71"),
+        Decimal("1256.59"),
     )
 
-    first = run(service.deliver_for_run(_run_result(first_symbol), scan_run_id="mu-1"))
-    second = run(service.deliver_for_run(_run_result(second_symbol), scan_run_id="mu-2"))
+    summaries = [
+        run(
+            service.deliver_for_run(
+                _run_result(_mu_watchlist_snapshot(signal_id=f"mu-{index}", invalidation=stop)),
+                scan_run_id=f"mu-{index}",
+            )
+        )
+        for index, stop in enumerate(stops, start=1)
+    ]
 
-    assert first.sent == 1
-    assert second.skipped == 1
+    assert summaries[0].sent == 1
+    assert all(summary.sent == 0 and summary.skipped == 1 for summary in summaries[1:])
     assert len(sender.messages) == 1
+    assert len(_sent_public_watchlist_records(db_path)) == 1
+    events = _sent_public_alert_event_records(db_path)
+    assert len(events) == 1
+    assert events[0]["symbol"] == "MUUSDT"
+    assert events[0]["side"] == "short"
 
 
 def test_same_watchlist_candidate_across_ten_scans_sends_once(tmp_path: Path) -> None:
@@ -2674,6 +2760,7 @@ def test_dedupe_survives_process_restart_using_database(tmp_path: Path) -> None:
     assert len(first_sender.messages) == 1
     assert second_sender.messages == []
     assert len(_sent_public_watchlist_records(db_path)) == 1
+    assert len(_sent_public_alert_event_records(db_path)) == 1
 
 
 def test_dedupe_survives_watch_state_recreation(tmp_path: Path) -> None:
@@ -2697,6 +2784,7 @@ def test_dedupe_survives_watch_state_recreation(tmp_path: Path) -> None:
     assert first.sent == 1
     assert recreated.skipped == 1
     assert len(sender.messages) == 1
+    assert len(_sent_public_alert_event_records(db_path)) == 1
 
 
 def test_reconciliation_is_idempotent_after_successful_send(tmp_path: Path) -> None:
@@ -2736,6 +2824,7 @@ def test_lifecycle_and_reconciliation_same_scan_send_once(tmp_path: Path) -> Non
     assert summary.skipped == 1
     assert len(sender.messages) == 1
     assert len(_sent_public_watchlist_records(db_path)) == 1
+    assert len(_sent_public_alert_event_records(db_path)) == 1
 
 
 def test_blocked_attempt_does_not_permanently_suppress_later_send(tmp_path: Path) -> None:
@@ -2795,6 +2884,7 @@ def test_same_plan_scalp_and_swing_collapsed_to_one_public_alert(tmp_path: Path)
     assert summary.sent == 1
     assert summary.skipped == 1
     assert len(sender.messages) == 1
+    assert len(_sent_public_alert_event_records(db_path)) == 1
     assert summary.public_watchlist_audit.public_watchlist_dedupe_audit["cross_mode_duplicates_collapsed"] == 1
 
 
@@ -2806,9 +2896,9 @@ def test_materially_distinct_scalp_and_swing_plans_can_send_separately(tmp_path:
     swing = _runtime_public_watchlist_snapshot(
         symbol="DISTINCTMODEUSDT",
         strategy_mode="swing",
-        entry_low=Decimal("126.20"),
-        entry_high=Decimal("126.45"),
-        invalidation=Decimal("125.80"),
+        entry_low=Decimal("126.30"),
+        entry_high=Decimal("126.35"),
+        invalidation=Decimal("126.00"),
         signal_id="distinct-swing",
     )
 
@@ -2837,6 +2927,7 @@ def test_opposite_side_is_new_plan(tmp_path: Path) -> None:
     assert first.sent == 1
     assert second.sent == 1
     assert len(sender.messages) == 2
+    assert len(_sent_public_alert_event_records(db_path)) == 2
 
 
 def test_new_structure_identity_is_new_plan(tmp_path: Path) -> None:
@@ -2869,9 +2960,9 @@ def test_material_zone_change_is_new_plan(tmp_path: Path) -> None:
     first_symbol = _runtime_public_watchlist_snapshot(symbol="ZONECHANGEUSDT", signal_id="zone-change-1")
     changed_zone = _runtime_public_watchlist_snapshot(
         symbol="ZONECHANGEUSDT",
-        entry_low=Decimal("126.20"),
-        entry_high=Decimal("126.45"),
-        invalidation=Decimal("125.80"),
+        entry_low=Decimal("126.30"),
+        entry_high=Decimal("126.35"),
+        invalidation=Decimal("126.00"),
         signal_id="zone-change-2",
     )
 
@@ -2881,6 +2972,7 @@ def test_material_zone_change_is_new_plan(tmp_path: Path) -> None:
     assert first.sent == 1
     assert second.sent == 1
     assert len(sender.messages) == 2
+    assert len(_sent_public_alert_event_records(db_path)) == 2
 
 
 def test_material_invalidation_change_is_new_plan(tmp_path: Path) -> None:
@@ -2900,6 +2992,73 @@ def test_material_invalidation_change_is_new_plan(tmp_path: Path) -> None:
     assert first.sent == 1
     assert second.sent == 1
     assert len(sender.messages) == 2
+
+
+def test_concurrent_public_watchlist_reservations_allow_one_sender(tmp_path: Path) -> None:
+    db_path = tmp_path / "concurrent-public-watchlist-reservation.db"
+    symbol_result = _syn_watchlist_snapshot(signal_id="concurrent-watchlist")
+    message = telegram_signal_message_from_symbol(symbol_result)
+    plan = _public_watchlist_canonical_plan(symbol_result, message)
+
+    def reserve_once(index: int):
+        attempted_at = f"2026-06-25T18:5{index}:00+00:00"
+        record = TelegramAlertAttemptRecord(
+            signal_id="concurrent-watchlist",
+            symbol=symbol_result.symbol,
+            direction=message.direction,
+            previous_state=NA,
+            new_state="WATCHLISTED",
+            alert_type=TelegramAlertType.WATCHLIST.value,
+            lifecycle_state="WATCHLISTED",
+            sent_at=None,
+            attempted_at=attempted_at,
+            telegram_status="reserved",
+            message_hash=f"concurrent-hash-{index}",
+            scan_run_id=f"concurrent-{index}",
+            attempted_alert_type=TelegramAlertType.WATCHLIST.value,
+            setup_quality_score="A",
+            rr_planned="2.8",
+            min_rr="2.5",
+            opportunity_score="80",
+            min_score_for_idea="80",
+            technical_score="49",
+            price_level="0.39115-0.39218",
+            entry_low=plan.raw_entry_low,
+            entry_high=plan.raw_entry_high,
+            stop_loss=plan.raw_invalidation,
+            tp1="0.41",
+            tp2="0.43",
+            tp3="0.45",
+            public_watchlist_plan_id=plan.plan_id,
+            public_watchlist_event_key=f"{plan.plan_id}|{PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE}",
+            public_alert_event_type=PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
+            normalized_entry_zone_low=plan.normalized_entry_low,
+            normalized_entry_zone_high=plan.normalized_entry_high,
+            normalized_invalidation=plan.normalized_invalidation,
+            dedupe_status="reserved",
+        )
+        with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+            return reserve_public_watchlist_event(
+                repository,
+                symbol=symbol_result.symbol,
+                side=message.direction,
+                canonical_plan_id=plan.plan_id,
+                event_type=PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
+                payload={"canonical_plan": plan, "reservation_record": record},
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve_once, (1, 2)))
+
+    assert sum(1 for result in results if result.granted) == 1
+    assert sum(1 for result in results if not result.granted) == 1
+    events = _public_alert_event_records(db_path)
+    assert len(events) == 1
+    assert events[0]["status"] == "RESERVED"
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts(signal_id="concurrent-watchlist")
+    assert len(attempts) == 1
+    assert attempts[0].telegram_status == "reserved"
 
 
 def test_limit_zone_hit_update_sent_once(tmp_path: Path) -> None:

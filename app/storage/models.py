@@ -166,6 +166,31 @@ class TelegramAlertAttemptRecord:
     dedupe_reason: str = "N/A"
     id: int | None = None
 
+@dataclass(frozen=True)
+class PublicAlertEventRecord:
+    canonical_plan_id: str
+    event_type: str
+    event_key: str
+    symbol: str
+    side: str
+    setup_family: str = "N/A"
+    normalized_zone_low: str = "N/A"
+    normalized_zone_high: str = "N/A"
+    normalized_invalidation: str = "N/A"
+    raw_entry_low: str = "N/A"
+    raw_entry_high: str = "N/A"
+    raw_stop_loss: str = "N/A"
+    status: str = "RESERVED"
+    reserved_at: str | None = None
+    sent_at: str | None = None
+    source_modes: str = "N/A"
+    matched_prior_alert_id: int | None = None
+    matched_prior_event_id: int | None = None
+    failure_reason: str = "N/A"
+    created_at: str = "N/A"
+    updated_at: str = "N/A"
+    id: int | None = None
+
 
 @dataclass(frozen=True)
 class ScanHistorySummary:

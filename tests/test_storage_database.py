@@ -24,7 +24,7 @@ from app.pipeline.scanner_runner import (
     ScannerRuntimeStats,
     ScannerSymbolResult,
 )
-from app.storage.database import StorageError, open_initialized_database
+from app.storage.database import SCHEMA_VERSION, StorageError, open_initialized_database
 from app.storage.models import WatchIterationMetadata
 from app.storage.repositories import export_history_payload, list_scan_history, store_scan_result
 
@@ -226,6 +226,7 @@ def test_database_creation(tmp_path) -> None:
         "setup_candidates",
         "replay_results",
         "telegram_alert_attempts",
+        "public_alert_events",
         "setup_outcome_analytics",
         "symbol_health_events",
     } <= tables
@@ -476,6 +477,107 @@ def test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path) -
 
 def test_database_migration_preserves_existing_alert_history(tmp_path) -> None:
     test_telegram_alert_attempt_migration_adds_audit_hygiene_columns(tmp_path)
+
+
+def test_public_alert_events_migration_is_idempotent_with_existing_watchlist_attempt_columns(tmp_path) -> None:
+    db_path = tmp_path / "legacy_public_watchlist_columns.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE telegram_alert_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                previous_state TEXT NOT NULL DEFAULT 'N/A',
+                new_state TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL,
+                sent_at TEXT,
+                attempted_at TEXT NOT NULL DEFAULT 'N/A',
+                telegram_status TEXT NOT NULL,
+                message_hash TEXT NOT NULL,
+                scan_run_id TEXT,
+                attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
+                setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                rr_planned TEXT NOT NULL DEFAULT 'N/A',
+                min_rr TEXT NOT NULL DEFAULT 'N/A',
+                opportunity_score TEXT NOT NULL DEFAULT 'N/A',
+                min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+                technical_score TEXT NOT NULL DEFAULT 'N/A',
+                price_level TEXT NOT NULL DEFAULT 'N/A',
+                entry_low TEXT NOT NULL DEFAULT 'N/A',
+                entry_high TEXT NOT NULL DEFAULT 'N/A',
+                stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                tp1 TEXT NOT NULL DEFAULT 'N/A',
+                tp2 TEXT NOT NULL DEFAULT 'N/A',
+                tp3 TEXT NOT NULL DEFAULT 'N/A',
+                blocked_reason TEXT NOT NULL DEFAULT 'N/A',
+                invalid_target_fields TEXT NOT NULL DEFAULT 'N/A',
+                error_message TEXT NOT NULL DEFAULT 'N/A',
+                first_seen_at TEXT NOT NULL DEFAULT 'N/A',
+                last_seen_at TEXT NOT NULL DEFAULT 'N/A',
+                seen_count INTEGER NOT NULL DEFAULT 1,
+                last_scan_run_id TEXT,
+                last_error_message TEXT NOT NULL DEFAULT 'N/A',
+                public_watchlist_plan_id TEXT NOT NULL DEFAULT 'N/A',
+                public_watchlist_event_key TEXT NOT NULL DEFAULT 'N/A',
+                public_alert_event_type TEXT NOT NULL DEFAULT 'N/A',
+                normalized_entry_zone_low TEXT NOT NULL DEFAULT 'N/A',
+                normalized_entry_zone_high TEXT NOT NULL DEFAULT 'N/A',
+                normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
+                dedupe_status TEXT NOT NULL DEFAULT 'N/A',
+                dedupe_reason TEXT NOT NULL DEFAULT 'N/A',
+                UNIQUE(signal_id, alert_type)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO telegram_alert_attempts (
+                signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
+                sent_at, attempted_at, telegram_status, message_hash, attempted_alert_type,
+                entry_low, entry_high, stop_loss, public_watchlist_plan_id, public_watchlist_event_key
+            ) VALUES (
+                'legacy-pepe-watchlist', '1000PEPEUSDT', 'long', 'WATCHLISTED', 'WATCHLIST', 'WATCHLISTED',
+                '2026-06-25T18:48:00+00:00', '2026-06-25T18:48:00+00:00', 'sent', 'legacy-hash', 'WATCHLIST',
+                '0.00270433', '0.0027082', '0.00268872', 'N/A', 'N/A'
+            )
+            """
+        )
+        connection.commit()
+
+    with open_initialized_database(db_path):
+        pass
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        attempts = connection.execute(
+            """
+            SELECT signal_id, symbol, direction, telegram_status, public_watchlist_plan_id, public_watchlist_event_key
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+        event_count = connection.execute("SELECT COUNT(*) FROM public_alert_events").fetchone()[0]
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        unique_event_key_indexes = []
+        for index in connection.execute("PRAGMA index_list(public_alert_events)").fetchall():
+            if index[2] != 1:
+                continue
+            columns = tuple(row[2] for row in connection.execute(f"PRAGMA index_info({index[1]})").fetchall())
+            unique_event_key_indexes.append(columns)
+
+    assert "public_alert_events" in tables
+    assert attempts == [("legacy-pepe-watchlist", "1000PEPEUSDT", "long", "sent", "N/A", "N/A")]
+    assert event_count == 0
+    assert ("event_key",) in unique_event_key_indexes
+    assert version == SCHEMA_VERSION
 
 
 def test_scan_run_insert(tmp_path) -> None:
