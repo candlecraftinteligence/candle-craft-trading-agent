@@ -14,6 +14,7 @@ from app.alerts.telegram_routing import (
     can_send_to_destination,
     log_blocked_telegram_route,
     normalize_destination,
+    normalize_message_type,
 )
 from app.core.config import Settings
 from app.data.dtos import NA
@@ -36,6 +37,13 @@ class TelegramSendResult:
     @property
     def sent(self) -> bool:
         return self.status == "sent"
+
+
+@dataclass(frozen=True)
+class PublicWatchlistSendGuard:
+    event_key: str
+    reservation_id: int
+    event_id: int
 
 
 @dataclass(frozen=True)
@@ -102,6 +110,7 @@ class TelegramSender:
         text: str,
         *,
         message_type: TelegramMessageType | str = TelegramMessageType.UNKNOWN,
+        public_watchlist_guard: PublicWatchlistSendGuard | None = None,
     ) -> TelegramSendResult:
         if not self._local_manual_mode:
             logger.warning("Telegram signal delivery skipped because LOCAL_MANUAL_MODE is false.")
@@ -125,7 +134,19 @@ class TelegramSender:
                 error_message="missing_telegram_credentials",
             )
 
-        route_decision = can_send_to_destination(self._destination, message_type)
+        normalized_message_type = normalize_message_type(message_type)
+        if (
+            normalized_message_type == TelegramMessageType.PUBLIC_WATCHLIST
+            and not _valid_public_watchlist_guard(public_watchlist_guard)
+        ):
+            logger.warning("Public watchlist Telegram send blocked because reservation metadata is missing.")
+            return TelegramSendResult(
+                status="skipped",
+                detail="Public WATCHLIST Telegram send requires a public_alert_events reservation.",
+                error_message="public_watchlist_missing_required_reservation",
+            )
+
+        route_decision = can_send_to_destination(self._destination, normalized_message_type)
         if not route_decision.allowed:
             log_blocked_telegram_route(route_decision)
             return TelegramSendResult(
@@ -162,6 +183,12 @@ class TelegramSender:
         except RuntimeError:
             return asyncio.run(self.send_text(text, message_type=message_type)).sent
         raise RuntimeError("send_message cannot be called from a running event loop; use send_text instead.")
+
+
+def _valid_public_watchlist_guard(guard: PublicWatchlistSendGuard | None) -> bool:
+    if guard is None:
+        return False
+    return bool(str(guard.event_key).strip()) and guard.reservation_id > 0 and guard.event_id > 0
 
 
 def resolve_public_signal_destination(settings: Settings) -> TelegramPublicDestination:
@@ -202,6 +229,7 @@ def _first_error(results: tuple[dict[str, Any], ...]) -> str:
 __all__ = [
     "PUBLIC_DESTINATION_FALLBACK_WARNING",
     "PUBLIC_DESTINATION_MISSING_WARNING",
+    "PublicWatchlistSendGuard",
     "TelegramPublicDestination",
     "TelegramSendResult",
     "TelegramSender",

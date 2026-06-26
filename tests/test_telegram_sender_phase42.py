@@ -5,7 +5,7 @@ import logging
 
 import httpx
 
-from app.alerts.telegram_sender import TelegramSender
+from app.alerts.telegram_sender import PublicWatchlistSendGuard, TelegramSender
 from app.alerts.telegram_routing import TelegramDestination, TelegramMessageType
 
 
@@ -108,3 +108,45 @@ def test_signal_channel_blocks_welcome_before_api_call(monkeypatch, caplog) -> N
     assert result.status == "skipped"
     assert result.error_message == "message_type_not_allowed_for_signal_channel"
     assert "super-secret-token" not in caplog.text
+
+
+def test_public_watchlist_requires_reservation_guard_before_api_call(monkeypatch) -> None:
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("public WATCHLIST without reservation must not call Telegram API")
+
+    monkeypatch.setattr("app.alerts.telegram_sender.send_telegram_messages", fail_if_called)
+    sender = TelegramSender(bot_token="token", chat_id="chat", signals_enabled=True)
+
+    result = run(sender.send_text("watch", message_type=TelegramMessageType.PUBLIC_WATCHLIST))
+
+    assert result.status == "skipped"
+    assert result.error_message == "public_watchlist_missing_required_reservation"
+
+
+def test_public_watchlist_reservation_guard_allows_api_call() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    try:
+        result = run(
+            TelegramSender(
+                bot_token="token",
+                chat_id="chat",
+                signals_enabled=True,
+                http_client=client,
+                api_base_url="https://telegram.test",
+            ).send_text(
+                "watch",
+                message_type=TelegramMessageType.PUBLIC_WATCHLIST,
+                public_watchlist_guard=PublicWatchlistSendGuard(
+                    event_key="PLAN|initial_watchlist",
+                    reservation_id=1,
+                    event_id=1,
+                ),
+            )
+        )
+    finally:
+        run(client.aclose())
+
+    assert result.status == "sent"

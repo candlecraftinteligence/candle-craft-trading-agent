@@ -17,7 +17,7 @@ from app.analytics.public_signal_quality import (
     normalize_grade,
     public_quality_decision,
 )
-from app.alerts.telegram_sender import TelegramSender
+from app.alerts.telegram_sender import PublicWatchlistSendGuard, TelegramSender
 from app.alerts.telegram_routing import TelegramMessageType
 from app.alerts.watchlist_expiry import (
     WATCHLIST_EXPIRY_REASON,
@@ -188,6 +188,8 @@ PUBLIC_WATCHLIST_PLAN_ID_VERSION = "public-watchlist-plan-v2"
 PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE = "initial_watchlist"
 PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON = "duplicate_successful_public_watchlist_event"
 PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON = "public_watchlist_event_reservation_in_flight"
+PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON = "public_watchlist_missing_required_reservation"
+PUBLIC_WATCHLIST_DUPLICATE_EQUIVALENT_PLAN_REASON = "public_watchlist_duplicate_equivalent_plan"
 PUBLIC_WATCHLIST_RESERVATION_STATUS = "reserved"
 PUBLIC_ALERT_EVENT_RESERVED_STATUS = "RESERVED"
 PUBLIC_ALERT_EVENT_SENT_STATUS = "SENT"
@@ -2269,7 +2271,7 @@ def _public_watchlist_reservation_duplicate_detail(
     fallback_matched_legacy_sent: bool,
     jitter_matched_same_plan: bool,
 ) -> str:
-    parts = ["Prior successful public watchlist event already exists."]
+    parts = ["Prior successful public watchlist event already exists.", PUBLIC_WATCHLIST_DUPLICATE_EQUIVALENT_PLAN_REASON]
     if fallback_matched_legacy_sent:
         parts.append("fallback_matched_legacy_sent")
     if jitter_matched_same_plan:
@@ -2287,7 +2289,7 @@ def _persist_public_watchlist_duplicate_reservation_skip(
     matched_prior_event_id: int | None = None,
 ) -> None:
     reason = PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON
-    detail_parts = [reason]
+    detail_parts = [reason, PUBLIC_WATCHLIST_DUPLICATE_EQUIVALENT_PLAN_REASON]
     if matched_prior is not None and matched_prior.id is not None:
         detail_parts.append(f"matched_prior_sent_row_id={matched_prior.id}")
     if matched_prior_event_id is not None:
@@ -2328,6 +2330,68 @@ def _persist_public_watchlist_duplicate_reservation_skip(
         skip_record.dedupe_reason,
     )
 
+
+def _persist_public_watchlist_final_send_guard_skip(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    symbol_result: ScannerSymbolResult,
+    *,
+    decision: TelegramAlertDecision,
+    reservation: PublicWatchlistReservationResult | None,
+    scan_run_id: str | None,
+    eligibility_context: TelegramEligibilityContext,
+) -> TelegramLifecycleDelivery:
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.message is not None
+    reason = _public_watchlist_final_send_guard_reason(reservation)
+    _record_public_watchlist_final_send_guard_event(
+        repository,
+        symbol_result=symbol_result,
+        message=decision.message,
+        reservation=reservation,
+        reason=reason,
+    )
+    return _persist_skipped_public_watchlist_attempt(
+        repository,
+        symbol_result,
+        decision=replace(decision, eligible=False, reason=reason),
+        reason=reason,
+        scan_run_id=scan_run_id,
+        eligibility_context=eligibility_context,
+    )
+
+
+def _public_watchlist_final_send_guard_reason(reservation: PublicWatchlistReservationResult | None) -> str:
+    if reservation is None:
+        return PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON
+    if not reservation.granted and reservation.reason == PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON:
+        return PUBLIC_WATCHLIST_DUPLICATE_EQUIVALENT_PLAN_REASON
+    if reservation.reservation_id is None or reservation.event_id is None:
+        return PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON
+    return _first_non_na(reservation.reason, PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON)
+
+
+def _record_public_watchlist_final_send_guard_event(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    *,
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+    reservation: PublicWatchlistReservationResult | None,
+    reason: str,
+) -> None:
+    plan = _public_watchlist_canonical_plan(symbol_result, message)
+    event_key = _public_watchlist_event_key(plan.plan_id, PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE)
+    if plan.plan_id == NA or event_key == NA:
+        return
+    _block_duplicate_public_alert_event(
+        repository,
+        plan=plan,
+        event_key=event_key,
+        event_type=PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
+        attempted_at=now_utc_iso(),
+        matched_prior_alert_id=reservation.matched_prior_alert_id if reservation is not None else None,
+        matched_prior_event_id=reservation.matched_prior_event_id if reservation is not None else None,
+        reason=reason,
+    )
 
 
 class TelegramLifecycleDeliveryService:
@@ -2870,9 +2934,32 @@ class TelegramLifecycleDeliveryService:
                 detail="Duplicate Telegram alert prevented.",
             )
 
+        public_watchlist_guard: PublicWatchlistSendGuard | None = None
+        if decision.alert_type == TelegramAlertType.WATCHLIST:
+            if (
+                reservation is None
+                or not reservation.granted
+                or reservation.reservation_id is None
+                or reservation.event_id is None
+            ):
+                return _persist_public_watchlist_final_send_guard_skip(
+                    repository,
+                    symbol_result,
+                    decision=decision,
+                    reservation=reservation,
+                    scan_run_id=scan_run_id,
+                    eligibility_context=context,
+                )
+            public_watchlist_guard = PublicWatchlistSendGuard(
+                event_key=reservation.event_key,
+                reservation_id=reservation.reservation_id,
+                event_id=reservation.event_id,
+            )
+
         send_result = await self.sender.send_text(
             message_text,
             message_type=_telegram_message_type_for_alert(decision.alert_type, message),
+            public_watchlist_guard=public_watchlist_guard,
         )
         if reservation is not None:
             if reservation.reservation_id is None:
@@ -6540,11 +6627,8 @@ def _public_watchlist_legacy_record_matches_plan(
     if _symbol(record.symbol) != plan.symbol or _status_key(record.direction) != plan.side:
         return False, False
     record_plan_id = _text(record.public_watchlist_plan_id)
-    if record_plan_id != NA:
-        if record_plan_id == plan.plan_id:
-            return True, False
-        if plan.structural_identity:
-            return False, False
+    if record_plan_id != NA and record_plan_id == plan.plan_id:
+        return True, False
 
     current_low = _decimal_or_none(plan.raw_entry_low)
     current_high = _decimal_or_none(plan.raw_entry_high)

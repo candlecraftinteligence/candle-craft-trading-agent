@@ -14,7 +14,9 @@ from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
     PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
+    PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON,
     PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES,
+    PublicWatchlistReservationResult,
     SQLiteTelegramAlertAttemptRepository,
     TelegramAlertType,
     TelegramEligibilityContext,
@@ -54,8 +56,12 @@ class FakeSender:
         self.status = status
         self.messages: list[str] = []
         self.calls: list[dict[str, object]] = []
+        self.public_watchlist_guards: list[object] = []
 
     async def send_text(self, text: str, **kwargs: object) -> TelegramSendResult:
+        guard = kwargs.pop("public_watchlist_guard", None)
+        if guard is not None:
+            self.public_watchlist_guards.append(guard)
         self.messages.append(text)
         self.calls.append(kwargs)
         return TelegramSendResult(status=self.status, detail=f"{self.status}.")
@@ -2437,6 +2443,139 @@ def _mu_watchlist_snapshot(*, signal_id: str, invalidation: object = Decimal("12
     )
 
 
+def _skhynix_watchlist_snapshot(*, signal_id: str, structure_suffix: str = "1") -> ScannerSymbolResult:
+    return _runtime_public_watchlist_snapshot(
+        symbol="SKHYNIXUSDT",
+        side="short",
+        grade="A",
+        potential_rr=Decimal("2.6"),
+        entry_low=Decimal("1744.16"),
+        entry_high=Decimal("1754.74"),
+        invalidation=Decimal("1779.61"),
+        signal_id=signal_id,
+        extra_diagnostics={
+            "tick_size": Decimal("0.01"),
+            "sweep_structure_id": f"skhynix-sweep-{structure_suffix}",
+            "bos_structure_id": f"skhynix-bos-{structure_suffix}",
+            "pullback_zone_id": f"skhynix-zone-{structure_suffix}",
+        },
+    )
+
+
+def _xplus_watchlist_snapshot(*, signal_id: str, structure_suffix: str = "1") -> ScannerSymbolResult:
+    return _runtime_public_watchlist_snapshot(
+        symbol="XPLUSDT",
+        side="short",
+        grade="A",
+        potential_rr=Decimal("2.8"),
+        entry_low=Decimal("0.10393"),
+        entry_high=Decimal("0.10448"),
+        invalidation=Decimal("0.10661"),
+        signal_id=signal_id,
+        extra_diagnostics={
+            "tick_size": Decimal("0.00001"),
+            "tp1": Decimal("0.10300"),
+            "tp2": Decimal("0.10220"),
+            "tp3": Decimal("0.10150"),
+            "sweep_structure_id": f"xplus-sweep-{structure_suffix}",
+            "bos_structure_id": f"xplus-bos-{structure_suffix}",
+            "pullback_zone_id": f"xplus-zone-{structure_suffix}",
+        },
+    )
+
+
+def test_skhynix_post_pr42_duplicate_structural_drift_sends_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "skhynix-post-pr42-dedupe.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    first = run(
+        service.deliver_for_run(
+            _run_result(_skhynix_watchlist_snapshot(signal_id="skhynix-1", structure_suffix="08-25")),
+            scan_run_id="skhynix-08-25",
+        )
+    )
+    second = run(
+        service.deliver_for_run(
+            _run_result(_skhynix_watchlist_snapshot(signal_id="skhynix-2", structure_suffix="08-34")),
+            scan_run_id="skhynix-08-34",
+        )
+    )
+
+    assert first.sent == 1
+    assert second.skipped == 1
+    assert len(sender.messages) == 1
+    assert len(sender.public_watchlist_guards) == 1
+    assert len(_sent_public_alert_event_records(db_path)) == 1
+    duplicate_rows = _duplicate_public_watchlist_records(db_path)
+    assert len(duplicate_rows) == 1
+    assert "public_watchlist_duplicate_equivalent_plan" in duplicate_rows[0]["dedupe_reason"]
+
+
+def test_xplus_post_pr42_duplicate_structural_drift_sends_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "xplus-post-pr42-dedupe.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    first = run(
+        service.deliver_for_run(
+            _run_result(_xplus_watchlist_snapshot(signal_id="xplus-1", structure_suffix="08-25")),
+            scan_run_id="xplus-08-25",
+        )
+    )
+    second = run(
+        service.deliver_for_run(
+            _run_result(_xplus_watchlist_snapshot(signal_id="xplus-2", structure_suffix="08-34")),
+            scan_run_id="xplus-08-34",
+        )
+    )
+
+    assert first.sent == 1
+    assert second.skipped == 1
+    assert len(sender.messages) == 1
+    assert len(sender.public_watchlist_guards) == 1
+    assert len(_sent_public_alert_event_records(db_path)) == 1
+    duplicate_rows = _duplicate_public_watchlist_records(db_path)
+    assert len(duplicate_rows) == 1
+    assert "public_watchlist_duplicate_equivalent_plan" in duplicate_rows[0]["dedupe_reason"]
+
+
+def test_public_watchlist_final_send_guard_blocks_missing_reservation_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "final-send-missing-reservation.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    def fake_reservation(*args, **kwargs):
+        return PublicWatchlistReservationResult(
+            granted=True,
+            event_key="missing-reservation-event",
+            status="reserved",
+            reason=NA,
+        )
+
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.reserve_public_watchlist_event", fake_reservation)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_skhynix_watchlist_snapshot(signal_id="bypass-missing-reservation")),
+            scan_run_id="bypass-missing-reservation",
+        )
+    )
+
+    assert summary.sent == 0
+    assert summary.skipped == 1
+    assert sender.messages == []
+    assert summary.deliveries[0].error_message == PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON
+    rows = _public_watchlist_attempt_records(db_path)
+    assert rows[-1]["telegram_status"] == "skipped"
+    assert rows[-1]["error_message"] == PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON
+    blocked_events = _blocked_public_alert_event_records(db_path)
+    assert len(blocked_events) == 1
+    assert blocked_events[0]["failure_reason"] == PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON
+
+
 def test_same_synusdt_plan_sends_once_across_iterations(tmp_path: Path) -> None:
     db_path = tmp_path / "synusdt-hard-dedupe.db"
     sender = FakeSender()
@@ -2930,8 +3069,8 @@ def test_opposite_side_is_new_plan(tmp_path: Path) -> None:
     assert len(_sent_public_alert_event_records(db_path)) == 2
 
 
-def test_new_structure_identity_is_new_plan(tmp_path: Path) -> None:
-    db_path = tmp_path / "new-structure.db"
+def test_structure_identity_drift_with_same_economics_is_duplicate_plan(tmp_path: Path) -> None:
+    db_path = tmp_path / "structure-drift-same-economics.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
     first_symbol = _runtime_public_watchlist_snapshot(
@@ -2939,18 +3078,19 @@ def test_new_structure_identity_is_new_plan(tmp_path: Path) -> None:
         signal_id="structure-1",
         extra_diagnostics={"sweep_structure_id": "sweep-1", "bos_structure_id": "bos-1", "pullback_zone_id": "zone-1"},
     )
-    new_structure = _runtime_public_watchlist_snapshot(
+    structure_drift = _runtime_public_watchlist_snapshot(
         symbol="STRUCTUSDT",
         signal_id="structure-2",
         extra_diagnostics={"sweep_structure_id": "sweep-2", "bos_structure_id": "bos-2", "pullback_zone_id": "zone-2"},
     )
 
     first = run(service.deliver_for_run(_run_result(first_symbol), scan_run_id="structure-1"))
-    second = run(service.deliver_for_run(_run_result(new_structure), scan_run_id="structure-2"))
+    second = run(service.deliver_for_run(_run_result(structure_drift), scan_run_id="structure-2"))
 
     assert first.sent == 1
-    assert second.sent == 1
-    assert len(sender.messages) == 2
+    assert second.skipped == 1
+    assert len(sender.messages) == 1
+    assert len(_sent_public_alert_event_records(db_path)) == 1
 
 
 def test_material_zone_change_is_new_plan(tmp_path: Path) -> None:
