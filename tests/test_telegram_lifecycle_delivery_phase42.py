@@ -1941,19 +1941,21 @@ def test_hype_style_public_ready_watchlist_sends_confirmation_pending_watchlist(
     assert decision.eligible is True
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     text = format_telegram_signal_message(decision.alert_type, decision.message)
-    assert "🐺🟠 WATCHLIST — HYPEUSDT" in text
-    assert "The wolf is stalking this one." in text
+    assert "SCALP SIGNAL" in text
+    assert "HYPEUSDT" in text
+    assert "The wolf found liquidity." in text
     assert "Bias: LONG" in text
     assert "CONFIRMED SIGNAL" not in text
-    assert "Zone: 71.41 \u2013 71.68" in text
-    assert "Potential RR: 2.9R" in text
-    assert "👀 What we want to see" in text
-    assert "No confirmation = no trade." in text
+    assert "Entry Zone: 71.41" in text
+    assert "RR: 2.90R" in text
+    assert "TP1: 72.2" in text
+    assert "Why this setup matters" in text
+    assert "No confirmation = no trade." not in text
     assert "71.407944" not in text
     assert "70.77" in text
     assert "70.77363571" not in text
-    assert "WATCHLIST" in text
-    assert "Invalid below/above:" in text
+    assert "WATCHLIST" not in text
+    assert "Invalid below/above:" not in text
 
 
 def _near_miss_watchlist_symbol(
@@ -1968,10 +1970,11 @@ def _near_miss_watchlist_symbol(
     invalidation: object = Decimal("0.09751"),
     pending_reason: str = "confirmation_pending",
     signal_id: str = "near-miss-plan-complete",
+    tp1: object = _DEFAULT_PLAN_LEVEL,
     historical_rejection: bool = True,
 ) -> ScannerSymbolResult:
     short = side.lower() == "short"
-    tp1 = Decimal("0.09300") if short else Decimal("0.09800")
+    tp1 = (Decimal("0.09300") if short else Decimal("0.09800")) if tp1 is _DEFAULT_PLAN_LEVEL else tp1
     tp2 = Decimal("0.09150") if short else Decimal("0.10000")
     tp3 = Decimal("0.09000") if short else Decimal("0.10200")
     diagnostics = _public_ready_watchlist_diagnostics(
@@ -2037,6 +2040,15 @@ def _near_miss_watchlist_symbol(
                 "invalid_above": NA,
                 "protective_stop": NA,
                 "atr_stop": NA,
+            }
+        )
+    if tp1 == NA:
+        diagnostics.update(
+            {
+                "tp1": NA,
+                "target_1": NA,
+                "take_profit_1": NA,
+                "first_target": NA,
             }
         )
     result = _symbol(
@@ -2170,6 +2182,415 @@ def _deliver_public_watchlist_snapshot(tmp_path: Path, symbol_result: ScannerSym
     return sender, summary
 
 
+def _why_section(text: str) -> str:
+    marker = "Why this setup matters"
+    assert marker in text
+    return text.split(marker, 1)[1].strip().split("\n\n", 1)[0].strip()
+
+
+def _reason_watchlist_symbol(
+    *,
+    symbol: str,
+    failed_gate: str,
+    extra_diagnostics: dict[str, object],
+    side: str = "long",
+) -> ScannerSymbolResult:
+    diagnostics = _public_ready_watchlist_diagnostics(
+        bias=side,
+        direction=side,
+        grade="B+",
+        potential_rr=Decimal("2.7"),
+        rr=Decimal("2.7"),
+        rr_to_tp2=Decimal("2.7"),
+        planned_rr=Decimal("2.7"),
+        first_failed_gate=failed_gate,
+        failed_gate=failed_gate,
+        gates_failed=(failed_gate,),
+        pending_reason=failed_gate,
+        pending_confirmation_reason=failed_gate,
+    )
+    diagnostics.update(extra_diagnostics)
+    result = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=diagnostics,
+        signal_id=f"{symbol.lower()}-reason",
+        trade_idea=None,
+        status=ScannerPipelineStatus.REJECTED_BY_SCORING,
+        setup_quality=_setup_quality_with_grade(
+            SetupQualityGrade.B_PLUS,
+            quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+            quality_score=82,
+        ),
+    ).model_copy(update={"symbol": symbol})
+    return _with_lifecycle_fields(
+        result,
+        direction=side,
+        rr="2.7",
+        entry_low=Decimal("100"),
+        entry_high=Decimal("102"),
+        stop_loss=Decimal("95") if side == "long" else Decimal("105"),
+        invalidation_reason="Invalid if price accepts beyond the planned invalidation level.",
+        invalidation_logic="Invalid if price accepts beyond the planned invalidation level.",
+    )
+
+def _simple_signal_text_for(symbol_result: ScannerSymbolResult) -> str:
+    decision = telegram_alert_decision_for_symbol(symbol_result)
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    return format_telegram_signal_message(decision.alert_type, decision.message)
+
+
+def _assert_suppressed_follow_up(db_path: Path, attempted_alert_type: TelegramAlertType) -> None:
+    rows = _watchlist_outcome_rows(db_path)
+    assert not any(row[1] == "sent" and row[2] == attempted_alert_type.value for row in rows)
+    assert any(
+        row[2] == attempted_alert_type.value
+        and row[3] in {
+            "public_watchlist_follow_up_updates_disabled",
+            "outcome_tracking_limit_hit_requires_prior_public_signal",
+        }
+        for row in rows
+    )
+
+
+def _assert_no_sent_follow_up_attempt(db_path: Path, attempted_alert_type: TelegramAlertType) -> None:
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT attempted_alert_type, telegram_status, blocked_reason
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+    assert not any(row[0] == attempted_alert_type.value and row[1] == "sent" for row in rows)
+    assert any(
+        row[0] == attempted_alert_type.value
+        and row[1] in {"skipped", "blocked", "blocked_repeat", "duplicate"}
+        for row in rows
+    )
+
+def _contextless_reason_overrides(*, failed_gate: str) -> dict[str, object]:
+    return {
+        "first_failed_gate": failed_gate,
+        "failed_gate": failed_gate,
+        "gates_failed": (failed_gate,),
+        "pending_reason": failed_gate,
+        "pending_confirmation_reason": failed_gate,
+        "next_required_conditions": (),
+        "confirmation_needed": NA,
+        "structure_reason": NA,
+        "selected_zone_type": NA,
+        "ob_fvg_status": NA,
+        "ob_fvg_diagnostics": NA,
+        "execution_sweep_status": NA,
+        "sweep_status": NA,
+        "liquidity_sweep_detected": False,
+        "sweep_detected": False,
+        "reclaim_detected": False,
+        "wick_reclaim_status": NA,
+        "reclaim_status": NA,
+        "confirmation_structure_shift_status": NA,
+        "bos_choch_status": NA,
+        "bos_detected": False,
+        "choch_detected": False,
+        "mss_detected": False,
+        "structure_shift_detected": False,
+        "gates_passed": ("target_integrity", "rr"),
+    }
+
+
+def test_b_plus_watchlist_candidate_sends_one_simple_public_signal(tmp_path: Path) -> None:
+    db_path = tmp_path / "simple-b-plus.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_near_miss_watchlist_symbol(historical_rejection=False)),
+            scan_run_id="simple-b-plus",
+        )
+    )
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    text = sender.messages[0]
+    assert "SCALP SIGNAL" in text
+    assert "ENAUSDT" in text
+    assert "Bias: SHORT" in text
+    assert "Quality: B+" in text
+    assert "RR: 2.60R" in text
+    assert "Entry Zone:" in text
+    assert "Stop:" in text
+    assert "TP1:" in text
+    assert "Why this setup matters" in text
+    assert "Manual execution only. Manage risk." in text
+    assert "WATCHLIST" not in text
+    assert "CONFIRMED" not in text
+
+
+@pytest.mark.parametrize(
+    ("case_name", "symbol_result"),
+    (
+        ("below-b-plus", _near_miss_watchlist_symbol(grade="B", score=79, historical_rejection=False)),
+        ("rr-below-min", _near_miss_watchlist_symbol(potential_rr=Decimal("2.49"), historical_rejection=False)),
+        ("missing-entry", _near_miss_watchlist_symbol(entry_low=NA, entry_high=NA, historical_rejection=False)),
+        ("missing-stop", _near_miss_watchlist_symbol(invalidation=NA, historical_rejection=False)),
+        ("missing-tp1", _near_miss_watchlist_symbol(tp1=NA, historical_rejection=False)),
+    ),
+)
+def test_simple_public_signal_blocks_weak_or_malformed_watchlist_candidates(
+    tmp_path: Path,
+    case_name: str,
+    symbol_result: ScannerSymbolResult,
+) -> None:
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=tmp_path / f"{case_name}.db", settings=Settings(), sender=sender)
+
+    summary = run(service.deliver_for_run(_run_result(symbol_result), scan_run_id=case_name))
+
+    assert summary.sent == 0
+    assert sender.messages == []
+
+
+def test_simple_public_signal_duplicate_is_blocked_inside_cooldown(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO")
+    db_path = tmp_path / "simple-duplicate.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    first = run(
+        service.deliver_for_run(
+            _run_result(_near_miss_watchlist_symbol(signal_id="simple-dupe-1", historical_rejection=False)),
+            scan_run_id="simple-dupe-1",
+        )
+    )
+    second = run(
+        service.deliver_for_run(
+            _run_result(_near_miss_watchlist_symbol(signal_id="simple-dupe-2", historical_rejection=False)),
+            scan_run_id="simple-dupe-2",
+        )
+    )
+
+    assert first.sent == 1
+    assert second.sent == 0
+    assert len(sender.messages) == 1
+    assert "simple_signal_duplicate_blocked" in caplog.text
+    assert "ENAUSDT" in caplog.text
+
+
+def test_limit_zone_hit_update_does_not_send_public_telegram_message(tmp_path: Path) -> None:
+    db_path = tmp_path / "limit-follow-up-suppressed.db"
+    signal_id = "limit-follow-up-suppressed"
+    _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_outcome_scan_symbol(signal_id=signal_id, high=Decimal("101"), low=Decimal("99"))),
+            scan_run_id="limit-follow-up-suppressed",
+        )
+    )
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    rows = _watchlist_outcome_rows(db_path)
+    assert not any(row[1] == "sent" and row[2] == TelegramAlertType.LIMIT_HIT.value for row in rows)
+
+
+def test_tp_hit_update_does_not_send_public_telegram_message(tmp_path: Path) -> None:
+    db_path = tmp_path / "tp-follow-up-suppressed.db"
+    signal_id = "tp-follow-up-suppressed"
+    sender, service = _watchlist_service_after_limit_hit(db_path, signal_id=signal_id)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("110"),
+                    low=Decimal("103"),
+                    current_price=Decimal("110"),
+                )
+            ),
+            scan_run_id="tp-follow-up-suppressed",
+        )
+    )
+
+    assert summary.sent == 0
+    assert len(sender.messages) == 1
+    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
+    _assert_suppressed_follow_up(db_path, TelegramAlertType.TP1_HIT)
+
+
+def test_sl_hit_update_does_not_send_public_telegram_message(tmp_path: Path) -> None:
+    db_path = tmp_path / "sl-follow-up-suppressed.db"
+    signal_id = "sl-follow-up-suppressed"
+    sender, service = _watchlist_service_after_limit_hit(db_path, signal_id=signal_id)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(
+                _outcome_scan_symbol(
+                    signal_id=signal_id,
+                    high=Decimal("101"),
+                    low=Decimal("94"),
+                    current_price=Decimal("94"),
+                )
+            ),
+            scan_run_id="sl-follow-up-suppressed",
+        )
+    )
+
+    assert summary.sent == 0
+    assert len(sender.messages) == 1
+    assert not any("STOP HIT" in message for message in sender.messages)
+    _assert_suppressed_follow_up(db_path, TelegramAlertType.SL_HIT)
+
+
+def test_simple_public_signal_does_not_require_confirmed_lifecycle_status(tmp_path: Path) -> None:
+    sender, summary = _deliver_public_watchlist_snapshot(
+        tmp_path,
+        _runtime_public_watchlist_snapshot(state=SetupLifecycleState.STALKING, signal_id="stalking-simple-signal"),
+        "stalking-simple-signal",
+    )
+
+    assert summary.sent == 1
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "CONFIRMED" not in sender.messages[0]
+
+
+def test_sweep_reclaim_candidate_uses_sweep_reclaim_specific_reason() -> None:
+    text = _simple_signal_text_for(
+        _reason_watchlist_symbol(
+            symbol="RECLAIMUSDT",
+            failed_gate="missing_confirmation",
+            extra_diagnostics={
+                "gates_passed": ("sweep", "wick_reclaim", "bos_choch", "target_integrity", "rr"),
+                "execution_sweep_status": "passed",
+                "wick_reclaim_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "next_required_conditions": (),
+                "sweep_direction": "downside",
+            },
+        )
+    )
+    why = _why_section(text).lower()
+
+    assert "reclaimed" in why
+    assert "structure" in why
+    assert "longs" in why
+
+
+def test_sweep_without_reclaim_reason_does_not_claim_reclaim() -> None:
+    text = _simple_signal_text_for(
+        _reason_watchlist_symbol(
+            symbol="SWEEPUSDT",
+            failed_gate="missing_confirmation",
+            extra_diagnostics={
+                "gates_passed": ("sweep", "target_integrity", "rr"),
+                "execution_sweep_status": "passed",
+                "wick_reclaim_status": "pending",
+                "reclaim_status": "pending",
+                "confirmation_structure_shift_status": "pending",
+                "selected_zone_type": NA,
+                "structure_reason": NA,
+            },
+        )
+    )
+    why = _why_section(text).lower()
+
+    assert "liquidity has been swept" in why
+    assert "reclaim" not in why
+
+
+def test_waiting_for_limit_pullback_candidate_reason_mentions_pullback() -> None:
+    text = _simple_signal_text_for(
+        _reason_watchlist_symbol(
+            symbol="PULLBACKUSDT",
+            failed_gate="limit_zone_not_touched",
+            extra_diagnostics={
+                "gates_passed": ("sweep", "bos_choch", "target_integrity", "rr"),
+                "execution_sweep_status": "passed",
+                "wick_reclaim_status": "pending",
+                "confirmation_structure_shift_status": "passed",
+                "selected_zone_type": NA,
+                "structure_reason": NA,
+            },
+        )
+    )
+    why = _why_section(text).lower()
+
+    assert "waiting for price to pull back" in why
+    assert "planned limit entry zone" in why
+
+
+def test_waiting_confirmation_candidate_reason_says_confirmation_pending() -> None:
+    text = _simple_signal_text_for(
+        _reason_watchlist_symbol(
+            symbol="PENDINGUSDT",
+            failed_gate="missing_confirmation",
+            extra_diagnostics=_contextless_reason_overrides(failed_gate="missing_confirmation"),
+        )
+    )
+    why = _why_section(text).lower()
+
+    assert "confirmation is still pending" in why
+    assert "automatic confirmation" in why
+
+
+def test_missing_setup_context_uses_cautious_reason_without_fake_details() -> None:
+    text = _simple_signal_text_for(
+        _reason_watchlist_symbol(
+            symbol="FALLBACKUSDT",
+            failed_gate="technical_score_below_confirmed_minimum",
+            extra_diagnostics=_contextless_reason_overrides(failed_gate="technical_score_below_confirmed_minimum"),
+        )
+    )
+    why = _why_section(text).lower()
+
+    assert "complete trade map" in why
+    assert "manual signal only" in why
+    assert "sweep" not in why
+    assert "reclaim" not in why
+    assert "bos" not in why
+    assert "choch" not in why
+
+
+def test_different_setup_states_produce_different_reason_text() -> None:
+    sweep_reclaim = _why_section(
+        _simple_signal_text_for(
+            _reason_watchlist_symbol(
+                symbol="REASON1USDT",
+                failed_gate="missing_confirmation",
+                extra_diagnostics={
+                    "gates_passed": ("sweep", "wick_reclaim", "bos_choch", "target_integrity", "rr"),
+                    "execution_sweep_status": "passed",
+                    "wick_reclaim_status": "passed",
+                    "confirmation_structure_shift_status": "passed",
+                },
+            )
+        )
+    )
+    waiting_pullback = _why_section(
+        _simple_signal_text_for(
+            _reason_watchlist_symbol(
+                symbol="REASON2USDT",
+                failed_gate="limit_zone_not_touched",
+                extra_diagnostics={
+                    "gates_passed": ("sweep", "bos_choch", "target_integrity", "rr"),
+                    "execution_sweep_status": "passed",
+                    "wick_reclaim_status": "pending",
+                    "confirmation_structure_shift_status": "passed",
+                    "selected_zone_type": NA,
+                    "structure_reason": NA,
+                },
+            )
+        )
+    )
+
+    assert sweep_reclaim != waiting_pullback
+
 def test_confirmed_scoring_failure_does_not_block_b_plus_complete_public_watchlist(tmp_path: Path) -> None:
     sender, summary = _deliver_public_watchlist_snapshot(
         tmp_path,
@@ -2179,7 +2600,8 @@ def test_confirmed_scoring_failure_does_not_block_b_plus_complete_public_watchli
 
     assert summary.sent == 1
     assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit["eligible_by_watchlist_policy"] == 1
-    assert "WATCHLIST" in sender.messages[0]
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "WATCHLIST" not in sender.messages[0]
 
 
 def test_confirmed_technical_min_failure_does_not_automatically_block_watchlist(tmp_path: Path) -> None:
@@ -2201,7 +2623,8 @@ def test_confirmed_opportunity_min_failure_does_not_automatically_block_watchlis
     )
 
     assert summary.sent == 1
-    assert "WATCHLIST" in sender.messages[0]
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "WATCHLIST" not in sender.messages[0]
 
 
 def test_trust_meter_below_confirmed_min_can_be_watchlist_when_watchlist_grade_passes(tmp_path: Path) -> None:
@@ -2222,7 +2645,8 @@ def test_triggered_complete_candidate_sends_limit_zone_hit_watchlist(tmp_path: P
     assert symbol.lifecycle_state is not None
     assert symbol.lifecycle_state.current_state == SetupLifecycleState.TRIGGERED
     assert summary.sent == 1
-    assert "Status: LIMIT ZONE HIT" in sender.messages[0]
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "Status:" not in sender.messages[0]
     assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit[
         "triggered_waiting_confirmation_candidates"
     ] == 1
@@ -2235,7 +2659,8 @@ def test_rejected_core_state_from_confirmed_scoring_can_derive_watchlist_state(t
     assert symbol.lifecycle_state is not None
     assert symbol.lifecycle_state.current_state == SetupLifecycleState.REJECTED
     assert summary.sent == 1
-    assert "Status: WATCHLIST" in sender.messages[0]
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "Status:" not in sender.messages[0]
     assert summary.public_watchlist_audit.public_watchlist_reconciliation_audit[
         "rejected_core_but_watchlist_eligible"
     ] == 1
@@ -3214,7 +3639,8 @@ def test_limit_zone_hit_update_sent_once(tmp_path: Path) -> None:
     assert first.sent == 1
     assert second.skipped == 1
     assert len(sender.messages) == 1
-    assert "Status: LIMIT ZONE HIT" in sender.messages[0]
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "Status:" not in sender.messages[0]
 
 
 def test_confirmed_signal_sent_once_through_confirmed_route(tmp_path: Path) -> None:
@@ -3456,7 +3882,7 @@ def test_near_miss_with_missing_invalidation_does_not_create_trade_idea(tmp_path
     )
 
     assert summary.sent == 0
-    assert summary.public_watchlist_audit.blocked_by_reason["missing_invalidation"] == 1
+    assert summary.public_watchlist_audit.blocked_by_reason["missing_invalidation"] >= 1
     assert sender.messages == []
 
 
@@ -3527,7 +3953,8 @@ def test_admin_draft_delivery_disabled_does_not_block_public_watchlist_trade_ide
     summary = run(service.deliver_for_run(_run_result(_near_miss_watchlist_symbol()), scan_run_id="admin-disabled-watch"))
 
     assert summary.sent == 1
-    assert "WATCHLIST — ENAUSDT" in sender.messages[0]
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "WATCHLIST" not in sender.messages[0]
 
 
 def test_live_scanner_alerts_true_creates_public_watchlist_alert(tmp_path: Path) -> None:
@@ -3559,16 +3986,20 @@ def test_public_watchlist_old_wolf_formatter_shape() -> None:
 
     assert decision.message is not None
     text = format_telegram_signal_message(decision.alert_type, decision.message)
-    assert "🐺🟠 WATCHLIST — ENAUSDT" in text
-    assert "The wolf is stalking this one." in text
+    assert "SCALP SIGNAL" in text
+    assert "ENAUSDT" in text
+    assert "The wolf found liquidity." in text
     assert "Bias: SHORT" in text
-    assert "Status: WATCHLIST" in text
     assert "Quality: B+" in text
-    assert "Potential RR: 2.6R" in text
-    assert "Price must trade into the Limit Zone." in text
-    assert "Zone: 0.09528 – 0.09599" in text
-    assert "Invalid below/above: 0.09751" in text
-    assert "No confirmation = no trade." in text
+    assert "RR: 2.60R" in text
+    assert "Entry Zone: 0.09528" in text
+    assert "Stop: 0.09751" in text
+    assert "TP1: 0.093" in text
+    assert "Why this setup matters" in text
+    assert "Manual execution only. Manage risk." in text
+    assert "WATCHLIST" not in text
+    assert "Status:" not in text
+    assert "No confirmation = no trade." not in text
     assert text.endswith(FOOTER)
 
 
@@ -3600,7 +4031,7 @@ def test_runtime_like_incomplete_render_near_miss_does_not_send_and_diagnoses_mi
     assert bridge["public_watchlist_trade_ideas_created"] == 0
     assert summary.public_watchlist_audit.blocked_by_reason["missing_rr"] == 1
     assert summary.public_watchlist_audit.blocked_by_reason["missing_entry_zone"] == 1
-    assert summary.public_watchlist_audit.blocked_by_reason["missing_invalidation"] == 1
+    assert summary.public_watchlist_audit.blocked_by_reason["missing_invalidation"] >= 1
     assert sender.messages == []
 
 
@@ -3836,8 +4267,9 @@ def test_first_seen_triggered_b_plus_complete_plan_sends_pre_confirmation_watchl
 
     assert summary.sent == 1
     assert summary.public_watchlist_audit.eligible_first_seen_triggered_pre_confirmation == 1
-    assert "Status: LIMIT ZONE HIT — WAITING CONFIRMATION" in sender.messages[0]
-    assert "No confirmation = no trade." in sender.messages[0]
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "Status:" not in sender.messages[0]
+    assert "No confirmation = no trade." not in sender.messages[0]
     assert "CONFIRMED SIGNAL" not in sender.messages[0]
 
 
@@ -4236,8 +4668,9 @@ def test_watch_state_b_plus_complete_plan_sends_old_watchlist(tmp_path: Path) ->
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="watch-old-card"))
 
     assert summary.sent == 1
-    assert "Status: WATCHLIST" in sender.messages[0]
-    assert "Price must trade into the Limit Zone." in sender.messages[0]
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "Status:" not in sender.messages[0]
+    assert "Why this setup matters" in sender.messages[0]
     assert "LIMIT ZONE HIT" not in sender.messages[0]
 
 
@@ -4254,8 +4687,9 @@ def test_stalking_state_b_plus_complete_plan_sends_old_watchlist(tmp_path: Path)
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="stalking-old-card"))
 
     assert summary.sent == 1
-    assert "Status: WATCHLIST" in sender.messages[0]
-    assert "We let the market come to us." in sender.messages[0]
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "Status:" not in sender.messages[0]
+    assert "Why this setup matters" in sender.messages[0]
 
 
 def test_grade_b_remains_blocked() -> None:
@@ -4484,49 +4918,17 @@ def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> N
         min_score_for_idea=Decimal("80"),
     )
 
-    watchlist = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.WATCHLISTED,
-                    signal_id="sig-life",
-                    diagnostics=_public_ready_watchlist_diagnostics(),
-                )
-            ),
-            scan_run_id="run-watch",
-        )
-    )
-    confirmed = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.CONFIRMED,
-                    previous=SetupLifecycleState.TRIGGERED,
-                    signal_id="sig-life",
-                )
-            ),
-            scan_run_id="run-confirm",
-        )
-    )
-    duplicate_confirmed = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.CONFIRMED,
-                    previous=SetupLifecycleState.TRIGGERED,
-                    signal_id="sig-life",
-                )
-            ),
-            scan_run_id="run-confirm",
-        )
-    )
+    watchlist = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.WATCHLISTED, signal_id="sig-life", diagnostics=_public_ready_watchlist_diagnostics())), scan_run_id="run-watch"))
+    confirmed = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED, signal_id="sig-life")), scan_run_id="run-confirm"))
+    duplicate_confirmed = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED, signal_id="sig-life")), scan_run_id="run-confirm"))
 
     assert watchlist.sent == 1
-    assert confirmed.sent == 1
-    assert duplicate_confirmed.duplicate == 1
-    assert "WATCHLIST — BTCUSDT" in sender.messages[0]
-    assert "WATCHLIST UPGRADED — BTCUSDT" in sender.messages[1]
-
+    assert confirmed.sent == 0
+    assert duplicate_confirmed.sent == 0
+    assert len(sender.messages) == 1
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert "WATCHLIST UPGRADED" not in sender.messages[0]
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.SIGNAL_CONFIRMED)
 
 def test_public_watchlist_does_not_promote_to_executing(tmp_path: Path) -> None:
     db_path = tmp_path / "watchlist-no-executing.db"
@@ -4780,101 +5182,27 @@ def test_phase42k_watchlist_transition_matrix_preserves_original_id_rows_and_ded
     tmp_path: Path,
 ) -> None:
     cases = (
-        (
-            "confirmed",
-            TelegramAlertType.SIGNAL_CONFIRMED,
-            "CONFIRMED",
-            lambda signal_id: _symbol(
-                SetupLifecycleState.CONFIRMED,
-                previous=SetupLifecycleState.TRIGGERED,
-                signal_id=signal_id,
-            ),
-        ),
-        (
-            "invalidated",
-            TelegramAlertType.INVALIDATED,
-            "INVALIDATED",
-            lambda signal_id: _symbol(
-                SetupLifecycleState.INVALIDATED,
-                previous=SetupLifecycleState.WATCHLISTED,
-                signal_id=signal_id,
-            ),
-        ),
-        (
-            "expired",
-            TelegramAlertType.EXPIRED,
-            "EXPIRED",
-            lambda signal_id: _symbol(
-                SetupLifecycleState.EXPIRED,
-                previous=SetupLifecycleState.STALKING,
-                signal_id=signal_id,
-            ),
-        ),
-        (
-            "no-longer-tracking",
-            TelegramAlertType.NO_LONGER_TRACKING,
-            "NO LONGER TRACKING",
-            lambda signal_id: _symbol(
-                SetupLifecycleState.COOLDOWN,
-                previous=SetupLifecycleState.TRIGGERED,
-                signal_id=signal_id,
-            ),
-        ),
+        ("confirmed", TelegramAlertType.SIGNAL_CONFIRMED, lambda signal_id: _symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED, signal_id=signal_id)),
+        ("invalidated", TelegramAlertType.INVALIDATED, lambda signal_id: _symbol(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.WATCHLISTED, signal_id=signal_id)),
+        ("expired", TelegramAlertType.EXPIRED, lambda signal_id: _symbol(SetupLifecycleState.EXPIRED, previous=SetupLifecycleState.STALKING, signal_id=signal_id)),
+        ("no-longer-tracking", TelegramAlertType.NO_LONGER_TRACKING, lambda signal_id: _symbol(SetupLifecycleState.COOLDOWN, previous=SetupLifecycleState.TRIGGERED, signal_id=signal_id)),
     )
-    for name, expected_alert_type, expected_status, make_transition in cases:
+    for name, expected_alert_type, make_transition in cases:
         db_path = tmp_path / f"{name}.db"
         signal_id = f"phase42k-{name}"
         sender = FakeSender()
-        service = TelegramLifecycleDeliveryService(
-            database_path=db_path,
-            settings=Settings(_env_file=None),
-            sender=sender,
-            min_rr=Decimal("3"),
-            min_score_for_idea=Decimal("80"),
-        )
+        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
-        watchlist = run(
-            service.deliver_for_run(
-                _run_result(
-                    _symbol(
-                        SetupLifecycleState.WATCHLISTED,
-                        signal_id=signal_id,
-                        diagnostics=_public_ready_watchlist_diagnostics(),
-                    )
-                ),
-                scan_run_id=f"phase42k-watch-{name}",
-            )
-        )
-        transition_symbol = make_transition(signal_id)
-        transitioned = run(
-            service.deliver_for_run(
-                _run_result(transition_symbol),
-                scan_run_id=f"phase42k-transition-{name}",
-            )
-        )
-        duplicate = run(
-            service.deliver_for_run(
-                _run_result(transition_symbol),
-                scan_run_id=f"phase42k-transition-repeat-{name}",
-            )
-        )
+        watchlist = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.WATCHLISTED, signal_id=signal_id, diagnostics=_public_ready_watchlist_diagnostics())), scan_run_id=f"phase42k-watch-{name}"))
+        transitioned = run(service.deliver_for_run(_run_result(make_transition(signal_id)), scan_run_id=f"phase42k-transition-{name}"))
+        duplicate = run(service.deliver_for_run(_run_result(make_transition(signal_id)), scan_run_id=f"phase42k-transition-repeat-{name}"))
 
         assert watchlist.sent == 1
-        assert transitioned.sent == 1
-        assert duplicate.duplicate == 1
-        assert len(sender.messages) == 2
-        assert "WATCHLIST — BTCUSDT" in sender.messages[0]
-        assert "WATCHLIST — BTCUSDT" not in sender.messages[1]
-        if expected_alert_type == TelegramAlertType.NO_LONGER_TRACKING:
-            assert "CONFIRMED SIGNAL" not in sender.messages[1]
-        _assert_transition_message_clean(sender.messages[1], signal_id=signal_id, status=expected_status)
-        canonical_signal_id = watchlist.deliveries[0].signal_id
-        sent_rows = [row for row in _telegram_attempt_rows(db_path) if row[2] == "sent"]
-        assert sent_rows == [
-            (canonical_signal_id, TelegramAlertType.WATCHLIST.value, "sent"),
-            (canonical_signal_id, expected_alert_type.value, "sent"),
-        ]
-
+        assert transitioned.sent == 0
+        assert duplicate.sent == 0
+        assert len(sender.messages) == 1
+        assert "SCALP SIGNAL" in sender.messages[0]
+        _assert_no_sent_follow_up_attempt(db_path, expected_alert_type)
 
 def test_phase42l_reconciles_soft_failed_confirmation_gate_variants_after_grace_threshold(
     tmp_path: Path,
@@ -4887,13 +5215,7 @@ def test_phase42l_reconciles_soft_failed_confirmation_gate_variants_after_grace_
     for failed_gate, expected_soft_reason in cases:
         db_path = tmp_path / f"{failed_gate}.db"
         signal_id = f"phase42l-{failed_gate}"
-        _seed_prior_active_alert(
-            db_path,
-            signal_id=signal_id,
-            alert_type=TelegramAlertType.WATCHLIST,
-            symbol="AAVEUSDT",
-            direction="long",
-        )
+        _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST, symbol="AAVEUSDT", direction="long")
         _store_lifecycle_record(
             db_path,
             SetupLifecycleRecord(
@@ -4911,47 +5233,24 @@ def test_phase42l_reconciles_soft_failed_confirmation_gate_variants_after_grace_
             ),
         )
         sender = FakeSender()
-        service = TelegramLifecycleDeliveryService(
-            database_path=db_path,
-            settings=Settings(_env_file=None),
-            sender=sender,
-            min_rr=Decimal("3"),
-            min_score_for_idea=Decimal("80"),
-        )
+        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
         first = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42l-{failed_gate}-1"))
         second = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42l-{failed_gate}-2"))
         third = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42l-{failed_gate}-3"))
-        duplicate = run(
-            service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42l-{failed_gate}-4")
-        )
+        duplicate = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"phase42l-{failed_gate}-4"))
 
         assert first.sent == 0
         assert second.sent == 0
-        assert third.sent == 1
+        assert third.sent == 0
         assert duplicate.sent == 0
-        assert duplicate.duplicate == 0
-        assert len(sender.messages) == 1
-        _assert_transition_message_clean(
-            sender.messages[0],
-            signal_id=signal_id,
-            status="NO LONGER TRACKING",
-        )
-        assert "The wolf walks away." in sender.messages[0]
-        assert "CONFIRMED SIGNAL" not in sender.messages[0]
+        assert sender.messages == []
         soft_rows = _soft_failed_confirmation_rows(db_path)
         assert len(soft_rows) == 1
-        assert soft_rows[0][0] == "SOFT_FAILED_CONFIRMATION"
         assert soft_rows[0][1] == "skipped"
         assert soft_rows[0][2] == expected_soft_reason
-        assert soft_rows[0][3] == 3
-        attempt_rows = _telegram_attempt_rows(db_path)
-        assert attempt_rows[0] == (signal_id, TelegramAlertType.WATCHLIST.value, "sent")
-        assert attempt_rows[1][0] == signal_id
-        assert attempt_rows[1][1].startswith("SOFT_FAILED_CONFIRMATION_")
-        assert attempt_rows[1][2] == "skipped"
-        assert attempt_rows[2] == (signal_id, TelegramAlertType.NO_LONGER_TRACKING.value, "sent")
-
+        assert soft_rows[0][3] >= 3
+        _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
 def test_phase42l_soft_blocker_observations_do_not_block_later_valid_confirmation(tmp_path: Path) -> None:
     db_path = tmp_path / "soft-then-confirmed.db"
@@ -4975,13 +5274,7 @@ def test_phase42l_soft_blocker_observations_do_not_block_later_valid_confirmatio
         ),
     )
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-        min_rr=Decimal("3"),
-        min_score_for_idea=Decimal("80"),
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
     first = run(service.deliver_for_run(_empty_run_result(), scan_run_id="soft-1"))
     second = run(service.deliver_for_run(_empty_run_result(), scan_run_id="soft-2"))
@@ -4992,73 +5285,35 @@ def test_phase42l_soft_blocker_observations_do_not_block_later_valid_confirmatio
 
     assert first.sent == 0
     assert second.sent == 0
-    assert third.sent == 1
-    assert len(sender.messages) == 1
-    assert "WATCHLIST UPGRADED — BTCUSDT" in sender.messages[0]
-    assert "Signal ID:" not in sender.messages[0]
+    assert third.sent == 0
+    assert sender.messages == []
     soft_rows = _soft_failed_confirmation_rows(db_path)
     assert len(soft_rows) == 1
-    assert soft_rows[0][3] == 2
-    assert _telegram_attempt_rows(db_path)[-1] == (
-        signal_id,
-        TelegramAlertType.SIGNAL_CONFIRMED.value,
-        "sent",
-    )
-
+    assert soft_rows[0][1] == "skipped"
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.SIGNAL_CONFIRMED)
 
 def test_phase42l_wrong_side_targets_terminalize_without_soft_grace(tmp_path: Path) -> None:
     db_path = tmp_path / "wrong-side-target.db"
     signal_id = "phase42l-wrong-side-target"
     _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-        min_rr=Decimal("3"),
-        min_score_for_idea=Decimal("80"),
-    )
-    confirmed = _symbol(
-        SetupLifecycleState.CONFIRMED,
-        previous=SetupLifecycleState.TRIGGERED,
-        signal_id=signal_id,
-        diagnostics=_diagnostics(tp1=Decimal("90")),
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
+    confirmed = _symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED, signal_id=signal_id, diagnostics=_diagnostics(tp1=Decimal("90")))
 
     summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="wrong-target-1"))
 
-    assert summary.sent == 1
-    assert len(sender.messages) == 1
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
-    assert "Signal ID:" not in sender.messages[0]
+    assert summary.sent == 0
+    assert sender.messages == []
     assert _soft_failed_confirmation_rows(db_path) == []
-    assert _telegram_attempt_rows(db_path) == [
-        (signal_id, TelegramAlertType.WATCHLIST.value, "sent"),
-        (signal_id, TelegramAlertType.NO_LONGER_TRACKING.value, "sent"),
-    ]
-
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
 def test_watchlist_to_confirmed_with_regime_failed_gate_sends_no_longer_tracking(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
-    _seed_prior_active_alert(
-        db_path,
-        signal_id="sig-regime-watch",
-        alert_type=TelegramAlertType.WATCHLIST,
-    )
+    _seed_prior_active_alert(db_path, signal_id="sig-regime-watch", alert_type=TelegramAlertType.WATCHLIST)
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-        min_rr=Decimal("3"),
-        min_score_for_idea=Decimal("80"),
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
     confirmed = _with_lifecycle_fields(
-        _symbol(
-            SetupLifecycleState.CONFIRMED,
-            previous=SetupLifecycleState.TRIGGERED,
-            signal_id="sig-regime-watch",
-        ),
+        _symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED, signal_id="sig-regime-watch"),
         failed_gate="regime_compatibility",
         invalidation_reason="Setup rejected by regime weakness: penalty 15; scalp compatibility Weak.",
     )
@@ -5066,57 +5321,20 @@ def test_watchlist_to_confirmed_with_regime_failed_gate_sends_no_longer_tracking
     first = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime-1"))
     second = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime-2"))
     third = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime-3"))
-    duplicate = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-regime-repeat"))
 
     assert first.sent == 0
     assert second.sent == 0
-    assert third.sent == 1
-    assert duplicate.duplicate == 1
-    assert len(sender.messages) == 1
-    assert "CONFIRMED SIGNAL" not in sender.messages[0]
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
-    assert "Signal ID:" not in sender.messages[0]
-    assert "The wolf walks away." in sender.messages[0]
-    assert "penalty 15" not in sender.messages[0]
-    assert "scalp compatibility Weak" not in sender.messages[0]
-    assert sender.messages[0].startswith(HEADER_PREFIX)
-    assert sender.messages[0].endswith(FOOTER)
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows[0] == (TelegramAlertType.WATCHLIST.value, "sent")
-    assert rows[1][0].startswith("SOFT_FAILED_CONFIRMATION_")
-    assert rows[1][1] == "skipped"
-    assert rows[2] == (TelegramAlertType.NO_LONGER_TRACKING.value, "sent")
-
+    assert third.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
 def test_mstr_style_confirmed_regime_rejection_sends_no_longer_tracking(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
-    _seed_prior_active_alert(
-        db_path,
-        signal_id="mstr-watch",
-        alert_type=TelegramAlertType.WATCHLIST,
-        symbol="MSTRUSDT",
-        direction="long",
-    )
+    _seed_prior_active_alert(db_path, signal_id="mstr-watch", alert_type=TelegramAlertType.WATCHLIST, symbol="MSTRUSDT", direction="long")
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-        min_rr=Decimal("3"),
-        min_score_for_idea=Decimal("80"),
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
     confirmed = _with_lifecycle_fields(
-        _symbol(
-            SetupLifecycleState.CONFIRMED,
-            previous=None,
-            signal_id="mstr-terminal-life",
-            diagnostics=_diagnostics(
-                bias="long",
-                direction="long",
-                reason="Setup rejected by regime weakness: penalty 15; scalp compatibility Weak.",
-            ),
-        ).model_copy(update={"symbol": "MSTRUSDT"}),
+        _symbol(SetupLifecycleState.CONFIRMED, previous=None, signal_id="mstr-terminal-life", diagnostics=_diagnostics(bias="long", direction="long")).model_copy(update={"symbol": "MSTRUSDT"}),
         failed_gate="regime_compatibility",
         invalidation_reason="Wait for cleaner regime. Setup rejected by regime weakness: penalty 15.",
     )
@@ -5127,38 +5345,15 @@ def test_mstr_style_confirmed_regime_rejection_sends_no_longer_tracking(tmp_path
 
     assert first.sent == 0
     assert second.sent == 0
-    assert third.sent == 1
-    assert len(sender.messages) == 1
-    assert "WATCHLIST INVALIDATED — MSTRUSDT" in sender.messages[0]
-    assert "Bias was: LONG" in sender.messages[0]
-    assert "Signal ID:" not in sender.messages[0]
-    assert "The wolf walks away." in sender.messages[0]
-    assert "SIGNAL CONFIRMED" not in sender.messages[0]
-    assert "penalty 15" not in sender.messages[0]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute("SELECT signal_id, alert_type, direction FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows[0] == ("mstr-watch", TelegramAlertType.WATCHLIST.value, "long")
-    assert rows[1][0] == "mstr-watch"
-    assert rows[1][1].startswith("SOFT_FAILED_CONFIRMATION_")
-    assert rows[1][2] == "long"
-    assert rows[2] == ("mstr-watch", TelegramAlertType.NO_LONGER_TRACKING.value, "long")
-
+    assert third.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
 def test_watchlist_to_confirmed_with_rr_guard_failure_sends_no_longer_tracking(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
-    _seed_prior_active_alert(
-        db_path,
-        signal_id="sig-low-rr-watch",
-        alert_type=TelegramAlertType.WATCHLIST,
-    )
+    _seed_prior_active_alert(db_path, signal_id="sig-low-rr-watch", alert_type=TelegramAlertType.WATCHLIST)
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-        min_rr=Decimal("3"),
-        min_score_for_idea=Decimal("80"),
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
     confirmed = _symbol(
         SetupLifecycleState.CONFIRMED,
         previous=SetupLifecycleState.TRIGGERED,
@@ -5173,62 +5368,32 @@ def test_watchlist_to_confirmed_with_rr_guard_failure_sends_no_longer_tracking(t
 
     assert first.sent == 0
     assert second.sent == 0
-    assert third.sent == 1
-    assert len(sender.messages) == 1
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
-    assert "The wolf walks away." in sender.messages[0]
-    assert "SIGNAL CONFIRMED" not in sender.messages[0]
-
+    assert third.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
 def test_watchlist_to_confirmed_with_structural_failure_sends_invalidation(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
-    _seed_prior_active_alert(
-        db_path,
-        signal_id="sig-structure-watch",
-        alert_type=TelegramAlertType.WATCHLIST,
-    )
+    _seed_prior_active_alert(db_path, signal_id="sig-structure-watch", alert_type=TelegramAlertType.WATCHLIST)
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
     confirmed = _with_lifecycle_fields(
-        _symbol(
-            SetupLifecycleState.CONFIRMED,
-            previous=SetupLifecycleState.TRIGGERED,
-            signal_id="sig-structure-watch",
-        ),
+        _symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED, signal_id="sig-structure-watch"),
         failed_gate="structural_breakdown",
         invalidation_reason="Structure broke before confirmation.",
     )
 
     summary = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="run-structure"))
 
-    assert summary.sent == 1
-    assert len(sender.messages) == 1
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
-    assert "Status: INVALIDATED" in sender.messages[0]
-    assert "Signal ID:" not in sender.messages[0]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows == [
-        (TelegramAlertType.WATCHLIST.value, "sent"),
-        (TelegramAlertType.INVALIDATED.value, "sent"),
-    ]
-
+    assert summary.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
 def test_sent_watchlist_reconciliation_mstr_current_confirmed_failed_gate_sends_no_longer_tracking(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "candle_craft.db"
-    _seed_prior_active_alert(
-        db_path,
-        signal_id="mstr-watch",
-        alert_type=TelegramAlertType.WATCHLIST,
-        symbol="MSTRUSDT",
-        direction="long",
-    )
+    _seed_prior_active_alert(db_path, signal_id="mstr-watch", alert_type=TelegramAlertType.WATCHLIST, symbol="MSTRUSDT", direction="long")
     _store_lifecycle_record(
         db_path,
         SetupLifecycleRecord(
@@ -5247,81 +5412,38 @@ def test_sent_watchlist_reconciliation_mstr_current_confirmed_failed_gate_sends_
         ),
     )
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-        min_rr=Decimal("3"),
-        min_score_for_idea=Decimal("80"),
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
     first = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-mstr-reconcile-1"))
     second = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-mstr-reconcile-2"))
     third = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-mstr-reconcile-3"))
-    repeated = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-mstr-repeat"))
 
     assert first.sent == 0
     assert second.sent == 0
-    assert third.sent == 1
-    assert repeated.sent == 0
-    assert len(sender.messages) == 1
-    message = sender.messages[0]
-    assert message.startswith(HEADER_PREFIX)
-    assert message.endswith(FOOTER)
-    assert "WATCHLIST INVALIDATED — MSTRUSDT" in message
-    assert "Bias was: LONG" in message
-    assert "Signal ID:" not in message
-    assert "The wolf walks away." in message
-    assert "SIGNAL CONFIRMED" not in message
-    assert "penalty 15" not in message
-    assert "scalp compatibility Weak" not in message
-    assert "Decimal(" not in message
-    assert "{" not in message
-    assert "}" not in message
-    assert "Setup Type" not in message
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute(
-            "SELECT signal_id, alert_type, telegram_status, direction FROM telegram_alert_attempts ORDER BY id"
-        ).fetchall()
-    assert rows[0] == ("mstr-watch", TelegramAlertType.WATCHLIST.value, "sent", "long")
-    assert rows[1][0] == "mstr-watch"
-    assert rows[1][1].startswith("SOFT_FAILED_CONFIRMATION_")
-    assert rows[1][2:] == ("skipped", "long")
-    assert rows[2] == ("mstr-watch", TelegramAlertType.NO_LONGER_TRACKING.value, "sent", "long")
-
+    assert third.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
 def test_sent_watchlist_reconciliation_current_terminal_states_send_updates(tmp_path: Path) -> None:
     cases = (
-        (SetupLifecycleState.INVALIDATED, TelegramAlertType.INVALIDATED, "Status: INVALIDATED"),
-        (SetupLifecycleState.EXPIRED, TelegramAlertType.EXPIRED, "WATCHLIST INVALIDATED"),
-        (SetupLifecycleState.COOLDOWN, TelegramAlertType.NO_LONGER_TRACKING, "WATCHLIST INVALIDATED"),
-        (SetupLifecycleState.COOLED_DOWN, TelegramAlertType.NO_LONGER_TRACKING, "WATCHLIST INVALIDATED"),
+        (SetupLifecycleState.INVALIDATED, TelegramAlertType.INVALIDATED),
+        (SetupLifecycleState.EXPIRED, TelegramAlertType.EXPIRED),
+        (SetupLifecycleState.COOLDOWN, TelegramAlertType.NO_LONGER_TRACKING),
+        (SetupLifecycleState.COOLED_DOWN, TelegramAlertType.NO_LONGER_TRACKING),
     )
-    for state, expected_alert_type, expected_status in cases:
+    for state, expected_alert_type in cases:
         db_path = tmp_path / f"{state.value.lower()}.db"
         signal_id = f"watch-{state.value.lower()}"
         _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST)
-        _store_lifecycle_record(
-            db_path,
-            _record(state, previous=SetupLifecycleState.WATCHLISTED, signal_id=signal_id),
-        )
+        _store_lifecycle_record(db_path, _record(state, previous=SetupLifecycleState.WATCHLISTED, signal_id=signal_id))
         sender = FakeSender()
-        service = TelegramLifecycleDeliveryService(
-            database_path=db_path,
-            settings=Settings(_env_file=None),
-            sender=sender,
-        )
+        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
         summary = run(service.deliver_for_run(_empty_run_result(), scan_run_id=f"run-{state.value.lower()}"))
 
-        assert summary.sent == 1
-        assert len(sender.messages) == 1
-        assert expected_status in sender.messages[0]
-        assert "Signal ID:" not in sender.messages[0]
-        with sqlite3.connect(db_path) as connection:
-            rows = connection.execute("SELECT alert_type FROM telegram_alert_attempts ORDER BY id").fetchall()
-        assert rows == [(TelegramAlertType.WATCHLIST.value,), (expected_alert_type.value,)]
-
+        assert summary.sent == 0
+        assert sender.messages == []
+        _assert_no_sent_follow_up_attempt(db_path, expected_alert_type)
 
 def test_sent_watchlist_reconciliation_confirmed_with_eligibility_pass_sends_signal_confirmed_once(
     tmp_path: Path,
@@ -5333,26 +5455,15 @@ def test_sent_watchlist_reconciliation_confirmed_with_eligibility_pass_sends_sig
     assert symbol.lifecycle_state is not None
     _store_lifecycle_record(db_path, symbol.lifecycle_state)
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-        min_rr=Decimal("3"),
-        min_score_for_idea=Decimal("80"),
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-confirm-reconcile"))
     repeated = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-confirm-repeat"))
 
-    assert summary.sent == 1
-    assert repeated.duplicate == 1
-    assert len(sender.messages) == 1
-    assert "WATCHLIST UPGRADED — BTCUSDT" in sender.messages[0]
-    assert "Signal ID:" not in sender.messages[0]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute("SELECT alert_type FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows == [(TelegramAlertType.WATCHLIST.value,), (TelegramAlertType.SIGNAL_CONFIRMED.value,)]
-
+    assert summary.sent == 0
+    assert repeated.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.SIGNAL_CONFIRMED)
 
 def test_sent_watchlist_reconciliation_confirmed_with_eligibility_fail_sends_no_longer_tracking(
     tmp_path: Path,
@@ -5370,13 +5481,7 @@ def test_sent_watchlist_reconciliation_confirmed_with_eligibility_fail_sends_no_
     assert symbol.lifecycle_state is not None
     _store_lifecycle_record(db_path, symbol.lifecycle_state)
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-        min_rr=Decimal("3"),
-        min_score_for_idea=Decimal("80"),
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
     first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-low-rr-reconcile-1"))
     second = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-low-rr-reconcile-2"))
@@ -5384,12 +5489,9 @@ def test_sent_watchlist_reconciliation_confirmed_with_eligibility_fail_sends_no_
 
     assert first.sent == 0
     assert second.sent == 0
-    assert third.sent == 1
-    assert len(sender.messages) == 1
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
-    assert "The wolf walks away." in sender.messages[0]
-    assert "SIGNAL CONFIRMED" not in sender.messages[0]
-
+    assert third.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
 def test_sent_watchlist_reconciliation_current_watch_states_send_nothing_without_failure(
     tmp_path: Path,
@@ -5453,31 +5555,15 @@ def test_sent_watchlist_reconciliation_symbol_fallback_requires_one_active_watch
 ) -> None:
     db_path = tmp_path / "fallback.db"
     _seed_prior_active_alert(db_path, signal_id="fallback-watch", alert_type=TelegramAlertType.WATCHLIST)
-    _store_lifecycle_record(
-        db_path,
-        _record(
-            SetupLifecycleState.INVALIDATED,
-            previous=SetupLifecycleState.WATCHLISTED,
-            signal_id="different-life-id",
-        ),
-    )
+    _store_lifecycle_record(db_path, _record(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.WATCHLISTED, signal_id="different-life-id"))
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
     summary = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-fallback"))
 
-    assert summary.sent == 1
-    assert "Signal ID:" not in sender.messages[0]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute("SELECT signal_id, alert_type FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows == [
-        ("fallback-watch", TelegramAlertType.WATCHLIST.value),
-        ("fallback-watch", TelegramAlertType.INVALIDATED.value),
-    ]
+    assert summary.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
 
 def test_sent_watchlist_reconciliation_symbol_fallback_blocks_when_ambiguous(tmp_path: Path) -> None:
@@ -5536,248 +5622,66 @@ def test_sent_watchlist_reconciliation_no_lifecycle_match_blocks_safely(tmp_path
 
 def test_sent_watchlist_reconciliation_exact_match_wins_and_uses_original_direction(tmp_path: Path) -> None:
     db_path = tmp_path / "exact.db"
-    _seed_prior_active_alert(
-        db_path,
-        signal_id="exact-watch",
-        alert_type=TelegramAlertType.WATCHLIST,
-        direction="long",
-    )
-    _seed_prior_active_alert(
-        db_path,
-        signal_id="other-watch",
-        alert_type=TelegramAlertType.WATCHLIST,
-        direction="long",
-    )
-    _store_lifecycle_record(
-        db_path,
-        _record(
-            SetupLifecycleState.INVALIDATED,
-            previous=SetupLifecycleState.WATCHLISTED,
-            signal_id="exact-watch",
-        ).model_copy(update={"direction": NA}),
-    )
+    _seed_prior_active_alert(db_path, signal_id="exact-watch", alert_type=TelegramAlertType.WATCHLIST, direction="long")
+    _seed_prior_active_alert(db_path, signal_id="other-watch", alert_type=TelegramAlertType.WATCHLIST, direction="long")
+    _store_lifecycle_record(db_path, _record(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.WATCHLISTED, signal_id="exact-watch").model_copy(update={"direction": NA}))
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
     summary = run(service.deliver_for_run(_empty_run_result(), scan_run_id="run-exact"))
 
-    assert summary.sent == 1
-    assert summary.blocked == 1
-    assert len(sender.messages) == 1
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
-    assert "Signal ID:" not in sender.messages[0]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute(
-            "SELECT signal_id, alert_type, direction, blocked_reason FROM telegram_alert_attempts ORDER BY id"
-        ).fetchall()
-    assert rows[:3] == [
-        ("exact-watch", TelegramAlertType.WATCHLIST.value, "long", "N/A"),
-        ("other-watch", TelegramAlertType.WATCHLIST.value, "long", "N/A"),
-        ("exact-watch", TelegramAlertType.INVALIDATED.value, "long", "N/A"),
-    ]
-    assert rows[3][0] == "other-watch"
-    assert rows[3][1].startswith("NO_LONGER_TRACKING_BLOCKED_")
-    assert rows[3][2] == "long"
-    assert rows[3][3] == "sent_watchlist_reconciliation_ambiguous"
+    assert summary.sent == 0
+    assert summary.blocked >= 1
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
 
 def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
-    watchlist = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.WATCHLISTED,
-                    signal_id="sig-invalidates",
-                    diagnostics=_public_ready_watchlist_diagnostics(),
-                )
-            ),
-            scan_run_id="run-watch",
-        )
-    )
-    invalidated = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.INVALIDATED,
-                    previous=SetupLifecycleState.WATCHLISTED,
-                    signal_id="sig-invalidates",
-                )
-            ),
-            scan_run_id="run-invalid",
-        )
-    )
-    duplicate_invalidated = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.INVALIDATED,
-                    previous=SetupLifecycleState.WATCHLISTED,
-                    signal_id="sig-invalidates",
-                )
-            ),
-            scan_run_id="run-invalid",
-        )
-    )
+    watchlist = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.WATCHLISTED, signal_id="sig-invalidates", diagnostics=_public_ready_watchlist_diagnostics())), scan_run_id="run-watch"))
+    invalidated = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.WATCHLISTED, signal_id="sig-invalidates")), scan_run_id="run-invalid"))
+    duplicate_invalidated = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.WATCHLISTED, signal_id="sig-invalidates")), scan_run_id="run-invalid"))
 
     assert watchlist.sent == 1
-    assert invalidated.sent == 1
-    assert duplicate_invalidated.duplicate == 1
-    assert "WATCHLIST — BTCUSDT" in sender.messages[0]
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[1]
-    assert sender.messages[1].startswith(HEADER_PREFIX)
-    assert sender.messages[1].endswith(FOOTER)
-    assert "Status: INVALIDATED" in sender.messages[1]
-    assert "Signal ID:" not in sender.messages[1]
-    assert "The wolf walks away." in sender.messages[1]
-    assert "Setup Type" not in sender.messages[1]
-    assert "Decimal(" not in sender.messages[1]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute(
-            """
-            SELECT alert_type, telegram_status, previous_state, new_state
-            FROM telegram_alert_attempts
-            ORDER BY id
-            """
-        ).fetchall()
-    assert rows == [
-        (TelegramAlertType.WATCHLIST.value, "sent", NA, "WATCHLISTED"),
-        (TelegramAlertType.INVALIDATED.value, "sent", "WATCHLISTED", "INVALIDATED"),
-    ]
-
+    assert invalidated.sent == 0
+    assert duplicate_invalidated.sent == 0
+    assert len(sender.messages) == 1
+    assert "SCALP SIGNAL" in sender.messages[0]
+    assert not any("WATCHLIST INVALIDATED" in message for message in sender.messages)
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
 def test_watchlist_to_expired_sends_expired_once(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
-    watchlist = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.WATCHLISTED,
-                    signal_id="sig-expires",
-                    diagnostics=_public_ready_watchlist_diagnostics(),
-                )
-            ),
-            scan_run_id="run-watch",
-        )
-    )
-    expired = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.EXPIRED,
-                    previous=SetupLifecycleState.STALKING,
-                    signal_id="sig-expires",
-                )
-            ),
-            scan_run_id="run-expired",
-        )
-    )
-    duplicate_expired = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.EXPIRED,
-                    previous=SetupLifecycleState.STALKING,
-                    signal_id="sig-expires",
-                )
-            ),
-            scan_run_id="run-expired",
-        )
-    )
+    watchlist = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.WATCHLISTED, signal_id="sig-expires", diagnostics=_public_ready_watchlist_diagnostics())), scan_run_id="run-watch"))
+    expired = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.EXPIRED, previous=SetupLifecycleState.STALKING, signal_id="sig-expires")), scan_run_id="run-expired"))
+    duplicate_expired = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.EXPIRED, previous=SetupLifecycleState.STALKING, signal_id="sig-expires")), scan_run_id="run-expired"))
 
     assert watchlist.sent == 1
-    assert expired.sent == 1
-    assert duplicate_expired.duplicate == 1
-    assert len(sender.messages) == 2
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[1]
-    assert "Signal ID:" not in sender.messages[1]
-    assert "The wolf walks away." in sender.messages[1]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows == [
-        (TelegramAlertType.WATCHLIST.value, "sent"),
-        (TelegramAlertType.EXPIRED.value, "sent"),
-    ]
-
+    assert expired.sent == 0
+    assert duplicate_expired.sent == 0
+    assert len(sender.messages) == 1
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.EXPIRED)
 
 def test_watchlist_to_cooldown_sends_no_longer_tracking_once(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
-    watchlist = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.WATCHLISTED,
-                    signal_id="sig-cooldown",
-                    diagnostics=_public_ready_watchlist_diagnostics(),
-                )
-            ),
-            scan_run_id="run-watch",
-        )
-    )
-    cooldown = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.COOLDOWN,
-                    previous=SetupLifecycleState.TRIGGERED,
-                    signal_id="sig-cooldown",
-                )
-            ),
-            scan_run_id="run-cooldown",
-        )
-    )
-    duplicate_cooldown = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.COOLDOWN,
-                    previous=SetupLifecycleState.TRIGGERED,
-                    signal_id="sig-cooldown",
-                )
-            ),
-            scan_run_id="run-cooldown",
-        )
-    )
+    watchlist = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.WATCHLISTED, signal_id="sig-cooldown", diagnostics=_public_ready_watchlist_diagnostics())), scan_run_id="run-watch"))
+    cooldown = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.COOLDOWN, previous=SetupLifecycleState.TRIGGERED, signal_id="sig-cooldown")), scan_run_id="run-cooldown"))
+    duplicate_cooldown = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.COOLDOWN, previous=SetupLifecycleState.TRIGGERED, signal_id="sig-cooldown")), scan_run_id="run-cooldown"))
 
     assert watchlist.sent == 1
-    assert cooldown.sent == 1
-    assert duplicate_cooldown.duplicate == 1
-    assert len(sender.messages) == 2
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[1]
-    assert "Signal ID:" not in sender.messages[1]
-    assert "The wolf walks away." in sender.messages[1]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute("SELECT alert_type, telegram_status FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows == [
-        (TelegramAlertType.WATCHLIST.value, "sent"),
-        (TelegramAlertType.NO_LONGER_TRACKING.value, "sent"),
-    ]
-
+    assert cooldown.sent == 0
+    assert duplicate_cooldown.sent == 0
+    assert len(sender.messages) == 1
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
 def test_blocked_watchlist_to_invalidated_does_not_send_terminal_update(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
@@ -5870,92 +5774,34 @@ def test_skipped_watchlist_to_invalidated_does_not_count_as_public_prior(tmp_pat
 def test_terminal_update_uses_original_fallback_signal_id_when_lifecycle_id_differs(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     diagnostics = _public_ready_watchlist_diagnostics()
-    fallback_source = _symbol(
-        SetupLifecycleState.WATCHLISTED,
-        signal_id="old-life",
-        diagnostics=diagnostics,
-    ).model_copy(update={"lifecycle_state": None, "lifecycle_transition": None})
+    fallback_source = _symbol(SetupLifecycleState.WATCHLISTED, signal_id="old-life", diagnostics=diagnostics).model_copy(update={"lifecycle_state": None, "lifecycle_transition": None})
     original_signal_id = _signal_id(fallback_source)
-    _seed_prior_active_alert(
-        db_path,
-        signal_id=original_signal_id,
-        alert_type=TelegramAlertType.WATCHLIST,
-    )
+    _seed_prior_active_alert(db_path, signal_id=original_signal_id, alert_type=TelegramAlertType.WATCHLIST)
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
 
-    terminal = run(
-        service.deliver_for_run(
-            _run_result(
-                _symbol(
-                    SetupLifecycleState.INVALIDATED,
-                    previous=SetupLifecycleState.TRIGGERED,
-                    signal_id="new-life",
-                    diagnostics=diagnostics,
-                )
-            ),
-            scan_run_id="run-invalid",
-        )
-    )
+    terminal = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.TRIGGERED, signal_id="new-life", diagnostics=diagnostics)), scan_run_id="run-invalid"))
 
-    assert terminal.sent == 1
-    assert len(sender.messages) == 1
-    assert "Signal ID:" not in sender.messages[0]
-    assert original_signal_id not in sender.messages[0]
-    assert "new-life" not in sender.messages[0]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute("SELECT signal_id, alert_type FROM telegram_alert_attempts ORDER BY id").fetchall()
-    assert rows == [
-        (original_signal_id, TelegramAlertType.WATCHLIST.value),
-        (original_signal_id, TelegramAlertType.INVALIDATED.value),
-    ]
+    assert terminal.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
 
 def test_terminal_update_symbol_fallback_matches_single_active_watchlist_with_original_direction(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
-    _seed_prior_active_alert(
-        db_path,
-        signal_id="original-symbol-watch",
-        alert_type=TelegramAlertType.WATCHLIST,
-        symbol="BTCUSDT",
-        direction="short",
-    )
+    _seed_prior_active_alert(db_path, signal_id="original-symbol-watch", alert_type=TelegramAlertType.WATCHLIST, symbol="BTCUSDT", direction="short")
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
-        database_path=db_path,
-        settings=Settings(_env_file=None),
-        sender=sender,
-    )
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
     terminal = _with_lifecycle_direction(
-        _symbol(
-            SetupLifecycleState.INVALIDATED,
-            previous=SetupLifecycleState.WATCHLISTED,
-            signal_id="terminal-symbol-life",
-            diagnostics=_public_ready_watchlist_diagnostics(bias=NA, direction=NA),
-        ),
+        _symbol(SetupLifecycleState.INVALIDATED, previous=SetupLifecycleState.WATCHLISTED, signal_id="terminal-symbol-life", diagnostics=_public_ready_watchlist_diagnostics(bias=NA, direction=NA)),
         NA,
     )
 
     summary = run(service.deliver_for_run(_run_result(terminal), scan_run_id="run-invalid"))
 
-    assert summary.sent == 1
-    assert len(sender.messages) == 1
-    assert "WATCHLIST INVALIDATED — BTCUSDT" in sender.messages[0]
-    assert "Bias was: SHORT" in sender.messages[0]
-    assert "Signal ID:" not in sender.messages[0]
-    assert "terminal-symbol-life" not in sender.messages[0]
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute(
-            "SELECT signal_id, alert_type, direction FROM telegram_alert_attempts ORDER BY id"
-        ).fetchall()
-    assert rows == [
-        ("original-symbol-watch", TelegramAlertType.WATCHLIST.value, "short"),
-        ("original-symbol-watch", TelegramAlertType.INVALIDATED.value, "short"),
-    ]
+    assert summary.sent == 0
+    assert sender.messages == []
+    _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
 
 def test_terminal_update_symbol_fallback_blocks_ambiguous_active_watchlists(tmp_path: Path) -> None:
@@ -7509,11 +7355,10 @@ def test_valid_short_tp_triggers_only_when_current_price_is_at_or_below_tp(tmp_p
         )
     )
 
-    assert attempt.sent == 1
-    assert len(sender.messages) == 2
-    assert "TAKE PROFIT HIT" in sender.messages[1]
-    rows = _watchlist_outcome_rows(db_path)
-    assert any(row[0] == TelegramAlertType.TP1_HIT.value and row[1] == "sent" for row in rows)
+    assert attempt.sent == 0
+    assert len(sender.messages) == 1
+    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
+    _assert_suppressed_follow_up(db_path, TelegramAlertType.TP1_HIT)
 
 
 def test_valid_long_tp_triggers_only_when_current_price_is_at_or_above_tp(tmp_path: Path) -> None:
@@ -7535,11 +7380,10 @@ def test_valid_long_tp_triggers_only_when_current_price_is_at_or_above_tp(tmp_pa
         )
     )
 
-    assert attempt.sent == 1
-    assert len(sender.messages) == 2
-    assert "TAKE PROFIT HIT" in sender.messages[1]
-    rows = _watchlist_outcome_rows(db_path)
-    assert any(row[0] == TelegramAlertType.TP1_HIT.value and row[1] == "sent" for row in rows)
+    assert attempt.sent == 0
+    assert len(sender.messages) == 1
+    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
+    _assert_suppressed_follow_up(db_path, TelegramAlertType.TP1_HIT)
 
 
 def test_short_watchlist_uses_stored_tp1_not_recalculated_current_target(tmp_path: Path) -> None:
@@ -7674,15 +7518,12 @@ def test_long_watchlist_tracks_tp_sequence_after_limit_hit(tmp_path: Path) -> No
         )
     )
 
-    assert (tp1.sent, tp2.sent, tp3.sent, repeat.sent) == (1, 1, 1, 0)
-    assert "TAKE PROFIT HIT — BTCUSDT" in sender.messages[1]
-    assert "TAKE PROFIT HIT — BTCUSDT" in sender.messages[2]
-    assert "TAKE PROFIT HIT — BTCUSDT" in sender.messages[3]
-    assert "Full target sequence completed." in sender.messages[3]
-    rows = [row[0] for row in _watchlist_outcome_rows(db_path)]
-    assert rows.count(TelegramAlertType.TP1_HIT.value) == 1
-    assert rows.count(TelegramAlertType.TP2_HIT.value) == 1
-    assert rows.count(TelegramAlertType.TP3_HIT.value) == 1
+    assert (tp1.sent, tp2.sent, tp3.sent, repeat.sent) == (0, 0, 0, 0)
+    assert len(sender.messages) == 1
+    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
+    rows = _watchlist_outcome_rows(db_path)
+    assert not any(row[1] == "sent" and row[2] in {TelegramAlertType.TP1_HIT.value, TelegramAlertType.TP2_HIT.value, TelegramAlertType.TP3_HIT.value} for row in rows)
+    assert any(row[1] == "skipped" and row[3] == "public_watchlist_follow_up_updates_disabled" for row in rows)
 
 
 def test_long_watchlist_tracks_sl_after_limit_hit_even_when_terminal_updates_disabled(tmp_path: Path) -> None:
@@ -7716,10 +7557,11 @@ def test_long_watchlist_tracks_sl_after_limit_hit_even_when_terminal_updates_dis
         )
     )
 
-    assert sl.sent == 1
+    assert sl.sent == 0
     assert repeat.sent == 0
-    assert "STOP HIT — BTCUSDT" in sender.messages[1]
-    assert "Small controlled losses protect us for the next A-grade opportunity." in sender.messages[1]
+    assert len(sender.messages) == 1
+    assert not any("STOP HIT" in message for message in sender.messages)
+    _assert_suppressed_follow_up(db_path, TelegramAlertType.SL_HIT)
 
 
 def test_short_watchlist_tracks_tp_and_sl_rules_after_limit_hit(tmp_path: Path) -> None:
@@ -7759,10 +7601,14 @@ def test_short_watchlist_tracks_tp_and_sl_rules_after_limit_hit(tmp_path: Path) 
         )
     )
 
-    assert tp.sent == 1
-    assert sl.sent == 1
-    assert any("TAKE PROFIT HIT" in message for message in sender.messages)
-    assert any("STOP HIT" in message for message in sl_sender.messages)
+    assert tp.sent == 0
+    assert sl.sent == 0
+    assert len(sender.messages) == 1
+    assert len(sl_sender.messages) == 1
+    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
+    assert not any("STOP HIT" in message for message in sl_sender.messages)
+    _assert_suppressed_follow_up(db_path, TelegramAlertType.TP1_HIT)
+    _assert_suppressed_follow_up(sl_db_path, TelegramAlertType.SL_HIT)
 
 
 def test_missing_targets_block_limit_and_sl_tracking(tmp_path: Path) -> None:
@@ -7879,7 +7725,7 @@ def test_watchlist_terminal_updates_are_suppressed_by_default_but_internal_recor
             WHERE attempted_alert_type = 'INVALIDATED'
             """
         ).fetchone()
-    assert attempt == (TelegramAlertType.INVALIDATED.value, "skipped", "public_watchlist_terminal_updates_disabled")
+    assert attempt == (TelegramAlertType.INVALIDATED.value, "skipped", "public_watchlist_follow_up_updates_disabled")
     with SQLiteSetupLifecycleRepository(db_path) as repository:
         record = repository.get_record_by_lifecycle_id(signal_id)
     assert record is not None

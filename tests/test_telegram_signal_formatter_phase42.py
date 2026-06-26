@@ -66,62 +66,66 @@ def test_valid_scalp_signal_renders_premium_format() -> None:
     assert "Signal ID" not in text
 
 
-def test_old_public_watchlist_formatter_matches_expected_shape() -> None:
+def test_public_watchlist_formatter_matches_simple_signal_shape() -> None:
     text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message())
 
-    assert "🐺🟠 WATCHLIST — BTCUSDT" in text
-    assert "The wolf is stalking this one." in text
+    assert "🐺🟠 SCALP SIGNAL — BTCUSDT" in text
+    assert "The wolf found liquidity." in text
     assert "Bias: LONG" in text
-    assert "Status: WATCHLIST" in text
     assert "Quality: A" in text
-    assert "Potential RR: 2.9R" in text
-    assert "👀 What we want to see" in text
-    assert "📍 Area of Interest" in text
-    assert "Zone: 100 – 102" in text
-    assert "Invalid below/above: 95" in text
-    assert "Limit Zone must hold as support after the pullback." in text
-    assert "Bullish structure must remain valid above the invalidation level." in text
-    assert "No confirmation = no trade." in text
-    assert "We let the market come to us." in text
+    assert "RR: 2.92R" in text
+    assert "🎯 Trade Map" in text
+    assert "Entry Zone: 100 – 102" in text
+    assert "Stop: 95" in text
+    assert "TP1: 110" in text
+    assert "TP2: 115" in text
+    assert "TP3: 120" in text
+    assert "🧠 Why this setup matters" in text
+    assert "Sweep and reclaim into valid pullback." in text
+    assert "🚫 Invalid if" in text
+    assert "Invalid if price accepts below 95." in text
+    assert "⚠️ Manual execution only. Manage risk." in text
     assert "Candle Craft | Signal. Structure. Execution." in text
-    assert "Research Watch" not in text
-    assert "Trade map: N/A" not in text
-    assert "Wait for RR expansion above minimum" not in text
-    assert "Regime blocked the setup" not in text
-    assert "Regime fit: Weak" not in text
-    lowered = text.lower()
-    assert "scalp signal" not in lowered
-    assert "active for manual execution" not in lowered
-    assert "executing" not in lowered
-    assert "enter now" not in lowered
+    assert "WATCHLIST" not in text
+    assert "Status:" not in text
+    assert "Potential RR" not in text
+    assert "No confirmation = no trade." not in text
+    assert "CONFIRMED" not in text
 
 
-def test_old_public_watchlist_formatter_uses_short_side_wording() -> None:
-    text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message(direction="short", stop_loss=Decimal("105")))
+def test_public_watchlist_formatter_uses_short_bias_and_stop() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(direction="short", stop_loss=Decimal("105"), invalidation_reason="Invalid if price accepts above 105."),
+    )
 
     assert "Bias: SHORT" in text
-    assert "Limit Zone must hold as resistance after the pullback." in text
-    assert "Bearish structure must remain valid below the invalidation level." in text
-    assert "Invalid below/above: 105" in text
+    assert "Stop: 105" in text
+    assert "Invalid if price accepts above 105." in text
+    assert "Limit Zone must hold as resistance" not in text
+    assert "Bearish structure must remain valid" not in text
+    assert "Invalid below/above" not in text
 
 
-
-def test_old_watchlist_formatter_shape() -> None:
-    test_old_public_watchlist_formatter_matches_expected_shape()
+def test_watchlist_formatter_shape() -> None:
+    test_public_watchlist_formatter_matches_simple_signal_shape()
 
 
 def test_triggered_waiting_confirmation_formatter_shape() -> None:
     text = format_telegram_signal_message(
         TelegramAlertType.WATCHLIST,
-        _message(watchlist_status="LIMIT_ZONE_HIT_WAITING_CONFIRMATION"),
+        _message(
+            watchlist_status="LIMIT_ZONE_HIT_WAITING_CONFIRMATION",
+            structure_reason="Liquidity has been swept, but structure has not fully confirmed yet. This is a stalking setup - confirmation is still required before aggressive execution.",
+        ),
     )
 
-    assert "Status: LIMIT ZONE HIT" in text
-    assert "Price is in or near the Limit Zone." in text
-    assert "Wait for clean confirmation before any trade." in text
-    assert "No confirmation = no trade." in text
-    assert "We let the market prove it." in text
+    assert "SCALP SIGNAL" in text
+    assert "confirmation is still required" in text
+    assert "Status: LIMIT ZONE HIT" not in text
+    assert "No confirmation = no trade." not in text
     assert "CONFIRMED SIGNAL" not in text
+
 def test_watchlist_upgraded_requires_upgrade_flag() -> None:
     plain = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, _message())
     upgraded = format_telegram_signal_message(

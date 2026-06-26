@@ -555,6 +555,7 @@ class PublicWatchlistCandidate:
     entry_zone_low: Any = NA
     entry_zone_high: Any = NA
     stop_loss: Any = NA
+    tp1: Any = NA
     invalidation_level: Any = NA
     pending_confirmation_reason: str = NA
     failed_gate: str = NA
@@ -2313,6 +2314,13 @@ def _persist_public_watchlist_duplicate_reservation_skip(
     if not inserted:
         repository.compact_repeated_attempt(skip_record)
     logger.info(
+        "simple_signal_duplicate_blocked symbol=%s bias=%s signature=%s cooldown_remaining=%s",
+        skip_record.symbol,
+        skip_record.direction,
+        skip_record.public_watchlist_plan_id,
+        NA,
+    )
+    logger.info(
         "public_watchlist_duplicate_skipped symbol=%s side=%s raw_zone=%s-%s raw_invalidation=%s "
         "normalized_zone=%s-%s normalized_invalidation=%s matched_prior_sent_row_id=%s "
         "canonical_plan_id=%s event_type=%s dedupe_reason=%s",
@@ -2765,10 +2773,9 @@ class TelegramLifecycleDeliveryService:
                     eligibility_context=context,
                 )
         if (
-            decision.alert_type in TERMINAL_UPDATE_ALERT_TYPES
+            _public_watchlist_follow_up_alert_suppressed(decision.alert_type)
             and prior_active_alert is not None
             and prior_active_alert.alert_type == TelegramAlertType.WATCHLIST.value
-            and not self.public_watchlist_terminal_updates_enabled
         ):
             return _persist_suppressed_watchlist_terminal_update(
                 repository,
@@ -3322,9 +3329,8 @@ class TelegramLifecycleDeliveryService:
             if outcome is None:
                 continue
             if (
-                outcome.alert_type in TERMINAL_UPDATE_ALERT_TYPES
+                _public_watchlist_follow_up_alert_suppressed(outcome.alert_type)
                 and prior_alert.alert_type == TelegramAlertType.WATCHLIST.value
-                and not self.public_watchlist_terminal_updates_enabled
             ):
                 deliveries.append(
                     _persist_suppressed_watchlist_terminal_update(
@@ -3409,6 +3415,16 @@ class TelegramLifecycleDeliveryService:
             return outcome
 
         alert_type, message = outcome
+        if _public_watchlist_follow_up_alert_suppressed(alert_type):
+            return _persist_suppressed_watchlist_terminal_update(
+                repository,
+                prior_alert=prior_alert,
+                symbol_result=current_result,
+                alert_type=alert_type,
+                message=message,
+                scan_run_id=scan_run_id,
+                eligibility_context=eligibility_context,
+            )
         if repository.has_attempt(signal_id=prior_alert.signal_id, alert_type=alert_type):
             repository.compact_existing_attempt(
                 signal_id=prior_alert.signal_id,
@@ -3676,6 +3692,12 @@ def _can_try_public_watchlist_reconciliation(
         "lifecycle_state_not_eligible",
     } or decision.alert_type is None
 
+
+def _public_watchlist_follow_up_alert_suppressed(alert_type: TelegramAlertType | None) -> bool:
+    return alert_type in TERMINAL_UPDATE_ALERT_TYPES or alert_type in TP_SL_ALERT_TYPES or alert_type in {
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        TelegramAlertType.LIMIT_HIT,
+    }
 
 def _public_watchlist_reconciliation_decision_for_symbol(
     symbol_result: ScannerSymbolResult,
@@ -4064,6 +4086,20 @@ def _public_watchlist_candidate_from_symbol(symbol_result: ScannerSymbolResult) 
         _level_field(getattr(trade_idea, "stop_loss", None), "price"),
         invalidation_level if _decimal_or_none(invalidation_level) is not None else NA,
     )
+    tp1 = _first_non_na(
+        getattr(lifecycle, "tp1", NA) if lifecycle is not None else NA,
+        _field(intelligence, "tp1"),
+        _field(intelligence, "target_1"),
+        _field(intelligence, "take_profit_1"),
+        diagnostics.get("tp1"),
+        diagnostics.get("target_1"),
+        diagnostics.get("take_profit_1"),
+        diagnostics.get("first_target"),
+        _field(setup, "tp1"),
+        _field(setup, "target_1"),
+        _field(setup, "take_profit_1"),
+        _take_profit(trade_idea, 1),
+    )
     potential_rr = _first_non_na(
         _field(intelligence, "potential_rr"),
         _field(intelligence, "rr"),
@@ -4130,6 +4166,7 @@ def _public_watchlist_candidate_from_symbol(symbol_result: ScannerSymbolResult) 
         entry_zone_low=entry_low,
         entry_zone_high=entry_high,
         stop_loss=stop_loss,
+        tp1=tp1,
         invalidation_level=invalidation_level,
         pending_confirmation_reason=_text(pending_confirmation),
         failed_gate=failed_gate or NA,
@@ -4165,6 +4202,7 @@ def _message_with_public_watchlist_candidate(
             message.watch_zone,
         ),
         stop_loss=candidate.stop_loss if _text(candidate.stop_loss) != NA else message.stop_loss,
+        tp1=candidate.tp1 if _text(candidate.tp1) != NA else message.tp1,
         planned_rr=candidate.potential_rr if _text(candidate.potential_rr) != NA else message.planned_rr,
         confirmation_needed=(
             candidate.pending_confirmation_reason
@@ -4196,6 +4234,10 @@ def _public_watchlist_candidate_missing_fields(candidate: PublicWatchlistCandida
         missing.append("missing_rr")
     if _decimal_pair_values(candidate.entry_zone_low, candidate.entry_zone_high) is None:
         missing.append("missing_entry_zone")
+    if _decimal_or_none(candidate.stop_loss) is None:
+        missing.append("missing_stop")
+    if _decimal_or_none(candidate.tp1) is None:
+        missing.append("missing_tp1")
     if not _public_watchlist_candidate_has_invalidation(candidate):
         missing.append("missing_invalidation")
     return tuple(missing)
@@ -4208,6 +4250,8 @@ def _public_watchlist_candidate_precise_missing_blockers(candidate: PublicWatchl
         "missing_grade": "public_watchlist_missing_grade",
         "missing_rr": "public_watchlist_missing_rr",
         "missing_entry_zone": "public_watchlist_missing_entry_zone",
+        "missing_stop": "public_watchlist_missing_stop",
+        "missing_tp1": "public_watchlist_missing_tp1",
         "missing_invalidation": "public_watchlist_missing_invalidation",
     }
     return tuple(precise[field] for field in _public_watchlist_candidate_missing_fields(candidate) if field in precise)
@@ -4267,6 +4311,197 @@ def _first_decimal_pair_text(*values: Any) -> tuple[Decimal, Decimal] | None:
     return None
 
 
+def _compose_simple_signal_reason(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    message: TelegramSignalMessage,
+    candidate: PublicWatchlistCandidate | None = None,
+) -> str:
+    candidate = candidate or _public_watchlist_candidate_from_symbol(symbol_result)
+    passed_tokens = _context_status_tokens(
+        diagnostics.get("gates_passed"),
+        diagnostics.get("passed_gates"),
+        diagnostics.get("completed_gates"),
+    )
+    failed_codes = set(_public_watchlist_failed_gate_codes(symbol_result, candidate=candidate))
+    context_tokens = _context_status_tokens(
+        diagnostics.get("first_failed_gate"),
+        diagnostics.get("failed_gate"),
+        diagnostics.get("pending_reason"),
+        diagnostics.get("pending_confirmation_reason"),
+        diagnostics.get("next_required_conditions"),
+        diagnostics.get("confirmation_needed"),
+        message.confirmation_needed,
+        message.watchlist_status,
+        candidate.pending_confirmation_reason,
+    )
+    sweep = _context_contains_any(passed_tokens, ("sweep", "liquidity_sweep")) or _context_any_positive(
+        diagnostics,
+        "liquidity_sweep_detected",
+        "sweep_detected",
+        "execution_sweep_detected",
+        "execution_sweep_status",
+        "sweep_status",
+    )
+    reclaim = _context_contains_any(passed_tokens, ("reclaim", "wick_reclaim")) or _context_any_positive(
+        diagnostics,
+        "reclaim_detected",
+        "wick_reclaim_detected",
+        "wick_reclaim_status",
+        "reclaim_status",
+        "structural_reclaim_status",
+    )
+    structure_shift = _context_contains_any(passed_tokens, ("bos", "choch", "mss", "structure_shift")) or _context_any_positive(
+        diagnostics,
+        "bos_detected",
+        "choch_detected",
+        "mss_detected",
+        "structure_shift_detected",
+        "confirmation_structure_shift_status",
+        "bos_choch_status",
+    )
+    waiting_pullback = bool(
+        failed_codes
+        & {
+            "limit_zone_not_hit",
+            "limit_zone_not_touched",
+            "entry_zone_not_hit",
+            "entry_zone_not_touched",
+            "pullback_pending",
+            "fvg_not_tapped",
+            "ob_retest_pending",
+            "limit_zone_hold_pending",
+            "pullback_hold_pending",
+        }
+    ) or _context_contains_any(context_tokens, ("pullback", "limit_zone", "entry_zone", "ob_retest", "fvg_not_tapped"))
+    waiting_confirmation = any("confirmation" in code or "trigger" in code for code in failed_codes) or _context_contains_any(
+        context_tokens,
+        ("confirmation", "trigger_not_hit", "stalking_not_triggered", "bos_body_close_pending", "choch_confirmation_pending"),
+    )
+    order_block = _context_contains_any(passed_tokens, ("order_block", "ob", "ob_fvg")) or _diagnostic_text_contains(
+        diagnostics,
+        "order_block",
+        "ob",
+        "selected_zone_type",
+        "ob_fvg_status",
+        "ob_fvg_diagnostics",
+    )
+    fvg = _context_contains_any(passed_tokens, ("fvg", "imbalance", "ob_fvg")) or _diagnostic_text_contains(
+        diagnostics,
+        "fvg",
+        "imbalance",
+        "selected_zone_type",
+        "ob_fvg_status",
+        "ob_fvg_diagnostics",
+    )
+    regime_pending = any(classify_failed_gate_code(code) == REGIME_MARKET_CONDITION_PENDING for code in failed_codes)
+    side_group = _simple_signal_side_group(message.direction)
+    sweep_label = _sweep_direction_label(diagnostics)
+    sweep_subject = f"{sweep_label} liquidity" if sweep_label != NA else "Liquidity"
+
+    if sweep and structure_shift and waiting_pullback:
+        if reclaim:
+            return "Liquidity sweep, reclaim, and structure shift are already in place. The setup is now waiting for price to pull back into the planned limit entry zone."
+        return "Liquidity sweep and structure shift are already in place. The setup is now waiting for price to pull back into the planned limit entry zone."
+    if sweep and reclaim and structure_shift:
+        return f"{sweep_subject} was swept, price reclaimed the zone, and structure is starting to shift back in favor of {side_group}."
+    if sweep and reclaim:
+        return "Liquidity was swept and price reclaimed the zone, giving a defined manual setup with clear invalidation."
+    if sweep and waiting_confirmation:
+        return "Liquidity has been swept, but structure has not fully confirmed yet. This is a stalking setup - confirmation is still required before aggressive execution."
+    if order_block or fvg:
+        if order_block and fvg:
+            zone_text = "validated imbalance/order-block zone"
+        elif order_block:
+            zone_text = "validated order-block zone"
+        else:
+            zone_text = "validated imbalance zone"
+        return f"Price is reacting around a {zone_text}, giving a defined entry area with clear invalidation."
+    if regime_pending:
+        return "Structure and trade map are valid, but broader market conditions are not fully supportive. This remains a manual-execution setup, not an automatic confirmation."
+    if waiting_confirmation:
+        return "The trade map is valid, but confirmation is still pending. This remains a manual-execution setup, not an automatic confirmation."
+    if waiting_pullback:
+        return "The trade map is defined and price is waiting for a pullback into the planned limit entry zone before manual execution."
+    existing = _clean_public_sentence(message.structure_reason)
+    if existing != NA and not _looks_raw_or_generic_context(existing):
+        return existing
+    return "The setup has a complete trade map, acceptable quality, and defined invalidation. Treat it as a manual signal only."
+
+
+def _context_status_tokens(*values: Any) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        for item in _sequence_or_single(value):
+            key = _status_key(item)
+            if key:
+                tokens.add(key)
+    return tokens
+
+
+def _context_contains_any(tokens: set[str], fragments: Sequence[str]) -> bool:
+    return any(fragment in token for token in tokens for fragment in fragments)
+
+
+def _context_any_positive(diagnostics: Mapping[str, Any], *keys: str) -> bool:
+    return any(_context_positive(diagnostics.get(key)) for key in keys)
+
+
+def _context_positive(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    key = _status_key(value)
+    return key in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "pass",
+        "passed",
+        "detected",
+        "confirmed",
+        "present",
+        "valid",
+        "validated",
+        "complete",
+        "completed",
+        "intact",
+    }
+
+
+def _diagnostic_text_contains(diagnostics: Mapping[str, Any], *fragments: str) -> bool:
+    for key, value in diagnostics.items():
+        if key not in fragments:
+            continue
+        text = _text(value).lower()
+        if text != NA.lower() and any(fragment in text for fragment in fragments):
+            return True
+    return False
+
+
+def _simple_signal_side_group(direction: Any) -> str:
+    side = _status_key(direction)
+    if side == "long":
+        return "longs"
+    if side == "short":
+        return "shorts"
+    return "the planned side"
+
+
+def _sweep_direction_label(diagnostics: Mapping[str, Any]) -> str:
+    key = _status_key(
+        _first_non_na(
+            diagnostics.get("sweep_direction"),
+            diagnostics.get("liquidity_sweep_direction"),
+            diagnostics.get("swept_liquidity_side"),
+        )
+    )
+    if key in {"down", "downside", "sell_side", "sellside", "below", "lows"}:
+        return "Downside"
+    if key in {"up", "upside", "buy_side", "buyside", "above", "highs"}:
+        return "Upside"
+    return NA
+
 def _telegram_signal_message_for_alert(
     symbol_result: ScannerSymbolResult,
     alert_type: TelegramAlertType,
@@ -4296,6 +4531,10 @@ def _telegram_signal_message_for_alert(
                 diagnostics.get("regime_confidence_score"),
                 _mapping_value(symbol_result.regime_diagnostics, "confidence_score"),
             ),
+        )
+        message = replace(
+            message,
+            structure_reason=_compose_simple_signal_reason(symbol_result, diagnostics, message, candidate),
         )
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
         return replace(message, invalidation_reason=_terminal_update_reason(symbol_result, alert_type))
@@ -7271,9 +7510,11 @@ def _watchlist_public_readiness_blockers(
     missing_trade_map: list[str] = []
     if _decimal_pair_values(message.entry_low, message.entry_high) is None:
         missing_trade_map.append("public_watchlist_missing_entry_zone")
-    if _decimal_or_none(message.stop_loss) is None and _text(
-        _first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)
-    ) == NA:
+    if _decimal_or_none(message.stop_loss) is None:
+        missing_trade_map.append("public_watchlist_missing_stop")
+    if _decimal_or_none(message.tp1) is None:
+        missing_trade_map.append("public_watchlist_missing_tp1")
+    if _text(_first_non_na(message.watchlist_invalidation_reason, message.invalidation_reason)) == NA:
         missing_trade_map.append("public_watchlist_missing_invalidation")
     if missing_trade_map:
         blockers.extend(missing_trade_map)
@@ -7401,7 +7642,7 @@ def _looks_raw_or_generic_context(value: Any) -> bool:
         return True
     lowered = text.lower()
     return (
-        text in {"Core structure is still developing.", "N/A"}
+        text in {"Core structure is still developing.", "Setup is structurally valid and waiting for confirmation.", "N/A"}
         or "{" in text
         or "}" in text
         or "decimal(" in lowered
@@ -7857,7 +8098,7 @@ def _persist_suppressed_watchlist_terminal_update(
     eligibility_context: TelegramEligibilityContext,
 ) -> TelegramLifecycleDelivery:
     seen_at = now_utc_iso()
-    reason = "public_watchlist_terminal_updates_disabled"
+    reason = "public_watchlist_follow_up_updates_disabled"
     skipped_alert_type = _watchlist_terminal_suppression_alert_type(alert_type)
     transition = symbol_result.lifecycle_transition
     previous_state = transition.from_state.value if transition and transition.from_state else NA
@@ -7897,14 +8138,14 @@ def _persist_suppressed_watchlist_terminal_update(
     )
     inserted = repository.insert_attempt(record)
     status = "skipped"
-    detail = "Public watchlist terminal update suppressed by configuration."
+    detail = "Public watchlist follow-up update suppressed."
     if not inserted:
         compacted = repository.compact_repeated_attempt(record)
         status = "blocked_repeat" if compacted else "duplicate"
         detail = (
-            "Repeated suppressed watchlist terminal update compacted."
+            "Repeated suppressed watchlist follow-up update compacted."
             if compacted
-            else "Duplicate suppressed watchlist terminal update prevented."
+            else "Duplicate suppressed watchlist follow-up update prevented."
         )
     return TelegramLifecycleDelivery(
         symbol=prior_alert.symbol,
