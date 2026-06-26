@@ -46,7 +46,7 @@ from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
-from app.storage.models import TelegramAlertAttemptRecord
+from app.storage.models import PublicAlertEventRecord, TelegramAlertAttemptRecord
 
 logger = logging.getLogger(__name__)
 
@@ -183,11 +183,16 @@ PUBLIC_WATCHLIST_MIN_SCORE = Decimal("80")
 PUBLIC_WATCHLIST_MAX_PER_SCAN = 3
 PUBLIC_WATCHLIST_COOLDOWN_HOURS = 24
 PUBLIC_WATCHLIST_PRICE_TOLERANCE_TICKS = Decimal("10")
-PUBLIC_WATCHLIST_PLAN_ID_VERSION = "public-watchlist-plan-v1"
+PUBLIC_WATCHLIST_ZONE_TOLERANCE_MULTIPLIER = Decimal("2")
+PUBLIC_WATCHLIST_PLAN_ID_VERSION = "public-watchlist-plan-v2"
 PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE = "initial_watchlist"
 PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON = "duplicate_successful_public_watchlist_event"
 PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON = "public_watchlist_event_reservation_in_flight"
 PUBLIC_WATCHLIST_RESERVATION_STATUS = "reserved"
+PUBLIC_ALERT_EVENT_RESERVED_STATUS = "RESERVED"
+PUBLIC_ALERT_EVENT_SENT_STATUS = "SENT"
+PUBLIC_ALERT_EVENT_FAILED_STATUS = "FAILED"
+PUBLIC_ALERT_EVENT_BLOCKED_STATUS = "BLOCKED"
 DEFAULT_MIN_TECHNICAL_SCORE = Decimal("50")
 PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS = {
     "watch",
@@ -580,10 +585,12 @@ class PublicWatchlistReservationResult:
     granted: bool
     event_key: str
     reservation_id: int | None = None
+    event_id: int | None = None
     status: str = "skipped"
     reason: str = NA
     detail: str = NA
     matched_prior_alert_id: int | None = None
+    matched_prior_event_id: int | None = None
     fallback_matched_legacy_sent: bool = False
     jitter_matched_same_plan: bool = False
 
@@ -1681,6 +1688,261 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             raise StorageError("Telegram alert attempt repository is not open.")
         return self.connection
 
+def _public_alert_event_from_row(row: sqlite3.Row | None) -> PublicAlertEventRecord | None:
+    if row is None:
+        return None
+    return PublicAlertEventRecord(**{key: row[key] for key in row.keys()})
+
+
+def _public_alert_event_status(value: Any) -> str:
+    status = _status_key(value).upper()
+    if status in {
+        PUBLIC_ALERT_EVENT_RESERVED_STATUS,
+        PUBLIC_ALERT_EVENT_SENT_STATUS,
+        PUBLIC_ALERT_EVENT_FAILED_STATUS,
+        PUBLIC_ALERT_EVENT_BLOCKED_STATUS,
+    }:
+        return status
+    return PUBLIC_ALERT_EVENT_BLOCKED_STATUS
+
+
+def _get_public_alert_event(
+    db: SQLiteTelegramAlertAttemptRepository,
+    *,
+    event_key: str,
+    statuses: Sequence[str] | None = None,
+) -> PublicAlertEventRecord | None:
+    normalized_event_key = _text(event_key)
+    if normalized_event_key == NA:
+        return None
+    params: list[Any] = [normalized_event_key]
+    status_clause = str()
+    if statuses:
+        normalized_statuses = tuple(_public_alert_event_status(status) for status in statuses if _text(status) != NA)
+        if normalized_statuses:
+            placeholders = ",".join("?" for _ in normalized_statuses)
+            status_clause = f"AND status IN ({placeholders})"
+            params.extend(normalized_statuses)
+    row = db._connection.execute(
+        f"""
+        SELECT * FROM public_alert_events
+        WHERE event_key = ?
+          {status_clause}
+        ORDER BY id ASC
+        LIMIT 1
+        """
+,
+        params,
+    ).fetchone()
+    return _public_alert_event_from_row(row)
+
+
+def _public_alert_event_matches_plan(
+    event: PublicAlertEventRecord,
+    plan: PublicWatchlistPlanIdentity,
+) -> tuple[bool, bool]:
+    record = TelegramAlertAttemptRecord(
+        signal_id=NA,
+        symbol=event.symbol,
+        direction=event.side,
+        previous_state=NA,
+        new_state=NA,
+        alert_type=TelegramAlertType.WATCHLIST.value,
+        lifecycle_state=NA,
+        sent_at=event.sent_at,
+        telegram_status=_text(event.status).lower(),
+        message_hash=NA,
+        entry_low=event.raw_entry_low,
+        entry_high=event.raw_entry_high,
+        stop_loss=event.raw_stop_loss,
+        public_watchlist_plan_id=event.canonical_plan_id,
+    )
+    if _text(event.setup_family) != NA and plan.setup_family != NA and _text(event.setup_family) != plan.setup_family:
+        return False, False
+    return _public_watchlist_legacy_record_matches_plan(record, plan)
+
+
+def _find_matching_public_alert_event(
+    db: SQLiteTelegramAlertAttemptRepository,
+    *,
+    symbol: str,
+    direction: Any,
+    plan: PublicWatchlistPlanIdentity,
+    event_type: str,
+) -> tuple[PublicAlertEventRecord | None, bool]:
+    normalized_symbol = _symbol(symbol)
+    normalized_direction = _status_key(direction)
+    normalized_event_type = _status_key(event_type) or PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE
+    if normalized_symbol == NA or normalized_direction not in {"long", "short"}:
+        return None, False
+    statuses = (PUBLIC_ALERT_EVENT_SENT_STATUS, PUBLIC_ALERT_EVENT_RESERVED_STATUS)
+    placeholders = ",".join("?" for _ in statuses)
+    rows = db._connection.execute(
+        f"""
+        SELECT * FROM public_alert_events
+        WHERE symbol = ?
+          AND side = ?
+          AND event_type = ?
+          AND status IN ({placeholders})
+        ORDER BY id ASC
+        """
+,
+        (normalized_symbol, normalized_direction, normalized_event_type, *statuses),
+    ).fetchall()
+    for row in rows:
+        event = _public_alert_event_from_row(row)
+        if event is None:
+            continue
+        matched, jitter = _public_alert_event_matches_plan(event, plan)
+        if matched:
+            return event, jitter
+    return None, False
+
+def _insert_public_alert_event(
+    db: SQLiteTelegramAlertAttemptRepository,
+    *,
+    plan: PublicWatchlistPlanIdentity,
+    event_key: str,
+    event_type: str,
+    status: str,
+    reserved_at: str,
+    sent_at: str | None = None,
+    matched_prior_alert_id: int | None = None,
+    matched_prior_event_id: int | None = None,
+    failure_reason: str = NA,
+) -> tuple[PublicAlertEventRecord | None, bool]:
+    normalized_event_key = _text(event_key)
+    if normalized_event_key == NA:
+        return None, False
+    source_modes = ",".join(plan.source_modes) if plan.source_modes else NA
+    ledger_status = _public_alert_event_status(status)
+    timestamp = reserved_at if _text(reserved_at) != NA else now_utc_iso()
+    try:
+        db._connection.execute(
+            """
+            INSERT INTO public_alert_events (
+                canonical_plan_id, event_type, event_key, symbol, side, setup_family,
+                normalized_zone_low, normalized_zone_high, normalized_invalidation,
+                raw_entry_low, raw_entry_high, raw_stop_loss, status, reserved_at, sent_at,
+                source_modes, matched_prior_alert_id, matched_prior_event_id, failure_reason,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+,
+            (
+                _text(plan.plan_id),
+                _status_key(event_type) or PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
+                normalized_event_key,
+                _symbol(plan.symbol),
+                _status_key(plan.side),
+                _text(plan.setup_family),
+                _text(plan.normalized_entry_low),
+                _text(plan.normalized_entry_high),
+                _text(plan.normalized_invalidation),
+                _text(plan.raw_entry_low),
+                _text(plan.raw_entry_high),
+                _text(plan.raw_invalidation),
+                ledger_status,
+                timestamp,
+                sent_at if _text(sent_at) != NA else None,
+                source_modes,
+                int(matched_prior_alert_id) if matched_prior_alert_id is not None else None,
+                int(matched_prior_event_id) if matched_prior_event_id is not None else None,
+                _text(failure_reason),
+                timestamp,
+                timestamp,
+            ),
+        )
+    except sqlite3.IntegrityError:
+        return _get_public_alert_event(db, event_key=normalized_event_key), False
+    return _get_public_alert_event(db, event_key=normalized_event_key), True
+
+
+def _mark_public_alert_event_result(
+    db: SQLiteTelegramAlertAttemptRepository,
+    *,
+    event_id: int,
+    status: str,
+    sent_at: str | None,
+    failure_reason: str,
+) -> bool:
+    ledger_status = PUBLIC_ALERT_EVENT_SENT_STATUS if _text(status) == "sent" else PUBLIC_ALERT_EVENT_FAILED_STATUS
+    now = now_utc_iso()
+    cursor = db._connection.execute(
+        """
+        UPDATE public_alert_events
+        SET status = ?,
+            sent_at = ?,
+            failure_reason = ?,
+            updated_at = ?
+        WHERE id = ?
+        """
+,
+        (
+            ledger_status,
+            sent_at if ledger_status == PUBLIC_ALERT_EVENT_SENT_STATUS else None,
+            NA if ledger_status == PUBLIC_ALERT_EVENT_SENT_STATUS else _text(failure_reason),
+            now,
+            int(event_id),
+        ),
+    )
+    return cursor.rowcount > 0
+
+
+def _reserve_existing_public_alert_event(
+    db: SQLiteTelegramAlertAttemptRepository,
+    *,
+    event_id: int,
+    reserved_at: str,
+) -> bool:
+    timestamp = reserved_at if _text(reserved_at) != NA else now_utc_iso()
+    cursor = db._connection.execute(
+        """
+        UPDATE public_alert_events
+        SET status = ?,
+            reserved_at = ?,
+            sent_at = NULL,
+            failure_reason = ?,
+            updated_at = ?
+        WHERE id = ?
+          AND status = ?
+        """,
+        (
+            PUBLIC_ALERT_EVENT_RESERVED_STATUS,
+            timestamp,
+            NA,
+            timestamp,
+            int(event_id),
+            PUBLIC_ALERT_EVENT_FAILED_STATUS,
+        ),
+    )
+    return cursor.rowcount > 0
+
+
+def _block_duplicate_public_alert_event(
+    db: SQLiteTelegramAlertAttemptRepository,
+    *,
+    plan: PublicWatchlistPlanIdentity,
+    event_key: str,
+    event_type: str,
+    attempted_at: str,
+    matched_prior_alert_id: int | None = None,
+    matched_prior_event_id: int | None = None,
+    reason: str = PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON,
+) -> PublicAlertEventRecord | None:
+    event, _ = _insert_public_alert_event(
+        db,
+        plan=plan,
+        event_key=event_key,
+        event_type=event_type,
+        status=PUBLIC_ALERT_EVENT_BLOCKED_STATUS,
+        reserved_at=attempted_at,
+        matched_prior_alert_id=matched_prior_alert_id,
+        matched_prior_event_id=matched_prior_event_id,
+        failure_reason=reason,
+    )
+    return event
+
 
 def reserve_public_watchlist_event(
     db: SQLiteTelegramAlertAttemptRepository,
@@ -1713,6 +1975,53 @@ def reserve_public_watchlist_event(
     plan = payload.get("canonical_plan")
     if not isinstance(plan, PublicWatchlistPlanIdentity):
         plan = PublicWatchlistPlanIdentity(plan_id=canonical_plan_id, symbol=_symbol(symbol), side=_status_key(side))
+    active_event_statuses = (PUBLIC_ALERT_EVENT_SENT_STATUS, PUBLIC_ALERT_EVENT_RESERVED_STATUS)
+    prior_event = _get_public_alert_event(event_key=event_key, statuses=active_event_statuses, db=db)
+    event_jitter_matched = False
+    if prior_event is None:
+        prior_event, event_jitter_matched = _find_matching_public_alert_event(
+            db,
+            symbol=symbol,
+            direction=side,
+            plan=plan,
+            event_type=event_type,
+        )
+    if prior_event is not None:
+        prior_attempt = db.find_successful_public_watchlist_event(event_key=prior_event.event_key)
+        if prior_event.status == PUBLIC_ALERT_EVENT_SENT_STATUS:
+            if prior_attempt is not None:
+                _persist_public_watchlist_duplicate_reservation_skip(
+                    db,
+                    reservation_record,
+                    matched_prior=prior_attempt,
+                    fallback_matched_legacy_sent=False,
+                    jitter_matched_same_plan=event_jitter_matched,
+                    matched_prior_event_id=prior_event.id,
+                )
+            return PublicWatchlistReservationResult(
+                granted=False,
+                event_key=event_key,
+                status="skipped",
+                reason=PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON,
+                detail=_public_watchlist_reservation_duplicate_detail(
+                    fallback_matched_legacy_sent=False,
+                    jitter_matched_same_plan=event_jitter_matched,
+                ),
+                matched_prior_alert_id=prior_attempt.id if prior_attempt is not None else None,
+                matched_prior_event_id=prior_event.id,
+                fallback_matched_legacy_sent=False,
+                jitter_matched_same_plan=event_jitter_matched,
+            )
+        return PublicWatchlistReservationResult(
+            granted=False,
+            event_key=event_key,
+            event_id=prior_event.id,
+            status="skipped",
+            reason=PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON,
+            detail="Public watchlist event is already reserved by another send path.",
+            matched_prior_event_id=prior_event.id,
+        )
+
 
     prior = db.find_successful_public_watchlist_event(event_key=event_key)
     fallback_matched = False
@@ -1726,12 +2035,22 @@ def reserve_public_watchlist_event(
             since=payload.get("legacy_since"),
         )
     if prior is not None:
+        blocked_event = _block_duplicate_public_alert_event(
+            db,
+            plan=plan,
+            event_key=event_key,
+            event_type=event_type,
+            attempted_at=_text(reservation_record.attempted_at),
+            matched_prior_alert_id=prior.id,
+            reason=PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON,
+        )
         _persist_public_watchlist_duplicate_reservation_skip(
             db,
             reservation_record,
             matched_prior=prior,
             fallback_matched_legacy_sent=fallback_matched,
             jitter_matched_same_plan=jitter_matched,
+            matched_prior_event_id=blocked_event.id if blocked_event is not None else None,
         )
         return PublicWatchlistReservationResult(
             granted=False,
@@ -1774,14 +2093,110 @@ def reserve_public_watchlist_event(
                 reason=PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON,
                 detail="Public watchlist event is already reserved by another send path.",
             )
-        if existing.id is not None and db.replace_attempt_with_reservation(attempt_id=existing.id, record=reservation_record):
-            return PublicWatchlistReservationResult(
-                granted=True,
+        if existing.id is not None:
+            ledger_event, ledger_inserted = _insert_public_alert_event(
+                db,
+                plan=plan,
                 event_key=event_key,
-                reservation_id=existing.id,
-                status=PUBLIC_WATCHLIST_RESERVATION_STATUS,
-                reason=NA,
-                detail="Public watchlist event reservation refreshed for retry.",
+                event_type=event_type,
+                status=PUBLIC_ALERT_EVENT_RESERVED_STATUS,
+                reserved_at=_text(reservation_record.attempted_at),
+            )
+            if ledger_event is None:
+                return PublicWatchlistReservationResult(
+                    granted=False,
+                    event_key=event_key,
+                    status="blocked",
+                    reason="public_alert_event_reservation_failed",
+                    detail="Public alert event ledger reservation could not be created.",
+                )
+            if not ledger_inserted:
+                retry_reserved = (
+                    ledger_event.status == PUBLIC_ALERT_EVENT_FAILED_STATUS
+                    and ledger_event.id is not None
+                    and _reserve_existing_public_alert_event(
+                        db,
+                        event_id=ledger_event.id,
+                        reserved_at=_text(reservation_record.attempted_at),
+                    )
+                )
+                if not retry_reserved:
+                    return PublicWatchlistReservationResult(
+                        granted=False,
+                        event_key=event_key,
+                        event_id=ledger_event.id,
+                        status="skipped",
+                        reason=PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON,
+                        detail="Public watchlist event is already reserved by another send path.",
+                        matched_prior_event_id=ledger_event.id,
+                    )
+            if db.replace_attempt_with_reservation(attempt_id=existing.id, record=reservation_record):
+                return PublicWatchlistReservationResult(
+                    granted=True,
+                    event_key=event_key,
+                    reservation_id=existing.id,
+                    event_id=ledger_event.id,
+                    status=PUBLIC_WATCHLIST_RESERVATION_STATUS,
+                    reason=NA,
+                    detail="Public watchlist event reservation refreshed for retry.",
+                )
+
+    ledger_event, ledger_inserted = _insert_public_alert_event(
+        db,
+        plan=plan,
+        event_key=event_key,
+        event_type=event_type,
+        status=PUBLIC_ALERT_EVENT_RESERVED_STATUS,
+        reserved_at=_text(reservation_record.attempted_at),
+    )
+    if ledger_event is None:
+        return PublicWatchlistReservationResult(
+            granted=False,
+            event_key=event_key,
+            status="blocked",
+            reason="public_alert_event_reservation_failed",
+            detail="Public alert event ledger reservation could not be created.",
+        )
+    if not ledger_inserted:
+        prior_attempt = db.find_successful_public_watchlist_event(event_key=ledger_event.event_key)
+        if ledger_event.status == PUBLIC_ALERT_EVENT_SENT_STATUS:
+            if prior_attempt is not None:
+                _persist_public_watchlist_duplicate_reservation_skip(
+                    db,
+                    reservation_record,
+                    matched_prior=prior_attempt,
+                    fallback_matched_legacy_sent=False,
+                    jitter_matched_same_plan=False,
+                    matched_prior_event_id=ledger_event.id,
+                )
+            return PublicWatchlistReservationResult(
+                granted=False,
+                event_key=event_key,
+                event_id=ledger_event.id,
+                status="skipped",
+                reason=PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON,
+                detail="Prior successful public watchlist event already exists.",
+                matched_prior_alert_id=prior_attempt.id if prior_attempt is not None else None,
+                matched_prior_event_id=ledger_event.id,
+            )
+        retry_reserved = (
+            ledger_event.status == PUBLIC_ALERT_EVENT_FAILED_STATUS
+            and ledger_event.id is not None
+            and _reserve_existing_public_alert_event(
+                db,
+                event_id=ledger_event.id,
+                reserved_at=_text(reservation_record.attempted_at),
+            )
+        )
+        if not retry_reserved:
+            return PublicWatchlistReservationResult(
+                granted=False,
+                event_key=event_key,
+                event_id=ledger_event.id,
+                status="skipped",
+                reason=PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON,
+                detail="Public watchlist event is already reserved by another send path.",
+                matched_prior_event_id=ledger_event.id,
             )
 
     inserted = db.insert_attempt(reservation_record)
@@ -1791,6 +2206,7 @@ def reserve_public_watchlist_event(
             granted=True,
             event_key=event_key,
             reservation_id=reserved.id if reserved is not None else None,
+            event_id=ledger_event.id,
             status=PUBLIC_WATCHLIST_RESERVATION_STATUS,
             reason=NA,
             detail="Public watchlist event reserved before send.",
@@ -1833,6 +2249,7 @@ def reserve_public_watchlist_event(
                 granted=True,
                 event_key=event_key,
                 reservation_id=retry_existing.id,
+                event_id=ledger_event.id,
                 status=PUBLIC_WATCHLIST_RESERVATION_STATUS,
                 reason=NA,
                 detail="Public watchlist event reservation refreshed for retry.",
@@ -1864,14 +2281,17 @@ def _persist_public_watchlist_duplicate_reservation_skip(
     repository: SQLiteTelegramAlertAttemptRepository,
     reservation_record: TelegramAlertAttemptRecord,
     *,
-    matched_prior: TelegramAlertAttemptRecord,
+    matched_prior: TelegramAlertAttemptRecord | None,
     fallback_matched_legacy_sent: bool,
     jitter_matched_same_plan: bool,
+    matched_prior_event_id: int | None = None,
 ) -> None:
     reason = PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON
     detail_parts = [reason]
-    if matched_prior.id is not None:
+    if matched_prior is not None and matched_prior.id is not None:
         detail_parts.append(f"matched_prior_sent_row_id={matched_prior.id}")
+    if matched_prior_event_id is not None:
+        detail_parts.append(f"matched_prior_event_id={matched_prior_event_id}")
     if fallback_matched_legacy_sent:
         detail_parts.append("fallback_matched_legacy_sent")
     if jitter_matched_same_plan:
@@ -1902,7 +2322,7 @@ def _persist_public_watchlist_duplicate_reservation_skip(
         skip_record.normalized_entry_zone_low,
         skip_record.normalized_entry_zone_high,
         skip_record.normalized_invalidation,
-        matched_prior.id if matched_prior.id is not None else NA,
+        matched_prior.id if matched_prior is not None and matched_prior.id is not None else NA,
         skip_record.public_watchlist_plan_id,
         skip_record.public_alert_event_type,
         skip_record.dedupe_reason,
@@ -2465,6 +2885,16 @@ class TelegramLifecycleDeliveryService:
                     message_hash=message_hash,
                     error_message=PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON,
                 )
+            if reservation.event_id is None:
+                return TelegramLifecycleDelivery(
+                    symbol=symbol_result.symbol,
+                    signal_id=signal_id,
+                    alert_type=decision.alert_type.value,
+                    status="failed",
+                    detail="Public alert event ledger reservation was not available after acquisition.",
+                    message_hash=message_hash,
+                    error_message="public_alert_event_reservation_missing",
+                )
             result_reason = NA if send_result.status == "sent" else _first_non_na(send_result.error_message, send_result.detail)
             marked = repository.mark_public_watchlist_reservation_result(
                 attempt_id=reservation.reservation_id,
@@ -2484,6 +2914,23 @@ class TelegramLifecycleDeliveryService:
                     detail="Public watchlist reservation result could not be persisted.",
                     message_hash=message_hash,
                     error_message="public_watchlist_reservation_mark_failed",
+                )
+            ledger_marked = _mark_public_alert_event_result(
+                repository,
+                event_id=reservation.event_id,
+                status=send_result.status,
+                sent_at=attempted_at if send_result.status == "sent" else None,
+                failure_reason=result_reason,
+            )
+            if not ledger_marked:
+                return TelegramLifecycleDelivery(
+                    symbol=symbol_result.symbol,
+                    signal_id=signal_id,
+                    alert_type=decision.alert_type.value,
+                    status="failed",
+                    detail="Public alert event ledger result could not be persisted.",
+                    message_hash=message_hash,
+                    error_message="public_alert_event_mark_failed",
                 )
         else:
             record = TelegramAlertAttemptRecord(
@@ -4052,7 +4499,10 @@ def _public_watchlist_cooldown_key_from_parts(
         "liquidity_grab_pullback",
         _public_watchlist_normalized_price(low, tick_size),
         _public_watchlist_normalized_price(high, tick_size),
-        _public_watchlist_normalized_price(invalidation, tick_size),
+        _public_watchlist_quantized_price(
+            invalidation,
+            _public_watchlist_material_invalidation_quantum(low, high, tick_size),
+        ),
     )
     plan_hash = hashlib.sha256("|".join(_text(part) for part in identity_parts).encode("utf-8")).hexdigest()[:20]
     return f"{normalized_symbol}|{normalized_direction}|{plan_hash}"
@@ -5901,18 +6351,27 @@ def _public_watchlist_canonical_plan(
     tick_size = _public_watchlist_tick_size(symbol_result, message, (entry_low, entry_high, invalidation))
     normalized_entry_low = _public_watchlist_normalized_price(entry_low, tick_size)
     normalized_entry_high = _public_watchlist_normalized_price(entry_high, tick_size)
-    normalized_invalidation = _public_watchlist_normalized_price(invalidation, tick_size)
+    invalidation_quantum = _public_watchlist_material_invalidation_quantum(entry_low, entry_high, tick_size)
+    normalized_invalidation = _public_watchlist_quantized_price(invalidation, invalidation_quantum)
     structural_identity = _public_watchlist_structural_identity(symbol_result, message)
-    identity_parts = (
-        PUBLIC_WATCHLIST_PLAN_ID_VERSION,
-        symbol,
-        side,
-        setup_family,
-        normalized_entry_low,
-        normalized_entry_high,
-        normalized_invalidation,
-        *(f"{key}={value}" for key, value in structural_identity),
-    )
+    if structural_identity:
+        identity_parts = (
+            PUBLIC_WATCHLIST_PLAN_ID_VERSION,
+            symbol,
+            side,
+            setup_family,
+            *(f"{key}={value}" for key, value in structural_identity),
+        )
+    else:
+        identity_parts = (
+            PUBLIC_WATCHLIST_PLAN_ID_VERSION,
+            symbol,
+            side,
+            setup_family,
+            normalized_entry_low,
+            normalized_entry_high,
+            normalized_invalidation,
+        )
     plan_hash = hashlib.sha256("|".join(_text(part) for part in identity_parts).encode("utf-8")).hexdigest()[:20]
     return PublicWatchlistPlanIdentity(
         plan_id=f"{symbol}|{side}|{plan_hash}",
@@ -6017,9 +6476,25 @@ def _public_watchlist_tick_size_from_prices(prices: Sequence[Decimal]) -> Decima
 def _public_watchlist_normalized_price(value: Decimal, tick_size: Decimal) -> str:
     tick = tick_size if tick_size > 0 else Decimal("0.00000001")
     quantum = tick * PUBLIC_WATCHLIST_PRICE_TOLERANCE_TICKS
-    normalized = (value / quantum).to_integral_value(rounding=ROUND_HALF_UP) * quantum
+    return _public_watchlist_quantized_price(value, quantum)
+
+
+def _public_watchlist_quantized_price(value: Decimal, quantum: Decimal) -> str:
+    normalized_quantum = quantum if quantum > 0 else Decimal("0.00000001")
+    normalized = (value / normalized_quantum).to_integral_value(rounding=ROUND_HALF_UP) * normalized_quantum
     return _text(normalized)
 
+
+def _public_watchlist_material_invalidation_quantum(
+    entry_low: Decimal,
+    entry_high: Decimal,
+    tick_size: Decimal,
+) -> Decimal:
+    tick = tick_size if tick_size > 0 else Decimal("0.00000001")
+    tick_quantum = tick * PUBLIC_WATCHLIST_PRICE_TOLERANCE_TICKS
+    zone_width = abs(entry_high - entry_low)
+    zone_quantum = zone_width * PUBLIC_WATCHLIST_ZONE_TOLERANCE_MULTIPLIER
+    return max(tick_quantum, zone_quantum)
 
 def _integer_or_none(value: Any) -> int | None:
     number = _decimal_or_none(value)
@@ -6064,8 +6539,12 @@ def _public_watchlist_legacy_record_matches_plan(
 ) -> tuple[bool, bool]:
     if _symbol(record.symbol) != plan.symbol or _status_key(record.direction) != plan.side:
         return False, False
-    if _text(record.public_watchlist_plan_id) != NA and _text(record.public_watchlist_plan_id) == plan.plan_id:
-        return True, False
+    record_plan_id = _text(record.public_watchlist_plan_id)
+    if record_plan_id != NA:
+        if record_plan_id == plan.plan_id:
+            return True, False
+        if plan.structural_identity:
+            return False, False
 
     current_low = _decimal_or_none(plan.raw_entry_low)
     current_high = _decimal_or_none(plan.raw_entry_high)
@@ -6093,9 +6572,9 @@ def _public_watchlist_legacy_record_matches_plan(
         return False, False
 
     normalized_matches = (
-        _public_watchlist_normalized_price(prior_zone[0], tolerance) == plan.normalized_entry_low
-        and _public_watchlist_normalized_price(prior_zone[1], tolerance) == plan.normalized_entry_high
-        and _public_watchlist_normalized_price(prior_invalidation, tolerance) == plan.normalized_invalidation
+        _public_watchlist_quantized_price(prior_zone[0], tolerance) == plan.normalized_entry_low
+        and _public_watchlist_quantized_price(prior_zone[1], tolerance) == plan.normalized_entry_high
+        and _public_watchlist_quantized_price(prior_invalidation, tolerance) == plan.normalized_invalidation
     )
     jitter_matched = not normalized_matches or any(
         (
@@ -6114,8 +6593,13 @@ def _public_watchlist_material_price_tolerance(
     tick = _decimal_or_none(plan.tick_size)
     if tick is None or tick <= 0:
         tick = _public_watchlist_tick_size_from_prices(tuple(price for price in prices if price.is_finite()))
-    return tick * PUBLIC_WATCHLIST_PRICE_TOLERANCE_TICKS
-
+    tick_tolerance = tick * PUBLIC_WATCHLIST_PRICE_TOLERANCE_TICKS
+    low = _decimal_or_none(plan.raw_entry_low)
+    high = _decimal_or_none(plan.raw_entry_high)
+    if low is None or high is None:
+        return tick_tolerance
+    zone_tolerance = abs(high - low) * PUBLIC_WATCHLIST_ZONE_TOLERANCE_MULTIPLIER
+    return max(tick_tolerance, zone_tolerance)
 
 def _public_watchlist_plan_row_matches(row: sqlite3.Row, *, cooldown_key: str, signal_id: str | None = None) -> bool:
     normalized_signal_id = _identity(signal_id)

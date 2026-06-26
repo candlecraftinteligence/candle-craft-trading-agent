@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 class StorageError(RuntimeError):
@@ -18,6 +18,7 @@ def connect_database(path: Path | str = DEFAULT_DATABASE_PATH) -> sqlite3.Connec
         connection = sqlite3.connect(database_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
         return connection
     except sqlite3.Error as exc:
         raise StorageError(f"Unable to open scan history database: {database_path}") from exc
@@ -278,6 +279,37 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_scan_run
                 ON telegram_alert_attempts(scan_run_id);
 
+            CREATE TABLE IF NOT EXISTS public_alert_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_plan_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                event_key TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                setup_family TEXT NOT NULL DEFAULT 'N/A',
+                normalized_zone_low TEXT NOT NULL DEFAULT 'N/A',
+                normalized_zone_high TEXT NOT NULL DEFAULT 'N/A',
+                normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
+                raw_entry_low TEXT NOT NULL DEFAULT 'N/A',
+                raw_entry_high TEXT NOT NULL DEFAULT 'N/A',
+                raw_stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                status TEXT NOT NULL,
+                reserved_at TEXT,
+                sent_at TEXT,
+                source_modes TEXT NOT NULL DEFAULT 'N/A',
+                matched_prior_alert_id INTEGER,
+                matched_prior_event_id INTEGER,
+                failure_reason TEXT NOT NULL DEFAULT 'N/A',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(event_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_public_alert_events_symbol_side_setup
+                ON public_alert_events(symbol, side, setup_family, event_type, status);
+            CREATE INDEX IF NOT EXISTS ix_public_alert_events_status
+                ON public_alert_events(status);
+
             CREATE TABLE IF NOT EXISTS symbol_health (
                 symbol TEXT PRIMARY KEY,
                 successful_scans INTEGER NOT NULL DEFAULT 0,
@@ -419,6 +451,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "dedupe_reason", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_nullable_telegram_sent_at(connection)
         _ensure_telegram_alert_attempt_indexes(connection)
+        _ensure_public_alert_event_indexes(connection)
         _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_health", "last_priority_rank", "INTEGER")
         _ensure_column(connection, "symbol_health", "last_prioritized_at", "TEXT")
@@ -501,6 +534,20 @@ def _ensure_telegram_alert_attempt_indexes(connection: sqlite3.Connection) -> No
             WHERE telegram_status IN ('reserved', 'sent')
               AND public_watchlist_event_key IS NOT NULL
               AND public_watchlist_event_key NOT IN ('', 'N/A')
+        """
+    )
+
+def _ensure_public_alert_event_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_public_alert_events_symbol_side_setup
+            ON public_alert_events(symbol, side, setup_family, event_type, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_public_alert_events_status
+            ON public_alert_events(status)
         """
     )
 
