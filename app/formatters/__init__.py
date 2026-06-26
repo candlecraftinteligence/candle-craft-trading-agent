@@ -20,6 +20,7 @@ from app.formatters.telegram_signal_formatter import (
     format_premium_lifecycle_update_message,
     format_premium_public_signal_message,
     format_premium_watchlist_message,
+    format_simple_public_signal_message,
     format_public_no_trade_message,
     format_telegram_signal_message,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "format_premium_lifecycle_update_message",
     "format_premium_public_signal_message",
     "format_premium_watchlist_message",
+    "format_simple_public_signal_message",
     "format_public_no_trade_message",
     "format_telegram_signal_message",
 ]

@@ -91,7 +91,7 @@ def format_telegram_signal_message(
     if normalized == TelegramAlertType.RESEARCH_WATCH:
         return format_research_watch_message(message)
     if normalized == TelegramAlertType.WATCHLIST:
-        return format_premium_watchlist_message(message)
+        return format_simple_public_signal_message(message)
     if normalized == TelegramAlertType.SIGNAL_CONFIRMED:
         return format_premium_public_signal_message(message)
     if normalized == TelegramAlertType.LIMIT_HIT:
@@ -168,6 +168,35 @@ def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
         FOOTER,
     )
 
+
+def format_simple_public_signal_message(message: TelegramSignalMessage) -> str:
+    reason = safe_reason_text(message.structure_reason, message.confluence, message.current_context)
+    if reason == NA:
+        reason = "The setup has a complete trade map and defined invalidation. Treat it as a manual signal only."
+    return _join(
+        f"{HEADER_PREFIX} SCALP SIGNAL {EM_DASH} {format_symbol(message.symbol)}",
+        "",
+        "The wolf found liquidity.",
+        "",
+        f"Bias: {format_direction(message.direction)}",
+        f"Quality: {_quality_display(message.quality)}",
+        f"RR: {format_rr(message.planned_rr)}",
+        "",
+        "\U0001F3AF Trade Map",
+        f"Entry Zone: {format_entry_zone(message)}",
+        f"Stop: {format_price(message.stop_loss)}",
+        *_simple_signal_tp_lines(message),
+        "",
+        "\U0001F9E0 Why this setup matters",
+        reason,
+        "",
+        "\U0001F6AB Invalid if",
+        _simple_signal_invalidation_text(message),
+        "",
+        "\u26A0\ufe0f Manual execution only. Manage risk.",
+        "",
+        FOOTER,
+    )
 
 def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
     side = _direction_key(message.direction)
@@ -446,7 +475,7 @@ def _format_signal_invalidated_update(message: TelegramSignalMessage) -> str:
 
 
 def format_watchlist_alert(message: TelegramSignalMessage) -> str:
-    return format_premium_watchlist_message(message)
+    return format_simple_public_signal_message(message)
 
 
 def format_signal_confirmed_alert(message: TelegramSignalMessage) -> str:
@@ -489,6 +518,19 @@ def format_tp_lines(message: TelegramSignalMessage) -> tuple[str, str, str]:
         f"TP3: {format_price(message.tp3)}",
     )
 
+
+def _simple_signal_tp_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    lines = [f"TP1: {format_price(message.tp1)}"]
+    for label, value in (("TP2", message.tp2), ("TP3", message.tp3)):
+        price = format_price(value)
+        if price != NA:
+            lines.append(f"{label}: {price}")
+    return tuple(lines)
+
+
+def _simple_signal_invalidation_text(message: TelegramSignalMessage) -> str:
+    text = safe_invalidation_text(message)
+    return text if text != NA else "Price accepts beyond the invalidation level."
 
 def _watchlist_tp_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     lines: list[str] = []
@@ -919,6 +961,7 @@ __all__ = [
     "format_premium_lifecycle_update_message",
     "format_premium_public_signal_message",
     "format_premium_watchlist_message",
+    "format_simple_public_signal_message",
     "format_price",
     "format_public_no_trade_message",
     "format_research_watch_message",

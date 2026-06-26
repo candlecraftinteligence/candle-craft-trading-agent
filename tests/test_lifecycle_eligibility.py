@@ -55,7 +55,7 @@ def test_public_watchlist_eligible_requires_complete_public_trade_map() -> None:
     assert public_watchlist_eligible(_watch_record(entry_low="N/A")) is False
     assert public_watchlist_eligible(_watch_record(entry_high="N/A")) is False
     assert public_watchlist_eligible(_watch_record(stop_loss="N/A")) is False
-    assert public_watchlist_eligible(_watch_record(tp1="N/A")) is True
+    assert public_watchlist_eligible(_watch_record(tp1="N/A")) is False
 
 
 def test_public_watchlist_eligible_rejects_quality_rr_regime_and_no_edge_blockers() -> None:

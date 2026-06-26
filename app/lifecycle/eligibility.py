@@ -215,6 +215,8 @@ def _has_public_watchlist_plan(record: Any) -> bool:
         return False
     if levels.entry_low is None or levels.entry_high is None:
         return False
+    if levels.tp1 is None:
+        return False
     if levels.entry_low > levels.entry_high:
         return False
     invalidation = _first_field(
