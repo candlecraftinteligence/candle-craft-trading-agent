@@ -400,6 +400,31 @@ def test_target_integrity_block_does_not_synthesize_passed_gates() -> None:
     assert diagnostics["gates_failed"] == ("target_integrity",)
 
 
+def test_selected_setup_features_repair_stale_generic_technical_score_for_scoring() -> None:
+    execution = scanner_runner_module._StrategyExecution(
+        valid_strategy_modes=("swing",),
+        strategy_diagnostics={
+            "swing": {
+                "mode": "swing",
+                "execution_sweep_status": "passed",
+                "confirmation_structure_shift_status": "passed",
+                "pullback_zone_status": "valid",
+                "selected_zone_type": "OB",
+                "rr_to_tp2": Decimal("2.6"),
+                "target_integrity_status": "passed",
+                "gates_passed": ("sweep", "bos_choch", "pullback_zone", "ob_fvg", "rr", "target_integrity"),
+                "gates_failed": (),
+            }
+        },
+    )
+    stale_technical = type("Technical", (), {"structure_score": 25})()
+
+    score = scanner_runner_module._technical_score_for_scoring(stale_technical, execution)
+
+    assert score >= 50
+    assert score > stale_technical.structure_score
+
+
 def test_tp_sequence_uses_absolute_reward_distance() -> None:
     assert scanner_runner_module._tp_sequence_valid(
         direction="long",

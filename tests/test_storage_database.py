@@ -46,6 +46,13 @@ def _valid_symbol() -> ScannerSymbolResult:
         status_history=(ScannerPipelineStatus.IDEA_CREATED,),
         technical_score=88,
         derivatives_score=82,
+        candidate_quality_grade="A",
+        final_quality_grade="A",
+        final_failed_gate=NA,
+        final_block_reason=NA,
+        target_integrity_status="passed",
+        target_failure=NA,
+        actionability_state="A_GRADE_ACTIONABLE",
         valid_strategy_modes=("swing",),
         strategy_diagnostics={
             "swing": {
@@ -58,6 +65,12 @@ def _valid_symbol() -> ScannerSymbolResult:
                 "tp2": Decimal("115"),
                 "tp3": Decimal("120"),
                 "rr_to_tp2": Decimal("3"),
+                "opportunity_score": Decimal("88"),
+                "candidate_quality_grade": "A",
+                "final_quality_grade": "A",
+                "final_failed_gate": NA,
+                "actionability_state": "A_GRADE_ACTIONABLE",
+                "target_integrity_status": "passed",
                 "invalidation": "Invalid if price accepts below 95.",
                 "trust_grade": "A",
                 "trust_percentage": 88,
@@ -715,6 +728,38 @@ def test_setup_candidate_insert(tmp_path) -> None:
         ).fetchone()
 
     assert row == ("BTCUSDT", "swing", "long", "100", "95", "110", "115", "3")
+
+
+def test_setup_candidate_persists_final_actionability_audit_fields(tmp_path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+
+    run_id = store_scan_result(db_path, _scan_result())
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT candidate_quality_grade, final_quality_grade, technical_score,
+                   opportunity_score, failed_gate, final_block_reason,
+                   target_integrity_status, target_failure, rr, actionability_state
+            FROM setup_candidates
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+    assert dict(row) == {
+        "candidate_quality_grade": "A",
+        "final_quality_grade": "A",
+        "technical_score": "88",
+        "opportunity_score": "88",
+        "failed_gate": NA,
+        "final_block_reason": NA,
+        "target_integrity_status": "passed",
+        "target_failure": NA,
+        "rr": "3",
+        "actionability_state": "A_GRADE_ACTIONABLE",
+    }
 
 
 def test_replay_result_insert(tmp_path) -> None:

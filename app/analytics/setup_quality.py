@@ -45,6 +45,14 @@ PULLBACK_GATES = {
     "entry_window_expired",
 }
 RR_GATES = {"missing_rr", "missing_target", "rr_below_minimum", "challenge_rr_below_3", "rr_too_low"}
+TARGET_INTEGRITY_GATES = {
+    "target_integrity",
+    "target_integrity_failed",
+    "target_order_invalid",
+    "targets_not_monotonic",
+    "invalid_tp_sequence",
+}
+FINAL_RR_REJECTION_GATES = RR_GATES | TARGET_INTEGRITY_GATES
 FINAL_QUALITY_GATES = {
     "trust_meter_below_minimum",
     "challenge_trust_below_85",
@@ -57,6 +65,7 @@ FINAL_QUALITY_GATES = {
     "derivatives_conflict",
     "funding_oi_guard",
     "quality_filter",
+    *TARGET_INTEGRITY_GATES,
 }
 LATE_GATES = PULLBACK_GATES | RR_GATES | FINAL_QUALITY_GATES
 
@@ -270,7 +279,7 @@ def validate_setup_quality(quality_input: SetupQualityInput | Mapping[str, Any] 
     confirmation_missing = data.sweep_passed and not data.confirmation_passed and _failed_gate(data) in CONFIRMATION_GATES
     core_passed = data.sweep_passed and data.confirmation_passed
     rr_value = _best_rr_value(data)
-    rr_meets_required = rr_value != NA and rr_value >= data.required_rr
+    rr_meets_required = rr_value != NA and rr_value >= data.required_rr and not _final_rr_validation_failed(data)
     rr_below_scanner_minimum = rr_value == NA or rr_value < MIN_SCANNER_RR
     late_gate_failed = _failed_gate(data) in LATE_GATES or bool(set(data.gates_failed) & LATE_GATES)
 
@@ -596,7 +605,7 @@ def _strongest_factors(data: SetupQualityInput, factors: Sequence[SetupQualityFa
         values.append("clean 5m BOS/CHoCH")
     if data.pullback_valid:
         values.append("pullback zone valid")
-    if _best_rr_value(data) != NA and _best_rr_value(data) >= data.required_rr:
+    if _best_rr_value(data) != NA and _best_rr_value(data) >= data.required_rr and not _final_rr_validation_failed(data):
         values.append("RR meets threshold")
     if _alignment_score(data) >= Decimal("70"):
         values.append("context aligned")
@@ -622,6 +631,8 @@ def _weakest_factors(
         values.append("late pullback")
     if rr == NA or rr < data.required_rr:
         values.append("marginal RR")
+    elif _final_rr_validation_failed(data):
+        values.append("final target/RR validation failed")
     if _alignment_score(data) < Decimal("50"):
         values.append("trend conflict")
     if _context_score(data) < Decimal("70"):
@@ -709,6 +720,8 @@ def _rr_note(data: SetupQualityInput) -> str:
     if rr == NA:
         return "RR is N/A."
     if rr >= data.required_rr:
+        if _final_rr_validation_failed(data):
+            return f"RR {rr} meets numeric threshold, but final target/RR validation failed."
         return f"RR {rr} meets required {data.required_rr}."
     return f"RR {rr} is below required {data.required_rr}."
 
@@ -737,6 +750,11 @@ def _execution_note(execution_risk: Decimal) -> str:
     if execution_risk <= Decimal("45"):
         return "Execution risk is moderate."
     return "Execution risk is elevated."
+
+
+def _final_rr_validation_failed(data: SetupQualityInput) -> bool:
+    gates = {_failed_gate(data), *data.gates_failed}
+    return bool(gates & FINAL_RR_REJECTION_GATES)
 
 
 def _failed_gate(data: SetupQualityInput) -> str:

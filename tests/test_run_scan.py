@@ -657,13 +657,44 @@ def test_scan_run_manifest_appends_one_compact_row_per_scan_loop(tmp_path, monke
 
 
 def test_scan_run_manifest_counts_actionable_a_grade_separately_from_confirmed() -> None:
+    actionable_lifecycle = _lifecycle_record("ACTIONUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE).model_copy(
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "A",
+            "actionability_state": "A_GRADE_ACTIONABLE",
+        }
+    )
+    blocked_lifecycle = _lifecycle_record("BLOCKUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE).model_copy(
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "Blocked",
+            "final_failed_gate": "scoring",
+            "final_block_reason": "A-grade candidate, but blocked by final scoring.",
+            "actionability_state": "A_GRADE_BLOCKED_BY_SCORING",
+        }
+    )
     actionable = _near_miss_rank_result("ACTIONUSDT").model_copy(
-        update={"lifecycle_state": _lifecycle_record("ACTIONUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE)}
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "A",
+            "actionability_state": "A_GRADE_ACTIONABLE",
+            "lifecycle_state": actionable_lifecycle,
+        }
+    )
+    blocked = _near_miss_rank_result("BLOCKUSDT").model_copy(
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "Blocked",
+            "final_failed_gate": "scoring",
+            "final_block_reason": "A-grade candidate, but blocked by final scoring.",
+            "actionability_state": "A_GRADE_BLOCKED_BY_SCORING",
+            "lifecycle_state": blocked_lifecycle,
+        }
     )
     confirmed = _valid_rank_result("CONFIRMUSDT").model_copy(
         update={"lifecycle_state": _lifecycle_record("CONFIRMUSDT", SetupLifecycleState.CONFIRMED)}
     )
-    result = _run_result_for((actionable, confirmed), run_id="run-actionable")
+    result = _run_result_for((actionable, blocked, confirmed), run_id="run-actionable")
     watchlist = run_scan.WatchlistResolution(
         symbols=("ACTIONUSDT", "CONFIRMUSDT"),
         source_label="manual",
@@ -678,10 +709,17 @@ def test_scan_run_manifest_counts_actionable_a_grade_separately_from_confirmed()
     )
 
     assert row["valid_setup_count"] == 1
-    assert row["actionable_setup_count"] == 2
+    assert row["actionable_setup_count"] == 1
+    assert row["candidate_a_grade_setups"] == 2
+    assert row["actionable_a_grade_setups"] == 1
     assert row["actionable_a_grade_count"] == 1
+    assert row["blocked_a_grade_by_scoring"] == 1
+    assert row["blocked_a_grade_by_target"] == 0
+    assert row["blocked_a_grade_by_entry_window"] == 0
+    assert row["blocked_a_grade_by_trust"] == 0
+    assert row["confirmed_setups"] == 1
     assert row["confirmed_setup_count"] == 1
-    assert row["lifecycle_state_counts"] == {"ACTIONABLE_A_GRADE": 1, "CONFIRMED": 1}
+    assert row["lifecycle_state_counts"] == {"ACTIONABLE_A_GRADE": 2, "CONFIRMED": 1}
 
 
 def test_scan_run_manifest_counts_target_integrity_blocks() -> None:
@@ -779,13 +817,44 @@ def test_store_scan_prints_run_id_and_database(tmp_path, monkeypatch, capsys) ->
 
 def test_store_scan_persists_actionable_a_grade_counts_separately(tmp_path) -> None:
     db_path = tmp_path / "history.db"
+    actionable_lifecycle = _lifecycle_record("ACTIONUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE).model_copy(
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "A",
+            "actionability_state": "A_GRADE_ACTIONABLE",
+        }
+    )
+    blocked_lifecycle = _lifecycle_record("BLOCKUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE).model_copy(
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "Blocked",
+            "final_failed_gate": "scoring",
+            "final_block_reason": "A-grade candidate, but blocked by final scoring.",
+            "actionability_state": "A_GRADE_BLOCKED_BY_SCORING",
+        }
+    )
     actionable = _near_miss_rank_result("ACTIONUSDT").model_copy(
-        update={"lifecycle_state": _lifecycle_record("ACTIONUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE)}
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "A",
+            "actionability_state": "A_GRADE_ACTIONABLE",
+            "lifecycle_state": actionable_lifecycle,
+        }
+    )
+    blocked = _near_miss_rank_result("BLOCKUSDT").model_copy(
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "Blocked",
+            "final_failed_gate": "scoring",
+            "final_block_reason": "A-grade candidate, but blocked by final scoring.",
+            "actionability_state": "A_GRADE_BLOCKED_BY_SCORING",
+            "lifecycle_state": blocked_lifecycle,
+        }
     )
     confirmed = _valid_rank_result("CONFIRMUSDT").model_copy(
         update={"lifecycle_state": _lifecycle_record("CONFIRMUSDT", SetupLifecycleState.CONFIRMED)}
     )
-    result = _run_result_for((actionable, confirmed), run_id="run-actionable")
+    result = _run_result_for((actionable, blocked, confirmed), run_id="run-actionable")
 
     run_scan.store_scan_result(
         db_path,
@@ -798,16 +867,23 @@ def test_store_scan_persists_actionable_a_grade_counts_separately(tmp_path) -> N
         connection.row_factory = sqlite3.Row
         row = connection.execute(
             """
-            SELECT total_valid_setups, actionable_setups, actionable_a_grade_setups, confirmed_setups
+            SELECT total_valid_setups, actionable_setups, actionable_a_grade_setups,
+                   confirmed_setups, candidate_a_grade_setups, blocked_a_grade_by_scoring,
+                   blocked_a_grade_by_target, blocked_a_grade_by_entry_window, blocked_a_grade_by_trust
             FROM scan_runs
             WHERE run_id = 'run-actionable'
             """
         ).fetchone()
 
     assert row["total_valid_setups"] == 1
-    assert row["actionable_setups"] == 2
+    assert row["actionable_setups"] == 1
     assert row["actionable_a_grade_setups"] == 1
     assert row["confirmed_setups"] == 1
+    assert row["candidate_a_grade_setups"] == 2
+    assert row["blocked_a_grade_by_scoring"] == 1
+    assert row["blocked_a_grade_by_target"] == 0
+    assert row["blocked_a_grade_by_entry_window"] == 0
+    assert row["blocked_a_grade_by_trust"] == 0
 
 
 def test_store_scan_persists_normal_scan_summary_metadata(tmp_path, monkeypatch, capsys) -> None:

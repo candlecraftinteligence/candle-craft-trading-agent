@@ -99,18 +99,22 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         return tuple(_record_from_row(row) for row in rows)
 
     def upsert_record(self, record: SetupLifecycleRecord) -> None:
+        params = _record_params(record)
+        placeholders = ", ".join("?" for _ in params)
         self._connection.execute(
-            """
+            f"""
             INSERT INTO setup_lifecycle_records (
                 lifecycle_id, symbol, mode, direction, current_state, previous_state,
                 first_seen_at, last_seen_at, last_transition_at, failed_gate,
-                readiness_score, quality_score, edge_score, regime_state, action_label,
+                candidate_quality_grade, final_quality_grade, technical_score, opportunity_score,
+                final_failed_gate, final_block_reason, target_integrity_status, target_failure,
+                actionability_state, readiness_score, quality_score, edge_score, regime_state, action_label,
                 invalidation_reason, cooldown_until, archived_at, entry_low, entry_high,
                 stop_loss, tp1, tp2, tp3, rr, invalidation_logic, confirmation_count,
                 required_confirmation_cycles, quality_grade_first_seen, quality_grade_current,
                 quality_grade_confirmed, confirmed_at, decay_count, decay_reason,
                 symbol_health_score_at_detection, symbol_health_penalty_cycles, setup_identity
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ({placeholders})
             ON CONFLICT(lifecycle_id) DO UPDATE SET
                 symbol = excluded.symbol,
                 mode = excluded.mode,
@@ -121,6 +125,15 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 last_seen_at = excluded.last_seen_at,
                 last_transition_at = excluded.last_transition_at,
                 failed_gate = excluded.failed_gate,
+                candidate_quality_grade = excluded.candidate_quality_grade,
+                final_quality_grade = excluded.final_quality_grade,
+                technical_score = excluded.technical_score,
+                opportunity_score = excluded.opportunity_score,
+                final_failed_gate = excluded.final_failed_gate,
+                final_block_reason = excluded.final_block_reason,
+                target_integrity_status = excluded.target_integrity_status,
+                target_failure = excluded.target_failure,
+                actionability_state = excluded.actionability_state,
                 readiness_score = excluded.readiness_score,
                 quality_score = excluded.quality_score,
                 edge_score = excluded.edge_score,
@@ -149,7 +162,7 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 symbol_health_penalty_cycles = excluded.symbol_health_penalty_cycles,
                 setup_identity = excluded.setup_identity
             """,
-            _record_params(record),
+            params,
         )
 
     def insert_event(self, event: SetupLifecycleEvent) -> None:
@@ -263,6 +276,15 @@ def _record_params(record: SetupLifecycleRecord) -> tuple[Any, ...]:
         record.last_seen_at,
         record.last_transition_at,
         record.failed_gate,
+        record.candidate_quality_grade,
+        record.final_quality_grade,
+        record.technical_score,
+        record.opportunity_score,
+        record.final_failed_gate,
+        record.final_block_reason,
+        record.target_integrity_status,
+        record.target_failure,
+        record.actionability_state,
         record.readiness_score,
         record.quality_score,
         record.edge_score,
@@ -322,6 +344,15 @@ def _record_from_row(row: sqlite3.Row) -> SetupLifecycleRecord:
         last_seen_at=row["last_seen_at"],
         last_transition_at=row["last_transition_at"],
         failed_gate=row["failed_gate"],
+        candidate_quality_grade=row["candidate_quality_grade"],
+        final_quality_grade=row["final_quality_grade"],
+        technical_score=row["technical_score"],
+        opportunity_score=row["opportunity_score"],
+        final_failed_gate=row["final_failed_gate"],
+        final_block_reason=row["final_block_reason"],
+        target_integrity_status=row["target_integrity_status"],
+        target_failure=row["target_failure"],
+        actionability_state=row["actionability_state"],
         readiness_score=int(row["readiness_score"] or 0),
         quality_score=int(row["quality_score"] or 0),
         edge_score=row["edge_score"],

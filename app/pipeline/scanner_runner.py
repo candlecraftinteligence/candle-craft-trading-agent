@@ -378,6 +378,13 @@ class ScannerSymbolResult(BaseModel):
     pullback_intelligence: PullbackIntelligenceResult | None = None
     target_intelligence: TargetIntelligenceResult | None = None
     setup_quality: SetupQualityResult = Field(default_factory=default_setup_quality_result)
+    candidate_quality_grade: str = NA
+    final_quality_grade: str = NA
+    final_failed_gate: str = NA
+    final_block_reason: str = NA
+    target_integrity_status: str = NA
+    target_failure: str = NA
+    actionability_state: str = NA
     regime_warnings: tuple[str, ...] = ()
     regime_state: str = NA
     regime_confidence_score: MaybeInt = NA
@@ -890,10 +897,17 @@ class ScannerRunner:
                 strategy_execution=strategy_execution,
             )
 
+        target_integrity = _target_integrity_decision(strategy_execution, candidate)
+        strategy_execution = (
+            target_integrity.strategy_execution
+            if target_integrity.blocked and target_integrity.strategy_execution is not None
+            else _strategy_execution_with_target_integrity_pass(strategy_execution)
+        )
+        effective_technical_score = _technical_score_for_scoring(technical, strategy_execution)
         strategy_catalyst_score = _strategy_catalyst_score(strategy_execution.selected_setup)
         score_result = self.scoring_engine.score(
             {
-                "technical_score": Decimal(technical.structure_score),
+                "technical_score": Decimal(effective_technical_score),
                 "derivatives_score": _scoring_derivatives_score(derivatives_enrichment),
                 "risk_approved": risk_decision.approved,
                 "best_rr": _best_rr_for_scoring(risk_decision),
@@ -907,6 +921,26 @@ class ScannerRunner:
                 "unverified_data": _scoring_unverified_data(base_unverified),
             }
         )
+        if target_integrity.blocked:
+            return self._symbol_result(
+                symbol=symbol,
+                status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+                status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+                candles=candles,
+                current_price=current_price,
+                optional_data=optional_data,
+                missing_data=base_missing,
+                unverified_data=base_unverified,
+                rejection_reason=target_integrity.reason,
+                technical_result=technical,
+                derivatives_result=derivatives,
+                derivatives_enrichment=derivatives_enrichment,
+                risk_decision=risk_decision,
+                score_result=score_result,
+                strategy_execution=strategy_execution,
+                rejection_stage_override=TARGET_INTEGRITY_FAILED_GATE,
+                technical_score_override=effective_technical_score,
+            )
         if (
             not score_result.hard_filter_result.passed
             or score_result.decision == "reject"
@@ -928,27 +962,7 @@ class ScannerRunner:
                 risk_decision=risk_decision,
                 score_result=score_result,
                 strategy_execution=strategy_execution,
-            )
-
-        target_integrity = _target_integrity_decision(strategy_execution, candidate)
-        if target_integrity.blocked:
-            return self._symbol_result(
-                symbol=symbol,
-                status=ScannerPipelineStatus.SCANNED_NO_SETUP,
-                status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
-                candles=candles,
-                current_price=current_price,
-                optional_data=optional_data,
-                missing_data=base_missing,
-                unverified_data=base_unverified,
-                rejection_reason=target_integrity.reason,
-                technical_result=technical,
-                derivatives_result=derivatives,
-                derivatives_enrichment=derivatives_enrichment,
-                risk_decision=risk_decision,
-                score_result=score_result,
-                strategy_execution=target_integrity.strategy_execution or strategy_execution,
-                rejection_stage_override=TARGET_INTEGRITY_FAILED_GATE,
+                technical_score_override=effective_technical_score,
             )
 
         trade_idea = self.trade_idea_agent.create(
@@ -995,6 +1009,7 @@ class ScannerRunner:
                 risk_decision=risk_decision,
                 score_result=score_result,
                 strategy_execution=strategy_execution,
+                technical_score_override=effective_technical_score,
             )
 
         status_history = [ScannerPipelineStatus.IDEA_CREATED]
@@ -1052,6 +1067,7 @@ class ScannerRunner:
             alert_result=alert_result,
             journal_entry=journal_entry,
             strategy_execution=strategy_execution,
+            technical_score_override=effective_technical_score,
         )
 
     async def _fetch_primary_candles(
@@ -1461,6 +1477,7 @@ class ScannerRunner:
         journal_entry: JournalEntryResult | None = None,
         strategy_execution: _StrategyExecution | None = None,
         rejection_stage_override: str | None = None,
+        technical_score_override: MaybeInt | None = None,
     ) -> ScannerSymbolResult:
         cleaned_missing = _unique_strings(missing_data)
         cleaned_unverified = _unique_strings(unverified_data)
@@ -1487,6 +1504,9 @@ class ScannerRunner:
             missing_data=cleaned_missing,
             unverified_data=cleaned_unverified,
         )
+        candidate_quality_grade = _display_decimal_or_text(
+            getattr(setup_quality.quality_grade, "value", setup_quality.quality_grade)
+        )
         return ScannerSymbolResult(
             symbol=symbol,
             status=status,
@@ -1504,7 +1524,11 @@ class ScannerRunner:
             latest_close=_current_price_from_candles(candles),
             latest_high=_decimal_field(candles[-1], ("high",)) if candles else NA,
             latest_low=_decimal_field(candles[-1], ("low",)) if candles else NA,
-            technical_score=technical_result.structure_score if technical_result is not None else NA,
+            technical_score=technical_score_override
+            if technical_score_override is not None
+            else technical_result.structure_score
+            if technical_result is not None
+            else NA,
             derivatives_score=derivatives_enrichment.derivatives_score
             if derivatives_enrichment is not None
             else derivatives_result.derivatives_score
@@ -1593,6 +1617,8 @@ class ScannerRunner:
             pullback_intelligence=strategy_execution.pullback_intelligence,
             target_intelligence=strategy_execution.target_intelligence,
             setup_quality=setup_quality,
+            candidate_quality_grade=candidate_quality_grade,
+            final_quality_grade=candidate_quality_grade,
         )
 
 
@@ -1998,6 +2024,90 @@ def _strategy_execution_with_target_integrity_block(
             "rejected_strategy_modes": _unique_strings((*target_modes, *strategy_execution.rejected_strategy_modes)),
         }
     )
+
+
+def _strategy_execution_with_target_integrity_pass(strategy_execution: _StrategyExecution) -> _StrategyExecution:
+    diagnostics = dict(strategy_execution.strategy_diagnostics)
+    target_modes = (
+        strategy_execution.valid_strategy_modes
+        or strategy_execution.rejected_strategy_modes
+        or tuple(diagnostics)
+        or ("swing",)
+    )
+    for mode in target_modes:
+        raw = diagnostics.get(mode)
+        mode_diagnostics = dict(raw) if isinstance(raw, Mapping) else {}
+        mode_diagnostics["target_integrity_status"] = _first_non_na(
+            mode_diagnostics.get("target_integrity_status"),
+            "passed",
+        )
+        gates_passed = _sequence_from_diagnostics(mode_diagnostics.get("gates_passed"))
+        mode_diagnostics["gates_passed"] = _unique_strings((*gates_passed, TARGET_INTEGRITY_FAILED_GATE))
+        diagnostics[mode] = mode_diagnostics
+    return strategy_execution.model_copy(update={"strategy_diagnostics": diagnostics})
+
+
+def _technical_score_for_scoring(
+    technical: TechnicalStructureResult,
+    strategy_execution: _StrategyExecution,
+) -> int:
+    base_score = int(technical.structure_score)
+    diagnostics = _representative_strategy_diagnostics(strategy_execution)
+    feature_score = _strategy_feature_technical_score(diagnostics)
+    if feature_score is None:
+        return base_score
+    return max(base_score, feature_score)
+
+
+def _strategy_feature_technical_score(diagnostics: Mapping[str, Any]) -> int | None:
+    if not diagnostics:
+        return None
+    gates_passed = set(_sequence_from_diagnostics(diagnostics.get("gates_passed")))
+    gates_failed = set(_sequence_from_diagnostics(diagnostics.get("gates_failed")))
+    score = 10
+    features_seen = 0
+
+    sweep_status = _display_decimal_or_text(diagnostics.get("execution_sweep_status")).lower()
+    if sweep_status == "passed" or "sweep" in gates_passed:
+        score += 20
+        features_seen += 1
+
+    shift_status = _display_decimal_or_text(diagnostics.get("confirmation_structure_shift_status")).lower()
+    if shift_status in {"passed", "valid"} or "bos_choch" in gates_passed:
+        score += 25
+        features_seen += 1
+
+    pullback_status = _display_decimal_or_text(diagnostics.get("pullback_zone_status")).lower()
+    if pullback_status in {"valid", "passed"} or "pullback_zone" in gates_passed:
+        score += 15
+        features_seen += 1
+
+    selected_zone_type = _display_decimal_or_text(diagnostics.get("selected_zone_type"))
+    if selected_zone_type != NA or "ob_fvg" in gates_passed:
+        score += 15
+        features_seen += 1
+
+    rr = _first_decimal(
+        diagnostics.get("rr_to_tp2"),
+        diagnostics.get("best_rr"),
+        diagnostics.get("planned_rr"),
+        diagnostics.get("rr"),
+    )
+    rr_failure_gates = {"missing_rr", "rr_below_minimum", "challenge_rr_below_3"}
+    required_rr = Decimal("3.0") if _display_decimal_or_text(diagnostics.get("mode")) == "challenge" else Decimal("2.5")
+    if rr != NA and rr >= required_rr and not bool(gates_failed & rr_failure_gates):
+        score += 10
+        features_seen += 1
+
+    target_status = _display_decimal_or_text(diagnostics.get("target_integrity_status")).lower()
+    target_failed = TARGET_INTEGRITY_FAILED_GATE in gates_failed or target_status in {"blocked", "failed", "reject"}
+    if not target_failed and (target_status in {"passed", "valid", "ok"} or TARGET_INTEGRITY_FAILED_GATE in gates_passed):
+        score += 5
+        features_seen += 1
+
+    if features_seen == 0:
+        return None
+    return min(score, 100)
 
 
 def _target_block_reason(target_intelligence: TargetIntelligenceResult) -> str:

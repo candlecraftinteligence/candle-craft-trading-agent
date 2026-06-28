@@ -39,6 +39,20 @@ logger = logging.getLogger(__name__)
 
 ACTIONABLE_A_GRADE_MIN_RR = Decimal("2.5")
 ACTIONABLE_A_GRADE_GRADES = {"a+", "a", "a-"}
+A_GRADE_ACTIONABLE_STATE = "A_GRADE_ACTIONABLE"
+A_GRADE_BLOCKED_BY_SCORING_STATE = "A_GRADE_BLOCKED_BY_SCORING"
+A_GRADE_BLOCKED_BY_TARGET_STATE = "A_GRADE_BLOCKED_BY_TARGET"
+A_GRADE_BLOCKED_BY_ENTRY_WINDOW_STATE = "A_GRADE_BLOCKED_BY_ENTRY_WINDOW"
+A_GRADE_BLOCKED_BY_TRUST_STATE = "A_GRADE_BLOCKED_BY_TRUST"
+A_GRADE_BLOCKED_BY_FINAL_GATES_STATE = "A_GRADE_BLOCKED_BY_FINAL_GATES"
+NOT_A_GRADE_CANDIDATE_STATE = "NOT_A_GRADE_CANDIDATE"
+A_GRADE_BLOCKED_STATES = {
+    A_GRADE_BLOCKED_BY_SCORING_STATE,
+    A_GRADE_BLOCKED_BY_TARGET_STATE,
+    A_GRADE_BLOCKED_BY_ENTRY_WINDOW_STATE,
+    A_GRADE_BLOCKED_BY_TRUST_STATE,
+    A_GRADE_BLOCKED_BY_FINAL_GATES_STATE,
+}
 A_GRADE_ALLOWED_WAITING_GATES = {
     "challenge_limit_entry_missing",
     "entry_limit_missing",
@@ -212,10 +226,20 @@ class SetupLifecycleService:
             outcome_record = _outcome_analytics_record(repository, transition, observation)
             if outcome_record is not None:
                 repository.upsert_outcome_analytics(outcome_record)
+        audit_updates = {
+            "candidate_quality_grade": observation.candidate_quality_grade,
+            "final_quality_grade": observation.final_quality_grade,
+            "final_failed_gate": observation.final_failed_gate,
+            "final_block_reason": observation.final_block_reason,
+            "target_integrity_status": observation.target_integrity_status,
+            "target_failure": observation.target_failure,
+            "actionability_state": observation.actionability_state,
+        }
         updated = symbol_result.model_copy(
             update={
                 "lifecycle_state": transition.record,
                 "lifecycle_transition": transition,
+                **audit_updates,
             }
         )
         meta = _process_meta(
@@ -283,6 +307,8 @@ def observation_from_symbol_result(
     quality_score = _int_or_zero(getattr(symbol_result.setup_quality, "quality_score", 0))
     quality_grade = _quality_grade_text(symbol_result, diagnostics)
     quality_state = _setup_quality_state_text(symbol_result)
+    technical_score_text = _display(symbol_result.technical_score)
+    opportunity_score_text = _display(_opportunity_score(symbol_result, diagnostics))
     edge_score = _first_non_na(
         getattr(symbol_result.setup_quality, "profitability_edge_score", NA),
         symbol_result.historical_expectancy,
@@ -297,7 +323,24 @@ def observation_from_symbol_result(
         rr=rr,
         failed_gate=failed_gate,
         gates_failed=gates_failed,
+        technical_score=technical_score_text,
+        opportunity_score=opportunity_score_text,
+        min_score_for_idea=min_score_for_idea,
     )
+    actionability_state, final_failed_gate, final_block_reason, final_quality_grade = _a_grade_actionability_fields(
+        symbol_result,
+        diagnostics,
+        quality_grade=quality_grade,
+        actionable=actionable_a_grade_candidate,
+        actionable_reason=actionable_grade_reason,
+        failed_gate=failed_gate,
+        gates_failed=gates_failed,
+        technical_score=technical_score_text,
+        opportunity_score=opportunity_score_text,
+        min_score_for_idea=min_score_for_idea,
+    )
+    target_integrity_status = _target_integrity_status_text(diagnostics)
+    target_failure = _target_failure_text(diagnostics)
     a_grade_watch_candidate = False
     requires_limit_fill = actionable_a_grade_candidate or _requires_limit_fill_before_active(symbol_result, diagnostics)
     if (
@@ -320,6 +363,13 @@ def observation_from_symbol_result(
         readiness_label=display.readiness_label,
         quality_score=quality_score,
         quality_grade=quality_grade,
+        candidate_quality_grade=quality_grade,
+        final_quality_grade=final_quality_grade,
+        final_failed_gate=final_failed_gate,
+        final_block_reason=final_block_reason,
+        target_integrity_status=target_integrity_status,
+        target_failure=target_failure,
+        actionability_state=actionability_state,
         entry_low=_display(entry_low),
         entry_high=_display(entry_high),
         stop_loss=_display(stop_loss),
@@ -348,8 +398,8 @@ def observation_from_symbol_result(
         valid_trade_idea=valid_trade_idea,
         core_status=_display(getattr(symbol_result.status, "value", symbol_result.status)),
         setup_quality_state=quality_state,
-        technical_score=_display(symbol_result.technical_score),
-        opportunity_score=_display(_opportunity_score(symbol_result, diagnostics)),
+        technical_score=technical_score_text,
+        opportunity_score=opportunity_score_text,
         min_technical_score="50",
         min_opportunity_score=_display(min_score_for_idea),
         active_rejection_reason=_first_non_na(
@@ -540,11 +590,15 @@ def _log_lifecycle_actionability_audit(
     lifecycle_promotion_reason = transition.reason.value if transition.transitioned else SetupTransitionReason.NO_CHANGE.value
     logger.info(
         "lifecycle_actionability_audit symbol=%s public_decision=%s public_block_reason=%s "
+        "actionability_state=%s final_failed_gate=%s final_block_reason=%s "
         "actionable_grade_reason=%s confirmation_block_reason=%s lifecycle_promotion_reason=%s "
         "previous_state=%s new_state=%s",
         symbol_result.symbol,
         "not_evaluated",
         NA,
+        observation.actionability_state,
+        observation.final_failed_gate,
+        observation.final_block_reason,
         observation.actionable_grade_reason,
         observation.confirmation_block_reason,
         lifecycle_promotion_reason,
@@ -711,6 +765,9 @@ def _actionable_a_grade_decision(
     rr: Decimal | None,
     failed_gate: str,
     gates_failed: Sequence[str],
+    technical_score: Any = NA,
+    opportunity_score: Any = NA,
+    min_score_for_idea: Any = Decimal("80"),
 ) -> tuple[bool, str]:
     grade_key = _quality_grade_key(quality_grade)
     if grade_key not in ACTIONABLE_A_GRADE_GRADES:
@@ -730,6 +787,14 @@ def _actionable_a_grade_decision(
         return False, "target_integrity_failed"
     if not _target_integrity_passed(diagnostics):
         return False, "target_integrity_not_passed"
+    technical_min = Decimal("50")
+    technical_value = _decimal_or_none(technical_score)
+    if technical_value is not None and technical_value < technical_min:
+        return False, f"technical_score_below_min:{_display(technical_value)}<{_display(technical_min)}"
+    opportunity_min = _decimal_or_none(min_score_for_idea) or Decimal("80")
+    opportunity_value = _decimal_or_none(opportunity_score)
+    if opportunity_value is not None and opportunity_value < opportunity_min:
+        return False, f"opportunity_score_below_min:{_display(opportunity_value)}<{_display(opportunity_min)}"
     if not _clean_pullback_acceptance(diagnostics, failed_gate=failed_gate):
         return False, "pullback_acceptance_not_clean"
     if not _confirmation_structure_shift_passed_when_available(symbol_result, diagnostics):
@@ -875,6 +940,107 @@ def _target_integrity_passed(diagnostics: Mapping[str, Any]) -> bool:
     if status in TARGET_INTEGRITY_PASSED_KEYS:
         return True
     return "target_integrity" in {_status_key(value) for value in _sequence_values(diagnostics.get("gates_passed"))}
+
+
+def _target_integrity_status_text(diagnostics: Mapping[str, Any]) -> str:
+    status = _first_non_na(
+        diagnostics.get("target_integrity_status"),
+        diagnostics.get("target_status"),
+        diagnostics.get("target_validation_status"),
+    )
+    if _display(status) != NA:
+        return _display(status)
+    if _target_integrity_failed(diagnostics):
+        return "blocked"
+    if _target_integrity_passed(diagnostics):
+        return "passed"
+    return NA
+
+
+def _target_failure_text(diagnostics: Mapping[str, Any]) -> str:
+    return _first_non_na(
+        diagnostics.get("target_failure"),
+        diagnostics.get("target_failure_type"),
+        diagnostics.get("target_integrity_reason"),
+        diagnostics.get("target_integrity_warning"),
+    )
+
+
+def _a_grade_actionability_fields(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    *,
+    quality_grade: str,
+    actionable: bool,
+    actionable_reason: str,
+    failed_gate: str,
+    gates_failed: Sequence[str],
+    technical_score: Any,
+    opportunity_score: Any,
+    min_score_for_idea: Any,
+) -> tuple[str, str, str, str]:
+    candidate_grade = _display(quality_grade)
+    if _quality_grade_key(candidate_grade) not in ACTIONABLE_A_GRADE_GRADES:
+        return NOT_A_GRADE_CANDIDATE_STATE, _text_final_gate(failed_gate), NA, candidate_grade
+    if actionable:
+        return A_GRADE_ACTIONABLE_STATE, NA, NA, candidate_grade
+
+    gate_keys = _gate_keys(failed_gate, gates_failed, diagnostics)
+    reason_key = _status_key(actionable_reason)
+    status_keys = _status_keys(symbol_result)
+    final_gate = _text_final_gate(failed_gate)
+
+    if _target_integrity_failed(diagnostics) or gate_keys & {"target_integrity", "target_integrity_failed", "target_order_invalid", "targets_not_monotonic"}:
+        return (
+            A_GRADE_BLOCKED_BY_TARGET_STATE,
+            "target_integrity",
+            "A-grade candidate, but blocked by target integrity.",
+            "Blocked",
+        )
+    if "entry_window_expired" in gate_keys or "entry_window_expired" in reason_key:
+        return (
+            A_GRADE_BLOCKED_BY_ENTRY_WINDOW_STATE,
+            "entry_window_expired",
+            "A-grade candidate, but blocked by expired entry window.",
+            "Blocked",
+        )
+    if gate_keys & {"trust_meter_below_minimum", "challenge_trust_below_85"} or "trust" in reason_key:
+        return (
+            A_GRADE_BLOCKED_BY_TRUST_STATE,
+            "trust_meter_below_minimum",
+            "A-grade candidate, but blocked by trust meter.",
+            "Blocked",
+        )
+    if (
+        "rejected_by_scoring" in status_keys
+        or gate_keys & {"scoring", "quality_filter", "technical_score_below_min", "opportunity_score_below_min"}
+        or _score_below_minimum(technical_score, Decimal("50"))
+        or _score_below_minimum(opportunity_score, _decimal_or_none(min_score_for_idea) or Decimal("80"))
+        or "score" in reason_key
+        or (reason_key == "hard_status_blocked" and "rejected_by_scoring" in status_keys)
+    ):
+        return (
+            A_GRADE_BLOCKED_BY_SCORING_STATE,
+            "scoring",
+            "A-grade candidate, but blocked by final scoring.",
+            "Blocked",
+        )
+    return (
+        A_GRADE_BLOCKED_BY_FINAL_GATES_STATE,
+        final_gate,
+        "A-grade candidate, but blocked by final gates.",
+        "Blocked",
+    )
+
+
+def _score_below_minimum(value: Any, minimum: Decimal) -> bool:
+    parsed = _decimal_or_none(value)
+    return parsed is not None and parsed < minimum
+
+
+def _text_final_gate(value: Any) -> str:
+    text = _display(value)
+    return text if text != NA else NA
 
 
 def _clean_pullback_acceptance(diagnostics: Mapping[str, Any], *, failed_gate: Any) -> bool:

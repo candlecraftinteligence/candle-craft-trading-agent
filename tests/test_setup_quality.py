@@ -157,3 +157,19 @@ def test_missing_optional_derivatives_reduces_confidence_without_auto_rejecting(
     }
     assert result.quality_state != SetupQualityState.REJECTED_NO_EDGE
     assert "mixed derivatives" in result.weakest_factors
+
+
+def test_target_integrity_failure_does_not_claim_clean_rr_threshold() -> None:
+    result = validate_setup_quality(
+        _base_quality_input(
+            setup_valid=False,
+            first_failed_gate="target_integrity",
+            gates_failed=("target_integrity",),
+            gates_passed=("sweep", "bos_choch", "pullback_zone", "fib_alignment", "rr"),
+        )
+    )
+
+    rr_factor = next(factor for factor in result.factor_breakdown if factor.name == "RR / profit potential")
+    assert "RR meets threshold" not in result.strongest_factors
+    assert "final target/RR validation failed" in result.weakest_factors
+    assert "final target/RR validation failed" in rr_factor.note

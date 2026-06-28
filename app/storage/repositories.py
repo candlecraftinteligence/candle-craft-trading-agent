@@ -131,7 +131,10 @@ def list_scan_history(
                 """
                 SELECT run_id, timestamp, universe, symbols_scanned, total_valid_setups,
                        near_misses, rejected, data_issues, market_regime, regime_confidence, runtime_stats_json,
-                       actionable_setups, actionable_a_grade_setups, confirmed_setups
+                       actionable_setups, actionable_a_grade_setups, confirmed_setups,
+                       candidate_a_grade_setups, blocked_a_grade_by_scoring,
+                       blocked_a_grade_by_target, blocked_a_grade_by_entry_window,
+                       blocked_a_grade_by_trust
                 FROM scan_runs
                 ORDER BY timestamp DESC
                 LIMIT ?
@@ -203,7 +206,8 @@ def _scan_run_record(
 ) -> ScanRunRecord:
     counts = _bucket_counts(raw_payload)
     lifecycle_counts = _lifecycle_state_counts(raw_payload, result)
-    actionable_a_grade_setups = lifecycle_counts.get("ACTIONABLE_A_GRADE", 0)
+    a_grade_counts = _a_grade_actionability_counts(raw_payload, result)
+    actionable_a_grade_setups = a_grade_counts["actionable_a_grade_setups"]
     confirmed_setups = lifecycle_counts.get("CONFIRMED", 0)
     data_issues = _data_issues(result)
     watch_data_issues = watch_iteration.data_issues if watch_iteration is not None else counts["data_issue"]
@@ -256,9 +260,14 @@ def _scan_run_record(
         symbol_health_summary_json=_json_dump(watch_iteration.symbol_health_summary or {})
         if watch_iteration is not None
         else "{}",
-        actionable_setups=counts["valid"] + actionable_a_grade_setups,
+        actionable_setups=actionable_a_grade_setups,
         actionable_a_grade_setups=actionable_a_grade_setups,
         confirmed_setups=confirmed_setups,
+        candidate_a_grade_setups=a_grade_counts["candidate_a_grade_setups"],
+        blocked_a_grade_by_scoring=a_grade_counts["blocked_a_grade_by_scoring"],
+        blocked_a_grade_by_target=a_grade_counts["blocked_a_grade_by_target"],
+        blocked_a_grade_by_entry_window=a_grade_counts["blocked_a_grade_by_entry_window"],
+        blocked_a_grade_by_trust=a_grade_counts["blocked_a_grade_by_trust"],
     )
 
 
@@ -420,7 +429,8 @@ def _symbol_result_record(
 
 
 def _setup_candidate_record(run_id: str, symbol_result: ScannerSymbolResult) -> SetupCandidateRecord | None:
-    lifecycle_state = _display(getattr(getattr(symbol_result, "lifecycle_state", None), "current_state", NA))
+    lifecycle = getattr(symbol_result, "lifecycle_state", None)
+    lifecycle_state = _display(getattr(lifecycle, "current_state", NA))
     a_grade_watch = lifecycle_state in {"ACTIONABLE_A_GRADE", "A_GRADE_WATCH"}
     if not symbol_result.valid_strategy_modes and not a_grade_watch:
         return None
@@ -438,6 +448,77 @@ def _setup_candidate_record(run_id: str, symbol_result: ScannerSymbolResult) -> 
     setup = getattr(setup_result, mode, None) if setup_result is not None else None
     quality = symbol_result.setup_quality
     raw_candidate = setup.model_dump(mode="json") if isinstance(setup, BaseModel) else dict(diagnostics)
+    candidate_quality_grade = _display(
+        _first_non_na(
+            getattr(symbol_result, "candidate_quality_grade", NA),
+            getattr(lifecycle, "candidate_quality_grade", NA),
+            getattr(quality.quality_grade, "value", quality.quality_grade),
+            diagnostics.get("candidate_quality_grade"),
+            diagnostics.get("quality_grade"),
+        )
+    )
+    final_quality_grade = _display(
+        _first_non_na(
+            getattr(symbol_result, "final_quality_grade", NA),
+            getattr(lifecycle, "final_quality_grade", NA),
+            diagnostics.get("final_quality_grade"),
+            candidate_quality_grade,
+        )
+    )
+    technical_score = _display(
+        _first_non_na(
+            getattr(symbol_result, "technical_score", NA),
+            getattr(lifecycle, "technical_score", NA),
+            diagnostics.get("technical_score"),
+        )
+    )
+    opportunity_score = _display(
+        _first_non_na(
+            getattr(getattr(symbol_result, "score_result", None), "total_score", NA),
+            getattr(lifecycle, "opportunity_score", NA),
+            diagnostics.get("opportunity_score"),
+            diagnostics.get("total_score"),
+        )
+    )
+    failed_gate = _display(
+        _first_non_na(
+            getattr(symbol_result, "final_failed_gate", NA),
+            getattr(lifecycle, "final_failed_gate", NA),
+            diagnostics.get("final_failed_gate"),
+            diagnostics.get("first_failed_gate"),
+            getattr(symbol_result, "rejection_stage", NA),
+        )
+    )
+    final_block_reason = _display(
+        _first_non_na(
+            getattr(symbol_result, "final_block_reason", NA),
+            getattr(lifecycle, "final_block_reason", NA),
+            diagnostics.get("final_block_reason"),
+        )
+    )
+    target_integrity_status = _display(
+        _first_non_na(
+            getattr(symbol_result, "target_integrity_status", NA),
+            getattr(lifecycle, "target_integrity_status", NA),
+            diagnostics.get("target_integrity_status"),
+        )
+    )
+    target_failure = _display(
+        _first_non_na(
+            getattr(symbol_result, "target_failure", NA),
+            getattr(lifecycle, "target_failure", NA),
+            diagnostics.get("target_failure"),
+            diagnostics.get("target_failure_type"),
+            diagnostics.get("target_failure_reason"),
+        )
+    )
+    actionability_state = _display(
+        _first_non_na(
+            getattr(symbol_result, "actionability_state", NA),
+            getattr(lifecycle, "actionability_state", NA),
+            diagnostics.get("actionability_state"),
+        )
+    )
     return SetupCandidateRecord(
         run_id=run_id,
         symbol=symbol_result.symbol,
@@ -453,6 +534,15 @@ def _setup_candidate_record(run_id: str, symbol_result: ScannerSymbolResult) -> 
             _first_non_na(getattr(setup, "invalidation", NA), diagnostics.get("invalidation"), diagnostics.get("invalidation_reason"))
         ),
         quality_grade=_display(getattr(quality.quality_grade, "value", quality.quality_grade)),
+        candidate_quality_grade=candidate_quality_grade,
+        final_quality_grade=final_quality_grade,
+        technical_score=technical_score,
+        opportunity_score=opportunity_score,
+        failed_gate=failed_gate,
+        final_block_reason=final_block_reason,
+        target_integrity_status=target_integrity_status,
+        target_failure=target_failure,
+        actionability_state=actionability_state,
         trust_meter=_trust_meter_text(setup, diagnostics),
         risk_warning=_display(getattr(setup, "risk_warning", NA)),
         raw_candidate_json=_json_dump(raw_candidate),
@@ -490,8 +580,10 @@ def _replay_result_records(
 
 
 def _insert_scan_run(connection: sqlite3.Connection, record: ScanRunRecord) -> None:
+    params = astuple(record)
+    placeholders = ", ".join("?" for _ in params)
     connection.execute(
-        """
+        f"""
         INSERT INTO scan_runs (
             run_id, timestamp, exchange, universe, symbols_scanned, symbols_json,
             strategy, timeframes_json, market_regime, regime_confidence,
@@ -501,10 +593,13 @@ def _insert_scan_run(connection: sqlite3.Connection, record: ScanRunRecord) -> N
             watch_iteration_number, started_at, completed_at, symbols_requested,
             symbols_queued, symbols_completed, valid_activations, still_watching,
             rejected_no_edge, runtime_sec, portfolio_summary_json, symbol_health_summary_json,
-            actionable_setups, actionable_a_grade_setups, confirmed_setups
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            actionable_setups, actionable_a_grade_setups, confirmed_setups,
+            candidate_a_grade_setups, blocked_a_grade_by_scoring,
+            blocked_a_grade_by_target, blocked_a_grade_by_entry_window,
+            blocked_a_grade_by_trust
+        ) VALUES ({placeholders})
         """,
-        astuple(record),
+        params,
     )
 
 
@@ -528,8 +623,11 @@ def _insert_setup_candidates(connection: sqlite3.Connection, records: Sequence[S
         """
         INSERT INTO setup_candidates (
             run_id, symbol, mode, direction, entry, stop, tp1, tp2, tp3, rr,
-            invalidation, quality_grade, trust_meter, risk_warning, raw_candidate_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            invalidation, quality_grade, candidate_quality_grade, final_quality_grade,
+            technical_score, opportunity_score, failed_gate, final_block_reason,
+            target_integrity_status, target_failure, actionability_state, trust_meter,
+            risk_warning, raw_candidate_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [astuple(record) for record in records],
     )
@@ -564,6 +662,11 @@ def _history_summary_from_row(row: sqlite3.Row) -> ScanHistorySummary:
         actionable_setups=int(row["actionable_setups"] or 0),
         actionable_a_grade_setups=int(row["actionable_a_grade_setups"] or 0),
         confirmed_setups=int(row["confirmed_setups"] or 0),
+        candidate_a_grade_setups=int(row["candidate_a_grade_setups"] or 0),
+        blocked_a_grade_by_scoring=int(row["blocked_a_grade_by_scoring"] or 0),
+        blocked_a_grade_by_target=int(row["blocked_a_grade_by_target"] or 0),
+        blocked_a_grade_by_entry_window=int(row["blocked_a_grade_by_entry_window"] or 0),
+        blocked_a_grade_by_trust=int(row["blocked_a_grade_by_trust"] or 0),
     )
 
 
@@ -598,6 +701,68 @@ def _lifecycle_state_counts(payload: Mapping[str, Any], result: ScannerRunResult
         if state != NA:
             counts[state] = counts.get(state, 0) + 1
     return counts
+
+
+def _a_grade_actionability_counts(payload: Mapping[str, Any], result: ScannerRunResult) -> dict[str, int]:
+    counts = {
+        "candidate_a_grade_setups": 0,
+        "actionable_a_grade_setups": 0,
+        "blocked_a_grade_by_scoring": 0,
+        "blocked_a_grade_by_target": 0,
+        "blocked_a_grade_by_entry_window": 0,
+        "blocked_a_grade_by_trust": 0,
+    }
+    raw_results = tuple(item for item in payload.get("results", ()) if isinstance(item, Mapping))
+    for index, symbol_result in enumerate(result.results):
+        raw_result = raw_results[index] if index < len(raw_results) else {}
+        lifecycle = getattr(symbol_result, "lifecycle_state", None)
+        diagnostics = _representative_diagnostics(symbol_result)
+        actionability_state = _display(
+            _first_non_na(
+                getattr(symbol_result, "actionability_state", NA),
+                getattr(lifecycle, "actionability_state", NA),
+                raw_result.get("actionability_state"),
+                _mapping_value(raw_result.get("lifecycle_state"), "actionability_state"),
+                diagnostics.get("actionability_state"),
+            )
+        )
+        candidate_grade = _display(
+            _first_non_na(
+                getattr(symbol_result, "candidate_quality_grade", NA),
+                getattr(lifecycle, "candidate_quality_grade", NA),
+                raw_result.get("candidate_quality_grade"),
+                _mapping_value(raw_result.get("lifecycle_state"), "candidate_quality_grade"),
+                getattr(symbol_result.setup_quality.quality_grade, "value", symbol_result.setup_quality.quality_grade),
+                diagnostics.get("quality_grade"),
+            )
+        )
+        lifecycle_state = _display(
+            _first_non_na(
+                getattr(lifecycle, "current_state", NA),
+                raw_result.get("lifecycle_current_state"),
+                _mapping_value(raw_result.get("lifecycle_state"), "current_state"),
+            )
+        )
+        is_a_candidate = _is_a_grade(candidate_grade) or actionability_state.startswith("A_GRADE_")
+        if is_a_candidate:
+            counts["candidate_a_grade_setups"] += 1
+        if actionability_state == "A_GRADE_ACTIONABLE":
+            counts["actionable_a_grade_setups"] += 1
+        elif actionability_state == "A_GRADE_BLOCKED_BY_SCORING":
+            counts["blocked_a_grade_by_scoring"] += 1
+        elif actionability_state == "A_GRADE_BLOCKED_BY_TARGET":
+            counts["blocked_a_grade_by_target"] += 1
+        elif actionability_state == "A_GRADE_BLOCKED_BY_ENTRY_WINDOW":
+            counts["blocked_a_grade_by_entry_window"] += 1
+        elif actionability_state == "A_GRADE_BLOCKED_BY_TRUST":
+            counts["blocked_a_grade_by_trust"] += 1
+        elif actionability_state == NA and lifecycle_state == "ACTIONABLE_A_GRADE" and is_a_candidate:
+            counts["actionable_a_grade_setups"] += 1
+    return counts
+
+
+def _is_a_grade(value: Any) -> bool:
+    return _display(value).strip().upper() in {"A-", "A", "A+"}
 
 
 def _data_issues(result: ScannerRunResult) -> list[dict[str, Any]]:
