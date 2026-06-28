@@ -57,6 +57,9 @@ class ScanRunRecord:
     runtime_sec: float | None = None
     portfolio_summary_json: str = "{}"
     symbol_health_summary_json: str = "{}"
+    actionable_setups: int = 0
+    actionable_a_grade_setups: int = 0
+    confirmed_setups: int = 0
 
 
 @dataclass(frozen=True)
@@ -205,6 +208,9 @@ class ScanHistorySummary:
     market_regime: str
     runtime_seconds: str
     regime_confidence: int = 0
+    actionable_setups: int = 0
+    actionable_a_grade_setups: int = 0
+    confirmed_setups: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -213,6 +219,9 @@ class ScanHistorySummary:
             "universe": self.universe,
             "symbols_scanned": self.symbols_scanned,
             "valid_setups": self.total_valid_setups,
+            "actionable_setups": self.actionable_setups,
+            "actionable_a_grade_setups": self.actionable_a_grade_setups,
+            "confirmed_setups": self.confirmed_setups,
             "near_misses": self.near_misses,
             "rejected": self.rejected,
             "data_issues": self.data_issues,

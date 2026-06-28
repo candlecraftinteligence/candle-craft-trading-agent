@@ -64,7 +64,10 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 rejected_no_edge INTEGER NOT NULL DEFAULT 0,
                 runtime_sec REAL,
                 portfolio_summary_json TEXT NOT NULL DEFAULT '{}',
-                symbol_health_summary_json TEXT NOT NULL DEFAULT '{}'
+                symbol_health_summary_json TEXT NOT NULL DEFAULT '{}',
+                actionable_setups INTEGER NOT NULL DEFAULT 0,
+                actionable_a_grade_setups INTEGER NOT NULL DEFAULT 0,
+                confirmed_setups INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS symbol_results (
@@ -375,6 +378,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "scan_runs", "runtime_sec", "REAL")
         _ensure_column(connection, "scan_runs", "portfolio_summary_json", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(connection, "scan_runs", "symbol_health_summary_json", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(connection, "scan_runs", "actionable_setups", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "actionable_a_grade_setups", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "confirmed_setups", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_results", "regime_confidence", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_results", "regime_compatibility_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_results", "regime_compatibility_label", "TEXT NOT NULL DEFAULT 'N/A'")

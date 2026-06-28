@@ -109,6 +109,7 @@ _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS = {
     "watchlisted",
     "watchlist_only",
     "watch_only",
+    "actionable_a_grade",
     "a_grade_watch",
     "stalking",
     "discovered",
@@ -128,7 +129,7 @@ _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS = {
     "sl_hit",
     "stop_hit",
 }
-_WATCH_STATE_KEYS = {"watch", "watching_limit_zone", "watchlist", "watchlisted"}
+_WATCH_STATE_KEYS = {"watch", "watching_limit_zone", "watchlist", "watchlisted", "actionable_a_grade"}
 _STALKING_STATE_KEYS = {"stalking"}
 _COOLDOWN_STATE_KEYS = {
     "cooldown",

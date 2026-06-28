@@ -1683,6 +1683,8 @@ def _scan_run_manifest_row(
         for result in (item.symbol_result for item in ranked)
         if result.lifecycle_state is not None
     )
+    actionable_a_grade_count = lifecycle_state_counts.get("ACTIONABLE_A_GRADE", 0)
+    confirmed_setup_count = lifecycle_state_counts.get("CONFIRMED", 0)
     target_integrity_blocks = sum(
         1
         for item in ranked
@@ -1696,6 +1698,9 @@ def _scan_run_manifest_row(
         "universe_label": _display(getattr(watchlist.universe, "label", watchlist.source_label)),
         "symbols_scanned": result.scanned_symbols,
         "valid_setup_count": bucket_counts.get("valid", 0),
+        "actionable_setup_count": bucket_counts.get("valid", 0) + actionable_a_grade_count,
+        "actionable_a_grade_count": actionable_a_grade_count,
+        "confirmed_setup_count": confirmed_setup_count,
         "near_miss_count": bucket_counts.get("near_miss", 0),
         "rejected_count": bucket_counts.get("no_setup", 0),
         "failed_symbol_count": result.failed_symbols,

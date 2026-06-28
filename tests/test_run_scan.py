@@ -635,6 +635,9 @@ def test_scan_run_manifest_appends_one_compact_row_per_scan_loop(tmp_path, monke
     assert row["universe_label"] == "Manual symbols"
     assert row["symbols_scanned"] == 1
     assert row["valid_setup_count"] == 0
+    assert row["actionable_setup_count"] == 0
+    assert row["actionable_a_grade_count"] == 0
+    assert row["confirmed_setup_count"] == 0
     assert row["near_miss_count"] == 0
     assert row["rejected_count"] == 1
     assert row["failed_symbol_count"] == 0
@@ -651,6 +654,34 @@ def test_scan_run_manifest_appends_one_compact_row_per_scan_loop(tmp_path, monke
     history = json.loads(history_path.read_text(encoding="utf-8"))
     assert history["schema_version"] == "nightly_scan_history_v1"
     assert history["runs"] == [row]
+
+
+def test_scan_run_manifest_counts_actionable_a_grade_separately_from_confirmed() -> None:
+    actionable = _near_miss_rank_result("ACTIONUSDT").model_copy(
+        update={"lifecycle_state": _lifecycle_record("ACTIONUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE)}
+    )
+    confirmed = _valid_rank_result("CONFIRMUSDT").model_copy(
+        update={"lifecycle_state": _lifecycle_record("CONFIRMUSDT", SetupLifecycleState.CONFIRMED)}
+    )
+    result = _run_result_for((actionable, confirmed), run_id="run-actionable")
+    watchlist = run_scan.WatchlistResolution(
+        symbols=("ACTIONUSDT", "CONFIRMUSDT"),
+        source_label="manual",
+        universe=run_scan.manual_symbol_universe(("ACTIONUSDT", "CONFIRMUSDT"), requested_size=2),
+    )
+
+    row = run_scan._scan_run_manifest_row(
+        result,
+        watchlist=watchlist,
+        ranked_results=rank_scan_results(result.results),
+        run_id="run-actionable",
+    )
+
+    assert row["valid_setup_count"] == 1
+    assert row["actionable_setup_count"] == 2
+    assert row["actionable_a_grade_count"] == 1
+    assert row["confirmed_setup_count"] == 1
+    assert row["lifecycle_state_counts"] == {"ACTIONABLE_A_GRADE": 1, "CONFIRMED": 1}
 
 
 def test_scan_run_manifest_counts_target_integrity_blocks() -> None:
@@ -744,6 +775,39 @@ def test_store_scan_prints_run_id_and_database(tmp_path, monkeypatch, capsys) ->
     captured = capsys.readouterr()
     assert "Stored scan run: run_123" in captured.out
     assert f"Database: {db_path}" in captured.out
+
+
+def test_store_scan_persists_actionable_a_grade_counts_separately(tmp_path) -> None:
+    db_path = tmp_path / "history.db"
+    actionable = _near_miss_rank_result("ACTIONUSDT").model_copy(
+        update={"lifecycle_state": _lifecycle_record("ACTIONUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE)}
+    )
+    confirmed = _valid_rank_result("CONFIRMUSDT").model_copy(
+        update={"lifecycle_state": _lifecycle_record("CONFIRMUSDT", SetupLifecycleState.CONFIRMED)}
+    )
+    result = _run_result_for((actionable, confirmed), run_id="run-actionable")
+
+    run_scan.store_scan_result(
+        db_path,
+        result,
+        ranked_results=rank_scan_results(result.results),
+        run_id="run-actionable",
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT total_valid_setups, actionable_setups, actionable_a_grade_setups, confirmed_setups
+            FROM scan_runs
+            WHERE run_id = 'run-actionable'
+            """
+        ).fetchone()
+
+    assert row["total_valid_setups"] == 1
+    assert row["actionable_setups"] == 2
+    assert row["actionable_a_grade_setups"] == 1
+    assert row["confirmed_setups"] == 1
 
 
 def test_store_scan_persists_normal_scan_summary_metadata(tmp_path, monkeypatch, capsys) -> None:

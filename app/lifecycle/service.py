@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from app.lifecycle.state_machine import (
     DEFAULT_SETUP_MERGE_TOLERANCE_PCT,
     LifecycleObservation,
     WATCH_PRIORITY_STATES,
+    confirmed_observation_block_reasons,
     entry_zone_touched,
     evaluate_lifecycle_transition,
     is_watchable_lifecycle_state,
@@ -32,8 +35,10 @@ from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
 from app.storage.database import DEFAULT_DATABASE_PATH
 from app.storage.symbol_health import load_symbol_health_records
 
-PUBLIC_A_GRADE_MIN_RR = Decimal("3.0")
-A_GRADE_WATCH_GRADES = {"a", "a+"}
+logger = logging.getLogger(__name__)
+
+ACTIONABLE_A_GRADE_MIN_RR = Decimal("2.5")
+ACTIONABLE_A_GRADE_GRADES = {"a+", "a", "a-"}
 A_GRADE_ALLOWED_WAITING_GATES = {
     "challenge_limit_entry_missing",
     "entry_limit_missing",
@@ -101,6 +106,17 @@ A_GRADE_HARD_GATE_BLOCKERS = {
     "wrong_side_stop",
 }
 TARGET_INTEGRITY_BLOCKED_KEYS = {"blocked", "failed", "fail", "rejected", "reject"}
+TARGET_INTEGRITY_PASSED_KEYS = {"ok", "pass", "passed", "valid"}
+ACTIONABLE_A_GRADE_ALLOWED_NON_FATAL_GATES = A_GRADE_ALLOWED_WAITING_GATES | {
+    "challenge_rr_below_3",
+    "rr_below_minimum",
+    "rr_too_low",
+}
+ACTIONABLE_A_GRADE_FATAL_GATE_BLOCKERS = A_GRADE_HARD_GATE_BLOCKERS - {
+    "challenge_rr_below_3",
+    "rr_below_minimum",
+    "rr_too_low",
+}
 
 
 class SetupLifecycleService:
@@ -191,6 +207,7 @@ class SetupLifecycleService:
             repository.upsert_record(transition.record)
         if transition.event is not None:
             repository.insert_event(transition.event)
+        _log_lifecycle_actionability_audit(symbol_result, observation, transition)
         if transition.record is not None:
             outcome_record = _outcome_analytics_record(repository, transition, observation)
             if outcome_record is not None:
@@ -271,20 +288,20 @@ def observation_from_symbol_result(
         symbol_result.historical_expectancy,
         symbol_result.expectancy_metrics.get("expectancy") if symbol_result.expectancy_metrics else NA,
     )
-    a_grade_watch_candidate = _a_grade_watch_candidate(
+    actionable_a_grade_candidate, actionable_grade_reason = _actionable_a_grade_decision(
         symbol_result,
         diagnostics,
         mode=mode,
         direction=direction,
         quality_grade=quality_grade,
         rr=rr,
-        required_rr=required_rr,
         failed_gate=failed_gate,
         gates_failed=gates_failed,
     )
-    requires_limit_fill = a_grade_watch_candidate or _requires_limit_fill_before_active(symbol_result, diagnostics)
+    a_grade_watch_candidate = False
+    requires_limit_fill = actionable_a_grade_candidate or _requires_limit_fill_before_active(symbol_result, diagnostics)
     if (
-        not a_grade_watch_candidate
+        not actionable_a_grade_candidate
         and not valid_trade_idea
         and not symbol_result.valid_strategy_modes
         and _status_key(failed_gate)
@@ -295,7 +312,7 @@ def observation_from_symbol_result(
     targets = _target_values(symbol_result, diagnostics)
     latest_high, latest_low = _latest_observed_range_values(symbol_result, diagnostics)
 
-    return LifecycleObservation(
+    observation = LifecycleObservation(
         symbol=symbol_result.symbol,
         mode=mode,
         direction=direction,
@@ -345,10 +362,16 @@ def observation_from_symbol_result(
         ),
         data_health_failed=_data_health_failed(symbol_result, diagnostics),
         limit_fill_required=requires_limit_fill,
+        actionable_a_grade_candidate=actionable_a_grade_candidate,
         a_grade_watch_candidate=a_grade_watch_candidate,
+        actionable_grade_reason=actionable_grade_reason,
         entry_filled=_entry_zone_touched_for_result(symbol_result, diagnostics),
         invalidated=_structural_acceptance_invalidated(pullback_failure_type, acceptance_status, failed_gate),
         expired=_status_key(failed_gate) == "entry_window_expired",
+    )
+    return replace(
+        observation,
+        confirmation_block_reason=_audit_reason(confirmed_observation_block_reasons(observation)),
     )
 
 
@@ -459,6 +482,7 @@ def _empty_process_summary(*, scanned_symbols: int) -> dict[str, Any]:
         "confirmed_after_multi_scan": 0,
         "decayed": 0,
         "expired": 0,
+        "actionable_a_grade": 0,
         "symbol_health_penalties_applied": 0,
     }
 
@@ -471,6 +495,7 @@ def _add_process_meta(summary: dict[str, Any], meta: Mapping[str, Any]) -> None:
         "confirmed_after_multi_scan",
         "decayed",
         "expired",
+        "actionable_a_grade",
         "symbol_health_penalties_applied",
     ):
         summary[key] = int(summary.get(key, 0)) + int(meta.get(key, 0))
@@ -498,8 +523,39 @@ def _process_meta(
         and record.current_state == SetupLifecycleState.EXPIRED
         and (existing is None or existing.current_state != SetupLifecycleState.EXPIRED)
         else 0,
+        "actionable_a_grade": 1
+        if record is not None and record.current_state == SetupLifecycleState.ACTIONABLE_A_GRADE
+        else 0,
         "symbol_health_penalties_applied": 1 if symbol_health_penalty_cycles > 0 else 0,
     }
+
+
+def _log_lifecycle_actionability_audit(
+    symbol_result: ScannerSymbolResult,
+    observation: LifecycleObservation,
+    transition: SetupTransitionResult,
+) -> None:
+    previous_state = transition.from_state.value if transition.from_state is not None else NA
+    new_state = transition.to_state.value
+    lifecycle_promotion_reason = transition.reason.value if transition.transitioned else SetupTransitionReason.NO_CHANGE.value
+    logger.info(
+        "lifecycle_actionability_audit symbol=%s public_decision=%s public_block_reason=%s "
+        "actionable_grade_reason=%s confirmation_block_reason=%s lifecycle_promotion_reason=%s "
+        "previous_state=%s new_state=%s",
+        symbol_result.symbol,
+        "not_evaluated",
+        NA,
+        observation.actionable_grade_reason,
+        observation.confirmation_block_reason,
+        lifecycle_promotion_reason,
+        previous_state,
+        new_state,
+    )
+
+
+def _audit_reason(reasons: Sequence[str]) -> str:
+    cleaned = tuple(_display(reason) for reason in reasons if _display(reason) != NA)
+    return ";".join(cleaned) if cleaned else NA
 
 
 def _outcome_analytics_record(
@@ -645,7 +701,7 @@ def _requires_limit_fill_before_active(symbol_result: ScannerSymbolResult, diagn
     return _quality_grade_key(_quality_grade_text(symbol_result, diagnostics)) in {"a", "a+"}
 
 
-def _a_grade_watch_candidate(
+def _actionable_a_grade_decision(
     symbol_result: ScannerSymbolResult,
     diagnostics: Mapping[str, Any],
     *,
@@ -653,33 +709,40 @@ def _a_grade_watch_candidate(
     direction: str,
     quality_grade: str,
     rr: Decimal | None,
-    required_rr: Decimal,
     failed_gate: str,
     gates_failed: Sequence[str],
-) -> bool:
-    if _quality_grade_key(quality_grade) not in A_GRADE_WATCH_GRADES:
-        return False
+) -> tuple[bool, str]:
+    grade_key = _quality_grade_key(quality_grade)
+    if grade_key not in ACTIONABLE_A_GRADE_GRADES:
+        return False, "grade_below_a_minus"
     if _display(symbol_result.symbol) == NA or _display(symbol_result.symbol).upper() == NA:
-        return False
+        return False, "missing_symbol"
     side = _display(direction).lower()
     if side not in {"long", "short"}:
-        return False
+        return False, "missing_side"
     if _display(symbol_result.error_message) != NA:
-        return False
+        return False, "scanner_error"
     if _status_keys(symbol_result) & A_GRADE_HARD_STATUS_BLOCKERS:
-        return False
+        return False, "hard_status_blocked"
     if _risk_validation_failed(symbol_result, diagnostics):
-        return False
+        return False, "risk_validation_failed"
     if _target_integrity_failed(diagnostics):
-        return False
+        return False, "target_integrity_failed"
+    if not _target_integrity_passed(diagnostics):
+        return False, "target_integrity_not_passed"
+    if not _clean_pullback_acceptance(diagnostics, failed_gate=failed_gate):
+        return False, "pullback_acceptance_not_clean"
+    if not _confirmation_structure_shift_passed_when_available(symbol_result, diagnostics):
+        return False, "confirmation_structure_shift_not_passed"
 
     gate_keys = _gate_keys(failed_gate, gates_failed, diagnostics)
-    hard_gates = gate_keys & A_GRADE_HARD_GATE_BLOCKERS
+    hard_gates = gate_keys & ACTIONABLE_A_GRADE_FATAL_GATE_BLOCKERS
     if hard_gates:
-        return False
+        return False, f"fatal_failed_gate:{','.join(sorted(hard_gates))}"
     actionable_gates = {gate for gate in gate_keys if gate and gate != "n_a"}
-    if actionable_gates and not actionable_gates <= A_GRADE_ALLOWED_WAITING_GATES:
-        return False
+    unexpected_gates = actionable_gates - ACTIONABLE_A_GRADE_ALLOWED_NON_FATAL_GATES
+    if unexpected_gates:
+        return False, f"unexpected_failed_gate:{','.join(sorted(unexpected_gates))}"
 
     entry_low, entry_high = (_decimal_or_none(value) for value in _entry_zone_values(symbol_result, diagnostics))
     stop = _decimal_or_none(_stop_value(symbol_result, diagnostics))
@@ -688,24 +751,28 @@ def _a_grade_watch_candidate(
     tp2 = _decimal_or_none(targets[1])
     tp3 = _decimal_or_none(targets[2])
     invalidation = _invalidation_value(symbol_result, diagnostics)
-    min_rr = max(required_rr, PUBLIC_A_GRADE_MIN_RR)
 
     if entry_low is None or entry_high is None:
-        return False
-    if stop is None or tp1 is None or tp2 is None:
-        return False
+        return False, "missing_entry_zone"
+    if stop is None:
+        return False, "missing_stop"
+    if tp1 is None or tp2 is None or tp3 is None:
+        return False, "missing_targets"
     if _display(invalidation) == NA:
-        return False
-    if rr is None or rr < min_rr:
-        return False
-
-    return _trade_map_geometry_valid(
+        return False, "missing_invalidation"
+    if rr is None:
+        return False, "rr_missing"
+    if rr < ACTIONABLE_A_GRADE_MIN_RR:
+        return False, f"rr_below_actionable_min:{_display(rr)}<{_display(ACTIONABLE_A_GRADE_MIN_RR)}"
+    if not _trade_map_geometry_valid(
         side=side,
         entry_low=entry_low,
         entry_high=entry_high,
         stop=stop,
-        targets=tuple(target for target in (tp1, tp2, tp3) if target is not None),
-    )
+        targets=(tp1, tp2, tp3),
+    ):
+        return False, "trade_map_geometry_invalid"
+    return True, "clean_a_grade_trade_map"
 
 
 def _quality_grade_text(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
@@ -795,6 +862,50 @@ def _target_integrity_failed(diagnostics: Mapping[str, Any]) -> bool:
     return _status_key(diagnostics.get("first_failed_gate")) == "target_integrity" or "target_integrity" in {
         _status_key(value) for value in _sequence_values(diagnostics.get("gates_failed"))
     }
+
+
+def _target_integrity_passed(diagnostics: Mapping[str, Any]) -> bool:
+    status = _status_key(
+        _first_non_na(
+            diagnostics.get("target_integrity_status"),
+            diagnostics.get("target_status"),
+            diagnostics.get("target_validation_status"),
+        )
+    )
+    if status in TARGET_INTEGRITY_PASSED_KEYS:
+        return True
+    return "target_integrity" in {_status_key(value) for value in _sequence_values(diagnostics.get("gates_passed"))}
+
+
+def _clean_pullback_acceptance(diagnostics: Mapping[str, Any], *, failed_gate: Any) -> bool:
+    blocked = {
+        "body_acceptance_failure",
+        "pullback_beyond_786",
+        "pullback_too_deep",
+        "structural_breakdown",
+    }
+    if _status_key(failed_gate) in blocked:
+        return False
+    if any(_status_key(value) in blocked for value in _sequence_values(diagnostics.get("gates_failed"))):
+        return False
+    status = _status_key(diagnostics.get("pullback_zone_status"))
+    if status in {"accepted", "clean", "pass", "passed", "valid"}:
+        return True
+    return "pullback_zone" in {_status_key(value) for value in _sequence_values(diagnostics.get("gates_passed"))}
+
+
+def _confirmation_structure_shift_passed_when_available(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> bool:
+    status = _status_key(diagnostics.get("confirmation_structure_shift_status"))
+    if status in {"confirmed", "pass", "passed", "valid"}:
+        return True
+    if status in {"blocked", "failed", "fail", "rejected", "reject"}:
+        return False
+    if bool(symbol_result.bos_detected or symbol_result.choch_detected):
+        return True
+    return "bos_choch" in {_status_key(value) for value in _sequence_values(diagnostics.get("gates_passed"))} or not status
 
 
 def _stop_value(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> Any:

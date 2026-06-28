@@ -21,12 +21,14 @@ ACTIVE_PROGRESSION = (
     SetupLifecycleState.STALKING,
     SetupLifecycleState.TRIGGERED,
     SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.ACTIONABLE_A_GRADE,
     SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.EXECUTING,
     SetupLifecycleState.MANAGING,
 )
 VALID_STATES = {
     SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.ACTIONABLE_A_GRADE,
     SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.EXECUTING,
     SetupLifecycleState.MANAGING,
@@ -40,6 +42,7 @@ OUTCOME_STATES = {
     SetupLifecycleState.EXPIRED,
 }
 WATCH_PRIORITY_STATES = (
+    SetupLifecycleState.ACTIONABLE_A_GRADE,
     SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.STALKING,
     SetupLifecycleState.TRIGGERED,
@@ -81,22 +84,26 @@ DECAYABLE_STATES = {
     SetupLifecycleState.STALKING,
     SetupLifecycleState.TRIGGERED,
     SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.ACTIONABLE_A_GRADE,
     SetupLifecycleState.A_GRADE_WATCH,
 }
 DECAY_GRADE_PATH = ("a+", "a", "a-", "b+")
 ENTRY_TOUCH_MONITOR_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
+    SetupLifecycleState.ACTIONABLE_A_GRADE,
     SetupLifecycleState.A_GRADE_WATCH,
 }
 ENTRY_TOUCH_REASON_REQUIRED_STATES = {
     SetupLifecycleState.WATCHLISTED,
+    SetupLifecycleState.ACTIONABLE_A_GRADE,
     SetupLifecycleState.A_GRADE_WATCH,
 }
 PLAN_LOCK_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
     SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.ACTIONABLE_A_GRADE,
     SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.EXECUTING,
     SetupLifecycleState.MANAGING,
@@ -121,11 +128,13 @@ INITIAL_PUBLIC_WATCHLIST_PENDING_GATES = frozenset(
 ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
     SetupLifecycleState.DISCOVERED: {
         SetupLifecycleState.WATCHLISTED,
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
         SetupLifecycleState.A_GRADE_WATCH,
         SetupLifecycleState.REJECTED,
     },
     SetupLifecycleState.REJECTED: {
         SetupLifecycleState.WATCHLISTED,
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
         SetupLifecycleState.A_GRADE_WATCH,
         SetupLifecycleState.ARCHIVED,
     },
@@ -133,6 +142,7 @@ ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
         SetupLifecycleState.STALKING,
         SetupLifecycleState.TRIGGERED,
         SetupLifecycleState.CONFIRMED,
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
         SetupLifecycleState.A_GRADE_WATCH,
         SetupLifecycleState.REJECTED,
         SetupLifecycleState.EXPIRED,
@@ -141,24 +151,35 @@ ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
         SetupLifecycleState.TRIGGERED,
         SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.WATCHLISTED,
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
         SetupLifecycleState.A_GRADE_WATCH,
         SetupLifecycleState.REJECTED,
         SetupLifecycleState.EXPIRED,
     },
     SetupLifecycleState.TRIGGERED: {
         SetupLifecycleState.CONFIRMED,
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
         SetupLifecycleState.A_GRADE_WATCH,
         SetupLifecycleState.STALKING,
         SetupLifecycleState.INVALIDATED,
         SetupLifecycleState.EXPIRED,
     },
     SetupLifecycleState.CONFIRMED: {
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
         SetupLifecycleState.A_GRADE_WATCH,
         SetupLifecycleState.EXECUTING,
         SetupLifecycleState.INVALIDATED,
         SetupLifecycleState.EXPIRED,
     },
     SetupLifecycleState.A_GRADE_WATCH: {
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
+        SetupLifecycleState.TRIGGERED,
+        SetupLifecycleState.CONFIRMED,
+        SetupLifecycleState.INVALIDATED,
+        SetupLifecycleState.EXPIRED,
+        SetupLifecycleState.COOLDOWN,
+    },
+    SetupLifecycleState.ACTIONABLE_A_GRADE: {
         SetupLifecycleState.TRIGGERED,
         SetupLifecycleState.CONFIRMED,
         SetupLifecycleState.INVALIDATED,
@@ -220,7 +241,11 @@ class LifecycleObservation:
     active_invalidation_reason: str = NA
     data_health_failed: bool = False
     limit_fill_required: bool = False
+    actionable_a_grade_candidate: bool = False
     a_grade_watch_candidate: bool = False
+    actionable_grade_reason: str = NA
+    confirmation_block_reason: str = NA
+    lifecycle_promotion_reason: str = NA
     entry_filled: bool = False
     tp_hit: bool = False
     sl_hit: bool = False
@@ -471,7 +496,9 @@ def evaluate_lifecycle_transition(
 
 def initial_state_for_observation(observation: LifecycleObservation) -> SetupLifecycleState:
     target = observed_state(observation)
-    if observation.a_grade_watch_candidate:
+    if target == SetupLifecycleState.ACTIONABLE_A_GRADE:
+        return SetupLifecycleState.ACTIONABLE_A_GRADE
+    if target == SetupLifecycleState.A_GRADE_WATCH:
         return SetupLifecycleState.A_GRADE_WATCH
     if target in {SetupLifecycleState.EXECUTING, SetupLifecycleState.MANAGING}:
         return SetupLifecycleState.CONFIRMED
@@ -491,10 +518,12 @@ def observed_state(observation: LifecycleObservation) -> SetupLifecycleState:
         return SetupLifecycleState.INVALIDATED
     if observation.expired:
         return SetupLifecycleState.EXPIRED
-    if observation.a_grade_watch_candidate:
-        return SetupLifecycleState.A_GRADE_WATCH
     if _confirmed_observation_ready(observation):
         return SetupLifecycleState.CONFIRMED
+    if observation.actionable_a_grade_candidate:
+        return SetupLifecycleState.ACTIONABLE_A_GRADE
+    if observation.a_grade_watch_candidate:
+        return SetupLifecycleState.A_GRADE_WATCH
     if observation.sweep_detected and observation.structure_shift_detected:
         return SetupLifecycleState.TRIGGERED
     if observation.sweep_detected:
@@ -554,6 +583,8 @@ def next_state_for_observation(
             return SetupLifecycleState.INVALIDATED
         if observation.expired:
             return SetupLifecycleState.EXPIRED
+        if observation.actionable_a_grade_candidate and not observation.entry_filled:
+            return SetupLifecycleState.ACTIONABLE_A_GRADE
         if observation.a_grade_watch_candidate and not observation.entry_filled:
             return SetupLifecycleState.A_GRADE_WATCH
         if observation.entry_filled:
@@ -568,12 +599,26 @@ def next_state_for_observation(
             return SetupLifecycleState.INVALIDATED
         if observation.expired:
             return SetupLifecycleState.EXPIRED
+        if target == SetupLifecycleState.ACTIONABLE_A_GRADE:
+            return SetupLifecycleState.ACTIONABLE_A_GRADE
+        if observation.entry_filled:
+            return SetupLifecycleState.TRIGGERED
+        if target == SetupLifecycleState.CONFIRMED:
+            return SetupLifecycleState.CONFIRMED
+        return current
+    if current == SetupLifecycleState.ACTIONABLE_A_GRADE:
+        if observation.invalidated or target == SetupLifecycleState.REJECTED:
+            return SetupLifecycleState.INVALIDATED
+        if observation.expired:
+            return SetupLifecycleState.EXPIRED
         if observation.entry_filled:
             return SetupLifecycleState.TRIGGERED
         if target == SetupLifecycleState.CONFIRMED:
             return SetupLifecycleState.CONFIRMED
         return current
     if current == SetupLifecycleState.REJECTED:
+        if target == SetupLifecycleState.ACTIONABLE_A_GRADE:
+            return SetupLifecycleState.ACTIONABLE_A_GRADE
         if target == SetupLifecycleState.A_GRADE_WATCH:
             return SetupLifecycleState.A_GRADE_WATCH
         if target in WATCH_PRIORITY_STATES or target in VALID_STATES:
@@ -582,6 +627,8 @@ def next_state_for_observation(
     if current == SetupLifecycleState.DISCOVERED:
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
+        if target == SetupLifecycleState.ACTIONABLE_A_GRADE:
+            return SetupLifecycleState.ACTIONABLE_A_GRADE
         if target == SetupLifecycleState.A_GRADE_WATCH:
             return SetupLifecycleState.A_GRADE_WATCH
         if target in WATCH_PRIORITY_STATES or target in VALID_STATES:
@@ -592,6 +639,8 @@ def next_state_for_observation(
             return SetupLifecycleState.TRIGGERED
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
+        if target == SetupLifecycleState.ACTIONABLE_A_GRADE:
+            return SetupLifecycleState.ACTIONABLE_A_GRADE
         if target == SetupLifecycleState.A_GRADE_WATCH:
             return SetupLifecycleState.A_GRADE_WATCH
         if observation.sweep_detected:
@@ -602,6 +651,8 @@ def next_state_for_observation(
             return SetupLifecycleState.TRIGGERED
         if target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.REJECTED
+        if target == SetupLifecycleState.ACTIONABLE_A_GRADE:
+            return SetupLifecycleState.ACTIONABLE_A_GRADE
         if target == SetupLifecycleState.A_GRADE_WATCH:
             return SetupLifecycleState.A_GRADE_WATCH
         if observation.sweep_detected and observation.structure_shift_detected:
@@ -612,6 +663,8 @@ def next_state_for_observation(
     if current == SetupLifecycleState.TRIGGERED:
         if observation.invalidated or target == SetupLifecycleState.REJECTED:
             return SetupLifecycleState.INVALIDATED
+        if target == SetupLifecycleState.ACTIONABLE_A_GRADE:
+            return SetupLifecycleState.ACTIONABLE_A_GRADE
         if target == SetupLifecycleState.A_GRADE_WATCH:
             return SetupLifecycleState.A_GRADE_WATCH
         if observation.pullback_and_rr_valid or observation.valid_trade_idea:
@@ -899,7 +952,11 @@ def _next_confirmation_count(
 
 
 def _confirmation_countable(observation: LifecycleObservation) -> bool:
-    return _confirmed_observation_ready(observation) or observation.a_grade_watch_candidate
+    return (
+        _confirmed_observation_ready(observation)
+        or observation.actionable_a_grade_candidate
+        or observation.a_grade_watch_candidate
+    )
 
 
 def _valid_confirmed_observation(observation: LifecycleObservation) -> bool:
@@ -908,6 +965,10 @@ def _valid_confirmed_observation(observation: LifecycleObservation) -> bool:
 
 def _confirmed_observation_ready(observation: LifecycleObservation) -> bool:
     return not _confirmed_observation_blockers(observation)
+
+
+def confirmed_observation_block_reasons(observation: LifecycleObservation) -> tuple[str, ...]:
+    return _confirmed_observation_blockers(observation)
 
 
 def _confirmed_observation_invalidates_active_signal(observation: LifecycleObservation) -> bool:
@@ -985,7 +1046,12 @@ def _confirmed_observation_blockers(observation: LifecycleObservation) -> tuple[
 
 
 def _setup_observable(observation: LifecycleObservation) -> bool:
-    if observation.valid_trade_idea or observation.pullback_and_rr_valid or observation.a_grade_watch_candidate:
+    if (
+        observation.valid_trade_idea
+        or observation.pullback_and_rr_valid
+        or observation.actionable_a_grade_candidate
+        or observation.a_grade_watch_candidate
+    ):
         return True
     return observation.sweep_detected or _is_watch_ready(observation)
 
@@ -1249,6 +1315,8 @@ def _reason_for_state(
         return SetupTransitionReason.STRUCTURE_SHIFT_CONFIRMED
     if state == SetupLifecycleState.CONFIRMED:
         return SetupTransitionReason.PULLBACK_RR_VALID
+    if state == SetupLifecycleState.ACTIONABLE_A_GRADE:
+        return SetupTransitionReason.ACTIONABLE_A_GRADE
     if state == SetupLifecycleState.A_GRADE_WATCH:
         return SetupTransitionReason.A_GRADE_WATCH
     if state == SetupLifecycleState.EXECUTING:
@@ -1279,7 +1347,13 @@ def _is_watch_ready(observation: LifecycleObservation) -> bool:
 
 def _active_setup_invalidated(current: SetupLifecycleState, target: SetupLifecycleState) -> bool:
     return (
-        current in {SetupLifecycleState.CONFIRMED, SetupLifecycleState.A_GRADE_WATCH, SetupLifecycleState.EXECUTING}
+        current
+        in {
+            SetupLifecycleState.CONFIRMED,
+            SetupLifecycleState.ACTIONABLE_A_GRADE,
+            SetupLifecycleState.A_GRADE_WATCH,
+            SetupLifecycleState.EXECUTING,
+        }
         and target == SetupLifecycleState.REJECTED
     )
 
@@ -1378,6 +1452,7 @@ __all__ = [
     "OUTCOME_STATES",
     "VALID_STATES",
     "WATCH_PRIORITY_STATES",
+    "confirmed_observation_block_reasons",
     "entry_zone_touched",
     "evaluate_lifecycle_transition",
     "initial_state_for_observation",
