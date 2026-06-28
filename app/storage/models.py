@@ -59,12 +59,15 @@ class ScanRunRecord:
     symbol_health_summary_json: str = "{}"
     actionable_setups: int = 0
     actionable_a_grade_setups: int = 0
+    actionable_a_grade_target_caution: int = 0
     confirmed_setups: int = 0
     candidate_a_grade_setups: int = 0
     blocked_a_grade_by_scoring: int = 0
     blocked_a_grade_by_target: int = 0
     blocked_a_grade_by_entry_window: int = 0
     blocked_a_grade_by_trust: int = 0
+    fatal_target_blocks: int = 0
+    soft_target_warnings: int = 0
 
 
 @dataclass(frozen=True)
@@ -112,9 +115,12 @@ class SetupCandidateRecord:
     technical_score: str
     opportunity_score: str
     failed_gate: str
+    final_failed_gate: str
     final_block_reason: str
     target_integrity_status: str
     target_failure: str
+    target_failure_severity: str
+    target_warning_reason: str
     actionability_state: str
     trust_meter: str
     risk_warning: str
@@ -224,12 +230,15 @@ class ScanHistorySummary:
     regime_confidence: int = 0
     actionable_setups: int = 0
     actionable_a_grade_setups: int = 0
+    actionable_a_grade_target_caution: int = 0
     confirmed_setups: int = 0
     candidate_a_grade_setups: int = 0
     blocked_a_grade_by_scoring: int = 0
     blocked_a_grade_by_target: int = 0
     blocked_a_grade_by_entry_window: int = 0
     blocked_a_grade_by_trust: int = 0
+    fatal_target_blocks: int = 0
+    soft_target_warnings: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -240,12 +249,15 @@ class ScanHistorySummary:
             "valid_setups": self.total_valid_setups,
             "actionable_setups": self.actionable_setups,
             "actionable_a_grade_setups": self.actionable_a_grade_setups,
+            "actionable_a_grade_target_caution": self.actionable_a_grade_target_caution,
             "confirmed_setups": self.confirmed_setups,
             "candidate_a_grade_setups": self.candidate_a_grade_setups,
             "blocked_a_grade_by_scoring": self.blocked_a_grade_by_scoring,
             "blocked_a_grade_by_target": self.blocked_a_grade_by_target,
             "blocked_a_grade_by_entry_window": self.blocked_a_grade_by_entry_window,
             "blocked_a_grade_by_trust": self.blocked_a_grade_by_trust,
+            "fatal_target_blocks": self.fatal_target_blocks,
+            "soft_target_warnings": self.soft_target_warnings,
             "near_misses": self.near_misses,
             "rejected": self.rejected,
             "data_issues": self.data_issues,

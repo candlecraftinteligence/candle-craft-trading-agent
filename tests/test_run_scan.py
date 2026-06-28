@@ -824,6 +824,17 @@ def test_store_scan_persists_actionable_a_grade_counts_separately(tmp_path) -> N
             "actionability_state": "A_GRADE_ACTIONABLE",
         }
     )
+    caution_lifecycle = _lifecycle_record("CAUTIONUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE).model_copy(
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "A",
+            "actionability_state": "A_GRADE_ACTIONABLE_TARGET_CAUTION",
+            "target_integrity_status": "warning",
+            "target_failure": "TARGET_INSIDE_CHOP",
+            "target_failure_severity": "target_caution_actionable",
+            "target_warning_reason": "TP2 remains inside recent chop/range.",
+        }
+    )
     blocked_lifecycle = _lifecycle_record("BLOCKUSDT", SetupLifecycleState.ACTIONABLE_A_GRADE).model_copy(
         update={
             "candidate_quality_grade": "A",
@@ -841,6 +852,18 @@ def test_store_scan_persists_actionable_a_grade_counts_separately(tmp_path) -> N
             "lifecycle_state": actionable_lifecycle,
         }
     )
+    caution = _near_miss_rank_result("CAUTIONUSDT").model_copy(
+        update={
+            "candidate_quality_grade": "A",
+            "final_quality_grade": "A",
+            "actionability_state": "A_GRADE_ACTIONABLE_TARGET_CAUTION",
+            "target_integrity_status": "warning",
+            "target_failure": "TARGET_INSIDE_CHOP",
+            "target_failure_severity": "target_caution_actionable",
+            "target_warning_reason": "TP2 remains inside recent chop/range.",
+            "lifecycle_state": caution_lifecycle,
+        }
+    )
     blocked = _near_miss_rank_result("BLOCKUSDT").model_copy(
         update={
             "candidate_quality_grade": "A",
@@ -854,7 +877,7 @@ def test_store_scan_persists_actionable_a_grade_counts_separately(tmp_path) -> N
     confirmed = _valid_rank_result("CONFIRMUSDT").model_copy(
         update={"lifecycle_state": _lifecycle_record("CONFIRMUSDT", SetupLifecycleState.CONFIRMED)}
     )
-    result = _run_result_for((actionable, blocked, confirmed), run_id="run-actionable")
+    result = _run_result_for((actionable, caution, blocked, confirmed), run_id="run-actionable")
 
     run_scan.store_scan_result(
         db_path,
@@ -868,23 +891,27 @@ def test_store_scan_persists_actionable_a_grade_counts_separately(tmp_path) -> N
         row = connection.execute(
             """
             SELECT total_valid_setups, actionable_setups, actionable_a_grade_setups,
-                   confirmed_setups, candidate_a_grade_setups, blocked_a_grade_by_scoring,
-                   blocked_a_grade_by_target, blocked_a_grade_by_entry_window, blocked_a_grade_by_trust
+                   actionable_a_grade_target_caution, confirmed_setups, candidate_a_grade_setups,
+                   blocked_a_grade_by_scoring, blocked_a_grade_by_target,
+                   blocked_a_grade_by_entry_window, blocked_a_grade_by_trust,
+                   fatal_target_blocks, soft_target_warnings
             FROM scan_runs
             WHERE run_id = 'run-actionable'
             """
         ).fetchone()
 
     assert row["total_valid_setups"] == 1
-    assert row["actionable_setups"] == 1
-    assert row["actionable_a_grade_setups"] == 1
+    assert row["actionable_setups"] == 2
+    assert row["actionable_a_grade_setups"] == 2
+    assert row["actionable_a_grade_target_caution"] == 1
     assert row["confirmed_setups"] == 1
-    assert row["candidate_a_grade_setups"] == 2
+    assert row["candidate_a_grade_setups"] == 3
     assert row["blocked_a_grade_by_scoring"] == 1
     assert row["blocked_a_grade_by_target"] == 0
     assert row["blocked_a_grade_by_entry_window"] == 0
     assert row["blocked_a_grade_by_trust"] == 0
-
+    assert row["fatal_target_blocks"] == 0
+    assert row["soft_target_warnings"] == 1
 
 def test_store_scan_persists_normal_scan_summary_metadata(tmp_path, monkeypatch, capsys) -> None:
     db_path = tmp_path / "history.db"

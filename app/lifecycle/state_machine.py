@@ -229,6 +229,8 @@ class LifecycleObservation:
     final_block_reason: str = NA
     target_integrity_status: str = NA
     target_failure: str = NA
+    target_failure_severity: str = NA
+    target_warning_reason: str = NA
     actionability_state: str = NA
     regime_state: str = NA
     action_label: str = NA
@@ -413,6 +415,8 @@ def evaluate_lifecycle_transition(
             final_block_reason=_text(observation.final_block_reason),
             target_integrity_status=_text(observation.target_integrity_status),
             target_failure=_text(observation.target_failure),
+            target_failure_severity=_text(observation.target_failure_severity),
+            target_warning_reason=_text(observation.target_warning_reason),
             actionability_state=_text(observation.actionability_state),
             readiness_score=_bounded_score(observation.readiness_score, 0),
             quality_score=_bounded_score(observation.quality_score, 0),
@@ -809,6 +813,8 @@ def _record_with_observation(
             "final_block_reason": _text(observation.final_block_reason),
             "target_integrity_status": _text(observation.target_integrity_status),
             "target_failure": _text(observation.target_failure),
+            "target_failure_severity": _text(observation.target_failure_severity),
+            "target_warning_reason": _text(observation.target_warning_reason),
             "actionability_state": _text(observation.actionability_state),
             "readiness_score": _bounded_score(observation.readiness_score, record.readiness_score),
             "quality_score": _bounded_score(observation.quality_score, record.quality_score),

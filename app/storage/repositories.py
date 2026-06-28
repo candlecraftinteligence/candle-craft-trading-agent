@@ -131,10 +131,10 @@ def list_scan_history(
                 """
                 SELECT run_id, timestamp, universe, symbols_scanned, total_valid_setups,
                        near_misses, rejected, data_issues, market_regime, regime_confidence, runtime_stats_json,
-                       actionable_setups, actionable_a_grade_setups, confirmed_setups,
+                       actionable_setups, actionable_a_grade_setups, actionable_a_grade_target_caution, confirmed_setups,
                        candidate_a_grade_setups, blocked_a_grade_by_scoring,
                        blocked_a_grade_by_target, blocked_a_grade_by_entry_window,
-                       blocked_a_grade_by_trust
+                       blocked_a_grade_by_trust, fatal_target_blocks, soft_target_warnings
                 FROM scan_runs
                 ORDER BY timestamp DESC
                 LIMIT ?
@@ -262,12 +262,15 @@ def _scan_run_record(
         else "{}",
         actionable_setups=actionable_a_grade_setups,
         actionable_a_grade_setups=actionable_a_grade_setups,
+        actionable_a_grade_target_caution=a_grade_counts["actionable_a_grade_target_caution"],
         confirmed_setups=confirmed_setups,
         candidate_a_grade_setups=a_grade_counts["candidate_a_grade_setups"],
         blocked_a_grade_by_scoring=a_grade_counts["blocked_a_grade_by_scoring"],
         blocked_a_grade_by_target=a_grade_counts["blocked_a_grade_by_target"],
         blocked_a_grade_by_entry_window=a_grade_counts["blocked_a_grade_by_entry_window"],
         blocked_a_grade_by_trust=a_grade_counts["blocked_a_grade_by_trust"],
+        fatal_target_blocks=a_grade_counts["fatal_target_blocks"],
+        soft_target_warnings=a_grade_counts["soft_target_warnings"],
     )
 
 
@@ -512,6 +515,21 @@ def _setup_candidate_record(run_id: str, symbol_result: ScannerSymbolResult) -> 
             diagnostics.get("target_failure_reason"),
         )
     )
+    target_failure_severity = _display(
+        _first_non_na(
+            getattr(symbol_result, "target_failure_severity", NA),
+            getattr(lifecycle, "target_failure_severity", NA),
+            diagnostics.get("target_failure_severity"),
+        )
+    )
+    target_warning_reason = _display(
+        _first_non_na(
+            getattr(symbol_result, "target_warning_reason", NA),
+            getattr(lifecycle, "target_warning_reason", NA),
+            diagnostics.get("target_warning_reason"),
+            diagnostics.get("target_integrity_warning"),
+        )
+    )
     actionability_state = _display(
         _first_non_na(
             getattr(symbol_result, "actionability_state", NA),
@@ -539,9 +557,12 @@ def _setup_candidate_record(run_id: str, symbol_result: ScannerSymbolResult) -> 
         technical_score=technical_score,
         opportunity_score=opportunity_score,
         failed_gate=failed_gate,
+        final_failed_gate=failed_gate,
         final_block_reason=final_block_reason,
         target_integrity_status=target_integrity_status,
         target_failure=target_failure,
+        target_failure_severity=target_failure_severity,
+        target_warning_reason=target_warning_reason,
         actionability_state=actionability_state,
         trust_meter=_trust_meter_text(setup, diagnostics),
         risk_warning=_display(getattr(setup, "risk_warning", NA)),
@@ -593,10 +614,10 @@ def _insert_scan_run(connection: sqlite3.Connection, record: ScanRunRecord) -> N
             watch_iteration_number, started_at, completed_at, symbols_requested,
             symbols_queued, symbols_completed, valid_activations, still_watching,
             rejected_no_edge, runtime_sec, portfolio_summary_json, symbol_health_summary_json,
-            actionable_setups, actionable_a_grade_setups, confirmed_setups,
+            actionable_setups, actionable_a_grade_setups, actionable_a_grade_target_caution, confirmed_setups,
             candidate_a_grade_setups, blocked_a_grade_by_scoring,
             blocked_a_grade_by_target, blocked_a_grade_by_entry_window,
-            blocked_a_grade_by_trust
+            blocked_a_grade_by_trust, fatal_target_blocks, soft_target_warnings
         ) VALUES ({placeholders})
         """,
         params,
@@ -624,10 +645,10 @@ def _insert_setup_candidates(connection: sqlite3.Connection, records: Sequence[S
         INSERT INTO setup_candidates (
             run_id, symbol, mode, direction, entry, stop, tp1, tp2, tp3, rr,
             invalidation, quality_grade, candidate_quality_grade, final_quality_grade,
-            technical_score, opportunity_score, failed_gate, final_block_reason,
-            target_integrity_status, target_failure, actionability_state, trust_meter,
-            risk_warning, raw_candidate_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            technical_score, opportunity_score, failed_gate, final_failed_gate, final_block_reason,
+            target_integrity_status, target_failure, target_failure_severity, target_warning_reason,
+            actionability_state, trust_meter, risk_warning, raw_candidate_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [astuple(record) for record in records],
     )
@@ -661,12 +682,15 @@ def _history_summary_from_row(row: sqlite3.Row) -> ScanHistorySummary:
         runtime_seconds=_runtime_text(runtime_stats),
         actionable_setups=int(row["actionable_setups"] or 0),
         actionable_a_grade_setups=int(row["actionable_a_grade_setups"] or 0),
+        actionable_a_grade_target_caution=int(row["actionable_a_grade_target_caution"] or 0),
         confirmed_setups=int(row["confirmed_setups"] or 0),
         candidate_a_grade_setups=int(row["candidate_a_grade_setups"] or 0),
         blocked_a_grade_by_scoring=int(row["blocked_a_grade_by_scoring"] or 0),
         blocked_a_grade_by_target=int(row["blocked_a_grade_by_target"] or 0),
         blocked_a_grade_by_entry_window=int(row["blocked_a_grade_by_entry_window"] or 0),
         blocked_a_grade_by_trust=int(row["blocked_a_grade_by_trust"] or 0),
+        fatal_target_blocks=int(row["fatal_target_blocks"] or 0),
+        soft_target_warnings=int(row["soft_target_warnings"] or 0),
     )
 
 
@@ -707,10 +731,13 @@ def _a_grade_actionability_counts(payload: Mapping[str, Any], result: ScannerRun
     counts = {
         "candidate_a_grade_setups": 0,
         "actionable_a_grade_setups": 0,
+        "actionable_a_grade_target_caution": 0,
         "blocked_a_grade_by_scoring": 0,
         "blocked_a_grade_by_target": 0,
         "blocked_a_grade_by_entry_window": 0,
         "blocked_a_grade_by_trust": 0,
+        "fatal_target_blocks": 0,
+        "soft_target_warnings": 0,
     }
     raw_results = tuple(item for item in payload.get("results", ()) if isinstance(item, Mapping))
     for index, symbol_result in enumerate(result.results):
@@ -743,11 +770,23 @@ def _a_grade_actionability_counts(payload: Mapping[str, Any], result: ScannerRun
                 _mapping_value(raw_result.get("lifecycle_state"), "current_state"),
             )
         )
+        severity_key = _metric_key(
+            _first_non_na(
+                getattr(symbol_result, "target_failure_severity", NA),
+                getattr(lifecycle, "target_failure_severity", NA),
+                raw_result.get("target_failure_severity"),
+                _mapping_value(raw_result.get("lifecycle_state"), "target_failure_severity"),
+                diagnostics.get("target_failure_severity"),
+            )
+        )
+        state_key = _metric_key(actionability_state)
         is_a_candidate = _is_a_grade(candidate_grade) or actionability_state.startswith("A_GRADE_")
         if is_a_candidate:
             counts["candidate_a_grade_setups"] += 1
-        if actionability_state == "A_GRADE_ACTIONABLE":
+        if actionability_state in {"A_GRADE_ACTIONABLE", "A_GRADE_ACTIONABLE_TARGET_CAUTION"}:
             counts["actionable_a_grade_setups"] += 1
+            if actionability_state == "A_GRADE_ACTIONABLE_TARGET_CAUTION":
+                counts["actionable_a_grade_target_caution"] += 1
         elif actionability_state == "A_GRADE_BLOCKED_BY_SCORING":
             counts["blocked_a_grade_by_scoring"] += 1
         elif actionability_state == "A_GRADE_BLOCKED_BY_TARGET":
@@ -758,7 +797,21 @@ def _a_grade_actionability_counts(payload: Mapping[str, Any], result: ScannerRun
             counts["blocked_a_grade_by_trust"] += 1
         elif actionability_state == NA and lifecycle_state == "ACTIONABLE_A_GRADE" and is_a_candidate:
             counts["actionable_a_grade_setups"] += 1
+        if severity_key == "fatal_target_failure" or state_key == "a_grade_blocked_by_target":
+            counts["fatal_target_blocks"] += 1
+        if severity_key in {"soft_target_warning", "target_caution_actionable"} or state_key == "a_grade_actionable_target_caution":
+            counts["soft_target_warnings"] += 1
     return counts
+
+
+def _metric_key(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return ""
+    key = text.lower().strip().replace("-", "_").replace(" ", "_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key.strip("_")
 
 
 def _is_a_grade(value: Any) -> bool:

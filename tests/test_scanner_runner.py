@@ -338,7 +338,7 @@ def test_target_quality_reject_blocks_trade_idea_alert_and_journal(monkeypatch) 
     assert fields["next_trigger_needed"] == "Wait until TP2 expands beyond opposing structure."
 
 
-def test_blocking_target_failure_type_blocks_even_without_reject_grade(monkeypatch) -> None:
+def test_target_inside_chop_soft_warning_does_not_block_trade_map(monkeypatch) -> None:
     target_intelligence = TargetIntelligenceResult(
         target_quality_grade=TargetQualityGrade.B,
         target_failure_type=TargetFailureType.TARGET_INSIDE_CHOP,
@@ -349,14 +349,41 @@ def test_blocking_target_failure_type_blocks_even_without_reject_grade(monkeypat
     result, alert_agent = _scan_with_target_intelligence(monkeypatch, target_intelligence)
 
     symbol_result = result.results[0]
+    diagnostics = symbol_result.strategy_diagnostics["swing"]
+    assert symbol_result.status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+    assert symbol_result.trade_idea is not None
+    assert symbol_result.alert_result is not None
+    assert symbol_result.journal_entry is not None
+    assert alert_agent.calls != []
+    assert diagnostics["target_integrity_status"] == "warning"
+    assert diagnostics["target_failure"] == TargetFailureType.TARGET_INSIDE_CHOP.value
+    assert diagnostics["target_failure_severity"] == "soft_target_warning"
+    assert diagnostics["target_warning_reason"] == "TP1 sits inside chop."
+    assert "target_integrity" in diagnostics["gates_passed"]
+    assert "target_integrity" not in diagnostics.get("gates_failed", ())
+
+
+def test_opposing_structure_target_failure_remains_blocking(monkeypatch) -> None:
+    target_intelligence = TargetIntelligenceResult(
+        target_quality_grade=TargetQualityGrade.B,
+        target_failure_type=TargetFailureType.OPPOSING_STRUCTURE_BLOCK,
+        rr_compression_reason="Opposing structure blocks the clean path before minimum RR.",
+        next_target_condition="Wait for target expansion above opposing structure.",
+    )
+
+    result, alert_agent = _scan_with_target_intelligence(monkeypatch, target_intelligence)
+
+    symbol_result = result.results[0]
+    diagnostics = symbol_result.strategy_diagnostics["swing"]
     assert symbol_result.status == ScannerPipelineStatus.SCANNED_NO_SETUP
     assert symbol_result.rejection_stage == "target_integrity"
     assert symbol_result.trade_idea is None
     assert symbol_result.alert_result is None
     assert symbol_result.journal_entry is None
     assert alert_agent.calls == []
+    assert diagnostics["target_failure"] == TargetFailureType.OPPOSING_STRUCTURE_BLOCK.value
+    assert diagnostics["target_failure_severity"] == "fatal_target_failure"
     assert build_symbol_display(symbol_result).action_label == "Wait for target expansion"
-
 
 def test_invalid_tp_sequence_blocks_before_alert(monkeypatch) -> None:
     monkeypatch.setattr(scanner_runner_module, "_tp_sequence_valid", lambda **kwargs: False)

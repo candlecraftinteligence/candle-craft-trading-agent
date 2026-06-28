@@ -77,6 +77,8 @@ class SetupLifecycleRecord(BaseModel):
     final_block_reason: str = NA
     target_integrity_status: str = NA
     target_failure: str = NA
+    target_failure_severity: str = NA
+    target_warning_reason: str = NA
     actionability_state: str = NA
     readiness_score: int = Field(default=0, ge=0, le=100)
     quality_score: int = Field(default=0, ge=0, le=100)
@@ -128,6 +130,8 @@ class SetupLifecycleRecord(BaseModel):
         "final_block_reason",
         "target_integrity_status",
         "target_failure",
+        "target_failure_severity",
+        "target_warning_reason",
         "actionability_state",
         "edge_score",
         "regime_state",

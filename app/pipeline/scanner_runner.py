@@ -91,8 +91,10 @@ FAST_REPLAY_CANDLES = 240
 FAST_OPTIONAL_REQUEST_TIMEOUT_SEC = 0.5
 TARGET_INTEGRITY_FAILED_GATE = "target_integrity"
 INVALID_TP_SEQUENCE_WARNING = "Invalid TP sequence: target labels are not monotonic by reward distance."
+TARGET_FAILURE_SEVERITY_FATAL = "fatal_target_failure"
+TARGET_FAILURE_SEVERITY_SOFT = "soft_target_warning"
+TARGET_FAILURE_SEVERITY_PASSED = "target_passed"
 TARGET_INTEGRITY_BLOCKING_FAILURE_TYPES = {
-    TargetFailureType.TARGET_INSIDE_CHOP.value,
     TargetFailureType.OPPOSING_STRUCTURE_BLOCK.value,
     TargetFailureType.DATA_INCOMPLETE.value,
     "RR_COMPRESSED",
@@ -384,6 +386,8 @@ class ScannerSymbolResult(BaseModel):
     final_block_reason: str = NA
     target_integrity_status: str = NA
     target_failure: str = NA
+    target_failure_severity: str = NA
+    target_warning_reason: str = NA
     actionability_state: str = NA
     regime_warnings: tuple[str, ...] = ()
     regime_state: str = NA
@@ -900,7 +904,7 @@ class ScannerRunner:
         target_integrity = _target_integrity_decision(strategy_execution, candidate)
         strategy_execution = (
             target_integrity.strategy_execution
-            if target_integrity.blocked and target_integrity.strategy_execution is not None
+            if target_integrity.strategy_execution is not None
             else _strategy_execution_with_target_integrity_pass(strategy_execution)
         )
         effective_technical_score = _technical_score_for_scoring(technical, strategy_execution)
@@ -1954,12 +1958,16 @@ def _target_integrity_decision(
 ) -> _TargetIntegrityDecision:
     reasons: list[str] = []
     warnings: list[str] = []
+    target_failure = NA
     target_intelligence = strategy_execution.target_intelligence
 
     if target_intelligence is not None:
         target_grade = _enum_text(target_intelligence.target_quality_grade)
         failure_type = _enum_text(target_intelligence.target_failure_type)
-        if target_grade == TargetQualityGrade.REJECT.value:
+        target_failure = failure_type
+        if failure_type == TargetFailureType.TARGET_INSIDE_CHOP.value:
+            warnings.append(_target_block_reason(target_intelligence))
+        elif target_grade == TargetQualityGrade.REJECT.value:
             reasons.append(_target_block_reason(target_intelligence))
         elif failure_type in TARGET_INTEGRITY_BLOCKING_FAILURE_TYPES:
             reasons.append(_target_block_reason(target_intelligence))
@@ -1972,21 +1980,34 @@ def _target_integrity_decision(
         reasons.append(INVALID_TP_SEQUENCE_WARNING)
         warnings.append(INVALID_TP_SEQUENCE_WARNING)
 
-    if not reasons:
-        return _TargetIntegrityDecision()
-
-    reason = _unique_strings(reasons)[0]
-    warning = _unique_strings(warnings)[0] if warnings else reason
-    return _TargetIntegrityDecision(
-        blocked=True,
-        reason=reason,
-        warning=warning,
-        strategy_execution=_strategy_execution_with_target_integrity_block(
-            strategy_execution,
+    if reasons:
+        reason = _unique_strings(reasons)[0]
+        warning = _unique_strings(warnings)[0] if warnings else reason
+        return _TargetIntegrityDecision(
+            blocked=True,
             reason=reason,
             warning=warning,
-        ),
-    )
+            strategy_execution=_strategy_execution_with_target_integrity_block(
+                strategy_execution,
+                reason=reason,
+                warning=warning,
+                failure_type=target_failure,
+            ),
+        )
+
+    if warnings:
+        warning = _unique_strings(warnings)[0]
+        return _TargetIntegrityDecision(
+            blocked=False,
+            warning=warning,
+            strategy_execution=_strategy_execution_with_target_integrity_warning(
+                strategy_execution,
+                warning=warning,
+                failure_type=target_failure,
+            ),
+        )
+
+    return _TargetIntegrityDecision()
 
 
 def _strategy_execution_with_target_integrity_block(
@@ -1994,6 +2015,7 @@ def _strategy_execution_with_target_integrity_block(
     *,
     reason: str,
     warning: str,
+    failure_type: str = NA,
 ) -> _StrategyExecution:
     diagnostics = dict(strategy_execution.strategy_diagnostics)
     target_modes = (
@@ -2009,6 +2031,11 @@ def _strategy_execution_with_target_integrity_block(
         mode_diagnostics["target_integrity_status"] = "blocked"
         mode_diagnostics["target_integrity_reason"] = reason
         mode_diagnostics["target_integrity_warning"] = warning
+        target_failure = _first_non_na(failure_type, mode_diagnostics.get("target_failure"), reason)
+        mode_diagnostics["target_failure"] = target_failure
+        mode_diagnostics["target_failure_type"] = target_failure
+        mode_diagnostics["target_failure_severity"] = TARGET_FAILURE_SEVERITY_FATAL
+        mode_diagnostics["target_warning_reason"] = warning
         mode_diagnostics["pullback_zone_status"] = _first_non_na(mode_diagnostics.get("pullback_zone_status"), "valid")
         mode_diagnostics["gates_passed"] = _sequence_from_diagnostics(mode_diagnostics.get("gates_passed"))
         gates_failed = _sequence_from_diagnostics(mode_diagnostics.get("gates_failed"))
@@ -2026,6 +2053,37 @@ def _strategy_execution_with_target_integrity_block(
     )
 
 
+def _strategy_execution_with_target_integrity_warning(
+    strategy_execution: _StrategyExecution,
+    *,
+    warning: str,
+    failure_type: str = NA,
+) -> _StrategyExecution:
+    diagnostics = dict(strategy_execution.strategy_diagnostics)
+    target_modes = (
+        strategy_execution.valid_strategy_modes
+        or strategy_execution.rejected_strategy_modes
+        or tuple(diagnostics)
+        or ("swing",)
+    )
+    for mode in target_modes:
+        raw = diagnostics.get(mode)
+        mode_diagnostics = dict(raw) if isinstance(raw, Mapping) else {}
+        mode_diagnostics["target_integrity_status"] = "warning"
+        mode_diagnostics["target_integrity_warning"] = warning
+        mode_diagnostics["target_warning_reason"] = warning
+        target_failure = _first_non_na(failure_type, mode_diagnostics.get("target_failure"), warning)
+        mode_diagnostics["target_failure"] = target_failure
+        mode_diagnostics["target_failure_type"] = target_failure
+        mode_diagnostics["target_failure_severity"] = TARGET_FAILURE_SEVERITY_SOFT
+        gates_passed = _sequence_from_diagnostics(mode_diagnostics.get("gates_passed"))
+        mode_diagnostics["gates_passed"] = _unique_strings((*gates_passed, TARGET_INTEGRITY_FAILED_GATE))
+        warnings = _sequence_from_diagnostics(mode_diagnostics.get("warnings"))
+        mode_diagnostics["warnings"] = _unique_strings((*warnings, warning))
+        diagnostics[mode] = mode_diagnostics
+    return strategy_execution.model_copy(update={"strategy_diagnostics": diagnostics})
+
+
 def _strategy_execution_with_target_integrity_pass(strategy_execution: _StrategyExecution) -> _StrategyExecution:
     diagnostics = dict(strategy_execution.strategy_diagnostics)
     target_modes = (
@@ -2040,6 +2098,10 @@ def _strategy_execution_with_target_integrity_pass(strategy_execution: _Strategy
         mode_diagnostics["target_integrity_status"] = _first_non_na(
             mode_diagnostics.get("target_integrity_status"),
             "passed",
+        )
+        mode_diagnostics["target_failure_severity"] = _first_non_na(
+            mode_diagnostics.get("target_failure_severity"),
+            TARGET_FAILURE_SEVERITY_PASSED,
         )
         gates_passed = _sequence_from_diagnostics(mode_diagnostics.get("gates_passed"))
         mode_diagnostics["gates_passed"] = _unique_strings((*gates_passed, TARGET_INTEGRITY_FAILED_GATE))

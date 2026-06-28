@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 ACTIONABLE_A_GRADE_MIN_RR = Decimal("2.5")
 ACTIONABLE_A_GRADE_GRADES = {"a+", "a", "a-"}
 A_GRADE_ACTIONABLE_STATE = "A_GRADE_ACTIONABLE"
+A_GRADE_ACTIONABLE_TARGET_CAUTION_STATE = "A_GRADE_ACTIONABLE_TARGET_CAUTION"
 A_GRADE_BLOCKED_BY_SCORING_STATE = "A_GRADE_BLOCKED_BY_SCORING"
 A_GRADE_BLOCKED_BY_TARGET_STATE = "A_GRADE_BLOCKED_BY_TARGET"
 A_GRADE_BLOCKED_BY_ENTRY_WINDOW_STATE = "A_GRADE_BLOCKED_BY_ENTRY_WINDOW"
@@ -121,6 +122,13 @@ A_GRADE_HARD_GATE_BLOCKERS = {
 }
 TARGET_INTEGRITY_BLOCKED_KEYS = {"blocked", "failed", "fail", "rejected", "reject"}
 TARGET_INTEGRITY_PASSED_KEYS = {"ok", "pass", "passed", "valid"}
+TARGET_FAILURE_SEVERITY_FATAL = "fatal_target_failure"
+TARGET_FAILURE_SEVERITY_SOFT = "soft_target_warning"
+TARGET_FAILURE_SEVERITY_CAUTION = "target_caution_actionable"
+TARGET_FAILURE_SEVERITY_PASSED = "target_passed"
+TARGET_CAUTION_STATUS_KEYS = {"warning", "warn", "caution", "soft_warning", "target_caution"}
+TARGET_INSIDE_CHOP_KEYS = {"target_inside_chop", "tp2_inside_chop", "tp2_inside_range", "tp2_remains_inside_recent_chop_range"}
+TARGET_CAUTION_ALLOWED_GATES = {"target_integrity", "target_integrity_failed", "target_inside_chop"}
 ACTIONABLE_A_GRADE_ALLOWED_NON_FATAL_GATES = A_GRADE_ALLOWED_WAITING_GATES | {
     "challenge_rr_below_3",
     "rr_below_minimum",
@@ -233,6 +241,8 @@ class SetupLifecycleService:
             "final_block_reason": observation.final_block_reason,
             "target_integrity_status": observation.target_integrity_status,
             "target_failure": observation.target_failure,
+            "target_failure_severity": observation.target_failure_severity,
+            "target_warning_reason": observation.target_warning_reason,
             "actionability_state": observation.actionability_state,
         }
         updated = symbol_result.model_copy(
@@ -341,6 +351,11 @@ def observation_from_symbol_result(
     )
     target_integrity_status = _target_integrity_status_text(diagnostics)
     target_failure = _target_failure_text(diagnostics)
+    target_failure_severity = _target_failure_severity_text(
+        diagnostics,
+        actionability_state=actionability_state,
+    )
+    target_warning_reason = _target_warning_reason_text(diagnostics)
     a_grade_watch_candidate = False
     requires_limit_fill = actionable_a_grade_candidate or _requires_limit_fill_before_active(symbol_result, diagnostics)
     if (
@@ -369,6 +384,8 @@ def observation_from_symbol_result(
         final_block_reason=final_block_reason,
         target_integrity_status=target_integrity_status,
         target_failure=target_failure,
+        target_failure_severity=target_failure_severity,
+        target_warning_reason=target_warning_reason,
         actionability_state=actionability_state,
         entry_low=_display(entry_low),
         entry_high=_display(entry_high),
@@ -783,16 +800,23 @@ def _actionable_a_grade_decision(
         return False, "hard_status_blocked"
     if _risk_validation_failed(symbol_result, diagnostics):
         return False, "risk_validation_failed"
-    if _target_integrity_failed(diagnostics):
+
+    soft_target_warning = _soft_target_warning(diagnostics)
+    if _target_integrity_failed(diagnostics) and not soft_target_warning:
         return False, "target_integrity_failed"
-    if not _target_integrity_passed(diagnostics):
+    if not (_target_integrity_passed(diagnostics) or soft_target_warning):
         return False, "target_integrity_not_passed"
-    technical_min = Decimal("50")
+
     technical_value = _decimal_or_none(technical_score)
+    opportunity_value = _decimal_or_none(opportunity_score)
+    technical_min = Decimal("90") if soft_target_warning else Decimal("50")
+    if technical_value is None and soft_target_warning:
+        return False, "technical_score_missing_for_target_caution"
     if technical_value is not None and technical_value < technical_min:
         return False, f"technical_score_below_min:{_display(technical_value)}<{_display(technical_min)}"
-    opportunity_min = _decimal_or_none(min_score_for_idea) or Decimal("80")
-    opportunity_value = _decimal_or_none(opportunity_score)
+    opportunity_min = Decimal("90") if soft_target_warning else (_decimal_or_none(min_score_for_idea) or Decimal("80"))
+    if opportunity_value is None and soft_target_warning:
+        return False, "opportunity_score_missing_for_target_caution"
     if opportunity_value is not None and opportunity_value < opportunity_min:
         return False, f"opportunity_score_below_min:{_display(opportunity_value)}<{_display(opportunity_min)}"
     if not _clean_pullback_acceptance(diagnostics, failed_gate=failed_gate):
@@ -801,13 +825,18 @@ def _actionable_a_grade_decision(
         return False, "confirmation_structure_shift_not_passed"
 
     gate_keys = _gate_keys(failed_gate, gates_failed, diagnostics)
-    hard_gates = gate_keys & ACTIONABLE_A_GRADE_FATAL_GATE_BLOCKERS
+    soft_allowed_gates = TARGET_CAUTION_ALLOWED_GATES if soft_target_warning else set()
+    if soft_target_warning and gate_keys & {"missing_rr", "rr_below_minimum", "rr_too_low", "challenge_rr_below_3"}:
+        return False, "target_caution_rr_gate_present"
+    hard_gates = (gate_keys - soft_allowed_gates) & ACTIONABLE_A_GRADE_FATAL_GATE_BLOCKERS
     if hard_gates:
-        return False, f"fatal_failed_gate:{','.join(sorted(hard_gates))}"
+        return False, "fatal_failed_gate:" + ",".join(sorted(hard_gates))
     actionable_gates = {gate for gate in gate_keys if gate and gate != "n_a"}
-    unexpected_gates = actionable_gates - ACTIONABLE_A_GRADE_ALLOWED_NON_FATAL_GATES
+    unexpected_gates = actionable_gates - ACTIONABLE_A_GRADE_ALLOWED_NON_FATAL_GATES - soft_allowed_gates
     if unexpected_gates:
-        return False, f"unexpected_failed_gate:{','.join(sorted(unexpected_gates))}"
+        return False, "unexpected_failed_gate:" + ",".join(sorted(unexpected_gates))
+    if soft_target_warning and not _market_regime_acceptable(symbol_result, diagnostics):
+        return False, "market_regime_not_acceptable_for_target_caution"
 
     entry_low, entry_high = (_decimal_or_none(value) for value in _entry_zone_values(symbol_result, diagnostics))
     stop = _decimal_or_none(_stop_value(symbol_result, diagnostics))
@@ -837,7 +866,7 @@ def _actionable_a_grade_decision(
         targets=(tp1, tp2, tp3),
     ):
         return False, "trade_map_geometry_invalid"
-    return True, "clean_a_grade_trade_map"
+    return True, "target_caution_actionable" if soft_target_warning else "clean_a_grade_trade_map"
 
 
 def _quality_grade_text(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
@@ -966,6 +995,111 @@ def _target_failure_text(diagnostics: Mapping[str, Any]) -> str:
     )
 
 
+def _target_warning_reason_text(diagnostics: Mapping[str, Any]) -> str:
+    return _first_non_na(
+        diagnostics.get("target_warning_reason"),
+        diagnostics.get("target_integrity_warning"),
+        diagnostics.get("target_integrity_reason"),
+    )
+
+
+def _target_failure_severity_text(
+    diagnostics: Mapping[str, Any],
+    *,
+    actionability_state: str = NA,
+) -> str:
+    if _status_key(actionability_state) == "a_grade_actionable_target_caution":
+        return TARGET_FAILURE_SEVERITY_CAUTION
+    explicit = _display(diagnostics.get("target_failure_severity"))
+    if explicit != NA:
+        return explicit
+    if _soft_target_warning(diagnostics):
+        return TARGET_FAILURE_SEVERITY_SOFT
+    if _target_integrity_failed(diagnostics):
+        return TARGET_FAILURE_SEVERITY_FATAL
+    if _target_integrity_passed(diagnostics):
+        return TARGET_FAILURE_SEVERITY_PASSED
+    return NA
+
+
+def _soft_target_warning(diagnostics: Mapping[str, Any]) -> bool:
+    if not _target_inside_chop_warning(diagnostics):
+        return False
+    severity = _status_key(diagnostics.get("target_failure_severity"))
+    if severity in {"soft_target_warning", "target_caution_actionable"}:
+        return True
+    status = _status_key(
+        _first_non_na(
+            diagnostics.get("target_integrity_status"),
+            diagnostics.get("target_status"),
+            diagnostics.get("target_validation_status"),
+        )
+    )
+    if status in TARGET_CAUTION_STATUS_KEYS:
+        return True
+    return bool({"target_inside_chop", "target_integrity"} & _target_failure_keys(diagnostics))
+
+
+def _target_inside_chop_warning(diagnostics: Mapping[str, Any]) -> bool:
+    keys = _target_failure_keys(diagnostics)
+    if keys & TARGET_INSIDE_CHOP_KEYS:
+        return True
+    haystack = _status_key(
+        " ".join(
+            _display(value)
+            for value in (
+                diagnostics.get("target_failure"),
+                diagnostics.get("target_failure_type"),
+                diagnostics.get("target_integrity_reason"),
+                diagnostics.get("target_integrity_warning"),
+                diagnostics.get("target_warning_reason"),
+            )
+            if _display(value) != NA
+        )
+    )
+    return "tp2" in haystack and ("chop" in haystack or "range" in haystack)
+
+
+def _target_failure_keys(diagnostics: Mapping[str, Any]) -> set[str]:
+    values: list[Any] = [
+        diagnostics.get("target_failure"),
+        diagnostics.get("target_failure_type"),
+        diagnostics.get("target_integrity_reason"),
+        diagnostics.get("target_integrity_warning"),
+        diagnostics.get("target_warning_reason"),
+    ]
+    values.extend(_sequence_values(diagnostics.get("gates_failed")))
+    return {_status_key(value) for value in values if _status_key(value)}
+
+
+def _market_regime_acceptable(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> bool:
+    if bool(getattr(symbol_result, "regime_blocked", False)):
+        return False
+    blocked = {
+        "regime_compatibility",
+        "regime_blocked",
+        "hard_regime_block",
+        "market_condition_blocked",
+        "market_condition_not_ready",
+        "btc_eth_regime_blocked",
+        "rejected_by_regime",
+        "weak_regime_fit",
+    }
+    if (_gate_keys(NA, (), diagnostics) | _status_keys(symbol_result)) & blocked:
+        return False
+    for value in (
+        getattr(symbol_result, "regime_compatibility_label", NA),
+        getattr(symbol_result, "regime_state", NA),
+        diagnostics.get("regime_compatibility_label"),
+        diagnostics.get("market_condition_status"),
+        diagnostics.get("regime_state"),
+    ):
+        key = _status_key(value)
+        if key in blocked or any(token in key for token in ("blocked", "rejected", "weak_regime", "not_ready")):
+            return False
+    return True
+
+
 def _a_grade_actionability_fields(
     symbol_result: ScannerSymbolResult,
     diagnostics: Mapping[str, Any],
@@ -982,15 +1116,22 @@ def _a_grade_actionability_fields(
     candidate_grade = _display(quality_grade)
     if _quality_grade_key(candidate_grade) not in ACTIONABLE_A_GRADE_GRADES:
         return NOT_A_GRADE_CANDIDATE_STATE, _text_final_gate(failed_gate), NA, candidate_grade
+    soft_target_warning = _soft_target_warning(diagnostics)
     if actionable:
-        return A_GRADE_ACTIONABLE_STATE, NA, NA, candidate_grade
+        state = (
+            A_GRADE_ACTIONABLE_TARGET_CAUTION_STATE
+            if soft_target_warning or _status_key(actionable_reason) == "target_caution_actionable"
+            else A_GRADE_ACTIONABLE_STATE
+        )
+        return state, NA, NA, candidate_grade
 
     gate_keys = _gate_keys(failed_gate, gates_failed, diagnostics)
     reason_key = _status_key(actionable_reason)
     status_keys = _status_keys(symbol_result)
     final_gate = _text_final_gate(failed_gate)
 
-    if _target_integrity_failed(diagnostics) or gate_keys & {"target_integrity", "target_integrity_failed", "target_order_invalid", "targets_not_monotonic"}:
+    target_gate_blocked = gate_keys & {"target_integrity", "target_integrity_failed", "target_order_invalid", "targets_not_monotonic"}
+    if (_target_integrity_failed(diagnostics) and not soft_target_warning) or (target_gate_blocked and not soft_target_warning):
         return (
             A_GRADE_BLOCKED_BY_TARGET_STATE,
             "target_integrity",

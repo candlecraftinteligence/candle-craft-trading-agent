@@ -78,6 +78,9 @@ class TelegramSignalMessage:
     regime_compatibility_label: Any = NA
     regime_confidence: Any = NA
     watchlist_status: Any = NA
+    actionability_state: Any = NA
+    target_failure_severity: Any = NA
+    target_warning_reason: Any = NA
     watchlist_outcome: bool = False
     upgraded_from_watchlist: bool = False
     was_watchlist: bool = False
@@ -189,6 +192,7 @@ def format_simple_public_signal_message(message: TelegramSignalMessage) -> str:
         "",
         "\U0001F9E0 Why this setup matters",
         reason,
+        *_target_caution_lines(message),
         "",
         "\U0001F6AB Invalid if",
         _simple_signal_invalidation_text(message),
@@ -197,6 +201,22 @@ def format_simple_public_signal_message(message: TelegramSignalMessage) -> str:
         "",
         FOOTER,
     )
+
+def _target_caution_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    state = _status_key(message.actionability_state)
+    severity = _status_key(message.target_failure_severity)
+    warning = _display(message.target_warning_reason)
+    warning_key = _status_key(warning)
+    caution = (
+        state == "a_grade_actionable_target_caution"
+        or severity == "target_caution_actionable"
+        or (severity == "soft_target_warning" and ("chop" in warning_key or "range" in warning_key))
+    )
+    if not caution:
+        return ()
+    detail = "TP2 sits inside recent chop/range" if warning == NA else warning.rstrip(".")
+    return (f"Target caution: {detail}, so the path is tighter/choppy. No chase; use the planned zone only.",)
+
 
 def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
     side = _direction_key(message.direction)

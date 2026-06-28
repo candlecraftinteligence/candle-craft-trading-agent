@@ -741,6 +741,150 @@ def test_a_grade_candidate_with_target_integrity_failure_blocks_by_target(tmp_pa
     assert symbol_result.target_failure == "RR_BELOW_MINIMUM"
 
 
+def test_a_grade_target_inside_chop_strong_scores_becomes_actionable_target_caution(tmp_path) -> None:
+    db_path = tmp_path / "a_grade_lifecycle.db"
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(
+            grade=SetupQualityGrade.A,
+            symbol="CHOPUSDT",
+            diagnostics_overrides={
+                "first_failed_gate": "target_inside_chop",
+                "gates_failed": ("target_inside_chop",),
+                "target_integrity_status": "warning",
+                "target_failure": "TARGET_INSIDE_CHOP",
+                "target_failure_severity": "soft_target_warning",
+                "target_warning_reason": "TP2 remains inside recent chop/range.",
+                "technical_score": Decimal("95"),
+                "opportunity_score": Decimal("94"),
+                "regime_compatibility_label": "Supportive",
+            },
+        ).model_copy(update={"technical_score": Decimal("95")}),
+        tmp_path,
+        now="2026-05-18T09:04:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.ACTIONABLE_A_GRADE
+    assert symbol_result.actionability_state == "A_GRADE_ACTIONABLE_TARGET_CAUTION"
+    assert symbol_result.final_quality_grade == "A"
+    assert symbol_result.final_failed_gate == NA
+    assert symbol_result.final_block_reason == NA
+    assert symbol_result.target_integrity_status == "warning"
+    assert symbol_result.target_failure == "TARGET_INSIDE_CHOP"
+    assert symbol_result.target_failure_severity == "target_caution_actionable"
+    assert symbol_result.target_warning_reason == "TP2 remains inside recent chop/range."
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        records = repository.get_records_for_symbols(("CHOPUSDT",))
+    assert records[0].actionability_state == "A_GRADE_ACTIONABLE_TARGET_CAUTION"
+    assert records[0].target_failure_severity == "target_caution_actionable"
+    assert records[0].target_warning_reason == "TP2 remains inside recent chop/range."
+
+
+def test_b_plus_target_caution_does_not_become_actionable(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(
+            grade=SetupQualityGrade.B_PLUS,
+            symbol="BPLUSUSDT",
+            diagnostics_overrides={
+                "first_failed_gate": "target_inside_chop",
+                "gates_failed": ("target_inside_chop",),
+                "target_integrity_status": "warning",
+                "target_failure": "TARGET_INSIDE_CHOP",
+                "target_failure_severity": "soft_target_warning",
+                "target_warning_reason": "TP2 remains inside recent chop/range.",
+                "technical_score": Decimal("95"),
+                "opportunity_score": Decimal("94"),
+            },
+        ).model_copy(update={"technical_score": Decimal("95")}),
+        tmp_path,
+        now="2026-05-18T09:05:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.ACTIONABLE_A_GRADE
+    assert symbol_result.actionability_state == "NOT_A_GRADE_CANDIDATE"
+    assert symbol_result.final_quality_grade == "B+"
+
+
+def test_invalid_tp_order_remains_blocked_by_target(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(
+            grade=SetupQualityGrade.A,
+            symbol="BADTPUSDT",
+            diagnostics_overrides={
+                "first_failed_gate": "targets_not_monotonic",
+                "gates_failed": ("targets_not_monotonic",),
+                "tp1": Decimal("115"),
+                "tp2": Decimal("110"),
+                "tp3": Decimal("120"),
+                "technical_score": Decimal("95"),
+                "opportunity_score": Decimal("94"),
+            },
+        ).model_copy(update={"technical_score": Decimal("95")}),
+        tmp_path,
+        now="2026-05-18T09:06:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.ACTIONABLE_A_GRADE
+    assert symbol_result.actionability_state == "A_GRADE_BLOCKED_BY_TARGET"
+    assert symbol_result.final_quality_grade == "Blocked"
+    assert symbol_result.final_failed_gate == "target_integrity"
+
+
+def test_rr_below_2_5_remains_blocked(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(
+            grade=SetupQualityGrade.A,
+            symbol="LOWRRUSDT",
+            diagnostics_overrides={
+                "first_failed_gate": "rr_below_minimum",
+                "gates_failed": ("rr_below_minimum",),
+                "rr_to_tp2": Decimal("2.49"),
+                "technical_score": Decimal("95"),
+                "opportunity_score": Decimal("94"),
+            },
+        ).model_copy(update={"technical_score": Decimal("95")}),
+        tmp_path,
+        now="2026-05-18T09:07:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.ACTIONABLE_A_GRADE
+    assert symbol_result.actionability_state != "A_GRADE_ACTIONABLE"
+    assert symbol_result.actionability_state != "A_GRADE_ACTIONABLE_TARGET_CAUTION"
+    assert symbol_result.final_quality_grade == "Blocked"
+    assert symbol_result.final_failed_gate == "rr_below_minimum"
+
+
+def test_opposing_structure_too_close_remains_blocked_by_target(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(
+            grade=SetupQualityGrade.A_PLUS,
+            symbol="OPPOSEUSDT",
+            diagnostics_overrides={
+                "first_failed_gate": "target_integrity",
+                "gates_failed": ("target_integrity",),
+                "target_integrity_status": "blocked",
+                "target_failure": "OPPOSING_STRUCTURE_BLOCK",
+                "target_failure_severity": "fatal_target_failure",
+                "target_warning_reason": "Opposing structure blocks the clean path before minimum RR.",
+                "technical_score": Decimal("95"),
+                "opportunity_score": Decimal("94"),
+            },
+        ).model_copy(update={"technical_score": Decimal("95"), "rejection_stage": "target_integrity"}),
+        tmp_path,
+        now="2026-05-18T09:08:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.ACTIONABLE_A_GRADE
+    assert symbol_result.actionability_state == "A_GRADE_BLOCKED_BY_TARGET"
+    assert symbol_result.final_quality_grade == "Blocked"
+    assert symbol_result.final_failed_gate == "target_integrity"
+    assert symbol_result.target_failure_severity == "fatal_target_failure"
+
 def test_rejected_clean_a_grade_trade_map_promotes_to_actionable_a_grade(tmp_path) -> None:
     db_path = tmp_path / "rejected-actionable-a-grade.db"
     with SQLiteSetupLifecycleRepository(db_path) as repository:
