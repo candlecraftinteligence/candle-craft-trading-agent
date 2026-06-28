@@ -434,7 +434,7 @@ def _a_grade_watch_symbol(
         "confirmation_structure_shift_status": "passed",
         "pullback_zone_status": "valid",
         "first_failed_gate": "limit_zone_not_touched",
-        "gates_passed": ("sweep", "bos_choch", "pullback_zone"),
+        "gates_passed": ("sweep", "bos_choch", "pullback_zone", "target_integrity"),
         "gates_failed": ("limit_zone_not_touched",),
         "entry_low": Decimal("100"),
         "entry_high": Decimal("102"),
@@ -632,7 +632,7 @@ def test_a_plus_complete_map_enters_a_grade_watch_without_valid_status(tmp_path)
     assert symbol_result.valid_strategy_modes == ()
     assert symbol_result.trade_idea is None
     assert symbol_result.lifecycle_state is not None
-    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.A_GRADE_WATCH
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.ACTIONABLE_A_GRADE
     assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.EXECUTING
 
 
@@ -646,7 +646,42 @@ def test_a_complete_map_enters_a_grade_watch_without_valid_status(tmp_path) -> N
     assert symbol_result.valid_strategy_modes == ()
     assert symbol_result.trade_idea is None
     assert symbol_result.lifecycle_state is not None
-    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.A_GRADE_WATCH
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.ACTIONABLE_A_GRADE
+
+
+def test_a_minus_clean_trade_map_with_rr_2_5_becomes_actionable_a_grade(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(
+            grade=SetupQualityGrade.A_MINUS,
+            diagnostics_overrides={"rr_to_tp2": Decimal("2.6")},
+        ),
+        tmp_path,
+        now="2026-05-18T09:01:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.ACTIONABLE_A_GRADE
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.CONFIRMED
+
+
+def test_rejected_clean_a_grade_trade_map_promotes_to_actionable_a_grade(tmp_path) -> None:
+    db_path = tmp_path / "rejected-actionable-a-grade.db"
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(_record(SetupLifecycleState.REJECTED))
+
+    result = apply_lifecycle_to_run_result(
+        _scan_result(_a_grade_watch_symbol(grade=SetupQualityGrade.A_PLUS)),
+        database_path=db_path,
+        scan_run_id="run-rejected-actionable-a",
+        now="2026-05-18T09:05:00+00:00",
+    )
+    symbol_result = result.results[0]
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_transition is not None
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.ACTIONABLE_A_GRADE
+    assert symbol_result.lifecycle_transition.from_state == SetupLifecycleState.REJECTED
+    assert symbol_result.lifecycle_transition.reason == SetupTransitionReason.ACTIONABLE_A_GRADE
 
 
 def test_a_grade_watch_does_not_become_active_before_limit_zone_touch(tmp_path) -> None:
@@ -657,7 +692,7 @@ def test_a_grade_watch_does_not_become_active_before_limit_zone_touch(tmp_path) 
     )
 
     assert symbol_result.lifecycle_state is not None
-    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.A_GRADE_WATCH
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.ACTIONABLE_A_GRADE
     assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.EXECUTING
 
 
@@ -677,7 +712,7 @@ def test_a_plus_a_grade_watch_promotes_when_candle_overlaps_entry_zone(tmp_path)
     assert symbol_result.lifecycle_state is not None
     assert symbol_result.lifecycle_transition is not None
     assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.TRIGGERED
-    assert symbol_result.lifecycle_transition.from_state == SetupLifecycleState.A_GRADE_WATCH
+    assert symbol_result.lifecycle_transition.from_state == SetupLifecycleState.ACTIONABLE_A_GRADE
     assert symbol_result.lifecycle_transition.reason == SetupTransitionReason.ENTRY_ZONE_TOUCHED
 
 
@@ -861,7 +896,7 @@ def test_plan_locking_includes_a_grade_watch_and_confirmed(tmp_path) -> None:
         "rr": "3.2",
         "invalidation_reason": "Invalid if price accepts below 95.",
     }
-    for state in (SetupLifecycleState.A_GRADE_WATCH, SetupLifecycleState.CONFIRMED):
+    for state in (SetupLifecycleState.ACTIONABLE_A_GRADE, SetupLifecycleState.A_GRADE_WATCH, SetupLifecycleState.CONFIRMED):
         db_path = tmp_path / f"{state.value}.db"
         stored = _record(state, lifecycle_id=f"life-{state.value}").model_copy(update=locked_levels)
         with SQLiteSetupLifecycleRepository(db_path) as repository:
@@ -899,6 +934,7 @@ def test_lower_grade_setup_is_not_promoted_by_a_grade_watch_path(tmp_path) -> No
     )
 
     assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.ACTIONABLE_A_GRADE
     assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.A_GRADE_WATCH
     assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.EXECUTING
 
@@ -924,6 +960,7 @@ def test_a_grade_watch_creation_blocks_missing_entry_stop_invalidation_rr_and_ta
         )
 
         assert symbol_result.lifecycle_state is not None
+        assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.ACTIONABLE_A_GRADE
         assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.A_GRADE_WATCH
         assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.EXECUTING
 

@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 WATCH_ALERT_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
+    SetupLifecycleState.ACTIONABLE_A_GRADE,
     SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.TRIGGERED,
 }
@@ -201,6 +202,7 @@ PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS = {
     "watchlist",
     "watchlisted",
     "stalking",
+    "actionable_a_grade",
     "a_grade_watch",
 }
 PUBLIC_WATCHLIST_FIRST_SEEN_TRIGGERED_STATE_KEY = "triggered"
@@ -673,6 +675,11 @@ class PublicWatchlistCandidateAudit:
     active_fatal_reasons: tuple[str, ...] = ()
     confirmed_only_pending_reasons: tuple[str, ...] = ()
     watchlist_eligibility_result: str = NA
+    public_decision: str = NA
+    public_block_reason: str = NA
+    actionable_grade_reason: str = NA
+    confirmation_block_reason: str = NA
+    lifecycle_promotion_reason: str = NA
     plan_hash: str = NA
     public_watchlist_plan_id: str = NA
     side: str = NA
@@ -6097,6 +6104,8 @@ def _public_watchlist_candidate_audit(
         failed_gate_codes=failed_gate_codes,
     )
     confirmed_only_pending_reasons = _public_watchlist_confirmed_only_pending_reasons(failed_gate_codes)
+    reject_reasons = gate.blocking_reasons if prefilter.passed else prefilter.blocking_reasons
+    public_decision = "eligible" if eligible else "blocked"
     return PublicWatchlistCandidateAudit(
         symbol=_symbol(message.symbol),
         eligible=eligible,
@@ -6105,10 +6114,15 @@ def _public_watchlist_candidate_audit(
         state=candidate.lifecycle_state,
         core_lifecycle_state=candidate.lifecycle_state,
         derived_public_watchlist_state=_public_watchlist_presentation_state(candidate),
-        reject_reasons=gate.blocking_reasons if prefilter.passed else prefilter.blocking_reasons,
+        reject_reasons=reject_reasons,
         active_fatal_reasons=active_fatal_reasons,
         confirmed_only_pending_reasons=confirmed_only_pending_reasons,
         watchlist_eligibility_result="pass" if eligible else "blocked",
+        public_decision=public_decision,
+        public_block_reason=_audit_reason_text(reject_reasons) if not eligible else NA,
+        actionable_grade_reason=_actionable_grade_reason_for_symbol(symbol_result),
+        confirmation_block_reason=_audit_reason_text(_confirmed_guard_blockers(symbol_result, context)),
+        lifecycle_promotion_reason=_lifecycle_promotion_reason(symbol_result),
         plan_hash=plan_hash,
         public_watchlist_plan_id=canonical_plan.plan_id,
         side=canonical_plan.side,
@@ -6143,6 +6157,29 @@ def _public_watchlist_candidate_audit(
             candidate=candidate,
         ),
     )
+
+def _audit_reason_text(reasons: Sequence[Any]) -> str:
+    cleaned = tuple(_text(reason) for reason in reasons if _text(reason) != NA)
+    return ";".join(cleaned) if cleaned else NA
+
+
+def _lifecycle_promotion_reason(symbol_result: ScannerSymbolResult) -> str:
+    transition = symbol_result.lifecycle_transition
+    if transition is None:
+        return NA
+    return _text(getattr(transition.reason, "value", transition.reason))
+
+
+def _actionable_grade_reason_for_symbol(symbol_result: ScannerSymbolResult) -> str:
+    diagnostics = _representative_diagnostics(symbol_result)
+    for key in ("actionable_grade_reason", "actionable_a_grade_reason"):
+        value = _text(diagnostics.get(key))
+        if value != NA:
+            return value
+    if _status_key(_lifecycle_state_text(symbol_result)) == "actionable_a_grade":
+        return "lifecycle_state_actionable_a_grade"
+    return NA
+
 
 def _public_watchlist_duplicate_skip_reason(reason: Any) -> bool:
     key = _text(reason)
@@ -6329,6 +6366,11 @@ def _log_public_watchlist_audit(summary: PublicWatchlistAuditSummary) -> None:
                 "public_watchlist_active_fatal_reasons": audit.active_fatal_reasons,
                 "public_watchlist_confirmed_only_pending_reasons": audit.confirmed_only_pending_reasons,
                 "public_watchlist_eligibility_result": audit.watchlist_eligibility_result,
+                "public_decision": audit.public_decision,
+                "public_block_reason": audit.public_block_reason,
+                "actionable_grade_reason": audit.actionable_grade_reason,
+                "confirmation_block_reason": audit.confirmation_block_reason,
+                "lifecycle_promotion_reason": audit.lifecycle_promotion_reason,
                 "public_watchlist_plan_hash": audit.plan_hash,
                 "public_watchlist_plan_id": audit.public_watchlist_plan_id,
                 "public_watchlist_side": audit.side,
@@ -8177,6 +8219,7 @@ def _prior_watchlist_expiry_decision(
     return watchlist_expiry_decision(
         timestamp_candidates=(prior_alert.first_seen_at, prior_alert.sent_at),
         state_candidates=state_candidates,
+        now=_parse_iso_datetime(now_utc_iso()),
     )
 
 
@@ -8933,7 +8976,8 @@ def _log_lifecycle_alert_audit(
         (
             "Telegram lifecycle alert audit: symbol=%s lifecycle_state=%s direction=%s "
             "current_price=%s entry_low=%s entry_high=%s tp1=%s tp2=%s tp3=%s stop_loss=%s "
-            "alert_type=%s decision=%s reason=%s"
+            "alert_type=%s decision=%s reason=%s public_decision=%s public_block_reason=%s "
+            "actionable_grade_reason=%s confirmation_block_reason=%s lifecycle_promotion_reason=%s"
         ),
         _symbol(message.symbol),
         _lifecycle_state_text(symbol_result),
@@ -8948,6 +8992,11 @@ def _log_lifecycle_alert_audit(
         alert_type.value,
         decision,
         _text(reason),
+        decision if alert_type == TelegramAlertType.WATCHLIST else NA,
+        _text(reason) if alert_type == TelegramAlertType.WATCHLIST else NA,
+        _actionable_grade_reason_for_symbol(symbol_result),
+        _text(reason) if "confirmation" in _status_key(reason) else NA,
+        _lifecycle_promotion_reason(symbol_result),
     )
 
 

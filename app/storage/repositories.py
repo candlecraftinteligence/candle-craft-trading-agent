@@ -130,7 +130,8 @@ def list_scan_history(
             rows = connection.execute(
                 """
                 SELECT run_id, timestamp, universe, symbols_scanned, total_valid_setups,
-                       near_misses, rejected, data_issues, market_regime, regime_confidence, runtime_stats_json
+                       near_misses, rejected, data_issues, market_regime, regime_confidence, runtime_stats_json,
+                       actionable_setups, actionable_a_grade_setups, confirmed_setups
                 FROM scan_runs
                 ORDER BY timestamp DESC
                 LIMIT ?
@@ -201,6 +202,9 @@ def _scan_run_record(
     watch_iteration: WatchIterationMetadata | None,
 ) -> ScanRunRecord:
     counts = _bucket_counts(raw_payload)
+    lifecycle_counts = _lifecycle_state_counts(raw_payload, result)
+    actionable_a_grade_setups = lifecycle_counts.get("ACTIONABLE_A_GRADE", 0)
+    confirmed_setups = lifecycle_counts.get("CONFIRMED", 0)
     data_issues = _data_issues(result)
     watch_data_issues = watch_iteration.data_issues if watch_iteration is not None else counts["data_issue"]
     summary = _scan_summary_metadata(result, watch_iteration=watch_iteration)
@@ -252,6 +256,9 @@ def _scan_run_record(
         symbol_health_summary_json=_json_dump(watch_iteration.symbol_health_summary or {})
         if watch_iteration is not None
         else "{}",
+        actionable_setups=counts["valid"] + actionable_a_grade_setups,
+        actionable_a_grade_setups=actionable_a_grade_setups,
+        confirmed_setups=confirmed_setups,
     )
 
 
@@ -414,7 +421,7 @@ def _symbol_result_record(
 
 def _setup_candidate_record(run_id: str, symbol_result: ScannerSymbolResult) -> SetupCandidateRecord | None:
     lifecycle_state = _display(getattr(getattr(symbol_result, "lifecycle_state", None), "current_state", NA))
-    a_grade_watch = lifecycle_state == "A_GRADE_WATCH"
+    a_grade_watch = lifecycle_state in {"ACTIONABLE_A_GRADE", "A_GRADE_WATCH"}
     if not symbol_result.valid_strategy_modes and not a_grade_watch:
         return None
     diagnostics = _representative_diagnostics(symbol_result)
@@ -493,8 +500,9 @@ def _insert_scan_run(connection: sqlite3.Connection, record: ScanRunRecord) -> N
             data_issues, data_issues_json, raw_payload_json, is_watch_iteration,
             watch_iteration_number, started_at, completed_at, symbols_requested,
             symbols_queued, symbols_completed, valid_activations, still_watching,
-            rejected_no_edge, runtime_sec, portfolio_summary_json, symbol_health_summary_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            rejected_no_edge, runtime_sec, portfolio_summary_json, symbol_health_summary_json,
+            actionable_setups, actionable_a_grade_setups, confirmed_setups
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         astuple(record),
     )
@@ -553,6 +561,9 @@ def _history_summary_from_row(row: sqlite3.Row) -> ScanHistorySummary:
         market_regime=row["market_regime"],
         regime_confidence=int(row["regime_confidence"] or 0),
         runtime_seconds=_runtime_text(runtime_stats),
+        actionable_setups=int(row["actionable_setups"] or 0),
+        actionable_a_grade_setups=int(row["actionable_a_grade_setups"] or 0),
+        confirmed_setups=int(row["confirmed_setups"] or 0),
     )
 
 
@@ -564,6 +575,28 @@ def _bucket_counts(payload: Mapping[str, Any]) -> dict[str, int]:
         bucket = _display(raw_result.get("display_bucket"))
         if bucket in counts:
             counts[bucket] += 1
+    return counts
+
+
+def _lifecycle_state_counts(payload: Mapping[str, Any], result: ScannerRunResult) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for raw_result in payload.get("results", ()):
+        if not isinstance(raw_result, Mapping):
+            continue
+        state = _display(
+            _first_non_na(
+                raw_result.get("lifecycle_current_state"),
+                _mapping_value(raw_result.get("lifecycle_state"), "current_state"),
+            )
+        )
+        if state != NA:
+            counts[state] = counts.get(state, 0) + 1
+    if counts:
+        return counts
+    for symbol_result in result.results:
+        state = _display(getattr(getattr(symbol_result, "lifecycle_state", None), "current_state", NA))
+        if state != NA:
+            counts[state] = counts.get(state, 0) + 1
     return counts
 
 

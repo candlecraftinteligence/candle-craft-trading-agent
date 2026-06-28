@@ -13,7 +13,7 @@ from app.data.dtos import NA
 _MISSING = object()
 
 PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
-WATCH_STATE_KEYS = frozenset({"watch", "watchlist", "watchlisted", "stalking", "a_grade_watch"})
+WATCH_STATE_KEYS = frozenset({"watch", "watchlist", "watchlisted", "stalking", "actionable_a_grade", "a_grade_watch"})
 FIRST_SEEN_TRIGGERED_STATE_KEY = "triggered"
 INTERNAL_TOUCH_STATE_KEYS = frozenset(
     {

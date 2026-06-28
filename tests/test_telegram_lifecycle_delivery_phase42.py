@@ -4969,6 +4969,49 @@ def test_public_watchlist_does_not_promote_to_executing(tmp_path: Path) -> None:
     assert "EXECUTING" not in sender.messages[0]
 
 
+def test_actionable_a_grade_public_watchlist_attempt_keeps_actionable_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "actionable-a-grade-watchlist.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    symbol = _symbol(
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
+        previous=SetupLifecycleState.REJECTED,
+        signal_id="sig-actionable-a",
+        diagnostics=_public_ready_watchlist_diagnostics(
+            first_failed_gate="limit_zone_not_touched",
+            gates_failed=("limit_zone_not_touched",),
+        ),
+        setup_quality=_setup_quality_with_grade(SetupQualityGrade.A_PLUS, quality_score=92),
+        trade_idea=None,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-actionable-a"))
+
+    assert summary.sent == 1
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT attempted_alert_type, lifecycle_state, previous_state, new_state, telegram_status
+            FROM telegram_alert_attempts
+            WHERE attempted_alert_type = ?
+            """,
+            (TelegramAlertType.WATCHLIST.value,),
+        ).fetchone()
+    assert row == (
+        TelegramAlertType.WATCHLIST.value,
+        SetupLifecycleState.ACTIONABLE_A_GRADE.value,
+        SetupLifecycleState.REJECTED.value,
+        SetupLifecycleState.ACTIONABLE_A_GRADE.value,
+        "sent",
+    )
+    assert "REJECTED" not in sender.messages[0]
+
+
 def test_public_watchlist_does_not_create_active_signal_base(tmp_path: Path) -> None:
     db_path = tmp_path / "watchlist-not-active-signal.db"
     sender = FakeSender()
