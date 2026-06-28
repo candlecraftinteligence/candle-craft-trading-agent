@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 class StorageError(RuntimeError):
@@ -67,7 +67,12 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 symbol_health_summary_json TEXT NOT NULL DEFAULT '{}',
                 actionable_setups INTEGER NOT NULL DEFAULT 0,
                 actionable_a_grade_setups INTEGER NOT NULL DEFAULT 0,
-                confirmed_setups INTEGER NOT NULL DEFAULT 0
+                confirmed_setups INTEGER NOT NULL DEFAULT 0,
+                candidate_a_grade_setups INTEGER NOT NULL DEFAULT 0,
+                blocked_a_grade_by_scoring INTEGER NOT NULL DEFAULT 0,
+                blocked_a_grade_by_target INTEGER NOT NULL DEFAULT 0,
+                blocked_a_grade_by_entry_window INTEGER NOT NULL DEFAULT 0,
+                blocked_a_grade_by_trust INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS symbol_results (
@@ -111,6 +116,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 rr TEXT NOT NULL,
                 invalidation TEXT NOT NULL,
                 quality_grade TEXT NOT NULL,
+                candidate_quality_grade TEXT NOT NULL DEFAULT 'N/A',
+                final_quality_grade TEXT NOT NULL DEFAULT 'N/A',
+                technical_score TEXT NOT NULL DEFAULT 'N/A',
+                opportunity_score TEXT NOT NULL DEFAULT 'N/A',
+                failed_gate TEXT NOT NULL DEFAULT 'N/A',
+                final_block_reason TEXT NOT NULL DEFAULT 'N/A',
+                target_integrity_status TEXT NOT NULL DEFAULT 'N/A',
+                target_failure TEXT NOT NULL DEFAULT 'N/A',
+                actionability_state TEXT NOT NULL DEFAULT 'N/A',
                 trust_meter TEXT NOT NULL,
                 risk_warning TEXT NOT NULL,
                 raw_candidate_json TEXT NOT NULL
@@ -148,6 +162,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 last_seen_at TEXT NOT NULL,
                 last_transition_at TEXT NOT NULL,
                 failed_gate TEXT NOT NULL DEFAULT 'N/A',
+                candidate_quality_grade TEXT NOT NULL DEFAULT 'N/A',
+                final_quality_grade TEXT NOT NULL DEFAULT 'N/A',
+                technical_score TEXT NOT NULL DEFAULT 'N/A',
+                opportunity_score TEXT NOT NULL DEFAULT 'N/A',
+                final_failed_gate TEXT NOT NULL DEFAULT 'N/A',
+                final_block_reason TEXT NOT NULL DEFAULT 'N/A',
+                target_integrity_status TEXT NOT NULL DEFAULT 'N/A',
+                target_failure TEXT NOT NULL DEFAULT 'N/A',
+                actionability_state TEXT NOT NULL DEFAULT 'N/A',
                 readiness_score INTEGER NOT NULL DEFAULT 0,
                 quality_score INTEGER NOT NULL DEFAULT 0,
                 edge_score TEXT NOT NULL DEFAULT 'N/A',
@@ -381,13 +404,36 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "scan_runs", "actionable_setups", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "scan_runs", "actionable_a_grade_setups", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "scan_runs", "confirmed_setups", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "candidate_a_grade_setups", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "blocked_a_grade_by_scoring", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "blocked_a_grade_by_target", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "blocked_a_grade_by_entry_window", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "scan_runs", "blocked_a_grade_by_trust", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_results", "regime_confidence", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_results", "regime_compatibility_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_results", "regime_compatibility_label", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "symbol_results", "regime_penalty", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(connection, "symbol_results", "environment_notes_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "setup_candidates", "candidate_quality_grade", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_candidates", "final_quality_grade", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_candidates", "technical_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_candidates", "opportunity_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_candidates", "failed_gate", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_candidates", "final_block_reason", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_candidates", "target_integrity_status", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_candidates", "target_failure", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_candidates", "actionability_state", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "setup_lifecycle_records", "cooldown_until", "TEXT")
         _ensure_column(connection, "setup_lifecycle_records", "archived_at", "TEXT")
+        _ensure_column(connection, "setup_lifecycle_records", "candidate_quality_grade", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "final_quality_grade", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "technical_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "opportunity_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "final_failed_gate", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "final_block_reason", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "target_integrity_status", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "target_failure", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "setup_lifecycle_records", "actionability_state", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "setup_lifecycle_records", "entry_low", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "setup_lifecycle_records", "entry_high", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "setup_lifecycle_records", "stop_loss", "TEXT NOT NULL DEFAULT 'N/A'")

@@ -218,6 +218,13 @@ PUBLIC_WATCHLIST_REJECTED_STATE_KEYS = {
     "rejected",
     "reject",
 }
+A_GRADE_PUBLIC_BLOCKED_ACTIONABILITY_STATES = {
+    "a_grade_blocked_by_scoring",
+    "a_grade_blocked_by_target",
+    "a_grade_blocked_by_entry_window",
+    "a_grade_blocked_by_trust",
+    "a_grade_blocked_by_final_gates",
+}
 REGIME_MARKET_CONDITION_PENDING = "REGIME_MARKET_CONDITION_PENDING"
 TIMING_CONFIRMATION_PENDING = "TIMING_CONFIRMATION_PENDING"
 CONFIRMED_SIGNAL_RR_PENDING = "CONFIRMED_SIGNAL_RR_PENDING"
@@ -5800,6 +5807,7 @@ def _public_watchlist_gate_result(
         reasons.append("public_watchlist_stale_or_expired")
 
     reasons.extend(_public_watchlist_quality_gate_blockers(candidate, min_grade=context.public_watchlist_min_grade))
+    reasons.extend(_public_watchlist_actionability_blockers(symbol_result))
     reasons.extend(_public_watchlist_status_blockers(symbol_result, candidate=candidate))
     reasons.extend(_public_watchlist_active_rejection_blockers(symbol_result, candidate=candidate))
     reasons.extend(_public_watchlist_data_health_blockers(symbol_result, candidate=candidate))
@@ -6172,11 +6180,28 @@ def _lifecycle_promotion_reason(symbol_result: ScannerSymbolResult) -> str:
 
 def _actionable_grade_reason_for_symbol(symbol_result: ScannerSymbolResult) -> str:
     diagnostics = _representative_diagnostics(symbol_result)
+    lifecycle = symbol_result.lifecycle_state
+    actionability_state = _status_key(
+        _first_non_na(
+            getattr(symbol_result, "actionability_state", NA),
+            getattr(lifecycle, "actionability_state", NA) if lifecycle is not None else NA,
+            diagnostics.get("actionability_state"),
+        )
+    )
+    if actionability_state in A_GRADE_PUBLIC_BLOCKED_ACTIONABILITY_STATES:
+        return _text(
+            _first_non_na(
+                getattr(symbol_result, "final_block_reason", NA),
+                getattr(lifecycle, "final_block_reason", NA) if lifecycle is not None else NA,
+                diagnostics.get("final_block_reason"),
+                actionability_state,
+            )
+        )
     for key in ("actionable_grade_reason", "actionable_a_grade_reason"):
         value = _text(diagnostics.get(key))
         if value != NA:
             return value
-    if _status_key(_lifecycle_state_text(symbol_result)) == "actionable_a_grade":
+    if actionability_state == "a_grade_actionable" or _status_key(_lifecycle_state_text(symbol_result)) == "actionable_a_grade":
         return "lifecycle_state_actionable_a_grade"
     return NA
 
@@ -7221,6 +7246,31 @@ def _public_watchlist_historical_rejection_only_ignored(
         *(_text(reason) for reason in symbol_result.rejection_reasons),
     )
     return any(_text(value) != NA for value in historical_values)
+
+
+def _public_watchlist_actionability_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    diagnostics = _representative_diagnostics(symbol_result)
+    lifecycle = symbol_result.lifecycle_state
+    state = _status_key(
+        _first_non_na(
+            getattr(symbol_result, "actionability_state", NA),
+            getattr(lifecycle, "actionability_state", NA) if lifecycle is not None else NA,
+            diagnostics.get("actionability_state"),
+        )
+    )
+    if state not in A_GRADE_PUBLIC_BLOCKED_ACTIONABILITY_STATES:
+        return ()
+    reason = _first_non_na(
+        getattr(symbol_result, "final_block_reason", NA),
+        getattr(lifecycle, "final_block_reason", NA) if lifecycle is not None else NA,
+        diagnostics.get("final_block_reason"),
+        getattr(symbol_result, "final_failed_gate", NA),
+        getattr(lifecycle, "final_failed_gate", NA) if lifecycle is not None else NA,
+        diagnostics.get("final_failed_gate"),
+        state,
+    )
+    return (f"public_watchlist_blocked_actionability:{state}:{_text(reason)}",)
+
 
 
 def _public_watchlist_target_integrity_blockers(

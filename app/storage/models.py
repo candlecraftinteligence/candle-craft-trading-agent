@@ -60,6 +60,11 @@ class ScanRunRecord:
     actionable_setups: int = 0
     actionable_a_grade_setups: int = 0
     confirmed_setups: int = 0
+    candidate_a_grade_setups: int = 0
+    blocked_a_grade_by_scoring: int = 0
+    blocked_a_grade_by_target: int = 0
+    blocked_a_grade_by_entry_window: int = 0
+    blocked_a_grade_by_trust: int = 0
 
 
 @dataclass(frozen=True)
@@ -102,6 +107,15 @@ class SetupCandidateRecord:
     rr: str
     invalidation: str
     quality_grade: str
+    candidate_quality_grade: str
+    final_quality_grade: str
+    technical_score: str
+    opportunity_score: str
+    failed_gate: str
+    final_block_reason: str
+    target_integrity_status: str
+    target_failure: str
+    actionability_state: str
     trust_meter: str
     risk_warning: str
     raw_candidate_json: str
@@ -211,6 +225,11 @@ class ScanHistorySummary:
     actionable_setups: int = 0
     actionable_a_grade_setups: int = 0
     confirmed_setups: int = 0
+    candidate_a_grade_setups: int = 0
+    blocked_a_grade_by_scoring: int = 0
+    blocked_a_grade_by_target: int = 0
+    blocked_a_grade_by_entry_window: int = 0
+    blocked_a_grade_by_trust: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -222,6 +241,11 @@ class ScanHistorySummary:
             "actionable_setups": self.actionable_setups,
             "actionable_a_grade_setups": self.actionable_a_grade_setups,
             "confirmed_setups": self.confirmed_setups,
+            "candidate_a_grade_setups": self.candidate_a_grade_setups,
+            "blocked_a_grade_by_scoring": self.blocked_a_grade_by_scoring,
+            "blocked_a_grade_by_target": self.blocked_a_grade_by_target,
+            "blocked_a_grade_by_entry_window": self.blocked_a_grade_by_entry_window,
+            "blocked_a_grade_by_trust": self.blocked_a_grade_by_trust,
             "near_misses": self.near_misses,
             "rejected": self.rejected,
             "data_issues": self.data_issues,

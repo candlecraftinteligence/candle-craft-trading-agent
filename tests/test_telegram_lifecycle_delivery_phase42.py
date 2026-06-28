@@ -2352,6 +2352,75 @@ def test_simple_public_signal_blocks_weak_or_malformed_watchlist_candidates(
     assert sender.messages == []
 
 
+def test_public_watchlist_blocks_a_grade_candidate_failed_by_final_scoring(tmp_path: Path) -> None:
+    db_path = tmp_path / "blocked-a-grade-scoring.db"
+    final_reason = "A-grade candidate, but blocked by final scoring."
+    diagnostics = _public_ready_watchlist_diagnostics(
+        grade="A",
+        watchlist_grade="A",
+        candidate_quality_grade="A",
+        final_quality_grade="Blocked",
+        actionability_state="A_GRADE_BLOCKED_BY_SCORING",
+        final_failed_gate="scoring",
+        final_block_reason=final_reason,
+        first_failed_gate="scoring",
+        failed_gate="scoring",
+        gates_failed=("scoring",),
+        technical_score=Decimal("49"),
+        opportunity_score=Decimal("79"),
+    )
+    symbol = _with_lifecycle_fields(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            diagnostics=diagnostics,
+            signal_id="blocked-a-grade-scoring",
+            trade_idea=None,
+            status=ScannerPipelineStatus.REJECTED_BY_SCORING,
+            rejection_reason="Technical score is below 50.",
+            rejection_reasons=("Opportunity score is below scanner minimum 80.",),
+            technical_score=Decimal("49"),
+            setup_quality=_setup_quality_with_grade(
+                SetupQualityGrade.A,
+                quality_state=SetupQualityState.WATCHLIST_NEAR_MISS,
+                quality_score=88,
+            ),
+        ),
+        candidate_quality_grade="A",
+        final_quality_grade="Blocked",
+        final_failed_gate="scoring",
+        final_block_reason=final_reason,
+        actionability_state="A_GRADE_BLOCKED_BY_SCORING",
+        technical_score="49",
+        opportunity_score="79",
+        failed_gate="scoring",
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-blocked-a-grade-scoring"))
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "public_watchlist_blocked_actionability:a_grade_blocked_by_scoring" in decision.reason
+    assert final_reason in decision.reason
+    assert summary.sent == 0
+    assert summary.blocked == 1
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT telegram_status, attempted_alert_type, blocked_reason, scan_run_id
+            FROM telegram_alert_attempts
+            """
+        ).fetchone()
+    assert row[0] == "blocked"
+    assert row[1] == TelegramAlertType.WATCHLIST.value
+    assert "public_watchlist_blocked_actionability:a_grade_blocked_by_scoring" in row[2]
+    assert final_reason in row[2]
+    assert row[3] == "run-blocked-a-grade-scoring"
+
+
 def test_simple_public_signal_duplicate_is_blocked_inside_cooldown(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level("INFO")
     db_path = tmp_path / "simple-duplicate.db"

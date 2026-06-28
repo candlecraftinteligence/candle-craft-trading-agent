@@ -653,8 +653,12 @@ def test_a_minus_clean_trade_map_with_rr_2_5_becomes_actionable_a_grade(tmp_path
     symbol_result = _apply_single_lifecycle(
         _a_grade_watch_symbol(
             grade=SetupQualityGrade.A_MINUS,
-            diagnostics_overrides={"rr_to_tp2": Decimal("2.6")},
-        ),
+            diagnostics_overrides={
+                "rr_to_tp2": Decimal("2.6"),
+                "technical_score": Decimal("70"),
+                "opportunity_score": Decimal("88"),
+            },
+        ).model_copy(update={"technical_score": 70}),
         tmp_path,
         now="2026-05-18T09:01:00+00:00",
     )
@@ -662,6 +666,79 @@ def test_a_minus_clean_trade_map_with_rr_2_5_becomes_actionable_a_grade(tmp_path
     assert symbol_result.lifecycle_state is not None
     assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.ACTIONABLE_A_GRADE
     assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.CONFIRMED
+    assert symbol_result.actionability_state == "A_GRADE_ACTIONABLE"
+    assert symbol_result.candidate_quality_grade == "A-"
+    assert symbol_result.final_quality_grade == "A-"
+    assert symbol_result.final_failed_gate == NA
+    assert symbol_result.final_block_reason == NA
+    assert symbol_result.lifecycle_state.actionability_state == "A_GRADE_ACTIONABLE"
+
+
+def test_a_grade_candidate_with_low_technical_score_blocks_by_final_scoring(tmp_path) -> None:
+    db_path = tmp_path / "a_grade_lifecycle.db"
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(
+            grade=SetupQualityGrade.A,
+            diagnostics_overrides={
+                "first_failed_gate": "scoring",
+                "gates_failed": ("scoring",),
+                "technical_score": Decimal("49"),
+                "opportunity_score": Decimal("88"),
+            },
+        ).model_copy(
+            update={
+                "technical_score": 49,
+                "rejection_stage": "scoring",
+                "rejection_reason": "Technical score is below 50.",
+            }
+        ),
+        tmp_path,
+        now="2026-05-18T09:02:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.ACTIONABLE_A_GRADE
+    assert symbol_result.actionability_state == "A_GRADE_BLOCKED_BY_SCORING"
+    assert symbol_result.final_quality_grade == "Blocked"
+    assert symbol_result.final_failed_gate == "scoring"
+    assert symbol_result.final_block_reason == "A-grade candidate, but blocked by final scoring."
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        records = repository.get_records_for_symbols(("BTCUSDT",))
+    assert records[0].candidate_quality_grade == "A"
+    assert records[0].technical_score == "49"
+    assert records[0].opportunity_score == "88"
+    assert records[0].actionability_state == "A_GRADE_BLOCKED_BY_SCORING"
+    assert records[0].final_block_reason == "A-grade candidate, but blocked by final scoring."
+
+
+def test_a_grade_candidate_with_target_integrity_failure_blocks_by_target(tmp_path) -> None:
+    symbol_result = _apply_single_lifecycle(
+        _a_grade_watch_symbol(
+            grade=SetupQualityGrade.A_PLUS,
+            symbol="TARGETUSDT",
+            diagnostics_overrides={
+                "first_failed_gate": "target_integrity",
+                "gates_failed": ("target_integrity",),
+                "target_integrity_status": "blocked",
+                "target_failure": "RR_BELOW_MINIMUM",
+                "target_integrity_reason": "Clean target path is too compressed.",
+                "technical_score": Decimal("70"),
+                "opportunity_score": Decimal("88"),
+            },
+        ).model_copy(update={"technical_score": 70, "rejection_stage": "target_integrity"}),
+        tmp_path,
+        now="2026-05-18T09:03:00+00:00",
+    )
+
+    assert symbol_result.lifecycle_state is not None
+    assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.ACTIONABLE_A_GRADE
+    assert symbol_result.actionability_state == "A_GRADE_BLOCKED_BY_TARGET"
+    assert symbol_result.final_quality_grade == "Blocked"
+    assert symbol_result.final_failed_gate == "target_integrity"
+    assert symbol_result.final_block_reason == "A-grade candidate, but blocked by target integrity."
+    assert symbol_result.target_integrity_status == "blocked"
+    assert symbol_result.target_failure == "RR_BELOW_MINIMUM"
 
 
 def test_rejected_clean_a_grade_trade_map_promotes_to_actionable_a_grade(tmp_path) -> None:
@@ -937,6 +1014,7 @@ def test_lower_grade_setup_is_not_promoted_by_a_grade_watch_path(tmp_path) -> No
     assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.ACTIONABLE_A_GRADE
     assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.A_GRADE_WATCH
     assert symbol_result.lifecycle_state.current_state != SetupLifecycleState.EXECUTING
+    assert symbol_result.actionability_state == "NOT_A_GRADE_CANDIDATE"
 
 
 def test_a_grade_watch_creation_blocks_missing_entry_stop_invalidation_rr_and_target_integrity(tmp_path) -> None:

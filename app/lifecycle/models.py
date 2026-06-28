@@ -69,6 +69,15 @@ class SetupLifecycleRecord(BaseModel):
     last_seen_at: str
     last_transition_at: str
     failed_gate: str = NA
+    candidate_quality_grade: str = NA
+    final_quality_grade: str = NA
+    technical_score: str = NA
+    opportunity_score: str = NA
+    final_failed_gate: str = NA
+    final_block_reason: str = NA
+    target_integrity_status: str = NA
+    target_failure: str = NA
+    actionability_state: str = NA
     readiness_score: int = Field(default=0, ge=0, le=100)
     quality_score: int = Field(default=0, ge=0, le=100)
     edge_score: str = NA
@@ -111,6 +120,15 @@ class SetupLifecycleRecord(BaseModel):
         "mode",
         "direction",
         "failed_gate",
+        "candidate_quality_grade",
+        "final_quality_grade",
+        "technical_score",
+        "opportunity_score",
+        "final_failed_gate",
+        "final_block_reason",
+        "target_integrity_status",
+        "target_failure",
+        "actionability_state",
         "edge_score",
         "regime_state",
         "action_label",

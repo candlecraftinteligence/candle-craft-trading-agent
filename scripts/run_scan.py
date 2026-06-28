@@ -1683,7 +1683,8 @@ def _scan_run_manifest_row(
         for result in (item.symbol_result for item in ranked)
         if result.lifecycle_state is not None
     )
-    actionable_a_grade_count = lifecycle_state_counts.get("ACTIONABLE_A_GRADE", 0)
+    actionability_counts = _manifest_actionability_counts(ranked)
+    actionable_a_grade_count = actionability_counts["actionable_a_grade_setups"]
     confirmed_setup_count = lifecycle_state_counts.get("CONFIRMED", 0)
     target_integrity_blocks = sum(
         1
@@ -1698,8 +1699,15 @@ def _scan_run_manifest_row(
         "universe_label": _display(getattr(watchlist.universe, "label", watchlist.source_label)),
         "symbols_scanned": result.scanned_symbols,
         "valid_setup_count": bucket_counts.get("valid", 0),
-        "actionable_setup_count": bucket_counts.get("valid", 0) + actionable_a_grade_count,
+        "actionable_setup_count": actionable_a_grade_count,
+        "candidate_a_grade_setups": actionability_counts["candidate_a_grade_setups"],
+        "actionable_a_grade_setups": actionable_a_grade_count,
         "actionable_a_grade_count": actionable_a_grade_count,
+        "blocked_a_grade_by_scoring": actionability_counts["blocked_a_grade_by_scoring"],
+        "blocked_a_grade_by_target": actionability_counts["blocked_a_grade_by_target"],
+        "blocked_a_grade_by_entry_window": actionability_counts["blocked_a_grade_by_entry_window"],
+        "blocked_a_grade_by_trust": actionability_counts["blocked_a_grade_by_trust"],
+        "confirmed_setups": confirmed_setup_count,
         "confirmed_setup_count": confirmed_setup_count,
         "near_miss_count": bucket_counts.get("near_miss", 0),
         "rejected_count": bucket_counts.get("no_setup", 0),
@@ -1726,6 +1734,63 @@ def _scan_run_manifest_row(
     if latest_scan_path is not None:
         row["latest_scan_path"] = str(latest_scan_path)
     return row
+
+
+def _manifest_actionability_counts(ranked_results: Sequence[Any]) -> dict[str, int]:
+    counts = {
+        "candidate_a_grade_setups": 0,
+        "actionable_a_grade_setups": 0,
+        "blocked_a_grade_by_scoring": 0,
+        "blocked_a_grade_by_target": 0,
+        "blocked_a_grade_by_entry_window": 0,
+        "blocked_a_grade_by_trust": 0,
+    }
+    for item in ranked_results:
+        symbol_result = item.symbol_result
+        lifecycle = getattr(symbol_result, "lifecycle_state", None)
+        diagnostics = representative_strategy_diagnostics(symbol_result)
+        actionability_state = _display(
+            _first_manifest_non_na(
+                getattr(symbol_result, "actionability_state", NA),
+                getattr(lifecycle, "actionability_state", NA),
+                diagnostics.get("actionability_state"),
+            )
+        )
+        quality = getattr(symbol_result, "setup_quality", None)
+        raw_grade = getattr(quality, "quality_grade", NA)
+        candidate_grade = _display(
+            _first_manifest_non_na(
+                getattr(symbol_result, "candidate_quality_grade", NA),
+                getattr(lifecycle, "candidate_quality_grade", NA),
+                getattr(raw_grade, "value", raw_grade),
+                diagnostics.get("candidate_quality_grade"),
+                diagnostics.get("quality_grade"),
+            )
+        )
+        lifecycle_state = _display(getattr(getattr(lifecycle, "current_state", NA), "value", getattr(lifecycle, "current_state", NA)))
+        is_a_candidate = candidate_grade.strip().upper() in {"A-", "A", "A+"} or actionability_state.startswith("A_GRADE_")
+        if is_a_candidate:
+            counts["candidate_a_grade_setups"] += 1
+        if actionability_state == "A_GRADE_ACTIONABLE":
+            counts["actionable_a_grade_setups"] += 1
+        elif actionability_state == "A_GRADE_BLOCKED_BY_SCORING":
+            counts["blocked_a_grade_by_scoring"] += 1
+        elif actionability_state == "A_GRADE_BLOCKED_BY_TARGET":
+            counts["blocked_a_grade_by_target"] += 1
+        elif actionability_state == "A_GRADE_BLOCKED_BY_ENTRY_WINDOW":
+            counts["blocked_a_grade_by_entry_window"] += 1
+        elif actionability_state == "A_GRADE_BLOCKED_BY_TRUST":
+            counts["blocked_a_grade_by_trust"] += 1
+        elif actionability_state == NA and lifecycle_state == "ACTIONABLE_A_GRADE" and is_a_candidate:
+            counts["actionable_a_grade_setups"] += 1
+    return counts
+
+
+def _first_manifest_non_na(*values: Any) -> Any:
+    for value in values:
+        if _display(value) != NA:
+            return value
+    return NA
 
 
 async def _route_admin_report(

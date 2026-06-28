@@ -59,6 +59,11 @@ TERMINAL_STATE_KEYS = frozenset(
 
 PUBLIC_BLOCKER_KEYS = frozenset(
     {
+        "a_grade_blocked_by_entry_window",
+        "a_grade_blocked_by_final_gates",
+        "a_grade_blocked_by_scoring",
+        "a_grade_blocked_by_target",
+        "a_grade_blocked_by_trust",
         "below_min_public_grade",
         "blocked",
         "body_acceptance_failure",
@@ -141,7 +146,12 @@ PUBLIC_WATCHLIST_ALLOWED_PENDING_BLOCKER_KEYS = frozenset(
 )
 
 PUBLIC_BLOCKER_TEXT = (
+    "a-grade candidate, but blocked",
     "below_min_public_grade",
+    "blocked by final scoring",
+    "blocked by target integrity",
+    "blocked by trust meter",
+    "blocked by expired entry window",
     "core_status_blocked",
     "failed quality gates",
     "invalid target",
@@ -604,6 +614,10 @@ def _symbol_text(value: Any) -> str:
 
 def _grade_candidates(record: Any) -> tuple[Any, ...]:
     return (
+        _first_field(record, "candidate_quality_grade"),
+        _first_field(record, ("lifecycle_state", "candidate_quality_grade")),
+        _first_field(record, "final_quality_grade"),
+        _first_field(record, ("lifecycle_state", "final_quality_grade")),
         _first_field(record, "quality_grade_current"),
         _first_field(record, "quality_grade_confirmed"),
         _first_field(record, "setup_quality_score"),
@@ -630,6 +644,13 @@ def _score_candidates(record: Any) -> tuple[Any, ...]:
 def _blocker_values(record: Any) -> tuple[Any, ...]:
     diagnostics = _representative_diagnostics(record)
     direct = (
+        _first_field(record, "actionability_state"),
+        _first_field(record, ("lifecycle_state", "actionability_state")),
+        _first_field(record, "final_failed_gate"),
+        _first_field(record, ("lifecycle_state", "final_failed_gate")),
+        _first_field(record, "final_block_reason"),
+        _first_field(record, ("lifecycle_state", "final_block_reason")),
+        _first_field(record, "public_block_reason"),
         _first_field(record, "failed_gate"),
         _first_field(record, "rejection_reason"),
         _first_field(record, "blocked_reason"),
@@ -644,6 +665,10 @@ def _blocker_values(record: Any) -> tuple[Any, ...]:
         _first_field(record, ("trade_idea", "status")),
     )
     diagnostic_values = (
+        diagnostics.get("actionability_state", NA),
+        diagnostics.get("final_failed_gate", NA),
+        diagnostics.get("final_block_reason", NA),
+        diagnostics.get("public_block_reason", NA),
         diagnostics.get("first_failed_gate", NA),
         diagnostics.get("failed_gate", NA),
         diagnostics.get("rejection_reason", NA),

@@ -223,6 +223,13 @@ class LifecycleObservation:
     latest_low: str = NA
     edge_score: str = NA
     failed_gate: str = NA
+    candidate_quality_grade: str = NA
+    final_quality_grade: str = NA
+    final_failed_gate: str = NA
+    final_block_reason: str = NA
+    target_integrity_status: str = NA
+    target_failure: str = NA
+    actionability_state: str = NA
     regime_state: str = NA
     action_label: str = NA
     invalidation_reason: str = NA
@@ -398,6 +405,15 @@ def evaluate_lifecycle_transition(
             last_seen_at=timestamp,
             last_transition_at=timestamp,
             failed_gate=NA if confirmed_snapshot_valid else _text(observation.failed_gate),
+            candidate_quality_grade=_text(observation.candidate_quality_grade),
+            final_quality_grade=_text(observation.final_quality_grade),
+            technical_score=_text(observation.technical_score),
+            opportunity_score=_text(observation.opportunity_score),
+            final_failed_gate=_text(observation.final_failed_gate),
+            final_block_reason=_text(observation.final_block_reason),
+            target_integrity_status=_text(observation.target_integrity_status),
+            target_failure=_text(observation.target_failure),
+            actionability_state=_text(observation.actionability_state),
             readiness_score=_bounded_score(observation.readiness_score, 0),
             quality_score=_bounded_score(observation.quality_score, 0),
             edge_score=_text(observation.edge_score),
@@ -785,6 +801,15 @@ def _record_with_observation(
         update={
             "last_seen_at": timestamp,
             "failed_gate": _text(observation.failed_gate),
+            "candidate_quality_grade": _text(observation.candidate_quality_grade),
+            "final_quality_grade": _text(observation.final_quality_grade),
+            "technical_score": _text(observation.technical_score),
+            "opportunity_score": _text(observation.opportunity_score),
+            "final_failed_gate": _text(observation.final_failed_gate),
+            "final_block_reason": _text(observation.final_block_reason),
+            "target_integrity_status": _text(observation.target_integrity_status),
+            "target_failure": _text(observation.target_failure),
+            "actionability_state": _text(observation.actionability_state),
             "readiness_score": _bounded_score(observation.readiness_score, record.readiness_score),
             "quality_score": _bounded_score(observation.quality_score, record.quality_score),
             "edge_score": _text(observation.edge_score),
