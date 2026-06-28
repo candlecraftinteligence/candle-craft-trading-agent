@@ -1703,10 +1703,13 @@ def _scan_run_manifest_row(
         "candidate_a_grade_setups": actionability_counts["candidate_a_grade_setups"],
         "actionable_a_grade_setups": actionable_a_grade_count,
         "actionable_a_grade_count": actionable_a_grade_count,
+        "actionable_a_grade_target_caution": actionability_counts["actionable_a_grade_target_caution"],
         "blocked_a_grade_by_scoring": actionability_counts["blocked_a_grade_by_scoring"],
         "blocked_a_grade_by_target": actionability_counts["blocked_a_grade_by_target"],
         "blocked_a_grade_by_entry_window": actionability_counts["blocked_a_grade_by_entry_window"],
         "blocked_a_grade_by_trust": actionability_counts["blocked_a_grade_by_trust"],
+        "fatal_target_blocks": actionability_counts["fatal_target_blocks"],
+        "soft_target_warnings": actionability_counts["soft_target_warnings"],
         "confirmed_setups": confirmed_setup_count,
         "confirmed_setup_count": confirmed_setup_count,
         "near_miss_count": bucket_counts.get("near_miss", 0),
@@ -1740,10 +1743,13 @@ def _manifest_actionability_counts(ranked_results: Sequence[Any]) -> dict[str, i
     counts = {
         "candidate_a_grade_setups": 0,
         "actionable_a_grade_setups": 0,
+        "actionable_a_grade_target_caution": 0,
         "blocked_a_grade_by_scoring": 0,
         "blocked_a_grade_by_target": 0,
         "blocked_a_grade_by_entry_window": 0,
         "blocked_a_grade_by_trust": 0,
+        "fatal_target_blocks": 0,
+        "soft_target_warnings": 0,
     }
     for item in ranked_results:
         symbol_result = item.symbol_result
@@ -1768,11 +1774,21 @@ def _manifest_actionability_counts(ranked_results: Sequence[Any]) -> dict[str, i
             )
         )
         lifecycle_state = _display(getattr(getattr(lifecycle, "current_state", NA), "value", getattr(lifecycle, "current_state", NA)))
+        severity_key = _manifest_status_key(
+            _first_manifest_non_na(
+                getattr(symbol_result, "target_failure_severity", NA),
+                getattr(lifecycle, "target_failure_severity", NA),
+                diagnostics.get("target_failure_severity"),
+            )
+        )
+        state_key = _manifest_status_key(actionability_state)
         is_a_candidate = candidate_grade.strip().upper() in {"A-", "A", "A+"} or actionability_state.startswith("A_GRADE_")
         if is_a_candidate:
             counts["candidate_a_grade_setups"] += 1
-        if actionability_state == "A_GRADE_ACTIONABLE":
+        if actionability_state in {"A_GRADE_ACTIONABLE", "A_GRADE_ACTIONABLE_TARGET_CAUTION"}:
             counts["actionable_a_grade_setups"] += 1
+            if actionability_state == "A_GRADE_ACTIONABLE_TARGET_CAUTION":
+                counts["actionable_a_grade_target_caution"] += 1
         elif actionability_state == "A_GRADE_BLOCKED_BY_SCORING":
             counts["blocked_a_grade_by_scoring"] += 1
         elif actionability_state == "A_GRADE_BLOCKED_BY_TARGET":
@@ -1783,7 +1799,21 @@ def _manifest_actionability_counts(ranked_results: Sequence[Any]) -> dict[str, i
             counts["blocked_a_grade_by_trust"] += 1
         elif actionability_state == NA and lifecycle_state == "ACTIONABLE_A_GRADE" and is_a_candidate:
             counts["actionable_a_grade_setups"] += 1
+        if severity_key == "fatal_target_failure" or state_key == "a_grade_blocked_by_target":
+            counts["fatal_target_blocks"] += 1
+        if severity_key in {"soft_target_warning", "target_caution_actionable"} or state_key == "a_grade_actionable_target_caution":
+            counts["soft_target_warnings"] += 1
     return counts
+
+
+def _manifest_status_key(value: Any) -> str:
+    text = _display(value)
+    if text == NA:
+        return ""
+    key = text.lower().strip().replace("-", "_").replace(" ", "_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key.strip("_")
 
 
 def _first_manifest_non_na(*values: Any) -> Any:

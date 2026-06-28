@@ -1408,6 +1408,147 @@ def test_public_watchlist_blocks_target_integrity_failure() -> None:
     assert "target_integrity_failed" in decision.reason
 
 
+def test_public_watchlist_blocks_fatal_target_failure() -> None:
+    symbol = _symbol(
+        SetupLifecycleState.A_GRADE_WATCH,
+        previous=SetupLifecycleState.TRIGGERED,
+        diagnostics=_public_ready_watchlist_diagnostics(
+            first_failed_gate="target_integrity",
+            gates_failed=("target_integrity",),
+            target_integrity_status="blocked",
+            target_failure="OPPOSING_STRUCTURE_BLOCK",
+            target_failure_severity="fatal_target_failure",
+            target_warning_reason="Opposing structure blocks the clean path before minimum RR.",
+        ),
+        setup_quality=_setup_quality_with_grade(SetupQualityGrade.A, quality_score=92),
+        trade_idea=None,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+    ).model_copy(
+        update={
+            "actionability_state": "A_GRADE_BLOCKED_BY_TARGET",
+            "target_integrity_status": "blocked",
+            "target_failure": "OPPOSING_STRUCTURE_BLOCK",
+            "target_failure_severity": "fatal_target_failure",
+            "target_warning_reason": "Opposing structure blocks the clean path before minimum RR.",
+            "final_failed_gate": "target_integrity",
+            "final_block_reason": "A-grade candidate, but blocked by target integrity.",
+        }
+    )
+    symbol = _with_lifecycle_fields(
+        symbol,
+        actionability_state="A_GRADE_BLOCKED_BY_TARGET",
+        target_integrity_status="blocked",
+        target_failure="OPPOSING_STRUCTURE_BLOCK",
+        target_failure_severity="fatal_target_failure",
+        target_warning_reason="Opposing structure blocks the clean path before minimum RR.",
+        final_failed_gate="target_integrity",
+        final_block_reason="A-grade candidate, but blocked by target integrity.",
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "target_integrity_failed" in decision.reason
+
+
+def test_public_watchlist_blocks_b_plus_target_caution() -> None:
+    symbol = _symbol(
+        SetupLifecycleState.A_GRADE_WATCH,
+        previous=SetupLifecycleState.TRIGGERED,
+        diagnostics=_public_ready_watchlist_diagnostics(
+            first_failed_gate="target_inside_chop",
+            gates_failed=("target_inside_chop",),
+            target_integrity_status="warning",
+            target_failure="TARGET_INSIDE_CHOP",
+            target_failure_severity="soft_target_warning",
+            target_warning_reason="TP2 remains inside recent chop/range.",
+        ),
+        setup_quality=_setup_quality_with_grade(SetupQualityGrade.B_PLUS, quality_score=88),
+        trade_idea=None,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+    ).model_copy(
+        update={
+            "actionability_state": "A_GRADE_ACTIONABLE_TARGET_CAUTION",
+            "target_integrity_status": "warning",
+            "target_failure": "TARGET_INSIDE_CHOP",
+            "target_failure_severity": "target_caution_actionable",
+            "target_warning_reason": "TP2 remains inside recent chop/range.",
+        }
+    )
+    symbol = _with_lifecycle_fields(
+        symbol,
+        actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
+        candidate_quality_grade="B+",
+        final_quality_grade="B+",
+        target_integrity_status="warning",
+        target_failure="TARGET_INSIDE_CHOP",
+        target_failure_severity="target_caution_actionable",
+        target_warning_reason="TP2 remains inside recent chop/range.",
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is False
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert "public_watchlist_target_caution_grade_below_a:b+" in decision.reason
+
+
+def test_public_watchlist_can_send_target_caution_with_clear_warning(tmp_path: Path) -> None:
+    db_path = tmp_path / "target-caution.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    symbol = _symbol(
+        SetupLifecycleState.A_GRADE_WATCH,
+        previous=SetupLifecycleState.TRIGGERED,
+        diagnostics=_public_ready_watchlist_diagnostics(
+            first_failed_gate="target_inside_chop",
+            gates_failed=("target_inside_chop",),
+            target_integrity_status="warning",
+            target_failure="TARGET_INSIDE_CHOP",
+            target_failure_severity="soft_target_warning",
+            target_warning_reason="TP2 remains inside recent chop/range.",
+            technical_score=Decimal("95"),
+            opportunity_score=Decimal("94"),
+        ),
+        signal_id="sig-target-caution",
+        setup_quality=_setup_quality_with_grade(SetupQualityGrade.A, quality_score=92),
+        trade_idea=None,
+        status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+        technical_score=Decimal("95"),
+    ).model_copy(
+        update={
+            "actionability_state": "A_GRADE_ACTIONABLE_TARGET_CAUTION",
+            "target_integrity_status": "warning",
+            "target_failure": "TARGET_INSIDE_CHOP",
+            "target_failure_severity": "target_caution_actionable",
+            "target_warning_reason": "TP2 remains inside recent chop/range.",
+        }
+    )
+    symbol = _with_lifecycle_fields(
+        symbol,
+        actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
+        candidate_quality_grade="A",
+        final_quality_grade="A",
+        final_failed_gate=NA,
+        final_block_reason=NA,
+        target_integrity_status="warning",
+        target_failure="TARGET_INSIDE_CHOP",
+        target_failure_severity="target_caution_actionable",
+        target_warning_reason="TP2 remains inside recent chop/range.",
+    )
+
+    summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="target-caution"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    text = sender.messages[0]
+    assert "Target caution:" in text
+    assert "path is tighter/choppy" in text
+    assert "No chase" in text
+    assert "target clean" not in text.lower()
+    assert "clean target" not in text.lower()
+
 def test_public_watchlist_blocks_terminal_lifecycle_states() -> None:
     for state in (
         SetupLifecycleState.INVALIDATED,

@@ -93,6 +93,23 @@ def test_public_watchlist_formatter_matches_simple_signal_shape() -> None:
     assert "CONFIRMED" not in text
 
 
+def test_public_watchlist_target_caution_renders_clear_no_chase_warning() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(
+            actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
+            target_failure_severity="target_caution_actionable",
+            target_warning_reason="TP2 remains inside recent chop/range.",
+        ),
+    )
+
+    assert "Target caution:" in text
+    assert "TP2 remains inside recent chop/range" in text
+    assert "path is tighter/choppy" in text
+    assert "No chase" in text
+    assert "target clean" not in text.lower()
+    assert "clean target" not in text.lower()
+
 def test_public_watchlist_formatter_uses_short_bias_and_stop() -> None:
     text = format_telegram_signal_message(
         TelegramAlertType.WATCHLIST,
