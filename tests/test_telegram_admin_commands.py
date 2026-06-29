@@ -566,6 +566,59 @@ def _expected_public_start_text() -> str:
     )
 
 
+def _expected_public_help_text() -> str:
+    return "\n".join(
+        (
+            "📖 How to Use Candle Craft",
+            "",
+            "🐺 Welcome to the Candle Craft pack.",
+            "",
+            "This is not a candle-chasing bot.",
+            "This is the Moon Trip signal desk — built for traders who wait for structure, liquidity, confirmation, and clean execution zones.",
+            "",
+            "The mission is simple:",
+            "",
+            "Less noise.",
+            "Better setups.",
+            "Sharper decisions.",
+            "",
+            "How to use it:",
+            "",
+            "1. 🦄 Join the signal channel",
+            "This is where filtered Candle Craft alerts and lifecycle updates are posted.",
+            "",
+            "2. 🐺 Wait for the hunt",
+            "No alert means no clean setup.",
+            "Silence is not weakness — it means the wolf is waiting for better market structure.",
+            "",
+            "3. 🧭 Read the signal like a battle plan",
+            "Focus on:",
+            "• pair",
+            "• direction",
+            "• setup thesis",
+            "• reaction zone",
+            "• invalidation",
+            "• targets",
+            "• lifecycle status",
+            "",
+            "4. 🚫 Never chase candles",
+            "If the move already left the zone, the opportunity is gone.",
+            "The pack waits for the next clean setup.",
+            "",
+            "5. 🛡 Stay responsible",
+            "Candle Craft provides manual signal intelligence only.",
+            "It does not execute trades, manage funds, access accounts, or guarantee profits.",
+            "",
+            "This is not financial advice.",
+            "All trading decisions remain your own responsibility.",
+            "",
+            "🌕 The Moon Trip is not about rushing.",
+            "It is about patience, structure, and execution.",
+            "",
+            "🐺 Candle Craft | Signal. Structure. Execution.",
+        )
+    )
+
 def _expected_public_donate_address_text(
     title: str,
     address: str,
@@ -1378,30 +1431,15 @@ def test_public_help_uses_button_guidance_instead_of_slash_command_wording(tmp_p
 
     response = service.public_response_for("/help")
 
-    _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
-    assert response.text.startswith(f"{SCREEN_HEADER} How to Use")
-    assert "How to use Candle Craft Intelligence" in response.text
-    assert "1. Join the signal channel." in response.text
-    assert "2. Wait for filtered setups only." in response.text
-    assert "3. Do not chase old alerts." in response.text
-    assert "4. Read the setup thesis, invalidation, and targets." in response.text
-    assert "5. Use your own risk management." in response.text
-    assert "• clean market structure" in response.text
-    assert "• liquidity sweeps" in response.text
-    assert "• confirmation behavior" in response.text
-    assert "• invalidation clarity" in response.text
-    assert "• high-quality risk/reward conditions" in response.text
-    assert "Candle Craft is manual signal intelligence only." in response.text
-    assert "The bot does not place trades." in response.text
-    assert "The bot does not manage funds." in response.text
-    assert "The bot does not guarantee outcomes." in response.text
+    assert response.text == _expected_public_help_text()
     assert "Last Scan" not in response.text
     assert "Active Signals" not in response.text
     assert "Watchlists" not in response.text
     assert "/lastscan" not in response.text
     assert "/signals" not in response.text
     assert "/watchlist" not in response.text
+    _assert_public_menu_only(response.reply_markup)
 
 
 def test_command_menu_cleanup_calls_telegram_safely_and_does_not_print_token(capsys) -> None:
@@ -1493,6 +1531,12 @@ def test_every_public_screen_has_brand_header_footer_and_no_execution_buttons(tm
 
     for command in ("/start", "/menu", "/lastscan", "/signals", "/watchlist", "/watchlists", "/social", "/help", "/donate"):
         response = service.public_response_for(command, public_config=config)
+        if command == "/help":
+            assert response.text == _expected_public_help_text()
+            assert response.text.endswith(SCREEN_FOOTER)
+            _assert_public_menu_only(response.reply_markup)
+            _assert_no_execution_buttons(response.reply_markup)
+            continue
         _assert_shell_screen(response.text)
         assert response.text.startswith(f"{SCREEN_HEADER} ")
         if command in {"/watchlist", "/watchlists"}:
@@ -1871,8 +1915,8 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
         assert "Integrity Desk" not in call["message"]
 
     assert "Social" in screen_calls[disabled_count]["message"]
-    assert "How to Use" in screen_calls[disabled_count + 1]["message"]
-    assert "How to Use" in screen_calls[disabled_count + 2]["message"]
+    assert screen_calls[disabled_count + 1]["message"] == _expected_public_help_text()
+    assert screen_calls[disabled_count + 2]["message"] == _expected_public_help_text()
     assert "Donate" in screen_calls[disabled_count + 3]["message"]
     assert screen_calls[disabled_count + 4]["message"] == "Not configured yet."
     assert screen_calls[disabled_count + 5]["message"] == "Not configured yet."
