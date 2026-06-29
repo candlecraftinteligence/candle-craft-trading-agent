@@ -187,9 +187,12 @@ PUBLIC_SIGNAL_MIN_RR = Decimal("3")
 PUBLIC_SIGNAL_MIN_TECHNICAL_SCORE = Decimal("95")
 PUBLIC_SIGNAL_MIN_OPPORTUNITY_SCORE = Decimal("95")
 PUBLIC_SIGNAL_MAX_PER_SCAN = 1
-PUBLIC_SIGNAL_MAX_PER_24H = 6
-PUBLIC_SIGNAL_SYMBOL_COOLDOWN_HOURS = 24
+PUBLIC_SIGNAL_MAX_PER_24H = 15
+PUBLIC_SIGNAL_MAX_PER_60M = 3
+PUBLIC_SIGNAL_SAME_SIDE_COOLDOWN_HOURS = 2
+PUBLIC_SIGNAL_OPPOSITE_SIDE_COOLDOWN_MINUTES = 60
 PUBLIC_SIGNAL_ROLLING_WINDOW_HOURS = 24
+PUBLIC_SIGNAL_ROLLING_WINDOW_MINUTES = 60
 PUBLIC_SIGNAL_MAJOR_PRIORITY_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT")
 PUBLIC_SIGNAL_NON_CRYPTO_BASE_SYMBOLS = frozenset(
     {
@@ -230,7 +233,8 @@ PUBLIC_WATCHLIST_MIN_RR = PUBLIC_SIGNAL_MIN_RR
 PUBLIC_WATCHLIST_MIN_SCORE = PUBLIC_SIGNAL_MIN_SCORE
 PUBLIC_WATCHLIST_MAX_PER_SCAN = PUBLIC_SIGNAL_MAX_PER_SCAN
 PUBLIC_WATCHLIST_MAX_PER_24H = PUBLIC_SIGNAL_MAX_PER_24H
-PUBLIC_WATCHLIST_COOLDOWN_HOURS = PUBLIC_SIGNAL_SYMBOL_COOLDOWN_HOURS
+PUBLIC_WATCHLIST_MAX_PER_60M = PUBLIC_SIGNAL_MAX_PER_60M
+PUBLIC_WATCHLIST_COOLDOWN_HOURS = PUBLIC_SIGNAL_SAME_SIDE_COOLDOWN_HOURS
 PUBLIC_WATCHLIST_PRICE_TOLERANCE_TICKS = Decimal("10")
 PUBLIC_WATCHLIST_ZONE_TOLERANCE_MULTIPLIER = Decimal("2")
 PUBLIC_WATCHLIST_PLAN_ID_VERSION = "public-watchlist-plan-v2"
@@ -678,6 +682,7 @@ class TelegramEligibilityContext:
     public_watchlist_min_score: Decimal = PUBLIC_WATCHLIST_MIN_SCORE
     public_watchlist_min_rr: Decimal = PUBLIC_WATCHLIST_MIN_RR
     public_watchlist_max_per_24h: int = PUBLIC_WATCHLIST_MAX_PER_24H
+    public_watchlist_max_per_60m: int = PUBLIC_WATCHLIST_MAX_PER_60M
     public_watchlist_symbol_whitelist: tuple[str, ...] = ()
     public_watchlist_require_plan: bool = True
     public_watchlist_require_entry_zone: bool = True
@@ -1273,6 +1278,30 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             (*sorted(PRIOR_ACTIVE_ALERT_TYPES), normalized_symbol),
         ).fetchall()
         return any(_parse_iso_datetime(row["sent_at"]) >= cutoff for row in rows)
+
+    def has_recent_public_signal_for_symbol_direction(self, *, symbol: str, direction: Any, since: str) -> bool:
+        normalized_symbol = _symbol(symbol)
+        normalized_direction = _status_key(direction)
+        if normalized_symbol == NA or normalized_direction not in {"long", "short"}:
+            return False
+        cutoff = _parse_iso_datetime(since)
+        type_placeholders = ",".join("?" for _ in PRIOR_ACTIVE_ALERT_TYPES)
+        rows = self._connection.execute(
+            f"""
+            SELECT sent_at, direction FROM telegram_alert_attempts
+            WHERE alert_type IN ({type_placeholders})
+              AND telegram_status = 'sent'
+              AND symbol = ?
+              AND sent_at IS NOT NULL
+              AND sent_at NOT IN ('', 'N/A')
+            """,
+            (*sorted(PRIOR_ACTIVE_ALERT_TYPES), normalized_symbol),
+        ).fetchall()
+        return any(
+            _status_key(row["direction"]) == normalized_direction and _parse_iso_datetime(row["sent_at"]) >= cutoff
+            for row in rows
+        )
+
     def has_prior_public_watchlist_plan_alert(
         self,
         *,
@@ -2561,9 +2590,13 @@ class TelegramLifecycleDeliveryService:
         return min(configured, PUBLIC_SIGNAL_MAX_PER_24H)
 
     @property
+    def public_watchlist_max_per_60m(self) -> int:
+        configured = max(0, int(getattr(self.settings, "public_watchlist_max_per_60m", PUBLIC_WATCHLIST_MAX_PER_60M)))
+        return min(configured, PUBLIC_SIGNAL_MAX_PER_60M)
+
+    @property
     def public_watchlist_cooldown_hours(self) -> int:
-        configured = max(0, int(getattr(self.settings, "public_watchlist_cooldown_hours", PUBLIC_WATCHLIST_COOLDOWN_HOURS)))
-        return max(configured, PUBLIC_SIGNAL_SYMBOL_COOLDOWN_HOURS)
+        return PUBLIC_SIGNAL_SAME_SIDE_COOLDOWN_HOURS
 
     @property
     def public_watchlist_symbol_whitelist(self) -> tuple[str, ...]:
@@ -2672,12 +2705,14 @@ class TelegramLifecycleDeliveryService:
                     public_watchlist_min_score=self.public_watchlist_min_score,
                     public_watchlist_min_rr=self.public_watchlist_min_rr,
                     public_watchlist_max_per_24h=self.public_watchlist_max_per_24h,
+                    public_watchlist_max_per_60m=self.public_watchlist_max_per_60m,
                     public_watchlist_symbol_whitelist=self.public_watchlist_symbol_whitelist,
                     public_watchlist_require_plan=self.public_watchlist_require_plan,
                     public_watchlist_require_entry_zone=self.public_watchlist_require_entry_zone,
                     public_watchlist_require_invalidation=self.public_watchlist_require_invalidation,
                 )
                 public_watchlist_daily_cap_reached: bool | None = None
+                public_watchlist_hourly_cap_reached: bool | None = None
                 selected_public_watchlist_scan_ids = _selected_public_watchlist_scan_signal_ids(
                     result.results,
                     eligibility_context,
@@ -2686,6 +2721,7 @@ class TelegramLifecycleDeliveryService:
                     cooldown_hours=self.public_watchlist_cooldown_hours,
                     attempted_at=None,
                     daily_cap_reached=public_watchlist_daily_cap_reached,
+                    hourly_cap_reached=public_watchlist_hourly_cap_reached,
                 )
                 public_watchlist_sent_this_scan = 0
                 for symbol_result in result.results:
@@ -2729,6 +2765,7 @@ class TelegramLifecycleDeliveryService:
                         eligibility_context=eligibility_context,
                         allow_public_watchlist=_public_watchlist_scan_signal_id(symbol_result, eligibility_context) in selected_public_watchlist_scan_ids,
                         public_watchlist_daily_cap_reached=public_watchlist_daily_cap_reached,
+                        public_watchlist_hourly_cap_reached=public_watchlist_hourly_cap_reached,
                     )
                     if delivery is None:
                         if audit is not None and audit.eligible:
@@ -2802,6 +2839,7 @@ class TelegramLifecycleDeliveryService:
         eligibility_context: TelegramEligibilityContext | None = None,
         allow_public_watchlist: bool = True,
         public_watchlist_daily_cap_reached: bool | None = None,
+        public_watchlist_hourly_cap_reached: bool | None = None,
     ) -> TelegramLifecycleDelivery | None:
         alert_type_hint = (
             _alert_type_for_transition(symbol_result, symbol_result.lifecycle_transition)
@@ -2898,6 +2936,7 @@ class TelegramLifecycleDeliveryService:
                 context,
                 allow_public_watchlist=allow_public_watchlist,
                 daily_cap_reached=public_watchlist_daily_cap_reached,
+                hourly_cap_reached=public_watchlist_hourly_cap_reached,
                 attempted_at=now_utc_iso(),
             )
             if rate_block_reason is not None:
@@ -5367,6 +5406,11 @@ def _public_watchlist_cooldown_cutoff(attempted_at: str, cooldown_hours: int) ->
     return (parsed - timedelta(hours=max(0, int(cooldown_hours)))).isoformat()
 
 
+def _public_watchlist_cooldown_cutoff_minutes(attempted_at: str, cooldown_minutes: int) -> str:
+    parsed = _parse_iso_datetime(attempted_at)
+    return (parsed - timedelta(minutes=max(0, int(cooldown_minutes)))).isoformat()
+
+
 def _public_watchlist_daily_cap_reached(
     repository: SQLiteTelegramAlertAttemptRepository,
     context: TelegramEligibilityContext,
@@ -5380,6 +5424,49 @@ def _public_watchlist_daily_cap_reached(
     return repository.count_recent_public_signal_alerts(since=since) >= cap
 
 
+def _public_watchlist_hourly_cap_reached(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    context: TelegramEligibilityContext,
+    *,
+    attempted_at: str,
+) -> bool:
+    cap = max(0, int(context.public_watchlist_max_per_60m))
+    if cap <= 0:
+        return True
+    since = _public_watchlist_cooldown_cutoff_minutes(attempted_at, PUBLIC_SIGNAL_ROLLING_WINDOW_MINUTES)
+    return repository.count_recent_public_signal_alerts(since=since) >= cap
+
+
+def _public_watchlist_symbol_cooldown_block_reason(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    message: TelegramSignalMessage,
+    *,
+    attempted_at: str,
+) -> str | None:
+    side = _status_key(message.direction)
+    if side not in {"long", "short"}:
+        return None
+    same_side_since = _public_watchlist_cooldown_cutoff(attempted_at, PUBLIC_SIGNAL_SAME_SIDE_COOLDOWN_HOURS)
+    if repository.has_recent_public_signal_for_symbol_direction(
+        symbol=message.symbol,
+        direction=side,
+        since=same_side_since,
+    ):
+        return "public_block_same_symbol_same_side_cooldown"
+    opposite_side = "short" if side == "long" else "long"
+    opposite_side_since = _public_watchlist_cooldown_cutoff_minutes(
+        attempted_at,
+        PUBLIC_SIGNAL_OPPOSITE_SIDE_COOLDOWN_MINUTES,
+    )
+    if repository.has_recent_public_signal_for_symbol_direction(
+        symbol=message.symbol,
+        direction=opposite_side,
+        since=opposite_side_since,
+    ):
+        return "public_block_same_symbol_opposite_side_cooldown"
+    return None
+
+
 def _public_watchlist_delivery_rate_block_reason(
     repository: SQLiteTelegramAlertAttemptRepository,
     message: TelegramSignalMessage,
@@ -5387,19 +5474,27 @@ def _public_watchlist_delivery_rate_block_reason(
     *,
     allow_public_watchlist: bool,
     daily_cap_reached: bool | None,
+    hourly_cap_reached: bool | None,
     attempted_at: str,
 ) -> str | None:
     if daily_cap_reached is None:
         daily_cap_reached = _public_watchlist_daily_cap_reached(repository, context, attempted_at=attempted_at)
     if daily_cap_reached:
         return "public_block_daily_cap"
+    if hourly_cap_reached is None:
+        hourly_cap_reached = _public_watchlist_hourly_cap_reached(repository, context, attempted_at=attempted_at)
+    if hourly_cap_reached:
+        return "public_block_hourly_cap"
     if not allow_public_watchlist:
         return "public_block_scan_cap"
-    cooldown_since = _public_watchlist_cooldown_cutoff(attempted_at, PUBLIC_SIGNAL_SYMBOL_COOLDOWN_HOURS)
-    if repository.has_recent_public_signal_for_symbol(symbol=message.symbol, since=cooldown_since):
-        return "public_block_symbol_cooldown"
+    cooldown_reason = _public_watchlist_symbol_cooldown_block_reason(
+        repository,
+        message,
+        attempted_at=attempted_at,
+    )
+    if cooldown_reason is not None:
+        return cooldown_reason
     return None
-
 
 def _selected_public_watchlist_scan_signal_ids(
     symbol_results: Sequence[ScannerSymbolResult],
@@ -5410,6 +5505,7 @@ def _selected_public_watchlist_scan_signal_ids(
     cooldown_hours: int,
     attempted_at: str | None,
     daily_cap_reached: bool | None,
+    hourly_cap_reached: bool | None,
 ) -> frozenset[str]:
     if max_per_scan <= 0:
         return frozenset()
@@ -5436,6 +5532,10 @@ def _selected_public_watchlist_scan_signal_ids(
     if daily_cap_reached is None:
         daily_cap_reached = _public_watchlist_daily_cap_reached(repository, context, attempted_at=checked_at)
     if daily_cap_reached:
+        return frozenset()
+    if hourly_cap_reached is None:
+        hourly_cap_reached = _public_watchlist_hourly_cap_reached(repository, context, attempted_at=checked_at)
+    if hourly_cap_reached:
         return frozenset()
     candidates: list[tuple[tuple[Any, ...], str]] = []
     for sort_key, signal_id, message in candidates_before_rate_limits:
