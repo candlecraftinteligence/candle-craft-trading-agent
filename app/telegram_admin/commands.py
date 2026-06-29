@@ -35,11 +35,12 @@ SCREEN_HEADER = "🐺🟠"
 SCREEN_FOOTER = "🐺 Candle Craft | Signal. Structure. Execution."
 SCREEN_DIVIDER = "━━━━━━━━━━━━━━━━━━"
 UNVERIFIED = "Unverified"
-JOIN_SIGNAL_CHANNEL_BUTTON_LABEL = "🐺 Join Signal Channel"
+JOIN_SIGNAL_CHANNEL_BUTTON_LABEL = "🦄 Join Signal Channel"
 PUBLIC_SIGNAL_CHANNEL_COPY = (
     "Join the private Candle Craft signal channel for live watchlists and lifecycle updates."
 )
 PUBLIC_SIGNAL_CHANNEL_MISSING_COPY = "Signal channel invite link is not configured yet."
+PUBLIC_DASHBOARD_DISABLED_COMMAND = "/dashboard_disabled"
 WOLF_BRIEFING_PREVIEW_HEADER = "🐺🟠 WOLF BRIEFING PREVIEW"
 WOLF_BRIEFING_PUBLISH_COMMAND = "/wolf_publish"
 WOLF_BRIEFING_CANCEL_COMMAND = "/wolf_cancel"
@@ -93,16 +94,16 @@ ADMIN_MENU_BUTTON_CALLBACKS: Mapping[str, str] = {
     "❓ Guide": "admin:guide",
 }
 PUBLIC_MENU_BUTTON_ROWS: tuple[tuple[str, ...], ...] = (
-    ("📡 Last Scan", "🔥 Active Signals"),
-    ("👁 Watchlists", "🌐 Social"),
-    ("❓ Help", "🧡 Donate"),
+    ("📖 How to Use", "🌐 Social"),
+    ("🧡 Donate",),
 )
 PUBLIC_MENU_BUTTON_COMMANDS: Mapping[str, str] = {
-    "📡 last scan": "/lastscan",
-    "🔥 active signals": "/signals",
-    "👁 watchlist": "/watchlists",
-    "👁 watchlists": "/watchlists",
-    "👁 watchlist signals": "/watchlists",
+    "📡 last scan": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "🔥 active signals": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "👁 watchlist": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "👁 watchlists": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "👁 watchlist signals": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "📖 how to use": "/help",
     "🌐 social": "/social",
     "❓ help": "/help",
     "🧡 donate": "/donate",
@@ -116,10 +117,20 @@ SIMPLE_REPLY_BUTTON_COMMANDS: Mapping[str, str] = {
     "active watchlists": "/watchlists",
 }
 PUBLIC_CALLBACK_COMMANDS: Mapping[str, str] = {
-    "public:lastscan": "/lastscan",
-    "public:signals": "/signals",
-    "public:watchlist": "/watchlists",
+    "public:lastscan": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "public:last_scan": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "public:signals": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "public:active_signals": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "public:watchlist": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "public:watchlists": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "lastscan": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "last_scan": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "signals": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "active_signals": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "watchlist": PUBLIC_DASHBOARD_DISABLED_COMMAND,
+    "watchlists": PUBLIC_DASHBOARD_DISABLED_COMMAND,
     "public:social": "/social",
+    "public:how_to_use": "/help",
     "public:help": "/help",
     "public:donate": "/donate",
     "public:donate_usdt_ton": "/donate_usdt_ton",
@@ -128,11 +139,8 @@ PUBLIC_CALLBACK_COMMANDS: Mapping[str, str] = {
     "public:menu": "/menu",
 }
 PUBLIC_MENU_BUTTON_CALLBACKS: Mapping[str, str] = {
-    "📡 Last Scan": "public:lastscan",
-    "🔥 Active Signals": "public:signals",
-    "👁 Watchlists": "public:watchlist",
+    "📖 How to Use": "public:help",
     "🌐 Social": "public:social",
-    "❓ Help": "public:help",
     "🧡 Donate": "public:donate",
 }
 ADMIN_COMMANDS: tuple[str, ...] = (
@@ -159,16 +167,6 @@ ADMIN_COMMANDS: tuple[str, ...] = (
 PUBLIC_COMMANDS: tuple[str, ...] = (
     "/start",
     "/menu",
-    "/status",
-    "/latest",
-    "/about",
-    "/lastscan",
-    "/signals",
-    "/watchlist",
-    "/watchlists",
-    "/signal",
-    "/signal_lifecycle",
-    "/signal_why",
     "/social",
     "/help",
     "/donate",
@@ -322,14 +320,21 @@ class TelegramAdminCommandService:
                 format_public_about_response(public_config),
                 public_config=public_config,
             )
+        if normalized == PUBLIC_DASHBOARD_DISABLED_COMMAND:
+            return _public_response(
+                normalized,
+                "public_dashboard_disabled",
+                format_public_dashboard_disabled_response(),
+                public_config=public_config,
+            )
         if normalized == "/lastscan":
             return self._public_lastscan_response()
         if normalized == "/signals":
             return self._public_signals_response()
-        if normalized in {"/signal", "/signal_lifecycle", "/signal_why"}:
-            return self._signal_detail_response(command, public=True, public_config=public_config)
         if normalized in {"/watchlist", "/watchlists"}:
             return self._public_watchlist_response(command=normalized)
+        if normalized in {"/signal", "/signal_lifecycle", "/signal_why"}:
+            return self._signal_detail_response(command, public=True, public_config=public_config)
         if normalized == "/social":
             return _public_response(normalized, "public_social", format_public_social_response(public_config))
         if normalized == "/donate":
@@ -1183,6 +1188,19 @@ def format_public_admin_reserved_response() -> str:
     )
 
 
+def format_public_dashboard_disabled_response() -> str:
+    return _screen(
+        "Candle Craft Intelligence",
+        (
+            "This public dashboard section is currently disabled for launch.",
+            "",
+            (
+                "Use the main menu to join the signal channel, read how the bot works, "
+                "follow socials, or donate."
+            ),
+        ),
+    )
+
 def format_public_social_response(config: Any | None) -> str:
     return _screen(
         "Social",
@@ -1190,11 +1208,7 @@ def format_public_social_response(config: Any | None) -> str:
             "Official Candle Craft links.",
             "",
             SCREEN_DIVIDER,
-            "X / Twitter:",
-            _public_url(config, "x_url", fallback=NA),
-            "",
-            "Telegram:",
-            _public_url(config, "telegram_url", fallback=NA),
+            *_public_social_link_lines(config),
             SCREEN_DIVIDER,
             "",
             "Only trust official Candle Craft links.",
@@ -1206,25 +1220,21 @@ def format_public_donate_response(config: Any | None) -> str:
     return _screen(
         "Donate",
         (
-            "Thank you for supporting the Candle Craft engine.",
+            "Support Candle Craft Intelligence",
             "",
-            (
-                "Your support helps us keep improving the signal desk, research tools, "
-                "and market-structure intelligence behind Candle Craft."
-            ),
+            "Voluntary donations help support:",
+            "• infrastructure",
+            "• research tooling",
+            "• data collection",
+            "• development time",
+            "• long-duration validation",
+            "",
+            "Only donate voluntarily.",
+            "Never send funds expecting guaranteed profits, managed trading, or private execution.",
             "",
             SCREEN_DIVIDER,
-            "How to donate:",
-            "",
-            "1. Choose your preferred cryptocurrency below.",
-            "2. Tap the button to copy the address.",
-            "3. Open your wallet and send your donation.",
-            "",
-            "We appreciate every bit of support from the Candle Craft community.",
-            SCREEN_DIVIDER,
-            "",
-            "Always verify the network before sending.",
-            "Support is optional.",
+            "Wallets:",
+            *_public_donate_wallet_lines(config),
         ),
     )
 
@@ -1261,31 +1271,28 @@ def format_public_donate_btc_address_response(config: Any | None) -> str:
 
 def format_public_help_response() -> str:
     return _screen(
-        "Help",
+        "How to Use",
         (
-            "How to use the Candle Craft signal desk.",
+            "How to use Candle Craft Intelligence",
             "",
-            SCREEN_DIVIDER,
-            "📡 Last Scan",
-            "Latest market intelligence.",
+            "1. Join the signal channel.",
+            "2. Wait for filtered setups only.",
+            "3. Do not chase old alerts.",
+            "4. Read the setup thesis, invalidation, and targets.",
+            "5. Use your own risk management.",
             "",
-            "🔥 Active Signals",
-            "Confirmed setups only.",
-            "",
-            "👁 Watchlists",
-            "Active public watchlist plans.",
-            "",
-            "🌐 Social",
-            "Official Candle Craft links.",
-            "",
-            "🧡 Donate",
-            "Optional support for development.",
-            SCREEN_DIVIDER,
+            "Candle Craft looks for:",
+            "• clean market structure",
+            "• liquidity sweeps",
+            "• confirmation behavior",
+            "• invalidation clarity",
+            "• high-quality risk/reward conditions",
             "",
             "Important:",
-            "No financial advice.",
-            "No guaranteed outcomes.",
-            "Risk management is always your responsibility.",
+            "Candle Craft is manual signal intelligence only.",
+            "The bot does not place trades.",
+            "The bot does not manage funds.",
+            "The bot does not guarantee outcomes.",
         ),
     )
 
@@ -1510,7 +1517,7 @@ def public_active_signals_inline_markup(items: Sequence[ActiveSignalItem]) -> Ma
 def signal_detail_inline_markup(symbol: str, *, scope: str) -> Mapping[str, Any]:
     safe_scope = "admin" if scope == "admin" else "public"
     selector = _callback_selector(symbol)
-    back_callback = "admin:menu" if safe_scope == "admin" else "public:signals"
+    back_callback = "admin:menu" if safe_scope == "admin" else "public:menu"
     return {
         "inline_keyboard": [
             [{"text": SIGNAL_DETAIL_REFRESH_BUTTON_LABEL, "callback_data": f"{safe_scope}:signal:{selector}"}],
@@ -2480,6 +2487,31 @@ def _hidden_status(config: Any | None, name: str) -> str:
     return "Hidden" if _display(getattr(config, name, None)) != NA else "N/A"
 
 
+def _public_social_link_lines(config: Any | None) -> tuple[str, ...]:
+    lines: list[str] = []
+    for label, name in (("X / Twitter", "x_url"), ("Telegram", "telegram_url")):
+        url = _public_url(config, name, fallback=NA)
+        if url == NA:
+            continue
+        if lines:
+            lines.append("")
+        lines.extend((f"{label}:", url))
+    return tuple(lines) if lines else ("Official Candle Craft links: N/A",)
+
+
+def _public_donate_wallet_lines(config: Any | None) -> tuple[str, ...]:
+    labels: list[str] = []
+    for label, address_name in (
+        ("USDT on TON", "donate_usdt_ton_address"),
+        ("TON", "donate_ton_address"),
+        ("BTC", "donate_btc_address"),
+    ):
+        if _public_config_text(config, address_name, fallback=NA) != NA:
+            labels.append(label)
+    if not labels:
+        return ("N/A",)
+    return tuple(f"{label}: use the copy button below." for label in labels)
+
 def _public_url(config: Any | None, name: str, *, fallback: str) -> str:
     if config is None:
         return fallback
@@ -2591,6 +2623,7 @@ __all__ = [
     "ADMIN_WOLF_BRIEFING_CALLBACK_COMMANDS",
     "PUBLIC_ADMIN_RESERVED_COMMANDS",
     "PUBLIC_CALLBACK_COMMANDS",
+    "PUBLIC_DASHBOARD_DISABLED_COMMAND",
     "PUBLIC_COMMANDS",
     "JOIN_SIGNAL_CHANNEL_BUTTON_LABEL",
     "PUBLIC_MENU_BUTTON_CALLBACKS",
@@ -2626,6 +2659,7 @@ __all__ = [
     "format_about_response",
     "format_public_about_response",
     "format_public_admin_reserved_response",
+    "format_public_dashboard_disabled_response",
     "format_public_donate_response",
     "format_public_donate_btc_address_response",
     "format_public_donate_ton_address_response",

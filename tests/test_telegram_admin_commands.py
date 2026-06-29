@@ -26,6 +26,7 @@ from app.telegram_admin.commands import (
     ADMIN_WOLF_BRIEFING_CALLBACK_COMMANDS,
     JOIN_SIGNAL_CHANNEL_BUTTON_LABEL,
     PUBLIC_CALLBACK_COMMANDS,
+    PUBLIC_DASHBOARD_DISABLED_COMMAND,
     PUBLIC_MENU_BUTTON_CALLBACKS,
     PUBLIC_MENU_BUTTON_ROWS,
     SCREEN_FOOTER,
@@ -671,12 +672,13 @@ def test_menu_button_labels_normalize_to_commands() -> None:
     assert normalize_admin_command("🧾 Integrity") == "/integrity"
     assert normalize_admin_command("⚙️ Config") == "/config"
     assert normalize_admin_command("❓ Guide") == "/guide"
-    assert normalize_admin_command("📡 Last Scan") == "/lastscan"
-    assert normalize_admin_command("🔥 Active Signals") == "/signals"
-    assert normalize_admin_command("👁 Watchlist") == "/watchlists"
+    assert normalize_admin_command("📡 Last Scan") == PUBLIC_DASHBOARD_DISABLED_COMMAND
+    assert normalize_admin_command("🔥 Active Signals") == PUBLIC_DASHBOARD_DISABLED_COMMAND
+    assert normalize_admin_command("👁 Watchlist") == PUBLIC_DASHBOARD_DISABLED_COMMAND
     assert normalize_admin_command("👁 Watchlists") == "/watchlists"
-    assert normalize_admin_command("👁 Watchlist Signals") == "/watchlists"
+    assert normalize_admin_command("👁 Watchlist Signals") == PUBLIC_DASHBOARD_DISABLED_COMMAND
     assert normalize_admin_command("Active Watchlists") == "/watchlists"
+    assert normalize_admin_command("📖 How to Use") == "/help"
     assert normalize_admin_command("🌐 Social") == "/social"
     assert normalize_admin_command("❓ Help") == "/help"
     assert normalize_admin_command("🧡 Donate") == "/donate"
@@ -1229,8 +1231,9 @@ def test_public_social_missing_links_use_configured_empty_states(tmp_path) -> No
 
     _assert_shell_screen(social.text)
     _assert_public_screen_safe(social.text)
-    assert "X / Twitter:\nN/A" in social.text
-    assert "Telegram:\nN/A" in social.text
+    assert "Official Candle Craft links: N/A" in social.text
+    assert "X / Twitter:\nN/A" not in social.text
+    assert "Telegram:\nN/A" not in social.text
     assert "Only trust official Candle Craft links." in social.text
 
 
@@ -1245,15 +1248,15 @@ def test_public_donate_screen_shows_support_instructions_and_hides_missing_butto
     _assert_public_donate_copy_markup(donate.reply_markup)
     _assert_no_execution_buttons(donate.reply_markup)
     assert donate.text.startswith(f"{SCREEN_HEADER} Donate")
-    assert "Thank you for supporting the Candle Craft engine." in donate.text
-    assert "Choose your preferred cryptocurrency below." in donate.text
-    assert "Tap the button to copy the address." in donate.text
-    assert "Open your wallet and send your donation." in donate.text
-    assert "We appreciate every bit of support from the Candle Craft community." in donate.text
-    assert "Always verify the network before sending." in donate.text
-    assert "Support is optional." in donate.text
+    assert "Support Candle Craft Intelligence" in donate.text
+    assert "Voluntary donations help support:" in donate.text
+    assert "• infrastructure" in donate.text
+    assert "• research tooling" in donate.text
+    assert "Only donate voluntarily." in donate.text
+    assert "Never send funds expecting guaranteed profits, managed trading, or private execution." in donate.text
+    assert "Wallets:" in donate.text
     assert "Address:" not in donate.text
-    assert "N/A" not in donate.text
+    assert "N/A" in donate.text
     assert "Donation link:" not in donate.text
     assert "📋 USDT on TON" not in _button_labels(donate.reply_markup)
     assert "📋 TON" not in _button_labels(donate.reply_markup)
@@ -1377,15 +1380,25 @@ def test_public_help_uses_button_guidance_instead_of_slash_command_wording(tmp_p
 
     _assert_shell_screen(response.text)
     _assert_public_screen_safe(response.text)
-    assert "How to use the Candle Craft signal desk." in response.text
-    assert "📡 Last Scan\nLatest market intelligence." in response.text
-    assert "🔥 Active Signals\nConfirmed setups only." in response.text
-    assert "👁 Watchlists\nActive public watchlist plans." in response.text
-    assert "🌐 Social\nOfficial Candle Craft links." in response.text
-    assert "🧡 Donate\nOptional support for development." in response.text
-    assert "No financial advice." in response.text
-    assert "No guaranteed outcomes." in response.text
-    assert "Risk management is always your responsibility." in response.text
+    assert response.text.startswith(f"{SCREEN_HEADER} How to Use")
+    assert "How to use Candle Craft Intelligence" in response.text
+    assert "1. Join the signal channel." in response.text
+    assert "2. Wait for filtered setups only." in response.text
+    assert "3. Do not chase old alerts." in response.text
+    assert "4. Read the setup thesis, invalidation, and targets." in response.text
+    assert "5. Use your own risk management." in response.text
+    assert "• clean market structure" in response.text
+    assert "• liquidity sweeps" in response.text
+    assert "• confirmation behavior" in response.text
+    assert "• invalidation clarity" in response.text
+    assert "• high-quality risk/reward conditions" in response.text
+    assert "Candle Craft is manual signal intelligence only." in response.text
+    assert "The bot does not place trades." in response.text
+    assert "The bot does not manage funds." in response.text
+    assert "The bot does not guarantee outcomes." in response.text
+    assert "Last Scan" not in response.text
+    assert "Active Signals" not in response.text
+    assert "Watchlists" not in response.text
     assert "/lastscan" not in response.text
     assert "/signals" not in response.text
     assert "/watchlist" not in response.text
@@ -1833,6 +1846,7 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
             audit_path=tmp_path / "audit.jsonl",
             state_path=tmp_path / "state.json",
             updates=updates,
+            limit=len(updates),
         )
     )
 
@@ -1845,31 +1859,32 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
     screen_calls = _screen_send_calls(transport)
     assert len(cleanup_calls) == 1
     assert len(screen_calls) == len(PUBLIC_CALLBACK_COMMANDS)
-    assert "Last Scan" in screen_calls[0]["message"]
-    assert "Active Signals" in screen_calls[1]["message"]
-    assert "WATCHLISTS" in screen_calls[2]["message"]
-    assert "Social" in screen_calls[3]["message"]
-    assert "Help" in screen_calls[4]["message"]
-    assert "Donate" in screen_calls[5]["message"]
-    assert screen_calls[6]["message"] == "Not configured yet."
-    assert screen_calls[7]["message"] == "Not configured yet."
-    assert screen_calls[8]["message"] == "Not configured yet."
-    assert "Welcome to the Moon Trip signal desk" in screen_calls[9]["message"]
-    for call in (screen_calls[0], screen_calls[1], screen_calls[3], screen_calls[4]):
+
+    disabled_count = 12
+    for call in screen_calls[:disabled_count]:
+        assert "This public dashboard section is currently disabled for launch." in call["message"]
+        assert "Use the main menu to join the signal channel" in call["message"]
         _assert_public_menu_only(call["reply_markup"])
         assert _callback_data_values(call["reply_markup"]) == ["public:menu"]
         _assert_public_screen_safe(call["message"])
         assert "System Desk" not in call["message"]
         assert "Integrity Desk" not in call["message"]
-    _assert_public_watchlist_controls(screen_calls[2]["reply_markup"])
-    _assert_public_screen_safe(screen_calls[2]["message"])
-    _assert_public_donate_copy_markup(screen_calls[5]["reply_markup"])
-    _assert_no_execution_buttons(screen_calls[5]["reply_markup"])
-    for call in screen_calls[6:9]:
+
+    assert "Social" in screen_calls[disabled_count]["message"]
+    assert "How to Use" in screen_calls[disabled_count + 1]["message"]
+    assert "How to Use" in screen_calls[disabled_count + 2]["message"]
+    assert "Donate" in screen_calls[disabled_count + 3]["message"]
+    assert screen_calls[disabled_count + 4]["message"] == "Not configured yet."
+    assert screen_calls[disabled_count + 5]["message"] == "Not configured yet."
+    assert screen_calls[disabled_count + 6]["message"] == "Not configured yet."
+    assert "Welcome to the Moon Trip signal desk" in screen_calls[disabled_count + 7]["message"]
+    _assert_public_donate_copy_markup(screen_calls[disabled_count + 3]["reply_markup"])
+    _assert_no_execution_buttons(screen_calls[disabled_count + 3]["reply_markup"])
+    for call in screen_calls[disabled_count + 4 : disabled_count + 7]:
         _assert_public_menu_only(call["reply_markup"])
         assert _callback_data_values(call["reply_markup"]) == ["public:menu"]
         _assert_no_execution_buttons(call["reply_markup"])
-    _assert_public_full_menu(screen_calls[9]["reply_markup"])
+    _assert_public_full_menu(screen_calls[disabled_count + 7]["reply_markup"])
     records = _read_jsonl(tmp_path / "audit.jsonl")
     assert [record["command"] for record in records] == list(PUBLIC_CALLBACK_COMMANDS.values())
     assert all(record["is_admin"] is False for record in records)
@@ -1906,9 +1921,9 @@ def test_public_users_can_access_configured_donation_copy_buttons(tmp_path) -> N
     screen_calls = _screen_send_calls(transport)
     assert len(screen_calls) == 1
     assert screen_calls[0]["chat_id"] == "public-chat"
-    assert "Thank you for supporting the Candle Craft engine." in screen_calls[0]["message"]
-    assert "Choose your preferred cryptocurrency below." in screen_calls[0]["message"]
-    assert "Tap the button to copy the address." in screen_calls[0]["message"]
+    assert "Support Candle Craft Intelligence" in screen_calls[0]["message"]
+    assert "Only donate voluntarily." in screen_calls[0]["message"]
+    assert "Never send funds expecting guaranteed profits, managed trading, or private execution." in screen_calls[0]["message"]
     assert "TEST_USDT_TON_ADDRESS" not in screen_calls[0]["message"]
     assert "TEST_TON_ADDRESS" not in screen_calls[0]["message"]
     assert "TEST_BTC_ADDRESS" not in screen_calls[0]["message"]
