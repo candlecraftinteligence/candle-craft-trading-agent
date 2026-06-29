@@ -30,11 +30,13 @@ class Settings(BaseSettings):
     telegram_watchlist_outcome_tracking_enabled: bool = True
     telegram_public_watchlist_terminal_updates_enabled: bool = False
     telegram_public_watchlist_enabled: bool = True
-    public_watchlist_min_grade: str = "B+"
-    public_watchlist_min_score: int = 80
-    public_watchlist_min_rr: Decimal = Decimal("2.5")
-    public_watchlist_max_per_scan: int = 3
+    public_watchlist_min_grade: str = "A"
+    public_watchlist_min_score: int = 88
+    public_watchlist_min_rr: Decimal = Decimal("3.0")
+    public_watchlist_max_per_scan: int = 1
+    public_watchlist_max_per_24h: int = 6
     public_watchlist_cooldown_hours: int = 24
+    public_watchlist_symbol_whitelist: str = ""
     public_watchlist_dedupe_across_modes: bool = True
     public_watchlist_require_plan: bool = True
     public_watchlist_require_entry_zone: bool = True
@@ -91,6 +93,7 @@ class Settings(BaseSettings):
         "telegram_research_max_per_scan",
         "public_watchlist_min_score",
         "public_watchlist_max_per_scan",
+        "public_watchlist_max_per_24h",
         "public_watchlist_cooldown_hours",
     )
     @classmethod

@@ -21,10 +21,11 @@ def test_default_settings_are_safe() -> None:
     assert settings.telegram_signals_enabled is False
     assert settings.telegram_signal_channel_invite_link is None
     assert settings.telegram_public_watchlist_enabled is True
-    assert settings.public_watchlist_min_grade == "B+"
-    assert settings.public_watchlist_min_score == 80
-    assert str(settings.public_watchlist_min_rr) == "2.5"
-    assert settings.public_watchlist_max_per_scan == 3
+    assert settings.public_watchlist_min_grade == "A"
+    assert settings.public_watchlist_min_score == 88
+    assert str(settings.public_watchlist_min_rr) == "3.0"
+    assert settings.public_watchlist_max_per_scan == 1
+    assert settings.public_watchlist_max_per_24h == 6
     assert settings.public_watchlist_cooldown_hours == 24
     assert settings.public_watchlist_dedupe_across_modes is True
     assert settings.public_watchlist_require_plan is True

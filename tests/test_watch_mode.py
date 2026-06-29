@@ -192,7 +192,7 @@ def _valid_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
     )
 
 
-def _watch_lifecycle_record(state: SetupLifecycleState = SetupLifecycleState.WATCHLISTED, **updates) -> SetupLifecycleRecord:
+def _watch_lifecycle_record(state: SetupLifecycleState = SetupLifecycleState.ACTIONABLE_A_GRADE, **updates) -> SetupLifecycleRecord:
     data = {
         "lifecycle_id": f"life-{updates.get('symbol', 'WATCHUSDT')}",
         "symbol": updates.get("symbol", "WATCHUSDT"),
@@ -210,7 +210,8 @@ def _watch_lifecycle_record(state: SetupLifecycleState = SetupLifecycleState.WAT
         "tp2": "115",
         "tp3": "120",
         "rr": "3",
-        "quality_grade_current": "B+",
+        "quality_grade_current": "A",
+        "actionability_state": "A_GRADE_ACTIONABLE",
         "failed_gate": NA,
         "invalidation_reason": NA,
     }
