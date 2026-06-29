@@ -56,6 +56,9 @@ class FakeCommandTransport:
         self.fail_get = fail_get
         self.get_calls: list[dict[str, Any]] = []
         self.send_calls: list[dict[str, Any]] = []
+        self.edit_text_calls: list[dict[str, Any]] = []
+        self.edit_caption_calls: list[dict[str, Any]] = []
+        self.delete_calls: list[dict[str, Any]] = []
         self.answer_callback_calls: list[dict[str, Any]] = []
 
     async def get_updates(self, *, bot_token: str, offset: int | None, limit: int, timeout: int):
@@ -89,6 +92,50 @@ class FakeCommandTransport:
         if self.fail_send_with is not None:
             return ({"status": "failed", "error": self.fail_send_with},)
         return ({"status": "sent", "message_id": 101, "chat_id": chat_id},)
+
+    async def edit_message_text(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+        message: str,
+        reply_markup=None,
+    ):
+        self.edit_text_calls.append(
+            {
+                "bot_token": bot_token,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "message": message,
+                "reply_markup": reply_markup,
+            }
+        )
+        return ({"status": "sent", "message_id": message_id, "chat_id": chat_id},)
+
+    async def edit_message_caption(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+        caption: str,
+        reply_markup=None,
+    ):
+        self.edit_caption_calls.append(
+            {
+                "bot_token": bot_token,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "caption": caption,
+                "reply_markup": reply_markup,
+            }
+        )
+        return ({"status": "sent", "message_id": message_id, "chat_id": chat_id},)
+
+    async def delete_message(self, *, bot_token: str, chat_id: str, message_id: int):
+        self.delete_calls.append({"bot_token": bot_token, "chat_id": chat_id, "message_id": message_id})
+        return ({"status": "sent", "message_id": message_id, "chat_id": chat_id},)
 
     async def answer_callback_query(
         self,
@@ -309,13 +356,26 @@ def _update(update_id: int, chat_id: str, text: str) -> dict[str, Any]:
     return {"update_id": update_id, "message": {"chat": {"id": chat_id}, "text": text}}
 
 
-def _callback_update(update_id: int, chat_id: str, callback_data: str) -> dict[str, Any]:
+def _callback_update(
+    update_id: int,
+    chat_id: str,
+    callback_data: str,
+    *,
+    message_id: int | None = None,
+    has_photo: bool = False,
+) -> dict[str, Any]:
+    message: dict[str, Any] = {"chat": {"id": chat_id}, "message_id": message_id or update_id}
+    if has_photo:
+        message["photo"] = [{"file_id": f"photo-{update_id}"}]
+        message["caption"] = _expected_public_start_text()
+    else:
+        message["text"] = "Current public UI"
     return {
         "update_id": update_id,
         "callback_query": {
             "id": f"callback-{update_id}",
             "from": {"id": chat_id},
-            "message": {"chat": {"id": chat_id}},
+            "message": message,
             "data": callback_data,
         },
     }
@@ -749,15 +809,28 @@ def test_inline_callback_data_maps_to_commands() -> None:
 
 def test_menus_use_inline_keyboards_and_not_persistent_reply_keyboards(tmp_path) -> None:
     service = TelegramAdminCommandService(project_root=tmp_path)
+    invite_link = "https://t.me/+test-private-invite"
 
     admin = service.response_for("/menu")
     public = service.public_response_for("/menu")
+    public_with_join = service.public_response_for(
+        "/menu",
+        public_config=TelegramAdminConfig(signal_channel_invite_link=invite_link),
+    )
 
     _assert_admin_full_menu(admin.reply_markup)
     _assert_public_full_menu(public.reply_markup)
+    _assert_inline_markup(public_with_join.reply_markup)
     _assert_no_execution_buttons(admin.reply_markup)
     _assert_no_execution_buttons(public.reply_markup)
-
+    labels = _button_labels(public_with_join.reply_markup)
+    assert JOIN_SIGNAL_CHANNEL_BUTTON_LABEL in labels
+    for row in PUBLIC_MENU_BUTTON_ROWS:
+        for label in row:
+            assert label in labels
+    assert "📡 Last Scan" not in labels
+    assert "🔥 Active Signals" not in labels
+    assert "👁 Watchlists" not in labels
 
 def test_empty_states_use_premium_copy_without_developer_wording(tmp_path) -> None:
     service = TelegramAdminCommandService(project_root=tmp_path)
@@ -1899,9 +1972,12 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
     assert [call["callback_query_id"] for call in transport.answer_callback_calls] == [
         f"callback-{update_id}" for update_id in range(40, 40 + len(PUBLIC_CALLBACK_COMMANDS))
     ]
-    cleanup_calls = _cleanup_send_calls(transport)
-    screen_calls = _screen_send_calls(transport)
-    assert len(cleanup_calls) == 1
+    assert all(call["text"] is None for call in transport.answer_callback_calls)
+    assert _cleanup_send_calls(transport) == []
+    assert transport.send_calls == []
+    assert transport.delete_calls == []
+    assert transport.edit_caption_calls == []
+    screen_calls = transport.edit_text_calls
     assert len(screen_calls) == len(PUBLIC_CALLBACK_COMMANDS)
 
     disabled_count = 12
@@ -1937,6 +2013,189 @@ def test_public_callbacks_route_to_public_screens(tmp_path) -> None:
     assert "public-chat" not in serialized
 
 
+def test_public_how_to_use_callback_deletes_photo_before_sending_text_page(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_callback_update(51, "public-chat", "public:help", message_id=700, has_photo=True),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == 1
+    assert transport.answer_callback_calls == [
+        {"bot_token": "secret-token", "callback_query_id": "callback-51", "text": None}
+    ]
+    assert transport.edit_text_calls == []
+    assert transport.edit_caption_calls == []
+    assert transport.delete_calls == [{"bot_token": "secret-token", "chat_id": "public-chat", "message_id": 700}]
+    screen_calls = _screen_send_calls(transport)
+    assert len(screen_calls) == 1
+    assert screen_calls[0]["message"] == _expected_public_help_text()
+    assert screen_calls[0]["photo_path"] is None
+    assert screen_calls[0]["photo_url"] is None
+    _assert_public_menu_only(screen_calls[0]["reply_markup"])
+    assert _callback_data_values(screen_calls[0]["reply_markup"]) == ["public:menu"]
+
+
+def test_public_social_callback_edits_current_text_message_without_stacking(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_callback_update(52, "public-chat", "public:social", message_id=701),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert transport.send_calls == []
+    assert transport.delete_calls == []
+    assert transport.edit_caption_calls == []
+    assert len(transport.edit_text_calls) == 1
+    call = transport.edit_text_calls[0]
+    assert call["message_id"] == 701
+    assert "Social" in call["message"]
+    assert "Only trust official Candle Craft links." in call["message"]
+    _assert_public_menu_only(call["reply_markup"])
+    assert _callback_data_values(call["reply_markup"]) == ["public:menu"]
+
+
+def test_public_donate_callback_edits_current_text_message_without_stacking(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_callback_update(53, "public-chat", "public:donate", message_id=702),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert transport.send_calls == []
+    assert transport.delete_calls == []
+    assert transport.edit_caption_calls == []
+    assert len(transport.edit_text_calls) == 1
+    call = transport.edit_text_calls[0]
+    assert call["message_id"] == 702
+    assert "Support Candle Craft Intelligence" in call["message"]
+    assert "Only donate voluntarily." in call["message"]
+    _assert_public_donate_copy_markup(call["reply_markup"])
+
+
+def test_public_back_to_menu_callback_replaces_text_with_existing_welcome_photo(tmp_path) -> None:
+    logo_path = _write_local_logo(tmp_path)
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    transport = FakeCommandTransport()
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+                public_logo_path=str(Path("assets") / "telegram" / "welcome.png"),
+                public_logo_url="https://cdn.example.test/candle-logo.png",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=(_callback_update(54, "public-chat", "public:menu", message_id=703),),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == 1
+    assert transport.edit_text_calls == []
+    assert transport.edit_caption_calls == []
+    assert transport.delete_calls == [{"bot_token": "secret-token", "chat_id": "public-chat", "message_id": 703}]
+    assert _cleanup_send_calls(transport) == []
+    screen_calls = _screen_send_calls(transport)
+    assert len(screen_calls) == 1
+    assert screen_calls[0]["message"] == _expected_public_start_text()
+    assert screen_calls[0]["photo_path"] == logo_path
+    assert screen_calls[0]["photo_url"] is None
+    _assert_public_full_menu(screen_calls[0]["reply_markup"])
+    assert "↩" not in " ".join(_button_labels(screen_calls[0]["reply_markup"]))
+    records = _read_jsonl(tmp_path / "audit.jsonl")
+    assert records[0]["command"] == "/menu"
+
+
+def test_legacy_public_dashboard_callbacks_edit_disabled_launch_message(tmp_path) -> None:
+    service = TelegramAdminCommandService(project_root=tmp_path)
+    transport = FakeCommandTransport()
+    callbacks = ("public:lastscan", "public:active_signals", "public:watchlists")
+    updates = tuple(
+        _callback_update(update_id, "public-chat", callback_data)
+        for update_id, callback_data in enumerate(callbacks, start=55)
+    )
+
+    result = asyncio.run(
+        process_telegram_admin_commands(
+            config=TelegramAdminConfig(
+                admin_enabled=True,
+                dry_run=False,
+                bot_token="secret-token",
+                admin_chat_id="admin-chat",
+            ),
+            command_service=service,
+            transport=transport,
+            audit_path=tmp_path / "audit.jsonl",
+            state_path=tmp_path / "state.json",
+            updates=updates,
+            limit=len(updates),
+        )
+    )
+
+    assert result.delivery_status == "sent_public"
+    assert result.sent_count == len(callbacks)
+    assert transport.send_calls == []
+    assert transport.delete_calls == []
+    assert transport.edit_caption_calls == []
+    assert len(transport.edit_text_calls) == len(callbacks)
+    for call in transport.edit_text_calls:
+        assert "This public dashboard section is currently disabled for launch." in call["message"]
+        assert "Use the main menu to join the signal channel" in call["message"]
+        _assert_public_menu_only(call["reply_markup"])
+        assert _callback_data_values(call["reply_markup"]) == ["public:menu"]
+    records = _read_jsonl(tmp_path / "audit.jsonl")
+    assert [record["command"] for record in records] == [PUBLIC_DASHBOARD_DISABLED_COMMAND] * len(callbacks)
+
+
 def test_public_users_can_access_configured_donation_copy_buttons(tmp_path) -> None:
     service = TelegramAdminCommandService(project_root=tmp_path)
     transport = FakeCommandTransport()
@@ -1962,25 +2221,29 @@ def test_public_users_can_access_configured_donation_copy_buttons(tmp_path) -> N
 
     assert result.delivery_status == "sent_public"
     assert result.sent_count == 1
-    screen_calls = _screen_send_calls(transport)
-    assert len(screen_calls) == 1
-    assert screen_calls[0]["chat_id"] == "public-chat"
-    assert "Support Candle Craft Intelligence" in screen_calls[0]["message"]
-    assert "Only donate voluntarily." in screen_calls[0]["message"]
-    assert "Never send funds expecting guaranteed profits, managed trading, or private execution." in screen_calls[0]["message"]
-    assert "TEST_USDT_TON_ADDRESS" not in screen_calls[0]["message"]
-    assert "TEST_TON_ADDRESS" not in screen_calls[0]["message"]
-    assert "TEST_BTC_ADDRESS" not in screen_calls[0]["message"]
+    assert transport.send_calls == []
+    assert transport.delete_calls == []
+    assert transport.edit_caption_calls == []
+    assert len(transport.edit_text_calls) == 1
+    call = transport.edit_text_calls[0]
+    assert call["chat_id"] == "public-chat"
+    assert call["message_id"] == 50
+    assert "Support Candle Craft Intelligence" in call["message"]
+    assert "Only donate voluntarily." in call["message"]
+    assert "Never send funds expecting guaranteed profits, managed trading, or private execution." in call["message"]
+    assert "TEST_USDT_TON_ADDRESS" not in call["message"]
+    assert "TEST_TON_ADDRESS" not in call["message"]
+    assert "TEST_BTC_ADDRESS" not in call["message"]
     _assert_public_donate_copy_markup(
-        screen_calls[0]["reply_markup"],
+        call["reply_markup"],
         usdt_ton="TEST_USDT_TON_ADDRESS",
         ton="TEST_TON_ADDRESS",
         btc="TEST_BTC_ADDRESS",
     )
-    _assert_no_execution_buttons(screen_calls[0]["reply_markup"])
-    assert "System Desk" not in screen_calls[0]["message"]
-    assert "Integrity Desk" not in screen_calls[0]["message"]
-    assert "Configuration Desk" not in screen_calls[0]["message"]
+    _assert_no_execution_buttons(call["reply_markup"])
+    assert "System Desk" not in call["message"]
+    assert "Integrity Desk" not in call["message"]
+    assert "Configuration Desk" not in call["message"]
     records = _read_jsonl(tmp_path / "audit.jsonl")
     assert records[0]["command"] == "/donate"
     assert records[0]["is_admin"] is False
@@ -2078,7 +2341,10 @@ def test_public_user_cannot_access_admin_callbacks(tmp_path) -> None:
     assert result.sent_count == len(ADMIN_CALLBACK_COMMANDS)
     assert len(transport.answer_callback_calls) == len(ADMIN_CALLBACK_COMMANDS)
     assert _cleanup_send_calls(transport) == []
-    screen_calls = _screen_send_calls(transport)
+    assert transport.send_calls == []
+    assert transport.delete_calls == []
+    assert transport.edit_caption_calls == []
+    screen_calls = transport.edit_text_calls
     assert len(screen_calls) == len(ADMIN_CALLBACK_COMMANDS)
     for call in screen_calls:
         assert "Candle Craft public signal desk status." in call["message"]

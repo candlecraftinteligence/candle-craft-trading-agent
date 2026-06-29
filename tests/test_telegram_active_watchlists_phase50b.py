@@ -1014,7 +1014,7 @@ def test_signal_detail_callbacks_route_safely_and_legacy_active_signals_callback
         )
     )
 
-    screen_calls = _screen_send_calls(transport)
+    screen_calls = transport.edit_text_calls
     assert result.delivery_status == "sent_public"
     assert result.sent_count == len(updates)
     assert [call["callback_query_id"] for call in transport.answer_callback_calls] == [
@@ -1890,7 +1890,7 @@ def test_public_watchlist_commands_and_refresh_back_buttons_route_safely(tmp_pat
         )
     )
 
-    screen_calls = _screen_send_calls(transport)
+    screen_calls = _screen_send_calls(transport) + transport.edit_text_calls
     messages = [call["message"] for call in screen_calls]
     watchlist_calls = [screen_calls[index] for index in (0, 1, 3, 4)]
     disabled_calls = [screen_calls[2], screen_calls[5]]
