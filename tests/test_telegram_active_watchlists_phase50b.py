@@ -68,7 +68,7 @@ def _insert_attempt(
     first_seen_at: str | None = None,
     scan_run_id: str = "run-active",
     price_level: str = NA,
-    setup_quality_score: str = "B+",
+    setup_quality_score: str = "A",
     rr_planned: str = NA,
     entry_low: str = NA,
     entry_high: str = NA,
@@ -174,7 +174,7 @@ def _insert_symbol_result(
     failed_gate: str = NA,
     rejection_reason: str = NA,
     next_trigger_needed: str = NA,
-    setup_quality_score: str = "B+",
+    setup_quality_score: str = "A",
     readiness_score: int = 70,
     raw_result: dict[str, Any] | None = None,
 ) -> None:
@@ -225,7 +225,7 @@ def _insert_lifecycle_record(
     direction: str = "long",
     failed_gate: str = NA,
     invalidation_reason: str = NA,
-    quality_score: int = 85,
+    quality_score: int = 88,
     readiness_score: int = 70,
     last_seen_at: str = "2026-06-04T12:00:00Z",
     last_transition_at: str = "2026-06-04T12:00:00Z",
@@ -379,7 +379,7 @@ def _insert_planned_watchlist(
     lifecycle_state: str | None = None,
     sent_at: str | None = None,
     first_seen_at: str | None = None,
-    setup_quality_score: str = "B+",
+    setup_quality_score: str = "A",
     entry_low: str | None = None,
     entry_high: str | None = None,
     stop: str | None = None,
@@ -389,6 +389,7 @@ def _insert_planned_watchlist(
     invalidation: str | None = None,
     raw_candidate: dict[str, Any] | None = None,
     blocked_reason: str = NA,
+    rr_planned: str = "3",
 ) -> None:
     if direction.lower() == "short":
         defaults = {
@@ -425,11 +426,12 @@ def _insert_planned_watchlist(
         symbol=symbol,
         direction=direction,
         scan_run_id=scan_run_id,
-        new_state=new_state,
-        lifecycle_state=lifecycle_state,
+        new_state=new_state or "ACTIONABLE_A_GRADE",
+        lifecycle_state=lifecycle_state or new_state or "ACTIONABLE_A_GRADE",
         sent_at=sent_at,
         first_seen_at=first_seen_at,
         setup_quality_score=setup_quality_score,
+        rr_planned=rr_planned,
         entry_low=plan["entry_low"],
         entry_high=plan["entry_high"],
         stop_loss=plan["stop"],
@@ -467,7 +469,7 @@ def _insert_active_signal(
     alert_type: str = "SIGNAL_CONFIRMED",
     new_state: str = "CONFIRMED",
     lifecycle_state: str = "CONFIRMED",
-    setup_quality_score: str = "A-",
+    setup_quality_score: str = "A",
     rr_planned: str = "3.1",
     sent_at: str | None = None,
     entry_low: str | None = None,
@@ -697,7 +699,7 @@ def test_active_signals_dedupe_same_symbol_bias_and_hide_expired_duplicate(tmp_p
         signal_id="sig-new-current",
         symbol="BTCUSDT",
         alert_type="SIGNAL_CONFIRMED",
-        setup_quality_score="A-",
+        setup_quality_score="A",
         rr_planned="3.2",
         entry_low="100",
         entry_high="102",
@@ -780,7 +782,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
         alert_type="SIGNAL_CONFIRMED",
         new_state="CONFIRMED",
         lifecycle_state="CONFIRMED",
-        setup_quality_score="A-",
+        setup_quality_score="A",
         rr_planned="3.1244673",
         entry_low="42.123456",
         entry_high="42.987654",
@@ -796,7 +798,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
         alert_type="LIMIT_HIT",
         new_state="LIMIT_ZONE_HIT",
         lifecycle_state="LIMIT_ZONE_HIT",
-        setup_quality_score="A-",
+        setup_quality_score="A",
         rr_planned="3.1244673",
         entry_low="42.123456",
         entry_high="42.987654",
@@ -832,7 +834,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
 
     assert detail.text.startswith("🐺🟠 CRCLUSDT — SIGNAL DETAIL")
     assert "Status: ENTRY ZONE TOUCHED" in detail.text
-    assert "Quality: A-" in detail.text
+    assert "Quality: A" in detail.text
     assert "RR: 3.12R" in detail.text
     assert "Lifecycle: CONFIRMED → LIMIT ZONE HIT" in detail.text
     assert "Entry Zone: 42.12 – 42.99" in detail.text
@@ -854,7 +856,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
         alert_type="SIGNAL_CONFIRMED",
         new_state="CONFIRMED",
         lifecycle_state="CONFIRMED",
-        setup_quality_score="A-",
+        setup_quality_score="A",
         rr_planned="3.12",
         scan_run_id="run-detail",
         entry_low="100",
@@ -875,7 +877,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
         tp2="118",
         tp3="125",
         invalidation="Price accepts below 95.",
-        quality_grade="A-",
+        quality_grade="A",
         raw_candidate={
             "reason_for_trade": "Liquidity swept and structure shifted.",
             "confirmed_facts": ["Sweep confirmed.", "Structure shift confirmed."],
@@ -922,7 +924,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
     assert detail.text.startswith("🐺🟠 BTCUSDT — SIGNAL DETAIL")
     assert "Bias: LONG" in detail.text
     assert "Status: CONFIRMED" in detail.text
-    assert "Quality: A-" in detail.text
+    assert "Quality: A" in detail.text
     assert "RR: 3.12R" in detail.text
     assert "Lifecycle: WATCHLISTED → CONFIRMED → EXECUTING" in detail.text
     assert "Entry Zone: 100 – 102" in detail.text

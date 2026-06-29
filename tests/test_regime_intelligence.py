@@ -475,8 +475,9 @@ def test_strategy_mode_non_regime_failure_not_regime_pending(failure_type: str, 
 
     assert "REGIME_MARKET_CONDITION_PENDING" not in gate.failed_gate_classes
     if classify_failed_gate_code(gate_code) == TIMING_CONFIRMATION_PENDING:
-        assert gate.allowed is True
+        assert gate.allowed is False
         assert gate.allowed_missing_gate == TIMING_CONFIRMATION_PENDING
+        assert "public_block_non_actionable_state" in gate.blocking_reasons
         return
     assert gate.allowed is False
     assert any(
@@ -514,7 +515,7 @@ def test_strategy_mode_rr_failure_blocks_public_watchlist() -> None:
     assert gate.allowed is False
     assert gate.failed_gate_classes == ("FATAL_PUBLIC_WATCHLIST_GATE",)
     assert "public_watchlist_fatal_failed_gates=regime_compatibility" in gate.blocking_reasons
-    assert "public_watchlist_rr_below_min:1.99<2.5" in gate.blocking_reasons
+    assert "public_watchlist_rr_below_min:1.99<3" in gate.blocking_reasons
 
 
 def test_strategy_mode_missing_regime_data_still_blocks_as_regime_failure() -> None:

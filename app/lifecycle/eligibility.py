@@ -12,8 +12,8 @@ from app.data.dtos import NA
 
 _MISSING = object()
 
-PUBLIC_WATCHLIST_MIN_RR = Decimal("2.5")
-WATCH_STATE_KEYS = frozenset({"watch", "watchlist", "watchlisted", "stalking", "actionable_a_grade", "a_grade_watch"})
+PUBLIC_WATCHLIST_MIN_RR = Decimal("3")
+WATCH_STATE_KEYS = frozenset({"actionable_a_grade", "a_grade_actionable", "a_grade_actionable_target_caution"})
 FIRST_SEEN_TRIGGERED_STATE_KEY = "triggered"
 INTERNAL_TOUCH_STATE_KEYS = frozenset(
     {
@@ -33,6 +33,9 @@ INTERNAL_TOUCH_STATE_KEYS = frozenset(
 )
 PUBLIC_SIGNAL_ELIGIBLE_STATE_KEYS = frozenset({"confirmed"})
 PUBLIC_ACTIVE_STATE_KEYS = frozenset({"confirmed", "executing", "managing", "active"})
+PUBLIC_WATCHLIST_ACTIONABLE_STATE_KEYS = frozenset(
+    {"actionable_a_grade", "a_grade_actionable", "a_grade_actionable_target_caution"}
+)
 ACTIVE_SIGNAL_STATE_KEYS = PUBLIC_ACTIVE_STATE_KEYS
 TERMINAL_STATE_KEYS = frozenset(
     {
@@ -381,9 +384,17 @@ def is_public_watchlist_candidate(
     if _has_archived_at(candidate):
         reasons.append("archived")
     state = _current_state(candidate)
-    first_seen_triggered = _first_seen_triggered_pre_confirmation(candidate)
-    if (not is_watch_state(state) and not first_seen_triggered) or is_terminal_state(state):
-        reasons.append(f"lifecycle_state_not_eligible:{_status_key(state) or 'missing'}")
+    state_key = _status_key(state)
+    actionability_key = _status_key(
+        _first_field(candidate, "actionability_state", ("lifecycle_state", "actionability_state"))
+    )
+    if (
+        state_key in PUBLIC_ACTIVE_STATE_KEYS
+        or state_key in INTERNAL_TOUCH_STATE_KEYS
+        or state_key not in PUBLIC_WATCHLIST_ACTIONABLE_STATE_KEYS
+        and actionability_key not in PUBLIC_WATCHLIST_ACTIONABLE_STATE_KEYS
+    ) or is_terminal_state(state):
+        reasons.append(f"lifecycle_state_not_eligible:{state_key or 'missing'}")
     if _cooldown_active(candidate):
         reasons.append("cooldown")
     direction_ok = has_valid_direction(candidate)
@@ -411,11 +422,7 @@ def is_public_watchlist_candidate(
     if not quality.passed:
         reasons.append(quality.reason)
 
-    allowed_blocker_keys = (
-        PUBLIC_WATCHLIST_ALLOWED_PENDING_BLOCKER_KEYS
-        if direction_ok and public_plan_ok and rr_ok and quality.passed
-        else frozenset()
-    )
+    allowed_blocker_keys = frozenset()
     reasons.extend(
         _public_blocker_reasons(
             candidate,
@@ -872,6 +879,7 @@ __all__ = [
     "ACTIVE_SIGNAL_STATE_KEYS",
     "LifecycleEligibilityConfig",
     "PUBLIC_WATCHLIST_MIN_RR",
+    "PUBLIC_WATCHLIST_ACTIONABLE_STATE_KEYS",
     "ResearchWatchEligibilityConfig",
     "TERMINAL_STATE_KEYS",
     "WATCH_STATE_KEYS",

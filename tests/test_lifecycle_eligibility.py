@@ -20,7 +20,7 @@ from app.lifecycle.eligibility import (
 def _watch_record(**overrides):
     record = {
         "symbol": "BTCUSDT",
-        "current_state": "WATCHLISTED",
+        "current_state": "ACTIONABLE_A_GRADE",
         "archived_at": None,
         "direction": "long",
         "entry_low": "100",
@@ -30,7 +30,9 @@ def _watch_record(**overrides):
         "tp2": "115",
         "tp3": "120",
         "rr": "3",
-        "quality_grade_current": "B+",
+        "quality_grade_current": "A",
+        "quality_score": "88",
+        "actionability_state": "A_GRADE_ACTIONABLE",
         "failed_gate": "N/A",
         "rejection_reason": "N/A",
         "blocked_reason": "N/A",
@@ -60,25 +62,25 @@ def test_public_watchlist_eligible_requires_complete_public_trade_map() -> None:
 
 def test_public_watchlist_eligible_rejects_quality_rr_regime_and_no_edge_blockers() -> None:
     assert public_watchlist_eligible(_watch_record(quality_grade_current="Reject")) is False
-    assert public_watchlist_eligible(_watch_record(quality_grade_current="N/A")) is False
-    assert public_watchlist_eligible(_watch_record(rr="2.9")) is True
+    assert public_watchlist_eligible(_watch_record(quality_grade_current="N/A", quality_score="N/A")) is False
+    assert public_watchlist_eligible(_watch_record(rr="2.9")) is False
     assert public_watchlist_eligible(_watch_record(rr="2.4")) is False
     assert has_valid_rr(_watch_record(rr="2.9"), Decimal("3")) is False
     assert public_watchlist_eligible(_watch_record(failed_gate="rejected_by_regime")) is False
     assert public_watchlist_eligible(_watch_record(rejection_reason="rejected_no_edge")) is False
-    assert public_watchlist_eligible(_watch_record(rejection_reason="scanned_no_setup")) is True
+    assert public_watchlist_eligible(_watch_record(rejection_reason="scanned_no_setup")) is False
 
 
-def test_public_watchlist_eligible_allows_rr_below_confirmed_minimum_gate() -> None:
+def test_public_watchlist_eligible_blocks_rr_below_public_minimum_gate() -> None:
     record = _watch_record(rr="2.6", failed_gate="rr_below_minimum")
 
-    assert public_watchlist_eligible(record) is True
+    assert public_watchlist_eligible(record) is False
 
 
-def test_public_watchlist_eligible_allows_first_seen_triggered_confirmation_pending() -> None:
-    record = _watch_record(current_state="TRIGGERED", failed_gate="missing_confirmation")
+def test_public_watchlist_eligible_blocks_first_seen_triggered_confirmation_pending() -> None:
+    record = _watch_record(current_state="TRIGGERED", actionability_state="N/A", failed_gate="missing_confirmation")
 
-    assert public_watchlist_eligible(record) is True
+    assert public_watchlist_eligible(record) is False
 
 
 def test_public_watchlist_eligible_rejects_rr_below_public_minimum_gate() -> None:

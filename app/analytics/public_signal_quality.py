@@ -7,7 +7,7 @@ from typing import Any
 
 from app.data.dtos import NA
 
-MIN_PUBLIC_SIGNAL_GRADE = "B+"
+MIN_PUBLIC_SIGNAL_GRADE = "A"
 
 GRADE_RANKS: dict[str, int] = {
     "no_trade": 0,

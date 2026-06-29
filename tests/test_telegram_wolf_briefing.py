@@ -188,7 +188,8 @@ def _wolf_watch_row(**overrides: Any) -> dict[str, Any]:
     row = {
         "symbol": "VALIDUSDT",
         "display_rank": 1,
-        "lifecycle_current_state": "WATCHLISTED",
+        "lifecycle_current_state": "ACTIONABLE_A_GRADE",
+        "actionability_state": "A_GRADE_ACTIONABLE",
         "direction": "long",
         "entry_low": "100",
         "entry_high": "102",
@@ -197,7 +198,7 @@ def _wolf_watch_row(**overrides: Any) -> dict[str, Any]:
         "tp2": "115",
         "tp3": "120",
         "rr": "3",
-        "quality_grade_current": "B+",
+        "quality_grade_current": "A",
     }
     row.update(overrides)
     return row
