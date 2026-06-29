@@ -945,7 +945,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
         "public:signal:BTCUSDT",
         "public:signal_lifecycle:BTCUSDT",
         "public:signal_why:BTCUSDT",
-        "public:signals",
+        "public:menu",
     ]
 
     lifecycle = service.public_response_for("/signal_lifecycle BTCUSDT")
@@ -973,7 +973,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
     assert "TP1: 110" not in refreshed.text
 
 
-def test_signal_detail_callbacks_route_safely_and_back_to_active_signals(tmp_path: Path) -> None:
+def test_signal_detail_callbacks_route_safely_and_legacy_active_signals_callback_is_disabled(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _insert_attempt(
         db_path,
@@ -1026,12 +1026,12 @@ def test_signal_detail_callbacks_route_safely_and_back_to_active_signals(tmp_pat
     assert screen_calls[0]["message"].startswith("🐺🟠 ETHUSDT — SIGNAL DETAIL")
     assert screen_calls[1]["message"].startswith("🐺🟠 ETHUSDT — WHY VALID?")
     assert screen_calls[2]["message"].startswith("🐺🟠 ETHUSDT — LIFECYCLE")
-    assert "Active Signals" in screen_calls[3]["message"]
+    assert "This public dashboard section is currently disabled for launch." in screen_calls[3]["message"]
     assert _callback_data_values(screen_calls[0]["reply_markup"]) == [
         "public:signal:ETHUSDT",
         "public:signal_lifecycle:ETHUSDT",
         "public:signal_why:ETHUSDT",
-        "public:signals",
+        "public:menu",
     ]
     assert "order was placed" not in "\n".join(call["message"].lower() for call in screen_calls)
 
@@ -1892,7 +1892,8 @@ def test_public_watchlist_commands_and_refresh_back_buttons_route_safely(tmp_pat
 
     screen_calls = _screen_send_calls(transport)
     messages = [call["message"] for call in screen_calls]
-    watchlist_calls = screen_calls[:6]
+    watchlist_calls = [screen_calls[index] for index in (0, 1, 3, 4)]
+    disabled_calls = [screen_calls[2], screen_calls[5]]
     assert result.delivery_status == "sent_public"
     assert len(messages) == len(updates)
     assert [call["callback_query_id"] for call in transport.answer_callback_calls] == ["callback-6", "callback-7"]
@@ -1903,5 +1904,6 @@ def test_public_watchlist_commands_and_refresh_back_buttons_route_safely(tmp_pat
         for call in watchlist_calls
     )
     assert all(_callback_data_values(call["reply_markup"]) == ["public:watchlist", "public:menu"] for call in watchlist_calls)
+    assert all("This public dashboard section is currently disabled for launch." in call["message"] for call in disabled_calls)
     assert "Candle Craft Intelligence" in messages[-1]
     assert "secret-token" not in "\n".join(messages)

@@ -31,12 +31,10 @@ from app.telegram_admin.commands import DEFAULT_SCAN_RUN_MANIFEST_PATH, Telegram
 COMMANDS_TO_REGISTER: tuple[Mapping[str, str], ...] = (
     {"command": "start", "description": "Open the Candle Craft menu"},
     {"command": "menu", "description": "Open the Candle Craft menu"},
-    {"command": "status", "description": "Show bot status"},
-    {"command": "latest", "description": "Show latest public lifecycle alerts"},
-    {"command": "watchlists", "description": "Show active public watchlists"},
-    {"command": "about", "description": "About Candle Craft"},
+    {"command": "help", "description": "How to use Candle Craft"},
+    {"command": "social", "description": "Official Candle Craft links"},
+    {"command": "donate", "description": "Support Candle Craft"},
 )
-
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Candle Craft Telegram UI listener only.")
