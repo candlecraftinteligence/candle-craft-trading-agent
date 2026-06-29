@@ -25,8 +25,9 @@ def test_default_settings_are_safe() -> None:
     assert settings.public_watchlist_min_score == 88
     assert str(settings.public_watchlist_min_rr) == "3.0"
     assert settings.public_watchlist_max_per_scan == 1
-    assert settings.public_watchlist_max_per_24h == 6
-    assert settings.public_watchlist_cooldown_hours == 24
+    assert settings.public_watchlist_max_per_24h == 15
+    assert settings.public_watchlist_max_per_60m == 3
+    assert settings.public_watchlist_cooldown_hours == 2
     assert settings.public_watchlist_dedupe_across_modes is True
     assert settings.public_watchlist_require_plan is True
     assert settings.public_watchlist_require_entry_zone is True

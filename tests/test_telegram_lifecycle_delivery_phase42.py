@@ -451,14 +451,14 @@ def test_public_v1_actionable_a_grade_score_88_rr_3_can_send(tmp_path: Path) -> 
     assert _public_v1_block_reasons(db_path)[0][1] == "sent"
 
 
-def test_public_v1_blocks_score_82_and_persists_reason(tmp_path: Path) -> None:
+def test_public_v1_blocks_score_87_and_persists_reason(tmp_path: Path) -> None:
     db_path = tmp_path / "public-v1-score.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
 
     summary = run(
         service.deliver_for_run(
-            _run_result(_public_v1_symbol(quality_score=82)),
+            _run_result(_public_v1_symbol(quality_score=87)),
             scan_run_id="public-v1-score",
         )
     )
@@ -474,6 +474,21 @@ def test_public_v1_blocks_rr_2_99() -> None:
     assert decision.eligible is False
     assert "public_block_rr_below_3" in decision.reason
 
+
+def test_public_v1_blocks_a_minus_and_b_plus_grades() -> None:
+    for grade in (SetupQualityGrade.A_MINUS, SetupQualityGrade.B_PLUS):
+        decision = telegram_alert_decision_for_symbol(
+            _public_v1_symbol(
+                grade=grade,
+                quality_score=95,
+                rr=Decimal("4"),
+                technical_score=Decimal("99"),
+                opportunity_score=Decimal("99"),
+            )
+        )
+
+        assert decision.eligible is False
+        assert "public_block_below_quality_score" in decision.reason
 
 def test_public_v1_blocks_plain_triggered_even_with_high_scores() -> None:
     decision = telegram_alert_decision_for_symbol(
@@ -602,15 +617,21 @@ def test_public_v1_scan_cap_sends_best_one_and_persists_loser_reason(tmp_path: P
     assert any(row[0] == "ETHUSDT" and row[1] == "skipped" and row[2] == "public_block_scan_cap" for row in rows)
 
 
+def test_public_v1_allows_15th_daily_signal_when_hourly_cap_not_exceeded(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-daily-cap-allows-15.db"
+    _seed_public_cap_history(db_path, 14)
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(service.deliver_for_run(_run_result(_public_v1_symbol(symbol="ALLOW15USDT")), scan_run_id="public-v1-daily-15"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+
+
 def test_public_v1_daily_cap_blocks_and_persists_reason(tmp_path: Path) -> None:
     db_path = tmp_path / "public-v1-daily-cap.db"
-    for index in range(6):
-        _seed_prior_active_alert(
-            db_path,
-            signal_id=f"prior-{index}",
-            alert_type=TelegramAlertType.WATCHLIST,
-            symbol=f"CAP{index}USDT",
-        )
+    _seed_public_cap_history(db_path, 15)
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
 
@@ -621,14 +642,102 @@ def test_public_v1_daily_cap_blocks_and_persists_reason(tmp_path: Path) -> None:
     assert any(row[2] == "public_block_daily_cap" for row in _public_v1_block_reasons(db_path))
 
 
-def test_public_v1_symbol_cooldown_blocks_opposite_side_repeat(tmp_path: Path) -> None:
-    db_path = tmp_path / "public-v1-symbol-cooldown.db"
+def test_public_v1_allows_3rd_hourly_signal(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-hourly-cap-allows-3.db"
+    for index, minutes_ago in enumerate((50, 30)):
+        _seed_prior_active_alert(
+            db_path,
+            signal_id=f"prior-hour-{index}",
+            alert_type=TelegramAlertType.WATCHLIST,
+            symbol=f"HOUR{index}USDT",
+            sent_at=_sent_at_ago(minutes=minutes_ago),
+        )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(service.deliver_for_run(_run_result(_public_v1_symbol(symbol="HOURNEWUSDT")), scan_run_id="public-v1-hourly-3"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+
+
+def test_public_v1_hourly_cap_blocks_4th_signal_inside_60_minutes(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-hourly-cap.db"
+    for index, minutes_ago in enumerate((50, 30, 10)):
+        _seed_prior_active_alert(
+            db_path,
+            signal_id=f"prior-hour-{index}",
+            alert_type=TelegramAlertType.WATCHLIST,
+            symbol=f"HOUR{index}USDT",
+            sent_at=_sent_at_ago(minutes=minutes_ago),
+        )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(service.deliver_for_run(_run_result(_public_v1_symbol(symbol="HOURBLOCKUSDT")), scan_run_id="public-v1-hourly-cap"))
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    assert any(row[2] == "public_block_hourly_cap" for row in _public_v1_block_reasons(db_path))
+
+def test_public_v1_same_symbol_same_side_inside_2h_is_blocked(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-same-side-cooldown.db"
     _seed_prior_active_alert(
         db_path,
-        signal_id="prior-btc",
+        signal_id="prior-btc-long",
         alert_type=TelegramAlertType.WATCHLIST,
         symbol="BTCUSDT",
         direction="long",
+        sent_at=_sent_at_ago(minutes=90),
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_public_v1_symbol(symbol="BTCUSDT", direction="long", signal_id="btc-long-repeat", rr=Decimal("3.5"))),
+            scan_run_id="public-v1-same-side-cooldown",
+        )
+    )
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    assert any(row[2] == "public_block_same_symbol_same_side_cooldown" for row in _public_v1_block_reasons(db_path))
+
+
+def test_public_v1_same_symbol_same_side_after_2h_can_send(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-same-side-after-2h.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="prior-btc-long",
+        alert_type=TelegramAlertType.WATCHLIST,
+        symbol="BTCUSDT",
+        direction="long",
+        sent_at=_sent_at_ago(minutes=121),
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_public_v1_symbol(symbol="BTCUSDT", direction="long", signal_id="btc-long-after-2h", rr=Decimal("3.5"))),
+            scan_run_id="public-v1-same-side-after-2h",
+        )
+    )
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+
+
+def test_public_v1_opposite_side_inside_60m_is_blocked(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-opposite-side-cooldown.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="prior-btc-long",
+        alert_type=TelegramAlertType.WATCHLIST,
+        symbol="BTCUSDT",
+        direction="long",
+        sent_at=_sent_at_ago(minutes=30),
     )
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
@@ -636,14 +745,61 @@ def test_public_v1_symbol_cooldown_blocks_opposite_side_repeat(tmp_path: Path) -
     summary = run(
         service.deliver_for_run(
             _run_result(_public_v1_symbol(symbol="BTCUSDT", direction="short", signal_id="btc-short", rr=Decimal("3.5"))),
-            scan_run_id="public-v1-symbol-cooldown",
+            scan_run_id="public-v1-opposite-side-cooldown",
         )
     )
 
     assert summary.sent == 0
     assert sender.messages == []
-    assert any(row[2] == "public_block_symbol_cooldown" for row in _public_v1_block_reasons(db_path))
+    assert any(row[2] == "public_block_same_symbol_opposite_side_cooldown" for row in _public_v1_block_reasons(db_path))
 
+
+def test_public_v1_opposite_side_after_60m_can_send(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-opposite-side-after-60m.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="prior-btc-long",
+        alert_type=TelegramAlertType.WATCHLIST,
+        symbol="BTCUSDT",
+        direction="long",
+        sent_at=_sent_at_ago(minutes=61),
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_public_v1_symbol(symbol="BTCUSDT", direction="short", signal_id="btc-short-after-60m", rr=Decimal("3.5"))),
+            scan_run_id="public-v1-opposite-side-after-60m",
+        )
+    )
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+
+
+def test_public_v1_btc_long_then_short_after_2h_can_send(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-btc-flip-after-2h.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id="prior-btc-long",
+        alert_type=TelegramAlertType.WATCHLIST,
+        symbol="BTCUSDT",
+        direction="long",
+        sent_at=_sent_at_ago(minutes=121),
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_public_v1_symbol(symbol="BTCUSDT", direction="short", signal_id="btc-short-after-2h", rr=Decimal("3.5"))),
+            scan_run_id="public-v1-btc-flip-after-2h",
+        )
+    )
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
 
 def test_public_v1_non_crypto_symbol_is_blocked_and_persisted(tmp_path: Path) -> None:
     db_path = tmp_path / "public-v1-non-crypto.db"
@@ -876,6 +1032,22 @@ def _seed_prior_active_alert(
             )
         )
 
+
+def _sent_at_ago(*, hours: int = 0, minutes: int = 0) -> str:
+    return (datetime.now(UTC) - timedelta(hours=hours, minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+
+def _seed_public_cap_history(db_path: Path, count: int) -> None:
+    start = datetime.now(UTC) - timedelta(hours=23)
+    for index in range(count):
+        sent_at = (start + timedelta(minutes=90 * index)).isoformat().replace("+00:00", "Z")
+        _seed_prior_active_alert(
+            db_path,
+            signal_id=f"prior-cap-{index}",
+            alert_type=TelegramAlertType.WATCHLIST,
+            symbol=f"CAP{index}USDT",
+            sent_at=sent_at,
+        )
 
 def _telegram_attempt_rows(db_path: Path) -> list[tuple[str, str, str]]:
     with sqlite3.connect(db_path) as connection:
@@ -2953,7 +3125,7 @@ def test_simple_public_signal_duplicate_is_blocked_inside_cooldown(tmp_path: Pat
     assert first.sent == 1
     assert second.sent == 0
     assert len(sender.messages) == 1
-    assert any(row[2] == "public_block_symbol_cooldown" for row in _public_v1_block_reasons(db_path))
+    assert any(row[2] == "public_block_same_symbol_opposite_side_cooldown" for row in _public_v1_block_reasons(db_path))
 
 
 def test_limit_zone_hit_update_does_not_send_public_telegram_message(tmp_path: Path) -> None:
@@ -3302,7 +3474,7 @@ def test_existing_candidate_with_prior_successful_alert_hits_symbol_cooldown(tmp
     assert first.sent == 1
     assert second.sent == 0
     assert len(sender.messages) == 1
-    assert any(row[2] == "public_block_symbol_cooldown" for row in _public_v1_block_reasons(db_path))
+    assert any(row[2] == "public_block_same_symbol_same_side_cooldown" for row in _public_v1_block_reasons(db_path))
 
 
 def test_plan_change_hits_same_symbol_public_cooldown(tmp_path: Path) -> None:
@@ -3331,7 +3503,7 @@ def test_plan_change_hits_same_symbol_public_cooldown(tmp_path: Path) -> None:
     assert first.sent == 1
     assert second.sent == 0
     assert len(sender.messages) == 1
-    assert any(row[2] == "public_block_symbol_cooldown" for row in _public_v1_block_reasons(db_path))
+    assert any(row[2] == "public_block_same_symbol_same_side_cooldown" for row in _public_v1_block_reasons(db_path))
 
 
 def _public_watchlist_attempt_records(db_path: Path) -> list[dict[str, object]]:
@@ -3526,7 +3698,7 @@ def test_xplus_post_pr42_duplicate_structural_drift_sends_once(tmp_path: Path) -
     assert len(sender.messages) == 1
     assert len(sender.public_watchlist_guards) == 1
     assert len(_sent_public_alert_event_records(db_path)) == 1
-    assert any(row[2] == "public_block_symbol_cooldown" for row in _public_v1_block_reasons(db_path))
+    assert any(row[2] == "public_block_same_symbol_same_side_cooldown" for row in _public_v1_block_reasons(db_path))
 
 
 def test_public_watchlist_final_send_guard_blocks_missing_reservation_metadata(
@@ -3580,7 +3752,7 @@ def test_same_synusdt_plan_sends_once_across_iterations(tmp_path: Path) -> None:
 
     assert first.sent == 1
     assert second.skipped == 1
-    assert second.deliveries[0].error_message == "public_block_symbol_cooldown"
+    assert second.deliveries[0].error_message == "public_block_same_symbol_same_side_cooldown"
     assert len(sender.messages) == 1
     assert len(_sent_public_watchlist_records(db_path)) == 1
     assert len(_sent_public_alert_event_records(db_path)) == 1
@@ -3682,11 +3854,11 @@ def test_old_sent_row_without_plan_id_is_fallback_matched(tmp_path: Path, monkey
     )
 
     assert summary.skipped == 1
-    assert summary.deliveries[0].error_message == "public_block_symbol_cooldown"
+    assert summary.deliveries[0].error_message == "public_block_same_symbol_same_side_cooldown"
     assert sender.messages == []
     rows = _public_watchlist_attempt_records(db_path)
     assert len([row for row in rows if row["telegram_status"] == "sent"]) == 1
-    assert any(row["blocked_reason"] == "public_block_symbol_cooldown" for row in rows)
+    assert any(row["blocked_reason"] == "public_block_same_symbol_same_side_cooldown" for row in rows)
 
 def test_muusdt_same_public_watchlist_plan_sends_once(tmp_path: Path) -> None:
     db_path = tmp_path / "muusdt-hard-dedupe.db"
@@ -3754,7 +3926,7 @@ def test_same_watchlist_candidate_across_ten_scans_sends_once(tmp_path: Path) ->
     assert all(summary.sent == 0 and summary.skipped == 1 for summary in summaries[1:])
     assert len(sender.messages) == 1
     assert len(_sent_public_watchlist_records(db_path)) == 1
-    cooldown_rows = [row for row in _public_v1_block_reasons(db_path) if row[2] == "public_block_symbol_cooldown"]
+    cooldown_rows = [row for row in _public_v1_block_reasons(db_path) if row[2] == "public_block_same_symbol_same_side_cooldown"]
     assert len(cooldown_rows) == 1
 
 
@@ -3774,7 +3946,7 @@ def test_invalidation_jitter_within_tick_tolerance_dedupes(tmp_path: Path) -> No
 
     assert first.sent == 1
     assert second.skipped == 1
-    assert second.deliveries[0].error_message == "public_block_symbol_cooldown"
+    assert second.deliveries[0].error_message == "public_block_same_symbol_same_side_cooldown"
     assert len(sender.messages) == 1
     assert rows[0]["public_watchlist_plan_id"] == rows[1]["public_watchlist_plan_id"]
 
@@ -3926,7 +4098,7 @@ def test_reconciliation_is_idempotent_after_successful_send(tmp_path: Path) -> N
 
     assert first.sent == 1
     assert second.skipped == 1
-    assert second.deliveries[0].error_message == "public_block_symbol_cooldown"
+    assert second.deliveries[0].error_message == "public_block_same_symbol_same_side_cooldown"
     assert len(sender.messages) == 1
 
 
@@ -4049,7 +4221,7 @@ def test_opposite_side_hits_same_symbol_cooldown(tmp_path: Path) -> None:
     assert second.sent == 0
     assert len(sender.messages) == 1
     assert len(_sent_public_alert_event_records(db_path)) == 1
-    assert any(row[2] == "public_block_symbol_cooldown" for row in _public_v1_block_reasons(db_path))
+    assert any(row[2] == "public_block_same_symbol_opposite_side_cooldown" for row in _public_v1_block_reasons(db_path))
 
 
 def test_structure_identity_drift_with_same_economics_is_duplicate_plan(tmp_path: Path) -> None:
@@ -4096,7 +4268,7 @@ def test_material_zone_change_hits_same_symbol_cooldown(tmp_path: Path) -> None:
     assert second.sent == 0
     assert len(sender.messages) == 1
     assert len(_sent_public_alert_event_records(db_path)) == 1
-    assert any(row[2] == "public_block_symbol_cooldown" for row in _public_v1_block_reasons(db_path))
+    assert any(row[2] == "public_block_same_symbol_same_side_cooldown" for row in _public_v1_block_reasons(db_path))
 
 
 def test_material_invalidation_change_hits_same_symbol_cooldown(tmp_path: Path) -> None:
@@ -4116,7 +4288,7 @@ def test_material_invalidation_change_hits_same_symbol_cooldown(tmp_path: Path) 
     assert first.sent == 1
     assert second.sent == 0
     assert len(sender.messages) == 1
-    assert any(row[2] == "public_block_symbol_cooldown" for row in _public_v1_block_reasons(db_path))
+    assert any(row[2] == "public_block_same_symbol_same_side_cooldown" for row in _public_v1_block_reasons(db_path))
 
 
 def test_concurrent_public_watchlist_reservations_allow_one_sender(tmp_path: Path) -> None:
@@ -4226,7 +4398,7 @@ def test_public_watchlist_cooldown_uses_canonical_plan_id(tmp_path: Path) -> Non
 
     assert first.sent == 1
     assert second.skipped == 1
-    assert second.deliveries[0].error_message == "public_block_symbol_cooldown"
+    assert second.deliveries[0].error_message == "public_block_same_symbol_same_side_cooldown"
     assert rows[0]["public_watchlist_plan_id"] == rows[1]["public_watchlist_plan_id"]
     assert len(sender.messages) == 1
 
@@ -5598,7 +5770,7 @@ def test_public_watchlist_dedupes_by_setup_id(tmp_path: Path) -> None:
 
     assert first.sent == 1
     assert second.skipped == 1
-    assert second.deliveries[0].error_message == "public_block_symbol_cooldown"
+    assert second.deliveries[0].error_message == "public_block_same_symbol_same_side_cooldown"
     assert len(sender.messages) == 1
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts(signal_id=first.deliveries[0].signal_id)
@@ -5622,7 +5794,7 @@ def test_public_watchlist_respects_symbol_side_plan_cooldown(tmp_path: Path) -> 
     assert first.sent == 1
     assert second.skipped == 1
     assert len(sender.messages) == 1
-    assert second.deliveries[0].error_message == "public_block_symbol_cooldown"
+    assert second.deliveries[0].error_message == "public_block_same_symbol_same_side_cooldown"
     assert second.public_watchlist_audit.public_watchlist_dedupe_audit["prior_successful_alert_found"] == 1
 
 def test_public_watchlist_routing_creates_send_attempt_or_skip_reason(tmp_path: Path) -> None:
@@ -7314,7 +7486,7 @@ def test_each_alert_type_is_not_sent_twice(tmp_path: Path) -> None:
         assert first.sent == 1, alert_type
         if alert_type == TelegramAlertType.WATCHLIST:
             assert second.skipped == 1, alert_type
-            assert second.deliveries[0].error_message == "public_block_symbol_cooldown"
+            assert second.deliveries[0].error_message == "public_block_same_symbol_same_side_cooldown"
         else:
             assert second.duplicate == 1, alert_type
         assert len(sender.messages) == 1, alert_type
