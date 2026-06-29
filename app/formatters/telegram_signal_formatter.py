@@ -46,12 +46,49 @@ PUBLIC_STATUS_BY_ALERT_TYPE = {
 
 
 @dataclass(frozen=True)
+class SignalMessageContext:
+    symbol: Any = NA
+    direction: Any = NA
+    primary_mode: Any = NA
+    secondary_modes: tuple[Any, ...] = ()
+    source_modes: tuple[Any, ...] = ()
+    confluence_valid: bool = False
+    grade: Any = NA
+    quality_score: Any = NA
+    lifecycle_state: Any = NA
+    actionability_state: Any = NA
+    entry_low: Any = NA
+    entry_high: Any = NA
+    stop_loss: Any = NA
+    tp1: Any = NA
+    tp2: Any = NA
+    tp3: Any = NA
+    rr: Any = NA
+    technical_score: Any = NA
+    opportunity_score: Any = NA
+    target_integrity_status: Any = NA
+    target_failure: Any = NA
+    target_failure_severity: Any = NA
+    target_warning_reason: Any = NA
+    final_failed_gate: Any = NA
+    final_block_reason: Any = NA
+    invalidation_logic: Any = NA
+    why_it_matters_points: tuple[Any, ...] = ()
+    what_we_want_next_points: tuple[Any, ...] = ()
+    caution_points: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True)
 class TelegramSignalMessage:
     symbol: Any = NA
     direction: Any = NA
     signal_id: Any = NA
     mode: Any = NA
+    primary_mode: Any = NA
+    secondary_modes: tuple[Any, ...] = ()
+    source_modes: tuple[Any, ...] = ()
     quality: Any = NA
+    quality_score: Any = NA
     watch_zone: Any = NA
     entry_low: Any = NA
     entry_high: Any = NA
@@ -74,17 +111,28 @@ class TelegramSignalMessage:
     price_level: Any = NA
     min_rr: Any = NA
     readiness_score: Any = NA
+    lifecycle_state: Any = NA
+    technical_score: Any = NA
+    opportunity_score: Any = NA
     regime_state: Any = NA
     regime_compatibility_label: Any = NA
     regime_confidence: Any = NA
     watchlist_status: Any = NA
     actionability_state: Any = NA
+    target_integrity_status: Any = NA
+    target_failure: Any = NA
     target_failure_severity: Any = NA
     target_warning_reason: Any = NA
+    final_failed_gate: Any = NA
+    final_block_reason: Any = NA
+    invalidation_logic: Any = NA
+    why_it_matters_points: tuple[Any, ...] = ()
+    what_we_want_next_points: tuple[Any, ...] = ()
+    caution_points: tuple[Any, ...] = ()
+    signal_context: SignalMessageContext | None = None
     watchlist_outcome: bool = False
     upgraded_from_watchlist: bool = False
     was_watchlist: bool = False
-
 
 def format_telegram_signal_message(
     alert_type: TelegramAlertType | str,
@@ -143,64 +191,331 @@ def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
     if message.upgraded_from_watchlist:
         return format_watchlist_upgraded_message(message)
 
-    reason = safe_reason_text(message.structure_reason, message.confluence)
-    return _join(
-        f"{HEADER_PREFIX} {_signal_title(message)} {EM_DASH} {format_symbol(message.symbol)}",
-        "",
-        "The wolf found liquidity.",
-        "",
-        f"Bias: {format_direction(message.direction)}",
-        "Status: CONFIRMED",
-        f"Quality: {_quality_display(message.quality)}",
-        f"RR: {format_rr(message.planned_rr)}",
-        "",
-        "\U0001F3AF Trade Map",
-        f"Entry Zone: {format_entry_zone(message)}",
-        f"Stop: {format_price(message.stop_loss)}",
-        *format_tp_lines(message),
-        "",
-        "\U0001F9E0 Why this setup matters",
-        reason,
-        f"Now we wait for execution inside the limit zone {EM_DASH} no chase.",
-        "",
-        "\U0001F6AB Invalid if",
-        safe_invalidation_text(message),
-        "",
-        "\u26A0\ufe0f Manual execution only. Manage risk.",
-        "",
-        FOOTER,
-    )
+    return _format_public_signal_message(message, confirmed=True)
 
 
 def format_simple_public_signal_message(message: TelegramSignalMessage) -> str:
-    reason = safe_reason_text(message.structure_reason, message.confluence, message.current_context)
-    if reason == NA:
-        reason = "The setup has a complete trade map and defined invalidation. Treat it as a manual signal only."
+    return _format_public_signal_message(message, confirmed=False)
+
+
+def _format_public_signal_message(message: TelegramSignalMessage, *, confirmed: bool) -> str:
     return _join(
-        f"{HEADER_PREFIX} SCALP SIGNAL {EM_DASH} {format_symbol(message.symbol)}",
-        "",
-        "The wolf found liquidity.",
+        f"{HEADER_PREFIX} {format_symbol(message.symbol)} {EM_DASH} {_public_signal_title(message)}",
         "",
         f"Bias: {format_direction(message.direction)}",
-        f"Quality: {_quality_display(message.quality)}",
+        _public_grade_score_line(message),
+        f"Actionability: {_public_actionability_display(message, confirmed=confirmed)}",
         f"RR: {format_rr(message.planned_rr)}",
         "",
-        "\U0001F3AF Trade Map",
-        f"Entry Zone: {format_entry_zone(message)}",
-        f"Stop: {format_price(message.stop_loss)}",
-        *_simple_signal_tp_lines(message),
+        *_public_trade_map_section(message),
         "",
         "\U0001F9E0 Why this setup matters",
-        reason,
-        *_target_caution_lines(message),
+        *_public_why_lines(message),
+        "",
+        "\u26A0\ufe0f Execution notes",
+        *_public_execution_note_lines(message, confirmed=confirmed),
         "",
         "\U0001F6AB Invalid if",
-        _simple_signal_invalidation_text(message),
+        *_public_invalidation_lines(message),
         "",
-        "\u26A0\ufe0f Manual execution only. Manage risk.",
+        "\U0001F440 What we want next",
+        *_public_next_lines(message, confirmed=confirmed),
         "",
         FOOTER,
     )
+
+def _effective_signal_context(message: TelegramSignalMessage) -> SignalMessageContext:
+    if message.signal_context is not None:
+        return message.signal_context
+    return SignalMessageContext(
+        symbol=message.symbol,
+        direction=message.direction,
+        primary_mode=_first_display(message.primary_mode, message.mode),
+        secondary_modes=message.secondary_modes,
+        source_modes=message.source_modes,
+        grade=message.quality,
+        quality_score=message.quality_score,
+        lifecycle_state=message.lifecycle_state,
+        actionability_state=message.actionability_state,
+        entry_low=message.entry_low,
+        entry_high=message.entry_high,
+        stop_loss=message.stop_loss,
+        tp1=message.tp1,
+        tp2=message.tp2,
+        tp3=message.tp3,
+        rr=message.planned_rr,
+        technical_score=message.technical_score,
+        opportunity_score=message.opportunity_score,
+        target_integrity_status=message.target_integrity_status,
+        target_failure=message.target_failure,
+        target_failure_severity=message.target_failure_severity,
+        target_warning_reason=message.target_warning_reason,
+        final_failed_gate=message.final_failed_gate,
+        final_block_reason=message.final_block_reason,
+        invalidation_logic=_first_display(message.invalidation_logic, message.invalidation_reason, message.watchlist_invalidation_reason),
+        why_it_matters_points=message.why_it_matters_points,
+        what_we_want_next_points=message.what_we_want_next_points,
+        caution_points=message.caution_points,
+    )
+
+
+def _public_signal_title(message: TelegramSignalMessage) -> str:
+    context = _effective_signal_context(message)
+    source_modes = _canonical_modes(
+        context.source_modes,
+        message.source_modes,
+        context.primary_mode,
+        message.primary_mode,
+        message.mode,
+        context.secondary_modes,
+        message.secondary_modes,
+    )
+    primary = _canonical_mode(_first_display(context.primary_mode, message.primary_mode, message.mode))
+    if primary == NA and source_modes:
+        primary = source_modes[0]
+    if context.confluence_valid and {"scalp", "swing"}.issubset(set(source_modes)):
+        return "SCALP + SWING CONFLUENCE SIGNAL"
+    if primary == "swing":
+        return "SWING SETUP SIGNAL"
+    if primary == "scalp":
+        return "SCALP SETUP SIGNAL"
+    if primary == "challenge":
+        return "CHALLENGE SETUP SIGNAL"
+    return _signal_title(message)
+
+
+def _public_grade_score_line(message: TelegramSignalMessage) -> str:
+    context = _effective_signal_context(message)
+    grade = _quality_display(_first_display(context.grade, message.quality))
+    score = _display(_first_display(context.quality_score, message.quality_score))
+    return f"Grade: {grade} | Score: {score}"
+
+
+def _public_actionability_display(message: TelegramSignalMessage, *, confirmed: bool) -> str:
+    context = _effective_signal_context(message)
+    actionability = _status_key(_first_display(context.actionability_state, message.actionability_state))
+    lifecycle = _status_key(_first_display(context.lifecycle_state, message.lifecycle_state))
+    watch_status = _status_key(message.watchlist_status)
+    failed_gate = _status_key(_first_display(context.final_failed_gate, message.final_failed_gate, message.confirmation_needed))
+    if actionability == "a_grade_actionable_target_caution" or _target_caution_points(message):
+        return "A-grade target caution"
+    if actionability in {"a_grade_actionable", "actionable_a_grade"} or lifecycle == "actionable_a_grade":
+        return "Clean A-grade"
+    if lifecycle == "confirmed" or confirmed:
+        return "Confirmed plan"
+    if "waiting_confirmation" in watch_status or "confirmation" in failed_gate or lifecycle in {"watch", "stalking", "triggered"}:
+        return "Waiting confirmation"
+    if "limit_zone" in failed_gate or "entry_zone" in failed_gate or "pullback" in failed_gate:
+        return "Waiting limit zone"
+    text = _title_display(_first_display(context.actionability_state, context.lifecycle_state, message.actionability_state))
+    return text if text != NA else "Waiting confirmation"
+
+
+def _public_trade_map_section(message: TelegramSignalMessage) -> tuple[str, ...]:
+    missing = _public_trade_map_missing(message)
+    header = "\U0001F3AF Trade Map" if not missing else "\U0001F3AF Trade Map (incomplete stored context)"
+    lines: list[str] = [header]
+    lines.extend(_public_available_trade_map_lines(message))
+    if missing:
+        lines.append(f"Missing: {', '.join(missing)}")
+    return tuple(lines)
+
+
+def _public_available_trade_map_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    context = _effective_signal_context(message)
+    entry_low = _first_display(context.entry_low, message.entry_low)
+    entry_high = _first_display(context.entry_high, message.entry_high)
+    stop_loss = _first_display(context.stop_loss, message.stop_loss)
+    tp1 = _first_display(context.tp1, message.tp1)
+    tp2 = _first_display(context.tp2, message.tp2)
+    tp3 = _first_display(context.tp3, message.tp3)
+    lines: list[str] = []
+    entry = _entry_range_values(entry_low, entry_high)
+    if entry != NA:
+        lines.append(f"Entry: {entry}")
+    stop = format_price(stop_loss)
+    if stop != NA:
+        lines.append(f"Stop: {stop}")
+    for label, value in (("TP1", tp1), ("TP2", tp2), ("TP3", tp3)):
+        price = format_price(value)
+        if price != NA:
+            lines.append(f"{label}: {price}")
+    return tuple(lines)
+
+
+def _public_trade_map_missing(message: TelegramSignalMessage) -> tuple[str, ...]:
+    context = _effective_signal_context(message)
+    missing: list[str] = []
+    if _entry_range_values(_first_display(context.entry_low, message.entry_low), _first_display(context.entry_high, message.entry_high)) == NA:
+        missing.append("entry zone")
+    if format_price(_first_display(context.stop_loss, message.stop_loss)) == NA:
+        missing.append("stop")
+    for label, value in (
+        ("TP1", _first_display(context.tp1, message.tp1)),
+        ("TP2", _first_display(context.tp2, message.tp2)),
+        ("TP3", _first_display(context.tp3, message.tp3)),
+    ):
+        if format_price(value) == NA:
+            missing.append(label)
+    if _rr_display(_first_display(context.rr, message.planned_rr)) == NA:
+        missing.append("RR")
+    return tuple(missing)
+
+
+def _entry_range_values(entry_low: Any, entry_high: Any) -> str:
+    low = format_price(entry_low)
+    high = format_price(entry_high)
+    if low == NA or high == NA:
+        return NA
+    if low == high:
+        return low
+    return f"{low} {RANGE_DASH} {high}"
+
+
+def _public_why_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    context = _effective_signal_context(message)
+    lines = _public_point_lines(context.why_it_matters_points)
+    if lines:
+        return lines
+    reason = safe_reason_text(message.structure_reason, message.confluence, message.current_context)
+    if reason != NA:
+        return (f"- {reason}",)
+    return ("- Stored public context does not include structured setup rationale.",)
+
+
+def _public_execution_note_lines(message: TelegramSignalMessage, *, confirmed: bool) -> tuple[str, ...]:
+    context = _effective_signal_context(message)
+    points: list[Any] = [*context.caution_points, *_target_caution_points(message)]
+    actionability = _status_key(_first_display(context.actionability_state, message.actionability_state))
+    if actionability not in {"a_grade_actionable", "a_grade_actionable_target_caution", "actionable_a_grade"} and not confirmed:
+        points.append("Do not treat this as a clean actionable setup until the pending condition resolves.")
+    if not points:
+        points.append("Use the planned zone only. No market chase.")
+    points.append("\u26A0\ufe0f Manual execution only. Manage risk.")
+    return _public_point_lines(tuple(points))
+
+
+def _public_invalidation_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    return (f"- {_public_invalidation_text(message)}",)
+
+
+def _public_invalidation_text(message: TelegramSignalMessage) -> str:
+    context = _effective_signal_context(message)
+    explicit_context = _safe_public_text(context.invalidation_logic) if message.signal_context is not None else NA
+    explicit_message = _safe_public_text(message.invalidation_logic)
+    for explicit in (explicit_context, explicit_message):
+        if explicit != NA:
+            return explicit
+    stop = format_price(_first_display(context.stop_loss, message.stop_loss))
+    direction = _direction_key(_first_display(context.direction, message.direction))
+    if stop != NA:
+        if direction == "long":
+            return f"Invalid if price accepts below {stop}."
+        if direction == "short":
+            return f"Invalid if price accepts above {stop}."
+        return f"Invalid if price accepts beyond {stop}."
+    raw = _safe_public_text(_first_display(message.invalidation_reason, message.watchlist_invalidation_reason))
+    if raw != NA:
+        return raw
+    return "Hard invalidation: stop level unavailable in stored context."
+
+
+def _public_next_lines(message: TelegramSignalMessage, *, confirmed: bool) -> tuple[str, ...]:
+    context = _effective_signal_context(message)
+    lines = _public_point_lines(context.what_we_want_next_points)
+    if lines:
+        return lines
+    actionability = _status_key(_first_display(context.actionability_state, message.actionability_state))
+    lifecycle = _status_key(_first_display(context.lifecycle_state, message.lifecycle_state))
+    if actionability == "a_grade_actionable_target_caution":
+        return _public_point_lines(("No chase. We want clean entry reaction and fast movement away from chop.",))
+    if actionability in {"a_grade_actionable", "actionable_a_grade"} or lifecycle == "actionable_a_grade" or confirmed:
+        return _public_point_lines(("Hold entry zone and continue displacement toward TP1.",))
+    if lifecycle in {"watch", "watchlisted", "stalking"}:
+        return _public_point_lines(("Wait for 5m BOS/CHoCH confirmation after sweep.",))
+    if lifecycle == "triggered":
+        return _public_point_lines(("Need confirmation candle close and target path expansion.",))
+    needs = tuple(_safe_public_text(value) for value in message.needs_next)
+    needs = tuple(value for value in needs if value != NA)
+    if needs:
+        return _public_point_lines(needs)
+    return _public_point_lines(("Wait for the next stored confirmation condition before acting.",))
+
+
+def _target_caution_points(message: TelegramSignalMessage) -> tuple[str, ...]:
+    context = _effective_signal_context(message)
+    state = _status_key(_first_display(context.actionability_state, message.actionability_state))
+    severity = _status_key(_first_display(context.target_failure_severity, message.target_failure_severity))
+    warning = _display(_first_display(context.target_warning_reason, message.target_warning_reason))
+    warning_key = _status_key(warning)
+    caution = (
+        state == "a_grade_actionable_target_caution"
+        or severity in {"target_caution_actionable", "soft_target_warning"}
+        or ("chop" in warning_key or "range" in warning_key)
+    )
+    if not caution:
+        return ()
+    warning_detail = () if warning == NA else (warning.rstrip("."),)
+    return (
+        *warning_detail,
+        f"Target path is tighter/choppy {EM_DASH} no chase.",
+        "TP1 reaction matters.",
+        "Reduce aggression until price clears chop.",
+    )
+
+
+def _public_point_lines(values: Sequence[Any]) -> tuple[str, ...]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _safe_public_text(value)
+        if text == NA:
+            continue
+        normalized = text.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        lines.append(f"- {text}")
+        if len(lines) == 6:
+            break
+    return tuple(lines)
+
+
+def _canonical_modes(*values: Any) -> tuple[str, ...]:
+    modes: list[str] = []
+    for value in values:
+        for mode in _mode_tokens(value):
+            if mode not in modes:
+                modes.append(mode)
+    return tuple(modes)
+
+
+def _canonical_mode(value: Any) -> str:
+    modes = _canonical_modes(value)
+    return modes[0] if modes else NA
+
+
+def _mode_tokens(value: Any) -> tuple[str, ...]:
+    if value is None or value == NA or isinstance(value, Mapping):
+        return ()
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        tokens: list[str] = []
+        for item in value:
+            for mode in _mode_tokens(item):
+                if mode not in tokens:
+                    tokens.append(mode)
+        return tuple(tokens)
+    text = _display(value)
+    if text == NA:
+        return ()
+    key = text.lower().replace("+", " ").replace(",", " ").replace("/", " ").replace("|", " ")
+    key = key.replace("-", "_")
+    tokens: list[str] = []
+    for mode in ("scalp", "swing", "challenge"):
+        parts = key.split()
+        if key == mode or mode in parts or key.endswith(f"_{mode}") or f"_{mode}_" in key:
+            tokens.append(mode)
+    return tuple(tokens)
 
 def _target_caution_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     state = _status_key(message.actionability_state)
@@ -550,7 +865,7 @@ def _simple_signal_tp_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
 
 def _simple_signal_invalidation_text(message: TelegramSignalMessage) -> str:
     text = safe_invalidation_text(message)
-    return text if text != NA else "Price accepts beyond the invalidation level."
+    return text if text != NA else "Hard invalidation: stop level unavailable in stored context."
 
 def _watchlist_tp_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     lines: list[str] = []
@@ -617,10 +932,10 @@ def safe_invalidation_text(message: TelegramSignalMessage) -> str:
     if stop == NA:
         return NA
     if direction == "long":
-        return f"Price accepts below {stop}."
+        return f"Invalid if price accepts below {stop}."
     if direction == "short":
-        return f"Price accepts above {stop}."
-    return f"Price accepts beyond {stop}."
+        return f"Invalid if price accepts above {stop}."
+    return f"Invalid if price accepts beyond {stop}."
 
 
 def safe_public_rejection_summary(value: Any) -> str:
@@ -972,6 +1287,7 @@ __all__ = [
     "HEADER_PREFIX",
     "PUBLIC_STATUS_BY_ALERT_TYPE",
     "TelegramAlertType",
+    "SignalMessageContext",
     "TelegramSignalMessage",
     "format_entry_zone",
     "format_expired_update",
