@@ -29,6 +29,7 @@ from app.alerts.watchlist_expiry import (
 from app.core.config import Settings
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
+    SignalMessageContext,
     TelegramAlertType,
     TelegramSignalMessage,
     format_telegram_price,
@@ -3940,7 +3941,7 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
             ),
         ),
     )
-    return TelegramSignalMessage(
+    message = TelegramSignalMessage(
         symbol=symbol_result.symbol,
         direction=direction,
         signal_id=_signal_id(symbol_result),
@@ -4016,6 +4017,7 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
             diagnostics.get("target_integrity_reason"),
         ),
     )
+    return _message_with_signal_context(symbol_result, diagnostics, message)
 
 
 def _public_watchlist_candidate_from_symbol(symbol_result: ScannerSymbolResult) -> PublicWatchlistCandidate:
@@ -4371,6 +4373,445 @@ def _message_with_public_watchlist_candidate(
     )
 
 
+def _message_with_signal_context(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    message: TelegramSignalMessage,
+    *,
+    candidate: PublicWatchlistCandidate | None = None,
+) -> TelegramSignalMessage:
+    context = _signal_message_context_from_symbol(symbol_result, diagnostics, message, candidate=candidate)
+    return replace(
+        message,
+        primary_mode=context.primary_mode,
+        secondary_modes=context.secondary_modes,
+        source_modes=context.source_modes,
+        quality_score=context.quality_score,
+        lifecycle_state=context.lifecycle_state,
+        technical_score=context.technical_score,
+        opportunity_score=context.opportunity_score,
+        target_integrity_status=context.target_integrity_status,
+        target_failure=context.target_failure,
+        target_failure_severity=context.target_failure_severity,
+        target_warning_reason=context.target_warning_reason,
+        final_failed_gate=context.final_failed_gate,
+        final_block_reason=context.final_block_reason,
+        invalidation_logic=context.invalidation_logic,
+        why_it_matters_points=context.why_it_matters_points,
+        what_we_want_next_points=context.what_we_want_next_points,
+        caution_points=context.caution_points,
+        signal_context=context,
+    )
+
+
+def _signal_message_context_from_symbol(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    message: TelegramSignalMessage,
+    *,
+    candidate: PublicWatchlistCandidate | None = None,
+) -> SignalMessageContext:
+    lifecycle = symbol_result.lifecycle_state
+    source_modes = _signal_context_source_modes(symbol_result, diagnostics, message, candidate=candidate)
+    primary_mode = _signal_context_primary_mode(symbol_result, diagnostics, message, source_modes, candidate=candidate)
+    secondary_modes = tuple(mode for mode in source_modes if mode != primary_mode)
+    valid_modes = set(_signal_mode_values(symbol_result.valid_strategy_modes))
+    actionability_state = _first_non_na(
+        getattr(symbol_result, "actionability_state", NA),
+        getattr(lifecycle, "actionability_state", NA) if lifecycle is not None else NA,
+        message.actionability_state,
+        diagnostics.get("actionability_state"),
+    )
+    target_warning_reason = _first_non_na(
+        getattr(symbol_result, "target_warning_reason", NA),
+        getattr(lifecycle, "target_warning_reason", NA) if lifecycle is not None else NA,
+        diagnostics.get("target_warning_reason"),
+        diagnostics.get("target_integrity_warning"),
+        diagnostics.get("target_integrity_reason"),
+        message.target_warning_reason,
+    )
+    target_failure_severity = _first_non_na(
+        getattr(symbol_result, "target_failure_severity", NA),
+        getattr(lifecycle, "target_failure_severity", NA) if lifecycle is not None else NA,
+        diagnostics.get("target_failure_severity"),
+        message.target_failure_severity,
+    )
+    final_failed_gate = _first_non_na(
+        getattr(symbol_result, "final_failed_gate", NA),
+        getattr(lifecycle, "final_failed_gate", NA) if lifecycle is not None else NA,
+        diagnostics.get("first_failed_gate"),
+        diagnostics.get("failed_gate"),
+        getattr(lifecycle, "failed_gate", NA) if lifecycle is not None else NA,
+        message.final_failed_gate,
+    )
+    final_block_reason = _first_non_na(
+        getattr(symbol_result, "final_block_reason", NA),
+        getattr(lifecycle, "final_block_reason", NA) if lifecycle is not None else NA,
+        diagnostics.get("final_block_reason"),
+        diagnostics.get("block_reason"),
+        message.final_block_reason,
+    )
+    context = SignalMessageContext(
+        symbol=symbol_result.symbol,
+        direction=message.direction,
+        primary_mode=primary_mode,
+        secondary_modes=secondary_modes,
+        source_modes=source_modes,
+        confluence_valid={"scalp", "swing"}.issubset(valid_modes),
+        grade=message.quality,
+        quality_score=_signal_context_quality_score(symbol_result, diagnostics, message),
+        lifecycle_state=_signal_context_lifecycle_state(symbol_result, candidate),
+        actionability_state=actionability_state,
+        entry_low=message.entry_low,
+        entry_high=message.entry_high,
+        stop_loss=message.stop_loss,
+        tp1=message.tp1,
+        tp2=message.tp2,
+        tp3=message.tp3,
+        rr=message.planned_rr,
+        technical_score=_first_non_na(
+            getattr(lifecycle, "technical_score", NA) if lifecycle is not None else NA,
+            symbol_result.technical_score,
+            diagnostics.get("technical_score"),
+            message.technical_score,
+        ),
+        opportunity_score=_first_non_na(
+            getattr(lifecycle, "opportunity_score", NA) if lifecycle is not None else NA,
+            _opportunity_score_text(symbol_result),
+            diagnostics.get("opportunity_score"),
+            diagnostics.get("total_score"),
+            message.opportunity_score,
+        ),
+        target_integrity_status=_first_non_na(
+            getattr(symbol_result, "target_integrity_status", NA),
+            getattr(lifecycle, "target_integrity_status", NA) if lifecycle is not None else NA,
+            diagnostics.get("target_integrity_status"),
+            message.target_integrity_status,
+        ),
+        target_failure=_first_non_na(
+            getattr(symbol_result, "target_failure", NA),
+            getattr(lifecycle, "target_failure", NA) if lifecycle is not None else NA,
+            diagnostics.get("target_failure"),
+            diagnostics.get("target_failure_type"),
+            message.target_failure,
+        ),
+        target_failure_severity=target_failure_severity,
+        target_warning_reason=target_warning_reason,
+        final_failed_gate=final_failed_gate,
+        final_block_reason=final_block_reason,
+        invalidation_logic=_signal_context_invalidation_logic(message, diagnostics),
+        why_it_matters_points=(),
+        what_we_want_next_points=(),
+        caution_points=(),
+    )
+    return replace(
+        context,
+        why_it_matters_points=_signal_context_why_points(symbol_result, diagnostics, context),
+        what_we_want_next_points=_signal_context_next_points(context, diagnostics),
+        caution_points=_signal_context_caution_points(context),
+    )
+
+
+def _signal_context_source_modes(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    message: TelegramSignalMessage,
+    *,
+    candidate: PublicWatchlistCandidate | None,
+) -> tuple[str, ...]:
+    values: list[Any] = [
+        symbol_result.valid_strategy_modes,
+        getattr(symbol_result.lifecycle_state, "mode", NA),
+        candidate.mode if candidate is not None else NA,
+        diagnostics.get("source_modes"),
+        diagnostics.get("mode"),
+        message.source_modes,
+        message.mode,
+    ]
+    if not _signal_mode_values(symbol_result.valid_strategy_modes):
+        values.append(symbol_result.rejected_strategy_modes)
+    return _unique_signal_modes(*values)
+
+
+def _signal_context_primary_mode(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    message: TelegramSignalMessage,
+    source_modes: Sequence[str],
+    *,
+    candidate: PublicWatchlistCandidate | None,
+) -> str:
+    for value in (
+        message.primary_mode,
+        message.mode,
+        getattr(symbol_result.lifecycle_state, "mode", NA),
+        candidate.mode if candidate is not None else NA,
+        diagnostics.get("selected_mode"),
+        diagnostics.get("mode"),
+    ):
+        modes = _signal_mode_values(value)
+        if modes:
+            return modes[0]
+    return source_modes[0] if source_modes else NA
+
+
+def _unique_signal_modes(*values: Any) -> tuple[str, ...]:
+    modes: list[str] = []
+    for value in values:
+        for mode in _signal_mode_values(value):
+            if mode not in modes:
+                modes.append(mode)
+    return tuple(modes)
+
+
+def _signal_mode_values(value: Any) -> tuple[str, ...]:
+    if value is None or value == NA or isinstance(value, Mapping):
+        return ()
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return _unique_signal_modes(*value)
+    text = _text(value)
+    if text == NA:
+        return ()
+    key = text.lower().replace("+", " ").replace(",", " ").replace("/", " ").replace("|", " ")
+    key = key.replace("-", "_")
+    tokens: list[str] = []
+    for mode in ("scalp", "swing", "challenge"):
+        parts = key.split()
+        if key == mode or mode in parts or key.endswith(f"_{mode}") or f"_{mode}_" in key:
+            tokens.append(mode)
+    return tuple(tokens)
+
+
+def _signal_context_quality_score(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    message: TelegramSignalMessage,
+) -> Any:
+    quality = symbol_result.setup_quality
+    return _first_non_zero_text(
+        message.quality_score,
+        diagnostics.get("setup_quality_score"),
+        diagnostics.get("quality_score"),
+        getattr(quality, "quality_score", NA) if getattr(quality, "is_evaluated", False) else NA,
+        getattr(symbol_result.lifecycle_state, "quality_score", NA) if symbol_result.lifecycle_state is not None else NA,
+        diagnostics.get("readiness_score"),
+    )
+
+
+def _first_non_zero_text(*values: Any) -> Any:
+    for value in values:
+        text = _text(value)
+        if text != NA and text != "0":
+            return value
+    return NA
+
+
+def _signal_context_lifecycle_state(
+    symbol_result: ScannerSymbolResult,
+    candidate: PublicWatchlistCandidate | None,
+) -> str:
+    lifecycle = symbol_result.lifecycle_state
+    return _first_non_na(
+        getattr(getattr(lifecycle, "current_state", NA), "value", getattr(lifecycle, "current_state", NA)) if lifecycle is not None else NA,
+        candidate.lifecycle_state if candidate is not None else NA,
+    )
+
+
+def _signal_context_invalidation_logic(message: TelegramSignalMessage, diagnostics: Mapping[str, Any]) -> str:
+    stop = format_telegram_price(message.stop_loss)
+    if stop == NA:
+        return "Hard invalidation: stop level unavailable in stored context."
+    direction = _status_key(message.direction)
+    side_word = "below" if direction == "long" else "above" if direction == "short" else "beyond"
+    body_context = _text(diagnostics.get("body_acceptance_ratio")) != NA or _text(diagnostics.get("acceptance_status")) != NA
+    close_language = "body-closes and accepts" if body_context else "accepts"
+    return f"Invalid if price {close_language} {side_word} {stop}."
+
+
+def _signal_context_why_points(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    context: SignalMessageContext,
+) -> tuple[str, ...]:
+    passed_tokens = _context_status_tokens(
+        diagnostics.get("gates_passed"),
+        diagnostics.get("passed_gates"),
+        diagnostics.get("completed_gates"),
+    )
+    points: list[str] = []
+    sweep = _context_contains_any(passed_tokens, ("sweep", "liquidity_sweep")) or _context_any_positive(
+        diagnostics,
+        "liquidity_sweep_detected",
+        "sweep_detected",
+        "execution_sweep_detected",
+        "execution_sweep_status",
+        "sweep_status",
+    ) or bool(getattr(symbol_result, "sweep_detected", False))
+    if sweep:
+        sweep_label = _signal_context_sweep_label(context, diagnostics)
+        if sweep_label != NA:
+            points.append(f"{sweep_label} liquidity was swept before the setup mapped.")
+        else:
+            points.append("Liquidity sweep is present in diagnostics.")
+
+    reclaim = _context_contains_any(passed_tokens, ("reclaim", "wick_reclaim")) or _context_any_positive(
+        diagnostics,
+        "reclaim_detected",
+        "wick_reclaim_detected",
+        "wick_reclaim_status",
+        "reclaim_status",
+        "structural_reclaim_status",
+    )
+    if reclaim:
+        points.append("Price reclaimed the swept zone instead of accepting through it.")
+
+    structure_shift = _context_contains_any(passed_tokens, ("bos", "choch", "mss", "structure_shift")) or _context_any_positive(
+        diagnostics,
+        "bos_detected",
+        "choch_detected",
+        "mss_detected",
+        "structure_shift_detected",
+        "confirmation_structure_shift_status",
+        "bos_choch_status",
+    ) or bool(getattr(symbol_result, "bos_detected", False)) or bool(getattr(symbol_result, "choch_detected", False))
+    if structure_shift:
+        points.append("5m BOS/CHoCH confirms the structure shift.")
+
+    zone_type = _status_key(_first_non_na(diagnostics.get("selected_zone_type"), diagnostics.get("ob_fvg_status")))
+    has_ob = "ob" in zone_type or "order_block" in zone_type or _context_contains_any(passed_tokens, ("ob", "order_block"))
+    has_fvg = "fvg" in zone_type or "imbalance" in zone_type or _context_contains_any(passed_tokens, ("fvg", "imbalance"))
+    if has_ob and has_fvg:
+        points.append("Pullback is mapped into an OB/FVG reaction zone.")
+    elif has_ob:
+        points.append("Pullback is mapped into an order-block reaction zone.")
+    elif has_fvg:
+        points.append("Pullback is mapped into an FVG reaction zone.")
+
+    fib_status = _status_key(diagnostics.get("fib_alignment_status"))
+    if _context_contains_any(passed_tokens, ("fib",)) or fib_status in {"aligned", "valid", "passed", "confirmed"}:
+        points.append("Pullback depth aligns with the fib pocket.")
+
+    target_status = _status_key(context.target_integrity_status)
+    warning_key = _status_key(context.target_warning_reason)
+    if target_status in {"passed", "valid", "clean"}:
+        points.append("Target integrity leaves a clean RR path toward TP2.")
+    elif target_status == "warning" or "chop" in warning_key or "range" in warning_key:
+        points.append("Target path is tighter/choppy, so TP1 reaction matters.")
+
+    regime_point = _signal_context_regime_point(symbol_result, diagnostics)
+    if regime_point != NA:
+        points.append(regime_point)
+
+    return tuple(_dedupe_public_points(points))
+
+
+def _signal_context_sweep_label(context: SignalMessageContext, diagnostics: Mapping[str, Any]) -> str:
+    label = _sweep_direction_label(diagnostics)
+    if label != NA:
+        return label
+    direction = _status_key(context.direction)
+    if direction == "long":
+        return "Downside"
+    if direction == "short":
+        return "Upside"
+    return NA
+
+
+def _signal_context_regime_point(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:
+    label = _status_key(
+        _first_non_na(
+            symbol_result.regime_compatibility_label,
+            diagnostics.get("regime_compatibility_label"),
+            _mapping_value(symbol_result.regime_diagnostics, "compatibility_label"),
+        )
+    )
+    if not label or "acceptable" in label or "neutral" in label:
+        return NA
+    if any(fragment in label for fragment in ("support", "favorable", "strong", "allowed", "tailwind")):
+        state = _first_non_na(symbol_result.regime_state, diagnostics.get("regime_state"), _mapping_value(symbol_result.regime_diagnostics, "state"))
+        state_text = _plain_label(state) if _text(state) != NA else "market"
+        return f"Regime context supports the setup in the {state_text} environment."
+    return NA
+
+
+def _signal_context_next_points(context: SignalMessageContext, diagnostics: Mapping[str, Any]) -> tuple[str, ...]:
+    actionability = _status_key(context.actionability_state)
+    lifecycle = _status_key(context.lifecycle_state)
+    failed_gate = _status_key(context.final_failed_gate)
+    warning = _clean_public_sentence(context.target_warning_reason)
+    points: list[str] = []
+    if actionability == "a_grade_actionable_target_caution":
+        points.append("No chase. We want clean entry reaction and fast movement away from chop.")
+        points.append("TP1 reaction matters; TP2 path is tighter/choppy.")
+    elif actionability in {"a_grade_actionable", "actionable_a_grade"} or lifecycle == "actionable_a_grade":
+        points.append("Hold entry zone and continue displacement toward TP1.")
+    elif lifecycle in {"watch", "watchlisted", "stalking"}:
+        points.append("Wait for 5m BOS/CHoCH confirmation after sweep.")
+    elif lifecycle == "triggered":
+        points.append("Need confirmation candle close and target path expansion.")
+
+    actionable_state = actionability in {"a_grade_actionable", "a_grade_actionable_target_caution", "actionable_a_grade"} or lifecycle == "actionable_a_grade"
+    gate_point = _signal_context_gate_next_point(failed_gate)
+    if gate_point != NA and not actionable_state:
+        points.append(gate_point)
+    if warning != NA and (actionability == "a_grade_actionable_target_caution" or _status_key(context.target_integrity_status) == "warning"):
+        points.append(warning)
+    if not points:
+        text = _clean_public_sentence(_first_non_na(diagnostics.get("next_trigger_needed"), diagnostics.get("confirmation_needed")))
+        if text != NA:
+            points.append(text)
+    return tuple(_dedupe_public_points(points))
+
+
+def _signal_context_gate_next_point(failed_gate: str) -> str:
+    if not failed_gate:
+        return NA
+    if "limit_zone" in failed_gate or "entry_zone" in failed_gate or "pullback" in failed_gate:
+        return "Wait for pullback into entry zone. No market chase."
+    if "confirmation" in failed_gate or "bos" in failed_gate or "choch" in failed_gate:
+        return "Wait for 5m BOS/CHoCH confirmation after sweep."
+    if "target" in failed_gate or "rr" in failed_gate:
+        return "Need target path expansion before treating the setup as clean."
+    return NA
+
+
+def _signal_context_caution_points(context: SignalMessageContext) -> tuple[str, ...]:
+    actionability = _status_key(context.actionability_state)
+    severity = _status_key(context.target_failure_severity)
+    warning = _clean_public_sentence(context.target_warning_reason)
+    warning_key = _status_key(warning)
+    if not (
+        actionability == "a_grade_actionable_target_caution"
+        or severity in {"target_caution_actionable", "soft_target_warning"}
+        or "chop" in warning_key
+        or "range" in warning_key
+    ):
+        return ()
+    warning_detail = () if warning == NA else (warning,)
+    return _dedupe_public_points(
+        (
+            *warning_detail,
+            "Target path is tighter/choppy - no chase.",
+            "TP1 reaction matters.",
+            "Reduce aggression until price clears chop.",
+        )
+    )
+
+
+def _dedupe_public_points(points: Sequence[str]) -> tuple[str, ...]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for point in points:
+        text = _clean_public_sentence(point)
+        if text == NA:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(text)
+    return tuple(output)
+
 def _public_watchlist_candidate_plan_complete(candidate: PublicWatchlistCandidate) -> bool:
     return not _public_watchlist_candidate_missing_fields(candidate)
 
@@ -4689,6 +5130,7 @@ def _telegram_signal_message_for_alert(
             message,
             structure_reason=_compose_simple_signal_reason(symbol_result, diagnostics, message, candidate),
         )
+        message = _message_with_signal_context(symbol_result, diagnostics, message, candidate=candidate)
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
         return replace(message, invalidation_reason=_terminal_update_reason(symbol_result, alert_type))
     return message
@@ -5318,11 +5760,8 @@ def _watchlist_invalidation_sentence(
     stop = format_telegram_price(stop_loss)
     side = _status_key(direction)
     if stop != NA:
-        side_word = "below" if side == "long" else "above" if side == "short" else "through"
-        return (
-            f"Watchlist invalidates if price accepts {side_word} {stop} or the sweep/BOS/CHoCH "
-            "structure fails before a valid OB/FVG pullback forms."
-        )
+        side_word = "below" if side == "long" else "above" if side == "short" else "beyond"
+        return f"Invalid if price accepts {side_word} {stop}."
 
     raw = _clean_public_sentence(
         _first_non_na(
@@ -10866,21 +11305,11 @@ def _public_invalidation_sentence(
     if stop == NA:
         raw = _clean_public_sentence(raw_invalidation)
         return raw if raw != NA and not _looks_like_rejection_reason(raw) else NA
-    entry = _entry_zone_text(entry_low, entry_high)
     if side == "long":
-        zone = " and accepts below the entry reclaim zone" if entry != NA else ""
-        return (
-            f"Signal invalidates if price closes below {stop}{zone}, "
-            "confirming that the bullish continuation structure has failed."
-        )
+        return f"Invalid if price accepts below {stop}."
     if side == "short":
-        zone = " and accepts above the entry rejection zone" if entry != NA else ""
-        return (
-            f"Signal invalidates if price closes above {stop}{zone}, "
-            "confirming that the bearish continuation structure has failed."
-        )
-    raw = _clean_public_sentence(raw_invalidation)
-    return raw if raw != NA and not _looks_like_rejection_reason(raw) else NA
+        return f"Invalid if price accepts above {stop}."
+    return f"Invalid if price accepts beyond {stop}."
 
 
 def _human_confluence_sentence(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> str:

@@ -7,6 +7,7 @@ from app.formatters.telegram_signal_formatter import (
     FOOTER,
     HEADER_PREFIX,
     TelegramAlertType,
+    SignalMessageContext,
     TelegramSignalMessage,
     format_public_no_trade_message,
     format_telegram_price,
@@ -50,40 +51,44 @@ def test_all_public_signal_messages_end_with_candle_craft_footer() -> None:
 def test_valid_scalp_signal_renders_premium_format() -> None:
     text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, _message())
 
-    assert "🐺🟠 SCALP SIGNAL — BTCUSDT" in text
-    assert "The wolf found liquidity." in text
+    assert "🐺🟠 BTCUSDT — SCALP SETUP SIGNAL" in text
     assert "Bias: LONG" in text
-    assert "Status: CONFIRMED" in text
-    assert "Quality: A" in text
+    assert "Grade: A | Score: N/A" in text
+    assert "Actionability: Confirmed plan" in text
     assert "RR: 2.92R" in text
     assert "🎯 Trade Map" in text
-    assert "Entry Zone: 100 – 102" in text
+    assert "Entry: 100 – 102" in text
     assert "TP1: 110" in text
     assert "TP2: 115" in text
     assert "TP3: 120" in text
-    assert "Now we wait for execution inside the limit zone — no chase." in text
+    assert "🧠 Why this setup matters" in text
+    assert "⚠️ Execution notes" in text
+    assert "Hold entry zone and continue displacement toward TP1." in text
     assert "⚠️ Manual execution only. Manage risk." in text
+    assert "The wolf found liquidity." not in text
     assert "Signal ID" not in text
-
 
 def test_public_watchlist_formatter_matches_simple_signal_shape() -> None:
     text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message())
 
-    assert "🐺🟠 SCALP SIGNAL — BTCUSDT" in text
-    assert "The wolf found liquidity." in text
+    assert "🐺🟠 BTCUSDT — SCALP SETUP SIGNAL" in text
     assert "Bias: LONG" in text
-    assert "Quality: A" in text
+    assert "Grade: A | Score: N/A" in text
+    assert "Actionability: Waiting confirmation" in text
     assert "RR: 2.92R" in text
     assert "🎯 Trade Map" in text
-    assert "Entry Zone: 100 – 102" in text
+    assert "Entry: 100 – 102" in text
     assert "Stop: 95" in text
     assert "TP1: 110" in text
     assert "TP2: 115" in text
     assert "TP3: 120" in text
     assert "🧠 Why this setup matters" in text
     assert "Sweep and reclaim into valid pullback." in text
+    assert "⚠️ Execution notes" in text
     assert "🚫 Invalid if" in text
     assert "Invalid if price accepts below 95." in text
+    assert "👀 What we want next" in text
+    assert "Price must trade into the Limit Zone." in text
     assert "⚠️ Manual execution only. Manage risk." in text
     assert "Candle Craft | Signal. Structure. Execution." in text
     assert "WATCHLIST" not in text
@@ -91,7 +96,6 @@ def test_public_watchlist_formatter_matches_simple_signal_shape() -> None:
     assert "Potential RR" not in text
     assert "No confirmation = no trade." not in text
     assert "CONFIRMED" not in text
-
 
 def test_public_watchlist_target_caution_renders_clear_no_chase_warning() -> None:
     text = format_telegram_signal_message(
@@ -103,10 +107,10 @@ def test_public_watchlist_target_caution_renders_clear_no_chase_warning() -> Non
         ),
     )
 
-    assert "Target caution:" in text
+    assert "Actionability: A-grade target caution" in text
     assert "TP2 remains inside recent chop/range" in text
     assert "path is tighter/choppy" in text
-    assert "No chase" in text
+    assert "no chase" in text.lower()
     assert "target clean" not in text.lower()
     assert "clean target" not in text.lower()
 
@@ -137,7 +141,7 @@ def test_triggered_waiting_confirmation_formatter_shape() -> None:
         ),
     )
 
-    assert "SCALP SIGNAL" in text
+    assert "SCALP SETUP SIGNAL" in text
     assert "confirmation is still required" in text
     assert "Status: LIMIT ZONE HIT" not in text
     assert "No confirmation = no trade." not in text
@@ -249,22 +253,22 @@ def test_no_trade_output_does_not_expose_internal_debug_codes() -> None:
     assert "strategy_diagnostics" not in text
 
 
-def test_missing_tp3_renders_na() -> None:
+def test_missing_tp3_renders_incomplete_trade_map() -> None:
     text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, _message(tp3=NA))
 
-    assert "TP3: N/A" in text
+    assert "Trade Map (incomplete stored context)" in text
+    assert "Missing: TP3" in text
+    assert "TP3: N/A" not in text
 
-
-def test_missing_reason_renders_na_without_inventing_confirmation() -> None:
+def test_missing_reason_renders_context_gap_without_inventing_confirmation() -> None:
     text = format_telegram_signal_message(
         TelegramAlertType.SIGNAL_CONFIRMED,
         _message(structure_reason=NA, confluence=NA),
     )
 
-    reason = text.split("🧠 Why this setup matters\n", 1)[1].split("\nNow we wait", 1)[0]
-    assert reason == "N/A"
+    reason = text.split("🧠 Why this setup matters\n", 1)[1].split("\n\n⚠️ Execution notes", 1)[0]
+    assert "Stored public context does not include structured setup rationale." in reason
     assert "confirmation" not in reason.lower()
-
 
 def test_missing_invalidation_uses_safe_stop_fallback() -> None:
     text = format_telegram_signal_message(
@@ -272,8 +276,96 @@ def test_missing_invalidation_uses_safe_stop_fallback() -> None:
         _message(invalidation_reason=NA),
     )
 
-    assert "🚫 Invalid if\nPrice accepts below 95." in text
+    assert "🚫 Invalid if\n- Invalid if price accepts below 95." in text
 
+def test_swing_signal_labels_swing_setup() -> None:
+    text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message(mode="swing"))
+
+    assert "🐺🟠 BTCUSDT — SWING SETUP SIGNAL" in text
+    assert "SCALP SETUP" not in text
+
+
+def test_combined_source_modes_need_valid_confluence_flag() -> None:
+    selected_scalp = _message(
+        mode="scalp",
+        signal_context=SignalMessageContext(
+            symbol="BTCUSDT",
+            direction="long",
+            primary_mode="scalp",
+            source_modes=("scalp", "swing"),
+            confluence_valid=False,
+        ),
+    )
+    confluence = _message(
+        mode="scalp",
+        signal_context=SignalMessageContext(
+            symbol="BTCUSDT",
+            direction="long",
+            primary_mode="scalp",
+            secondary_modes=("swing",),
+            source_modes=("scalp", "swing"),
+            confluence_valid=True,
+        ),
+    )
+
+    assert "SCALP SETUP SIGNAL" in format_telegram_signal_message(TelegramAlertType.WATCHLIST, selected_scalp)
+    assert "SCALP + SWING CONFLUENCE SIGNAL" in format_telegram_signal_message(TelegramAlertType.WATCHLIST, confluence)
+
+
+def test_a_plus_grade_and_score_are_shown() -> None:
+    text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message(quality="A+", quality_score=96))
+
+    assert "Grade: A+ | Score: 96" in text
+
+
+def test_long_and_short_invalidation_are_direction_aware() -> None:
+    long_text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message(invalidation_reason=NA))
+    short_text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(direction="short", stop_loss=Decimal("105"), invalidation_reason=NA),
+    )
+
+    assert "Invalid if price accepts below 95." in long_text
+    assert "Invalid if price accepts above 105." in short_text
+
+
+def test_missing_invalidation_level_does_not_invent_number() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(stop_loss=NA, invalidation_reason=NA, watchlist_invalidation_reason=NA),
+    )
+
+    assert "Hard invalidation: stop level unavailable in stored context." in text
+    assert "95" not in text
+
+
+def test_structured_why_points_replace_generic_fallback_text() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.WATCHLIST,
+        _message(
+            structure_reason="Setup quality does not provide enough deterministic edge.",
+            signal_context=SignalMessageContext(
+                symbol="BTCUSDT",
+                direction="long",
+                primary_mode="scalp",
+                source_modes=("scalp",),
+                why_it_matters_points=(
+                    "Downside liquidity was swept before the setup mapped.",
+                    "5m BOS/CHoCH confirms the structure shift.",
+                    "Pullback is mapped into an OB/FVG reaction zone.",
+                    "Pullback depth aligns with the fib pocket.",
+                    "Target integrity leaves a clean RR path toward TP2.",
+                ),
+            ),
+        ),
+    )
+
+    assert "Downside liquidity was swept" in text
+    assert "5m BOS/CHoCH confirms" in text
+    assert "OB/FVG reaction zone" in text
+    assert "fib pocket" in text
+    assert "clean RR path" in text
+    assert "Setup quality does not provide enough deterministic edge" not in text
 
 def test_rejected_no_setup_output_is_not_converted_to_valid_signal() -> None:
     text = format_public_no_trade_message(_message(), "Opportunity score is below 80.")
