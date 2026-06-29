@@ -26,6 +26,9 @@ from app.telegram_admin.commands import (
 class FakeCommandTransport:
     def __init__(self) -> None:
         self.send_calls: list[dict[str, Any]] = []
+        self.edit_text_calls: list[dict[str, Any]] = []
+        self.edit_caption_calls: list[dict[str, Any]] = []
+        self.delete_calls: list[dict[str, Any]] = []
         self.answer_callback_calls: list[dict[str, Any]] = []
 
     async def get_updates(self, *, bot_token: str, offset: int | None, limit: int, timeout: int):
@@ -52,6 +55,50 @@ class FakeCommandTransport:
             }
         )
         return ({"status": "sent", "message_id": len(self.send_calls), "chat_id": chat_id},)
+
+    async def edit_message_text(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+        message: str,
+        reply_markup=None,
+    ):
+        self.edit_text_calls.append(
+            {
+                "bot_token": bot_token,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "message": message,
+                "reply_markup": reply_markup,
+            }
+        )
+        return ({"status": "sent", "message_id": message_id, "chat_id": chat_id},)
+
+    async def edit_message_caption(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+        caption: str,
+        reply_markup=None,
+    ):
+        self.edit_caption_calls.append(
+            {
+                "bot_token": bot_token,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "caption": caption,
+                "reply_markup": reply_markup,
+            }
+        )
+        return ({"status": "sent", "message_id": message_id, "chat_id": chat_id},)
+
+    async def delete_message(self, *, bot_token: str, chat_id: str, message_id: int):
+        self.delete_calls.append({"bot_token": bot_token, "chat_id": chat_id, "message_id": message_id})
+        return ({"status": "sent", "message_id": message_id, "chat_id": chat_id},)
 
     async def answer_callback_query(self, *, bot_token: str, callback_query_id: str, text: str | None = None):
         self.answer_callback_calls.append(
@@ -555,8 +602,11 @@ def test_public_user_cannot_publish_wolf_briefing(tmp_path: Path) -> None:
     )
 
     assert result.delivery_status == "sent_public"
-    assert all(call["chat_id"] != "public-channel" for call in transport.send_calls)
-    assert "published to public channel" not in transport.send_calls[0]["message"]
+    assert transport.send_calls == []
+    assert transport.delete_calls == []
+    assert transport.edit_caption_calls == []
+    assert all(call["chat_id"] != "public-channel" for call in transport.edit_text_calls)
+    assert "published to public channel" not in transport.edit_text_calls[0]["message"]
 
 
 def test_public_user_does_not_see_publish_button_when_public_wolf_enabled(tmp_path: Path) -> None:
@@ -785,7 +835,7 @@ def _callback_update(update_id: int, chat_id: str, callback_data: str) -> dict[s
         "callback_query": {
             "id": f"callback-{update_id}",
             "from": {"id": chat_id},
-            "message": {"chat": {"id": chat_id}},
+            "message": {"chat": {"id": chat_id}, "message_id": update_id, "text": "Current UI"},
             "data": callback_data,
         },
     }

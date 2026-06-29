@@ -73,6 +73,37 @@ class TelegramAdminCommandTransport(Protocol):
     ) -> tuple[Mapping[str, Any], ...]:
         """Send one admin command response through Telegram."""
 
+    async def edit_message_text(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+        message: str,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Edit an existing Telegram text message."""
+
+    async def edit_message_caption(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+        caption: str,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Edit an existing Telegram media caption."""
+
+    async def delete_message(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Delete one Telegram message."""
+
     async def answer_callback_query(
         self,
         *,
@@ -160,6 +191,62 @@ class HttpxTelegramAdminCommandTransport:
             bot_token=bot_token,
             chat_id=chat_id,
             message=message,
+            http_client=self._http_client,
+            api_base_url=self._api_base_url,
+            timeout=self._timeout,
+        )
+
+    async def edit_message_text(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+        message: str,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        return await _edit_message_text(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            message_id=message_id,
+            message=message,
+            reply_markup=reply_markup,
+            http_client=self._http_client,
+            api_base_url=self._api_base_url,
+            timeout=self._timeout,
+        )
+
+    async def edit_message_caption(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+        caption: str,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> tuple[Mapping[str, Any], ...]:
+        return await _edit_message_caption(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=caption,
+            reply_markup=reply_markup,
+            http_client=self._http_client,
+            api_base_url=self._api_base_url,
+            timeout=self._timeout,
+        )
+
+    async def delete_message(
+        self,
+        *,
+        bot_token: str,
+        chat_id: str,
+        message_id: int,
+    ) -> tuple[Mapping[str, Any], ...]:
+        return await _delete_message(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            message_id=message_id,
             http_client=self._http_client,
             api_base_url=self._api_base_url,
             timeout=self._timeout,
@@ -316,6 +403,7 @@ async def _process_update(
         )
         chat_id = _callback_chat_id(callback_query)
         chat_type = _callback_chat_type(callback_query)
+        callback_message = _callback_message_payload(callback_query)
         if not _command_chat_is_private(chat_id, chat_type, config):
             _save_latest_processed_update_id(state_path, update_id)
             return _ProcessedUpdate("ignored_unauthorized", preview="Ignored non-private Telegram command update.")
@@ -329,6 +417,7 @@ async def _process_update(
                 config=config,
                 command_service=command_service,
                 transport=transport,
+                callback_message=callback_message,
                 state_path=state_path,
                 audit_path=audit_path,
             )
@@ -340,6 +429,7 @@ async def _process_update(
                 config=config,
                 command_service=command_service,
                 transport=transport,
+                callback_message=callback_message,
                 state_path=state_path,
                 audit_path=audit_path,
             )
@@ -382,6 +472,7 @@ async def _process_update(
             config=config,
             command_service=command_service,
             transport=transport,
+            callback_message=callback_message,
             state_path=state_path,
             audit_path=audit_path,
         )
@@ -715,10 +806,14 @@ async def _process_public_update(
     config: TelegramAdminConfig,
     command_service: TelegramAdminCommandService,
     transport: TelegramAdminCommandTransport,
+    callback_message: Mapping[str, Any] | None = None,
     state_path: Path,
     audit_path: Path,
 ) -> _ProcessedUpdate:
-    response = command_service.public_response_for(command, public_config=config)
+    response_command = _public_callback_response_command(command, callback_message)
+    response = command_service.public_response_for(response_command, public_config=config)
+    if response_command != command:
+        response = replace(response, command=command)
     skipped = _public_skip_status(config, chat_id)
     if skipped is not None:
         _append_public_command_audit(audit_path, update_id, chat_id, response, skipped)
@@ -729,13 +824,14 @@ async def _process_public_update(
         _save_latest_processed_update_id(state_path, update_id)
         return _ProcessedUpdate("dry_run", preview=_preview(response.text))
 
-    await _cleanup_reply_keyboard_if_needed(
-        config=config,
-        chat_id=chat_id,
-        response=response,
-        transport=transport,
-        state_path=state_path,
-    )
+    if callback_message is None:
+        await _cleanup_reply_keyboard_if_needed(
+            config=config,
+            chat_id=chat_id,
+            response=response,
+            transport=transport,
+            state_path=state_path,
+        )
 
     try:
         raw_results = await _send_public_command_response(
@@ -743,6 +839,7 @@ async def _process_public_update(
             chat_id=chat_id,
             response=response,
             transport=transport,
+            callback_message=callback_message,
         )
     except Exception as exc:
         error = _sanitize_error(exc, config, extra_secrets=(chat_id,))
@@ -760,13 +857,13 @@ async def _process_public_update(
     _append_public_command_audit(audit_path, update_id, chat_id, response, "failed", error_message=error)
     return _ProcessedUpdate("failed", preview=_preview(response.text), error_message=error)
 
-
 async def _send_public_command_response(
     *,
     config: TelegramAdminConfig,
     chat_id: str,
     response: AdminCommandResponse,
     transport: TelegramAdminCommandTransport,
+    callback_message: Mapping[str, Any] | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     route_decision = can_send_to_destination(
         signal_channel_destination_for_chat(
@@ -783,6 +880,15 @@ async def _send_public_command_response(
                 "status": "skipped",
                 "error": route_decision.reason,
             },
+        )
+
+    if callback_message is not None:
+        return await _send_public_callback_response(
+            config=config,
+            chat_id=chat_id,
+            response=response,
+            transport=transport,
+            callback_message=callback_message,
         )
 
     if response.photo_path is None and response.photo_url is None:
@@ -833,6 +939,99 @@ async def _send_public_command_response(
         photo_path=None,
         photo_url=None,
     )
+
+
+def _public_callback_response_command(command: str, callback_message: Mapping[str, Any] | None) -> str:
+    if callback_message is not None and command == "/menu":
+        return "/start"
+    return command
+
+
+async def _send_public_callback_response(
+    *,
+    config: TelegramAdminConfig,
+    chat_id: str,
+    response: AdminCommandResponse,
+    transport: TelegramAdminCommandTransport,
+    callback_message: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], ...]:
+    message_id = _callback_message_id(callback_message)
+    if message_id is None:
+        return _public_callback_failure("telegram_callback_message_id_missing")
+
+    if _public_response_has_photo(response):
+        return await _delete_then_send_public_response(
+            config=config,
+            chat_id=chat_id,
+            message_id=message_id,
+            response=response,
+            transport=transport,
+        )
+
+    if _callback_message_has_media(callback_message):
+        return await _delete_then_send_public_response(
+            config=config,
+            chat_id=chat_id,
+            message_id=message_id,
+            response=response,
+            transport=transport,
+        )
+
+    edit_results = await transport.edit_message_text(
+        bot_token=config.bot_token or "",
+        chat_id=chat_id,
+        message_id=message_id,
+        message=response.text,
+        reply_markup=response.reply_markup,
+    )
+    if _raw_results_sent(edit_results):
+        return edit_results
+
+    return await _delete_then_send_public_response(
+        config=config,
+        chat_id=chat_id,
+        message_id=message_id,
+        response=response,
+        transport=transport,
+    )
+
+
+async def _delete_then_send_public_response(
+    *,
+    config: TelegramAdminConfig,
+    chat_id: str,
+    message_id: int,
+    response: AdminCommandResponse,
+    transport: TelegramAdminCommandTransport,
+) -> tuple[Mapping[str, Any], ...]:
+    delete_results = await transport.delete_message(
+        bot_token=config.bot_token or "",
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+    if not _raw_results_sent(delete_results):
+        return delete_results
+    send_results = await _send_public_command_response(
+        config=config,
+        chat_id=chat_id,
+        response=response,
+        transport=transport,
+        callback_message=None,
+    )
+    return tuple(delete_results) + tuple(send_results)
+
+
+def _public_response_has_photo(response: AdminCommandResponse) -> bool:
+    return response.photo_path is not None or response.photo_url is not None
+
+
+def _callback_message_has_media(message: Mapping[str, Any]) -> bool:
+    media_keys = ("photo", "video", "animation", "document", "audio", "voice", "video_note", "sticker")
+    return any(key in message and message.get(key) for key in media_keys)
+
+
+def _public_callback_failure(error: str) -> tuple[Mapping[str, Any], ...]:
+    return ({"status": "failed", "error": error},)
 
 
 async def _send_public_text_response(
@@ -1311,6 +1510,177 @@ async def _send_admin_messages_with_reply_markup(
     return tuple(results)
 
 
+async def _edit_message_text(
+    *,
+    bot_token: str,
+    chat_id: str,
+    message_id: int,
+    message: str,
+    reply_markup: Mapping[str, Any] | None,
+    http_client: httpx.AsyncClient | None,
+    api_base_url: str,
+    timeout: float,
+) -> tuple[Mapping[str, Any], ...]:
+    chunks = split_message(message, TELEGRAM_MAX_MESSAGE_LENGTH)
+    if len(chunks) != 1:
+        return (
+            _admin_send_failure(
+                part_number=1,
+                total_parts=max(1, len(chunks)),
+                error="Telegram public UI text exceeds the single-message navigation limit.",
+            ),
+        )
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": chunks[0] if chunks else message,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = dict(reply_markup)
+    return await _post_telegram_single_action(
+        bot_token=bot_token,
+        method="editMessageText",
+        payload=payload,
+        http_client=http_client,
+        api_base_url=api_base_url,
+        timeout=timeout,
+        timeout_error="Telegram public UI edit request timed out.",
+        request_error_prefix="Telegram public UI edit request failed",
+    )
+
+
+async def _edit_message_caption(
+    *,
+    bot_token: str,
+    chat_id: str,
+    message_id: int,
+    caption: str,
+    reply_markup: Mapping[str, Any] | None,
+    http_client: httpx.AsyncClient | None,
+    api_base_url: str,
+    timeout: float,
+) -> tuple[Mapping[str, Any], ...]:
+    chunks = split_message(caption, 1024)
+    if len(chunks) != 1:
+        return (
+            _admin_send_failure(
+                part_number=1,
+                total_parts=max(1, len(chunks)),
+                error="Telegram public UI caption exceeds the single-message navigation limit.",
+            ),
+        )
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": chunks[0] if chunks else caption,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = dict(reply_markup)
+    return await _post_telegram_single_action(
+        bot_token=bot_token,
+        method="editMessageCaption",
+        payload=payload,
+        http_client=http_client,
+        api_base_url=api_base_url,
+        timeout=timeout,
+        timeout_error="Telegram public UI caption edit request timed out.",
+        request_error_prefix="Telegram public UI caption edit request failed",
+    )
+
+
+async def _delete_message(
+    *,
+    bot_token: str,
+    chat_id: str,
+    message_id: int,
+    http_client: httpx.AsyncClient | None,
+    api_base_url: str,
+    timeout: float,
+) -> tuple[Mapping[str, Any], ...]:
+    return await _post_telegram_single_action(
+        bot_token=bot_token,
+        method="deleteMessage",
+        payload={"chat_id": chat_id, "message_id": message_id},
+        http_client=http_client,
+        api_base_url=api_base_url,
+        timeout=timeout,
+        timeout_error="Telegram public UI delete request timed out.",
+        request_error_prefix="Telegram public UI delete request failed",
+    )
+
+
+async def _post_telegram_single_action(
+    *,
+    bot_token: str,
+    method: str,
+    payload: Mapping[str, Any],
+    http_client: httpx.AsyncClient | None,
+    api_base_url: str,
+    timeout: float,
+    timeout_error: str,
+    request_error_prefix: str,
+) -> tuple[Mapping[str, Any], ...]:
+    close_client = http_client is None
+    client = http_client or httpx.AsyncClient(base_url=api_base_url, timeout=timeout)
+    url = f"/bot{bot_token}/{method}"
+    try:
+        try:
+            response = await client.post(url, json=dict(payload))
+        except httpx.TimeoutException:
+            return (_admin_send_failure(part_number=1, total_parts=1, error=timeout_error),)
+        except httpx.HTTPError as exc:
+            return (_admin_send_failure(part_number=1, total_parts=1, error=f"{request_error_prefix}: {exc}"),)
+
+        if response.status_code != 200:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=1,
+                    error=_telegram_send_http_error(response),
+                    http_status=response.status_code,
+                    rate_limited=response.status_code == 429,
+                ),
+            )
+
+        try:
+            body = response.json()
+        except ValueError:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=1,
+                    error="Malformed Telegram public UI response.",
+                    http_status=response.status_code,
+                ),
+            )
+
+        if not isinstance(body, Mapping) or body.get("ok") is not True:
+            return (
+                _admin_send_failure(
+                    part_number=1,
+                    total_parts=1,
+                    error=_telegram_malformed_body_error(body),
+                    http_status=response.status_code,
+                ),
+            )
+
+        return (
+            {
+                "status": "sent",
+                "part_number": 1,
+                "total_parts": 1,
+                "http_status": response.status_code,
+                "rate_limited": False,
+                "error": None,
+                **_telegram_success_metadata(body),
+            },
+        )
+    finally:
+        if close_client:
+            await client.aclose()
+
+
 async def _answer_callback_query(
     *,
     bot_token: str,
@@ -1599,6 +1969,11 @@ def _callback_query_payload(update: Mapping[str, Any]) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _callback_message_payload(callback_query: Mapping[str, Any]) -> Mapping[str, Any]:
+    value = callback_query.get("message")
+    return value if isinstance(value, Mapping) else {}
+
+
 def _callback_query_id(callback_query: Mapping[str, Any]) -> str:
     return _display(callback_query.get("id"))
 
@@ -1624,6 +1999,13 @@ def _callback_chat_type(callback_query: Mapping[str, Any]) -> str:
     if isinstance(message, Mapping):
         return _chat_type(message)
     return NA
+
+
+def _callback_message_id(message: Mapping[str, Any]) -> int | None:
+    try:
+        return int(str(message.get("message_id")))
+    except (TypeError, ValueError):
+        return None
 
 
 def _update_id(update: Mapping[str, Any]) -> int | None:
