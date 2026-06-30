@@ -450,6 +450,21 @@ def test_public_v1_actionable_a_grade_score_88_rr_3_can_send(tmp_path: Path) -> 
     assert len(sender.messages) == 1
     assert _public_v1_block_reasons(db_path)[0][1] == "sent"
 
+def test_public_v1_clean_a_plus_score_88_rr_3_can_send(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-valid-a-plus.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_public_v1_symbol(grade=SetupQualityGrade.A_PLUS, quality_score=88, rr=Decimal("3.0"))),
+            scan_run_id="public-v1-valid-a-plus",
+        )
+    )
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+
 
 def test_public_v1_blocks_score_87_and_persists_reason(tmp_path: Path) -> None:
     db_path = tmp_path / "public-v1-score.db"
@@ -503,7 +518,7 @@ def test_public_v1_blocks_plain_triggered_even_with_high_scores() -> None:
     )
 
     assert decision.eligible is False
-    assert "public_block_non_actionable_state" in decision.reason
+    assert "public_block_non_public_terminal_state" in decision.reason
 
 
 def test_public_v1_blocks_rejected_state() -> None:
@@ -518,7 +533,7 @@ def test_public_v1_blocks_rejected_state() -> None:
     )
 
     assert decision.eligible is False
-    assert "public_block_non_actionable_state" in decision.reason or decision.reason == "lifecycle_state_not_eligible"
+    assert "public_block_non_public_terminal_state" in decision.reason or decision.reason == "lifecycle_state_not_eligible"
 
 
 def test_public_v1_blocks_b_plus_public_grade() -> None:
@@ -536,51 +551,196 @@ def test_public_v1_blocks_b_plus_public_grade() -> None:
     assert "public_block_below_quality_score" in decision.reason
 
 
-def test_public_v1_target_caution_requires_score_91_and_rr_3() -> None:
-    caution = {
-        "target_integrity_status": "warning",
-        "target_failure": "TARGET_INSIDE_CHOP",
-        "target_failure_severity": "target_caution_actionable",
-        "target_warning_reason": "TARGET_INSIDE_CHOP",
-    }
+def test_public_v1_target_caution_a_score_88_rr_2_8_can_send(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-target-caution-a.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
 
-    low_score = telegram_alert_decision_for_symbol(
-        _public_v1_symbol(
-            actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
-            quality_score=90,
-            rr=Decimal("3"),
-            technical_score=Decimal("95"),
-            opportunity_score=Decimal("95"),
-            diagnostics=caution,
-        )
-    )
-    low_rr = telegram_alert_decision_for_symbol(
-        _public_v1_symbol(
-            actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
-            quality_score=91,
-            rr=Decimal("2.99"),
-            technical_score=Decimal("95"),
-            opportunity_score=Decimal("95"),
-            diagnostics=caution,
-        )
-    )
-    valid = telegram_alert_decision_for_symbol(
-        _public_v1_symbol(
-            actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
-            quality_score=91,
-            rr=Decimal("3"),
-            technical_score=Decimal("95"),
-            opportunity_score=Decimal("95"),
-            diagnostics=caution,
+    summary = run(
+        service.deliver_for_run(
+            _run_result(_public_target_caution_symbol(signal_id="target-caution-a")),
+            scan_run_id="public-v1-target-caution-a",
         )
     )
 
-    assert low_score.eligible is False
-    assert "public_block_target_caution_not_strong_enough" in low_score.reason
-    assert low_rr.eligible is False
-    assert "public_block_rr_below_3" in low_rr.reason
-    assert valid.eligible is True
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    text = sender.messages[0]
+    assert "TARGET CAUTION" in text
+    assert "Target path is choppy/tighter" in text
+    assert "No chase" in text
+    assert "TP1 reaction matters" in text
+    assert "Reduce aggression until price clears chop" in text
 
+
+def test_public_v1_target_caution_a_plus_score_88_rr_2_8_can_send() -> None:
+    decision = telegram_alert_decision_for_symbol(
+        _public_target_caution_symbol(
+            grade=SetupQualityGrade.A_PLUS,
+            quality_score=88,
+            rr=Decimal("2.8"),
+            signal_id="target-caution-a-plus",
+        )
+    )
+
+    assert decision.eligible is True
+    assert decision.alert_type == TelegramAlertType.WATCHLIST
+
+
+def test_public_v1_target_caution_blocks_thresholds_and_grades() -> None:
+    cases = (
+        (
+            "rr_low",
+            _public_target_caution_symbol(rr=Decimal("2.79"), signal_id="target-caution-rr-low"),
+            "public_block_target_caution_rr_below_2_8",
+        ),
+        (
+            "score_low",
+            _public_target_caution_symbol(quality_score=87, signal_id="target-caution-score-low"),
+            "public_block_target_caution_score_below_88",
+        ),
+        (
+            "a_minus",
+            _public_target_caution_symbol(grade=SetupQualityGrade.A_MINUS, quality_score=88, signal_id="target-caution-a-minus"),
+            "public_block_below_quality_score",
+        ),
+        (
+            "b_plus",
+            _public_target_caution_symbol(grade=SetupQualityGrade.B_PLUS, quality_score=88, signal_id="target-caution-b-plus"),
+            "public_watchlist_target_caution_grade_below_a:b+",
+        ),
+    )
+
+    for name, symbol, expected_reason in cases:
+        decision = telegram_alert_decision_for_symbol(symbol)
+        assert decision.eligible is False, name
+        assert expected_reason in decision.reason, name
+
+
+def test_public_v1_target_caution_blocks_integrity_failures() -> None:
+    cases = (
+        (
+            "blocked_status",
+            _public_target_caution_symbol(
+                signal_id="target-caution-status-blocked",
+                diagnostics={"target_integrity_status": "blocked", "target_integrity_failed": True},
+            ),
+            "public_block_target_caution_status_blocked",
+        ),
+        (
+            "final_failed_gate_target_integrity",
+            _public_target_caution_symbol(
+                signal_id="target-caution-final-gate",
+                diagnostics={"final_failed_gate": "target_integrity"},
+                final_failed_gate="target_integrity",
+            ),
+            "public_block_target_caution_status_blocked",
+        ),
+        (
+            "invalid_tp_order",
+            _public_target_caution_symbol(
+                signal_id="target-caution-tp-order",
+                diagnostics={"tp2": Decimal("109")},
+                tp2="109",
+            ),
+            "tp_order",
+        ),
+        (
+            "wrong_side_target",
+            _public_target_caution_symbol(
+                signal_id="target-caution-wrong-side",
+                diagnostics={"tp1": Decimal("99")},
+                tp1="99",
+            ),
+            "invalid_target_fields=tp1",
+        ),
+        (
+            "opposing_structure_block",
+            _public_target_caution_symbol(
+                signal_id="target-caution-opposing",
+                diagnostics={
+                    "target_failure": "OPPOSING_STRUCTURE_BLOCK",
+                    "target_failure_severity": "fatal_target_failure",
+                    "target_warning_reason": "OPPOSING_STRUCTURE_BLOCK",
+                },
+                target_failure="OPPOSING_STRUCTURE_BLOCK",
+                target_failure_severity="fatal_target_failure",
+                target_warning_reason="OPPOSING_STRUCTURE_BLOCK",
+            ),
+            "public_block_target_caution_not_inside_chop",
+        ),
+    )
+
+    for name, symbol, expected_reason in cases:
+        decision = telegram_alert_decision_for_symbol(symbol)
+        assert decision.eligible is False, name
+        assert expected_reason in decision.reason, name
+
+
+def test_public_v1_triggered_target_caution_requires_public_actionability_and_confirmation(tmp_path: Path) -> None:
+    plain_triggered = telegram_alert_decision_for_symbol(
+        _public_v1_symbol(
+            state=SetupLifecycleState.TRIGGERED,
+            actionability_state=NA,
+            quality_score=95,
+            rr=Decimal("4"),
+            technical_score=Decimal("99"),
+            opportunity_score=Decimal("99"),
+            signal_id="plain-triggered",
+        )
+    )
+    insufficient_confirmation = telegram_alert_decision_for_symbol(
+        _public_target_caution_symbol(
+            state=SetupLifecycleState.TRIGGERED,
+            confirmation_count=1,
+            required_confirmation_cycles=2,
+            signal_id="triggered-caution-low-confirmation",
+        )
+    )
+
+    db_path = tmp_path / "triggered-target-caution.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    sufficient = run(
+        service.deliver_for_run(
+            _run_result(
+                _public_target_caution_symbol(
+                    state=SetupLifecycleState.TRIGGERED,
+                    confirmation_count=2,
+                    required_confirmation_cycles=2,
+                    signal_id="triggered-caution-confirmed",
+                )
+            ),
+            scan_run_id="triggered-target-caution",
+        )
+    )
+
+    assert plain_triggered.eligible is False
+    assert "public_block_non_public_terminal_state" in plain_triggered.reason
+    assert insufficient_confirmation.eligible is False
+    assert "public_block_non_public_terminal_state" in insufficient_confirmation.reason
+    assert sufficient.sent == 1
+    assert len(sender.messages) == 1
+
+
+def test_public_v1_target_caution_terminal_states_block() -> None:
+    for state in (
+        SetupLifecycleState.REJECTED,
+        SetupLifecycleState.COOLDOWN,
+        SetupLifecycleState.INVALIDATED,
+        SetupLifecycleState.EXPIRED,
+    ):
+        symbol = _public_target_caution_symbol(state=state, signal_id=f"target-caution-{state.value.lower()}")
+        message = telegram_signal_message_from_symbol(symbol)
+        gate = _public_watchlist_gate_result(symbol, message, TelegramEligibilityContext())
+
+        assert gate.allowed is False, state
+        assert any(
+            reason == "public_block_non_public_terminal_state"
+            or "public_watchlist_state_not_eligible" in reason
+            or "public_watchlist_terminal_state" in reason
+            for reason in gate.blocking_reasons
+        ), state
 
 def test_public_v1_blocks_fatal_target_failure() -> None:
     decision = telegram_alert_decision_for_symbol(
@@ -802,15 +962,17 @@ def test_public_v1_btc_long_then_short_after_2h_can_send(tmp_path: Path) -> None
     assert len(sender.messages) == 1
 
 def test_public_v1_non_crypto_symbol_is_blocked_and_persisted(tmp_path: Path) -> None:
-    db_path = tmp_path / "public-v1-non-crypto.db"
-    sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+    for symbol in ("NVDAUSDT", "MUUSDT", "GLWUSDT", "ARMUSDT", "SAMSUNGUSDT", "MSTRUSDT", "RKLBUSDT"):
+        db_path = tmp_path / f"public-v1-non-crypto-{symbol.lower()}.db"
+        sender = FakeSender()
+        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
 
-    summary = run(service.deliver_for_run(_run_result(_public_v1_symbol(symbol="NVDAUSDT")), scan_run_id="public-v1-non-crypto"))
+        summary = run(service.deliver_for_run(_run_result(_public_v1_symbol(symbol=symbol)), scan_run_id=f"public-v1-non-crypto-{symbol}"))
 
-    assert summary.sent == 0
-    assert sender.messages == []
-    assert any(row[2] and "public_block_non_crypto_symbol" in row[2] for row in _public_v1_block_reasons(db_path))
+        assert summary.sent == 0
+        assert sender.messages == []
+        assert any(row[2] and "public_block_non_crypto_symbol" in row[2] for row in _public_v1_block_reasons(db_path))
+
 
 def test_a_grade_watch_waiting_state_is_research_only_until_actionable_public_state() -> None:
     decision = telegram_alert_decision_for_symbol(
@@ -954,6 +1116,58 @@ def _public_v1_symbol(
     transition = result.lifecycle_transition.model_copy(update={"symbol": symbol, "record": record})
     return result.model_copy(update={"lifecycle_state": record, "lifecycle_transition": transition})
 
+
+def _target_caution_diagnostics(**overrides: object) -> dict[str, object]:
+    data: dict[str, object] = {
+        "first_failed_gate": "target_inside_chop",
+        "gates_failed": ("target_inside_chop",),
+        "target_integrity_status": "warning",
+        "target_failure": "TARGET_INSIDE_CHOP",
+        "target_failure_severity": "target_caution_actionable",
+        "target_warning_reason": "TARGET_INSIDE_CHOP",
+    }
+    data.update(overrides)
+    return data
+
+
+def _public_target_caution_symbol(
+    *,
+    grade: SetupQualityGrade = SetupQualityGrade.A,
+    quality_score: int = 88,
+    rr: Decimal = Decimal("2.8"),
+    state: SetupLifecycleState = SetupLifecycleState.ACTIONABLE_A_GRADE,
+    symbol: str = "BTCUSDT",
+    signal_id: str = "target-caution",
+    confirmation_count: int = 2,
+    required_confirmation_cycles: int = 2,
+    diagnostics: dict[str, object] | None = None,
+    **overrides: object,
+) -> ScannerSymbolResult:
+    caution_diagnostics = _target_caution_diagnostics(**(diagnostics or {}))
+    symbol_result = _public_v1_symbol(
+        symbol=symbol,
+        signal_id=signal_id,
+        state=state,
+        actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
+        grade=grade,
+        quality_score=quality_score,
+        rr=rr,
+        technical_score=Decimal("95"),
+        opportunity_score=Decimal("95"),
+        diagnostics=caution_diagnostics,
+    )
+    lifecycle_updates: dict[str, object] = {
+        "actionability_state": "A_GRADE_ACTIONABLE_TARGET_CAUTION",
+        "confirmation_count": confirmation_count,
+        "required_confirmation_cycles": required_confirmation_cycles,
+        "failed_gate": caution_diagnostics.get("first_failed_gate", NA),
+        "target_integrity_status": caution_diagnostics.get("target_integrity_status", "warning"),
+        "target_failure": caution_diagnostics.get("target_failure", "TARGET_INSIDE_CHOP"),
+        "target_failure_severity": caution_diagnostics.get("target_failure_severity", "target_caution_actionable"),
+        "target_warning_reason": caution_diagnostics.get("target_warning_reason", "TARGET_INSIDE_CHOP"),
+    }
+    lifecycle_updates.update(overrides)
+    return _with_lifecycle_fields(symbol_result, **lifecycle_updates)
 
 def _public_v1_block_reasons(db_path: Path) -> list[tuple[str, str, str]]:
     with sqlite3.connect(db_path) as connection:
@@ -2015,6 +2229,8 @@ def test_public_watchlist_can_send_target_caution_with_clear_warning(tmp_path: P
         final_quality_grade="A",
         final_failed_gate=NA,
         final_block_reason=NA,
+        confirmation_count=2,
+        required_confirmation_cycles=2,
         target_integrity_status="warning",
         target_failure="TARGET_INSIDE_CHOP",
         target_failure_severity="target_caution_actionable",
@@ -2027,8 +2243,11 @@ def test_public_watchlist_can_send_target_caution_with_clear_warning(tmp_path: P
     assert len(sender.messages) == 1
     text = sender.messages[0]
     assert "Actionability: A-grade target caution" in text
-    assert "path is tighter/choppy" in text
+    assert "TARGET CAUTION" in text
+    assert "Target path is choppy/tighter" in text
     assert "No chase" in text
+    assert "TP1 reaction matters" in text
+    assert "Reduce aggression until price clears chop" in text
     assert "target clean" not in text.lower()
     assert "clean target" not in text.lower()
 
@@ -3596,9 +3815,9 @@ def _syn_watchlist_snapshot(*, signal_id: str, invalidation: object = Decimal("0
     )
 
 
-def _mu_watchlist_snapshot(*, signal_id: str, invalidation: object = Decimal("1257.60")) -> ScannerSymbolResult:
+def _eth_watchlist_snapshot(*, signal_id: str, invalidation: object = Decimal("1257.60")) -> ScannerSymbolResult:
     return _runtime_public_watchlist_snapshot(
-        symbol="MUUSDT",
+        symbol="ETHUSDT",
         side="short",
         grade="A",
         potential_rr=Decimal("3.2"),
@@ -3860,8 +4079,8 @@ def test_old_sent_row_without_plan_id_is_fallback_matched(tmp_path: Path, monkey
     assert len([row for row in rows if row["telegram_status"] == "sent"]) == 1
     assert any(row["blocked_reason"] == "public_block_same_symbol_same_side_cooldown" for row in rows)
 
-def test_muusdt_same_public_watchlist_plan_sends_once(tmp_path: Path) -> None:
-    db_path = tmp_path / "muusdt-hard-dedupe.db"
+def test_ethusdt_same_public_watchlist_plan_sends_once(tmp_path: Path) -> None:
+    db_path = tmp_path / "ethusdt-hard-dedupe.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
     stops = (
@@ -3878,8 +4097,8 @@ def test_muusdt_same_public_watchlist_plan_sends_once(tmp_path: Path) -> None:
     summaries = [
         run(
             service.deliver_for_run(
-                _run_result(_mu_watchlist_snapshot(signal_id=f"mu-{index}", invalidation=stop)),
-                scan_run_id=f"mu-{index}",
+                _run_result(_eth_watchlist_snapshot(signal_id=f"eth-{index}", invalidation=stop)),
+                scan_run_id=f"eth-{index}",
             )
         )
         for index, stop in enumerate(stops, start=1)
@@ -3891,7 +4110,7 @@ def test_muusdt_same_public_watchlist_plan_sends_once(tmp_path: Path) -> None:
     assert len(_sent_public_watchlist_records(db_path)) == 1
     events = _sent_public_alert_event_records(db_path)
     assert len(events) == 1
-    assert events[0]["symbol"] == "MUUSDT"
+    assert events[0]["symbol"] == "ETHUSDT"
     assert events[0]["side"] == "short"
 
 
@@ -4996,7 +5215,7 @@ def test_first_seen_triggered_b_plus_complete_plan_is_research_only(tmp_path: Pa
             "SELECT blocked_reason FROM telegram_alert_attempts WHERE attempted_alert_type = 'WATCHLIST'"
         ).fetchone()
     assert row is not None
-    assert "public_block_non_actionable_state" in row[0]
+    assert "public_block_non_public_terminal_state" in row[0]
 
 def test_first_seen_triggered_reject_grade_does_not_send_watchlist(tmp_path: Path) -> None:
     db_path = tmp_path / "first-seen-reject.db"

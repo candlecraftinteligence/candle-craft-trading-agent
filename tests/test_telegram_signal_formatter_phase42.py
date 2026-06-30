@@ -109,8 +109,11 @@ def test_public_watchlist_target_caution_renders_clear_no_chase_warning() -> Non
 
     assert "Actionability: A-grade target caution" in text
     assert "TP2 remains inside recent chop/range" in text
-    assert "path is tighter/choppy" in text
-    assert "no chase" in text.lower()
+    assert "TARGET CAUTION" in text
+    assert "Target path is choppy/tighter" in text
+    assert "No chase" in text
+    assert "TP1 reaction matters" in text
+    assert "Reduce aggression until price clears chop" in text
     assert "target clean" not in text.lower()
     assert "clean target" not in text.lower()
 
