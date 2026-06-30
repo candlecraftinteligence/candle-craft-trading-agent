@@ -458,7 +458,8 @@ def _target_caution_points(message: TelegramSignalMessage) -> tuple[str, ...]:
     warning_detail = () if warning == NA else (warning.rstrip("."),)
     return (
         *warning_detail,
-        f"Target path is tighter/choppy {EM_DASH} no chase.",
+        "TARGET CAUTION: Target path is choppy/tighter.",
+        "No chase.",
         "TP1 reaction matters.",
         "Reduce aggression until price clears chop.",
     )
@@ -530,7 +531,9 @@ def _target_caution_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     if not caution:
         return ()
     detail = "TP2 sits inside recent chop/range" if warning == NA else warning.rstrip(".")
-    return (f"Target caution: {detail}, so the path is tighter/choppy. No chase; use the planned zone only.",)
+    return (
+        f"TARGET CAUTION: {detail}. Target path is choppy/tighter. No chase. TP1 reaction matters. Reduce aggression until price clears chop.",
+    )
 
 
 def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:

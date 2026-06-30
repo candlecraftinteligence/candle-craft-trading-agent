@@ -182,8 +182,9 @@ TERMINAL_IDENTITY_BLOCK_REASONS = {
 DEFAULT_CONFIRMED_MIN_RR = Decimal("3")
 PUBLIC_SIGNAL_MIN_GRADE = MIN_PUBLIC_SIGNAL_GRADE
 PUBLIC_SIGNAL_MIN_SCORE = Decimal("88")
-PUBLIC_SIGNAL_TARGET_CAUTION_MIN_SCORE = Decimal("91")
 PUBLIC_SIGNAL_MIN_RR = Decimal("3")
+PUBLIC_SIGNAL_TARGET_CAUTION_MIN_SCORE = Decimal("88")
+PUBLIC_SIGNAL_TARGET_CAUTION_MIN_RR = Decimal("2.8")
 PUBLIC_SIGNAL_MIN_TECHNICAL_SCORE = Decimal("95")
 PUBLIC_SIGNAL_MIN_OPPORTUNITY_SCORE = Decimal("95")
 PUBLIC_SIGNAL_MAX_PER_SCAN = 1
@@ -208,9 +209,41 @@ PUBLIC_SIGNAL_NON_CRYPTO_BASE_SYMBOLS = frozenset(
         "SOXL",
         "DRAM",
         "MRVL",
+        "RKLB",
+        "MSTR",
+        "SAMSUNG",
+        "ARM",
+        "GLW",
+        "SNDK",
+        "FLNC",
+        "AAOI",
+        "HOOD",
+        "COIN",
+        "IBM",
+        "MU",
+        "META",
+        "AMZN",
+        "MSFT",
+        "XAUT",
     }
 )
 PUBLIC_SIGNAL_ALLOWED_TARGET_CAUTION_WARNINGS = frozenset({"target_inside_chop"})
+PUBLIC_SIGNAL_NON_PUBLIC_TERMINAL_STATES = frozenset(
+    {
+        "triggered",
+        "rejected",
+        "reject",
+        "cooldown",
+        "cooled_down",
+        "invalidated",
+        "expired",
+        "archived",
+        "no_longer_tracking",
+        "removed",
+        "cancelled",
+        "canceled",
+    }
+)
 PUBLIC_SIGNAL_BLOCKED_LIFECYCLE_STATES = frozenset(
     {"triggered", "rejected", "reject", "watchlisted", "watchlist", "stalking", "cooldown", "invalidated", "expired"}
 )
@@ -224,6 +257,7 @@ PUBLIC_SIGNAL_HARD_FINAL_GATE_KEYS = frozenset(
         "body_acceptance_failure",
         "opposing_structure_too_close",
         "opposing_structure",
+        "opposing_structure_block",
         "target_integrity",
         "target_integrity_failed",
     }
@@ -6579,7 +6613,12 @@ def _public_watchlist_gate_result(
         failed_gate_classes,
     )
     planned_rr = _decimal_or_none(candidate.potential_rr)
-    min_rr = _decimal_or_default(context.public_watchlist_min_rr, PUBLIC_WATCHLIST_MIN_RR)
+    target_caution = _public_watchlist_target_caution_actionable(symbol_result)
+    min_rr = (
+        PUBLIC_SIGNAL_TARGET_CAUTION_MIN_RR
+        if target_caution
+        else max(_decimal_or_default(context.public_watchlist_min_rr, PUBLIC_WATCHLIST_MIN_RR), PUBLIC_WATCHLIST_MIN_RR)
+    )
     reasons: list[str] = []
     reasons.extend(_public_watchlist_v1_blockers(symbol_result, message, context, candidate=candidate))
 
@@ -6599,12 +6638,12 @@ def _public_watchlist_gate_result(
         reasons.append("public_watchlist_stale_or_expired")
 
     reasons.extend(_public_watchlist_quality_gate_blockers(candidate, min_grade=context.public_watchlist_min_grade))
-    if _public_watchlist_target_caution_actionable(symbol_result):
+    if target_caution:
         grade_blocker = _public_watchlist_target_caution_grade_blocker(candidate)
         if grade_blocker != NA:
             reasons.append(grade_blocker)
-        if planned_rr is None or planned_rr < PUBLIC_WATCHLIST_MIN_RR:
-            reasons.append("public_watchlist_target_caution_rr_below_3")
+        if planned_rr is None or planned_rr < PUBLIC_SIGNAL_TARGET_CAUTION_MIN_RR:
+            reasons.append("public_block_target_caution_rr_below_2_8")
     reasons.extend(_public_watchlist_actionability_blockers(symbol_result))
     reasons.extend(_public_watchlist_status_blockers(symbol_result, candidate=candidate))
     reasons.extend(_public_watchlist_active_rejection_blockers(symbol_result, candidate=candidate))
@@ -6630,9 +6669,12 @@ def _public_watchlist_gate_result(
     if planned_rr is None:
         reasons.append("public_watchlist_missing_rr")
     elif planned_rr < min_rr:
-        reasons.append(f"public_watchlist_rr_below_min:{_text(planned_rr)}<{_text(min_rr)}")
+        if target_caution:
+            reasons.append("public_block_target_caution_rr_below_2_8")
+        else:
+            reasons.append(f"public_watchlist_rr_below_min:{_text(planned_rr)}<{_text(min_rr)}")
 
-    if not failed_gate_codes and not _public_watchlist_target_caution_actionable(symbol_result) and state_key != "actionable_a_grade" and _public_watchlist_actionability_state_key(symbol_result) not in PUBLIC_SIGNAL_ALLOWED_ACTIONABILITY_STATES:
+    if not failed_gate_codes and not target_caution and state_key != "actionable_a_grade" and _public_watchlist_actionability_state_key(symbol_result) not in PUBLIC_SIGNAL_ALLOWED_ACTIONABILITY_STATES:
         reasons.append("public_watchlist_missing_explicit_timing_gate")
     elif failed_gate_codes and allowed_missing_gate is None:
         malformed_gates = tuple(
@@ -7273,7 +7315,7 @@ def _public_watchlist_failed_gate_codes(
         codes = tuple(
             code
             for code in codes
-            if code not in {"target_inside_chop", "target_integrity", "target_integrity_failed"}
+            if code != "target_inside_chop"
         )
     if candidate is not None:
         if candidate.first_seen_triggered_pre_confirmation and not codes:
@@ -7387,8 +7429,10 @@ def _public_watchlist_state_allowed(
     state_key = candidate.lifecycle_state
     if state_key in PUBLIC_WATCHLIST_ELIGIBLE_STATE_KEYS:
         return True
-    if candidate.first_seen_triggered_pre_confirmation:
-        return True
+    if state_key == PUBLIC_WATCHLIST_FIRST_SEEN_TRIGGERED_STATE_KEY:
+        if _public_watchlist_target_caution_actionable(symbol_result):
+            return _public_watchlist_target_caution_confirmation_ready(symbol_result)
+        return candidate.first_seen_triggered_pre_confirmation
     return _public_watchlist_rejected_state_allowed(symbol_result, candidate, failed_gate_codes, failed_gate_classes)
 
 
@@ -7940,8 +7984,12 @@ def _public_watchlist_v1_blockers(
     state_key = _status_key(_public_gate_state(symbol_result))
     actionability_key = _public_watchlist_actionability_state_key(symbol_result)
     target_caution = actionability_key == "a_grade_actionable_target_caution" or _public_watchlist_target_caution_actionable(symbol_result)
+    target_caution_confirmation_ready = _public_watchlist_target_caution_confirmation_ready(symbol_result)
 
-    if state_key in PUBLIC_SIGNAL_BLOCKED_LIFECYCLE_STATES:
+    if state_key in PUBLIC_SIGNAL_NON_PUBLIC_TERMINAL_STATES:
+        if not (state_key == "triggered" and target_caution and target_caution_confirmation_ready):
+            reasons.append("public_block_non_public_terminal_state")
+    elif state_key in PUBLIC_SIGNAL_BLOCKED_LIFECYCLE_STATES:
         reasons.append("public_block_non_actionable_state")
     elif state_key != "actionable_a_grade" and actionability_key not in PUBLIC_SIGNAL_ALLOWED_ACTIONABILITY_STATES:
         reasons.append("public_block_non_actionable_state")
@@ -7954,10 +8002,14 @@ def _public_watchlist_v1_blockers(
     if score is None or score < min_score or not _public_grade_at_least(candidate.grade, context.public_watchlist_min_grade):
         reasons.append("public_block_below_quality_score")
 
-    min_rr = max(_decimal_or_default(context.public_watchlist_min_rr, PUBLIC_SIGNAL_MIN_RR), PUBLIC_SIGNAL_MIN_RR)
     planned_rr = _decimal_or_none(message.planned_rr)
-    if planned_rr is None or planned_rr < min_rr:
-        reasons.append("public_block_rr_below_3")
+    if target_caution:
+        if planned_rr is None or planned_rr < PUBLIC_SIGNAL_TARGET_CAUTION_MIN_RR:
+            reasons.append("public_block_target_caution_rr_below_2_8")
+    else:
+        min_rr = max(_decimal_or_default(context.public_watchlist_min_rr, PUBLIC_SIGNAL_MIN_RR), PUBLIC_SIGNAL_MIN_RR)
+        if planned_rr is None or planned_rr < min_rr:
+            reasons.append("public_block_rr_below_3")
 
     technical_score = _technical_score_decimal(symbol_result)
     if technical_score is None or technical_score < PUBLIC_SIGNAL_MIN_TECHNICAL_SCORE:
@@ -7969,28 +8021,35 @@ def _public_watchlist_v1_blockers(
 
     final_failed_gate = _public_watchlist_final_failed_gate_key(symbol_result)
     if final_failed_gate != NA:
-        if "rr" in final_failed_gate:
+        if target_caution:
+            if final_failed_gate == "target_inside_chop":
+                pass
+            elif final_failed_gate in {"target_integrity", "target_integrity_failed"}:
+                reasons.append("public_block_target_caution_status_blocked")
+            else:
+                reasons.append("public_block_target_caution_not_inside_chop")
+        elif "rr" in final_failed_gate:
             reasons.append("public_block_rr_below_3")
-        elif target_caution and final_failed_gate not in {"target_integrity", "target_integrity_failed", "target_inside_chop"}:
-            reasons.append("public_block_target_caution_not_strong_enough")
-        elif not target_caution:
+        else:
             reasons.append("public_block_non_actionable_state")
 
     if _public_watchlist_has_hard_public_block(symbol_result):
-        reasons.append("public_block_non_actionable_state")
+        reasons.append("public_block_target_caution_status_blocked" if target_caution else "public_block_non_actionable_state")
 
-    if target_caution and _public_watchlist_target_caution_not_strong_enough(
-        symbol_result,
-        message,
-        score=score,
-        planned_rr=planned_rr,
-        technical_score=technical_score,
-        opportunity_score=opportunity_score,
-    ):
-        reasons.append("public_block_target_caution_not_strong_enough")
+    if target_caution:
+        reasons.extend(
+            _public_watchlist_target_caution_blockers(
+                symbol_result,
+                message,
+                candidate=candidate,
+                score=score,
+                planned_rr=planned_rr,
+                technical_score=technical_score,
+                opportunity_score=opportunity_score,
+            )
+        )
 
     return tuple(dict.fromkeys(reasons))
-
 
 def _public_watchlist_actionability_state_key(symbol_result: ScannerSymbolResult) -> str:
     diagnostics = _representative_diagnostics(symbol_result)
@@ -8036,39 +8095,137 @@ def _public_watchlist_has_hard_public_block(symbol_result: ScannerSymbolResult) 
     return any(key in haystack for key in PUBLIC_SIGNAL_HARD_FINAL_GATE_KEYS)
 
 
-def _public_watchlist_target_caution_not_strong_enough(
+def _public_watchlist_target_caution_blockers(
     symbol_result: ScannerSymbolResult,
     message: TelegramSignalMessage,
     *,
+    candidate: PublicWatchlistCandidate,
     score: Decimal | None,
     planned_rr: Decimal | None,
     technical_score: Decimal | None,
     opportunity_score: Decimal | None,
-) -> bool:
+) -> tuple[str, ...]:
+    blockers: list[str] = []
     if score is None or score < PUBLIC_SIGNAL_TARGET_CAUTION_MIN_SCORE:
-        return True
-    if planned_rr is None or planned_rr < PUBLIC_SIGNAL_MIN_RR:
-        return True
+        blockers.append("public_block_target_caution_score_below_88")
+    if planned_rr is None or planned_rr < PUBLIC_SIGNAL_TARGET_CAUTION_MIN_RR:
+        blockers.append("public_block_target_caution_rr_below_2_8")
     if technical_score is None or technical_score < PUBLIC_SIGNAL_MIN_TECHNICAL_SCORE:
-        return True
+        blockers.append("public_block_low_technical_score")
     if opportunity_score is None or opportunity_score < PUBLIC_SIGNAL_MIN_OPPORTUNITY_SCORE:
-        return True
+        blockers.append("public_block_low_opportunity_score")
+    if not _public_watchlist_target_caution_confirmation_ready(symbol_result):
+        blockers.append("public_block_non_public_terminal_state")
+
+    status = _public_watchlist_target_integrity_status_key(symbol_result, message)
+    if status in {"blocked", "failed", "fail", "invalid", "rejected"}:
+        blockers.append("public_block_target_caution_status_blocked")
+    elif status != "warning":
+        blockers.append("public_block_target_caution_not_inside_chop")
+
     if not _public_watchlist_target_caution_warning_is_exact(symbol_result):
+        blockers.append("public_block_target_caution_not_inside_chop")
+
+    blockers.extend(_public_watchlist_target_caution_failed_gate_blockers(symbol_result, candidate=candidate))
+    blockers.extend(_public_watchlist_target_caution_trade_map_blockers(message))
+    if _public_watchlist_target_caution_has_fatal_failure(symbol_result, message):
+        blockers.append("public_block_target_caution_status_blocked")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _public_watchlist_target_caution_confirmation_ready(symbol_result: ScannerSymbolResult) -> bool:
+    diagnostics = _representative_diagnostics(symbol_result)
+    lifecycle = symbol_result.lifecycle_state
+    confirmation_count = _first_decimal(
+        getattr(symbol_result, "confirmation_count", NA),
+        getattr(lifecycle, "confirmation_count", NA) if lifecycle is not None else NA,
+        diagnostics.get("confirmation_count"),
+    )
+    required_cycles = _first_decimal(
+        getattr(symbol_result, "required_confirmation_cycles", NA),
+        getattr(lifecycle, "required_confirmation_cycles", NA) if lifecycle is not None else NA,
+        diagnostics.get("required_confirmation_cycles"),
+    )
+    if confirmation_count is None and required_cycles is None:
         return True
-    return _public_watchlist_target_caution_has_fatal_failure(symbol_result, message)
+    if confirmation_count is None:
+        return False
+    if required_cycles is None:
+        required_cycles = Decimal("1")
+    return confirmation_count >= required_cycles
+
+
+def _public_watchlist_triggered_target_caution_allowed(symbol_result: ScannerSymbolResult) -> bool:
+    return (
+        _status_key(_public_gate_state(symbol_result)) == PUBLIC_WATCHLIST_FIRST_SEEN_TRIGGERED_STATE_KEY
+        and _public_watchlist_target_caution_actionable(symbol_result)
+        and _public_watchlist_target_caution_confirmation_ready(symbol_result)
+    )
+
+def _public_watchlist_target_integrity_status_key(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage | None = None,
+) -> str:
+    diagnostics = _representative_diagnostics(symbol_result)
+    lifecycle = symbol_result.lifecycle_state
+    return _status_key(
+        _first_non_na(
+            getattr(symbol_result, "target_integrity_status", NA),
+            getattr(lifecycle, "target_integrity_status", NA) if lifecycle is not None else NA,
+            diagnostics.get("target_integrity_status"),
+            message.target_integrity_status if message is not None else NA,
+        )
+    )
+
+
+def _public_watchlist_target_caution_failed_gate_blockers(
+    symbol_result: ScannerSymbolResult,
+    *,
+    candidate: PublicWatchlistCandidate,
+) -> tuple[str, ...]:
+    allowed = {"target_inside_chop"}
+    if _public_watchlist_triggered_target_caution_allowed(symbol_result):
+        allowed.add("first_seen_triggered_pre_confirmation")
+    blockers: list[str] = []
+    for code in _public_watchlist_failed_gate_codes(symbol_result, candidate=candidate):
+        if code in allowed:
+            continue
+        if code in {"target_integrity", "target_integrity_failed"}:
+            blockers.append("public_block_target_caution_status_blocked")
+        else:
+            blockers.append("public_block_target_caution_not_inside_chop")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _public_watchlist_target_caution_trade_map_blockers(message: TelegramSignalMessage) -> tuple[str, ...]:
+    blockers: list[str] = []
+    if _decimal_pair_values(message.entry_low, message.entry_high) is None and _decimal_pair_text(message.watch_zone) is None:
+        blockers.append("public_watchlist_missing_entry_zone")
+    if _decimal_or_none(message.stop_loss) is None:
+        blockers.append("public_watchlist_missing_stop")
+    if _decimal_or_none(message.tp1) is None:
+        blockers.append("public_watchlist_missing_tp1")
+    if _decimal_or_none(message.tp2) is None:
+        blockers.append("public_watchlist_missing_tp2")
+    if _decimal_or_none(message.tp3) is None:
+        blockers.append("public_watchlist_missing_tp3")
+    return tuple(dict.fromkeys(blockers))
 
 
 def _public_watchlist_target_caution_warning_is_exact(symbol_result: ScannerSymbolResult) -> bool:
     diagnostics = _representative_diagnostics(symbol_result)
     lifecycle = symbol_result.lifecycle_state
-    key = _status_key(
+    failure_key = _status_key(
         _first_non_na(
             getattr(symbol_result, "target_failure", NA),
             getattr(lifecycle, "target_failure", NA) if lifecycle is not None else NA,
             diagnostics.get("target_failure"),
+            diagnostics.get("target_failure_type"),
         )
     )
-    return key in PUBLIC_SIGNAL_ALLOWED_TARGET_CAUTION_WARNINGS
+    if failure_key:
+        return failure_key in PUBLIC_SIGNAL_ALLOWED_TARGET_CAUTION_WARNINGS
+    return _public_watchlist_target_warning_is_chop(symbol_result)
 
 
 def _public_watchlist_target_caution_has_fatal_failure(
@@ -8082,13 +8239,13 @@ def _public_watchlist_target_caution_has_fatal_failure(
         return True
     if _status_key(diagnostics.get("target_failure_severity")) in {"fatal", "fatal_target_failure", "target_failure_fatal"}:
         return True
-    status = _status_key(diagnostics.get("target_integrity_status"))
-    if status in {"blocked", "failed", "fail", "invalid", "rejected"}:
+    if _public_watchlist_target_integrity_status_key(symbol_result, message) in {"blocked", "failed", "fail", "invalid", "rejected"}:
+        return True
+    if _public_watchlist_final_failed_gate_key(symbol_result) in {"target_integrity", "target_integrity_failed"}:
         return True
     return _truthy_public_flag(diagnostics.get("target_integrity_failed")) or _truthy_public_flag(
         diagnostics.get("target_integrity_blocked")
     )
-
 
 def _public_grade_at_least(value: Any, min_grade: Any) -> bool:
     rank = grade_rank(value)
