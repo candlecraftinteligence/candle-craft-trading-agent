@@ -566,11 +566,11 @@ def test_public_v1_target_caution_a_score_88_rr_2_8_can_send(tmp_path: Path) -> 
     assert summary.sent == 1
     assert len(sender.messages) == 1
     text = sender.messages[0]
-    assert "TARGET CAUTION" in text
-    assert "Target path is choppy/tighter" in text
-    assert "No chase" in text
-    assert "TP1 reaction matters" in text
-    assert "Reduce aggression until price clears chop" in text
+    assert "Status: 🟠 A-Grade Setup · TP1 Priority" in text
+    assert "Target path is choppy/tighter" not in text
+    assert "No chase. Entry only inside the mapped zone." in text
+    assert "TP1 reaction matters because TP2/TP3 path is choppy." in text
+    assert text.count("TP1 reaction matters because TP2/TP3 path is choppy.") == 1
 
 
 def test_public_v1_target_caution_a_plus_score_88_rr_2_8_can_send() -> None:
@@ -2242,12 +2242,12 @@ def test_public_watchlist_can_send_target_caution_with_clear_warning(tmp_path: P
     assert summary.sent == 1
     assert len(sender.messages) == 1
     text = sender.messages[0]
-    assert "Actionability: A-grade target caution" in text
-    assert "TARGET CAUTION" in text
-    assert "Target path is choppy/tighter" in text
-    assert "No chase" in text
-    assert "TP1 reaction matters" in text
-    assert "Reduce aggression until price clears chop" in text
+    assert "Actionability" + ":" not in text
+    assert "Status: 🟠 A-Grade Setup · TP1 Priority" in text
+    assert "Target path is choppy/tighter" not in text
+    assert "No chase. Entry only inside the mapped zone." in text
+    assert "TP1 reaction matters because TP2/TP3 path is choppy." in text
+    assert text.count("TP1 reaction matters because TP2/TP3 path is choppy.") == 1
     assert "target clean" not in text.lower()
     assert "clean target" not in text.lower()
 
@@ -2809,14 +2809,14 @@ def test_hype_style_actionable_a_grade_watchlist_sends_public_signal() -> None:
     assert decision.eligible is True
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     text = format_telegram_signal_message(decision.alert_type, decision.message)
-    assert "SWING SETUP SIGNAL" in text
+    assert "· SWING" in text
     assert "HYPEUSDT" in text
-    assert "Bias: LONG" in text
+    assert "HYPEUSDT · LONG · SWING" in text
     assert "CONFIRMED SIGNAL" not in text
     assert "Entry: 71.41" in text
     assert "RR: 3.10R" in text
     assert "TP1: 72.2" in text
-    assert "Why this setup matters" in text
+    assert "🧠 Edge" in text
     assert "No confirmation = no trade." not in text
     assert "71.407944" not in text
     assert "70.77" in text
@@ -2850,13 +2850,13 @@ def test_public_signal_context_extracts_specific_diagnostics_for_message() -> No
 
     assert message.signal_context is not None
     assert message.signal_context.primary_mode == "swing"
-    assert "CTXUSDT — SWING SETUP SIGNAL" in text
+    assert "CTXUSDT · LONG · SWING" in text
     assert "Downside liquidity was swept" in text
-    assert "Price reclaimed the swept zone" in text
-    assert "5m BOS/CHoCH confirms" in text
-    assert "FVG reaction zone" in text
-    assert "fib pocket" in text
-    assert "clean RR path" in text
+    assert "Downside liquidity was swept and reclaimed." in text
+    assert "5m structure shifted bullish" in text
+    assert "FVG + fib reaction zone" in text
+    assert "fib reaction zone" in text
+    assert "clean RR path" not in text
     assert "Invalid if price" in text and "below 95" in text
     assert "Setup quality does not provide enough deterministic edge" not in text
 
@@ -3095,9 +3095,9 @@ def _deliver_public_watchlist_snapshot(tmp_path: Path, symbol_result: ScannerSym
 
 
 def _why_section(text: str) -> str:
-    marker = "Why this setup matters"
+    marker = "🧠 Edge"
     assert marker in text
-    return text.split(marker, 1)[1].strip().split("\n\n", 1)[0].strip()
+    return text.split(marker, 1)[1].strip().split("\n\n⚠️ Execution", 1)[0].strip()
 
 
 def _reason_watchlist_symbol(
@@ -3490,8 +3490,8 @@ def test_waiting_for_limit_pullback_candidate_reason_mentions_pullback() -> None
     why = _why_section(text).lower()
 
     lowered = text.lower()
-    assert "wait for pullback into entry zone" in lowered
-    assert "no market chase" in lowered
+    assert "wait for confirmation" in lowered
+    assert "no entry until structure accepts back through the trigger zone" in lowered
 
 
 def test_waiting_confirmation_candidate_reason_says_confirmation_pending() -> None:
@@ -3505,7 +3505,7 @@ def test_waiting_confirmation_candidate_reason_says_confirmation_pending() -> No
     why = _why_section(text).lower()
 
     lowered = text.lower()
-    assert "wait for 5m bos/choch confirmation after sweep" in lowered
+    assert "wait for confirmation" in lowered
 
 
 def test_missing_setup_context_uses_cautious_reason_without_fake_details() -> None:
@@ -3518,7 +3518,7 @@ def test_missing_setup_context_uses_cautious_reason_without_fake_details() -> No
     )
     why = _why_section(text).lower()
 
-    assert "regime context supports" in why
+    assert "pullback aligned inside ob/fvg reaction zone" in why
     assert "sweep" not in why
     assert "reclaim" not in why
     assert "bos" not in why
@@ -4590,8 +4590,8 @@ def test_limit_zone_hit_update_sent_once(tmp_path: Path) -> None:
     assert first.sent == 1
     assert second.skipped == 1
     assert len(sender.messages) == 1
-    assert "SWING SETUP SIGNAL" in sender.messages[0]
-    assert "Status:" not in sender.messages[0]
+    assert "· SWING" in sender.messages[0]
+    assert "Status:" in sender.messages[0]
 
 
 def test_confirmed_signal_sent_once_through_confirmed_route(tmp_path: Path) -> None:
@@ -4907,7 +4907,7 @@ def test_admin_draft_delivery_disabled_does_not_block_public_watchlist_trade_ide
     summary = run(service.deliver_for_run(_run_result(_public_v1_symbol(symbol="ENAUSDT", direction="short", rr=Decimal("3.5"))), scan_run_id="admin-disabled-watch"))
 
     assert summary.sent == 1
-    assert "SWING SETUP SIGNAL" in sender.messages[0]
+    assert "· SWING" in sender.messages[0]
     assert "WATCHLIST" not in sender.messages[0]
 
 
@@ -4940,18 +4940,18 @@ def test_public_watchlist_old_wolf_formatter_shape() -> None:
 
     assert decision.message is not None
     text = format_telegram_signal_message(decision.alert_type, decision.message)
-    assert "SWING SETUP SIGNAL" in text
+    assert "· SWING" in text
     assert "ENAUSDT" in text
-    assert "Bias: SHORT" in text
+    assert "ENAUSDT · SHORT · SWING" in text
     assert "Grade: B+ | Score: 80" in text
     assert "RR: 2.60R" in text
     assert "Entry: 0.09528" in text
     assert "Stop: 0.09751" in text
     assert "TP1: 0.093" in text
-    assert "Why this setup matters" in text
-    assert "Manual execution only. Manage risk." in text
+    assert "🧠 Edge" in text
+    assert "Not financial advice." in text
     assert "WATCHLIST" not in text
-    assert "Status:" not in text
+    assert "Status:" in text
     assert "No confirmation = no trade." not in text
     assert text.endswith(FOOTER)
 
@@ -5325,7 +5325,7 @@ def test_confirmed_signal_route_not_dependent_on_prior_watchlist_alert(tmp_path:
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-no-prior-watch"))
 
     assert summary.sent == 1
-    assert "Actionability: Confirmed plan" in sender.messages[0]
+    assert "Status: 🟢 Entry Zone Active" in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
             "SELECT attempted_alert_type FROM telegram_alert_attempts WHERE telegram_status = 'sent'"
@@ -5354,7 +5354,7 @@ def test_confirmed_signal_creates_send_attempt_when_valid_and_telegram_enabled(t
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-stale-rejection"))
 
     assert summary.sent == 1
-    assert "Actionability: Confirmed plan" in sender.messages[0]
+    assert "Status: 🟢 Entry Zone Active" in sender.messages[0]
     assert "DYDXUSDT" in sender.messages[0]
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
@@ -5470,7 +5470,7 @@ def test_signal_confirmed_attempt_created_for_true_confirmed_candidate(tmp_path:
     assert summary.confirmed_alert_audit.signal_confirmed_attempts_created == 1
     assert summary.confirmed_alert_audit.signal_confirmed_sent == 1
     assert _attempt_count(db_path) == 1
-    assert "Actionability: Confirmed plan" in sender.messages[0]
+    assert "Status: 🟢 Entry Zone Active" in sender.messages[0]
 
 
 def test_true_confirmed_candidate_not_blocked_by_historical_rejection_reason(tmp_path: Path) -> None:
@@ -5865,7 +5865,7 @@ def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> N
     assert confirmed.sent == 0
     assert duplicate_confirmed.sent == 0
     assert len(sender.messages) == 1
-    assert "SWING SETUP SIGNAL" in sender.messages[0]
+    assert "· SWING" in sender.messages[0]
     assert "WATCHLIST UPGRADED" not in sender.messages[0]
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.SIGNAL_CONFIRMED)
 
@@ -6118,7 +6118,7 @@ def test_phase42k_watchlist_transition_matrix_preserves_original_id_rows_and_ded
         assert transitioned.sent == 0
         assert duplicate.sent == 0
         assert len(sender.messages) == 1
-        assert "SWING SETUP SIGNAL" in sender.messages[0]
+        assert "· SWING" in sender.messages[0]
         _assert_no_sent_follow_up_attempt(db_path, expected_alert_type)
 
 def test_phase42l_reconciles_soft_failed_confirmation_gate_variants_after_grace_threshold(
@@ -6566,7 +6566,7 @@ def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> Non
     assert invalidated.sent == 0
     assert duplicate_invalidated.sent == 0
     assert len(sender.messages) == 1
-    assert "SWING SETUP SIGNAL" in sender.messages[0]
+    assert "· SWING" in sender.messages[0]
     assert not any("WATCHLIST INVALIDATED" in message for message in sender.messages)
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
@@ -7574,8 +7574,8 @@ def test_confluence_from_raw_derivatives_context_is_public_text() -> None:
     message = telegram_signal_message_from_symbol(symbol_result)
     text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, message)
 
-    assert "🧠 Why this setup matters" in text
-    assert "Why this setup matters" in text
+    assert "🧠 Edge" in text
+    assert "🧠 Edge" in text
     for forbidden in ("Decimal(", "{", "}", "true", "false", "funding_rate:", "open_interest:"):
         assert forbidden not in text
 
