@@ -52,20 +52,20 @@ def _idea(**overrides: object) -> TradeIdeaResult:
 def test_formats_valid_trade_idea() -> None:
     message = AlertAgent().format(_idea())
 
-    assert "🐺🟠 BTCUSDT — SIGNAL" in message
-    assert "Bias: LONG" in message
-    assert "Actionability: Confirmed plan" in message
-    assert "Grade: A | Score: N/A" in message
-    assert "RR: 3.50R" in message
+    assert message.startswith("🐺 Candle Craft Intelligence")
+    assert "BTCUSDT · LONG · SETUP" in message
+    assert "Grade: A | Score: N/A | RR: 3.50R" in message
+    assert "Status: 🟢 Entry Zone Active" in message
     assert "Entry: 100 – 102" in message
     assert "Stop: 95" in message
     assert "TP1: 112" in message
     assert "TP2: 120" in message
-    assert "Trade Map (incomplete stored context)" in message
-    assert "Missing: TP3" in message
-    assert "⚠️ Manual execution only. Manage risk." in message
+    assert "TP3: N/A" in message
+    assert "Not financial advice." in message
+    assert "Actionability" + ":" not in message
+    assert "Trade Map (incomplete stored context)" not in message
+    assert "Manual execution only. Manage risk." not in message
     assert "Exchange:" not in message
-
 
 def test_dry_run_does_not_call_telegram() -> None:
     async def scenario() -> None:
@@ -95,7 +95,7 @@ def test_dry_run_returns_formatted_message() -> None:
 
     assert result.status == "dry_run"
     assert result.dry_run is True
-    assert "🐺🟠 BTCUSDT — SIGNAL" in result.formatted_message
+    assert result.formatted_message.startswith("🐺 Candle Craft Intelligence")
     assert result.message_parts == (result.formatted_message,)
 
 
@@ -140,7 +140,7 @@ def test_mocked_telegram_success() -> None:
             payload = json.loads(request.content.decode())
             assert request.url.path == "/bottoken/sendMessage"
             assert payload["chat_id"] == "chat"
-            assert "🐺🟠 BTCUSDT — SIGNAL" in payload["text"]
+            assert payload["text"].startswith("🐺 Candle Craft Intelligence")
             assert CANDLE_CRAFT_SIGNATURE in payload["text"]
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
 
@@ -234,7 +234,7 @@ def test_unverified_data_preserved_as_unverified() -> None:
 def test_risk_warning_included() -> None:
     message = AlertAgent().format(_idea())
 
-    assert "⚠️ Manual execution only. Manage risk." in message
+    assert "Not financial advice." in message
 
 
 def test_candle_craft_signature_included() -> None:

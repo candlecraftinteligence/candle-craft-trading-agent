@@ -72,16 +72,19 @@ def _rejected_symbol_result(**overrides: object) -> ScannerSymbolResult:
 def test_valid_setup_formatting_is_premium_telegram_ready() -> None:
     text = format_telegram_strategy_output(_valid_symbol_result())
 
-    assert "🐺🟠 BTCUSDT — SCALP SETUP SIGNAL" in text
-    assert "Bias: LONG" in text
-    assert "Actionability: Confirmed plan" in text
-    assert "RR: 3.25R" in text
+    assert text.startswith("🐺 Candle Craft Intelligence")
+    assert "BTCUSDT · LONG · SCALP" in text
+    assert "Grade: A | Score: N/A | RR: 3.25R" in text
+    assert "Status: 🟢 Entry Zone Active" in text
     assert "Entry: 103100 – 103300" in text
+    assert "TP1: 104800" in text
+    assert "TP2: 106000" in text
     assert "TP3: 107500" in text
+    assert "No chase. Entry only inside the mapped zone." in text
+    assert "Invalid if price body-closes and accepts below 102400." in text
     assert "Signal ID" not in text
     assert "strategy_diagnostics" not in text
     assert text.endswith("Candle Craft | Signal. Structure. Execution.")
-
 
 def test_no_setup_formatting_is_premium_no_trade() -> None:
     text = format_no_setup_message(_rejected_symbol_result())
@@ -123,8 +126,8 @@ def test_na_values_are_preserved_in_valid_setup_formatting() -> None:
             }
         )
     )
-    assert "Trade Map (incomplete stored context)" in missing_tp3
-    assert "Missing: TP3" in missing_tp3
+    assert "🎯 Trade Map" in missing_tp3
+    assert "TP3: N/A" in missing_tp3
 
 
 def test_full_diagnostics_remain_explicit_cli_diagnostics() -> None:

@@ -693,8 +693,9 @@ def _message_has_risk_warning(message: str) -> bool:
         text = line.strip().lower()
         if "manual execution" in text and "manage risk" in text:
             return True
+        if "not financial advice" in text:
+            return True
     return False
-
 
 def _message_has_invalidation(message: str) -> bool:
     if _message_has_field(message, "Invalidation"):

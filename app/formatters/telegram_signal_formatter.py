@@ -13,6 +13,8 @@ FOOTER = "Candle Craft | Signal. Structure. Execution."
 BULLET = "\u2022"
 RANGE_DASH = "\u2013"
 EM_DASH = "\u2014"
+MIDDLE_DOT = "\u00B7"
+COMPACT_SEPARATOR = "\u2501" * 14
 DEFAULT_MIN_RR_DISPLAY = Decimal("3")
 
 
@@ -200,27 +202,30 @@ def format_simple_public_signal_message(message: TelegramSignalMessage) -> str:
 
 def _format_public_signal_message(message: TelegramSignalMessage, *, confirmed: bool) -> str:
     return _join(
-        f"{HEADER_PREFIX} {format_symbol(message.symbol)} {EM_DASH} {_public_signal_title(message)}",
+        "\U0001F43A Candle Craft Intelligence",
         "",
-        f"Bias: {format_direction(message.direction)}",
-        _public_grade_score_line(message),
-        f"Actionability: {_public_actionability_display(message, confirmed=confirmed)}",
-        f"RR: {format_rr(message.planned_rr)}",
+        f"{format_symbol(message.symbol)} {MIDDLE_DOT} {format_direction(message.direction)} {MIDDLE_DOT} {_public_setup_style(message)}",
+        _public_grade_score_rr_line(message),
+        f"Status: {_public_status_display(message, confirmed=confirmed)}",
         "",
-        *_public_trade_map_section(message),
+        *_public_liquidity_lines(message),
         "",
-        "\U0001F9E0 Why this setup matters",
-        *_public_why_lines(message),
+        COMPACT_SEPARATOR,
         "",
-        "\u26A0\ufe0f Execution notes",
-        *_public_execution_note_lines(message, confirmed=confirmed),
+        "\U0001F3AF Trade Map",
+        *_public_compact_trade_map_lines(message),
         "",
-        "\U0001F6AB Invalid if",
-        *_public_invalidation_lines(message),
+        COMPACT_SEPARATOR,
         "",
-        "\U0001F440 What we want next",
-        *_public_next_lines(message, confirmed=confirmed),
+        "\U0001F9E0 Edge",
+        *_public_edge_lines(message),
         "",
+        "\u26A0\ufe0f Execution",
+        *_public_execution_lines(message, confirmed=confirmed),
+        "",
+        _public_compact_invalidation_line(message),
+        "",
+        "Not financial advice.",
         FOOTER,
     )
 
@@ -259,7 +264,8 @@ def _effective_signal_context(message: TelegramSignalMessage) -> SignalMessageCo
     )
 
 
-def _public_signal_title(message: TelegramSignalMessage) -> str:
+
+def _public_setup_style(message: TelegramSignalMessage) -> str:
     context = _effective_signal_context(message)
     source_modes = _canonical_modes(
         context.source_modes,
@@ -274,93 +280,277 @@ def _public_signal_title(message: TelegramSignalMessage) -> str:
     if primary == NA and source_modes:
         primary = source_modes[0]
     if context.confluence_valid and {"scalp", "swing"}.issubset(set(source_modes)):
-        return "SCALP + SWING CONFLUENCE SIGNAL"
-    if primary == "swing":
-        return "SWING SETUP SIGNAL"
-    if primary == "scalp":
-        return "SCALP SETUP SIGNAL"
-    if primary == "challenge":
-        return "CHALLENGE SETUP SIGNAL"
-    return _signal_title(message)
+        return "SCALP/SWING"
+    labels = {"scalp": "SCALP", "swing": "SWING", "challenge": "CHALLENGE"}
+    if primary in labels:
+        return labels[primary]
+    mode = _mode_display(message.mode)
+    return mode if mode != NA else "SETUP"
 
 
-def _public_grade_score_line(message: TelegramSignalMessage) -> str:
+def _public_grade_score_rr_line(message: TelegramSignalMessage) -> str:
     context = _effective_signal_context(message)
     grade = _quality_display(_first_display(context.grade, message.quality))
     score = _display(_first_display(context.quality_score, message.quality_score))
-    return f"Grade: {grade} | Score: {score}"
+    rr = format_rr(_first_display(context.rr, message.planned_rr))
+    return f"Grade: {grade} | Score: {score} | RR: {rr}"
 
 
-def _public_actionability_display(message: TelegramSignalMessage, *, confirmed: bool) -> str:
+def _public_status_display(message: TelegramSignalMessage, *, confirmed: bool) -> str:
+    if _public_is_invalidated(message):
+        return "\U0001F534 Invalidated"
+    if _has_target_caution(message):
+        return f"\U0001F7E0 A-Grade Setup {MIDDLE_DOT} TP1 Priority"
+    if _public_requires_confirmation(message, confirmed=confirmed):
+        return f"\U0001F7E1 Watch {MIDDLE_DOT} Confirmation Needed"
+    return "\U0001F7E2 Entry Zone Active"
+
+
+def _public_is_invalidated(message: TelegramSignalMessage) -> bool:
+    context = _effective_signal_context(message)
+    terminal_keys = {
+        "invalidated",
+        "expired",
+        "no_longer_tracking",
+        "cancelled",
+        "canceled",
+        "closed",
+        "sl_hit",
+        "stop_hit",
+    }
+    values = (
+        context.lifecycle_state,
+        message.lifecycle_state,
+        message.watchlist_status,
+        context.final_failed_gate,
+        message.final_failed_gate,
+    )
+    return any(_status_key(value) in terminal_keys for value in values)
+
+
+def _public_requires_confirmation(message: TelegramSignalMessage, *, confirmed: bool) -> bool:
+    if confirmed:
+        return False
     context = _effective_signal_context(message)
     actionability = _status_key(_first_display(context.actionability_state, message.actionability_state))
     lifecycle = _status_key(_first_display(context.lifecycle_state, message.lifecycle_state))
     watch_status = _status_key(message.watchlist_status)
     failed_gate = _status_key(_first_display(context.final_failed_gate, message.final_failed_gate, message.confirmation_needed))
-    if actionability == "a_grade_actionable_target_caution" or _target_caution_points(message):
-        return "A-grade target caution"
-    if actionability in {"a_grade_actionable", "actionable_a_grade"} or lifecycle == "actionable_a_grade":
-        return "Clean A-grade"
-    if lifecycle == "confirmed" or confirmed:
-        return "Confirmed plan"
-    if "waiting_confirmation" in watch_status or "confirmation" in failed_gate or lifecycle in {"watch", "stalking", "triggered"}:
-        return "Waiting confirmation"
-    if "limit_zone" in failed_gate or "entry_zone" in failed_gate or "pullback" in failed_gate:
-        return "Waiting limit zone"
-    text = _title_display(_first_display(context.actionability_state, context.lifecycle_state, message.actionability_state))
-    return text if text != NA else "Waiting confirmation"
+    if actionability in {"a_grade_actionable", "a_grade_actionable_target_caution", "actionable_a_grade"}:
+        return False
+    if lifecycle in {"confirmed", "actionable_a_grade", "active", "executing", "managing"}:
+        return False
+    if lifecycle in {"watch", "watchlist", "watchlisted", "stalking", "triggered", "a_grade_watch"}:
+        return True
+    if "waiting_confirmation" in watch_status or "confirmation" in failed_gate:
+        return True
+    return True
 
 
-def _public_trade_map_section(message: TelegramSignalMessage) -> tuple[str, ...]:
-    missing = _public_trade_map_missing(message)
-    header = "\U0001F3AF Trade Map" if not missing else "\U0001F3AF Trade Map (incomplete stored context)"
-    lines: list[str] = [header]
-    lines.extend(_public_available_trade_map_lines(message))
-    if missing:
-        lines.append(f"Missing: {', '.join(missing)}")
-    return tuple(lines)
-
-
-def _public_available_trade_map_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+def _has_target_caution(message: TelegramSignalMessage) -> bool:
     context = _effective_signal_context(message)
-    entry_low = _first_display(context.entry_low, message.entry_low)
-    entry_high = _first_display(context.entry_high, message.entry_high)
-    stop_loss = _first_display(context.stop_loss, message.stop_loss)
-    tp1 = _first_display(context.tp1, message.tp1)
-    tp2 = _first_display(context.tp2, message.tp2)
-    tp3 = _first_display(context.tp3, message.tp3)
+    state = _status_key(_first_display(context.actionability_state, message.actionability_state))
+    severity = _status_key(_first_display(context.target_failure_severity, message.target_failure_severity))
+    warning = _status_key(_first_display(context.target_warning_reason, message.target_warning_reason))
+    target_status = _status_key(_first_display(context.target_integrity_status, message.target_integrity_status))
+    failure = _status_key(_first_display(context.target_failure, message.target_failure, context.final_failed_gate, message.final_failed_gate))
+    return (
+        state == "a_grade_actionable_target_caution"
+        or severity in {"target_caution_actionable", "soft_target_warning"}
+        or target_status in {"warning", "soft_warning"}
+        or "target_inside_chop" in failure
+        or "chop" in warning
+        or "range" in warning
+    )
+
+
+def _public_liquidity_lines(message: TelegramSignalMessage) -> tuple[str, str]:
+    side = _public_liquidity_side(message)
+    if side == "downside":
+        return ("\U0001F43A Wolf found downside liquidity.", "Now we track the reaction.")
+    if side == "upside":
+        return ("\U0001F43A Wolf found upside liquidity.", "Now we track the rejection.")
+    return ("\U0001F43A Wolf is tracking liquidity.", "Now we wait for confirmation.")
+
+
+def _public_liquidity_side(message: TelegramSignalMessage) -> str:
+    evidence = _public_edge_evidence_text(message)
+    if not _has_liquidity_sweep_evidence(evidence):
+        return NA
+    if "downside liquidity" in evidence or ("downside" in evidence and "liquidity" in evidence):
+        return "downside"
+    if "upside liquidity" in evidence or ("upside" in evidence and "liquidity" in evidence):
+        return "upside"
+    direction = _direction_key(_first_display(_effective_signal_context(message).direction, message.direction))
+    if direction == "long":
+        return "downside"
+    if direction == "short":
+        return "upside"
+    return NA
+
+
+def _has_liquidity_sweep_evidence(evidence: str) -> bool:
+    return "sweep" in evidence or "swept" in evidence or "reclaim" in evidence or "reject" in evidence
+
+
+def _public_compact_trade_map_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    context = _effective_signal_context(message)
+    entry = _entry_range_values(_first_display(context.entry_low, message.entry_low), _first_display(context.entry_high, message.entry_high))
+    stop = format_price(_first_display(context.stop_loss, message.stop_loss))
+    tp1 = format_price(_first_display(context.tp1, message.tp1))
+    tp2 = format_price(_first_display(context.tp2, message.tp2))
+    tp3 = format_price(_first_display(context.tp3, message.tp3))
+    return (
+        f"Entry: {entry if entry != NA else NA}",
+        f"Stop: {stop if stop != NA else NA}",
+        f"TP1: {tp1 if tp1 != NA else NA}",
+        f"TP2: {tp2 if tp2 != NA else NA}",
+        f"TP3: {tp3 if tp3 != NA else NA}",
+    )
+
+
+def _public_edge_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     lines: list[str] = []
-    entry = _entry_range_values(entry_low, entry_high)
-    if entry != NA:
-        lines.append(f"Entry: {entry}")
-    stop = format_price(stop_loss)
-    if stop != NA:
-        lines.append(f"Stop: {stop}")
-    for label, value in (("TP1", tp1), ("TP2", tp2), ("TP3", tp3)):
-        price = format_price(value)
-        if price != NA:
-            lines.append(f"{label}: {price}")
-    return tuple(lines)
+    liquidity = _public_edge_liquidity_line(message)
+    if liquidity != NA:
+        lines.append(liquidity)
+    confluence = _public_edge_confluence_line(message)
+    if confluence != NA and confluence not in lines:
+        lines.append(confluence)
+    if not lines:
+        lines.extend(_public_fallback_edge_lines(message))
+    return tuple(lines[:2]) if lines else (NA,)
 
 
-def _public_trade_map_missing(message: TelegramSignalMessage) -> tuple[str, ...]:
+def _public_edge_liquidity_line(message: TelegramSignalMessage) -> str:
+    side = _public_liquidity_side(message)
+    evidence = _public_edge_evidence_text(message)
+    if side == "downside":
+        if "reclaim" in evidence:
+            return "Downside liquidity was swept and reclaimed."
+        return "Downside liquidity was swept."
+    if side == "upside":
+        if "reject" in evidence:
+            return "Upside liquidity was swept and rejected."
+        return "Upside liquidity was swept."
+    return NA
+
+
+def _public_edge_confluence_line(message: TelegramSignalMessage) -> str:
+    evidence = _public_edge_evidence_text(message)
+    direction = _direction_key(_first_display(_effective_signal_context(message).direction, message.direction))
+    direction_word = "bullish" if direction == "long" else "bearish" if direction == "short" else "directional"
+    structure = _has_structure_shift_evidence(evidence)
+    zone = _public_reaction_zone_label(evidence)
+    structure_text = f"5m structure shifted {direction_word}" if structure else NA
+    if structure_text != NA and zone != NA:
+        return f"{structure_text}, with pullback aligned {zone}."
+    if structure_text != NA:
+        return f"{structure_text}."
+    if zone != NA:
+        return f"Pullback aligned {zone}."
+    return NA
+
+
+def _has_structure_shift_evidence(evidence: str) -> bool:
+    return (
+        "structure shifted" in evidence
+        or "structure shift" in evidence
+        or "structure is confirmed" in evidence
+        or "bos/choch confirmed" in evidence
+        or "bos/choch confirms" in evidence
+        or "clean ltf bos/choch" in evidence
+        or ("bos" in evidence and "confirmed" in evidence)
+        or ("choch" in evidence and "confirmed" in evidence)
+    )
+
+
+def _public_reaction_zone_label(evidence: str) -> str:
+    normalized = evidence.replace("-", "_").replace("/", "_").replace(" ", "_")
+    padded = f" {evidence} "
+    has_ob = "ob_fvg" in normalized or "order_block" in normalized or "order block" in evidence or " ob " in padded
+    has_fvg = "ob_fvg" in normalized or "fvg" in normalized or "imbalance" in evidence
+    has_fib = "fib" in evidence
+    if has_ob and has_fvg and has_fib:
+        return "inside OB/FVG + fib reaction zone"
+    if has_ob and has_fvg:
+        return "inside OB/FVG reaction zone"
+    if has_ob and has_fib:
+        return "inside OB + fib reaction zone"
+    if has_fvg and has_fib:
+        return "inside FVG + fib reaction zone"
+    if has_ob:
+        return "inside OB reaction zone"
+    if has_fvg:
+        return "inside FVG reaction zone"
+    if has_fib:
+        return "with fib reaction zone"
+    return NA
+
+
+def _public_fallback_edge_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     context = _effective_signal_context(message)
-    missing: list[str] = []
-    if _entry_range_values(_first_display(context.entry_low, message.entry_low), _first_display(context.entry_high, message.entry_high)) == NA:
-        missing.append("entry zone")
-    if format_price(_first_display(context.stop_loss, message.stop_loss)) == NA:
-        missing.append("stop")
-    for label, value in (
-        ("TP1", _first_display(context.tp1, message.tp1)),
-        ("TP2", _first_display(context.tp2, message.tp2)),
-        ("TP3", _first_display(context.tp3, message.tp3)),
-    ):
-        if format_price(value) == NA:
-            missing.append(label)
-    if _rr_display(_first_display(context.rr, message.planned_rr)) == NA:
-        missing.append("RR")
-    return tuple(missing)
+    lines: list[str] = []
+    for value in _public_text_fragments(context.why_it_matters_points, message.structure_reason, message.confluence, message.current_context):
+        text = _safe_public_text(value)
+        if text == NA:
+            continue
+        key = text.lower()
+        if "target path" in key or "tp1 reaction" in key or "no chase" in key or "manual execution" in key:
+            continue
+        if text not in lines:
+            lines.append(text)
+        if len(lines) == 2:
+            break
+    return tuple(lines) if lines else (NA,)
 
+
+def _public_execution_lines(message: TelegramSignalMessage, *, confirmed: bool) -> tuple[str, ...]:
+    if _public_requires_confirmation(message, confirmed=confirmed):
+        return ("Wait for confirmation. No entry until structure accepts back through the trigger zone.",)
+    lines = ["No chase. Entry only inside the mapped zone."]
+    if _has_target_caution(message):
+        lines.append("TP1 reaction matters because TP2/TP3 path is choppy.")
+    return tuple(lines[:2])
+
+
+def _public_compact_invalidation_line(message: TelegramSignalMessage) -> str:
+    context = _effective_signal_context(message)
+    stop = format_price(_first_display(context.stop_loss, message.stop_loss))
+    direction = _direction_key(_first_display(context.direction, message.direction))
+    if stop != NA:
+        side = "below" if direction == "long" else "above" if direction == "short" else "beyond"
+        return f"Invalid if price body-closes and accepts {side} {stop}."
+    explicit = _public_invalidation_text(message)
+    if explicit != NA and "stop level unavailable" not in explicit.lower():
+        return explicit
+    return "Invalidation: N/A."
+
+
+def _public_edge_evidence_text(message: TelegramSignalMessage) -> str:
+    context = _effective_signal_context(message)
+    fragments = _public_text_fragments(
+        context.why_it_matters_points,
+        message.structure_reason,
+        message.confluence,
+        message.current_context,
+        message.ob_fvg_status,
+    )
+    return " ".join(fragments).lower()
+
+
+def _public_text_fragments(*values: Any) -> tuple[str, ...]:
+    fragments: list[str] = []
+    for value in values:
+        if isinstance(value, Mapping):
+            continue
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            fragments.extend(_public_text_fragments(*value))
+            continue
+        text = _display(value)
+        if text != NA:
+            fragments.append(text)
+    return tuple(fragments)
 
 def _entry_range_values(entry_low: Any, entry_high: Any) -> str:
     low = format_price(entry_low)
@@ -370,33 +560,6 @@ def _entry_range_values(entry_low: Any, entry_high: Any) -> str:
     if low == high:
         return low
     return f"{low} {RANGE_DASH} {high}"
-
-
-def _public_why_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
-    context = _effective_signal_context(message)
-    lines = _public_point_lines(context.why_it_matters_points)
-    if lines:
-        return lines
-    reason = safe_reason_text(message.structure_reason, message.confluence, message.current_context)
-    if reason != NA:
-        return (f"- {reason}",)
-    return ("- Stored public context does not include structured setup rationale.",)
-
-
-def _public_execution_note_lines(message: TelegramSignalMessage, *, confirmed: bool) -> tuple[str, ...]:
-    context = _effective_signal_context(message)
-    points: list[Any] = [*context.caution_points, *_target_caution_points(message)]
-    actionability = _status_key(_first_display(context.actionability_state, message.actionability_state))
-    if actionability not in {"a_grade_actionable", "a_grade_actionable_target_caution", "actionable_a_grade"} and not confirmed:
-        points.append("Do not treat this as a clean actionable setup until the pending condition resolves.")
-    if not points:
-        points.append("Use the planned zone only. No market chase.")
-    points.append("\u26A0\ufe0f Manual execution only. Manage risk.")
-    return _public_point_lines(tuple(points))
-
-
-def _public_invalidation_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
-    return (f"- {_public_invalidation_text(message)}",)
 
 
 def _public_invalidation_text(message: TelegramSignalMessage) -> str:
@@ -420,67 +583,13 @@ def _public_invalidation_text(message: TelegramSignalMessage) -> str:
     return "Hard invalidation: stop level unavailable in stored context."
 
 
-def _public_next_lines(message: TelegramSignalMessage, *, confirmed: bool) -> tuple[str, ...]:
-    context = _effective_signal_context(message)
-    lines = _public_point_lines(context.what_we_want_next_points)
-    if lines:
-        return lines
-    actionability = _status_key(_first_display(context.actionability_state, message.actionability_state))
-    lifecycle = _status_key(_first_display(context.lifecycle_state, message.lifecycle_state))
-    if actionability == "a_grade_actionable_target_caution":
-        return _public_point_lines(("No chase. We want clean entry reaction and fast movement away from chop.",))
-    if actionability in {"a_grade_actionable", "actionable_a_grade"} or lifecycle == "actionable_a_grade" or confirmed:
-        return _public_point_lines(("Hold entry zone and continue displacement toward TP1.",))
-    if lifecycle in {"watch", "watchlisted", "stalking"}:
-        return _public_point_lines(("Wait for 5m BOS/CHoCH confirmation after sweep.",))
-    if lifecycle == "triggered":
-        return _public_point_lines(("Need confirmation candle close and target path expansion.",))
-    needs = tuple(_safe_public_text(value) for value in message.needs_next)
-    needs = tuple(value for value in needs if value != NA)
-    if needs:
-        return _public_point_lines(needs)
-    return _public_point_lines(("Wait for the next stored confirmation condition before acting.",))
-
-
 def _target_caution_points(message: TelegramSignalMessage) -> tuple[str, ...]:
-    context = _effective_signal_context(message)
-    state = _status_key(_first_display(context.actionability_state, message.actionability_state))
-    severity = _status_key(_first_display(context.target_failure_severity, message.target_failure_severity))
-    warning = _display(_first_display(context.target_warning_reason, message.target_warning_reason))
-    warning_key = _status_key(warning)
-    caution = (
-        state == "a_grade_actionable_target_caution"
-        or severity in {"target_caution_actionable", "soft_target_warning"}
-        or ("chop" in warning_key or "range" in warning_key)
-    )
-    if not caution:
+    if not _has_target_caution(message):
         return ()
+    context = _effective_signal_context(message)
+    warning = _display(_first_display(context.target_warning_reason, message.target_warning_reason))
     warning_detail = () if warning == NA else (warning.rstrip("."),)
-    return (
-        *warning_detail,
-        "TARGET CAUTION: Target path is choppy/tighter.",
-        "No chase.",
-        "TP1 reaction matters.",
-        "Reduce aggression until price clears chop.",
-    )
-
-
-def _public_point_lines(values: Sequence[Any]) -> tuple[str, ...]:
-    lines: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        text = _safe_public_text(value)
-        if text == NA:
-            continue
-        normalized = text.lower()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        lines.append(f"- {text}")
-        if len(lines) == 6:
-            break
-    return tuple(lines)
-
+    return (*warning_detail, "TP1 reaction matters because TP2/TP3 path is choppy.")
 
 def _canonical_modes(*values: Any) -> tuple[str, ...]:
     modes: list[str] = []
@@ -519,22 +628,9 @@ def _mode_tokens(value: Any) -> tuple[str, ...]:
     return tuple(tokens)
 
 def _target_caution_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
-    state = _status_key(message.actionability_state)
-    severity = _status_key(message.target_failure_severity)
-    warning = _display(message.target_warning_reason)
-    warning_key = _status_key(warning)
-    caution = (
-        state == "a_grade_actionable_target_caution"
-        or severity == "target_caution_actionable"
-        or (severity == "soft_target_warning" and ("chop" in warning_key or "range" in warning_key))
-    )
-    if not caution:
+    if not _has_target_caution(message):
         return ()
-    detail = "TP2 sits inside recent chop/range" if warning == NA else warning.rstrip(".")
-    return (
-        f"TARGET CAUTION: {detail}. Target path is choppy/tighter. No chase. TP1 reaction matters. Reduce aggression until price clears chop.",
-    )
-
+    return ("TP1 reaction matters because TP2/TP3 path is choppy.",)
 
 def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
     side = _direction_key(message.direction)
