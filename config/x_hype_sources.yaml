@@ -1,0 +1,91 @@
+sources:
+  - name: CoinDesk
+    type: rss
+    url: https://www.coindesk.com/arc/outboundfeeds/rss/
+    tier: 1
+    enabled: true
+    categories:
+      - markets
+      - regulation
+      - institutions
+    reliability_weight: 1.05
+    notes: Reputable major crypto/business news feed.
+
+  - name: Cointelegraph
+    type: rss
+    url: https://cointelegraph.com/rss
+    tier: 2
+    enabled: true
+    categories:
+      - crypto
+      - markets
+    reliability_weight: 0.95
+    notes: High-volume crypto publication; scoring filters generic items.
+
+  - name: Decrypt
+    type: rss
+    url: https://decrypt.co/feed
+    tier: 2
+    enabled: true
+    categories:
+      - crypto
+      - culture
+      - security
+    reliability_weight: 0.95
+    notes: Useful for security, exchange, regulation, and narrative stories.
+
+  - name: The Block
+    type: rss
+    url: https://www.theblock.co/rss.xml
+    tier: 2
+    enabled: true
+    categories:
+      - markets
+      - data
+      - institutions
+    reliability_weight: 1.0
+    notes: Market structure and institutional-flow coverage.
+
+  - name: SEC Press Releases
+    type: rss
+    url: https://www.sec.gov/news/pressreleases.rss
+    tier: 1
+    enabled: true
+    categories:
+      - regulation
+      - enforcement
+    reliability_weight: 1.1
+    notes: Official regulator feed; crypto relevance is handled by scoring.
+
+  - name: Binance Announcements
+    type: rss
+    url: https://www.binance.com/en/support/announcement/rss
+    tier: 1
+    enabled: false
+    categories:
+      - exchange
+      - listing
+    reliability_weight: 1.0
+    notes: Verify the current Binance RSS URL before enabling.
+
+  - name: Coinbase Blog
+    type: rss
+    url: https://www.coinbase.com/blog/rss.xml
+    tier: 1
+    enabled: false
+    categories:
+      - exchange
+      - regulation
+      - institutions
+    reliability_weight: 1.0
+    notes: Official exchange/project feed example; enable after confirming the URL.
+
+  - name: High Noise Crypto Feed Example
+    type: rss
+    url: https://example.invalid/crypto-rss.xml
+    tier: 3
+    enabled: false
+    categories:
+      - high-noise
+    reliability_weight: 0.65
+    notes: Tier 3 sources should generally remain disabled unless they cluster with stronger sources.
