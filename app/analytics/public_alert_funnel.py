@@ -10,6 +10,55 @@ from typing import Any, Mapping
 from app.data.dtos import NA
 
 UNKNOWN_PUBLIC_BLOCK = "UNKNOWN_PUBLIC_BLOCK"
+UNVERIFIED = "Unverified"
+
+SCORE_GATE = "SCORE_GATE"
+RR_GATE = "RR_GATE"
+TARGET_INTEGRITY_GATE = "TARGET_INTEGRITY_GATE"
+TARGET_CAUTION_GATE = "TARGET_CAUTION_GATE"
+LIFECYCLE_PUBLIC_STATE_GATE = "LIFECYCLE_PUBLIC_STATE_GATE"
+SYMBOL_UNIVERSE_GATE = "SYMBOL_UNIVERSE_GATE"
+ENTRY_WINDOW_GATE = "ENTRY_WINDOW_GATE"
+DEDUPLICATION_GATE = "DEDUPLICATION_GATE"
+TERMINAL_UPDATE_GATE = "TERMINAL_UPDATE_GATE"
+UNKNOWN_GATE = "UNKNOWN_GATE"
+
+BLOCK_STAGES = (
+    SCORE_GATE,
+    RR_GATE,
+    TARGET_INTEGRITY_GATE,
+    TARGET_CAUTION_GATE,
+    LIFECYCLE_PUBLIC_STATE_GATE,
+    SYMBOL_UNIVERSE_GATE,
+    ENTRY_WINDOW_GATE,
+    DEDUPLICATION_GATE,
+    TERMINAL_UPDATE_GATE,
+    UNKNOWN_GATE,
+)
+
+DEFAULT_PUBLIC_QUALITY_THRESHOLD = Decimal("88")
+DEFAULT_PUBLIC_RR_MIN = Decimal("3")
+TARGET_CAUTION_RR_MIN = Decimal("2.8")
+DEFAULT_PUBLIC_TECHNICAL_MIN = Decimal("95")
+DEFAULT_PUBLIC_OPPORTUNITY_MIN = Decimal("95")
+PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE = "initial_watchlist"
+TERMINAL_LIFECYCLE_ATTEMPT_TYPES = {
+    "COOLDOWN",
+    "EXPIRED",
+    "INVALIDATED",
+    "LIMIT_HIT",
+    "NO_LONGER_TRACKING",
+    "SL_HIT",
+    "STOPPED_OUT",
+    "TAKE_PROFIT_HIT",
+    "TARGET_HIT",
+    "TP1_HIT",
+    "TP2_HIT",
+    "TP3_HIT",
+    "WATCHLIST_EXPIRY",
+    "WATCHLIST_OUTCOME_TRACKING",
+    "WATCHLIST_TERMINAL_SUPPRESSION",
+}
 
 PUBLIC_BLOCK_CATEGORIES = (
     "LOW_SCORE",
@@ -49,7 +98,9 @@ _ATTEMPT_COLUMNS = (
     "attempted_alert_type",
     "setup_quality_score",
     "rr_planned",
+    "min_rr",
     "opportunity_score",
+    "min_score_for_idea",
     "technical_score",
     "entry_low",
     "entry_high",
@@ -63,6 +114,10 @@ _ATTEMPT_COLUMNS = (
     "dedupe_reason",
     "first_seen_at",
     "last_seen_at",
+    "seen_count",
+    "public_watchlist_plan_id",
+    "public_watchlist_event_key",
+    "public_alert_event_type",
 )
 
 _LATEST_SCAN_COUNTER_COLUMNS = (
@@ -171,6 +226,89 @@ def normalize_public_block_reasons(blocked_reason: str) -> list[str]:
     return categories or [UNKNOWN_PUBLIC_BLOCK]
 
 
+def classify_block_stage(blocked_reason: str | Mapping[str, Any], dedupe_reason: str = NA) -> str:
+    row = blocked_reason if isinstance(blocked_reason, Mapping) else None
+    reason = _combined_reason(row) if row is not None else _combine_reason_text(blocked_reason, dedupe_reason)
+    categories = set(normalize_public_block_reasons(reason))
+    key = _reason_key(reason)
+
+    if "terminal_update_no_prior_public_alert" in key or "TERMINAL_UPDATE_NO_PRIOR_PUBLIC_ALERT" in categories:
+        return TERMINAL_UPDATE_GATE
+    if "duplicate_successful_public_watchlist_event" in key or "DUPLICATE_PUBLIC_PLAN" in categories:
+        return DEDUPLICATION_GATE
+    if "TARGET_INTEGRITY_BLOCKED" in categories or "INVALID_TP_SEQUENCE" in categories:
+        return TARGET_INTEGRITY_GATE
+    if (
+        "TARGET_CAUTION_SCORE_BELOW_88" in categories
+        or "TARGET_CAUTION_RR_BELOW_2_8" in categories
+        or "TARGET_CAUTION_NOT_STRONG_ENOUGH" in categories
+        or "TARGET_INSIDE_CHOP" in categories
+    ):
+        return TARGET_CAUTION_GATE
+    if "LOW_SCORE" in categories or "BELOW_MIN_PUBLIC_GRADE" in categories:
+        return SCORE_GATE
+    if "RR_BELOW_MIN" in categories:
+        return RR_GATE
+    if "NON_CRYPTO_SYMBOL" in categories:
+        return SYMBOL_UNIVERSE_GATE
+    if "ENTRY_WINDOW_EXPIRED" in categories:
+        return ENTRY_WINDOW_GATE
+    if "NON_PUBLIC_TERMINAL_STATE" in categories or "NON_ACTIONABLE_STATE" in categories:
+        return LIFECYCLE_PUBLIC_STATE_GATE
+    return UNKNOWN_GATE
+
+
+def is_otherwise_publishable_near_miss(row: Mapping[str, Any]) -> bool:
+    if _display(row.get("telegram_status")).lower() not in {"blocked", NA.lower()}:
+        return False
+
+    reason = _combined_reason(row)
+    categories = set(normalize_public_block_reasons(reason))
+    if {
+        "NON_CRYPTO_SYMBOL",
+        "INVALID_TP_SEQUENCE",
+        "TARGET_INTEGRITY_BLOCKED",
+        "LOW_SCORE",
+        "LOW_TECHNICAL_SCORE",
+        "LOW_OPPORTUNITY_SCORE",
+        "TARGET_CAUTION_SCORE_BELOW_88",
+        "TARGET_CAUTION_RR_BELOW_2_8",
+        "TARGET_CAUTION_NOT_STRONG_ENOUGH",
+    } & categories:
+        return False
+    if "RR_BELOW_MIN" in categories and not _target_caution_rr_qualifies(row):
+        return False
+    return _passes_score_rr_technical_opportunity_checks(row)
+
+
+def build_near_miss_key(row: Mapping[str, Any]) -> str:
+    plan_id = _display(row.get("public_watchlist_plan_id"))
+    if plan_id != NA:
+        return f"plan:{plan_id}"
+    event_key = _display(row.get("public_watchlist_event_key"))
+    if event_key != NA:
+        return f"event:{event_key}"
+    fields = (
+        _display(row.get("symbol")),
+        _status_key(row.get("direction")) or NA,
+        _rounded_number(row.get("entry_low")),
+        _rounded_number(row.get("entry_high")),
+        _rounded_number(row.get("stop_loss")),
+        _rounded_number(row.get("tp1")),
+        _rounded_number(row.get("tp2")),
+        _rounded_number(row.get("tp3")),
+    )
+    return "setup:" + "|".join(fields)
+
+
+def summarize_block_reason_for_humans(blocked_reason: str | Mapping[str, Any]) -> str:
+    reason = _combined_reason(blocked_reason) if isinstance(blocked_reason, Mapping) else _display(blocked_reason)
+    stage = classify_block_stage(blocked_reason)
+    categories = [category for category in normalize_public_block_reasons(reason) if category != UNKNOWN_PUBLIC_BLOCK]
+    if not categories:
+        return f"{stage}: {_shorten(reason, 80)}"
+    return f"{stage}: {', '.join(categories)}"
+
 def build_public_alert_funnel_report(
     database_path: Path | str,
     *,
@@ -187,11 +325,15 @@ def build_public_alert_funnel_report(
         "error": NA,
         "telegram_status_summary": _status_summary(Counter()),
         "status_by_lifecycle_state": [],
+        "block_stage_counts": [],
         "normalized_block_category_counts": [],
         "top_blocked_symbols": [],
         "best_near_miss_blocked_setups": [],
+        "otherwise_publishable_near_misses": [],
+        "lifecycle_public_state_blocks": [],
         "sent_attempts": [],
         "non_crypto_symbol_blocks": [],
+        "non_crypto_hygiene": {},
         "target_caution_chop_summary": [],
         "latest_scan_run_counters": {},
     }
@@ -232,11 +374,18 @@ def build_public_alert_funnel_report(
                         Counter(_display(row.get("telegram_status")).lower() for row in attempts)
                     ),
                     "status_by_lifecycle_state": _status_by_lifecycle_state(attempts),
+                    "block_stage_counts": _block_stage_counts(stop_rows),
                     "normalized_block_category_counts": _category_counts(stop_rows),
                     "top_blocked_symbols": _top_blocked_symbols(blocked_rows, max_rows),
                     "best_near_miss_blocked_setups": _best_near_miss_rows(blocked_rows, max_rows),
+                    "otherwise_publishable_near_misses": _best_near_miss_rows(
+                        [row for row in blocked_rows if is_otherwise_publishable_near_miss(row)],
+                        max_rows,
+                    ),
+                    "lifecycle_public_state_blocks": _lifecycle_public_state_blocks(blocked_rows, max_rows),
                     "sent_attempts": _sent_attempt_rows(sent_rows, max_rows),
                     "non_crypto_symbol_blocks": _non_crypto_symbol_blocks(blocked_rows),
+                    "non_crypto_hygiene": _non_crypto_hygiene(blocked_rows, max_rows),
                     "target_caution_chop_summary": _target_caution_chop_summary(connection, cutoff, max_rows),
                     "latest_scan_run_counters": _latest_scan_run_counters(connection),
                 }
@@ -273,6 +422,12 @@ def format_public_alert_funnel_report(report: Mapping[str, Any]) -> str:
     )
     _append_table(
         lines,
+        "Block stage counts",
+        ("block_stage", "count"),
+        report.get("block_stage_counts", ()),
+    )
+    _append_table(
+        lines,
         "Top blocked symbols",
         ("symbol", "lifecycle_state", "categories", "count"),
         report.get("top_blocked_symbols", ()),
@@ -294,10 +449,50 @@ def format_public_alert_funnel_report(report: Mapping[str, Any]) -> str:
             "TP1",
             "TP2",
             "TP3",
+            "count_seen",
+            "first_seen_at",
+            "last_seen_at",
             "categories",
+            "block_stage",
             "raw_blocked_reason",
         ),
         report.get("best_near_miss_blocked_setups", ()),
+    )
+    _append_table(
+        lines,
+        "Otherwise publishable near-misses",
+        (
+            "symbol",
+            "direction",
+            "lifecycle_state",
+            "score",
+            "RR",
+            "technical_score",
+            "opportunity_score",
+            "count_seen",
+            "categories",
+            "block_stage",
+            "raw_blocked_reason",
+        ),
+        report.get("otherwise_publishable_near_misses", ()),
+    )
+    _append_table(
+        lines,
+        "Lifecycle/public-state block diagnostics",
+        (
+            "symbol",
+            "direction",
+            "lifecycle_state",
+            "attempted_alert_type",
+            "public_alert_event_type",
+            "initial_watchlist_attempt",
+            "terminal_lifecycle_update",
+            "prior_public_alert_event",
+            "otherwise_passed_quality_rr_technical_opportunity",
+            "block_stage",
+            "raw_blocked_reason",
+        ),
+        report.get("lifecycle_public_state_blocks", ()),
     )
     _append_table(
         lines,
@@ -310,6 +505,21 @@ def format_public_alert_funnel_report(report: Mapping[str, Any]) -> str:
         "Non-crypto symbol blocked count",
         ("symbol", "count"),
         report.get("non_crypto_symbol_blocks", ()),
+    )
+    non_crypto_hygiene = report.get("non_crypto_hygiene", {})
+    _append_count_section(
+        lines,
+        "Non-crypto hygiene summary",
+        {
+            key: non_crypto_hygiene.get(key, NA)
+            for key in ("blocked_attempts", "total_blocked_attempts", "blocked_attempt_percentage")
+        },
+    )
+    _append_table(
+        lines,
+        "Top non-crypto symbols",
+        ("symbol", "count", "in_near_miss_list"),
+        non_crypto_hygiene.get("top_symbols") if isinstance(non_crypto_hygiene, Mapping) else (),
     )
     _append_table(
         lines,
@@ -381,6 +591,10 @@ def _category_counts(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
             counter[category] += 1
     return [{"category": category, "count": count} for category, count in counter.most_common()]
 
+def _block_stage_counts(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    counter: Counter[str] = Counter(classify_block_stage(row) for row in rows)
+    return [{"block_stage": stage, "count": count} for stage, count in counter.most_common()]
+
 
 def _top_blocked_symbols(rows: list[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
     counter: Counter[tuple[str, str, str]] = Counter()
@@ -396,16 +610,73 @@ def _top_blocked_symbols(rows: list[Mapping[str, Any]], limit: int) -> list[dict
 
 
 def _best_near_miss_rows(rows: list[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
-    ranked = sorted(
-        rows,
-        key=lambda row: (
-            _decimal_sort(row.get("setup_quality_score")),
-            _decimal_sort(row.get("opportunity_score")),
-            _decimal_sort(row.get("technical_score")),
-            _decimal_sort(row.get("rr_planned")),
-        ),
-        reverse=True,
+    return _deduped_near_miss_rows(rows)[:limit]
+
+
+def _deduped_near_miss_rows(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(build_near_miss_key(row), []).append(row)
+
+    output: list[dict[str, Any]] = []
+    for near_miss_key, group in grouped.items():
+        best = max(group, key=_near_miss_rank_tuple)
+        categories = _group_categories(group)
+        output.append(
+            {
+                "near_miss_key": near_miss_key,
+                "symbol": _display(best.get("symbol")),
+                "direction": _display(best.get("direction")),
+                "lifecycle_state": _display(best.get("lifecycle_state")),
+                "score": _display(best.get("setup_quality_score")),
+                "RR": _display(best.get("rr_planned")),
+                "technical_score": _display(best.get("technical_score")),
+                "opportunity_score": _display(best.get("opportunity_score")),
+                "entry_low": _display(best.get("entry_low")),
+                "entry_high": _display(best.get("entry_high")),
+                "stop_loss": _display(best.get("stop_loss")),
+                "TP1": _display(best.get("tp1")),
+                "TP2": _display(best.get("tp2")),
+                "TP3": _display(best.get("tp3")),
+                "count_seen": sum(_seen_count(row) for row in group),
+                "first_seen_at": _format_timestamp(_group_first_seen_at(group)),
+                "last_seen_at": _format_timestamp(_group_last_seen_at(group)),
+                "categories": ",".join(categories),
+                "block_stage": classify_block_stage(best),
+                "raw_blocked_reason": _shorten(_display(best.get("blocked_reason")), 100),
+                "human_reason": summarize_block_reason_for_humans(best),
+            }
+        )
+    return sorted(output, key=_near_miss_output_rank_tuple, reverse=True)
+
+
+def _near_miss_rank_tuple(row: Mapping[str, Any]) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    return (
+        _decimal_sort(row.get("setup_quality_score")),
+        _decimal_sort(row.get("opportunity_score")),
+        _decimal_sort(row.get("technical_score")),
+        _decimal_sort(row.get("rr_planned")),
     )
+
+
+def _near_miss_output_rank_tuple(row: Mapping[str, Any]) -> tuple[Decimal, Decimal, Decimal, Decimal, str]:
+    return (
+        _decimal_sort(row.get("score")),
+        _decimal_sort(row.get("opportunity_score")),
+        _decimal_sort(row.get("technical_score")),
+        _decimal_sort(row.get("RR")),
+        str(row.get("symbol")),
+    )
+
+
+def _lifecycle_public_state_blocks(rows: list[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
+    filtered = [
+        row
+        for row in rows
+        if classify_block_stage(row) in {LIFECYCLE_PUBLIC_STATE_GATE, TERMINAL_UPDATE_GATE}
+        or "NON_PUBLIC_TERMINAL_STATE" in normalize_public_block_reasons(_combined_reason(row))
+    ]
+    ranked = sorted(filtered, key=_near_miss_rank_tuple, reverse=True)
     output: list[dict[str, Any]] = []
     for row in ranked[:limit]:
         output.append(
@@ -413,22 +684,20 @@ def _best_near_miss_rows(rows: list[Mapping[str, Any]], limit: int) -> list[dict
                 "symbol": _display(row.get("symbol")),
                 "direction": _display(row.get("direction")),
                 "lifecycle_state": _display(row.get("lifecycle_state")),
-                "score": _display(row.get("setup_quality_score")),
-                "RR": _display(row.get("rr_planned")),
-                "technical_score": _display(row.get("technical_score")),
-                "opportunity_score": _display(row.get("opportunity_score")),
-                "entry_low": _display(row.get("entry_low")),
-                "entry_high": _display(row.get("entry_high")),
-                "stop_loss": _display(row.get("stop_loss")),
-                "TP1": _display(row.get("tp1")),
-                "TP2": _display(row.get("tp2")),
-                "TP3": _display(row.get("tp3")),
-                "categories": ",".join(normalize_public_block_reasons(_combined_reason(row))),
+                "attempted_alert_type": _display(row.get("attempted_alert_type")),
+                "public_alert_event_type": _display(row.get("public_alert_event_type")),
                 "raw_blocked_reason": _shorten(_display(row.get("blocked_reason")), 100),
+                "initial_watchlist_attempt": _yes_no(_is_initial_watchlist_attempt(row)),
+                "terminal_lifecycle_update": _yes_no(_is_terminal_lifecycle_update(row)),
+                "prior_public_alert_event": _prior_public_alert_event_status(row),
+                "otherwise_passed_quality_rr_technical_opportunity": _yes_no(
+                    _passes_score_rr_technical_opportunity_checks(row)
+                ),
+                "block_stage": classify_block_stage(row),
+                "categories": ",".join(normalize_public_block_reasons(_combined_reason(row))),
             }
         )
     return output
-
 
 def _sent_attempt_rows(rows: list[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
     ranked = sorted(rows, key=lambda row: _row_timestamp(row) or datetime.min.replace(tzinfo=UTC), reverse=True)
@@ -451,6 +720,29 @@ def _non_crypto_symbol_blocks(rows: list[Mapping[str, Any]]) -> list[dict[str, A
         if "NON_CRYPTO_SYMBOL" in normalize_public_block_reasons(_combined_reason(row)):
             counter[_display(row.get("symbol"))] += 1
     return [{"symbol": symbol, "count": count} for symbol, count in counter.most_common()]
+
+def _non_crypto_hygiene(rows: list[Mapping[str, Any]], limit: int) -> dict[str, Any]:
+    counter: Counter[str] = Counter()
+    near_miss_symbols = {row["symbol"] for row in _best_near_miss_rows(rows, limit)}
+    for row in rows:
+        if "NON_CRYPTO_SYMBOL" in normalize_public_block_reasons(_combined_reason(row)):
+            counter[_display(row.get("symbol"))] += _seen_count(row)
+    blocked_attempts = sum(counter.values())
+    total_blocked_attempts = sum(_seen_count(row) for row in rows)
+    top_symbols = [
+        {
+            "symbol": symbol,
+            "count": count,
+            "in_near_miss_list": _yes_no(symbol in near_miss_symbols),
+        }
+        for symbol, count in counter.most_common(limit)
+    ]
+    return {
+        "blocked_attempts": blocked_attempts,
+        "total_blocked_attempts": total_blocked_attempts,
+        "blocked_attempt_percentage": _percentage(blocked_attempts, total_blocked_attempts),
+        "top_symbols": top_symbols,
+    }
 
 
 def _target_caution_chop_summary(
@@ -514,13 +806,46 @@ def _latest_scan_run_counters(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def _combined_reason(row: Mapping[str, Any]) -> str:
-    reason = _display(row.get("blocked_reason"))
-    dedupe_reason = _display(row.get("dedupe_reason"))
+    return _combine_reason_text(row.get("blocked_reason"), row.get("dedupe_reason"))
+
+
+def _combine_reason_text(reason_value: Any, dedupe_reason_value: Any = NA) -> str:
+    reason = _display(reason_value)
+    dedupe_reason = _display(dedupe_reason_value)
     if dedupe_reason == NA or dedupe_reason == reason:
         return reason
     if reason == NA:
         return dedupe_reason
     return f"{reason}; {dedupe_reason}"
+
+
+def _group_categories(rows: list[Mapping[str, Any]]) -> list[str]:
+    categories: list[str] = []
+    for row in rows:
+        for category in normalize_public_block_reasons(_combined_reason(row)):
+            if category not in categories:
+                categories.append(category)
+    return categories
+
+
+def _group_first_seen_at(rows: list[Mapping[str, Any]]) -> datetime | None:
+    timestamps = [_first_seen_timestamp(row) for row in rows]
+    valid = [timestamp for timestamp in timestamps if timestamp is not None]
+    return min(valid) if valid else None
+
+
+def _group_last_seen_at(rows: list[Mapping[str, Any]]) -> datetime | None:
+    timestamps = [_last_seen_timestamp(row) for row in rows]
+    valid = [timestamp for timestamp in timestamps if timestamp is not None]
+    return max(valid) if valid else None
+
+
+def _first_seen_timestamp(row: Mapping[str, Any]) -> datetime | None:
+    return _parse_timestamp(row.get("first_seen_at")) or _row_timestamp(row)
+
+
+def _last_seen_timestamp(row: Mapping[str, Any]) -> datetime | None:
+    return _parse_timestamp(row.get("last_seen_at")) or _row_timestamp(row)
 
 
 def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
@@ -553,6 +878,105 @@ def _decimal_sort(value: Any) -> Decimal:
     except (InvalidOperation, ValueError):
         return Decimal("-1")
 
+
+def _decimal_or_none(value: Any) -> Decimal | None:
+    text = _display(value)
+    if text == NA:
+        return None
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _passes_score_rr_technical_opportunity_checks(row: Mapping[str, Any]) -> bool:
+    score = _decimal_or_none(row.get("setup_quality_score"))
+    technical_score = _decimal_or_none(row.get("technical_score"))
+    opportunity_score = _decimal_or_none(row.get("opportunity_score"))
+    rr = _decimal_or_none(row.get("rr_planned"))
+    quality_threshold = _decimal_or_none(row.get("min_score_for_idea")) or DEFAULT_PUBLIC_QUALITY_THRESHOLD
+    rr_min = _decimal_or_none(row.get("min_rr")) or DEFAULT_PUBLIC_RR_MIN
+
+    if score is None or score < quality_threshold:
+        return False
+    if technical_score is None or technical_score < DEFAULT_PUBLIC_TECHNICAL_MIN:
+        return False
+    if opportunity_score is not None and opportunity_score < DEFAULT_PUBLIC_OPPORTUNITY_MIN:
+        return False
+    if rr is None:
+        return False
+    return rr >= rr_min or _target_caution_rr_qualifies(row)
+
+
+def _target_caution_rr_qualifies(row: Mapping[str, Any]) -> bool:
+    rr = _decimal_or_none(row.get("rr_planned"))
+    if rr is None or rr < TARGET_CAUTION_RR_MIN:
+        return False
+    reason = _reason_key(_combined_reason(row))
+    categories = normalize_public_block_reasons(_combined_reason(row))
+    return "target_caution" in reason or any(category.startswith("TARGET_CAUTION_") for category in categories)
+
+
+def _seen_count(row: Mapping[str, Any]) -> int:
+    value = row.get("seen_count")
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return count if count >= 1 else 1
+
+
+def _rounded_number(value: Any) -> str:
+    number = _decimal_or_none(value)
+    if number is None:
+        return _display(value)
+    rounded = number.quantize(Decimal("0.00000001")).normalize()
+    return format(rounded, "f")
+
+
+def _status_key(value: Any) -> str:
+    return _display(value).lower().replace("-", "_").replace(" ", "_")
+
+
+def _is_initial_watchlist_attempt(row: Mapping[str, Any]) -> bool:
+    attempted_type = _status_key(row.get("attempted_alert_type"))
+    event_type = _status_key(row.get("public_alert_event_type"))
+    return attempted_type == "watchlist" or event_type == PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE
+
+
+def _is_terminal_lifecycle_update(row: Mapping[str, Any]) -> bool:
+    attempted_type = _display(row.get("attempted_alert_type")).upper()
+    return attempted_type in TERMINAL_LIFECYCLE_ATTEMPT_TYPES or classify_block_stage(row) == TERMINAL_UPDATE_GATE
+
+
+def _prior_public_alert_event_status(row: Mapping[str, Any]) -> str:
+    reason = _reason_key(_combined_reason(row))
+    if (
+        "terminal_update_no_prior_public_alert" in reason
+        or "outcome_tracking_no_prior_public_watchlist" in reason
+        or "limit_hit_requires_prior_public_signal" in reason
+    ):
+        return "no"
+    if "duplicate_successful_public_watchlist_event" in reason or "prior_successful_public_watchlist" in reason:
+        return "yes"
+    return UNVERIFIED
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
+
+
+def _percentage(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "0.0%"
+    value = Decimal(numerator) / Decimal(denominator) * Decimal("100")
+    return f"{value.quantize(Decimal('0.1'))}%"
+
+
+def _format_timestamp(value: datetime | None) -> str:
+    if value is None:
+        return NA
+    return _iso_z(value)
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
