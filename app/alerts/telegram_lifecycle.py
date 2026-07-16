@@ -52,6 +52,11 @@ from app.storage.models import PublicAlertEventRecord, TelegramAlertAttemptRecor
 
 logger = logging.getLogger(__name__)
 
+PUBLIC_SIGNAL_POLICY_SETUP_ONLY = "setup_only"
+CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON = (
+    "confirmed_public_delivery_disabled_by_setup_only_policy"
+)
+
 WATCH_ALERT_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
@@ -98,6 +103,9 @@ WATCHLIST_EXPIRY_ATTEMPT = "WATCHLIST_EXPIRY"
 RESEARCH_WATCH_DISABLED_REASON = "research_watch_disabled"
 RESEARCH_WATCH_PUBLIC_DISABLED_REASON = "research_watch_public_delivery_disabled"
 RESEARCH_WATCH_COOLDOWN_REASON = "research_watch_cooldown_active"
+RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON = (
+    "research_watch_public_delivery_disabled_by_setup_only_policy"
+)
 SENT_WATCHLIST_RECONCILIATION_ATTEMPT = "SENT_WATCHLIST_RECONCILIATION"
 SENT_WATCHLIST_RECONCILIATION_NO_MATCH = "sent_watchlist_reconciliation_no_lifecycle_match"
 SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguous"
@@ -736,10 +744,13 @@ class TelegramLifecycleDelivery:
 
 @dataclass(frozen=True)
 class ConfirmedAlertAuditSummary:
+    public_signal_policy: str = PUBLIC_SIGNAL_POLICY_SETUP_ONLY
     confirmed_candidates_seen: int = 0
     confirmed_prefilter_passed: int = 0
+    confirmed_policy_disabled: int = 0
     signal_confirmed_attempts_created: int = 0
     signal_confirmed_sent: int = 0
+    policy_disabled_by_reason: Mapping[str, int] = field(default_factory=dict)
     blocked_before_attempt_by_reason: Mapping[str, int] = field(default_factory=dict)
 
 
@@ -2593,6 +2604,24 @@ class TelegramLifecycleDeliveryService:
         return bool(getattr(self.settings, "telegram_public_watchlist_enabled", True))
 
     @property
+    def public_signal_policy(self) -> str:
+        configured = _status_key(
+            getattr(
+                self.settings,
+                "telegram_public_signal_policy",
+                PUBLIC_SIGNAL_POLICY_SETUP_ONLY,
+            )
+        )
+        if configured != PUBLIC_SIGNAL_POLICY_SETUP_ONLY:
+            logger.warning("Unsupported public signal policy ignored; enforcing setup_only.")
+            return PUBLIC_SIGNAL_POLICY_SETUP_ONLY
+        return configured
+
+    @property
+    def setup_only_public_delivery(self) -> bool:
+        return self.public_signal_policy == PUBLIC_SIGNAL_POLICY_SETUP_ONLY
+
+    @property
     def public_watchlist_min_score(self) -> Decimal:
         configured = _decimal_or_default(
             getattr(self.settings, "public_watchlist_min_score", PUBLIC_WATCHLIST_MIN_SCORE),
@@ -2694,8 +2723,10 @@ class TelegramLifecycleDeliveryService:
         public_watchlist_audits: dict[str, PublicWatchlistCandidateAudit] = {}
         confirmed_candidates_seen = 0
         confirmed_prefilter_passed = 0
+        confirmed_policy_disabled = 0
         signal_confirmed_attempts_created = 0
         signal_confirmed_sent = 0
+        confirmed_policy_disabled_by_reason: dict[str, int] = {}
         confirmed_blocked_before_attempt: dict[str, int] = {}
 
         def record_delivery(delivery: TelegramLifecycleDelivery) -> None:
@@ -2718,7 +2749,10 @@ class TelegramLifecycleDeliveryService:
                 blocked_repeat += 1
             else:
                 skipped += 1
-            if delivery.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value:
+            if (
+                not self.setup_only_public_delivery
+                and delivery.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value
+            ):
                 if delivery.status in {"sent", "failed", "skipped", "blocked"}:
                     signal_confirmed_attempts_created += 1
                 if delivery.status == "sent":
@@ -2775,23 +2809,37 @@ class TelegramLifecycleDeliveryService:
                     )
                     if alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED:
                         confirmed_candidates_seen += 1
-                        confirmed_message = _telegram_signal_message_for_alert(
-                            symbol_result,
-                            TelegramAlertType.SIGNAL_CONFIRMED,
-                            eligibility_context,
-                        )
-                        confirmed_prefilter = _confirmed_alert_attempt_prefilter(
-                            symbol_result,
-                            confirmed_message,
-                            eligibility_context,
-                        )
-                        if confirmed_prefilter.passed:
-                            confirmed_prefilter_passed += 1
-                        else:
-                            for reason in confirmed_prefilter.reason_buckets:
-                                confirmed_blocked_before_attempt[reason] = (
-                                    confirmed_blocked_before_attempt.get(reason, 0) + 1
+                        if self.setup_only_public_delivery:
+                            confirmed_policy_disabled += 1
+                            confirmed_policy_disabled_by_reason[
+                                CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON
+                            ] = (
+                                confirmed_policy_disabled_by_reason.get(
+                                    CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON,
+                                    0,
                                 )
+                                + 1
+                            )
+                        else:
+                            confirmed_message = _telegram_signal_message_for_alert(
+                                symbol_result,
+                                TelegramAlertType.SIGNAL_CONFIRMED,
+                                eligibility_context,
+                            )
+                            confirmed_prefilter = _confirmed_alert_attempt_prefilter(
+                                symbol_result,
+                                confirmed_message,
+                                eligibility_context,
+                            )
+                            if confirmed_prefilter.passed:
+                                confirmed_prefilter_passed += 1
+                            else:
+                                for reason in confirmed_prefilter.reason_buckets:
+                                    confirmed_blocked_before_attempt[reason] = (
+                                        confirmed_blocked_before_attempt.get(reason, 0) + 1
+                                    )
+                    if self.setup_only_public_delivery and alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED:
+                        continue
                     delivery = await self.deliver_for_symbol(
                         symbol_result,
                         repository=repository,
@@ -2842,10 +2890,13 @@ class TelegramLifecycleDeliveryService:
 
         public_watchlist_audit = _public_watchlist_audit_summary(public_watchlist_audits.values())
         confirmed_alert_audit = ConfirmedAlertAuditSummary(
+            public_signal_policy=self.public_signal_policy,
             confirmed_candidates_seen=confirmed_candidates_seen,
             confirmed_prefilter_passed=confirmed_prefilter_passed,
+            confirmed_policy_disabled=confirmed_policy_disabled,
             signal_confirmed_attempts_created=signal_confirmed_attempts_created,
             signal_confirmed_sent=signal_confirmed_sent,
+            policy_disabled_by_reason=dict(sorted(confirmed_policy_disabled_by_reason.items())),
             blocked_before_attempt_by_reason=dict(sorted(confirmed_blocked_before_attempt.items())),
         )
         _log_public_watchlist_audit(public_watchlist_audit)
@@ -2880,6 +2931,19 @@ class TelegramLifecycleDeliveryService:
             if symbol_result.lifecycle_transition
             else None
         )
+        if (
+            self.setup_only_public_delivery
+            and alert_type_hint is not None
+            and alert_type_hint != TelegramAlertType.WATCHLIST
+        ):
+            return None
+        if (
+            self.setup_only_public_delivery
+            and alert_type_hint == TelegramAlertType.WATCHLIST
+            and symbol_result.lifecycle_transition is not None
+            and symbol_result.lifecycle_transition.to_state not in WATCH_ALERT_STATES
+        ):
+            return None
         terminal_bridge = (
             _terminal_identity_bridge(repository, symbol_result, alert_type_hint)
             if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES
@@ -2985,7 +3049,10 @@ class TelegramLifecycleDeliveryService:
         if (
             _public_watchlist_follow_up_alert_suppressed(decision.alert_type)
             and prior_active_alert is not None
-            and prior_active_alert.alert_type == TelegramAlertType.WATCHLIST.value
+            and (
+                self.setup_only_public_delivery
+                or prior_active_alert.alert_type == TelegramAlertType.WATCHLIST.value
+            )
         ):
             return _persist_suppressed_watchlist_terminal_update(
                 repository,
@@ -2996,6 +3063,8 @@ class TelegramLifecycleDeliveryService:
                 scan_run_id=scan_run_id,
                 eligibility_context=context,
             )
+        if self.setup_only_public_delivery and _public_watchlist_follow_up_alert_suppressed(decision.alert_type):
+            return None
 
         message = decision.message
         signal_id = _delivery_signal_id_for_decision(symbol_result, decision)
@@ -3347,6 +3416,25 @@ class TelegramLifecycleDeliveryService:
             message_text = format_research_watch_alert(message_candidate)
             message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
 
+            if self.setup_only_public_delivery:
+                deliveries.append(
+                    _persist_research_watch_attempt(
+                        repository,
+                        message_candidate,
+                        signal_id=signal_id,
+                        scan_run_id=scan_run_id,
+                        attempted_at=attempted_at,
+                        status="skipped",
+                        detail="Research Watch public delivery is disabled by the setup-only policy.",
+                        message_hash=message_hash,
+                        blocked_reason=RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON,
+                        error_message=RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON,
+                    )
+                )
+                if len(deliveries) >= max_per_scan:
+                    break
+                continue
+
             if not self.research_watch_enabled:
                 deliveries.append(
                     _persist_research_watch_attempt(
@@ -3520,6 +3608,13 @@ class TelegramLifecycleDeliveryService:
             current_result = _current_result_for_lifecycle_record(match.record, prior_alert, current_results)
             if current_result is None:
                 current_result = current_result_for_prior
+            if (
+                self.setup_only_public_delivery
+                and _terminal_alert_type_for_lifecycle_state(
+                    _lifecycle_record_state_key(match.record)
+                ) is None
+            ):
+                continue
             outcome = _sent_watchlist_reconciliation_outcome(
                 prior_alert,
                 match.record,
@@ -7271,12 +7366,17 @@ def _log_confirmed_alert_audit(summary: ConfirmedAlertAuditSummary) -> None:
     if summary.confirmed_candidates_seen == 0:
         return
     logger.info(
-        "confirmed_alert_audit confirmed_candidates_seen=%s confirmed_prefilter_passed=%s "
-        "signal_confirmed_attempts_created=%s signal_confirmed_sent=%s blocked_before_attempt_by_reason=%s",
+        "confirmed_alert_audit public_signal_policy=%s confirmed_candidates_seen=%s "
+        "confirmed_prefilter_passed=%s confirmed_policy_disabled=%s "
+        "signal_confirmed_attempts_created=%s signal_confirmed_sent=%s "
+        "policy_disabled_by_reason=%s blocked_before_attempt_by_reason=%s",
+        summary.public_signal_policy,
         summary.confirmed_candidates_seen,
         summary.confirmed_prefilter_passed,
+        summary.confirmed_policy_disabled,
         summary.signal_confirmed_attempts_created,
         summary.signal_confirmed_sent,
+        dict(summary.policy_disabled_by_reason),
         dict(summary.blocked_before_attempt_by_reason),
     )
 
@@ -11923,8 +12023,11 @@ def _text(value: Any) -> str:
 
 
 __all__ = [
+    "CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON",
+    "PUBLIC_SIGNAL_POLICY_SETUP_ONLY",
     "PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES",
     "PUBLIC_WATCHLIST_TIMING_PENDING_GATE_CODES",
+    "RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON",
     "CONFIRMED_SIGNAL_RR_PENDING",
     "REGIME_MARKET_CONDITION_PENDING",
     "TIMING_CONFIRMATION_PENDING",

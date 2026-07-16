@@ -223,6 +223,13 @@ def _insert_lifecycle_record(
     symbol: str,
     current_state: str,
     direction: str = "long",
+    mode: str = "scalp",
+    entry_low: str = NA,
+    entry_high: str = NA,
+    stop_loss: str = NA,
+    tp1: str = NA,
+    tp2: str = NA,
+    tp3: str = NA,
     failed_gate: str = NA,
     invalidation_reason: str = NA,
     quality_score: int = 88,
@@ -238,13 +245,13 @@ def _insert_lifecycle_record(
                 lifecycle_id, symbol, mode, direction, current_state, previous_state,
                 first_seen_at, last_seen_at, last_transition_at, failed_gate,
                 readiness_score, quality_score, edge_score, regime_state, action_label,
-                invalidation_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                invalidation_reason, entry_low, entry_high, stop_loss, tp1, tp2, tp3
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 lifecycle_id,
                 symbol,
-                "scalp",
+                mode,
                 direction,
                 current_state,
                 NA,
@@ -258,6 +265,12 @@ def _insert_lifecycle_record(
                 "mixed",
                 "watchlist",
                 invalidation_reason,
+                entry_low,
+                entry_high,
+                stop_loss,
+                tp1,
+                tp2,
+                tp3,
             ),
         )
         connection.commit()
@@ -666,6 +679,145 @@ def test_active_signals_use_sent_runtime_signal_attempts(tmp_path: Path) -> None
     assert "WATCHUSDT" not in response.text
     assert "BLOCKUSDT" not in response.text
     assert "order was placed" not in response.text.lower()
+
+
+def test_sent_setup_alert_uses_matching_internal_active_lifecycle_for_signal_views(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sent_at = _fresh_timestamp(minutes_ago=10)
+    lifecycle_at = _fresh_timestamp(minutes_ago=5)
+    active_states = {
+        "CONFIRMED": "CONFIRMEDUSDT",
+        "EXECUTING": "EXECUTINGUSDT",
+        "MANAGING": "MANAGINGUSDT",
+    }
+    for state, symbol in active_states.items():
+        _insert_planned_watchlist(
+            db_path,
+            signal_id=f"public-plan-{state.lower()}",
+            symbol=symbol,
+            scan_run_id=f"run-{state.lower()}",
+            sent_at=sent_at,
+        )
+        _insert_lifecycle_record(
+            db_path,
+            lifecycle_id=f"internal-lifecycle-{state.lower()}",
+            symbol=symbol,
+            current_state=state,
+            entry_low="100",
+            entry_high="102",
+            stop_loss="95",
+            tp1="110",
+            tp2="115",
+            tp3="120",
+            invalidation_reason="Invalid beyond the persisted stop.",
+            last_seen_at=lifecycle_at,
+            last_transition_at=lifecycle_at,
+        )
+        _insert_lifecycle_event(
+            db_path,
+            lifecycle_id=f"internal-lifecycle-{state.lower()}",
+            symbol=symbol,
+            from_state="ACTIONABLE_A_GRADE",
+            to_state=state,
+            reason=f"Internal lifecycle reached {state}.",
+            timestamp=lifecycle_at,
+        )
+
+    service = _service(tmp_path, db_path)
+    active = service.public_response_for("/signals")
+
+    assert "Active signals: 3" in active.text
+    assert set(_button_labels(active.reply_markup)) == set(active_states.values())
+    for state, symbol in active_states.items():
+        detail = service.public_response_for(f"/signal {symbol}")
+        assert f"Status: {state}" in detail.text
+        assert "No active signal available for this symbol." not in detail.text
+
+        lifecycle = service.public_response_for(f"/signal_lifecycle {symbol}")
+        assert state in lifecycle.text
+        assert f"Latest reason: Internal lifecycle reached {state}." in lifecycle.text
+
+        why = service.public_response_for(f"/signal_why {symbol}")
+        assert f"Lifecycle state {state}." in why.text
+
+
+def test_sent_setup_alert_does_not_promote_non_active_or_closed_internal_states(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    sent_at = _fresh_timestamp(minutes_ago=10)
+    lifecycle_at = _fresh_timestamp(minutes_ago=5)
+    excluded_states = {
+        "WATCHLISTED": "WATCHONLYUSDT",
+        "STALKING": "STALKINGUSDT",
+        "INVALIDATED": "INVALIDATEDUSDT",
+        "EXPIRED": "EXPIREDUSDT",
+    }
+    for state, symbol in excluded_states.items():
+        _insert_planned_watchlist(
+            db_path,
+            signal_id=f"public-plan-{state.lower()}",
+            symbol=symbol,
+            scan_run_id=f"run-{state.lower()}",
+            sent_at=sent_at,
+        )
+        _insert_lifecycle_record(
+            db_path,
+            lifecycle_id=f"internal-lifecycle-{state.lower()}",
+            symbol=symbol,
+            current_state=state,
+            entry_low="100",
+            entry_high="102",
+            stop_loss="95",
+            tp1="110",
+            tp2="115",
+            tp3="120",
+            invalidation_reason=f"Internal lifecycle reached {state}.",
+            last_seen_at=lifecycle_at,
+            last_transition_at=lifecycle_at,
+        )
+
+    service = _service(tmp_path, db_path)
+    active = service.public_response_for("/signals")
+
+    assert "No active confirmed signals right now." in active.text
+    assert all(symbol not in _button_labels(active.reply_markup) for symbol in excluded_states.values())
+    for symbol in excluded_states.values():
+        detail = service.public_response_for(f"/signal {symbol}")
+        assert "No active signal available for this symbol. Setup expired or invalidated." in detail.text
+
+
+def test_old_public_plan_does_not_pair_with_newer_materially_different_internal_plan(tmp_path: Path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    _insert_planned_watchlist(
+        db_path,
+        signal_id="public-old-plan",
+        symbol="PLANMIXUSDT",
+        scan_run_id="run-old-plan",
+        sent_at=_fresh_timestamp(minutes_ago=20),
+    )
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="internal-new-plan",
+        symbol="PLANMIXUSDT",
+        current_state="MANAGING",
+        entry_low="200",
+        entry_high="202",
+        stop_loss="190",
+        tp1="220",
+        tp2="240",
+        tp3="260",
+        invalidation_reason="Invalid beyond the newer plan stop.",
+        last_seen_at=_fresh_timestamp(minutes_ago=5),
+        last_transition_at=_fresh_timestamp(minutes_ago=5),
+    )
+
+    service = _service(tmp_path, db_path)
+    active = service.public_response_for("/signals")
+    detail = service.public_response_for("/signal PLANMIXUSDT")
+
+    assert "No active confirmed signals right now." in active.text
+    assert "PLANMIXUSDT" not in _button_labels(active.reply_markup)
+    assert "No active signal available for this symbol. Setup expired or invalidated." in detail.text
+    assert "Status: MANAGING" not in detail.text
 
 
 def test_active_signals_dedupe_same_symbol_bias_and_hide_expired_duplicate(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ from app.formatters.telegram_signal_detail import TelegramSignalDetail, lifecycl
 from app.formatters.telegram_signal_formatter import PUBLIC_STATUS_BY_ALERT_TYPE, TelegramAlertType, safe_invalidation_text
 from app.telegram_admin.active_watchlists import (
     UNVERIFIED,
+    _ACTIVE_SIGNAL_ALLOWED_STATE_KEYS,
     _SIGNAL_QUERY_TYPES,
     _active_quality_text,
     _active_signal_base_row,
@@ -22,6 +23,7 @@ from app.telegram_admin.active_watchlists import (
     _json_mapping,
     _latest_runtime_database,
     _latest_symbol_result_for_attempt,
+    _lifecycle_row_for_attempt,
     _row_id,
     _select_or_na,
     _sent_alert_attempt_rows,
@@ -86,7 +88,7 @@ def _detail_from_rows(
             continue
         outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
-        lifecycle_row = _lifecycle_row(connection, signal_id, latest_row)
+        lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
         if not _active_signal_group_is_eligible(
             connection,
             signal_row=signal_row,
@@ -135,7 +137,7 @@ def _detail_from_group(
     return TelegramSignalDetail(
         symbol=_first_text(signal_row.get("symbol"), raw_result.get("symbol")),
         bias=_first_text(signal_row.get("direction"), trade_idea.get("direction"), candidate.get("direction")),
-        status=_status_for_latest_row(latest_row),
+        status=_status_for_latest_row(latest_row, lifecycle_row),
         quality=_quality_text(signal_row, raw_result, candidate, candidate_raw),
         rr=_first_text(signal_row.get("rr_planned")),
         lifecycle=lifecycle_chain,
@@ -213,69 +215,6 @@ def _candidate_detail(connection: sqlite3.Connection, row: Mapping[str, Any]) ->
         params,
     ).fetchone()
     return dict(candidate) if candidate is not None else {}
-
-
-def _lifecycle_row(connection: sqlite3.Connection, signal_id: str, row: Mapping[str, Any]) -> Mapping[str, Any]:
-    if not _table_exists(connection, "setup_lifecycle_records"):
-        return {}
-    columns = _table_columns(connection, "setup_lifecycle_records")
-    if not {"lifecycle_id", "symbol"} <= columns:
-        return {}
-    select_columns = [
-        "lifecycle_id",
-        "symbol",
-        _select_or_na("mode", columns),
-        _select_or_na("direction", columns),
-        _select_or_na("current_state", columns),
-        _select_or_na("last_seen_at", columns),
-        _select_or_na("last_transition_at", columns),
-        _select_or_na("failed_gate", columns),
-        _select_or_na("readiness_score", columns),
-        _select_or_na("quality_score", columns),
-        _select_or_na("action_label", columns),
-        _select_or_na("invalidation_reason", columns),
-    ]
-    if _clean(signal_id) != NA:
-        record = connection.execute(
-            f"""
-            SELECT {", ".join(select_columns)}
-            FROM setup_lifecycle_records
-            WHERE lifecycle_id = ?
-            LIMIT 1
-            """,
-            (signal_id,),
-        ).fetchone()
-        if record is not None:
-            return dict(record)
-
-    symbol = _clean(row.get("symbol"))
-    direction = _clean(row.get("direction"))
-    if symbol == NA:
-        return {}
-    if "direction" in columns and direction != NA:
-        record = connection.execute(
-            f"""
-            SELECT {", ".join(select_columns)}
-            FROM setup_lifecycle_records
-            WHERE UPPER(symbol) = UPPER(?)
-              AND UPPER(direction) = UPPER(?)
-            ORDER BY last_seen_at DESC
-            LIMIT 1
-            """,
-            (symbol, direction),
-        ).fetchone()
-    else:
-        record = connection.execute(
-            f"""
-            SELECT {", ".join(select_columns)}
-            FROM setup_lifecycle_records
-            WHERE UPPER(symbol) = UPPER(?)
-            ORDER BY last_seen_at DESC
-            LIMIT 1
-            """,
-            (symbol,),
-        ).fetchone()
-    return dict(record) if record is not None else {}
 
 
 def _lifecycle_events(connection: sqlite3.Connection, lifecycle_id: str) -> tuple[Mapping[str, Any], ...]:
@@ -423,8 +362,17 @@ def _quality_text(
     )
 
 
-def _status_for_latest_row(row: Mapping[str, Any]) -> str:
+def _status_for_latest_row(
+    row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> str:
     alert_type = _clean(row.get("alert_type"))
+    lifecycle_state = _first_text(lifecycle_row.get("current_state"))
+    if (
+        alert_type == TelegramAlertType.WATCHLIST.value
+        and _status_key(lifecycle_state) in _ACTIVE_SIGNAL_ALLOWED_STATE_KEYS
+    ):
+        return lifecycle_state
     try:
         public_status = PUBLIC_STATUS_BY_ALERT_TYPE[TelegramAlertType(alert_type)]
     except (ValueError, KeyError):
