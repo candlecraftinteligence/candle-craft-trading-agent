@@ -13,6 +13,8 @@ from app.formatters.scanner_display import format_scan_dashboard
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
 from scripts import run_scan
 
+REGIME_INTERVAL_MS = 12 * 60 * 60_000
+
 
 def _trend_candles(*, start: str = "100", step: str = "1", count: int = 90, wick: str = "1") -> list[dict[str, Decimal | int]]:
     candles: list[dict[str, Decimal | int]] = []
@@ -23,7 +25,7 @@ def _trend_candles(*, start: str = "100", step: str = "1", count: int = 90, wick
         price = Decimal(start) + step_value * Decimal(index)
         candles.append(
             {
-                "timestamp": index,
+                "timestamp": index * REGIME_INTERVAL_MS,
                 "open": price - step_value / Decimal("2"),
                 "high": price + wick_value,
                 "low": price - wick_value,
@@ -38,10 +40,10 @@ def _compression_candles() -> list[dict[str, Decimal | int]]:
     candles: list[dict[str, Decimal | int]] = []
     for index in range(70):
         close = Decimal("100") + (Decimal(index % 3) - Decimal("1")) * Decimal("0.1")
-        candles.append({"timestamp": index, "open": close, "high": close + Decimal("2"), "low": close - Decimal("2"), "close": close, "volume": Decimal("100")})
+        candles.append({"timestamp": index * REGIME_INTERVAL_MS, "open": close, "high": close + Decimal("2"), "low": close - Decimal("2"), "close": close, "volume": Decimal("100")})
     for index in range(70, 90):
         close = Decimal("100") + (Decimal(index % 2) * Decimal("0.02"))
-        candles.append({"timestamp": index, "open": close, "high": close + Decimal("0.15"), "low": close - Decimal("0.15"), "close": close, "volume": Decimal("100")})
+        candles.append({"timestamp": index * REGIME_INTERVAL_MS, "open": close, "high": close + Decimal("0.15"), "low": close - Decimal("0.15"), "close": close, "volume": Decimal("100")})
     return candles
 
 
@@ -49,7 +51,7 @@ def _panic_candles() -> list[dict[str, Decimal | int]]:
     candles = _trend_candles(start="100", step="0.1", count=70, wick="0.75")
     for index in range(70, 90):
         close = Decimal("110") + Decimal(index - 70) * Decimal("0.8")
-        candles.append({"timestamp": index, "open": close - Decimal("2"), "high": close + Decimal("9"), "low": close - Decimal("9"), "close": close, "volume": Decimal("500")})
+        candles.append({"timestamp": index * REGIME_INTERVAL_MS, "open": close - Decimal("2"), "high": close + Decimal("9"), "low": close - Decimal("9"), "close": close, "volume": Decimal("500")})
     return candles
 
 

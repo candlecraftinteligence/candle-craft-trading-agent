@@ -5,6 +5,7 @@ import inspect
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
@@ -52,6 +53,7 @@ from app.analytics.target_intelligence import (
 )
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
+from app.data.candle_integrity import CandleIntegrityError, closed_candles_as_of, normalize_utc_timestamp
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exceptions import ExchangeTimeoutError
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
@@ -80,6 +82,8 @@ DIRECT_STRATEGY_TIMEFRAMES = ("12h", "4h", "1h", "15m", "5m")
 SYNTHETIC_2D_SOURCE_TIMEFRAME = "1d"
 NO_VALID_STRATEGY_SETUP_REASON = "No valid Liquidity-Grab Pullback setup."
 MIN_12H_VOLUME_PROFILE_CANDLES = 20
+MIN_STRATEGY_CLOSED_CANDLES = 20
+MIN_REGIME_CLOSED_CANDLES = 40
 BINANCE_KLINE_LIMIT_MIN = 1
 BINANCE_KLINE_LIMIT_MAX = 1500
 DEFAULT_REQUEST_TIMEOUT_SEC = 10.0
@@ -187,6 +191,7 @@ class ScannerRunConfig(BaseModel):
     market_regime_enabled: bool = False
     regime_risk_mode: Literal["conservative", "balanced", "aggressive"] = "balanced"
     regime_strictness: Literal["low", "normal", "high"] = "normal"
+    decision_timestamp: datetime | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -278,6 +283,13 @@ class ScannerRunConfig(BaseModel):
         if normalized <= 0:
             raise ValueError("timeout values must be greater than zero")
         return normalized
+
+    @field_validator("decision_timestamp", mode="before")
+    @classmethod
+    def _normalize_decision_timestamp(cls, value: Any) -> datetime | None:
+        if value is None or value == "":
+            return None
+        return normalize_utc_timestamp(value, field_name="decision_timestamp")
 
     @model_validator(mode="after")
     def _validate_config(self) -> ScannerRunConfig:
@@ -543,6 +555,7 @@ class ScannerRunner:
         alert_agent: AlertAgent | None = None,
         journal_agent: JournalAgent | None = None,
         market_data_cache: MarketDataCache | None = None,
+        clock: Callable[[], datetime] | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         self.exchange_client = exchange_client
@@ -555,6 +568,7 @@ class ScannerRunner:
         self.alert_agent = alert_agent or AlertAgent()
         self.journal_agent = journal_agent or JournalAgent()
         self.market_data_cache = market_data_cache
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.logger = log or logger
 
     async def run(
@@ -566,6 +580,15 @@ class ScannerRunner:
         resume_metadata: Mapping[str, Any] | None = None,
     ) -> ScannerRunResult:
         run_config = config if isinstance(config, ScannerRunConfig) else ScannerRunConfig.model_validate(config)
+        if run_config.decision_timestamp is None:
+            run_config = run_config.model_copy(
+                update={
+                    "decision_timestamp": normalize_utc_timestamp(
+                        self.clock(),
+                        field_name="decision_timestamp",
+                    )
+                }
+            )
         client, owns_client = self._exchange_client_for(run_config)
         results: list[ScannerSymbolResult] = []
         total_symbols = len(run_config.symbols)
@@ -1074,6 +1097,33 @@ class ScannerRunner:
             technical_score_override=effective_technical_score,
         )
 
+    def _closed_candles_for_analysis(
+        self,
+        candles: Sequence[Any],
+        *,
+        symbol: str,
+        timeframe: str,
+        config: ScannerRunConfig,
+        minimum_closed_history: int,
+    ) -> tuple[Any, ...]:
+        if config.decision_timestamp is None:
+            raise RuntimeError("scanner decision_timestamp must be resolved before candle analysis")
+        window = closed_candles_as_of(
+            candles,
+            timeframe=timeframe,
+            decision_timestamp=config.decision_timestamp,
+            minimum_closed_history=minimum_closed_history,
+        )
+        if window.excluded_unclosed_count:
+            self.logger.debug(
+                "Excluded %s unclosed/future candles for symbol=%s timeframe=%s as_of=%s.",
+                window.excluded_unclosed_count,
+                symbol,
+                timeframe,
+                window.decision_timestamp.isoformat(),
+            )
+        return window.candles
+
     async def _fetch_primary_candles(
         self,
         client: BaseExchangeClient,
@@ -1094,14 +1144,32 @@ class ScannerRunner:
             )
             for warning in _unique_strings(limit_warnings):
                 self.logger.warning("Scanner candle limit adjusted for symbol=%s: %s", symbol, warning)
-            return resample_ohlcv_candles(source_candles, target_interval="2d")
+            synthetic = resample_ohlcv_candles(
+                source_candles,
+                target_interval="2d",
+                decision_timestamp=config.decision_timestamp,
+            )
+            return self._closed_candles_for_analysis(
+                synthetic,
+                symbol=symbol,
+                timeframe="2d",
+                config=config,
+                minimum_closed_history=self.technical_agent.min_required_candles,
+            )
         fetch_limit = _timeframe_fetch_limit(config, primary_timeframe, limit_warnings)
         for warning in _unique_strings(limit_warnings):
             self.logger.warning("Scanner candle limit adjusted for symbol=%s: %s", symbol, warning)
-        return await self._request_public_api(
+        candles = await self._request_public_api(
             config,
             f"{symbol} {config.interval} candles",
             lambda: client.get_klines(symbol, config.interval, fetch_limit),
+        )
+        return self._closed_candles_for_analysis(
+            candles,
+            symbol=symbol,
+            timeframe=primary_timeframe,
+            config=config,
+            minimum_closed_history=self.technical_agent.min_required_candles,
         )
 
     async def _fetch_market_regime_context(
@@ -1117,18 +1185,31 @@ class ScannerRunner:
             timeframe = SYNTHETIC_2D_SOURCE_TIMEFRAME
         limit_warnings: list[str] = []
         fetch_limit = _timeframe_fetch_limit(config, timeframe, limit_warnings)
-        context: dict[str, Any] = {"btc_candles": (), "eth_candles": (), "missing_data": []}
+        context: dict[str, Any] = {
+            "btc_candles": (),
+            "eth_candles": (),
+            "candle_timeframe": timeframe,
+            "decision_timestamp": config.decision_timestamp,
+            "missing_data": [],
+        }
         for symbol, key in (("BTCUSDT", "btc_candles"), ("ETHUSDT", "eth_candles")):
             try:
-                context[key] = await self._request_public_api(
+                candles = await self._request_public_api(
                     config,
                     f"{symbol} {timeframe} candles for market climate",
                     lambda symbol=symbol: client.get_klines(symbol, timeframe, fetch_limit),
                     timeout_sec=_optional_request_timeout(config),
                 )
+                context[key] = self._closed_candles_for_analysis(
+                    candles,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    config=config,
+                    minimum_closed_history=MIN_REGIME_CLOSED_CANDLES,
+                )
             except Exception as exc:
                 self.logger.debug("Market climate %s candles unavailable: %s", symbol, exc)
-                context["missing_data"].append(f"{symbol}_candles: N/A")
+                context["missing_data"].append(f"{symbol}_candles: N/A ({exc})")
         context["missing_data"].extend(limit_warnings)
         return context
 
@@ -1297,7 +1378,13 @@ class ScannerRunner:
                         f"{symbol} {SYNTHETIC_2D_SOURCE_TIMEFRAME} candles for synthetic 2d",
                         lambda: client.get_klines(symbol, SYNTHETIC_2D_SOURCE_TIMEFRAME, source_limit),
                     )
-                synthetic_2d = resample_ohlcv_candles(source_candles, target_interval="2d")
+                synthetic_2d = resample_ohlcv_candles(
+                    source_candles,
+                    target_interval="2d",
+                    decision_timestamp=config.decision_timestamp,
+                )
+            except CandleIntegrityError:
+                raise
             except Exception as exc:
                 self.logger.warning(
                     "Synthetic 2D candle creation failed for symbol=%s from 1d source: %s",
@@ -1307,7 +1394,13 @@ class ScannerRunner:
                 synthetic_2d = []
 
             if synthetic_2d:
-                candles_by_timeframe["2d"] = synthetic_2d
+                candles_by_timeframe["2d"] = self._closed_candles_for_analysis(
+                    synthetic_2d,
+                    symbol=symbol,
+                    timeframe="2d",
+                    config=config,
+                    minimum_closed_history=MIN_STRATEGY_CLOSED_CANDLES,
+                )
                 htf_source = "synthetic_from_1d"
             else:
                 missing_data.append("candles_2d: N/A")
@@ -1335,10 +1428,19 @@ class ScannerRunner:
                 missing_data.append(f"candles_{timeframe}: N/A")
                 continue
 
-            if candles:
-                candles_by_timeframe[timeframe] = candles
-            else:
+            if not candles:
                 missing_data.append(f"candles_{timeframe}: N/A")
+                continue
+            try:
+                candles_by_timeframe[timeframe] = self._closed_candles_for_analysis(
+                    candles,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    config=config,
+                    minimum_closed_history=MIN_STRATEGY_CLOSED_CANDLES,
+                )
+            except CandleIntegrityError:
+                raise
 
         return (
             candles_by_timeframe,
@@ -3134,6 +3236,8 @@ def _market_regime_for_scan(
         MarketRegimeInput(
             btc_candles=market_regime_context.get("btc_candles", ()),
             eth_candles=market_regime_context.get("eth_candles", ()),
+            candle_timeframe=market_regime_context.get("candle_timeframe", config.bias_timeframe),
+            decision_timestamp=market_regime_context.get("decision_timestamp", config.decision_timestamp),
             scanned_symbols=len(results),
             bullish_bias_pct=breadth["bullish_bias_pct"],
             bearish_bias_pct=breadth["bearish_bias_pct"],

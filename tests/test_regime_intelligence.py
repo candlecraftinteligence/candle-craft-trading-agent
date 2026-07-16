@@ -44,6 +44,8 @@ from app.research.queries import build_research_report
 from app.storage.database import open_initialized_database
 from app.storage.repositories import store_scan_result
 
+REGIME_INTERVAL_MS = 12 * 60 * 60_000
+
 
 def _trend_candles(*, start: str = "100", step: str = "1", count: int = 90, wick: str = "1") -> list[dict[str, Decimal | int]]:
     candles: list[dict[str, Decimal | int]] = []
@@ -54,7 +56,7 @@ def _trend_candles(*, start: str = "100", step: str = "1", count: int = 90, wick
         price = start_value + step_value * Decimal(index)
         candles.append(
             {
-                "timestamp": index,
+                "timestamp": index * REGIME_INTERVAL_MS,
                 "open": price - step_value / Decimal("2"),
                 "high": price + wick_value,
                 "low": price - wick_value,
@@ -71,7 +73,7 @@ def _compression_candles() -> list[dict[str, Decimal | int]]:
         close = Decimal("104") + Decimal(index % 2) * Decimal("0.01")
         candles.append(
             {
-                "timestamp": index,
+                "timestamp": index * REGIME_INTERVAL_MS,
                 "open": close,
                 "high": close + Decimal("0.08"),
                 "low": close - Decimal("0.08"),
