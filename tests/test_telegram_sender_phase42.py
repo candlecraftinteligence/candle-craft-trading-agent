@@ -149,6 +149,7 @@ def test_public_watchlist_reservation_guard_allows_api_call() -> None:
                 public_watchlist_guard=PublicWatchlistSendGuard(
                     event_key="PLAN|initial_watchlist",
                     reservation_id=1,
+                    attempt_id="attempt-1",
                     event_id=1,
                 ),
             )

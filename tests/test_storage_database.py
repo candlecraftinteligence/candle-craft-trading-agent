@@ -836,3 +836,170 @@ def test_corrupted_db_is_reported_cleanly(tmp_path) -> None:
 
     with pytest.raises(StorageError, match="Unable to initialize scan history database schema"):
         list_scan_history(db_path, limit=10)
+
+
+def _create_schema_v15_delivery_fixture(db_path) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE telegram_alert_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                previous_state TEXT NOT NULL DEFAULT 'N/A',
+                new_state TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL,
+                sent_at TEXT,
+                attempted_at TEXT NOT NULL DEFAULT 'N/A',
+                telegram_status TEXT NOT NULL,
+                message_hash TEXT NOT NULL,
+                scan_run_id TEXT,
+                public_watchlist_plan_id TEXT NOT NULL DEFAULT 'N/A',
+                public_watchlist_event_key TEXT NOT NULL DEFAULT 'N/A',
+                UNIQUE(signal_id, alert_type)
+            );
+            CREATE TABLE public_alert_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_plan_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                event_key TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                setup_family TEXT NOT NULL DEFAULT 'N/A',
+                normalized_zone_low TEXT NOT NULL DEFAULT 'N/A',
+                normalized_zone_high TEXT NOT NULL DEFAULT 'N/A',
+                normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
+                raw_entry_low TEXT NOT NULL DEFAULT 'N/A',
+                raw_entry_high TEXT NOT NULL DEFAULT 'N/A',
+                raw_stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                status TEXT NOT NULL,
+                reserved_at TEXT,
+                sent_at TEXT,
+                source_modes TEXT NOT NULL DEFAULT 'N/A',
+                matched_prior_alert_id INTEGER,
+                matched_prior_event_id INTEGER,
+                failure_reason TEXT NOT NULL DEFAULT 'N/A',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(event_key)
+            );
+            INSERT INTO telegram_alert_attempts (
+                signal_id, symbol, direction, new_state, alert_type,
+                lifecycle_state, sent_at, attempted_at, telegram_status,
+                message_hash, public_watchlist_plan_id, public_watchlist_event_key
+            ) VALUES (
+                'v15-signal', 'BTCUSDT', 'long', 'WATCHLISTED', 'WATCHLIST',
+                'WATCHLISTED', '2026-07-01T10:00:00Z', '2026-07-01T10:00:00Z',
+                'sent', 'v15-hash', 'v15-plan', 'v15-plan|initial_watchlist'
+            );
+            INSERT INTO public_alert_events (
+                canonical_plan_id, event_type, event_key, symbol, side,
+                setup_family, status, reserved_at, sent_at, source_modes
+            ) VALUES (
+                'v15-plan', 'initial_watchlist', 'v15-plan|initial_watchlist',
+                'BTCUSDT', 'long', 'swing', 'SENT',
+                '2026-07-01T10:00:00Z', '2026-07-01T10:00:01Z', 'swing'
+            );
+            PRAGMA user_version = 15;
+            """
+        )
+        connection.commit()
+
+
+def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:
+    db_path = tmp_path / "v15-to-v16.db"
+    _create_schema_v15_delivery_fixture(db_path)
+
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        attempt = connection.execute(
+            """
+            SELECT signal_id, telegram_status, sent_at, delivery_state
+            FROM telegram_alert_attempts
+            """
+        ).fetchone()
+        event = connection.execute(
+            """
+            SELECT canonical_plan_id, status, sent_at, delivery_state
+            FROM public_alert_events
+            """
+        ).fetchone()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+    assert attempt == (
+        "v15-signal", "sent", "2026-07-01T10:00:00Z", "SENT"
+    )
+    assert event == (
+        "v15-plan", "SENT", "2026-07-01T10:00:01Z", "SENT"
+    )
+    assert "public_alert_delivery_parts" in tables
+    assert version == 16 == SCHEMA_VERSION
+
+
+def test_schema_v16_migration_is_idempotent_for_v15_delivery_data(tmp_path) -> None:
+    db_path = tmp_path / "v16-idempotent.db"
+    _create_schema_v15_delivery_fixture(db_path)
+
+    with open_initialized_database(db_path):
+        pass
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM telegram_alert_attempts WHERE signal_id = 'v15-signal'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM public_alert_events WHERE canonical_plan_id = 'v15-plan'"
+        ).fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_schema_v16_migration_failure_rolls_back_completely(tmp_path, monkeypatch) -> None:
+    import app.storage.database as database_module
+
+    db_path = tmp_path / "v16-rollback.db"
+    _create_schema_v15_delivery_fixture(db_path)
+
+    def fail_migration(connection):
+        raise sqlite3.OperationalError("fault-injected migration failure")
+
+    monkeypatch.setattr(
+        database_module, "_migrate_public_alert_delivery_state_v16", fail_migration
+    )
+    with sqlite3.connect(db_path) as connection:
+        with pytest.raises(StorageError, match="initialize scan history database schema"):
+            database_module.initialize_database(connection)
+
+    with sqlite3.connect(db_path) as connection:
+        public_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(public_alert_events)"
+            ).fetchall()
+        }
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        event_count = connection.execute(
+            "SELECT COUNT(*) FROM public_alert_events"
+        ).fetchone()[0]
+
+    assert "delivery_state" not in public_columns
+    assert "public_alert_delivery_parts" not in tables
+    assert version == 15
+    assert event_count == 1

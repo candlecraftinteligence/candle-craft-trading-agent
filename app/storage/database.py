@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 class StorageError(RuntimeError):
@@ -28,8 +28,12 @@ def connect_database(path: Path | str = DEFAULT_DATABASE_PATH) -> sqlite3.Connec
 
 def initialize_database(connection: sqlite3.Connection) -> None:
     try:
+        if connection.in_transaction:
+            connection.commit()
         connection.executescript(
             """
+            BEGIN IMMEDIATE;
+
             CREATE TABLE IF NOT EXISTS scan_runs (
                 run_id TEXT PRIMARY KEY,
                 timestamp TEXT NOT NULL,
@@ -367,6 +371,26 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 matched_prior_alert_id INTEGER,
                 matched_prior_event_id INTEGER,
                 failure_reason TEXT NOT NULL DEFAULT 'N/A',
+                delivery_state TEXT NOT NULL DEFAULT 'PENDING',
+                payload_text TEXT NOT NULL DEFAULT 'N/A',
+                message_hash TEXT NOT NULL DEFAULT 'N/A',
+                destination_chat_id TEXT NOT NULL DEFAULT 'N/A',
+                destination_kind TEXT NOT NULL DEFAULT 'N/A',
+                attempt_id TEXT,
+                claim_owner TEXT,
+                claimed_at TEXT,
+                attempt_started_at TEXT,
+                lease_expires_at TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 3,
+                next_retry_at TEXT,
+                last_error_category TEXT NOT NULL DEFAULT 'N/A',
+                last_error_detail TEXT NOT NULL DEFAULT 'N/A',
+                telegram_message_id TEXT,
+                telegram_chat_id TEXT,
+                part_count INTEGER NOT NULL DEFAULT 1,
+                completed_at TEXT,
+                uncertain_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(event_key)
@@ -376,6 +400,36 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 ON public_alert_events(symbol, side, setup_family, event_type, status);
             CREATE INDEX IF NOT EXISTS ix_public_alert_events_status
                 ON public_alert_events(status);
+
+            CREATE TABLE IF NOT EXISTS public_alert_delivery_parts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                public_alert_event_id INTEGER NOT NULL REFERENCES public_alert_events(id) ON DELETE CASCADE,
+                event_key TEXT NOT NULL,
+                part_index INTEGER NOT NULL,
+                part_count INTEGER NOT NULL,
+                payload_text TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                delivery_state TEXT NOT NULL DEFAULT 'PENDING',
+                attempt_id TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                attempt_started_at TEXT,
+                sent_at TEXT,
+                telegram_message_id TEXT,
+                telegram_chat_id TEXT,
+                http_status INTEGER,
+                retry_after_seconds REAL,
+                next_retry_at TEXT,
+                last_error_category TEXT NOT NULL DEFAULT 'N/A',
+                last_error_detail TEXT NOT NULL DEFAULT 'N/A',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(public_alert_event_id, part_index)
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_public_alert_delivery_parts_state
+                ON public_alert_delivery_parts(delivery_state, next_retry_at);
+            CREATE INDEX IF NOT EXISTS ix_public_alert_delivery_parts_event
+                ON public_alert_delivery_parts(public_alert_event_id, part_index);
 
             CREATE TABLE IF NOT EXISTS symbol_health (
                 symbol TEXT PRIMARY KEY,
@@ -550,7 +604,45 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "normalized_invalidation", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "dedupe_status", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "dedupe_reason", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_state", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_attempt_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_attempt_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_next_retry_at", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_last_error_category", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "telegram_chat_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "telegram_message_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_part_count", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(connection, "public_alert_events", "delivery_state", "TEXT NOT NULL DEFAULT 'PENDING'")
+        _ensure_column(connection, "public_alert_events", "payload_text", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "public_alert_events", "message_hash", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "public_alert_events", "destination_chat_id", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "public_alert_events", "destination_kind", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "public_alert_events", "attempt_id", "TEXT")
+        _ensure_column(connection, "public_alert_events", "claim_owner", "TEXT")
+        _ensure_column(connection, "public_alert_events", "claimed_at", "TEXT")
+        _ensure_column(connection, "public_alert_events", "attempt_started_at", "TEXT")
+        _ensure_column(connection, "public_alert_events", "lease_expires_at", "TEXT")
+        _ensure_column(connection, "public_alert_events", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "public_alert_events", "max_attempts", "INTEGER NOT NULL DEFAULT 3")
+        _ensure_column(connection, "public_alert_events", "next_retry_at", "TEXT")
+        _ensure_column(connection, "public_alert_events", "last_error_category", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "public_alert_events", "last_error_detail", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "public_alert_events", "telegram_message_id", "TEXT")
+        _ensure_column(connection, "public_alert_events", "telegram_chat_id", "TEXT")
+        _ensure_column(connection, "public_alert_events", "part_count", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(connection, "public_alert_events", "completed_at", "TEXT")
+        _ensure_column(connection, "public_alert_events", "uncertain_at", "TEXT")
+        _migrate_public_alert_delivery_state_v16(connection)
         _ensure_nullable_telegram_sent_at(connection)
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_state", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_attempt_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_attempt_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_next_retry_at", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_last_error_category", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "telegram_chat_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "telegram_message_id", "TEXT")
+        _ensure_column(connection, "telegram_alert_attempts", "delivery_part_count", "INTEGER NOT NULL DEFAULT 1")
+        _migrate_public_alert_delivery_state_v16(connection)
         _ensure_telegram_alert_attempt_indexes(connection)
         _ensure_public_alert_event_indexes(connection)
         _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
@@ -578,6 +670,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
+        if connection.in_transaction:
+            connection.rollback()
         raise StorageError("Unable to initialize scan history database schema.") from exc
 
 
@@ -628,11 +722,12 @@ def _ensure_telegram_alert_attempt_indexes(connection: sqlite3.Connection) -> No
               AND public_watchlist_event_key NOT IN ('', 'N/A')
         """
     )
+    connection.execute("DROP INDEX IF EXISTS ux_telegram_alert_attempts_public_event_active")
     connection.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS ux_telegram_alert_attempts_public_event_active
             ON telegram_alert_attempts(public_watchlist_event_key)
-            WHERE telegram_status IN ('reserved', 'sent')
+            WHERE telegram_status IN ('reserved', 'pending', 'in_flight', 'retryable', 'uncertain', 'sent')
               AND public_watchlist_event_key IS NOT NULL
               AND public_watchlist_event_key NOT IN ('', 'N/A')
         """
@@ -649,6 +744,58 @@ def _ensure_public_alert_event_indexes(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS ix_public_alert_events_status
             ON public_alert_events(status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_public_alert_events_delivery_state
+            ON public_alert_events(delivery_state, next_retry_at)
+        """
+    )
+
+
+def _migrate_public_alert_delivery_state_v16(connection: sqlite3.Connection) -> None:
+    """Map pre-v16 rows without treating old reservations as safe to resend."""
+
+    connection.execute(
+        """
+        UPDATE public_alert_events
+        SET delivery_state = CASE
+                WHEN status = 'SENT' THEN 'SENT'
+                WHEN status = 'RESERVED' THEN 'UNCERTAIN'
+                WHEN status = 'FAILED' THEN 'FAILED_FINAL'
+                WHEN status = 'BLOCKED' THEN 'FAILED_FINAL'
+                ELSE 'FAILED_FINAL'
+            END,
+            uncertain_at = CASE
+                WHEN status = 'RESERVED' THEN COALESCE(uncertain_at, updated_at, reserved_at, created_at)
+                ELSE uncertain_at
+            END,
+            last_error_category = CASE
+                WHEN status = 'RESERVED' THEN 'legacy_reserved_acceptance_unknown'
+                ELSE last_error_category
+            END
+        WHERE delivery_state IS NULL
+           OR delivery_state = ''
+           OR (
+                delivery_state = 'PENDING'
+                AND payload_text = 'N/A'
+                AND message_hash = 'N/A'
+                AND attempt_count = 0
+                AND status IN ('SENT', 'RESERVED', 'FAILED', 'BLOCKED')
+           )
+        """
+    )
+    connection.execute(
+        """
+        UPDATE telegram_alert_attempts
+        SET delivery_state = CASE
+                WHEN telegram_status = 'sent' THEN 'SENT'
+                WHEN telegram_status = 'reserved' THEN 'UNCERTAIN'
+                WHEN telegram_status = 'failed' THEN 'FAILED_FINAL'
+                ELSE delivery_state
+            END
+        WHERE delivery_state IS NULL OR delivery_state IN ('', 'N/A')
         """
     )
 

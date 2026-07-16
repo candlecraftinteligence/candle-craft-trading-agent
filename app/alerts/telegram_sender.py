@@ -7,7 +7,12 @@ from typing import Any
 
 import httpx
 
-from app.alerts.telegram import DEFAULT_TELEGRAM_TIMEOUT, TELEGRAM_API_BASE_URL, send_telegram_messages
+from app.alerts.telegram import (
+    DEFAULT_TELEGRAM_TIMEOUT,
+    TELEGRAM_API_BASE_URL,
+    send_telegram_message_part,
+    send_telegram_messages,
+)
 from app.alerts.telegram_routing import (
     TelegramDestination,
     TelegramMessageType,
@@ -33,6 +38,7 @@ class TelegramSendResult:
     detail: str
     telegram_results: tuple[dict[str, Any], ...] = ()
     error_message: str = NA
+    delivery_state: str = NA
 
     @property
     def sent(self) -> bool:
@@ -44,6 +50,7 @@ class PublicWatchlistSendGuard:
     event_key: str
     reservation_id: int
     event_id: int
+    attempt_id: str = NA
 
 
 @dataclass(frozen=True)
@@ -108,19 +115,31 @@ class TelegramSender:
             destination=destination_type,
         )
 
-    async def send_text(
+    @property
+    def dry_run(self) -> bool:
+        return self._dry_run
+
+    @property
+    def destination_identity(self) -> str:
+        return self._chat_id or NA
+
+    @property
+    def destination_kind(self) -> str:
+        return self._destination.value
+
+    def preflight(
         self,
-        text: str,
         *,
         message_type: TelegramMessageType | str = TelegramMessageType.UNKNOWN,
         public_watchlist_guard: PublicWatchlistSendGuard | None = None,
-    ) -> TelegramSendResult:
+    ) -> TelegramSendResult | None:
         if not self._local_manual_mode:
             logger.warning("Telegram signal delivery skipped because LOCAL_MANUAL_MODE is false.")
             return TelegramSendResult(
                 status="skipped",
                 detail="Telegram signal delivery skipped because LOCAL_MANUAL_MODE is false.",
                 error_message="local_manual_mode_disabled",
+                delivery_state="POLICY_DISABLED",
             )
         if not self._signals_enabled:
             logger.info("Telegram signal formatted but sending is disabled.")
@@ -128,6 +147,7 @@ class TelegramSender:
                 status="skipped",
                 detail="Telegram sending is disabled by TELEGRAM_SIGNALS_ENABLED=false.",
                 error_message="telegram_sending_disabled",
+                delivery_state="POLICY_DISABLED",
             )
         if self._dry_run:
             logger.info("Telegram signal delivery skipped because TELEGRAM_DRY_RUN is true.")
@@ -135,6 +155,7 @@ class TelegramSender:
                 status="skipped",
                 detail="Telegram dry-run is enabled; no Telegram message was sent.",
                 error_message="telegram_dry_run_enabled",
+                delivery_state="SKIPPED_DRY_RUN",
             )
         if not self._bot_token or not self._chat_id:
             logger.warning("Telegram signal delivery skipped because credentials are missing.")
@@ -142,8 +163,8 @@ class TelegramSender:
                 status="skipped",
                 detail="Telegram credentials are missing; no Telegram message was sent.",
                 error_message="missing_telegram_credentials",
+                delivery_state="FAILED_FINAL",
             )
-
         normalized_message_type = normalize_message_type(message_type)
         if (
             normalized_message_type == TelegramMessageType.PUBLIC_WATCHLIST
@@ -154,8 +175,8 @@ class TelegramSender:
                 status="skipped",
                 detail="Public WATCHLIST Telegram send requires a public_alert_events reservation.",
                 error_message="public_watchlist_missing_required_reservation",
+                delivery_state="POLICY_DISABLED",
             )
-
         route_decision = can_send_to_destination(self._destination, normalized_message_type)
         if not route_decision.allowed:
             log_blocked_telegram_route(route_decision)
@@ -163,8 +184,23 @@ class TelegramSender:
                 status="skipped",
                 detail="Telegram message blocked by signal-channel routing guard.",
                 error_message=route_decision.reason,
+                delivery_state="POLICY_DISABLED",
             )
+        return None
 
+    async def send_text(
+        self,
+        text: str,
+        *,
+        message_type: TelegramMessageType | str = TelegramMessageType.UNKNOWN,
+        public_watchlist_guard: PublicWatchlistSendGuard | None = None,
+    ) -> TelegramSendResult:
+        blocked = self.preflight(
+            message_type=message_type,
+            public_watchlist_guard=public_watchlist_guard,
+        )
+        if blocked is not None:
+            return blocked
         results = await send_telegram_messages(
             bot_token=self._bot_token,
             chat_id=self._chat_id,
@@ -180,6 +216,45 @@ class TelegramSender:
             detail="Telegram signal sent." if sent else "Telegram signal delivery failed.",
             telegram_results=tuple(dict(result) for result in results),
             error_message=error,
+            delivery_state=_result_delivery_state(results),
+        )
+
+    async def send_part(
+        self,
+        text: str,
+        *,
+        part_number: int,
+        total_parts: int,
+        message_type: TelegramMessageType | str = TelegramMessageType.UNKNOWN,
+        public_watchlist_guard: PublicWatchlistSendGuard | None = None,
+    ) -> TelegramSendResult:
+        blocked = self.preflight(
+            message_type=message_type,
+            public_watchlist_guard=public_watchlist_guard,
+        )
+        if blocked is not None:
+            return blocked
+        result = await send_telegram_message_part(
+            bot_token=self._bot_token or "",
+            chat_id=self._chat_id or "",
+            message=text,
+            part_number=part_number,
+            total_parts=total_parts,
+            http_client=self._http_client,
+            api_base_url=self._api_base_url,
+            timeout=self._timeout,
+        )
+        sent = result.get("delivery_state") == "SENT"
+        return TelegramSendResult(
+            status="sent" if sent else "failed",
+            detail=(
+                "Telegram signal part sent."
+                if sent
+                else "Telegram signal part delivery did not confirm success."
+            ),
+            telegram_results=(dict(result),),
+            error_message=str(result.get("error") or NA),
+            delivery_state=str(result.get("delivery_state") or NA),
         )
 
     def send_message(
@@ -198,7 +273,13 @@ class TelegramSender:
 def _valid_public_watchlist_guard(guard: PublicWatchlistSendGuard | None) -> bool:
     if guard is None:
         return False
-    return bool(str(guard.event_key).strip()) and guard.reservation_id > 0 and guard.event_id > 0
+    return (
+        bool(str(guard.event_key).strip())
+        and guard.reservation_id > 0
+        and guard.event_id > 0
+        and bool(str(guard.attempt_id).strip())
+        and guard.attempt_id != NA
+    )
 
 
 def resolve_public_signal_destination(settings: Settings) -> TelegramPublicDestination:
@@ -234,6 +315,14 @@ def _first_error(results: tuple[dict[str, Any], ...]) -> str:
         if error:
             return str(error)
     return NA
+
+
+def _result_delivery_state(results: tuple[dict[str, Any], ...]) -> str:
+    if not results:
+        return "UNCERTAIN"
+    if all(result.get("delivery_state") == "SENT" for result in results):
+        return "SENT"
+    return str(results[-1].get("delivery_state") or "UNCERTAIN")
 
 
 __all__ = [
