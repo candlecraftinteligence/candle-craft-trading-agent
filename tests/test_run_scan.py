@@ -2180,6 +2180,31 @@ def test_diagnostics_level_overrides_verbose(monkeypatch, capsys) -> None:
     assert "Strategy diagnostics:" not in captured.out
 
 
+@pytest.mark.parametrize(
+    ("telegram_args", "lifecycle_selected", "legacy_local_selected"),
+    (
+        pytest.param(("--telegram-manual-signals",), True, False, id="manual"),
+        pytest.param(("--telegram-live-alerts", "true"), True, False, id="legacy-live-selector"),
+        pytest.param(
+            ("--telegram-manual-signals", "--telegram-live-alerts", "true"),
+            True,
+            False,
+            id="both",
+        ),
+        pytest.param((), False, True, id="local-dry-run"),
+    ),
+)
+def test_telegram_watch_route_selection_is_explicit(
+    telegram_args: tuple[str, ...],
+    lifecycle_selected: bool,
+    legacy_local_selected: bool,
+) -> None:
+    args = run_scan.parse_args(["--symbols", "BTCUSDT", "--watch", *telegram_args])
+
+    assert run_scan._telegram_lifecycle_public_delivery_enabled(args) is lifecycle_selected
+    assert run_scan._legacy_watch_activation_delivery_enabled(args) is legacy_local_selected
+
+
 def test_telegram_manual_lifecycle_label_does_not_say_dry_run_when_enabled(monkeypatch) -> None:
     monkeypatch.setenv("TELEGRAM_SIGNALS_ENABLED", "true")
     monkeypatch.setenv("LOCAL_MANUAL_MODE", "true")

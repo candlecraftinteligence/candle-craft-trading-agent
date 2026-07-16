@@ -42,7 +42,7 @@ _SL_TYPE = TelegramAlertType.SL_HIT.value
 _INVALIDATED_TYPE = TelegramAlertType.INVALIDATED.value
 _EXPIRED_TYPE = TelegramAlertType.EXPIRED.value
 _NO_LONGER_TRACKING_TYPE = TelegramAlertType.NO_LONGER_TRACKING.value
-_ACTIVE_SIGNAL_BASE_TYPES = (_SIGNAL_CONFIRMED_TYPE,)
+_ACTIVE_SIGNAL_BASE_TYPES = (_SIGNAL_CONFIRMED_TYPE, _WATCHLIST_TYPE)
 _RUNTIME_DATABASE_INFERENCE_BLOCKLIST = {"main_live_runtime.sqlite"}
 _TERMINAL_OUTCOME_TYPES = {
     _TP3_TYPE,
@@ -66,6 +66,7 @@ _WATCHLIST_QUERY_TYPES = (
 )
 _SIGNAL_QUERY_TYPES = (
     _SIGNAL_CONFIRMED_TYPE,
+    _WATCHLIST_TYPE,
     _LIMIT_TYPE,
     _TP1_TYPE,
     _TP2_TYPE,
@@ -1049,7 +1050,7 @@ def _active_signal_items_from_rows(
         hit_alert_types = frozenset(
             _clean(row.get("alert_type"))
             for row in (signal_row, *outcome_rows)
-            if _clean(row.get("alert_type")) not in {_SIGNAL_CONFIRMED_TYPE, NA}
+            if _clean(row.get("alert_type")) not in {_SIGNAL_CONFIRMED_TYPE, _WATCHLIST_TYPE, NA}
         )
         levels = _stored_trade_map_levels(signal_row)
         candidate_meta = _candidate_metadata(connection, latest_row)
@@ -1255,13 +1256,18 @@ def _active_signal_state_is_allowed(
     rows: Sequence[Mapping[str, Any]],
     lifecycle_row: Mapping[str, Any],
 ) -> bool:
-    values: list[Any] = [
-        *(row.get("alert_type") for row in rows),
-        *(row.get("new_state") for row in rows),
-        *(row.get("lifecycle_state") for row in rows),
-    ]
     if _lifecycle_row_matches_rows(rows, lifecycle_row):
-        values.append(lifecycle_row.get("current_state"))
+        lifecycle_state = _status_key(lifecycle_row.get("current_state"))
+        return lifecycle_state in _ACTIVE_SIGNAL_ALLOWED_STATE_KEYS
+
+    evaluation_rows = rows
+    if any(_clean(row.get("alert_type")) == _SIGNAL_CONFIRMED_TYPE for row in rows):
+        evaluation_rows = tuple(row for row in rows if _clean(row.get("alert_type")) != _WATCHLIST_TYPE)
+    values: list[Any] = [
+        *(row.get("alert_type") for row in evaluation_rows),
+        *(row.get("new_state") for row in evaluation_rows),
+        *(row.get("lifecycle_state") for row in evaluation_rows),
+    ]
     keys = {_status_key(value) for value in values if _status_key(value)}
     if keys & _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS:
         return False
@@ -1280,19 +1286,7 @@ def _lifecycle_row_matches_rows(rows: Sequence[Mapping[str, Any]], lifecycle_row
     }
     if lifecycle_id in row_ids:
         return True
-
-    lifecycle_timestamp = _latest_timestamp(
-        (
-            lifecycle_row.get("last_seen_at"),
-            lifecycle_row.get("last_transition_at"),
-        )
-    )
-    row_timestamp = _latest_timestamp(
-        value
-        for row in rows
-        for value in (row.get("last_seen_at"), row.get("sent_at"))
-    )
-    return lifecycle_timestamp is not None and row_timestamp is not None and lifecycle_timestamp >= row_timestamp
+    return any(_plan_geometry_matches(row, lifecycle_row) for row in rows)
 
 
 def _active_signal_row_has_complete_trade_map(row: Mapping[str, Any]) -> bool:
@@ -1330,6 +1324,31 @@ def _stored_trade_map_levels(row: Mapping[str, Any]) -> dict[str, str]:
     levels = {column: _price_text(row.get(column)) for column in _LEVEL_COLUMNS}
     _normalize_single_level_zone(levels)
     return levels
+
+
+def _plan_geometry_values(row: Mapping[str, Any]) -> tuple[Decimal, ...] | None:
+    values: list[Decimal] = []
+    for column in _LEVEL_COLUMNS:
+        value = _decimal_or_none(row.get(column))
+        if value is None:
+            return None
+        values.append(value)
+    values[0], values[1] = sorted((values[0], values[1]))
+    return tuple(values)
+
+
+def _plan_geometry_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_symbol = _symbol_text(left.get("symbol"))
+    right_symbol = _symbol_text(right.get("symbol"))
+    if left_symbol == NA or left_symbol != right_symbol:
+        return False
+    left_direction = _direction_text(left.get("direction"))
+    right_direction = _direction_text(right.get("direction"))
+    if left_direction == NA or left_direction != right_direction:
+        return False
+    left_geometry = _plan_geometry_values(left)
+    right_geometry = _plan_geometry_values(right)
+    return left_geometry is not None and left_geometry == right_geometry
 
 
 def _watchlist_trade_map_directionally_valid(*, direction: str, levels: Mapping[str, str]) -> bool:
@@ -2043,29 +2062,32 @@ def _lifecycle_row_for_attempt(connection: sqlite3.Connection, row: Mapping[str,
         return {}
     direction = _clean(row.get("direction"))
     if "direction" in columns and direction != NA:
-        record = connection.execute(
+        records = connection.execute(
             f"""
             SELECT {", ".join(select_columns)}
             FROM setup_lifecycle_records
             WHERE UPPER(symbol) = UPPER(?)
               AND UPPER(direction) = UPPER(?)
-            ORDER BY last_seen_at DESC
-            LIMIT 1
+            ORDER BY last_seen_at DESC, lifecycle_id DESC
             """,
             (symbol, direction),
-        ).fetchone()
+        ).fetchall()
     else:
-        record = connection.execute(
+        records = connection.execute(
             f"""
             SELECT {", ".join(select_columns)}
             FROM setup_lifecycle_records
             WHERE UPPER(symbol) = UPPER(?)
-            ORDER BY last_seen_at DESC
-            LIMIT 1
+            ORDER BY last_seen_at DESC, lifecycle_id DESC
             """,
             (symbol,),
-        ).fetchone()
-    return dict(record) if record is not None else {}
+        ).fetchall()
+    geometry_matches = tuple(
+        candidate
+        for candidate in (dict(record) for record in records)
+        if _plan_geometry_matches(row, candidate)
+    )
+    return geometry_matches[0] if len(geometry_matches) == 1 else {}
 
 
 def _latest_lifecycle_event(

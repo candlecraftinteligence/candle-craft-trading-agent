@@ -479,10 +479,88 @@ def test_telegram_dry_run_overrides_legacy_live_alert_flag(tmp_path, monkeypatch
     )
 
     captured = capsys.readouterr()
-    assert "Telegram manual lifecycle alerts: disabled" in captured.out
+    assert "Telegram lifecycle setup alerts:" in captured.out
     assert "Telegram admin drafts: disabled/dry-run" in captured.out
-    assert "Legacy scanner alerts: dry-run" in captured.out
-    assert "WATCHLIST UPGRADED" in captured.out
+    assert "Legacy scanner alerts: suppressed (lifecycle setup route selected)" in captured.out
+    assert "WATCHLIST UPGRADED" not in captured.out
+
+
+@pytest.mark.parametrize(
+    "telegram_args",
+    (
+        pytest.param(("--telegram-manual-signals",), id="manual"),
+        pytest.param(("--telegram-live-alerts", "true"), id="legacy-live-selector"),
+        pytest.param(
+            ("--telegram-manual-signals", "--telegram-live-alerts", "true"),
+            id="both",
+        ),
+    ),
+)
+def test_public_telegram_flags_use_one_lifecycle_route_per_watch_iteration(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    telegram_args: tuple[str, ...],
+) -> None:
+    state_path = tmp_path / "watch_state.json"
+    save_watch_state(state_path, _prior_state())
+    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    monkeypatch.setattr(run_scan, "SCAN_RUN_MANIFEST_PATH", tmp_path / "manifest.jsonl")
+    monkeypatch.setattr(run_scan, "NIGHTLY_SCAN_HISTORY_PATH", tmp_path / "nightly_history.json")
+    monkeypatch.setattr(run_scan, "_route_admin_report", _noop_admin_report)
+    monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
+    SequenceWatchRunner.configs = []
+    SequenceWatchRunner.results_by_call = [(_valid_symbol(),)]
+
+    lifecycle_calls: list[tuple[ScannerRunResult, str | None]] = []
+
+    class RecordingLifecycleDeliveryService:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def deliver_for_run(self, result, *, scan_run_id):
+            lifecycle_calls.append((result, scan_run_id))
+            return run_scan.TelegramLifecycleDeliverySummary(sent=1)
+
+    def fail_legacy_call(*args, **kwargs):  # pragma: no cover - should never run
+        raise AssertionError("public Telegram modes must not evaluate the legacy activation route")
+
+    async def fail_legacy_delivery(*args, **kwargs):  # pragma: no cover - should never run
+        raise AssertionError("public Telegram modes must not call the legacy Telegram sender")
+
+    monkeypatch.setattr(run_scan, "TelegramLifecycleDeliveryService", RecordingLifecycleDeliveryService)
+    monkeypatch.setattr(run_scan, "_telegram_manual_signal_settings", lambda: object())
+    monkeypatch.setattr(run_scan, "_telegram_manual_lifecycle_status_label", lambda args: "enabled")
+    monkeypatch.setattr(run_scan, "_telegram_admin_draft_status_label", lambda: "disabled")
+    monkeypatch.setattr(run_scan, "_startup_warnings", lambda *args: ())
+    monkeypatch.setattr(run_scan, "_watch_telegram_credentials", fail_legacy_call)
+    monkeypatch.setattr(run_scan, "should_trigger_activation_alert", fail_legacy_call)
+    monkeypatch.setattr(run_scan, "format_watch_activation_alert", fail_legacy_call)
+    monkeypatch.setattr(run_scan, "deliver_watch_activation_alert", fail_legacy_delivery)
+
+    asyncio.run(
+        run_scan.main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "--watch",
+                "--watch-max-iterations",
+                "1",
+                "--watch-interval-sec",
+                "0.01",
+                "--database-path",
+                str(tmp_path / "scanner.sqlite"),
+                *telegram_args,
+            ]
+        )
+    )
+
+    assert len(lifecycle_calls) == 1
+    state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state_payload["symbols"]["BTCUSDT"]["alert_sent"] is False
+    assert state_payload["symbols"]["BTCUSDT"]["activation_count"] == 0
+    captured = capsys.readouterr()
+    assert "Legacy scanner alerts: suppressed (lifecycle setup route selected)" in captured.out
 
 
 def test_watch_mode_single_iteration_updates_state_and_jsonl(tmp_path, monkeypatch, capsys) -> None:
@@ -988,33 +1066,6 @@ def test_watch_mode_max_iterations_stop(tmp_path, monkeypatch) -> None:
     assert len(SequenceWatchRunner.configs) == 2
 
 
-def test_live_telegram_requires_env_vars(monkeypatch, tmp_path) -> None:
-    state_path = tmp_path / "watch_state.json"
-    save_watch_state(state_path, _prior_state())
-    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
-    monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
-    monkeypatch.setattr(
-        run_scan,
-        "Settings",
-        lambda: SimpleNamespace(telegram_bot_token=None, telegram_chat_id=None, telegram_dry_run=False),
-    )
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
-
-    with pytest.raises(SystemExit, match="TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"):
-        asyncio.run(
-            run_scan.main(
-                [
-                    "--symbols",
-                    "BTCUSDT",
-                    "--watch",
-                    "--watch-max-iterations",
-                    "1",
-                    "--telegram-live-alerts",
-                    "true",
-                ]
-            )
-        )
 
 
 def test_watch_state_update_behavior() -> None:

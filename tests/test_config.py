@@ -19,6 +19,7 @@ def test_default_settings_are_safe() -> None:
     assert settings.telegram_admin_reports_enabled is None
     assert settings.telegram_dry_run is True
     assert settings.telegram_signals_enabled is False
+    assert settings.telegram_public_signal_policy == "setup_only"
     assert settings.telegram_signal_channel_invite_link is None
     assert settings.telegram_public_watchlist_enabled is True
     assert settings.public_watchlist_min_grade == "A"
@@ -70,6 +71,11 @@ def test_telegram_dry_run_loads_from_canonical_environment_setting(
 def test_order_execution_enabled_fails_safely() -> None:
     with pytest.raises(ValueError, match="ORDER_EXECUTION_ENABLED must remain false"):
         Settings(_env_file=None, order_execution_enabled=True)
+
+
+def test_unsupported_public_signal_policy_fails_safely() -> None:
+    with pytest.raises(ValueError, match="setup_only"):
+        Settings(_env_file=None, telegram_public_signal_policy="confirmed_updates")
 
 
 def test_signal_channel_invite_link_loads_from_environment(monkeypatch) -> None:

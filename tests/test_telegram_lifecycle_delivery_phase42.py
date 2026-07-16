@@ -14,9 +14,11 @@ import pytest
 from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
+    CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON,
     PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
     PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON,
     PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES,
+    RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON,
     PublicWatchlistReservationResult,
     SQLiteTelegramAlertAttemptRepository,
     TelegramAlertType,
@@ -66,6 +68,23 @@ class FakeSender:
         self.messages.append(text)
         self.calls.append(kwargs)
         return TelegramSendResult(status=self.status, detail=f"{self.status}.")
+
+
+class LegacyResearchWatchDeliveryService(TelegramLifecycleDeliveryService):
+    @property
+    def setup_only_public_delivery(self) -> bool:
+        return False
+
+def test_unknown_public_signal_policy_fails_closed_to_setup_only(tmp_path: Path) -> None:
+    class TypoPolicySettings:
+        telegram_public_signal_policy = "setup-ony"
+
+    service = TelegramLifecycleDeliveryService(
+        database_path=tmp_path / "policy.db",
+        settings=TypoPolicySettings(),
+        sender=FakeSender(),
+    )
+    assert service.public_signal_policy == "setup_only"
 
 
 def Settings(*args, **kwargs):
@@ -1298,6 +1317,28 @@ def _research_attempt_rows(db_path: Path) -> list[tuple[str, str, str | None, st
         ).fetchall()
 
 
+def _assert_research_watch_policy_disabled(
+    summary,
+    sender: FakeSender,
+    db_path: Path,
+    *,
+    expected_count: int = 1,
+    expected_persisted_count: int | None = None,
+) -> None:
+    assert summary.sent == 0
+    assert summary.failed == 0
+    assert summary.skipped == expected_count
+    assert sender.messages == []
+    assert sender.calls == []
+    policy_rows = [
+        row
+        for row in _research_attempt_rows(db_path)
+        if row[4] == RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON
+    ]
+    assert len(policy_rows) == (expected_persisted_count or expected_count)
+    assert all(row[1] == "skipped" and row[2] is None for row in policy_rows)
+
+
 def _insert_attempt_record(
     db_path: Path,
     *,
@@ -1411,7 +1452,7 @@ def test_sent_attempt_writes_delivery_sent_at(tmp_path: Path) -> None:
     assert _attempt_timestamp_rows(db_path) == [("sent", "2026-06-07T00:00:00Z", "2026-06-07T00:00:00Z")]
 
 
-def test_research_watch_sends_enabled_regime_blocked_near_miss_without_official_alert(tmp_path: Path) -> None:
+def test_setup_only_policy_persists_research_watch_skip_without_sender_call(tmp_path: Path) -> None:
     db_path = tmp_path / "research-watch.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -1422,23 +1463,7 @@ def test_research_watch_sends_enabled_regime_blocked_near_miss_without_official_
 
     summary = run(service.deliver_for_run(_run_result(_research_symbol()), scan_run_id="research-001"))
 
-    assert summary.sent == 1
-    assert len(sender.messages) == 1
-    message = sender.messages[0]
-    assert f"{HEADER_PREFIX} Research Watch — FILUSDT" in message
-    assert "Quality: 70" in message
-    assert "Readiness: 55" in message
-    assert "Regime: High Volatility" in message
-    assert "Regime fit: Hostile" in message
-    assert "Confidence: 9/10" in message
-    assert "Trade map:\nN/A — waiting for clean confirmation." in message
-    assert "SCALP SIGNAL" not in message
-    assert "WATCHLIST" not in message
-    assert "CONFIRMED" not in message
-    assert "LIMIT HIT" not in message
-    rows = _telegram_attempt_rows(db_path)
-    assert (rows[0][1], rows[0][2]) == (TelegramAlertType.RESEARCH_WATCH.value, "sent")
-    assert not any(row[1] in {TelegramAlertType.WATCHLIST.value, TelegramAlertType.SIGNAL_CONFIRMED.value} for row in rows)
+    _assert_research_watch_policy_disabled(summary, sender, db_path)
 
 
 def test_research_watch_does_not_send_when_disabled_or_public_delivery_disabled(tmp_path: Path) -> None:
@@ -1455,7 +1480,7 @@ def test_research_watch_does_not_send_when_disabled_or_public_delivery_disabled(
     for filename, settings, expected_status, expected_reason in cases:
         db_path = tmp_path / filename
         sender = FakeSender()
-        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=settings, sender=sender)
+        service = LegacyResearchWatchDeliveryService(database_path=db_path, settings=settings, sender=sender)
 
         summary = run(service.deliver_for_run(_run_result(_research_symbol()), scan_run_id=filename))
 
@@ -1478,7 +1503,7 @@ def test_research_watch_respects_quality_and_readiness_thresholds(tmp_path: Path
     for filename, symbol_result, settings in cases:
         db_path = tmp_path / filename
         sender = FakeSender()
-        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=settings, sender=sender)
+        service = LegacyResearchWatchDeliveryService(database_path=db_path, settings=settings, sender=sender)
 
         summary = run(service.deliver_for_run(_run_result(symbol_result), scan_run_id=filename))
 
@@ -1493,7 +1518,7 @@ def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldo
 ) -> None:
     db_path = tmp_path / "research-cooldown.db"
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
+    service = LegacyResearchWatchDeliveryService(
         database_path=db_path,
         settings=_research_settings(),
         sender=sender,
@@ -1531,7 +1556,7 @@ def test_research_watch_cooldown_uses_config_override(
 ) -> None:
     db_path = tmp_path / "research-cooldown-override.db"
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
+    service = LegacyResearchWatchDeliveryService(
         database_path=db_path,
         settings=_research_settings(cooldown_minutes=10),
         sender=sender,
@@ -1562,7 +1587,7 @@ def test_research_watch_cooldown_normalizes_perp_suffix(
 ) -> None:
     db_path = tmp_path / "research-cooldown-symbol-normalized.db"
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
+    service = LegacyResearchWatchDeliveryService(
         database_path=db_path,
         settings=_research_settings(),
         sender=sender,
@@ -1602,7 +1627,7 @@ def test_research_watch_cooldown_ignores_unsent_rows(
         signal_id=f"research-link-{status}",
     )
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
+    service = LegacyResearchWatchDeliveryService(
         database_path=db_path,
         settings=_research_settings(),
         sender=sender,
@@ -1622,7 +1647,7 @@ def test_research_watch_cooldown_only_sent_rows_suppress(
     db_path = tmp_path / "research-cooldown-sent-only.db"
     _insert_research_attempt_record(db_path, symbol="LINKUSDT", status="sent", signal_id="research-link-sent")
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
+    service = LegacyResearchWatchDeliveryService(
         database_path=db_path,
         settings=_research_settings(),
         sender=sender,
@@ -1646,7 +1671,7 @@ def test_research_watch_cooldown_skips_do_not_consume_send_cap(
     db_path = tmp_path / "research-cooldown-cap.db"
     _insert_research_attempt_record(db_path, symbol="LINKUSDT", status="sent", signal_id="research-link-sent")
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
+    service = LegacyResearchWatchDeliveryService(
         database_path=db_path,
         settings=_research_settings(max_per_scan=1),
         sender=sender,
@@ -1678,7 +1703,7 @@ def test_research_watch_cooldown_skips_do_not_consume_send_cap(
 def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path: Path) -> None:
     sent_db = tmp_path / "research-sent-at.db"
     sent_sender = FakeSender(status="sent")
-    sent_service = TelegramLifecycleDeliveryService(
+    sent_service = LegacyResearchWatchDeliveryService(
         database_path=sent_db,
         settings=_research_settings(),
         sender=sent_sender,
@@ -1688,7 +1713,7 @@ def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path:
 
     failed_db = tmp_path / "research-failed-at.db"
     failed_sender = FakeSender(status="failed")
-    failed_service = TelegramLifecycleDeliveryService(
+    failed_service = LegacyResearchWatchDeliveryService(
         database_path=failed_db,
         settings=_research_settings(),
         sender=failed_sender,
@@ -1705,7 +1730,7 @@ def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path:
 def test_research_watch_respects_per_scan_cap_and_quality_sort(tmp_path: Path) -> None:
     db_path = tmp_path / "research-cap.db"
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
+    service = LegacyResearchWatchDeliveryService(
         database_path=db_path,
         settings=_research_settings(max_per_scan=2),
         sender=sender,
@@ -1735,7 +1760,7 @@ def test_research_watch_respects_per_scan_cap_and_quality_sort(tmp_path: Path) -
 def test_research_watch_valid_trade_map_renders_but_remains_research_watch(tmp_path: Path) -> None:
     db_path = tmp_path / "research-valid-map.db"
     sender = FakeSender()
-    service = TelegramLifecycleDeliveryService(
+    service = LegacyResearchWatchDeliveryService(
         database_path=db_path,
         settings=_research_settings(),
         sender=sender,
@@ -3176,11 +3201,6 @@ def _assert_no_sent_follow_up_attempt(db_path: Path, attempted_alert_type: Teleg
             """
         ).fetchall()
     assert not any(row[0] == attempted_alert_type.value and row[1] == "sent" for row in rows)
-    assert any(
-        row[0] == attempted_alert_type.value
-        and row[1] in {"skipped", "blocked", "blocked_repeat", "duplicate"}
-        for row in rows
-    )
 
 def _contextless_reason_overrides(*, failed_gate: str) -> dict[str, object]:
     return {
@@ -4578,7 +4598,7 @@ def test_concurrent_public_watchlist_reservations_allow_one_sender(tmp_path: Pat
     assert attempts[0].telegram_status == "reserved"
 
 
-def test_limit_zone_hit_update_sent_once(tmp_path: Path) -> None:
+def test_repeated_runtime_public_watchlist_sends_once(tmp_path: Path) -> None:
     db_path = tmp_path / "limit-hit-once.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
@@ -4595,12 +4615,12 @@ def test_limit_zone_hit_update_sent_once(tmp_path: Path) -> None:
     assert "Status:" in sender.messages[0]
 
 
-def test_confirmed_signal_sent_once_through_confirmed_route(tmp_path: Path) -> None:
+def test_confirmed_signal_route_is_policy_silent(tmp_path: Path) -> None:
     test_duplicate_confirmed_signal_is_not_sent_twice(tmp_path)
 
 
-def test_terminal_update_sent_once_when_prior_public_alert_exists(tmp_path: Path) -> None:
-    test_watchlist_to_invalidated_sends_invalidation_once(tmp_path)
+def test_terminal_update_is_silent_when_prior_public_alert_exists(tmp_path: Path) -> None:
+    test_watchlist_to_invalidated_keeps_update_internal_and_silent(tmp_path)
 
 
 def test_public_watchlist_cooldown_uses_canonical_plan_id(tmp_path: Path) -> None:
@@ -4659,16 +4679,16 @@ def test_materially_new_invalidation_hits_same_symbol_cooldown(tmp_path: Path) -
     test_material_invalidation_change_hits_same_symbol_cooldown(tmp_path)
 
 
-def test_limit_zone_hit_update_sent_once_after_initial_watchlist(tmp_path: Path) -> None:
-    test_limit_zone_hit_update_sent_once(tmp_path)
+def test_initial_setup_alert_sent_once_after_repeat_evaluation(tmp_path: Path) -> None:
+    test_repeated_runtime_public_watchlist_sends_once(tmp_path)
 
 
-def test_initial_watchlist_not_resent_after_limit_zone_hit(tmp_path: Path) -> None:
-    test_limit_zone_hit_update_sent_once(tmp_path)
+def test_initial_watchlist_not_resent_after_repeat_evaluation(tmp_path: Path) -> None:
+    test_repeated_runtime_public_watchlist_sends_once(tmp_path)
 
 
-def test_confirmed_signal_route_unchanged(tmp_path: Path) -> None:
-    test_confirmed_signal_sent_once_through_confirmed_route(tmp_path)
+def test_confirmed_signal_route_is_intentionally_disabled(tmp_path: Path) -> None:
+    test_confirmed_signal_route_is_policy_silent(tmp_path)
 
 
 def test_missing_zone_remains_blocked(tmp_path: Path) -> None:
@@ -5317,7 +5337,7 @@ def test_confirmed_not_sent_as_watchlist() -> None:
     assert decision.alert_type != TelegramAlertType.WATCHLIST
 
 
-def test_confirmed_signal_route_not_dependent_on_prior_watchlist_alert(tmp_path: Path) -> None:
+def test_standalone_confirmed_signal_is_policy_disabled_without_prior_watchlist(tmp_path: Path) -> None:
     db_path = tmp_path / "confirmed-no-prior-watch.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
@@ -5325,16 +5345,10 @@ def test_confirmed_signal_route_not_dependent_on_prior_watchlist_alert(tmp_path:
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-no-prior-watch"))
 
-    assert summary.sent == 1
-    assert "Status: 🟢 Entry Zone Active" in sender.messages[0]
-    with sqlite3.connect(db_path) as connection:
-        row = connection.execute(
-            "SELECT attempted_alert_type FROM telegram_alert_attempts WHERE telegram_status = 'sent'"
-        ).fetchone()
-    assert row == (TelegramAlertType.SIGNAL_CONFIRMED.value,)
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
 
 
-def test_confirmed_signal_creates_send_attempt_when_valid_and_telegram_enabled(tmp_path: Path) -> None:
+def test_confirmed_signal_creates_no_public_attempt_when_policy_disabled(tmp_path: Path) -> None:
     db_path = tmp_path / "confirmed-stale-rejection-send.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -5354,19 +5368,7 @@ def test_confirmed_signal_creates_send_attempt_when_valid_and_telegram_enabled(t
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-stale-rejection"))
 
-    assert summary.sent == 1
-    assert "Status: 🟢 Entry Zone Active" in sender.messages[0]
-    assert "DYDXUSDT" in sender.messages[0]
-    with sqlite3.connect(db_path) as connection:
-        row = connection.execute(
-            """
-            SELECT symbol, attempted_alert_type, telegram_status, blocked_reason, error_message
-            FROM telegram_alert_attempts
-            WHERE signal_id = ?
-            """,
-            ("dydx-confirmed",),
-        ).fetchone()
-    assert row == ("DYDXUSDT", TelegramAlertType.SIGNAL_CONFIRMED.value, "sent", "N/A", "N/A")
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
 
 
 def test_telegram_dry_run_protects_confirmed_public_delivery_and_persistence(tmp_path: Path) -> None:
@@ -5399,17 +5401,7 @@ def test_telegram_dry_run_protects_confirmed_public_delivery_and_persistence(tmp
     finally:
         run(client.aclose())
 
-    assert requests == []
-    assert summary.sent == 0
-    assert summary.skipped == 1
-    assert summary.deliveries[0].status == "skipped"
-    assert summary.deliveries[0].error_message == "telegram_dry_run_enabled"
-    with sqlite3.connect(db_path) as connection:
-        row = connection.execute(
-            "SELECT telegram_status, sent_at FROM telegram_alert_attempts WHERE signal_id = ?",
-            ("confirmed-dry-run",),
-        ).fetchone()
-    assert row == ("skipped", None)
+    _assert_confirmed_public_delivery_policy_disabled(summary, requests, db_path)
 
 
 def _attempt_count(db_path: Path, attempted_alert_type: str = TelegramAlertType.SIGNAL_CONFIRMED.value) -> int:
@@ -5420,12 +5412,47 @@ def _attempt_count(db_path: Path, attempted_alert_type: str = TelegramAlertType.
         ).fetchone()[0]
 
 
+def _assert_confirmed_public_delivery_policy_disabled(
+    summary,
+    outbound_messages,
+    db_path: Path,
+) -> None:
+    audit = summary.confirmed_alert_audit
+    assert summary.sent == 0
+    assert summary.failed == 0
+    assert summary.duplicate == 0
+    assert audit.public_signal_policy == "setup_only"
+    assert audit.confirmed_candidates_seen == 1
+    assert audit.confirmed_prefilter_passed == 0
+    assert audit.confirmed_policy_disabled == 1
+    assert audit.signal_confirmed_attempts_created == 0
+    assert audit.signal_confirmed_sent == 0
+    assert audit.policy_disabled_by_reason == {
+        CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON: 1
+    }
+    assert audit.blocked_before_attempt_by_reason == {}
+    assert list(outbound_messages) == []
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT attempted_alert_type, telegram_status
+            FROM telegram_alert_attempts
+            """
+        ).fetchall()
+    assert not any(
+        row[0] == TelegramAlertType.SIGNAL_CONFIRMED.value
+        and row[1] in {"sent", "failed", "duplicate"}
+        for row in rows
+    )
+
+
 def test_signal_confirmed_attempt_not_created_for_rejected_by_scoring(tmp_path: Path) -> None:
     db_path = tmp_path / "rejected-confirmed.db"
+    sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,
         settings=Settings(),
-        sender=FakeSender(),
+        sender=sender,
         min_score_for_idea=Decimal("80"),
     )
     symbol = _symbol(
@@ -5437,18 +5464,16 @@ def test_signal_confirmed_attempt_not_created_for_rejected_by_scoring(tmp_path: 
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="rejected-confirmed"))
 
-    assert summary.sent == 0
-    assert summary.blocked == 0
-    assert _attempt_count(db_path) == 0
-    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason["rejected_by_scoring"] == 1
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
 
 
 def test_signal_confirmed_attempt_not_created_for_trade_idea_missing(tmp_path: Path) -> None:
     db_path = tmp_path / "missing-trade-idea.db"
+    sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,
         settings=Settings(),
-        sender=FakeSender(),
+        sender=sender,
         min_score_for_idea=Decimal("80"),
     )
     symbol = _symbol(
@@ -5460,18 +5485,16 @@ def test_signal_confirmed_attempt_not_created_for_trade_idea_missing(tmp_path: P
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="missing-trade-idea"))
 
-    assert summary.sent == 0
-    assert summary.blocked == 0
-    assert _attempt_count(db_path) == 0
-    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason["trade_idea_missing"] == 1
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
 
 
 def test_signal_confirmed_attempt_not_created_for_watchlist_near_miss(tmp_path: Path) -> None:
     db_path = tmp_path / "near-miss-confirmed.db"
+    sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,
         settings=Settings(),
-        sender=FakeSender(),
+        sender=sender,
         min_score_for_idea=Decimal("80"),
     )
     symbol = _symbol(
@@ -5483,13 +5506,10 @@ def test_signal_confirmed_attempt_not_created_for_watchlist_near_miss(tmp_path: 
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="near-miss-confirmed"))
 
-    assert summary.sent == 0
-    assert summary.blocked == 0
-    assert _attempt_count(db_path) == 0
-    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason["watchlist_near_miss_not_confirmed"] == 1
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
 
 
-def test_signal_confirmed_attempt_created_for_true_confirmed_candidate(tmp_path: Path) -> None:
+def test_true_confirmed_candidate_creates_no_public_attempt_under_setup_only(tmp_path: Path) -> None:
     db_path = tmp_path / "true-confirmed.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -5508,16 +5528,10 @@ def test_signal_confirmed_attempt_created_for_true_confirmed_candidate(tmp_path:
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="true-confirmed"))
 
-    assert summary.sent == 1
-    assert summary.confirmed_alert_audit.confirmed_candidates_seen == 1
-    assert summary.confirmed_alert_audit.confirmed_prefilter_passed == 1
-    assert summary.confirmed_alert_audit.signal_confirmed_attempts_created == 1
-    assert summary.confirmed_alert_audit.signal_confirmed_sent == 1
-    assert _attempt_count(db_path) == 1
-    assert "Status: 🟢 Entry Zone Active" in sender.messages[0]
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
 
 
-def test_true_confirmed_candidate_not_blocked_by_historical_rejection_reason(tmp_path: Path) -> None:
+def test_historical_rejection_is_not_prefiltered_when_confirmed_delivery_disabled(tmp_path: Path) -> None:
     db_path = tmp_path / "historical-rejection-confirmed.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -5537,18 +5551,16 @@ def test_true_confirmed_candidate_not_blocked_by_historical_rejection_reason(tmp
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="historical-rejection-confirmed"))
 
-    assert summary.sent == 1
-    assert summary.confirmed_alert_audit.confirmed_prefilter_passed == 1
-    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason == {}
-    assert _attempt_count(db_path) == 1
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
 
 
-def test_true_confirmed_candidate_still_blocked_by_active_rejection_reason(tmp_path: Path) -> None:
+def test_active_rejection_is_not_prefiltered_when_confirmed_delivery_disabled(tmp_path: Path) -> None:
     db_path = tmp_path / "active-rejection-confirmed.db"
+    sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,
         settings=Settings(),
-        sender=FakeSender(),
+        sender=sender,
         min_score_for_idea=Decimal("80"),
     )
     symbol = _symbol(
@@ -5561,18 +5573,16 @@ def test_true_confirmed_candidate_still_blocked_by_active_rejection_reason(tmp_p
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="active-rejection-confirmed"))
 
-    assert summary.sent == 0
-    assert summary.blocked == 0
-    assert _attempt_count(db_path) == 0
-    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason["active_rejection_reason"] == 1
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
 
 
 def test_runtime_like_homeusdt_false_confirmed_creates_no_signal_confirmed_attempt(tmp_path: Path) -> None:
     db_path = tmp_path / "homeusdt-false-confirmed.db"
+    sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,
         settings=Settings(),
-        sender=FakeSender(),
+        sender=sender,
         min_rr=Decimal("3"),
         min_score_for_idea=Decimal("80"),
     )
@@ -5612,13 +5622,7 @@ def test_runtime_like_homeusdt_false_confirmed_creates_no_signal_confirmed_attem
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="homeusdt-runtime"))
 
-    assert summary.sent == 0
-    assert summary.blocked == 0
-    assert _attempt_count(db_path) == 0
-    reasons = summary.confirmed_alert_audit.blocked_before_attempt_by_reason
-    assert reasons["rejected_by_scoring"] == 1
-    assert reasons["failed_confirmation_gate_scoring"] == 1
-    assert reasons["trade_idea_missing"] == 1
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
 
 
 def test_order_execution_not_called_for_confirmed_signal(tmp_path: Path) -> None:
@@ -5637,8 +5641,8 @@ def test_confirmed_signal_does_not_call_order_execution(tmp_path: Path) -> None:
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-no-orders"))
 
-    assert summary.sent == 1
-    assert sender.calls == [{"message_type": TelegramMessageType.PUBLIC_SIGNAL}]
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
+    assert sender.calls == []
     source = Path("app/alerts/telegram_lifecycle.py").read_text(encoding="utf-8").lower()
     for forbidden in ("execute_order", "place_order", "create_order"):
         assert forbidden not in source
@@ -5729,18 +5733,17 @@ def test_target_inside_chop_remains_blocked() -> None:
 
 
 def test_research_watch_still_blocked_from_public(tmp_path: Path) -> None:
+    db_path = tmp_path / "research-not-public.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
-        database_path=tmp_path / "research-not-public.db",
+        database_path=db_path,
         settings=_research_settings(enabled=True, to_public=True),
         sender=sender,
     )
 
     summary = run(service.deliver_for_run(_run_result(_research_symbol(missing_trade_map=False)), scan_run_id="research"))
 
-    assert summary.sent == 1
-    assert sender.calls[0]["message_type"] == TelegramMessageType.RESEARCH_WATCH
-    assert "WATCHLIST —" not in sender.messages[0]
+    _assert_research_watch_policy_disabled(summary, sender, db_path)
 
 
 def test_public_watchlist_v1_blocks_b_plus_and_rr_below_3() -> None:
@@ -5879,18 +5882,12 @@ def test_duplicate_confirmed_signal_is_not_sent_twice(tmp_path: Path) -> None:
     first = run(service.deliver_for_run(result, scan_run_id="run-001"))
     second = run(service.deliver_for_run(result, scan_run_id="run-001"))
 
-    assert first.sent == 1
-    assert second.duplicate == 1
-    assert len(sender.messages) == 1
-    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
-        attempts = repository.list_attempts(signal_id="sig-001")
-    assert len(attempts) == 1
-    assert attempts[0].alert_type == "SIGNAL_CONFIRMED"
-    assert attempts[0].scan_run_id == "run-001"
-    assert attempts[0].seen_count == 1
+    _assert_confirmed_public_delivery_policy_disabled(first, sender.messages, db_path)
+    _assert_confirmed_public_delivery_policy_disabled(second, sender.messages, db_path)
+    assert _attempt_count(db_path) == 0
 
 
-def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> None:
+def test_watchlist_to_confirmed_sends_only_initial_watchlist(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -5906,9 +5903,9 @@ def test_watchlist_to_confirmed_sends_signal_confirmed_once(tmp_path: Path) -> N
     duplicate_confirmed = run(service.deliver_for_run(_run_result(_symbol(SetupLifecycleState.CONFIRMED, previous=SetupLifecycleState.TRIGGERED, signal_id="sig-life")), scan_run_id="run-confirm"))
 
     assert watchlist.sent == 1
-    assert confirmed.sent == 0
-    assert duplicate_confirmed.sent == 0
     assert len(sender.messages) == 1
+    _assert_confirmed_public_delivery_policy_disabled(confirmed, sender.messages[1:], db_path)
+    _assert_confirmed_public_delivery_policy_disabled(duplicate_confirmed, sender.messages[1:], db_path)
     assert "· SWING" in sender.messages[0]
     assert "WATCHLIST UPGRADED" not in sender.messages[0]
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.SIGNAL_CONFIRMED)
@@ -6212,7 +6209,7 @@ def test_phase42l_reconciles_soft_failed_confirmation_gate_variants_after_grace_
         ("target_integrity", "soft_failed_confirmation:target_expansion"),
         ("rr_below_min", "soft_failed_confirmation:rr_below_min"),
     )
-    for failed_gate, expected_soft_reason in cases:
+    for failed_gate, _expected_soft_reason in cases:
         db_path = tmp_path / f"{failed_gate}.db"
         signal_id = f"phase42l-{failed_gate}"
         _seed_prior_active_alert(db_path, signal_id=signal_id, alert_type=TelegramAlertType.WATCHLIST, symbol="AAVEUSDT", direction="long")
@@ -6245,12 +6242,12 @@ def test_phase42l_reconciles_soft_failed_confirmation_gate_variants_after_grace_
         assert third.sent == 0
         assert duplicate.sent == 0
         assert sender.messages == []
-        soft_rows = _soft_failed_confirmation_rows(db_path)
-        assert len(soft_rows) == 1
-        assert soft_rows[0][1] == "skipped"
-        assert soft_rows[0][2] == expected_soft_reason
-        assert soft_rows[0][3] >= 3
+        assert _soft_failed_confirmation_rows(db_path) == []
         _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
+        with SQLiteSetupLifecycleRepository(db_path) as repository:
+            record = repository.get_record_by_lifecycle_id(signal_id)
+        assert record is not None
+        assert record.current_state == SetupLifecycleState.CONFIRMED
 
 def test_phase42l_soft_blocker_observations_do_not_block_later_valid_confirmation(tmp_path: Path) -> None:
     db_path = tmp_path / "soft-then-confirmed.db"
@@ -6285,12 +6282,13 @@ def test_phase42l_soft_blocker_observations_do_not_block_later_valid_confirmatio
 
     assert first.sent == 0
     assert second.sent == 0
-    assert third.sent == 0
-    assert sender.messages == []
-    soft_rows = _soft_failed_confirmation_rows(db_path)
-    assert len(soft_rows) == 1
-    assert soft_rows[0][1] == "skipped"
+    _assert_confirmed_public_delivery_policy_disabled(third, sender.messages, db_path)
+    assert _soft_failed_confirmation_rows(db_path) == []
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.SIGNAL_CONFIRMED)
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        record = repository.get_record_by_lifecycle_id(signal_id)
+    assert record is not None
+    assert record.current_state == SetupLifecycleState.CONFIRMED
 
 def test_phase42l_wrong_side_targets_terminalize_without_soft_grace(tmp_path: Path) -> None:
     db_path = tmp_path / "wrong-side-target.db"
@@ -6307,7 +6305,7 @@ def test_phase42l_wrong_side_targets_terminalize_without_soft_grace(tmp_path: Pa
     assert _soft_failed_confirmation_rows(db_path) == []
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
-def test_watchlist_to_confirmed_with_regime_failed_gate_sends_no_longer_tracking(tmp_path: Path) -> None:
+def test_watchlist_to_confirmed_regime_failure_remains_internal_and_silent(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _seed_prior_active_alert(db_path, signal_id="sig-regime-watch", alert_type=TelegramAlertType.WATCHLIST)
     sender = FakeSender()
@@ -6328,7 +6326,7 @@ def test_watchlist_to_confirmed_with_regime_failed_gate_sends_no_longer_tracking
     assert sender.messages == []
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
-def test_mstr_style_confirmed_regime_rejection_sends_no_longer_tracking(tmp_path: Path) -> None:
+def test_mstr_style_confirmed_regime_rejection_remains_internal_and_silent(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _seed_prior_active_alert(db_path, signal_id="mstr-watch", alert_type=TelegramAlertType.WATCHLIST, symbol="MSTRUSDT", direction="long")
     sender = FakeSender()
@@ -6349,7 +6347,7 @@ def test_mstr_style_confirmed_regime_rejection_sends_no_longer_tracking(tmp_path
     assert sender.messages == []
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
-def test_watchlist_to_confirmed_with_rr_guard_failure_sends_no_longer_tracking(tmp_path: Path) -> None:
+def test_watchlist_to_confirmed_rr_guard_failure_remains_internal_and_silent(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _seed_prior_active_alert(db_path, signal_id="sig-low-rr-watch", alert_type=TelegramAlertType.WATCHLIST)
     sender = FakeSender()
@@ -6372,7 +6370,7 @@ def test_watchlist_to_confirmed_with_rr_guard_failure_sends_no_longer_tracking(t
     assert sender.messages == []
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.NO_LONGER_TRACKING)
 
-def test_watchlist_to_confirmed_with_structural_failure_sends_invalidation(tmp_path: Path) -> None:
+def test_watchlist_to_confirmed_structural_failure_remains_internal_and_silent(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     _seed_prior_active_alert(db_path, signal_id="sig-structure-watch", alert_type=TelegramAlertType.WATCHLIST)
     sender = FakeSender()
@@ -6389,7 +6387,7 @@ def test_watchlist_to_confirmed_with_structural_failure_sends_invalidation(tmp_p
     assert sender.messages == []
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
-def test_sent_watchlist_reconciliation_mstr_current_confirmed_failed_gate_sends_no_longer_tracking(
+def test_sent_watchlist_reconciliation_mstr_confirmed_failure_is_policy_silent(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "candle_craft.db"
@@ -6445,7 +6443,7 @@ def test_sent_watchlist_reconciliation_current_terminal_states_send_updates(tmp_
         assert sender.messages == []
         _assert_no_sent_follow_up_attempt(db_path, expected_alert_type)
 
-def test_sent_watchlist_reconciliation_confirmed_with_eligibility_pass_sends_signal_confirmed_once(
+def test_sent_watchlist_reconciliation_confirmed_eligibility_pass_is_policy_silent(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "candle_craft.db"
@@ -6465,7 +6463,7 @@ def test_sent_watchlist_reconciliation_confirmed_with_eligibility_pass_sends_sig
     assert sender.messages == []
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.SIGNAL_CONFIRMED)
 
-def test_sent_watchlist_reconciliation_confirmed_with_eligibility_fail_sends_no_longer_tracking(
+def test_sent_watchlist_reconciliation_confirmed_eligibility_fail_is_policy_silent(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "candle_craft.db"
@@ -6636,7 +6634,7 @@ def test_sent_watchlist_reconciliation_exact_match_wins_and_uses_original_direct
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
 
-def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> None:
+def test_watchlist_to_invalidated_keeps_update_internal_and_silent(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
@@ -6653,7 +6651,7 @@ def test_watchlist_to_invalidated_sends_invalidation_once(tmp_path: Path) -> Non
     assert not any("WATCHLIST INVALIDATED" in message for message in sender.messages)
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.INVALIDATED)
 
-def test_watchlist_to_expired_sends_expired_once(tmp_path: Path) -> None:
+def test_watchlist_to_expired_keeps_update_internal_and_silent(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
@@ -6668,7 +6666,7 @@ def test_watchlist_to_expired_sends_expired_once(tmp_path: Path) -> None:
     assert len(sender.messages) == 1
     _assert_no_sent_follow_up_attempt(db_path, TelegramAlertType.EXPIRED)
 
-def test_watchlist_to_cooldown_sends_no_longer_tracking_once(tmp_path: Path) -> None:
+def test_watchlist_to_cooldown_keeps_update_internal_and_silent(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(_env_file=None), sender=sender)
@@ -6716,7 +6714,7 @@ def test_blocked_watchlist_to_invalidated_does_not_send_terminal_update(tmp_path
 
     assert blocked.blocked == 0
     assert blocked.public_watchlist_audit.blocked_before_attempt == 1
-    assert terminal.blocked == 1
+    assert terminal.attempted == 0
     assert sender.messages == []
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(
@@ -6726,9 +6724,7 @@ def test_blocked_watchlist_to_invalidated_does_not_send_terminal_update(tmp_path
             ORDER BY id
             """
         ).fetchall()
-    assert rows == [
-        (TelegramAlertType.INVALIDATED.value, "blocked", "terminal_update_no_prior_public_alert"),
-    ]
+    assert rows == []
 
 
 def test_skipped_watchlist_to_invalidated_does_not_count_as_public_prior(tmp_path: Path) -> None:
@@ -6759,7 +6755,7 @@ def test_skipped_watchlist_to_invalidated_does_not_count_as_public_prior(tmp_pat
         )
     )
 
-    assert terminal.blocked == 1
+    assert terminal.attempted == 0
     assert sender.messages == []
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(
@@ -6767,7 +6763,6 @@ def test_skipped_watchlist_to_invalidated_does_not_count_as_public_prior(tmp_pat
         ).fetchall()
     assert rows == [
         (TelegramAlertType.WATCHLIST.value, "skipped", NA),
-        (TelegramAlertType.INVALIDATED.value, "blocked", "terminal_update_no_prior_public_alert"),
     ]
 
 
@@ -6838,24 +6833,24 @@ def test_terminal_update_symbol_fallback_blocks_ambiguous_active_watchlists(tmp_
 
     summary = run(service.deliver_for_run(_run_result(terminal), scan_run_id="run-invalid"))
 
-    assert summary.blocked == 1
+    assert summary.blocked == 2
     assert sender.messages == []
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(
             """
             SELECT attempted_alert_type, telegram_status, blocked_reason
             FROM telegram_alert_attempts
+            WHERE telegram_status = 'blocked'
             ORDER BY id
             """
         ).fetchall()
-    assert rows[-1] == (
-        TelegramAlertType.INVALIDATED.value,
-        "blocked",
-        "terminal_update_identity_ambiguous",
-    )
+    assert rows == [
+        ("SENT_WATCHLIST_RECONCILIATION", "blocked", "sent_watchlist_reconciliation_ambiguous"),
+        ("SENT_WATCHLIST_RECONCILIATION", "blocked", "sent_watchlist_reconciliation_ambiguous"),
+    ]
 
 
-def test_repeated_unmatched_terminal_update_compacts_seen_count(tmp_path: Path) -> None:
+def test_repeated_unmatched_terminal_update_creates_no_public_attempt(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -6872,8 +6867,8 @@ def test_repeated_unmatched_terminal_update_compacts_seen_count(tmp_path: Path) 
     first = run(service.deliver_for_run(_run_result(terminal), scan_run_id="run-invalid-1"))
     second = run(service.deliver_for_run(_run_result(terminal), scan_run_id="run-invalid-2"))
 
-    assert first.blocked == 1
-    assert second.blocked_repeat == 1
+    assert first.attempted == 0
+    assert second.attempted == 0
     assert sender.messages == []
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(
@@ -6882,18 +6877,10 @@ def test_repeated_unmatched_terminal_update_compacts_seen_count(tmp_path: Path) 
             FROM telegram_alert_attempts
             """
         ).fetchall()
-    assert rows == [
-        (
-            TelegramAlertType.INVALIDATED.value,
-            "blocked",
-            "terminal_update_no_prior_public_alert",
-            2,
-            "run-invalid-2",
-        )
-    ]
+    assert rows == []
 
 
-def test_missing_telegram_credentials_skip_safely_and_persist_attempt(tmp_path: Path) -> None:
+def test_confirmed_policy_disables_before_missing_credentials_sender(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = TelegramSender(bot_token=None, chat_id=None, signals_enabled=True, dry_run=False)
     service = TelegramLifecycleDeliveryService(
@@ -6915,13 +6902,8 @@ def test_missing_telegram_credentials_skip_safely_and_persist_attempt(tmp_path: 
         )
     )
 
-    assert summary.skipped == 1
-    assert repeated.duplicate == 1
-    with sqlite3.connect(db_path) as connection:
-        rows = connection.execute(
-            "SELECT telegram_status, error_message, seen_count, scan_run_id, last_scan_run_id FROM telegram_alert_attempts"
-        ).fetchall()
-    assert rows == [("skipped", "missing_telegram_credentials", 2, "run-001", "run-002")]
+    _assert_confirmed_public_delivery_policy_disabled(summary, (), db_path)
+    _assert_confirmed_public_delivery_policy_disabled(repeated, (), db_path)
 
 
 def test_blocked_incomplete_watchlist_persists_without_telegram_send(tmp_path: Path) -> None:
@@ -7170,7 +7152,7 @@ def test_blocked_watchlist_different_signal_id_creates_separate_audit_record(tmp
     assert count == 0
 
 
-def test_blocked_different_alert_type_creates_separate_audit_record(tmp_path: Path) -> None:
+def test_blocked_watchlist_and_policy_disabled_confirmed_keep_only_watchlist_audit(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -7207,8 +7189,7 @@ def test_blocked_different_alert_type_creates_separate_audit_record(tmp_path: Pa
 
     assert watch_summary.blocked == 0
     assert watch_summary.public_watchlist_audit.blocked_before_attempt == 1
-    assert confirmed_summary.blocked == 0
-    assert confirmed_summary.confirmed_alert_audit.blocked_before_attempt_by_reason == {"rr_below_min": 1}
+    _assert_confirmed_public_delivery_policy_disabled(confirmed_summary, sender.messages, db_path)
     with sqlite3.connect(db_path) as connection:
         rows = connection.execute(
             "SELECT attempted_alert_type, telegram_status, seen_count FROM telegram_alert_attempts ORDER BY id"
@@ -7663,7 +7644,7 @@ def test_confluence_from_raw_derivatives_context_is_public_text() -> None:
         assert forbidden not in text
 
 
-def test_blocked_confirmed_alert_prefilter_records_summary_without_attempt(tmp_path: Path) -> None:
+def test_policy_disabled_confirmed_reports_summary_without_prefilter_or_attempt(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -7684,18 +7665,52 @@ def test_blocked_confirmed_alert_prefilter_records_summary_without_attempt(tmp_p
 
     summary = run(service.deliver_for_run(result, scan_run_id="run-001"))
 
-    assert summary.blocked == 0
-    assert summary.confirmed_alert_audit.confirmed_candidates_seen == 1
-    assert summary.confirmed_alert_audit.confirmed_prefilter_passed == 0
-    assert summary.confirmed_alert_audit.signal_confirmed_attempts_created == 0
-    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason == {"rr_below_min": 1}
+    _assert_confirmed_public_delivery_policy_disabled(summary, sender.messages, db_path)
+
+
+@pytest.mark.parametrize(
+    ("state", "previous"),
+    (
+        (SetupLifecycleState.STALKING, SetupLifecycleState.WATCHLISTED),
+        (SetupLifecycleState.TRIGGERED, SetupLifecycleState.STALKING),
+        (SetupLifecycleState.EXECUTING, SetupLifecycleState.CONFIRMED),
+        (SetupLifecycleState.ARCHIVED, SetupLifecycleState.COOLDOWN),
+    ),
+)
+def test_setup_only_silences_lifecycle_state_after_public_setup(
+    tmp_path: Path,
+    state: SetupLifecycleState,
+    previous: SetupLifecycleState,
+) -> None:
+    signal_id = f"silent-{state.value.lower()}"
+    db_path = tmp_path / f"{state.value.lower()}.db"
+    _seed_prior_active_alert(
+        db_path,
+        signal_id=signal_id,
+        alert_type=TelegramAlertType.WATCHLIST,
+    )
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path,
+        settings=Settings(_env_file=None),
+        sender=sender,
+    )
+    result = _run_result(_symbol(state, previous=previous, signal_id=signal_id))
+
+    first = run(service.deliver_for_run(result, scan_run_id="silent-state-1"))
+    second = run(service.deliver_for_run(result, scan_run_id="silent-state-2"))
+
+    assert first.sent == 0
+    assert second.sent == 0
     assert sender.messages == []
     with sqlite3.connect(db_path) as connection:
-        count = connection.execute("SELECT COUNT(*) FROM telegram_alert_attempts").fetchone()[0]
-    assert count == 0
+        sent_follow_ups = connection.execute(
+            "SELECT COUNT(*) FROM telegram_alert_attempts WHERE telegram_status = 'sent' AND alert_type != ?",
+            (TelegramAlertType.WATCHLIST.value,),
+        ).fetchone()[0]
+    assert sent_follow_ups == 0
 
-
-def test_each_alert_type_is_not_sent_twice(tmp_path: Path) -> None:
+def test_only_watchlist_alert_type_can_send_and_only_once(tmp_path: Path) -> None:
     cases = (
         (
             TelegramAlertType.WATCHLIST,
@@ -7785,13 +7800,21 @@ def test_each_alert_type_is_not_sent_twice(tmp_path: Path) -> None:
         first = run(service.deliver_for_run(_run_result(symbol_result), scan_run_id="run-001"))
         second = run(service.deliver_for_run(_run_result(symbol_result), scan_run_id="run-001"))
 
-        assert first.sent == 1, alert_type
         if alert_type == TelegramAlertType.WATCHLIST:
+            assert first.sent == 1, alert_type
             assert second.skipped == 1, alert_type
             assert second.deliveries[0].error_message == "public_block_same_symbol_same_side_cooldown"
+            assert len(sender.messages) == 1, alert_type
+            continue
+
+        assert first.sent == 0, alert_type
+        assert second.sent == 0, alert_type
+        assert sender.messages == [], alert_type
+        if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
+            _assert_confirmed_public_delivery_policy_disabled(first, sender.messages, db_path)
+            _assert_confirmed_public_delivery_policy_disabled(second, sender.messages, db_path)
         else:
-            assert second.duplicate == 1, alert_type
-        assert len(sender.messages) == 1, alert_type
+            _assert_no_sent_follow_up_attempt(db_path, alert_type)
 
 
 def test_sent_watchlist_limit_zone_touch_requires_prior_public_signal(tmp_path: Path) -> None:

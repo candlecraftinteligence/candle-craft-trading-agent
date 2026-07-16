@@ -1107,7 +1107,7 @@ def _startup_warnings(args: argparse.Namespace, effective_candle_limit: int) -> 
         warnings.append("Telegram commands enabled in config, but command listener must be run separately.")
     if (
         settings is not None
-        and _telegram_manual_signals_enabled(args)
+        and _telegram_lifecycle_public_delivery_enabled(args)
         and settings.telegram_signals_enabled
     ):
         destination = resolve_public_signal_destination(settings)
@@ -1975,11 +1975,19 @@ def _handle_research_command(args: argparse.Namespace) -> None:
 def _lifecycle_enabled(args: argparse.Namespace) -> bool:
     if args.lifecycle is not None:
         return bool(args.lifecycle)
-    return bool(args.watch or args.store_scan or args.show_lifecycle or _telegram_manual_signals_enabled(args))
+    return bool(
+        args.watch
+        or args.store_scan
+        or args.show_lifecycle
+        or _telegram_lifecycle_public_delivery_enabled(args)
+    )
 
 
 def _lifecycle_scan_run_id_enabled(args: argparse.Namespace) -> bool:
-    return bool(_lifecycle_enabled(args) and (args.store_scan or _telegram_manual_signals_enabled(args)))
+    return bool(
+        _lifecycle_enabled(args)
+        and (args.store_scan or _telegram_lifecycle_public_delivery_enabled(args))
+    )
 
 
 def _reset_lifecycle_state(args: argparse.Namespace) -> None:
@@ -2015,8 +2023,22 @@ def _telegram_manual_signals_enabled(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "telegram_manual_signals", False))
 
 
+def _telegram_lifecycle_public_delivery_enabled(args: argparse.Namespace) -> bool:
+    """Return whether this command selected the canonical lifecycle-backed public route."""
+
+    if _telegram_manual_signals_enabled(args):
+        return True
+    return bool(getattr(args, "watch", False) and getattr(args, "telegram_live_alerts", False))
+
+
+def _legacy_watch_activation_delivery_enabled(args: argparse.Namespace) -> bool:
+    """Keep the legacy activation path local-only when no public route was selected."""
+
+    return not _telegram_lifecycle_public_delivery_enabled(args)
+
+
 def _telegram_manual_lifecycle_status_label(args: argparse.Namespace) -> str:
-    if not _telegram_manual_signals_enabled(args):
+    if not _telegram_lifecycle_public_delivery_enabled(args):
         return "disabled"
     try:
         settings = Settings()
@@ -2045,7 +2067,7 @@ async def _deliver_telegram_manual_signals_if_enabled(
     *,
     scan_run_id: str | None,
 ) -> None:
-    if not _telegram_manual_signals_enabled(args):
+    if not _telegram_lifecycle_public_delivery_enabled(args):
         return
     settings = _telegram_manual_signal_settings()
     try:
@@ -2399,8 +2421,14 @@ async def _run_watch_mode(
     effective_candle_limit: int,
     command_used: str,
 ) -> None:
-    telegram_bot_token, telegram_chat_id, telegram_dry_run = _watch_telegram_credentials(args)
-    telegram_live = bool(args.telegram_live_alerts and not telegram_dry_run)
+    legacy_watch_activation_delivery = _legacy_watch_activation_delivery_enabled(args)
+    if legacy_watch_activation_delivery:
+        telegram_bot_token, telegram_chat_id, telegram_dry_run = _watch_telegram_credentials(args)
+    else:
+        telegram_bot_token, telegram_chat_id, telegram_dry_run = None, None, True
+    telegram_live = bool(
+        legacy_watch_activation_delivery and args.telegram_live_alerts and not telegram_dry_run
+    )
     try:
         state = load_watch_state(WATCH_STATE_PATH)
     except WatchModeError as exc:
@@ -2425,9 +2453,14 @@ async def _run_watch_mode(
     print(f"Symbols queued: {len(startup_queued_symbols)}")
     _print_symbol_queue_diagnostics(args, watchlist, startup_priority_plan, startup_queued_symbols)
     print("Watch mode: enabled")
-    print(f"Telegram manual lifecycle alerts: {_telegram_manual_lifecycle_status_label(args)}")
+    print(f"Telegram lifecycle setup alerts: {_telegram_manual_lifecycle_status_label(args)}")
     print(f"Telegram admin drafts: {_telegram_admin_draft_status_label()}")
-    print(f"Legacy scanner alerts: {'live' if telegram_live else 'dry-run'}")
+    legacy_alert_status = (
+        ("live" if telegram_live else "dry-run")
+        if legacy_watch_activation_delivery
+        else "suppressed (lifecycle setup route selected)"
+    )
+    print(f"Legacy scanner alerts: {legacy_alert_status}")
     for warning in _startup_warnings(args, effective_candle_limit):
         print(f"Warning: {warning}")
     print("")
@@ -2454,7 +2487,7 @@ async def _run_watch_mode(
 
             for symbol_result in execution.result.results:
                 previous_symbol_state = previous_state.symbols.get(symbol_result.symbol)
-                should_alert = should_trigger_activation_alert(
+                should_alert = legacy_watch_activation_delivery and should_trigger_activation_alert(
                     symbol_result,
                     previous_symbol_state,
                     portfolio_selection=execution.portfolio_selection if args.portfolio_select else None,
