@@ -21,7 +21,11 @@ from app.pipeline.scanner_runner import (
 )
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
-from app.storage.symbol_health import save_symbol_health_records
+from app.storage.symbol_health import (
+    load_symbol_health_records,
+    save_symbol_health_records,
+    update_symbol_health_for_result,
+)
 from app.universe.symbol_universe import BINANCE_USDT_PERP_TOP_VOLUME_MODE, SymbolUniverse
 from app.watch_mode import (
     WatchSymbolState,
@@ -815,6 +819,225 @@ def test_lifecycle_priority_promotes_without_shrinking_universe(tmp_path, monkey
     assert queue["final_queued_count"] == 3
     assert queue["lifecycle_priority_promoted_count"] == 1
     assert queue["lifecycle_priority_dropped_count"] == 0
+
+
+def test_active_lifecycle_outside_universe_gets_capacity_and_cooldown_exemption(tmp_path) -> None:
+    db_path = tmp_path / "queue.sqlite"
+    active_symbol = "OUTSIDEUSDT"
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(
+            _watch_lifecycle_record(
+                SetupLifecycleState.WATCHLISTED,
+                symbol=active_symbol,
+                lifecycle_id="life-outside",
+            )
+        )
+    save_symbol_health_records(
+        db_path,
+        {
+            active_symbol: SymbolHealthRecord(
+                symbol=active_symbol,
+                current_health_score=15,
+                cooldown_until="2099-01-01T00:00:00+00:00",
+                timeout_count=5,
+                timeout_strikes=3,
+            )
+        },
+    )
+    args = SimpleNamespace(
+        lifecycle=True,
+        database_path=db_path,
+        max_symbols=3,
+        adaptive_symbol_priority=True,
+        watch=True,
+        universe_size=3,
+    )
+    base_symbols = ("AAAUSDT", "BBBUSDT", "CCCUSDT")
+    watchlist = run_scan.WatchlistResolution(
+        symbols=base_symbols,
+        source_label="top volume",
+        universe=_universe(base_symbols, requested_size=3),
+    )
+
+    prioritized = run_scan._watchlist_with_lifecycle_priority(args, watchlist)
+    plan = run_scan._symbol_priority_plan_for_watchlist(args, prioritized)
+    queued = run_scan._queued_symbols_for_scan(args, prioritized, plan)
+    diagnostics = run_scan._symbol_queue_diagnostics(args, prioritized, plan, queued)
+
+    decision = plan.priority_by_symbol()[active_symbol]
+    assert prioritized.symbols == (active_symbol, "AAAUSDT", "BBBUSDT")
+    assert queued[0] == active_symbol
+    assert "CCCUSDT" not in queued
+    assert prioritized.lifecycle_capacity_displaced_symbols == ("CCCUSDT",)
+    assert decision.cooldown_exempted is True
+    assert decision.cooldown_until == "2099-01-01T00:00:00+00:00"
+    assert decision.timeout_strikes == 3
+    assert "active_lifecycle_monitoring" in decision.priority_reasons
+    assert diagnostics["active_lifecycle_monitoring_count"] == 1
+    assert diagnostics["active_lifecycle_cooldown_exemption_count"] == 1
+    assert diagnostics["exclusion_examples"]["active_lifecycle_cooldown_exemption"] == [active_symbol]
+
+
+def test_active_lifecycle_symbols_exceed_max_without_silent_omission(tmp_path) -> None:
+    db_path = tmp_path / "queue.sqlite"
+    active_symbols = ("ACTIVEAUSDT", "ACTIVEBUSDT", "ACTIVECUSDT")
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        for index, symbol in enumerate(active_symbols):
+            repository.upsert_record(
+                _watch_lifecycle_record(
+                    SetupLifecycleState.WATCHLISTED,
+                    symbol=symbol,
+                    lifecycle_id=f"life-{index}",
+                )
+            )
+    args = SimpleNamespace(lifecycle=True, database_path=db_path, max_symbols=2)
+    discovery = ("AAAUSDT", "BBBUSDT")
+    watchlist = run_scan.WatchlistResolution(
+        symbols=discovery,
+        source_label="top volume",
+        universe=_universe(discovery, requested_size=2),
+    )
+
+    prioritized = run_scan._watchlist_with_lifecycle_priority(args, watchlist)
+    plan = run_scan.empty_symbol_priority_plan(prioritized.symbols, enabled=False)
+    diagnostics = run_scan._symbol_queue_diagnostics(args, prioritized, plan, prioritized.symbols)
+
+    assert prioritized.symbols == active_symbols
+    assert prioritized.active_lifecycle_over_cap_count == 1
+    assert diagnostics["active_lifecycle_exceeded_cap"] is True
+    assert diagnostics["active_lifecycle_over_cap_count"] == 1
+    assert diagnostics["final_queued_count"] == 3
+
+
+def test_multiple_active_records_and_directions_scan_symbol_once_after_restart(tmp_path) -> None:
+    db_path = tmp_path / "queue.sqlite"
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(
+            _watch_lifecycle_record(
+                SetupLifecycleState.TRIGGERED,
+                symbol="DUALUSDT",
+                direction="long",
+                lifecycle_id="life-dual-long",
+            )
+        )
+        repository.upsert_record(
+            _watch_lifecycle_record(
+                SetupLifecycleState.CONFIRMED,
+                symbol="DUALUSDT",
+                direction="short",
+                lifecycle_id="life-dual-short",
+            )
+        )
+    args = SimpleNamespace(lifecycle=True, database_path=db_path, max_symbols=2)
+    discovery = ("AAAUSDT", "BBBUSDT")
+
+    def rebuild() -> run_scan.WatchlistResolution:
+        return run_scan._watchlist_with_lifecycle_priority(
+            args,
+            run_scan.WatchlistResolution(
+                symbols=discovery,
+                source_label="top volume",
+                universe=_universe(discovery, requested_size=2),
+            ),
+        )
+
+    first_process = rebuild()
+    restarted_process = rebuild()
+
+    assert first_process.symbols == ("DUALUSDT", "AAAUSDT")
+    assert first_process.symbols.count("DUALUSDT") == 1
+    assert restarted_process.symbols == first_process.symbols
+    assert restarted_process.active_lifecycle_symbols == ("DUALUSDT",)
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        assert len(repository.list_records_for_symbol(symbol="DUALUSDT")) == 2
+
+
+def test_active_timeout_history_is_preserved_and_symbol_retries_next_iteration(tmp_path) -> None:
+    db_path = tmp_path / "queue.sqlite"
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(
+            _watch_lifecycle_record(
+                SetupLifecycleState.STALKING,
+                symbol="ACTIVEUSDT",
+                lifecycle_id="life-active",
+            )
+        )
+    args = SimpleNamespace(
+        lifecycle=True,
+        database_path=db_path,
+        max_symbols=2,
+        adaptive_symbol_priority=True,
+        watch=True,
+        universe_size=2,
+    )
+    discovery = ("OTHERUSDT",)
+
+    def build_iteration():
+        watchlist = run_scan._watchlist_with_lifecycle_priority(
+            args,
+            run_scan.WatchlistResolution(
+                symbols=discovery,
+                source_label="top volume",
+                universe=_universe(discovery, requested_size=1),
+            ),
+        )
+        plan = run_scan._symbol_priority_plan_for_watchlist(args, watchlist)
+        return watchlist, plan, run_scan._queued_symbols_for_scan(args, watchlist, plan)
+
+    first_watchlist, first_plan, first_queue = build_iteration()
+    timeout_result = ScannerSymbolResult(
+        symbol="ACTIVEUSDT",
+        status=ScannerPipelineStatus.SCAN_ERROR,
+        status_history=(ScannerPipelineStatus.SCAN_ERROR,),
+        error_message="mocked market-data timeout",
+        timed_out=True,
+    )
+    other_result = _rejected_symbol("OTHERUSDT")
+    run_result = ScannerRunResult(
+        config=_scanner_config(list(first_queue)),
+        results=(timeout_result, other_result),
+        scanned_symbols=2,
+        failed_symbols=1,
+        trade_ideas_created=0,
+        dry_run_alerts_created=0,
+        journal_entries_created=0,
+    )
+    update_symbol_health_for_result(
+        db_path,
+        run_result,
+        plan=first_plan,
+        now="2098-01-01T00:00:00+00:00",
+        cooldown_minutes=60,
+        max_timeout_strikes=1,
+    )
+
+    restarted_watchlist, restarted_plan, restarted_queue = build_iteration()
+    health = load_symbol_health_records(db_path, ("ACTIVEUSDT",))["ACTIVEUSDT"]
+    decision = restarted_plan.priority_by_symbol()["ACTIVEUSDT"]
+
+    assert first_watchlist.active_lifecycle_symbols == ("ACTIVEUSDT",)
+    assert tuple(result.symbol for result in run_result.results) == ("ACTIVEUSDT", "OTHERUSDT")
+    assert health.timeout_count == 1
+    assert health.timeout_strikes == 1
+    assert health.cooldown_until is not None
+    assert restarted_watchlist.active_lifecycle_symbols == ("ACTIVEUSDT",)
+    assert restarted_queue == ("ACTIVEUSDT", "OTHERUSDT")
+    assert decision.cooldown_exempted is True
+    assert decision.cooldown_until == health.cooldown_until
+
+
+def test_resume_completed_result_does_not_skip_active_lifecycle_symbol() -> None:
+    completed = _rejected_symbol("ACTIVEUSDT")
+    resume_state = run_scan.ResumeState(
+        results_by_symbol={"ACTIVEUSDT": completed, "DISCOVERYUSDT": completed},
+        skipped_symbols=("ACTIVEUSDT", "DISCOVERYUSDT"),
+        loaded_symbols=("ACTIVEUSDT", "DISCOVERYUSDT"),
+    )
+
+    resumed = run_scan._resume_state_with_active_lifecycle_retry(resume_state, ("ACTIVEUSDT",))
+
+    assert resumed.skipped_symbols == ("DISCOVERYUSDT",)
+    assert resumed.results_by_symbol == resume_state.results_by_symbol
 
 
 def test_continue_watch_candidates_do_not_override_explicit_max_symbols(tmp_path, monkeypatch) -> None:

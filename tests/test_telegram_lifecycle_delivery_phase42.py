@@ -7674,6 +7674,7 @@ def test_policy_disabled_confirmed_reports_summary_without_prefilter_or_attempt(
         (SetupLifecycleState.STALKING, SetupLifecycleState.WATCHLISTED),
         (SetupLifecycleState.TRIGGERED, SetupLifecycleState.STALKING),
         (SetupLifecycleState.EXECUTING, SetupLifecycleState.CONFIRMED),
+        (SetupLifecycleState.MANAGING, SetupLifecycleState.EXECUTING),
         (SetupLifecycleState.ARCHIVED, SetupLifecycleState.COOLDOWN),
     ),
 )

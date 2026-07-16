@@ -14,22 +14,22 @@ from app.core.minimum_rr import hard_mode_minimum_rr
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
 from app.lifecycle.models import (
+    ACTIVE_LIFECYCLE_MONITORING_STATES,
     SetupLifecycleRecord,
     SetupLifecycleState,
     SetupOutcomeAnalyticsRecord,
     SetupTransitionReason,
     SetupTransitionResult,
+    lifecycle_monitoring_priority,
 )
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import (
     DEFAULT_CONFIRMATION_CYCLES,
     DEFAULT_SETUP_MERGE_TOLERANCE_PCT,
     LifecycleObservation,
-    WATCH_PRIORITY_STATES,
     confirmed_observation_block_reasons,
     entry_zone_touched,
     evaluate_lifecycle_transition,
-    is_watchable_lifecycle_state,
     now_utc_iso,
 )
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
@@ -453,44 +453,41 @@ def prioritize_watch_symbols(
     now: str | None = None,
 ) -> tuple[str, ...]:
     ordered = tuple(dict.fromkeys(_display(symbol).upper() for symbol in symbols if _display(symbol) != NA))
-    if not ordered:
-        return ()
+    active_symbols = active_lifecycle_symbols(ordered, database_path=database_path, now=now)
+    active_set = set(active_symbols)
+    return (*active_symbols, *(symbol for symbol in ordered if symbol not in active_set))
 
+
+def active_lifecycle_symbols(
+    symbols: Sequence[str] = (),
+    *,
+    database_path: Path | str = DEFAULT_DATABASE_PATH,
+    now: str | None = None,
+) -> tuple[str, ...]:
+    del now  # Active monitoring is reconstructed solely from persisted lifecycle state.
+    ordered = tuple(dict.fromkeys(_display(symbol).upper() for symbol in symbols if _display(symbol) != NA))
+    original_index = {symbol: index for index, symbol in enumerate(ordered)}
     with SQLiteSetupLifecycleRepository(database_path) as repository:
-        records = repository.get_records_for_symbols(ordered)
+        records = repository.get_records_for_states(ACTIVE_LIFECYCLE_MONITORING_STATES)
 
-    records_by_symbol: dict[str, list[SetupLifecycleRecord]] = {}
+    best_priority_by_symbol: dict[str, int] = {}
     for record in records:
-        records_by_symbol.setdefault(record.symbol, []).append(record)
+        rank = lifecycle_monitoring_priority(record.current_state)
+        prior_rank = best_priority_by_symbol.get(record.symbol)
+        if prior_rank is None or rank < prior_rank:
+            best_priority_by_symbol[record.symbol] = rank
 
-    priority_index = {state: index for index, state in enumerate(WATCH_PRIORITY_STATES)}
-    prioritized: list[tuple[int, int, str]] = []
-    passthrough: list[tuple[int, str]] = []
-    for original_index, symbol in enumerate(ordered):
-        symbol_records = records_by_symbol.get(symbol, [])
-        if not symbol_records:
-            passthrough.append((original_index, symbol))
-            continue
-        watchable = [record for record in symbol_records if is_watchable_lifecycle_state(record, now=now)]
-        if not watchable:
-            passthrough.append((original_index, symbol))
-            continue
-        best = min(
-            watchable,
-            key=lambda record: priority_index.get(record.current_state, len(priority_index)),
+    fallback_index = len(ordered)
+    return tuple(
+        sorted(
+            best_priority_by_symbol,
+            key=lambda symbol: (
+                best_priority_by_symbol[symbol],
+                original_index.get(symbol, fallback_index),
+                symbol,
+            ),
         )
-        prioritized.append((priority_index.get(best.current_state, len(priority_index)), original_index, symbol))
-
-    prioritized.sort()
-    passthrough.sort()
-    output: list[str] = []
-    for _priority, _index, symbol in prioritized:
-        if symbol not in output:
-            output.append(symbol)
-    for _index, symbol in passthrough:
-        if symbol not in output:
-            output.append(symbol)
-    return tuple(output)
+    )
 
 
 def _confirmation_cycles(value: int | None) -> int:
@@ -1553,4 +1550,5 @@ __all__ = [
     "apply_lifecycle_to_run_result",
     "observation_from_symbol_result",
     "prioritize_watch_symbols",
+    "active_lifecycle_symbols",
 ]

@@ -98,6 +98,24 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
 
+    def get_records_for_states(
+        self,
+        states: Sequence[SetupLifecycleState],
+    ) -> tuple[SetupLifecycleRecord, ...]:
+        normalized = tuple(dict.fromkeys(state.value for state in states))
+        if not normalized:
+            return ()
+        placeholders = ",".join("?" for _ in normalized)
+        rows = self._connection.execute(
+            f"""
+            SELECT * FROM setup_lifecycle_records
+            WHERE current_state IN ({placeholders})
+            ORDER BY symbol ASC, last_seen_at DESC, lifecycle_id ASC
+            """,
+            normalized,
+        ).fetchall()
+        return tuple(_record_from_row(row) for row in rows)
+
     def upsert_record(self, record: SetupLifecycleRecord) -> None:
         params = _record_params(record)
         placeholders = ", ".join("?" for _ in params)

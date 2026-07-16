@@ -8,6 +8,7 @@ from typing import Any
 
 from app.data.dtos import NA
 from app.lifecycle.models import (
+    ACTIVE_LIFECYCLE_MONITORING_STATES,
     SetupLifecycleEvent,
     SetupLifecycleRecord,
     SetupLifecycleState,
@@ -41,14 +42,7 @@ OUTCOME_STATES = {
     SetupLifecycleState.INVALIDATED,
     SetupLifecycleState.EXPIRED,
 }
-WATCH_PRIORITY_STATES = (
-    SetupLifecycleState.ACTIONABLE_A_GRADE,
-    SetupLifecycleState.A_GRADE_WATCH,
-    SetupLifecycleState.STALKING,
-    SetupLifecycleState.TRIGGERED,
-    SetupLifecycleState.CONFIRMED,
-    SetupLifecycleState.WATCHLISTED,
-)
+WATCH_PRIORITY_STATES = ACTIVE_LIFECYCLE_MONITORING_STATES[2:]
 DEFAULT_COOLDOWN_HOURS = 24
 DEFAULT_CONFIRMATION_CYCLES = 2
 DEFAULT_SETUP_MERGE_TOLERANCE_PCT = Decimal("0.5")

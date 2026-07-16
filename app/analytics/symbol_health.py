@@ -8,6 +8,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.data.dtos import NA
+from app.lifecycle.models import (
+    ACTIVE_LIFECYCLE_MONITORING_STATES,
+    lifecycle_requires_market_observation,
+)
 
 DEFAULT_SYMBOL_HEALTH_SCORE = 70
 DEFAULT_SYMBOL_COOLDOWN_MINUTES = 30.0
@@ -23,6 +27,9 @@ PRIORITY_LIFECYCLE_STATES = {
 WATCH_LIFECYCLE_STATES = {
     "STALKING": 1,
     "WATCHLISTED": 1,
+}
+ACTIVE_LIFECYCLE_PRIORITY = {
+    state.value: rank for rank, state in enumerate(ACTIVE_LIFECYCLE_MONITORING_STATES)
 }
 HOT_READINESS_LABELS = {"HOT WATCH", "VALID SETUP"}
 NEAR_MISS_BUCKETS = {"near_miss", "valid"}
@@ -104,6 +111,7 @@ class SymbolPriorityDecision(BaseModel):
     timeout_strikes: int = 0
     cooldown_until: str | None = None
     skipped_due_to_cooldown: bool = False
+    cooldown_exempted: bool = False
     lifecycle_state: str = NA
     last_display_bucket: str = NA
     last_readiness_label: str = NA
@@ -138,6 +146,10 @@ class SymbolPriorityPlan(BaseModel):
     def cooldown_symbols_count(self) -> int:
         return len(self.skipped_symbols)
 
+    @property
+    def cooldown_exemptions_count(self) -> int:
+        return sum(1 for decision in self.decisions if decision.cooldown_exempted)
+
     def priority_by_symbol(self) -> dict[str, SymbolPriorityDecision]:
         return {decision.symbol: decision for decision in self.decisions}
 
@@ -148,6 +160,7 @@ class SymbolPriorityPlan(BaseModel):
             "cooldown_symbols": self.cooldown_symbols_count,
             "skipped_due_to_cooldown": len(self.skipped_symbols),
             "priority_symbols": [decision.model_dump(mode="json") for decision in self.decisions],
+            "active_lifecycle_cooldown_exemptions": self.cooldown_exemptions_count,
         }
 
 
@@ -195,7 +208,12 @@ def build_symbol_priority_plan(
         record = records.get(symbol) or default_symbol_health(symbol)
         lifecycle_state = state_by_symbol.get(symbol, NA)
         reasons = _priority_reasons(record, lifecycle_state)
-        if cooldown_active(record.cooldown_until, timestamp):
+        requires_monitoring = lifecycle_requires_market_observation(lifecycle_state)
+        cooldown_is_active = cooldown_active(record.cooldown_until, timestamp)
+        if requires_monitoring:
+            reasons = tuple((*reasons, "active_lifecycle_monitoring"))
+
+        if cooldown_is_active and not requires_monitoring:
             skipped.append(
                 SymbolPriorityDecision(
                     symbol=symbol,
@@ -232,6 +250,7 @@ def build_symbol_priority_plan(
             cooldown_until=record.cooldown_until,
             lifecycle_state=lifecycle_state,
             last_display_bucket=record.last_display_bucket,
+            cooldown_exempted=cooldown_is_active and requires_monitoring,
             last_readiness_label=record.last_readiness_label,
             useful_scan_count=record.useful_scan_count,
             priority_reasons=reasons or ("health_score",),
@@ -549,6 +568,7 @@ def build_symbol_health_summary(
     priority_summary.setdefault("prioritized_symbols", len(symbol_results))
     priority_summary.setdefault("cooldown_symbols", 0)
     priority_summary.setdefault("skipped_due_to_cooldown", 0)
+    priority_summary.setdefault("active_lifecycle_cooldown_exemptions", 0)
     priority_summary.setdefault("priority_symbols", [])
     return priority_summary
 
@@ -710,11 +730,9 @@ def _priority_reasons(record: SymbolHealthRecord, lifecycle_state: str) -> tuple
 
 
 def _lifecycle_priority_rank(state: str) -> int:
-    if state in PRIORITY_LIFECYCLE_STATES:
-        return PRIORITY_LIFECYCLE_STATES[state]
-    if state in WATCH_LIFECYCLE_STATES:
-        return 1
-    return 2
+    if state in ACTIVE_LIFECYCLE_PRIORITY:
+        return ACTIVE_LIFECYCLE_PRIORITY[state]
+    return len(ACTIVE_LIFECYCLE_PRIORITY)
 
 
 def _hot_watch_rank(record: SymbolHealthRecord) -> int:
