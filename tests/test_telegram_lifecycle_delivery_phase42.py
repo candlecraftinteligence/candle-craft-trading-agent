@@ -62,12 +62,39 @@ class FakeSender:
         self.public_watchlist_guards: list[object] = []
 
     async def send_text(self, text: str, **kwargs: object) -> TelegramSendResult:
+        return await self.send_part(text, part_number=1, total_parts=1, **kwargs)
+
+    async def send_part(
+        self,
+        text: str,
+        *,
+        part_number: int,
+        total_parts: int,
+        **kwargs: object,
+    ) -> TelegramSendResult:
         guard = kwargs.pop("public_watchlist_guard", None)
         if guard is not None:
             self.public_watchlist_guards.append(guard)
         self.messages.append(text)
         self.calls.append(kwargs)
-        return TelegramSendResult(status=self.status, detail=f"{self.status}.")
+        sent = self.status == "sent"
+        transport = {
+            "status": "sent" if sent else "failed",
+            "delivery_state": "SENT" if sent else "RETRYABLE",
+            "part_number": part_number,
+            "total_parts": total_parts,
+            "message_id": len(self.messages) if sent else None,
+            "chat_id": "fake-public-chat" if sent else None,
+            "error_category": None if sent else "fake_known_rejection",
+            "error": None if sent else "fake_known_rejection",
+        }
+        return TelegramSendResult(
+            status=self.status,
+            detail=f"{self.status}.",
+            telegram_results=(transport,),
+            error_message=NA if sent else "fake_known_rejection",
+            delivery_state=transport["delivery_state"],
+        )
 
 
 class LegacyResearchWatchDeliveryService(TelegramLifecycleDeliveryService):
@@ -6051,7 +6078,7 @@ def test_telegram_dry_run_protects_public_watchlist_delivery_and_persistence(tmp
             "SELECT telegram_status, sent_at FROM telegram_alert_attempts WHERE signal_id = ?",
             (summary.deliveries[0].signal_id,),
         ).fetchone()
-    assert row == ("skipped", None)
+    assert row == ("skipped_dry_run", None)
 
 
 def test_public_watchlist_dedupes_by_setup_id(tmp_path: Path) -> None:
@@ -8746,3 +8773,302 @@ def test_watchlist_terminal_updates_are_suppressed_by_default_but_internal_recor
         record = repository.get_record_by_lifecycle_id(signal_id)
     assert record is not None
     assert record.current_state == SetupLifecycleState.INVALIDATED
+
+
+def test_outbox_intent_and_claim_are_committed_before_http(tmp_path: Path) -> None:
+    db_path = tmp_path / "intent-before-http.db"
+    observed: list[tuple[str, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        with sqlite3.connect(db_path) as audit:
+            event_state = audit.execute(
+                "SELECT delivery_state FROM public_alert_events"
+            ).fetchone()[0]
+            attempt_state = audit.execute(
+                "SELECT telegram_status FROM telegram_alert_attempts WHERE attempted_alert_type = 'WATCHLIST'"
+            ).fetchone()[0]
+            part_state = audit.execute(
+                "SELECT delivery_state FROM public_alert_delivery_parts"
+            ).fetchone()[0]
+        observed.append((event_state, attempt_state, part_state))
+        return httpx.Response(
+            200,
+            json={"ok": True, "result": {"message_id": 7001, "chat": {"id": -1007001}}},
+        )
+
+    settings = Settings(
+        _env_file=None,
+        telegram_bot_token="test-token",
+        telegram_public_chat_id="test-chat",
+        telegram_signals_enabled=True,
+        telegram_dry_run=False,
+        local_manual_mode=True,
+        order_execution_enabled=False,
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    try:
+        sender = TelegramSender.from_settings(settings, http_client=client, api_base_url="https://telegram.test")
+        summary = run(
+            TelegramLifecycleDeliveryService(
+                database_path=db_path, settings=settings, sender=sender
+            ).deliver_for_run(
+                _run_result(_public_v1_symbol(signal_id="intent-before-http")),
+                scan_run_id="intent-before-http",
+            )
+        )
+    finally:
+        run(client.aclose())
+
+    assert observed == [("IN_FLIGHT", "in_flight", "IN_FLIGHT")]
+    assert summary.sent == 1
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT delivery_state, telegram_message_id, telegram_chat_id
+            FROM public_alert_events
+            """
+        ).fetchone()
+    assert row == ("SENT", "7001", "-1007001")
+
+
+def test_intent_persistence_failure_makes_zero_http_calls(tmp_path: Path, monkeypatch) -> None:
+    from app.storage.database import StorageError
+
+    db_path = tmp_path / "intent-persistence-failure.db"
+    sender = FakeSender()
+
+    def fail_persistence(*args, **kwargs):
+        raise sqlite3.OperationalError("fault-injected intent failure")
+
+    monkeypatch.setattr("app.alerts.telegram_lifecycle.persist_intent_parts", fail_persistence)
+    service = TelegramLifecycleDeliveryService(
+        database_path=db_path, settings=Settings(_env_file=None), sender=sender
+    )
+
+    with pytest.raises(StorageError, match="before network activity"):
+        run(
+            service.deliver_for_run(
+                _run_result(_public_v1_symbol(signal_id="intent-persist-fail")),
+                scan_run_id="intent-persist-fail",
+            )
+        )
+
+    assert sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM public_alert_events").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM telegram_alert_attempts").fetchone()[0] == 0
+
+
+def test_crash_after_pending_commit_before_claim_resumes_safely(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "crash-after-pending.db"
+    symbol = _public_v1_symbol(signal_id="crash-after-pending")
+    first_sender = FakeSender()
+
+    def crash_before_claim(*args, **kwargs):
+        raise SystemExit("fault-injected crash before claim")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            "app.alerts.telegram_lifecycle.SQLitePublicTelegramOutbox.claim",
+            crash_before_claim,
+        )
+        with pytest.raises(SystemExit, match="before claim"):
+            run(
+                TelegramLifecycleDeliveryService(
+                    database_path=db_path,
+                    settings=Settings(_env_file=None),
+                    sender=first_sender,
+                ).deliver_for_run(_run_result(symbol), scan_run_id="pending-crash")
+            )
+
+    assert first_sender.messages == []
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT delivery_state FROM public_alert_events"
+        ).fetchone()[0] == "PENDING"
+
+    restart_sender = FakeSender()
+    summary = run(
+        TelegramLifecycleDeliveryService(
+            database_path=db_path,
+            settings=Settings(_env_file=None),
+            sender=restart_sender,
+        ).deliver_for_run(_run_result(symbol), scan_run_id="pending-restart")
+    )
+    assert summary.sent == 1
+    assert len(restart_sender.messages) == 1
+
+
+def test_crash_after_in_flight_commit_recovers_uncertain_without_resend(tmp_path: Path) -> None:
+    db_path = tmp_path / "crash-after-in-flight.db"
+    symbol = _public_v1_symbol(signal_id="crash-after-in-flight")
+
+    class CrashSender(FakeSender):
+        async def send_part(self, text: str, **kwargs: object) -> TelegramSendResult:
+            raise SystemExit("fault-injected process death after attempt start")
+
+    with pytest.raises(SystemExit, match="process death"):
+        run(
+            TelegramLifecycleDeliveryService(
+                database_path=db_path,
+                settings=Settings(_env_file=None),
+                sender=CrashSender(),
+            ).deliver_for_run(_run_result(symbol), scan_run_id="in-flight-crash")
+        )
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT delivery_state FROM public_alert_events"
+        ).fetchone()[0] == "IN_FLIGHT"
+        connection.execute(
+            "UPDATE public_alert_events SET lease_expires_at = '2026-01-01T00:00:00Z'"
+        )
+        connection.commit()
+
+    restart_sender = FakeSender()
+    summary = run(
+        TelegramLifecycleDeliveryService(
+            database_path=db_path,
+            settings=Settings(_env_file=None),
+            sender=restart_sender,
+        ).deliver_for_run(_run_result(symbol), scan_run_id="in-flight-restart")
+    )
+
+    assert summary.sent == 0
+    assert restart_sender.messages == []
+    assert summary.deliveries[0].status == "uncertain"
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT delivery_state FROM public_alert_events"
+        ).fetchone()[0] == "UNCERTAIN"
+
+
+def test_success_then_sent_commit_failure_is_uncertain_and_never_resent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "sent-commit-failure.db"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 8001}})
+
+    settings = Settings(
+        _env_file=None,
+        telegram_bot_token="test-token",
+        telegram_public_chat_id="test-chat",
+        telegram_signals_enabled=True,
+        telegram_dry_run=False,
+        local_manual_mode=True,
+        order_execution_enabled=False,
+    )
+    symbol = _public_v1_symbol(signal_id="sent-commit-failure")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    try:
+        sender = TelegramSender.from_settings(settings, http_client=client, api_base_url="https://telegram.test")
+        with monkeypatch.context() as scoped:
+            def fail_result_commit(*args, **kwargs):
+                raise sqlite3.OperationalError("fault-injected SENT commit failure")
+
+            scoped.setattr(
+                "app.alerts.telegram_lifecycle.SQLitePublicTelegramOutbox.record_part_result",
+                fail_result_commit,
+            )
+            first = run(
+                TelegramLifecycleDeliveryService(
+                    database_path=db_path, settings=settings, sender=sender
+                ).deliver_for_run(_run_result(symbol), scan_run_id="sent-commit-failure")
+            )
+    finally:
+        run(client.aclose())
+
+    assert len(requests) == 1
+    assert first.deliveries[0].status == "uncertain"
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT delivery_state FROM public_alert_events"
+        ).fetchone()[0] == "UNCERTAIN"
+
+    second_requests: list[httpx.Request] = []
+    second_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: second_requests.append(request)
+            or httpx.Response(200, json={"ok": True, "result": {"message_id": 8002}})
+        ),
+        base_url="https://telegram.test",
+    )
+    try:
+        second_sender = TelegramSender.from_settings(
+            settings, http_client=second_client, api_base_url="https://telegram.test"
+        )
+        second = run(
+            TelegramLifecycleDeliveryService(
+                database_path=db_path, settings=settings, sender=second_sender
+            ).deliver_for_run(_run_result(symbol), scan_run_id="sent-commit-restart")
+        )
+    finally:
+        run(second_client.aclose())
+
+    assert second.sent == 0
+    assert second_requests == []
+
+
+def test_dry_run_intent_never_becomes_live_retry_after_restart(tmp_path: Path) -> None:
+    db_path = tmp_path / "dry-run-no-live-retry.db"
+    symbol = _public_v1_symbol(signal_id="dry-run-no-live-retry")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 9001}})
+
+    dry_settings = Settings(
+        _env_file=None,
+        telegram_bot_token="test-token",
+        telegram_public_chat_id="test-chat",
+        telegram_signals_enabled=True,
+        telegram_dry_run=True,
+        local_manual_mode=True,
+        order_execution_enabled=False,
+    )
+    dry_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    try:
+        dry_sender = TelegramSender.from_settings(
+            dry_settings, http_client=dry_client, api_base_url="https://telegram.test"
+        )
+        first = run(
+            TelegramLifecycleDeliveryService(
+                database_path=db_path, settings=dry_settings, sender=dry_sender
+            ).deliver_for_run(_run_result(symbol), scan_run_id="dry-run")
+        )
+    finally:
+        run(dry_client.aclose())
+
+    live_settings = Settings(
+        _env_file=None,
+        telegram_bot_token="test-token",
+        telegram_public_chat_id="test-chat",
+        telegram_signals_enabled=True,
+        telegram_dry_run=False,
+        local_manual_mode=True,
+        order_execution_enabled=False,
+    )
+    live_client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    try:
+        live_sender = TelegramSender.from_settings(
+            live_settings, http_client=live_client, api_base_url="https://telegram.test"
+        )
+        second = run(
+            TelegramLifecycleDeliveryService(
+                database_path=db_path, settings=live_settings, sender=live_sender
+            ).deliver_for_run(_run_result(symbol), scan_run_id="live-restart")
+        )
+    finally:
+        run(live_client.aclose())
+
+    assert first.sent == 0
+    assert second.sent == 0
+    assert requests == []
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT delivery_state FROM public_alert_events"
+        ).fetchone()[0] == "SKIPPED_DRY_RUN"
