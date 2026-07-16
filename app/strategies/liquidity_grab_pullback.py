@@ -17,6 +17,15 @@ from app.analytics.pullback_zones import (
     analyze_pullback_zone,
     calculate_fib_alignment,
 )
+from app.core.minimum_rr import (
+    CHALLENGE_HARD_MINIMUM_RR,
+    DEFAULT_CONFIGURED_MINIMUM_RR,
+    SWING_HARD_MINIMUM_RR,
+    candidate_rr_meets_minimum,
+    minimum_rr_policy,
+    rr_rejection_reason,
+    validate_configured_minimum_rr,
+)
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
 
 DecimalLike = Decimal | int | str
@@ -32,8 +41,8 @@ OUTPUT_QUANT = Decimal("0.00000001")
 SWEEP_ATR_MULTIPLIER = Decimal("0.35")
 DEFAULT_ATR_PERIOD = 14
 VOLUME_CONFIRMATION_MULTIPLIER = Decimal("1.5")
-BASE_MIN_RR = Decimal("2.5")
-CHALLENGE_MIN_RR = Decimal("3.0")
+BASE_MIN_RR = SWING_HARD_MINIMUM_RR
+CHALLENGE_MIN_RR = CHALLENGE_HARD_MINIMUM_RR
 TICK_SIZE = Decimal("0.00000001")
 RISK_WARNING = (
     "This is not financial advice. Pullback ideas are conditional and must be invalidated at the stop."
@@ -226,6 +235,11 @@ class LiquidityGrabSetup(BaseModel):
     tp2: MaybeDecimal = NA
     tp3: MaybeDecimal = NA
     rr_to_tp2: MaybeDecimal = NA
+    configured_global_minimum_rr: Decimal = DEFAULT_CONFIGURED_MINIMUM_RR
+    hard_mode_floor: Decimal = SWING_HARD_MINIMUM_RR
+    effective_minimum_rr: Decimal = DEFAULT_CONFIGURED_MINIMUM_RR
+    candidate_rr: MaybeDecimal = NA
+    rr_rejection_reason: str = NA
     invalidation: str = NA
     risk_warning: str = RISK_WARNING
     missing_data: tuple[str, ...] = ()
@@ -339,6 +353,7 @@ class LiquidityGrabInput(BaseModel):
     sector_rotation: Any | None = None
     narrative: Any | None = None
     aggressive_toggle: bool = False
+    min_rr: Decimal = DEFAULT_CONFIGURED_MINIMUM_RR
     token_classification: Any | None = None
     htf_2d_context_source: str = NA
 
@@ -350,6 +365,11 @@ class LiquidityGrabInput(BaseModel):
         if value is not None and not value.is_finite():
             raise ValueError("current_price must be finite")
         return value
+
+    @field_validator("min_rr", mode="before")
+    @classmethod
+    def _minimum_rr_is_safe(cls, value: Any) -> Decimal:
+        return validate_configured_minimum_rr(value)
 
     @field_validator("htf_timeframe", "bias_timeframe", "execution_timeframe", "confirmation_timeframe")
     @classmethod
@@ -442,6 +462,9 @@ class LiquidityGrabEngine:
             unverified_data,
             rotation,
         )
+        challenge = _with_minimum_rr_policy(data.min_rr, challenge)
+        swing = _with_minimum_rr_policy(data.min_rr, swing)
+        scalp = _with_minimum_rr_policy(data.min_rr, scalp)
         challenge = _with_setup_diagnostics(data.symbol, challenge)
         swing = _with_setup_diagnostics(data.symbol, swing)
         scalp = _with_setup_diagnostics(data.symbol, scalp)
@@ -613,7 +636,7 @@ class LiquidityGrabEngine:
                 atr_15m=atr,
                 tick_size=TICK_SIZE,
                 aggressive_toggle=data.aggressive_toggle,
-                minimum_rr=CHALLENGE_MIN_RR if mode == LiquidityGrabMode.challenge else BASE_MIN_RR,
+                minimum_rr=minimum_rr_policy(data.min_rr, mode).effective_minimum_rr,
                 poc=data.poc if not _is_missing(data.poc) else NA,
                 value_area_high=data.value_area_high if not _is_missing(data.value_area_high) else NA,
                 value_area_low=data.value_area_low if not _is_missing(data.value_area_low) else NA,
@@ -1505,8 +1528,9 @@ def _gate_result(
     if rr_to_tp2 == NA:
         violations.append(_violation("missing_rr", "RR to TP2 is N/A."))
     else:
-        minimum_rr = CHALLENGE_MIN_RR if mode == LiquidityGrabMode.challenge else BASE_MIN_RR
-        if _decimal_from(rr_to_tp2, "rr_to_tp2") < minimum_rr:
+        policy = minimum_rr_policy(data.min_rr, mode)
+        minimum_rr = policy.effective_minimum_rr
+        if not candidate_rr_meets_minimum(rr_to_tp2, policy):
             violations.append(_violation("rr_below_minimum", f"RR to TP2 is below {minimum_rr}."))
 
     if trust_meter.grade == "No trade":
@@ -1785,6 +1809,26 @@ def _setup_for_mode(
     return swing
 
 
+def _with_minimum_rr_policy(
+    configured_minimum_rr: Decimal, setup: LiquidityGrabSetup
+) -> LiquidityGrabSetup:
+    policy = minimum_rr_policy(configured_minimum_rr, setup.mode)
+    candidate_rr = setup.rr_to_tp2
+    rr_failure_codes = {"missing_rr", "rr_below_minimum", "challenge_rr_below_3"}
+    rejection_reason = NA
+    if any(violation.code in rr_failure_codes for violation in setup.gate_result.violations):
+        rejection_reason = rr_rejection_reason(candidate_rr, policy)
+    return setup.model_copy(
+        update={
+            "configured_global_minimum_rr": policy.configured_global_minimum_rr,
+            "hard_mode_floor": policy.hard_mode_floor,
+            "effective_minimum_rr": policy.effective_minimum_rr,
+            "candidate_rr": candidate_rr,
+            "rr_rejection_reason": rejection_reason,
+        }
+    )
+
+
 def _with_setup_diagnostics(symbol: str, setup: LiquidityGrabSetup) -> LiquidityGrabSetup:
     fields = _setup_diagnostic_fields(setup)
     diagnosed = setup.model_copy(update=fields)
@@ -1836,6 +1880,11 @@ def _setup_diagnostic_fields(setup: LiquidityGrabSetup) -> dict[str, Any]:
         "fib_diagnostics": _fib_diagnostics(setup),
         "momentum_diagnostics": _momentum_diagnostics(setup),
         "rr_diagnostics": _rr_diagnostics(setup),
+        "configured_global_minimum_rr": setup.configured_global_minimum_rr,
+        "hard_mode_floor": setup.hard_mode_floor,
+        "effective_minimum_rr": setup.effective_minimum_rr,
+        "candidate_rr": setup.candidate_rr,
+        "rr_rejection_reason": setup.rr_rejection_reason,
         "trust_meter_diagnostics": _trust_meter_diagnostics(setup),
         "derivatives_supports_trade": setup.derivatives_supports_trade,
         "derivatives_conflict_reason": setup.derivatives_conflict_reason,

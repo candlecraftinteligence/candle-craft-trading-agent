@@ -14,10 +14,11 @@ from app.analytics.wick_close_structure import (
     analyze_wick_close_structure,
     wick_close_fields,
 )
+from app.core.minimum_rr import CHALLENGE_HARD_MINIMUM_RR, SWING_HARD_MINIMUM_RR
 
 OUTPUT_QUANT = Decimal("0.00000001")
-BASE_MIN_RR = Decimal("2.5")
-CHALLENGE_MIN_RR = Decimal("3.0")
+BASE_MIN_RR = SWING_HARD_MINIMUM_RR
+CHALLENGE_MIN_RR = CHALLENGE_HARD_MINIMUM_RR
 DEFAULT_TICK_SIZE = Decimal("0.00000001")
 ATR_STOP_BUFFER_MULTIPLIER = Decimal("0.10")
 

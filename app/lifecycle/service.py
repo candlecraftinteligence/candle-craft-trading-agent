@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.core.minimum_rr import hard_mode_minimum_rr
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
 from app.lifecycle.models import (
@@ -295,7 +296,10 @@ def observation_from_symbol_result(
     mode = _mode_from_result(symbol_result, diagnostics)
     direction = _direction_from_result(symbol_result, diagnostics)
     rr = _decimal_or_none(_first_non_na(diagnostics.get("rr_to_tp2"), _risk_best_rr(symbol_result)))
-    required_rr = Decimal("3.0") if mode == "challenge" else Decimal("2.5")
+    required_rr = _decimal_or_none(diagnostics.get("effective_minimum_rr"))
+    if required_rr is None:
+        safe_mode = mode if mode in {"challenge", "scalp", "swing"} else "swing"
+        required_rr = hard_mode_minimum_rr(safe_mode)
     pullback_status = _display(diagnostics.get("pullback_zone_status")).lower()
     valid_trade_idea = _valid_trade_idea_exists(symbol_result, display.display_status)
     pullback_valid = (

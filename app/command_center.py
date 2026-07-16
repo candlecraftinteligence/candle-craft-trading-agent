@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.analytics.portfolio_selection import PortfolioDecision, PortfolioSelectionResult, selected_symbols
+from app.core.minimum_rr import minimum_rr_policy
 from app.data.dtos import NA
 from app.formatters.scanner_display import (
     RankedSymbolDisplay,
@@ -42,10 +43,13 @@ def build_command_center_payload(
     cache_stats = result.cache_stats or {}
     runtime_warnings = _runtime_warnings(result, replay_warnings)
 
+    configured_minimum_rr = result.config.min_rr
     payload: dict[str, Any] = {
         "title": "DAILY COMMAND CENTER",
         "command_preset": command_preset or NA,
-        "configured_min_rr": _display(min_rr),
+        "configured_min_rr": _display(configured_minimum_rr),
+        "minimum_rr_policy": build_minimum_rr_policy_payload(result),
+        "minimum_rr_audit": build_minimum_rr_audit(result),
         "total_symbols_scanned": result.scanned_symbols,
         "valid_setups": len(valid_items),
         "near_misses": len(near_miss_items),
@@ -75,6 +79,46 @@ def build_command_center_payload(
     if portfolio_selection is not None:
         payload["portfolio_summary"] = build_portfolio_summary_payload(portfolio_selection)
     return payload
+
+
+def build_minimum_rr_policy_payload(result: ScannerRunResult) -> dict[str, Any]:
+    configured = result.config.min_rr
+    modes: dict[str, Any] = {}
+    for mode in ("scalp", "swing", "challenge"):
+        policy = minimum_rr_policy(configured, mode)
+        modes[mode] = {
+            "configured_global_minimum_rr": _display(policy.configured_global_minimum_rr),
+            "hard_mode_floor": _display(policy.hard_mode_floor),
+            "effective_minimum_rr": _display(policy.effective_minimum_rr),
+        }
+    return {
+        "configured_global_minimum_rr": _display(configured),
+        "modes": modes,
+    }
+
+
+def build_minimum_rr_audit(result: ScannerRunResult) -> list[dict[str, Any]]:
+    audit_rows: list[dict[str, Any]] = []
+    for symbol_result in result.results:
+        for mode, diagnostics in symbol_result.strategy_diagnostics.items():
+            if not isinstance(diagnostics, Mapping):
+                continue
+            audit_rows.append(
+                {
+                    "symbol": symbol_result.symbol,
+                    "mode": mode,
+                    "configured_global_minimum_rr": _display(
+                        diagnostics.get("configured_global_minimum_rr")
+                    ),
+                    "hard_mode_floor": _display(diagnostics.get("hard_mode_floor")),
+                    "effective_minimum_rr": _display(diagnostics.get("effective_minimum_rr")),
+                    "candidate_rr": _display(
+                        _first_non_na(diagnostics.get("candidate_rr"), diagnostics.get("rr_to_tp2"))
+                    ),
+                    "rr_rejection_reason": _display(diagnostics.get("rr_rejection_reason")),
+                }
+            )
+    return audit_rows
 
 
 def format_command_center_summary(
