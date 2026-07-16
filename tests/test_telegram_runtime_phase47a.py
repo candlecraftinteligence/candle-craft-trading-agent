@@ -183,6 +183,7 @@ def test_public_lifecycle_alerts_use_public_chat_id_when_set() -> None:
             telegram_public_chat_id="public-chat",
             telegram_public_channel_id="public-channel",
             telegram_signals_enabled=True,
+            telegram_dry_run=False,
         )
     )
 
@@ -198,6 +199,7 @@ def test_public_lifecycle_alerts_use_public_channel_when_public_chat_missing() -
             telegram_admin_chat_id="admin-chat",
             telegram_public_channel_id="public-channel",
             telegram_signals_enabled=True,
+            telegram_dry_run=False,
         )
     )
 
@@ -214,6 +216,7 @@ def test_public_lifecycle_alerts_use_legacy_chat_only_as_local_manual_fallback(c
             telegram_chat_id="legacy-chat",
             telegram_admin_chat_id="admin-chat",
             telegram_signals_enabled=True,
+            telegram_dry_run=False,
             local_manual_mode=True,
         )
     )
@@ -228,7 +231,7 @@ def test_missing_public_destination_logs_warning_and_does_not_crash(caplog) -> N
     caplog.set_level(logging.WARNING, logger="app.alerts.telegram_sender")
 
     sender = TelegramSender.from_settings(
-        _settings(telegram_bot_token="secret-token", telegram_signals_enabled=True)
+        _settings(telegram_bot_token="secret-token", telegram_signals_enabled=True, telegram_dry_run=False)
     )
     result = run(sender.send_text("hello"))
 

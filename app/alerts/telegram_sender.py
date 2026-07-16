@@ -60,6 +60,7 @@ class TelegramSender:
         bot_token: str | None,
         chat_id: str | None,
         signals_enabled: bool,
+        dry_run: bool = True,
         local_manual_mode: bool = True,
         http_client: httpx.AsyncClient | None = None,
         api_base_url: str = TELEGRAM_API_BASE_URL,
@@ -69,6 +70,7 @@ class TelegramSender:
         self._bot_token = _clean_optional(bot_token)
         self._chat_id = _clean_optional(chat_id)
         self._signals_enabled = bool(signals_enabled)
+        self._dry_run = bool(dry_run)
         self._local_manual_mode = bool(local_manual_mode)
         self._http_client = http_client
         self._api_base_url = api_base_url
@@ -98,6 +100,7 @@ class TelegramSender:
             bot_token=settings.telegram_bot_token,
             chat_id=destination.chat_id,
             signals_enabled=settings.telegram_signals_enabled,
+            dry_run=settings.telegram_dry_run,
             local_manual_mode=settings.local_manual_mode,
             http_client=http_client,
             api_base_url=api_base_url,
@@ -125,6 +128,13 @@ class TelegramSender:
                 status="skipped",
                 detail="Telegram sending is disabled by TELEGRAM_SIGNALS_ENABLED=false.",
                 error_message="telegram_sending_disabled",
+            )
+        if self._dry_run:
+            logger.info("Telegram signal delivery skipped because TELEGRAM_DRY_RUN is true.")
+            return TelegramSendResult(
+                status="skipped",
+                detail="Telegram dry-run is enabled; no Telegram message was sent.",
+                error_message="telegram_dry_run_enabled",
             )
         if not self._bot_token or not self._chat_id:
             logger.warning("Telegram signal delivery skipped because credentials are missing.")

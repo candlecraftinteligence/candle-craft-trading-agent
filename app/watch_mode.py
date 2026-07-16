@@ -10,7 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.alerts.integrity_manifest import AlertIntegrityManifest, build_alert_integrity_manifest
-from app.alerts.telegram import send_telegram_messages
+from app.alerts.telegram_sender import TelegramSender
 from app.analytics.portfolio_selection import PortfolioSelectionResult, selected_symbols
 from app.analytics.setup_quality import SetupQualityState
 from app.data.dtos import NA
@@ -411,26 +411,29 @@ async def deliver_watch_activation_alert(
     message: str,
     *,
     live: bool,
+    dry_run: bool = True,
     telegram_bot_token: str | None = None,
     telegram_chat_id: str | None = None,
 ) -> WatchAlertDelivery:
     if not live:
         return WatchAlertDelivery(status="dry_run", detail="Dry run: no Telegram alert was sent.")
-    if not telegram_bot_token or not telegram_chat_id:
+    if not dry_run and (not telegram_bot_token or not telegram_chat_id):
         raise WatchModeError(
             "Live Telegram watch alerts require TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env."
         )
 
-    results = await send_telegram_messages(
+    send_result = await TelegramSender(
         bot_token=telegram_bot_token,
         chat_id=telegram_chat_id,
-        message=message,
-    )
-    sent = bool(results) and all(result.get("status") == "sent" for result in results)
+        signals_enabled=True,
+        dry_run=dry_run,
+    ).send_text(message)
+    if send_result.error_message == "telegram_dry_run_enabled":
+        return WatchAlertDelivery(status="dry_run", detail="Dry run: no Telegram alert was sent.")
     return WatchAlertDelivery(
-        status="sent" if sent else "failed",
-        detail="Telegram alert sent." if sent else "Telegram alert failed.",
-        telegram_results=tuple(dict(result) for result in results),
+        status="sent" if send_result.sent else "failed",
+        detail="Telegram alert sent." if send_result.sent else "Telegram alert failed.",
+        telegram_results=send_result.telegram_results,
     )
 
 

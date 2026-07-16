@@ -445,9 +445,11 @@ def test_watch_iteration_still_watching_excludes_terminal_lifecycle_rows() -> No
     assert summary.still_watching == 0
 
 
-def test_dry_run_default_does_not_call_telegram(tmp_path, monkeypatch, capsys) -> None:
+def test_telegram_dry_run_overrides_legacy_live_alert_flag(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("TELEGRAM_ADMIN_ENABLED", "false")
     monkeypatch.setenv("TELEGRAM_DRY_RUN", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "valid-looking-test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "valid-looking-test-chat")
     state_path = tmp_path / "watch_state.json"
     save_watch_state(state_path, _prior_state())
     monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
@@ -458,7 +460,7 @@ def test_dry_run_default_does_not_call_telegram(tmp_path, monkeypatch, capsys) -
     async def fail_send(*args, **kwargs):  # pragma: no cover - should never run
         raise AssertionError("dry-run watch mode must not call Telegram transport")
 
-    monkeypatch.setattr("app.watch_mode.send_telegram_messages", fail_send)
+    monkeypatch.setattr("app.alerts.telegram_sender.send_telegram_messages", fail_send)
 
     asyncio.run(
         run_scan.main(
@@ -470,6 +472,8 @@ def test_dry_run_default_does_not_call_telegram(tmp_path, monkeypatch, capsys) -
                 "1",
                 "--watch-interval-sec",
                 "0.01",
+                "--telegram-live-alerts",
+                "true",
             ]
         )
     )
@@ -989,7 +993,11 @@ def test_live_telegram_requires_env_vars(monkeypatch, tmp_path) -> None:
     save_watch_state(state_path, _prior_state())
     monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
     monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
-    monkeypatch.setattr(run_scan, "Settings", lambda: SimpleNamespace(telegram_bot_token=None, telegram_chat_id=None))
+    monkeypatch.setattr(
+        run_scan,
+        "Settings",
+        lambda: SimpleNamespace(telegram_bot_token=None, telegram_chat_id=None, telegram_dry_run=False),
+    )
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
 

@@ -2399,7 +2399,8 @@ async def _run_watch_mode(
     effective_candle_limit: int,
     command_used: str,
 ) -> None:
-    telegram_bot_token, telegram_chat_id = _watch_telegram_credentials(args)
+    telegram_bot_token, telegram_chat_id, telegram_dry_run = _watch_telegram_credentials(args)
+    telegram_live = bool(args.telegram_live_alerts and not telegram_dry_run)
     try:
         state = load_watch_state(WATCH_STATE_PATH)
     except WatchModeError as exc:
@@ -2426,7 +2427,7 @@ async def _run_watch_mode(
     print("Watch mode: enabled")
     print(f"Telegram manual lifecycle alerts: {_telegram_manual_lifecycle_status_label(args)}")
     print(f"Telegram admin drafts: {_telegram_admin_draft_status_label()}")
-    print(f"Legacy scanner alerts: {'live' if args.telegram_live_alerts else 'dry-run'}")
+    print(f"Legacy scanner alerts: {'live' if telegram_live else 'dry-run'}")
     for warning in _startup_warnings(args, effective_candle_limit):
         print(f"Warning: {warning}")
     print("")
@@ -2464,6 +2465,7 @@ async def _run_watch_mode(
                     delivery = await deliver_watch_activation_alert(
                         message,
                         live=args.telegram_live_alerts,
+                        dry_run=telegram_dry_run,
                         telegram_bot_token=telegram_bot_token,
                         telegram_chat_id=telegram_chat_id,
                     )
@@ -2478,11 +2480,11 @@ async def _run_watch_mode(
                             symbol_result,
                             message=message,
                             delivery_status=delivery.status,
-                            live=args.telegram_live_alerts,
+                            live=telegram_live,
                         ),
                     )
                     activations.append(activation)
-                    if not args.telegram_live_alerts:
+                    if not telegram_live:
                         print(message)
                         print("")
                     elif delivery.status == "failed":
@@ -2799,18 +2801,19 @@ def _database_path_text(database_path: Path | str) -> str:
     return Path(database_path).as_posix()
 
 
-def _watch_telegram_credentials(args: argparse.Namespace) -> tuple[str | None, str | None]:
+def _watch_telegram_credentials(args: argparse.Namespace) -> tuple[str | None, str | None, bool]:
     if not args.telegram_live_alerts:
-        return None, None
+        return None, None, True
     settings = Settings()
+    dry_run = bool(settings.telegram_dry_run)
     bot_token = (settings.telegram_bot_token or "").strip()
     chat_id = (settings.telegram_chat_id or "").strip()
-    if not bot_token or not chat_id:
+    if not dry_run and (not bot_token or not chat_id):
         raise SystemExit(
             "--telegram-live-alerts true requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env. "
             "No live Telegram alert was sent."
         )
-    return bot_token, chat_id
+    return bot_token or None, chat_id or None, dry_run
 
 
 def _watch_iteration_timestamp() -> str:
