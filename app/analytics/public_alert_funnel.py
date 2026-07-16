@@ -316,6 +316,8 @@ def build_public_alert_funnel_report(
     limit: int = 20,
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    """Build a report whose lower cutoff is inclusive: timestamp >= as-of minus hours."""
+
     db_path = Path(database_path)
     report: dict[str, Any] = {
         "database_path": str(db_path),

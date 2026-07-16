@@ -111,6 +111,8 @@ def test_public_alert_funnel_script_prints_sample_report(tmp_path: Path, capsys:
             "24",
             "--limit",
             "5",
+            "--as-of",
+            "2026-07-03T12:00:00Z",
         ]
     )
 
@@ -122,6 +124,103 @@ def test_public_alert_funnel_script_prints_sample_report(tmp_path: Path, capsys:
     assert "BTCUSDT | long | ACTIONABLE_A_GRADE" in output
     assert "Otherwise publishable near-misses:" in output
     assert "Block stage counts:" in output
+
+
+def test_public_alert_funnel_script_normalizes_offset_as_of_to_utc(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "public-funnel-cli-offset.sqlite"
+    _seed_public_funnel_database(db_path)
+    common_args = ["--database-path", str(db_path), "--hours", "24", "--limit", "5", "--as-of"]
+
+    assert audit_public_alert_funnel.main([*common_args, "2026-07-03T12:00:00Z"]) == 0
+    utc_output = capsys.readouterr().out
+    assert audit_public_alert_funnel.main([*common_args, "2026-07-03T14:00:00+02:00"]) == 0
+    offset_output = capsys.readouterr().out
+
+    assert offset_output == utc_output
+
+
+@pytest.mark.parametrize(
+    ("as_of", "expected_error"),
+    (
+        (
+            "2026-07-03T12:00:00",
+            "must include a UTC offset or Z; timezone-naive timestamps are not allowed",
+        ),
+        ("not-a-timestamp", "must be a valid ISO-8601 timestamp with a UTC offset or Z"),
+    ),
+)
+def test_public_alert_funnel_script_rejects_invalid_as_of(
+    as_of: str,
+    expected_error: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        audit_public_alert_funnel.main(["--as-of", as_of])
+
+    assert exc_info.value.code == 2
+    assert expected_error in capsys.readouterr().err
+
+
+def test_public_alert_funnel_script_without_as_of_uses_default_current_utc_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    def build_report(database_path: Path, *, hours: int, limit: int, now: datetime | None) -> dict[str, object]:
+        captured.update(database_path=database_path, hours=hours, limit=limit, now=now)
+        return {"source_available": True}
+
+    monkeypatch.setattr(audit_public_alert_funnel, "build_public_alert_funnel_report", build_report)
+    monkeypatch.setattr(audit_public_alert_funnel, "format_public_alert_funnel_report", lambda report: "report")
+
+    assert audit_public_alert_funnel.main(["--database-path", str(tmp_path / "unused.sqlite")]) == 0
+
+    assert capsys.readouterr().out == "report\n"
+    assert captured["now"] is None
+
+
+def test_public_alert_funnel_reporting_cutoff_is_inclusive(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-funnel-boundary.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        initialize_database(connection)
+        for signal_id, symbol, attempted_at in (
+            ("inside-window", "INSIDEUSDT", "2026-07-02T12:00:01Z"),
+            ("exact-cutoff", "CUTOFFUSDT", "2026-07-02T12:00:00Z"),
+            ("outside-window", "OUTSIDEUSDT", "2026-07-02T11:59:59Z"),
+        ):
+            _insert_attempt(
+                connection,
+                signal_id=signal_id,
+                symbol=symbol,
+                direction="long",
+                lifecycle_state="ACTIONABLE_A_GRADE",
+                status="blocked",
+                attempted_at=attempted_at,
+                score="90",
+                rr="2.9",
+                technical_score="96",
+                opportunity_score="96",
+                blocked_reason="public_block_rr_below_3",
+            )
+        connection.commit()
+
+    report = build_public_alert_funnel_report(
+        db_path,
+        hours=24,
+        limit=10,
+        now=datetime(2026, 7, 3, 12, tzinfo=UTC),
+    )
+
+    assert report["telegram_status_summary"]["blocked"] == 2
+    assert {row["symbol"] for row in report["top_blocked_symbols"]} == {
+        "CUTOFFUSDT",
+        "INSIDEUSDT",
+    }
 
 
 def test_best_near_miss_dedupes_repeated_plan_id_rows(tmp_path: Path) -> None:
