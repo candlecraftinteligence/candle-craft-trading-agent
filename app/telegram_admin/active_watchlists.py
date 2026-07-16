@@ -1035,6 +1035,7 @@ def _active_signal_items_from_rows(
         outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
         lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
+        outcome_progress = _lifecycle_outcome_progress(connection, lifecycle_row)
         if not _active_signal_group_is_eligible(
             connection,
             signal_row=signal_row,
@@ -1051,7 +1052,7 @@ def _active_signal_items_from_rows(
             _clean(row.get("alert_type"))
             for row in (signal_row, *outcome_rows)
             if _clean(row.get("alert_type")) not in {_SIGNAL_CONFIRMED_TYPE, _WATCHLIST_TYPE, NA}
-        )
+        ) | _canonical_outcome_alert_types(outcome_progress)
         levels = _stored_trade_map_levels(signal_row)
         candidate_meta = _candidate_metadata(connection, latest_row)
         lifecycle_state = _first_non_na(
@@ -2519,6 +2520,41 @@ def _target_progress_lines(item: ActiveWatchlistItem) -> list[str]:
         status = "HIT" if target_type in item.hit_alert_types else "waiting"
         lines.append(f"{label}: {status} ({level})")
     return lines
+
+
+def _lifecycle_outcome_progress(
+    connection: sqlite3.Connection,
+    lifecycle_row: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+    if lifecycle_id == NA or not _table_exists(connection, "setup_lifecycle_outcome_progress"):
+        return {}
+    row = connection.execute(
+        """
+        SELECT *
+        FROM setup_lifecycle_outcome_progress
+        WHERE lifecycle_id = ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (lifecycle_id,),
+    ).fetchone()
+    return dict(row) if row is not None else {}
+
+
+def _canonical_outcome_alert_types(progress: Mapping[str, Any]) -> frozenset[str]:
+    values: set[str] = set()
+    if _clean(progress.get("entry_at")) != NA:
+        values.add(_LIMIT_TYPE)
+    for field_name, alert_type in (
+        ("tp1_at", _TP1_TYPE),
+        ("tp2_at", _TP2_TYPE),
+        ("tp3_at", _TP3_TYPE),
+        ("stop_at", _SL_TYPE),
+    ):
+        if _clean(progress.get(field_name)) != NA:
+            values.add(alert_type)
+    return frozenset(values)
 
 
 def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:

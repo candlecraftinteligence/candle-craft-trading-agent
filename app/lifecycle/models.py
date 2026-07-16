@@ -86,9 +86,13 @@ class SetupTransitionReason(str, Enum):
     A_GRADE_WATCH = "A-grade setup mapped and waiting for limit zone."
     VALID_TRADE_IDEA = "Valid trade idea exists."
     ENTRY_ZONE_TOUCHED = "Entry zone touched by latest price range."
+    ENTRY_ACTIVATED = "Entry activation recorded from a closed execution candle."
     ENTRY_FILL_SIMULATED = "Entry fill simulated or confirmed."
     SETUP_DECAYED = "Setup confidence decayed after no lifecycle progress."
     TAKE_PROFIT_HIT = "Take-profit outcome recorded."
+    TP1_MILESTONE = "TP1 milestone recorded internally."
+    TP2_MILESTONE = "TP2 milestone recorded internally."
+    TP3_MILESTONE = "TP3 milestone recorded internally."
     STOP_LOSS_HIT = "Stop-loss outcome recorded."
     SETUP_INVALIDATED = "Setup invalidated by current structure or failed gate."
     SETUP_EXPIRED = "Setup expired before completion."
@@ -233,6 +237,58 @@ class SetupLifecycleEvent(BaseModel):
         return text if text else NA
 
 
+class SetupLifecycleOutcomeProgress(BaseModel):
+    lifecycle_id: str
+    plan_identity: str
+    symbol: str
+    mode: str = NA
+    direction: str = NA
+    execution_timeframe: str = NA
+    evaluation_cursor_open_at: str | None = None
+    evaluation_cursor_close_at: str | None = None
+    entry_at: str | None = None
+    tp1_at: str | None = None
+    tp2_at: str | None = None
+    tp3_at: str | None = None
+    stop_at: str | None = None
+    invalidated_at: str | None = None
+    outcome_at: str | None = None
+    terminal_outcome: str = NA
+    integrity_status: str = NA
+    diagnostic: str = NA
+    metadata_json: str = "{}"
+    first_evaluated_at: str
+    last_evaluated_at: str
+
+    model_config = ConfigDict(frozen=True)
+
+    @field_validator("symbol")
+    @classmethod
+    def _normalize_progress_symbol(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("symbol must not be blank")
+        return normalized
+
+    @field_validator(
+        "lifecycle_id",
+        "plan_identity",
+        "mode",
+        "direction",
+        "execution_timeframe",
+        "terminal_outcome",
+        "integrity_status",
+        "diagnostic",
+        "metadata_json",
+    )
+    @classmethod
+    def _normalize_progress_text(cls, value: str | None) -> str:
+        if value is None:
+            return NA
+        text = str(value).strip()
+        return text if text else NA
+
+
 class SetupTransitionResult(BaseModel):
     lifecycle_id: str
     symbol: str
@@ -307,6 +363,7 @@ class SetupOutcomeAnalyticsRecord(BaseModel):
 
 
 __all__ = [
+    "SetupLifecycleOutcomeProgress",
     "SetupLifecycleEvent",
     "SetupLifecycleRecord",
     "SetupOutcomeAnalyticsRecord",

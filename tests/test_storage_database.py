@@ -241,6 +241,7 @@ def test_database_creation(tmp_path) -> None:
         "telegram_alert_attempts",
         "public_alert_events",
         "setup_outcome_analytics",
+        "setup_lifecycle_outcome_progress",
         "symbol_health_events",
     } <= tables
 
@@ -263,6 +264,12 @@ def test_scanner_process_improvement_schema_columns_exist(tmp_path) -> None:
         outcome_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(setup_outcome_analytics)").fetchall()
+        }
+        progress_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(setup_lifecycle_outcome_progress)"
+            ).fetchall()
         }
 
     assert {
@@ -292,6 +299,23 @@ def test_scanner_process_improvement_schema_columns_exist(tmp_path) -> None:
         "duplicate_noisy_setup_count",
     } <= health_columns
     assert {"lifecycle_id", "symbol", "final_outcome", "lifecycle_path", "raw_payload_json"} <= outcome_columns
+    assert {
+        "lifecycle_id",
+        "plan_identity",
+        "execution_timeframe",
+        "evaluation_cursor_open_at",
+        "entry_at",
+        "tp1_at",
+        "tp2_at",
+        "tp3_at",
+        "stop_at",
+        "invalidated_at",
+        "outcome_at",
+        "terminal_outcome",
+        "integrity_status",
+        "diagnostic",
+        "metadata_json",
+    } <= progress_columns
 
 
 def test_scan_run_migration_adds_watch_columns_without_destroying_rows(tmp_path) -> None:
