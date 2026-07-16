@@ -31,6 +31,47 @@ class SetupLifecycleState(str, Enum):
     ARCHIVED = "ARCHIVED"
 
 
+# Ordered to preserve the lifecycle queue's established urgency semantics while
+# ensuring execution-stage plans are observed before discovery work.
+ACTIVE_LIFECYCLE_MONITORING_STATES = (
+    SetupLifecycleState.EXECUTING,
+    SetupLifecycleState.MANAGING,
+    SetupLifecycleState.ACTIONABLE_A_GRADE,
+    SetupLifecycleState.A_GRADE_WATCH,
+    SetupLifecycleState.STALKING,
+    SetupLifecycleState.TRIGGERED,
+    SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.WATCHLISTED,
+)
+
+
+def lifecycle_requires_market_observation(state: SetupLifecycleState | str) -> bool:
+    try:
+        normalized = (
+            state
+            if isinstance(state, SetupLifecycleState)
+            else SetupLifecycleState(str(state).strip().upper())
+        )
+    except ValueError:
+        return False
+    return normalized in ACTIVE_LIFECYCLE_MONITORING_STATES
+
+
+def lifecycle_monitoring_priority(state: SetupLifecycleState | str) -> int:
+    try:
+        normalized = (
+            state
+            if isinstance(state, SetupLifecycleState)
+            else SetupLifecycleState(str(state).strip().upper())
+        )
+    except ValueError:
+        return len(ACTIVE_LIFECYCLE_MONITORING_STATES)
+    try:
+        return ACTIVE_LIFECYCLE_MONITORING_STATES.index(normalized)
+    except ValueError:
+        return len(ACTIVE_LIFECYCLE_MONITORING_STATES)
+
+
 class SetupTransitionReason(str, Enum):
     INITIALIZED = "Lifecycle initialized from current scan snapshot."
     DISCOVERED = "Setup discovered and awaiting stronger structure."

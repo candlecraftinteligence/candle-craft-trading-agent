@@ -92,10 +92,11 @@ from app.formatters.scanner_display import (  # noqa: E402
 )
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
 from app.telegram_admin import TelegramAdminConfig, route_admin_scan_report  # noqa: E402
+from app.lifecycle.models import lifecycle_monitoring_priority  # noqa: E402
 from app.lifecycle.service import (  # noqa: E402
     SetupLifecycleService,
     apply_lifecycle_to_run_result,
-    prioritize_watch_symbols,
+    active_lifecycle_symbols,
 )
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository  # noqa: E402
 from app.pipeline.scanner_runner import (  # noqa: E402
@@ -192,6 +193,9 @@ class WatchlistResolution:
     lifecycle_priority_added_symbols: tuple[str, ...] = ()
     lifecycle_priority_dropped_symbols: tuple[str, ...] = ()
 
+    active_lifecycle_symbols: tuple[str, ...] = ()
+    active_lifecycle_over_cap_count: int = 0
+    lifecycle_capacity_displaced_symbols: tuple[str, ...] = ()
 
 @dataclass(frozen=True)
 class ResumeState:
@@ -687,6 +691,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         return
 
     watchlist = await _resolve_watchlist_for_args(args)
+    watchlist = _watchlist_with_lifecycle_priority(args, watchlist)
     diagnostics_level = args.diagnostics_level
     if args.verbose and not args.diagnostics_level_explicit:
         diagnostics_level = "full"
@@ -750,6 +755,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
     print("")
 
     resume_state = _load_resume_state(args.resume_from, watchlist.symbols, skip_completed=not args.no_resume_skip)
+    resume_state = _resume_state_with_active_lifecycle_retry(resume_state, watchlist.active_lifecycle_symbols)
     if args.progress and resume_state.skipped_symbols:
         print(f"Resume: skipped {len(resume_state.skipped_symbols)} completed symbol(s).")
 
@@ -1480,6 +1486,23 @@ def _load_resume_state(
     )
 
 
+def _resume_state_with_active_lifecycle_retry(
+    resume_state: ResumeState,
+    active_symbols: Sequence[str],
+) -> ResumeState:
+    active_set = set(active_symbols)
+    if not active_set:
+        return resume_state
+    skipped_symbols = tuple(symbol for symbol in resume_state.skipped_symbols if symbol not in active_set)
+    if skipped_symbols == resume_state.skipped_symbols:
+        return resume_state
+    return ResumeState(
+        results_by_symbol=resume_state.results_by_symbol,
+        skipped_symbols=skipped_symbols,
+        loaded_symbols=resume_state.loaded_symbols,
+    )
+
+
 def _resume_result_is_completed(symbol_result: ScannerSymbolResult) -> bool:
     if symbol_result.error_message:
         return False
@@ -2133,17 +2156,23 @@ def _watchlist_with_lifecycle_priority(
         return watchlist
     original_symbols = watchlist.symbols
     try:
-        prioritized = prioritize_watch_symbols(original_symbols, database_path=args.database_path)
+        active_symbols = active_lifecycle_symbols(original_symbols, database_path=args.database_path)
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc
-    if not prioritized:
-        return watchlist
+
+    active_set = set(active_symbols)
+    discovery_symbols = tuple(symbol for symbol in original_symbols if symbol not in active_set)
+    uncapped_symbols = dedupe_symbols((*active_symbols, *discovery_symbols))
+    if args.max_symbols is not None:
+        if args.max_symbols < 1:
+            raise SystemExit("--max-symbols must be at least 1.")
+        discovery_capacity = max(0, args.max_symbols - len(active_symbols))
+        discovery_symbols = discovery_symbols[:discovery_capacity]
+    prioritized = dedupe_symbols((*active_symbols, *discovery_symbols))
+
     original_set = set(original_symbols)
     prioritized_set = set(prioritized)
     dropped_symbols = tuple(symbol for symbol in original_symbols if symbol not in prioritized_set)
-    if dropped_symbols:
-        prioritized = dedupe_symbols((*prioritized, *dropped_symbols))
-        prioritized_set = set(prioritized)
     added_symbols = tuple(symbol for symbol in prioritized if symbol not in original_set)
     original_index = {symbol: index for index, symbol in enumerate(original_symbols)}
     promoted_symbols = tuple(
@@ -2151,18 +2180,36 @@ def _watchlist_with_lifecycle_priority(
         for index, symbol in enumerate(prioritized)
         if symbol in original_index and index < original_index[symbol]
     )
-    if prioritized == original_symbols:
+    active_over_cap_count = (
+        max(0, len(active_symbols) - args.max_symbols)
+        if args.max_symbols is not None
+        else 0
+    )
+    cap_applied = watchlist.queue_cap_applied or len(prioritized) < len(uncapped_symbols)
+    pre_cap_count = max(
+        watchlist.pre_cap_symbols_count or len(original_symbols),
+        len(uncapped_symbols),
+    )
+    source_label = (
+        watchlist.source_label
+        if prioritized == original_symbols or watchlist.source_label.endswith(" + lifecycle priority")
+        else f"{watchlist.source_label} + lifecycle priority"
+    )
+    if prioritized == original_symbols and watchlist.active_lifecycle_symbols == active_symbols:
         return watchlist
     return WatchlistResolution(
         symbols=prioritized,
-        source_label=f"{watchlist.source_label} + lifecycle priority",
+        source_label=source_label,
         universe=watchlist.universe,
         explicit_excluded_symbols=watchlist.explicit_excluded_symbols,
-        pre_cap_symbols_count=watchlist.pre_cap_symbols_count,
-        queue_cap_applied=watchlist.queue_cap_applied,
+        pre_cap_symbols_count=pre_cap_count,
+        queue_cap_applied=cap_applied,
         lifecycle_priority_promoted_symbols=promoted_symbols,
         lifecycle_priority_added_symbols=added_symbols,
         lifecycle_priority_dropped_symbols=dropped_symbols,
+        active_lifecycle_symbols=active_symbols,
+        active_lifecycle_over_cap_count=active_over_cap_count,
+        lifecycle_capacity_displaced_symbols=dropped_symbols,
     )
 
 
@@ -2200,19 +2247,11 @@ def _lifecycle_states_for_symbols(args: argparse.Namespace, symbols: Sequence[st
             records = repository.get_records_for_symbols(symbols)
     except StorageError:
         raise
-    priority = {
-        "EXECUTING": 0,
-        "CONFIRMED": 0,
-        "TRIGGERED": 0,
-        "MANAGING": 0,
-        "STALKING": 1,
-        "WATCHLISTED": 1,
-    }
     output: dict[str, str] = {}
     best_rank: dict[str, int] = {}
     for record in records:
         state = record.current_state.value
-        rank = priority.get(state, 2)
+        rank = lifecycle_monitoring_priority(record.current_state)
         if record.symbol not in output or rank < best_rank[record.symbol]:
             output[record.symbol] = state
             best_rank[record.symbol] = rank
@@ -2240,6 +2279,12 @@ def _symbol_queue_diagnostics(
     queued_set = set(queued)
     health_excluded = tuple(symbol_priority_plan.skipped_symbols) if symbol_priority_plan.enabled else ()
     health_excluded_set = set(health_excluded)
+    cooldown_exemptions = tuple(
+        decision.symbol
+        for decision in symbol_priority_plan.decisions
+        if decision.cooldown_exempted
+    )
+    active_queued = tuple(symbol for symbol in watchlist.active_lifecycle_symbols if symbol in queued_set)
     adaptive_excluded = tuple(
         symbol
         for symbol in requested_symbols
@@ -2257,6 +2302,10 @@ def _symbol_queue_diagnostics(
         "lifecycle_priority_additions_count": len(watchlist.lifecycle_priority_added_symbols),
         "lifecycle_priority_promoted_count": len(watchlist.lifecycle_priority_promoted_symbols),
         "lifecycle_priority_dropped_count": len(watchlist.lifecycle_priority_dropped_symbols),
+        "active_lifecycle_monitoring_count": len(active_queued),
+        "active_lifecycle_cooldown_exemption_count": len(cooldown_exemptions),
+        "active_lifecycle_over_cap_count": watchlist.active_lifecycle_over_cap_count,
+        "active_lifecycle_exceeded_cap": watchlist.active_lifecycle_over_cap_count > 0,
         "adaptive_priority_enabled": bool(symbol_priority_plan.enabled),
         "adaptive_priority_excluded_count": len(adaptive_excluded),
         "queue_cap_applied": bool(watchlist.queue_cap_applied),
@@ -2267,8 +2316,10 @@ def _symbol_queue_diagnostics(
         "exclusion_examples": {
             "explicit_user_excluded": list(explicit_excluded[:20]),
             "symbol_health_cooldown": list(health_excluded[:20]),
+            "active_lifecycle_monitoring": list(active_queued[:20]),
+            "active_lifecycle_cooldown_exemption": list(cooldown_exemptions[:20]),
             "adaptive_priority_excluded": list(adaptive_excluded[:20]),
-            "lifecycle_priority_dropped_then_restored": list(watchlist.lifecycle_priority_dropped_symbols[:20]),
+            "discovery_displaced_by_active_lifecycle": list(watchlist.lifecycle_capacity_displaced_symbols[:20]),
         },
     }
 
@@ -2300,6 +2351,9 @@ def _format_symbol_queue_diagnostics(diagnostics: Mapping[str, Any]) -> str:
         f"- Symbol health excluded count: {diagnostics.get('symbol_health_excluded_count', 0)}",
         f"- Lifecycle priority additions count: {diagnostics.get('lifecycle_priority_additions_count', 0)}",
         f"- Lifecycle priority promoted count: {diagnostics.get('lifecycle_priority_promoted_count', 0)}",
+        f"- Active lifecycle monitoring count: {diagnostics.get('active_lifecycle_monitoring_count', 0)}",
+        f"- Active lifecycle cooldown exemptions: {diagnostics.get('active_lifecycle_cooldown_exemption_count', 0)}",
+        f"- Active lifecycle over cap count: {diagnostics.get('active_lifecycle_over_cap_count', 0)}",
         f"- Adaptive priority excluded count: {diagnostics.get('adaptive_priority_excluded_count', 0)}",
         f"- Queue cap applied: {cap_text}",
         f"- Final queued count: {diagnostics.get('final_queued_count', 0)}",
@@ -2307,8 +2361,10 @@ def _format_symbol_queue_diagnostics(diagnostics: Mapping[str, Any]) -> str:
     for reason in (
         "explicit_user_excluded",
         "symbol_health_cooldown",
+        "active_lifecycle_monitoring",
+        "active_lifecycle_cooldown_exemption",
         "adaptive_priority_excluded",
-        "lifecycle_priority_dropped_then_restored",
+        "discovery_displaced_by_active_lifecycle",
     ):
         values = example_map.get(reason, ())
         if values:

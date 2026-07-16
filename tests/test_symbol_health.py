@@ -4,6 +4,8 @@ import asyncio
 import json
 from decimal import Decimal
 
+import pytest
+
 from app.analytics.symbol_health import (
     SymbolHealthRecord,
     build_symbol_priority_plan,
@@ -247,6 +249,90 @@ def test_cooldown_expiry_allows_symbol_back_into_queue() -> None:
     assert "SLOWUSDT" not in future_plan.symbols_to_scan
     assert "SLOWUSDT" in expired_plan.symbols_to_scan
     assert cooldown_active(expired.cooldown_until, "2026-05-19T00:00:00+00:00") is False
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        SetupLifecycleState.WATCHLISTED,
+        SetupLifecycleState.STALKING,
+        SetupLifecycleState.TRIGGERED,
+        SetupLifecycleState.CONFIRMED,
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
+        SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.EXECUTING,
+        SetupLifecycleState.MANAGING,
+    ),
+)
+def test_active_lifecycle_state_exempts_future_health_cooldown(state: SetupLifecycleState) -> None:
+    cooldown_until = "2099-01-01T00:00:00+00:00"
+    record = SymbolHealthRecord(
+        symbol="ACTIVEUSDT",
+        current_health_score=12,
+        cooldown_until=cooldown_until,
+        timeout_count=4,
+        timeout_strikes=3,
+        data_issue_count=2,
+    )
+
+    plan = build_symbol_priority_plan(
+        ("ACTIVEUSDT", "DISCOVERYUSDT"),
+        {"ACTIVEUSDT": record},
+        lifecycle_states={"ACTIVEUSDT": state.value},
+        now="2026-05-19T00:00:00+00:00",
+    )
+
+    decision = plan.priority_by_symbol()["ACTIVEUSDT"]
+    assert plan.symbols_to_scan[0] == "ACTIVEUSDT"
+    assert plan.skipped_symbols == ()
+    assert decision.skipped_due_to_cooldown is False
+    assert decision.cooldown_exempted is True
+    assert decision.cooldown_until == cooldown_until
+    assert decision.health_score == 12
+    assert decision.timeout_strikes == 3
+    assert "active_lifecycle_monitoring" in decision.priority_reasons
+    assert plan.to_summary()["active_lifecycle_cooldown_exemptions"] == 1
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        SetupLifecycleState.DISCOVERED,
+        SetupLifecycleState.REJECTED,
+        SetupLifecycleState.TP_HIT,
+        SetupLifecycleState.SL_HIT,
+        SetupLifecycleState.INVALIDATED,
+        SetupLifecycleState.EXPIRED,
+        SetupLifecycleState.COOLDOWN,
+        SetupLifecycleState.COOLED_DOWN,
+        SetupLifecycleState.NO_LONGER_TRACKING,
+        SetupLifecycleState.REMOVED,
+        SetupLifecycleState.CANCELLED,
+        SetupLifecycleState.CANCELED,
+        SetupLifecycleState.ARCHIVED,
+    ),
+)
+def test_inactive_lifecycle_state_keeps_health_cooldown(state: SetupLifecycleState) -> None:
+    record = SymbolHealthRecord(
+        symbol="INACTIVEUSDT",
+        current_health_score=12,
+        cooldown_until="2099-01-01T00:00:00+00:00",
+        timeout_strikes=3,
+    )
+
+    plan = build_symbol_priority_plan(
+        ("INACTIVEUSDT", "DISCOVERYUSDT"),
+        {"INACTIVEUSDT": record},
+        lifecycle_states={"INACTIVEUSDT": state.value},
+        now="2026-05-19T00:00:00+00:00",
+    )
+
+    decision = plan.priority_by_symbol()["INACTIVEUSDT"]
+    assert plan.symbols_to_scan == ("DISCOVERYUSDT",)
+    assert plan.skipped_symbols == ("INACTIVEUSDT",)
+    assert decision.skipped_due_to_cooldown is True
+    assert decision.cooldown_exempted is False
+    assert "active_lifecycle_monitoring" not in decision.priority_reasons
 
 
 def test_adaptive_priority_orders_lifecycle_hot_health_then_liquidity() -> None:
