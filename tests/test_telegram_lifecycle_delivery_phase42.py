@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app.agents.trade_idea import create_trade_idea
@@ -5368,6 +5369,49 @@ def test_confirmed_signal_creates_send_attempt_when_valid_and_telegram_enabled(t
     assert row == ("DYDXUSDT", TelegramAlertType.SIGNAL_CONFIRMED.value, "sent", "N/A", "N/A")
 
 
+def test_telegram_dry_run_protects_confirmed_public_delivery_and_persistence(tmp_path: Path) -> None:
+    db_path = tmp_path / "confirmed-dry-run.db"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    settings = Settings(
+        _env_file=None,
+        telegram_bot_token="valid-looking-test-token",
+        telegram_public_chat_id="valid-looking-test-chat",
+        telegram_signals_enabled=True,
+        telegram_dry_run=True,
+        local_manual_mode=True,
+        order_execution_enabled=False,
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    try:
+        sender = TelegramSender.from_settings(settings, http_client=client, api_base_url="https://telegram.test")
+        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=settings, sender=sender)
+        symbol = _symbol(
+            SetupLifecycleState.CONFIRMED,
+            previous=SetupLifecycleState.TRIGGERED,
+            signal_id="confirmed-dry-run",
+        )
+        summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-dry-run"))
+    finally:
+        run(client.aclose())
+
+    assert requests == []
+    assert summary.sent == 0
+    assert summary.skipped == 1
+    assert summary.deliveries[0].status == "skipped"
+    assert summary.deliveries[0].error_message == "telegram_dry_run_enabled"
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT telegram_status, sent_at FROM telegram_alert_attempts WHERE signal_id = ?",
+            ("confirmed-dry-run",),
+        ).fetchone()
+    assert row == ("skipped", None)
+
+
 def _attempt_count(db_path: Path, attempted_alert_type: str = TelegramAlertType.SIGNAL_CONFIRMED.value) -> int:
     with sqlite3.connect(db_path) as connection:
         return connection.execute(
@@ -5972,6 +6016,45 @@ def test_public_watchlist_does_not_call_order_execution(tmp_path: Path) -> None:
     source = Path("app/alerts/telegram_lifecycle.py").read_text(encoding="utf-8").lower()
     for forbidden in ("execute_order", "place_order", "create_order"):
         assert forbidden not in source
+
+
+def test_telegram_dry_run_protects_public_watchlist_delivery_and_persistence(tmp_path: Path) -> None:
+    db_path = tmp_path / "watchlist-dry-run.db"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    settings = Settings(
+        _env_file=None,
+        telegram_bot_token="valid-looking-test-token",
+        telegram_public_chat_id="valid-looking-test-chat",
+        telegram_signals_enabled=True,
+        telegram_dry_run=True,
+        local_manual_mode=True,
+        order_execution_enabled=False,
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
+    try:
+        sender = TelegramSender.from_settings(settings, http_client=client, api_base_url="https://telegram.test")
+        service = TelegramLifecycleDeliveryService(database_path=db_path, settings=settings, sender=sender)
+        symbol = _public_v1_symbol(signal_id="watchlist-dry-run")
+        summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="watchlist-dry-run"))
+    finally:
+        run(client.aclose())
+
+    assert requests == []
+    assert summary.sent == 0
+    assert summary.skipped == 1
+    assert summary.deliveries[0].status == "skipped"
+    assert summary.deliveries[0].error_message == "telegram_dry_run_enabled"
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT telegram_status, sent_at FROM telegram_alert_attempts WHERE signal_id = ?",
+            (summary.deliveries[0].signal_id,),
+        ).fetchone()
+    assert row == ("skipped", None)
 
 
 def test_public_watchlist_dedupes_by_setup_id(tmp_path: Path) -> None:
@@ -6812,7 +6895,7 @@ def test_repeated_unmatched_terminal_update_compacts_seen_count(tmp_path: Path) 
 
 def test_missing_telegram_credentials_skip_safely_and_persist_attempt(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
-    sender = TelegramSender(bot_token=None, chat_id=None, signals_enabled=True)
+    sender = TelegramSender(bot_token=None, chat_id=None, signals_enabled=True, dry_run=False)
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,
         settings=Settings(_env_file=None),

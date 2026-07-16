@@ -56,6 +56,17 @@ def test_log_level_is_normalized() -> None:
     assert settings.log_level == "WARNING"
 
 
+@pytest.mark.parametrize(("raw_value", "expected"), [("true", True), ("false", False)])
+def test_telegram_dry_run_loads_from_canonical_environment_setting(
+    monkeypatch, raw_value: str, expected: bool
+) -> None:
+    monkeypatch.setenv("TELEGRAM_DRY_RUN", raw_value)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.telegram_dry_run is expected
+
+
 def test_order_execution_enabled_fails_safely() -> None:
     with pytest.raises(ValueError, match="ORDER_EXECUTION_ENABLED must remain false"):
         Settings(_env_file=None, order_execution_enabled=True)
