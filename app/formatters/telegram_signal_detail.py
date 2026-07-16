@@ -39,6 +39,7 @@ class TelegramSignalDetail:
     confirmed_facts: tuple[Any, ...] = ()
     confirmed_gates: tuple[Any, ...] = ()
     lifecycle_reason: Any = NA
+    outcome_progress: Any = NA
     updated_at: Any = NA
 
 
@@ -53,6 +54,7 @@ def format_signal_detail(detail: TelegramSignalDetail, *, detail_type: str = "SI
             f"Quality: {_text(detail.quality)}",
             f"RR: {format_rr(detail.rr)}",
             f"Lifecycle: {_lifecycle_display(detail.lifecycle)}",
+            *((f"Milestones: {_text(detail.outcome_progress)}",) if _text(detail.outcome_progress) != NA else ()),
             "",
             "\U0001F3AF Trade Map",
             f"Entry Zone: {_entry_text(detail.entry_low, detail.entry_high)}",
@@ -81,6 +83,7 @@ def format_signal_detail_lifecycle(detail: TelegramSignalDetail) -> str:
             f"{HEADER_PREFIX} {format_symbol(detail.symbol)} {EM_DASH} LIFECYCLE",
             "",
             _lifecycle_display(detail.lifecycle),
+            *((f"Milestones: {_text(detail.outcome_progress)}",) if _text(detail.outcome_progress) != NA else ()),
             "",
             f"Latest reason: {reason}",
             "",

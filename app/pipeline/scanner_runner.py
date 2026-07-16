@@ -63,7 +63,11 @@ from app.core.minimum_rr import (
     hard_mode_minimum_rr,
     validate_configured_minimum_rr,
 )
-from app.lifecycle.models import SetupLifecycleRecord, SetupTransitionResult
+from app.lifecycle.models import (
+    SetupLifecycleOutcomeProgress,
+    SetupLifecycleRecord,
+    SetupTransitionResult,
+)
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
 from app.strategies.liquidity_grab_pullback import (
     LiquidityGrabEngine,
@@ -432,6 +436,11 @@ class ScannerSymbolResult(BaseModel):
     historical_warning: str = NA
     lifecycle_state: SetupLifecycleRecord | None = None
     lifecycle_transition: SetupTransitionResult | None = None
+    lifecycle_outcome_progress: SetupLifecycleOutcomeProgress | None = None
+    lifecycle_execution_candles: tuple[Any, ...] | None = Field(default=None, exclude=True, repr=False)
+    lifecycle_execution_timeframe: str = Field(default=NA, exclude=True)
+    lifecycle_decision_timestamp: datetime | None = Field(default=None, exclude=True)
+
 
     model_config = ConfigDict(frozen=True)
 
@@ -532,6 +541,9 @@ class _StrategyExecution(BaseModel):
     selected_setup: LiquidityGrabSetup | None = None
     pullback_intelligence: PullbackIntelligenceResult | None = None
     target_intelligence: TargetIntelligenceResult | None = None
+    execution_candles: tuple[Any, ...] = Field(default=(), exclude=True, repr=False)
+    execution_timeframe: str = NA
+    decision_timestamp: datetime | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -1249,6 +1261,9 @@ class ScannerRunner:
             return _StrategyExecution(
                 strategy_missing_data=volume_profile.missing_data,
                 volume_profile=volume_profile,
+                execution_candles=tuple(profile_candles),
+                execution_timeframe=execution_timeframe,
+                decision_timestamp=config.decision_timestamp,
             )
 
         candles_by_timeframe, timeframe_missing, timeframe_context = await self._fetch_strategy_timeframe_candles(
@@ -1350,6 +1365,9 @@ class ScannerRunner:
             volume_profile=execution_volume_profile,
             volume_profile_12h=higher_timeframe_volume_profile,
             selected_setup=selected_setup,
+            execution_candles=tuple(candles_by_timeframe.get(execution_timeframe, ())),
+            execution_timeframe=execution_timeframe,
+            decision_timestamp=config.decision_timestamp,
             pullback_intelligence=_representative_pullback_intelligence(
                 diagnostics,
                 valid_modes=_unique_strings(valid_modes),
@@ -1694,6 +1712,9 @@ class ScannerRunner:
             rejection_reasons=_rejection_reasons_for(status, rejection_reason),
             missing_data=cleaned_missing,
             unverified_data=cleaned_unverified,
+            lifecycle_execution_candles=tuple(strategy_execution.execution_candles),
+            lifecycle_execution_timeframe=strategy_execution.execution_timeframe,
+            lifecycle_decision_timestamp=strategy_execution.decision_timestamp,
             strategy_name=strategy_execution.strategy_name,
             strategy_results=strategy_execution.strategy_results,
             formatted_strategy_output=strategy_execution.formatted_strategy_output,

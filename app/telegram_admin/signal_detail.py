@@ -24,6 +24,7 @@ from app.telegram_admin.active_watchlists import (
     _latest_runtime_database,
     _latest_symbol_result_for_attempt,
     _lifecycle_row_for_attempt,
+    _lifecycle_outcome_progress,
     _row_id,
     _select_or_na,
     _sent_alert_attempt_rows,
@@ -126,6 +127,7 @@ def _detail_from_group(
     candidate = _candidate_detail(connection, signal_row)
     candidate_raw = _json_mapping(candidate.get("raw_candidate_json"))
     lifecycle_events = _lifecycle_events(connection, _first_text(lifecycle_row.get("lifecycle_id"), signal_id))
+    outcome_progress = _lifecycle_outcome_progress(connection, lifecycle_row)
     levels = _stored_trade_map_levels(signal_row)
 
     trade_idea = _mapping(raw_result.get("trade_idea"))
@@ -167,8 +169,32 @@ def _detail_from_group(
         confirmed_facts=confirmed_facts,
         confirmed_gates=confirmed_gates,
         lifecycle_reason=lifecycle_reason,
+        outcome_progress=_outcome_progress_text(outcome_progress),
         updated_at=_first_text(latest_row.get("last_seen_at"), latest_row.get("sent_at")),
     )
+
+
+def _outcome_progress_text(progress: Mapping[str, Any]) -> str:
+    if not progress:
+        return NA
+    integrity = _clean(progress.get("integrity_status"))
+    has_milestone = any(
+        _clean(progress.get(field_name)) != NA
+        for field_name in ("entry_at", "tp1_at", "tp2_at", "tp3_at", "stop_at", "invalidated_at")
+    )
+    if integrity != "Verified" and not has_milestone:
+        return UNVERIFIED
+    labels = [
+        f"Entry {'HIT' if _clean(progress.get('entry_at')) != NA else 'waiting'}",
+        f"TP1 {'HIT' if _clean(progress.get('tp1_at')) != NA else 'waiting'}",
+        f"TP2 {'HIT' if _clean(progress.get('tp2_at')) != NA else 'waiting'}",
+        f"TP3 {'HIT' if _clean(progress.get('tp3_at')) != NA else 'waiting'}",
+    ]
+    if _clean(progress.get("stop_at")) != NA:
+        labels.append("Stop HIT")
+    elif _clean(progress.get("invalidated_at")) != NA:
+        labels.append("Invalidated")
+    return " | ".join(labels)
 
 
 def _candidate_detail(connection: sqlite3.Connection, row: Mapping[str, Any]) -> Mapping[str, Any]:

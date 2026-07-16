@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 class StorageError(RuntimeError):
@@ -230,6 +230,39 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 ON setup_lifecycle_events(lifecycle_id);
             CREATE INDEX IF NOT EXISTS ix_lifecycle_events_symbol_timestamp
                 ON setup_lifecycle_events(symbol, timestamp);
+
+            CREATE TABLE IF NOT EXISTS setup_lifecycle_outcome_progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lifecycle_id TEXT NOT NULL REFERENCES setup_lifecycle_records(lifecycle_id) ON DELETE CASCADE,
+                plan_identity TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'N/A',
+                direction TEXT NOT NULL DEFAULT 'N/A',
+                execution_timeframe TEXT NOT NULL DEFAULT 'N/A',
+                evaluation_cursor_open_at TEXT,
+                evaluation_cursor_close_at TEXT,
+                entry_at TEXT,
+                tp1_at TEXT,
+                tp2_at TEXT,
+                tp3_at TEXT,
+                stop_at TEXT,
+                invalidated_at TEXT,
+                outcome_at TEXT,
+                terminal_outcome TEXT NOT NULL DEFAULT 'N/A',
+                integrity_status TEXT NOT NULL DEFAULT 'N/A',
+                diagnostic TEXT NOT NULL DEFAULT 'N/A',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                first_evaluated_at TEXT NOT NULL,
+                last_evaluated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(lifecycle_id, plan_identity)
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_lifecycle_outcome_progress_active_plan
+                ON setup_lifecycle_outcome_progress(lifecycle_id, plan_identity);
+            CREATE INDEX IF NOT EXISTS ix_lifecycle_outcome_progress_symbol_outcome
+                ON setup_lifecycle_outcome_progress(symbol, terminal_outcome);
 
             CREATE TABLE IF NOT EXISTS setup_outcome_analytics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

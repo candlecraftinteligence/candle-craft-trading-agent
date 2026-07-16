@@ -16,12 +16,14 @@ from app.formatters.scanner_display import build_symbol_display, representative_
 from app.lifecycle.models import (
     ACTIVE_LIFECYCLE_MONITORING_STATES,
     SetupLifecycleRecord,
+    SetupLifecycleOutcomeProgress,
     SetupLifecycleState,
     SetupOutcomeAnalyticsRecord,
     SetupTransitionReason,
     SetupTransitionResult,
     lifecycle_monitoring_priority,
 )
+from app.lifecycle.outcomes import evaluate_closed_candle_outcomes
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import (
     DEFAULT_CONFIRMATION_CYCLES,
@@ -226,15 +228,47 @@ class SetupLifecycleService:
             symbol_health_score=health_score,
             symbol_health_penalty_cycles=health_penalty_cycles,
         )
-        if transition.record is not None:
-            repository.upsert_record(transition.record)
+        final_record = transition.record
+        outcome_progress: SetupLifecycleOutcomeProgress | None = None
+        effective_transition = transition
+        if final_record is not None:
+            repository.upsert_record(final_record)
         if transition.event is not None:
             repository.insert_event(transition.event)
         _log_lifecycle_actionability_audit(symbol_result, observation, transition)
-        if transition.record is not None:
-            outcome_record = _outcome_analytics_record(repository, transition, observation)
+
+        execution_candles = symbol_result.lifecycle_execution_candles
+        if final_record is not None and execution_candles is not None:
+            outcome_evaluation = evaluate_closed_candle_outcomes(
+                final_record,
+                execution_candles=execution_candles,
+                execution_timeframe=symbol_result.lifecycle_execution_timeframe,
+                decision_timestamp=symbol_result.lifecycle_decision_timestamp or now,
+                evaluated_at=now,
+                repository=repository,
+                scan_run_id=scan_run_id,
+            )
+            final_record = outcome_evaluation.record
+            outcome_progress = outcome_evaluation.progress
+            if outcome_evaluation.last_transition is not None:
+                effective_transition = outcome_evaluation.last_transition
+
+        if final_record is not None:
+            effective_transition = effective_transition.model_copy(update={"record": final_record})
+            outcome_record = _outcome_analytics_record(
+                repository,
+                effective_transition,
+                observation,
+                outcome_progress=outcome_progress,
+            )
             if outcome_record is not None:
-                repository.upsert_outcome_analytics(outcome_record)
+                already_persisted = any(
+                    item.lifecycle_id == outcome_record.lifecycle_id
+                    and item.final_outcome == outcome_record.final_outcome
+                    for item in repository.list_outcome_analytics(symbol=outcome_record.symbol)
+                )
+                if effective_transition.transitioned or not already_persisted:
+                    repository.upsert_outcome_analytics(outcome_record)
         audit_updates = {
             "candidate_quality_grade": observation.candidate_quality_grade,
             "final_quality_grade": observation.final_quality_grade,
@@ -248,14 +282,15 @@ class SetupLifecycleService:
         }
         updated = symbol_result.model_copy(
             update={
-                "lifecycle_state": transition.record,
-                "lifecycle_transition": transition,
+                "lifecycle_state": final_record,
+                "lifecycle_transition": effective_transition,
+                "lifecycle_outcome_progress": outcome_progress,
                 **audit_updates,
             }
         )
         meta = _process_meta(
             existing=existing,
-            transition=transition,
+            transition=effective_transition,
             symbol_health_penalty_cycles=health_penalty_cycles,
         )
         return updated, meta
@@ -436,9 +471,13 @@ def observation_from_symbol_result(
         actionable_a_grade_candidate=actionable_a_grade_candidate,
         a_grade_watch_candidate=a_grade_watch_candidate,
         actionable_grade_reason=actionable_grade_reason,
-        entry_filled=_entry_zone_touched_for_result(symbol_result, diagnostics),
+        entry_filled=(
+            _entry_zone_touched_for_result(symbol_result, diagnostics)
+            if symbol_result.lifecycle_execution_candles is None else False
+        ),
         invalidated=_structural_acceptance_invalidated(pullback_failure_type, acceptance_status, failed_gate),
         expired=_status_key(failed_gate) == "entry_window_expired",
+        closed_candle_outcomes_managed=symbol_result.lifecycle_execution_candles is not None,
     )
     return replace(
         observation,
@@ -634,6 +673,7 @@ def _outcome_analytics_record(
     repository: SQLiteSetupLifecycleRepository,
     transition: SetupTransitionResult,
     observation: LifecycleObservation,
+    outcome_progress: SetupLifecycleOutcomeProgress | None = None,
 ) -> SetupOutcomeAnalyticsRecord | None:
     record = transition.record
     if record is None:
@@ -653,6 +693,7 @@ def _outcome_analytics_record(
         "required_confirmation_cycles": record.required_confirmation_cycles,
         "decay_count": record.decay_count,
         "decay_reason": record.decay_reason,
+        "outcome_progress": outcome_progress.model_dump(mode="json") if outcome_progress is not None else None,
     }
     return SetupOutcomeAnalyticsRecord(
         lifecycle_id=record.lifecycle_id,
@@ -679,8 +720,9 @@ def _outcome_analytics_record(
 
 
 def _final_outcome_for_state(state: SetupLifecycleState) -> str:
+    # TP_HIT is terminal only after TP3; TP1 and TP2 remain internal milestones.
     if state == SetupLifecycleState.TP_HIT:
-        return "TP1_HIT"
+        return "TP3_HIT"
     if state == SetupLifecycleState.SL_HIT:
         return "SL_HIT"
     if state == SetupLifecycleState.INVALIDATED:

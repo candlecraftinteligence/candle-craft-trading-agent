@@ -254,6 +254,7 @@ class LifecycleObservation:
     sl_hit: bool = False
     invalidated: bool = False
     expired: bool = False
+    closed_candle_outcomes_managed: bool = False
 
     @property
     def pullback_and_rr_valid(self) -> bool:
@@ -467,7 +468,23 @@ def evaluate_lifecycle_transition(
             record=new_record,
         )
 
-    if _stored_monitoring_entry_zone_touched(record, observation):
+    if (
+        observation.closed_candle_outcomes_managed
+        and record.current_state in {SetupLifecycleState.TP_HIT, SetupLifecycleState.SL_HIT}
+    ):
+        return transition_record(
+            record,
+            record.current_state,
+            reason=SetupTransitionReason.NO_CHANGE,
+            now=timestamp,
+            scan_run_id=scan_run_id,
+            readiness_score=record.readiness_score,
+            quality_score=record.quality_score,
+            failed_gate=record.failed_gate,
+            notes="Canonical terminal lifecycle state is immutable.",
+        )
+
+    if not observation.closed_candle_outcomes_managed and _stored_monitoring_entry_zone_touched(record, observation):
         observation = _observation_with_stored_plan(observation, record, entry_filled=True)
 
     updated_record = _record_with_observation(

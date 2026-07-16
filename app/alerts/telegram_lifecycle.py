@@ -1011,6 +1011,20 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         self.connection.close()
         self.connection = None
 
+    def has_canonical_lifecycle_outcome_progress(self, *, lifecycle_id: str) -> bool:
+        normalized = _text(lifecycle_id)
+        if normalized == NA:
+            return False
+        row = self._connection.execute(
+            """
+            SELECT 1 FROM setup_lifecycle_outcome_progress
+            WHERE lifecycle_id = ?
+            LIMIT 1
+            """,
+            (normalized,),
+        ).fetchone()
+        return row is not None
+
     def has_attempt(self, *, signal_id: str, alert_type: TelegramAlertType | str) -> bool:
         row = self._connection.execute(
             """
@@ -3573,7 +3587,11 @@ class TelegramLifecycleDeliveryService:
                 continue
 
             current_result_for_prior = _current_result_for_prior_watchlist(prior_alert, current_results)
-            if self.watchlist_outcome_tracking_enabled and current_result_for_prior is not None:
+            if (
+                self.watchlist_outcome_tracking_enabled
+                and current_result_for_prior is not None
+                and current_result_for_prior.lifecycle_outcome_progress is None
+            ):
                 outcome_delivery = await self._send_watchlist_outcome_update(
                     repository,
                     prior_alert=prior_alert,
@@ -3605,6 +3623,8 @@ class TelegramLifecycleDeliveryService:
                 )
                 continue
             if match.record is None:
+                continue
+            if repository.has_canonical_lifecycle_outcome_progress(lifecycle_id=match.record.lifecycle_id):
                 continue
 
             current_result = _current_result_for_lifecycle_record(match.record, prior_alert, current_results)
@@ -9694,6 +9714,8 @@ def _watchlist_outcome_for_current_result(
     eligibility_context: TelegramEligibilityContext,
     scan_run_id: str | None,
 ) -> tuple[TelegramAlertType, TelegramSignalMessage] | TelegramLifecycleDelivery | None:
+    if current_result.lifecycle_outcome_progress is not None:
+        return None
     if prior_alert.alert_type != TelegramAlertType.WATCHLIST.value or prior_alert.telegram_status != "sent":
         _persist_watchlist_outcome_audit(
             repository,

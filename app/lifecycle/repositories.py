@@ -9,6 +9,7 @@ from typing import Any
 from app.data.dtos import NA
 from app.lifecycle.models import (
     SetupLifecycleEvent,
+    SetupLifecycleOutcomeProgress,
     SetupLifecycleRecord,
     SetupLifecycleState,
     SetupOutcomeAnalyticsRecord,
@@ -223,6 +224,79 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         rows = self._connection.execute(sql, params).fetchall()
         return tuple(_event_from_row(row) for row in rows)
 
+    def get_outcome_progress(
+        self,
+        *,
+        lifecycle_id: str,
+        plan_identity: str,
+    ) -> SetupLifecycleOutcomeProgress | None:
+        row = self._connection.execute(
+            """
+            SELECT * FROM setup_lifecycle_outcome_progress
+            WHERE lifecycle_id = ? AND plan_identity = ?
+            """,
+            (_lifecycle_id_text(lifecycle_id), _lifecycle_id_text(plan_identity)),
+        ).fetchone()
+        return _outcome_progress_from_row(row) if row is not None else None
+
+    def list_outcome_progress(
+        self,
+        *,
+        lifecycle_id: str | None = None,
+        symbol: str | None = None,
+    ) -> tuple[SetupLifecycleOutcomeProgress, ...]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if lifecycle_id is not None:
+            clauses.append("lifecycle_id = ?")
+            params.append(_lifecycle_id_text(lifecycle_id))
+        if symbol is not None:
+            clauses.append("symbol = ?")
+            params.append(_symbol(symbol))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection.execute(
+            f"""
+            SELECT * FROM setup_lifecycle_outcome_progress
+            {where}
+            ORDER BY id ASC
+            """,
+            params,
+        ).fetchall()
+        return tuple(_outcome_progress_from_row(row) for row in rows)
+
+    def upsert_outcome_progress(self, progress: SetupLifecycleOutcomeProgress) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO setup_lifecycle_outcome_progress (
+                lifecycle_id, plan_identity, symbol, mode, direction, execution_timeframe,
+                evaluation_cursor_open_at, evaluation_cursor_close_at, entry_at, tp1_at,
+                tp2_at, tp3_at, stop_at, invalidated_at, outcome_at, terminal_outcome,
+                integrity_status, diagnostic, metadata_json, first_evaluated_at, last_evaluated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(lifecycle_id, plan_identity) DO UPDATE SET
+                symbol = excluded.symbol,
+                mode = excluded.mode,
+                direction = excluded.direction,
+                execution_timeframe = excluded.execution_timeframe,
+                evaluation_cursor_open_at = excluded.evaluation_cursor_open_at,
+                evaluation_cursor_close_at = excluded.evaluation_cursor_close_at,
+                entry_at = excluded.entry_at,
+                tp1_at = excluded.tp1_at,
+                tp2_at = excluded.tp2_at,
+                tp3_at = excluded.tp3_at,
+                stop_at = excluded.stop_at,
+                invalidated_at = excluded.invalidated_at,
+                outcome_at = excluded.outcome_at,
+                terminal_outcome = excluded.terminal_outcome,
+                integrity_status = excluded.integrity_status,
+                diagnostic = excluded.diagnostic,
+                metadata_json = excluded.metadata_json,
+                last_evaluated_at = excluded.last_evaluated_at,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            _outcome_progress_params(progress),
+        )
+
     def upsert_outcome_analytics(self, record: SetupOutcomeAnalyticsRecord) -> None:
         self._connection.execute(
             """
@@ -274,6 +348,7 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         return tuple(_outcome_from_row(row) for row in rows)
 
     def reset(self) -> None:
+        self._connection.execute("DELETE FROM setup_lifecycle_outcome_progress")
         self._connection.execute("DELETE FROM setup_lifecycle_events")
         self._connection.execute("DELETE FROM setup_lifecycle_records")
 
@@ -282,6 +357,58 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         if self.connection is None:
             raise StorageError("Lifecycle repository is not open.")
         return self.connection
+
+def _outcome_progress_params(progress: SetupLifecycleOutcomeProgress) -> tuple[Any, ...]:
+    return (
+        progress.lifecycle_id,
+        progress.plan_identity,
+        progress.symbol,
+        progress.mode,
+        progress.direction,
+        progress.execution_timeframe,
+        progress.evaluation_cursor_open_at,
+        progress.evaluation_cursor_close_at,
+        progress.entry_at,
+        progress.tp1_at,
+        progress.tp2_at,
+        progress.tp3_at,
+        progress.stop_at,
+        progress.invalidated_at,
+        progress.outcome_at,
+        progress.terminal_outcome,
+        progress.integrity_status,
+        progress.diagnostic,
+        progress.metadata_json,
+        progress.first_evaluated_at,
+        progress.last_evaluated_at,
+    )
+
+
+def _outcome_progress_from_row(row: sqlite3.Row) -> SetupLifecycleOutcomeProgress:
+    return SetupLifecycleOutcomeProgress(
+        lifecycle_id=row["lifecycle_id"],
+        plan_identity=row["plan_identity"],
+        symbol=row["symbol"],
+        mode=row["mode"],
+        direction=row["direction"],
+        execution_timeframe=row["execution_timeframe"],
+        evaluation_cursor_open_at=row["evaluation_cursor_open_at"],
+        evaluation_cursor_close_at=row["evaluation_cursor_close_at"],
+        entry_at=row["entry_at"],
+        tp1_at=row["tp1_at"],
+        tp2_at=row["tp2_at"],
+        tp3_at=row["tp3_at"],
+        stop_at=row["stop_at"],
+        invalidated_at=row["invalidated_at"],
+        outcome_at=row["outcome_at"],
+        terminal_outcome=row["terminal_outcome"],
+        integrity_status=row["integrity_status"],
+        diagnostic=row["diagnostic"],
+        metadata_json=row["metadata_json"],
+        first_evaluated_at=row["first_evaluated_at"],
+        last_evaluated_at=row["last_evaluated_at"],
+    )
+
 
 
 def _record_params(record: SetupLifecycleRecord) -> tuple[Any, ...]:
