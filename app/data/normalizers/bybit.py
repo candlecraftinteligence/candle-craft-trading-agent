@@ -50,7 +50,15 @@ def normalize_bybit_klines(symbol: str, interval: str, payload: Any) -> list[Can
             )
         )
 
-    return sorted(candles, key=lambda candle: candle.timestamp)
+    timestamps = tuple(candle.timestamp for candle in candles)
+    if len(timestamps) > 1 and all(
+        current > following for current, following in zip(timestamps, timestamps[1:])
+    ):
+        # Bybit documents newest-first kline rows. Reverse only that canonical
+        # response shape; mixed, duplicate, or otherwise unordered rows remain
+        # untouched so the central integrity boundary can reject them explicitly.
+        candles.reverse()
+    return candles
 
 
 def normalize_bybit_ticker(symbol: str, payload: Any) -> TickerDTO:

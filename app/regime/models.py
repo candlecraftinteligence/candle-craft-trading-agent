@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Literal
@@ -145,6 +146,8 @@ class MarketRegimeInput(BaseModel):
     broad_participation_pct: MaybeDecimal = NA
     risk_mode: Literal["conservative", "balanced", "aggressive"] = "balanced"
     strictness: RegimeStrictness = RegimeStrictness.NORMAL
+    candle_timeframe: str = "12h"
+    decision_timestamp: datetime | None = None
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
 

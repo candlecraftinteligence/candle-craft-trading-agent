@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from app.data.candle_integrity import CandleIntegrityError, closed_candles_as_of
 from app.data.dtos import NA, MaybeDecimal
 from app.regime.models import (
     MarketRegimeInput,
@@ -64,9 +66,25 @@ def evaluate_market_regime(
     **overrides: Any,
 ) -> MarketRegimeResult:
     data = _normalize_input(regime_input, overrides)
-    btc = _market_metrics("BTCUSDT", data.btc_candles)
-    eth = _market_metrics("ETHUSDT", data.eth_candles)
-    missing_data = _unique_strings((*data.missing_data, *btc.missing_data, *eth.missing_data, *_proxy_missing_data(data)))
+    decision_timestamp = data.decision_timestamp or datetime.now(UTC)
+    btc_candles, btc_integrity = _causal_regime_candles(
+        "BTCUSDT", data.btc_candles, data.candle_timeframe, decision_timestamp
+    )
+    eth_candles, eth_integrity = _causal_regime_candles(
+        "ETHUSDT", data.eth_candles, data.candle_timeframe, decision_timestamp
+    )
+    btc = _market_metrics("BTCUSDT", btc_candles)
+    eth = _market_metrics("ETHUSDT", eth_candles)
+    missing_data = _unique_strings(
+        (
+            *data.missing_data,
+            *btc_integrity,
+            *eth_integrity,
+            *btc.missing_data,
+            *eth.missing_data,
+            *_proxy_missing_data(data),
+        )
+    )
     required_data_missing = bool(btc.missing_data or eth.missing_data)
     evidence = _evidence(data, btc, eth)
     state = RegimeState.MIXED if required_data_missing else _classify_state(data, btc, eth, evidence)
@@ -134,6 +152,26 @@ def _normalize_input(
     if "strictness" not in raw and "risk_mode" in raw:
         raw["strictness"] = raw["risk_mode"]
     return MarketRegimeInput.model_validate(raw)
+
+
+def _causal_regime_candles(
+    symbol: str,
+    candles: Sequence[Any],
+    timeframe: str,
+    decision_timestamp: Any,
+) -> tuple[tuple[Any, ...], tuple[str, ...]]:
+    if not candles:
+        return (), ()
+    try:
+        window = closed_candles_as_of(
+            candles,
+            timeframe=timeframe,
+            decision_timestamp=decision_timestamp,
+            minimum_closed_history=0,
+        )
+    except CandleIntegrityError as exc:
+        return (), (f"{symbol}_candles: N/A ({exc})",)
+    return window.candles, ()
 
 
 def _market_metrics(symbol: str, raw_candles: Sequence[Any]) -> _MarketMetrics:

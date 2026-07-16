@@ -9,6 +9,52 @@ from app.backtesting.strategy_replay import (
     backtest_json_payload,
 )
 
+BASE_TIMESTAMP_MS = 1_704_067_200_000
+FIVE_MINUTES_MS = 5 * 60_000
+FIFTEEN_MINUTES_MS = 15 * 60_000
+TWO_DAYS_MS = 2 * 24 * 60 * 60_000
+CONFIRMATION_START_MS = BASE_TIMESTAMP_MS + (36 * (FIFTEEN_MINUTES_MS - FIVE_MINUTES_MS))
+
+
+def _time_aligned(
+    candles: list[dict[str, Decimal | int]],
+    *,
+    duration_ms: int,
+    start_ms: int,
+) -> list[dict[str, Decimal | int]]:
+    return [
+        {**candle, "timestamp": start_ms + (index * duration_ms)}
+        for index, candle in enumerate(candles)
+    ]
+
+
+def _confirmation_candles(candles: list[dict[str, Decimal | int]]) -> list[dict[str, Decimal | int]]:
+    confirmation = _base_candles(36)
+    confirmation[8]["low"] = Decimal("90")
+    confirmation[12]["high"] = Decimal("110")
+    confirmation[18]["low"] = Decimal("85")
+    confirmation[18]["close"] = Decimal("91")
+    confirmation[18]["volume"] = Decimal("200")
+    confirmation[33]["open"] = Decimal("99")
+    confirmation[33]["close"] = Decimal("97")
+    confirmation[33]["low"] = Decimal("95")
+    confirmation[33]["high"] = Decimal("100")
+    confirmation[35]["open"] = Decimal("104")
+    confirmation[35]["high"] = Decimal("114")
+    confirmation[35]["low"] = Decimal("101")
+    confirmation[35]["close"] = Decimal("112")
+    return confirmation + [dict(candle) for candle in candles[36:]]
+
+
+def _causal_dataset(candles: list[dict[str, Decimal | int]]) -> dict[str, list[dict[str, Decimal | int]]]:
+    confirmation = _confirmation_candles(candles)
+    htf = _trend_candles()
+    return {
+        "15m": _time_aligned(candles, duration_ms=FIFTEEN_MINUTES_MS, start_ms=BASE_TIMESTAMP_MS),
+        "5m": _time_aligned(confirmation, duration_ms=FIVE_MINUTES_MS, start_ms=CONFIRMATION_START_MS),
+        "2d": _time_aligned(htf, duration_ms=TWO_DAYS_MS, start_ms=BASE_TIMESTAMP_MS - (len(htf) * TWO_DAYS_MS)),
+    }
+
 
 def _base_candles(count: int = 45, *, volume: Decimal = Decimal("100")) -> list[dict[str, Decimal | int]]:
     return [
@@ -69,7 +115,7 @@ def _run_replay(
 ):
     candles = _candles_with_future(future_candles)
     return StrategyReplayEngine().run(
-        {symbol: {"15m": candles, "5m": candles, "2d": _trend_candles()}},
+        {symbol: _causal_dataset(candles)},
         ReplayConfig(
             modes=("swing",),
             max_hold_candles=max_hold_candles,
@@ -87,7 +133,7 @@ def _candles_with_future(future_candles: list[dict[str, Decimal | int]]) -> list
 
 def _dataset(future_candles: list[dict[str, Decimal | int]]) -> dict[str, list[dict[str, Decimal | int]]]:
     candles = _candles_with_future(future_candles)
-    return {"15m": candles, "5m": candles, "2d": _trend_candles()}
+    return _causal_dataset(candles)
 
 
 def test_replay_detects_valid_historical_setup_and_limit_fill() -> None:

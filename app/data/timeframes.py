@@ -4,14 +4,24 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.data.candle_integrity import CandleIntegrityError, CandleIntegrityReason, closed_candles_as_of
 from app.data.dtos import NA, CandleDTO, MaybeDecimal, MaybeInt
 
+_DAY_MS = 86_400_000
+_TWO_DAY_MS = _DAY_MS * 2
 
-def resample_ohlcv_candles(candles: Sequence[Any], target_interval: str = "2d") -> list[Any]:
-    """Merge complete 1D OHLCV candle pairs into synthetic 2D candles.
 
-    Odd trailing candles are ignored because they do not form a complete 2D
-    candle. DTO inputs return DTO outputs; mapping inputs return dictionaries.
+def resample_ohlcv_candles(
+    candles: Sequence[Any],
+    target_interval: str = "2d",
+    *,
+    decision_timestamp: Any,
+) -> list[Any]:
+    """Merge complete closed 1D candles into UTC-anchored 2D candles.
+
+    Buckets are anchored to the Unix epoch in UTC. This makes a given daily
+    candle belong to the same 2D interval regardless of fetch-window position.
+    DTO inputs return DTO outputs; mapping inputs return dictionaries.
     """
 
     normalized_interval = target_interval.strip().lower()
@@ -20,16 +30,43 @@ def resample_ohlcv_candles(candles: Sequence[Any], target_interval: str = "2d") 
     if isinstance(candles, (str, bytes)) or not isinstance(candles, Sequence):
         raise ValueError("candles must be a sequence of OHLCV candle objects")
 
+    closed_window = closed_candles_as_of(
+        candles,
+        timeframe="1d",
+        decision_timestamp=decision_timestamp,
+        minimum_closed_history=0,
+    )
+    buckets: dict[int, list[Any]] = {}
+    close_timestamps: dict[int, int] = {}
+    for causal in closed_window.timeline:
+        open_ms = causal.open_timestamp_ms
+        if open_ms % _DAY_MS != 0:
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_OPEN_TIMESTAMP,
+                "synthetic 2d source must open on a 00:00 UTC daily boundary",
+                timeframe="1d",
+            )
+        bucket = open_ms // _TWO_DAY_MS
+        buckets.setdefault(bucket, []).append(causal.source)
+        close_timestamps[bucket] = causal.close_timestamp_ms
+
     output: list[Any] = []
-    for index in range(0, len(candles) - 1, 2):
-        first = candles[index]
-        second = candles[index + 1]
+    for bucket, source_pair in buckets.items():
+        bucket_start = bucket * _TWO_DAY_MS
+        if len(source_pair) != 2:
+            continue
+        first, second = source_pair
+        if _int_field(first, "timestamp") != bucket_start:
+            continue
+        if _int_field(second, "timestamp") != bucket_start + _DAY_MS:
+            continue
         open_price = _decimal_field(first, "open")
         high_price = max(_decimal_field(first, "high"), _decimal_field(second, "high"))
         low_price = min(_decimal_field(first, "low"), _decimal_field(second, "low"))
         close_price = _decimal_field(second, "close")
         volume = _decimal_field(first, "volume") + _decimal_field(second, "volume")
-        timestamp = _int_field(first, "timestamp")
+        timestamp = bucket_start
+        close_timestamp = close_timestamps[bucket]
 
         if isinstance(first, CandleDTO) and isinstance(second, CandleDTO):
             output.append(
@@ -43,7 +80,7 @@ def resample_ohlcv_candles(candles: Sequence[Any], target_interval: str = "2d") 
                     low=low_price,
                     close=close_price,
                     volume=volume,
-                    close_timestamp=_optional_int_field(second, "close_timestamp"),
+                    close_timestamp=close_timestamp,
                     quote_volume=_sum_optional_decimals(first, second, "quote_volume"),
                     trade_count=_sum_optional_ints(first, second, "trade_count"),
                     raw_source={
@@ -57,6 +94,7 @@ def resample_ohlcv_candles(candles: Sequence[Any], target_interval: str = "2d") 
 
         resampled = {
             "timestamp": timestamp,
+            "close_timestamp": close_timestamp,
             "interval": normalized_interval,
             "open": open_price,
             "high": high_price,
@@ -96,16 +134,6 @@ def _int_field(candle: Any, name: str) -> int:
     value = _field(candle, name)
     if value is None or value == "" or value == NA:
         raise ValueError(f"Missing required integer field {name}.")
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid integer value for {name}: {value!r}") from exc
-
-
-def _optional_int_field(candle: Any, name: str) -> MaybeInt:
-    value = _field(candle, name)
-    if value is None or value == "" or value == NA:
-        return NA
     try:
         return int(value)
     except (TypeError, ValueError) as exc:

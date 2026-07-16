@@ -15,6 +15,29 @@ from app.formatters.scanner_display import build_symbol_display, display_fields
 from app.pipeline import scanner_runner as scanner_runner_module
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunner
 
+_INTERVAL_MS = {
+    "5m": 5 * 60_000,
+    "15m": 15 * 60_000,
+    "1h": 60 * 60_000,
+    "4h": 4 * 60 * 60_000,
+    "12h": 12 * 60 * 60_000,
+    "1d": 24 * 60 * 60_000,
+    "2d": 2 * 24 * 60 * 60_000,
+}
+
+
+def _time_aligned_candles(
+    candles: list[dict[str, Decimal | int]],
+    interval: str,
+) -> list[dict[str, Decimal | int]]:
+    duration = _INTERVAL_MS[interval.lower()]
+    pattern_anchor = max(0, len(candles) - 6)
+    start = pattern_anchor * (_INTERVAL_MS["15m"] - duration) if interval.lower() == "5m" else 0
+    return [
+        {**candle, "timestamp": start + (int(candle["timestamp"]) * duration)}
+        for candle in candles
+    ]
+
 
 def run(coro: Any) -> Any:
     return asyncio.run(coro)
@@ -160,7 +183,7 @@ class FakeExchangeClient:
             raise RuntimeError(f"mocked kline failure for {symbol}")
         if interval in self.failing_timeframes:
             raise RuntimeError(f"mocked kline failure for {symbol} {interval}")
-        return self.candles_by_symbol[symbol][-limit:]
+        return _time_aligned_candles(self.candles_by_symbol[symbol][-limit:], interval)
 
     async def get_ticker(self, symbol: str) -> dict[str, Decimal | str | int]:
         await self._maybe_delay("get_ticker")

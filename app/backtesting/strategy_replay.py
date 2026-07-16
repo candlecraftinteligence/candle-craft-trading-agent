@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from statistics import median
 from typing import Any, Literal
@@ -19,6 +19,7 @@ from app.analytics.edge_analytics import (
     build_edge_analytics_report,
     condition_key_from_diagnostics,
 )
+from app.data.candle_integrity import closed_candles_as_of, validate_candle_sequence
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
 from app.strategies.liquidity_grab_pullback import (
     LiquidityGrabEngine,
@@ -264,6 +265,7 @@ class ReplaySummary(BaseModel):
 class _ReplayCandle:
     index: int
     timestamp: MaybeInt
+    close_timestamp: int
     open: Decimal
     high: Decimal
     low: Decimal
@@ -361,10 +363,17 @@ class StrategyReplayEngine:
         extra_data_notes: Sequence[str] = (),
     ) -> ReplaySymbolResult:
         replay_config = config if isinstance(config, ReplayConfig) else ReplayConfig.model_validate(config or {})
+        for timeframe, candles in candles_by_timeframe.items():
+            if candles:
+                validate_candle_sequence(
+                    candles,
+                    timeframe=timeframe,
+                    require_continuity=True,
+                )
         execution_timeframe = replay_config.execution_timeframe
         raw_execution = tuple(candles_by_timeframe.get(execution_timeframe, ()))
         raw_execution = raw_execution[-replay_config.replay_candles :]
-        execution_candles = _normalize_candles(raw_execution)
+        execution_candles = _normalize_candles(raw_execution, timeframe=execution_timeframe)
         if not execution_candles:
             stats = ReplayStats()
             edge_analytics = _edge_analytics_for_trades((), min_sample=replay_config.edge_min_sample)
@@ -398,9 +407,7 @@ class StrategyReplayEngine:
             candles_prefix = _prefix_by_timeframe(
                 candles_by_timeframe,
                 execution_timeframe=execution_timeframe,
-                execution_prefix_count=end_index + 1,
-                execution_total_count=len(raw_execution),
-                current_timestamp=current_candle.timestamp,
+                decision_timestamp=current_candle.close_timestamp,
                 execution_prefix=execution_prefix,
             )
             base_input = _strategy_input(
@@ -744,9 +751,7 @@ def _prefix_by_timeframe(
     candles_by_timeframe: Mapping[str, Sequence[Any]],
     *,
     execution_timeframe: str,
-    execution_prefix_count: int,
-    execution_total_count: int,
-    current_timestamp: MaybeInt,
+    decision_timestamp: int,
     execution_prefix: Sequence[Any],
 ) -> dict[str, tuple[Any, ...]]:
     output: dict[str, tuple[Any, ...]] = {}
@@ -755,7 +760,11 @@ def _prefix_by_timeframe(
         if timeframe == execution_timeframe:
             output[timeframe] = tuple(execution_prefix)
             continue
-        output[timeframe] = _slice_until(raw, current_timestamp, execution_prefix_count, execution_total_count)
+        output[timeframe] = _slice_until(
+            raw,
+            decision_timestamp,
+            timeframe=timeframe,
+        )
     if execution_timeframe not in output:
         output[execution_timeframe] = tuple(execution_prefix)
     return output
@@ -763,19 +772,18 @@ def _prefix_by_timeframe(
 
 def _slice_until(
     candles: Sequence[Any],
-    current_timestamp: MaybeInt,
-    execution_prefix_count: int,
-    execution_total_count: int,
+    decision_timestamp: int,
+    *,
+    timeframe: str,
 ) -> tuple[Any, ...]:
     if not candles:
         return ()
-    normalized = _normalize_candles(candles)
-    if current_timestamp != NA and any(candle.timestamp != NA for candle in normalized):
-        sliced = tuple(raw for raw, candle in zip(candles, normalized) if candle.timestamp != NA and int(candle.timestamp) <= int(current_timestamp))
-        return sliced
-    ratio = Decimal(execution_prefix_count) / Decimal(max(execution_total_count, 1))
-    end = int((Decimal(len(candles)) * ratio).to_integral_value(rounding=ROUND_CEILING))
-    return tuple(candles[: max(1, min(end, len(candles)))])
+    return closed_candles_as_of(
+        candles,
+        timeframe=timeframe,
+        decision_timestamp=decision_timestamp,
+        minimum_closed_history=0,
+    ).candles
 
 
 def _setup_for_mode(result: LiquidityGrabResult, mode: LiquidityGrabMode | str) -> LiquidityGrabSetup:
@@ -1558,13 +1566,16 @@ def _empty_symbol_result(
     )
 
 
-def _normalize_candles(candles: Sequence[Any]) -> tuple[_ReplayCandle, ...]:
+def _normalize_candles(candles: Sequence[Any], *, timeframe: str) -> tuple[_ReplayCandle, ...]:
     output: list[_ReplayCandle] = []
-    for index, candle in enumerate(candles):
+    timeline = validate_candle_sequence(candles, timeframe=timeframe, require_continuity=True)
+    for index, causal in enumerate(timeline):
+        candle = causal.source
         output.append(
             _ReplayCandle(
                 index=index,
-                timestamp=_normalize_timestamp(_field(candle, "timestamp")),
+                timestamp=causal.open_timestamp_ms,
+                close_timestamp=causal.close_timestamp_ms,
                 open=_decimal_from(_field(candle, "open"), "open"),
                 high=_decimal_from(_field(candle, "high"), "high"),
                 low=_decimal_from(_field(candle, "low"), "low"),
@@ -1579,15 +1590,6 @@ def _field(source: Any, name: str) -> Any:
     if isinstance(source, Mapping):
         return source.get(name)
     return getattr(source, name, None)
-
-
-def _normalize_timestamp(value: Any) -> MaybeInt:
-    if value is None or value == "" or value == NA:
-        return NA
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return NA
 
 
 def _normalize_optional_decimal(value: Any) -> MaybeDecimal:
