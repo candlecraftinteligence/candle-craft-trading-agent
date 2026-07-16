@@ -2969,7 +2969,9 @@ class TelegramLifecycleDeliveryService:
             if alert_type_hint == TelegramAlertType.LIMIT_HIT
             else repository.has_prior_active_alert(signal_id=_signal_id(symbol_result))
         )
-        context = eligibility_context or TelegramEligibilityContext()
+        context = _minimum_rr_context_for_symbol(
+            symbol_result, eligibility_context or TelegramEligibilityContext()
+        )
         decision = telegram_alert_decision_for_symbol(
             symbol_result,
             previously_active_sent=previously_active_sent,
@@ -3904,7 +3906,9 @@ def telegram_alert_decision_for_symbol(
     if alert_type is None:
         return TelegramAlertDecision(False, "lifecycle_state_not_eligible", lifecycle_transition=transition)
 
-    context = eligibility_context or TelegramEligibilityContext()
+    context = _minimum_rr_context_for_symbol(
+        symbol_result, eligibility_context or TelegramEligibilityContext()
+    )
     message = _telegram_signal_message_for_alert(symbol_result, alert_type, context)
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES and prior_public_alert is not None:
         message = replace(
@@ -11344,6 +11348,18 @@ def _representative_diagnostics(symbol_result: ScannerSymbolResult) -> Mapping[s
         if isinstance(diagnostics, Mapping):
             return diagnostics
     return {}
+
+
+def _minimum_rr_context_for_symbol(
+    symbol_result: ScannerSymbolResult,
+    context: TelegramEligibilityContext,
+) -> TelegramEligibilityContext:
+    effective_minimum_rr = _decimal_or_none(
+        _representative_diagnostics(symbol_result).get("effective_minimum_rr")
+    )
+    if effective_minimum_rr is None:
+        return context
+    return replace(context, min_rr=effective_minimum_rr)
 
 
 def _terminal_identity_bridge(

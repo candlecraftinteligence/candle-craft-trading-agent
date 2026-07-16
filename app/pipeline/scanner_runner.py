@@ -58,6 +58,11 @@ from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, Ope
 from app.data.exceptions import ExchangeTimeoutError
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
 from app.data.timeframes import resample_ohlcv_candles
+from app.core.minimum_rr import (
+    DEFAULT_CONFIGURED_MINIMUM_RR,
+    hard_mode_minimum_rr,
+    validate_configured_minimum_rr,
+)
 from app.lifecycle.models import SetupLifecycleRecord, SetupTransitionResult
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
 from app.strategies.liquidity_grab_pullback import (
@@ -171,6 +176,7 @@ class ScannerRunConfig(BaseModel):
     current_daily_loss_pct: Decimal | None = None
     leverage: Decimal | None = None
     min_score_for_idea: Decimal = Decimal("80")
+    min_rr: Decimal = DEFAULT_CONFIGURED_MINIMUM_RR
     verbose: bool = False
     strategy_name: str | None = LIQUIDITY_GRAB_STRATEGY_NAME
     strategy_modes: tuple[LiquidityGrabMode, ...] = DEFAULT_STRATEGY_MODES
@@ -218,6 +224,11 @@ class ScannerRunConfig(BaseModel):
         if value is None:
             return None
         return _decimal_from(value, "scanner_run_config")
+
+    @field_validator("min_rr", mode="before")
+    @classmethod
+    def _normalize_min_rr(cls, value: Any) -> Decimal:
+        return validate_configured_minimum_rr(value)
 
     @field_validator("strategy_name")
     @classmethod
@@ -1264,6 +1275,7 @@ class ScannerRunner:
             optional_data=optional_data,
             technical=technical,
             aggressive_toggle=config.aggressive_toggle,
+            min_rr=config.min_rr,
             htf_timeframe=config.htf_timeframe,
             bias_timeframe=config.bias_timeframe,
             execution_timeframe=config.execution_timeframe,
@@ -1298,7 +1310,7 @@ class ScannerRunner:
             strategy_results[mode_name] = result
             setup = _strategy_setup_for_mode(result, mode)
             mode_diagnostics = _strategy_diagnostics_for_setup(setup)
-            mode_diagnostics["required_rr"] = "3.0" if mode == LiquidityGrabMode.challenge else "2.5"
+            mode_diagnostics["required_rr"] = setup.effective_minimum_rr
             pullback_intelligence = build_pullback_intelligence(mode_diagnostics)
             mode_diagnostics["pullback_intelligence"] = pullback_intelligence.model_dump(mode="json")
             target_intelligence = _target_intelligence_for_setup(
@@ -1794,7 +1806,7 @@ def _setup_quality_for_result(
         derivatives_enrichment=derivatives_enrichment,
     )
     stop_distance_pct = _stop_distance_pct(setup)
-    required_rr = Decimal("3.0") if mode == "challenge" else Decimal("2.5")
+    required_rr = _required_rr_for_diagnostics(diagnostics, mode)
 
     return validate_setup_quality(
         SetupQualityInput(
@@ -2258,7 +2270,7 @@ def _strategy_feature_technical_score(diagnostics: Mapping[str, Any]) -> int | N
         diagnostics.get("rr"),
     )
     rr_failure_gates = {"missing_rr", "rr_below_minimum", "challenge_rr_below_3"}
-    required_rr = Decimal("3.0") if _display_decimal_or_text(diagnostics.get("mode")) == "challenge" else Decimal("2.5")
+    required_rr = _required_rr_for_diagnostics(diagnostics)
     if rr != NA and rr >= required_rr and not bool(gates_failed & rr_failure_gates):
         score += 10
         features_seen += 1
@@ -2272,6 +2284,19 @@ def _strategy_feature_technical_score(diagnostics: Mapping[str, Any]) -> int | N
     if features_seen == 0:
         return None
     return min(score, 100)
+
+
+def _required_rr_for_diagnostics(diagnostics: Mapping[str, Any], mode: Any = None) -> Decimal:
+    configured = _first_decimal(
+        diagnostics.get("effective_minimum_rr"),
+        diagnostics.get("required_rr"),
+    )
+    if configured != NA:
+        return configured
+    mode_name = _display_decimal_or_text(mode if mode is not None else diagnostics.get("mode")).lower()
+    if mode_name not in {"challenge", "scalp", "swing"}:
+        mode_name = "swing"
+    return hard_mode_minimum_rr(mode_name)
 
 
 def _target_block_reason(target_intelligence: TargetIntelligenceResult) -> str:
@@ -2406,6 +2431,7 @@ def _liquidity_grab_input(
     optional_data: _OptionalMarketData,
     technical: TechnicalStructureResult,
     aggressive_toggle: bool,
+    min_rr: Decimal,
     htf_timeframe: str,
     bias_timeframe: str,
     execution_timeframe: str,
@@ -2442,6 +2468,7 @@ def _liquidity_grab_input(
         "derivatives_enrichment": derivatives_enrichment,
         "cvd": None,
         "liquidation_data": None,
+        "min_rr": min_rr,
         "aggressive_toggle": aggressive_toggle,
         "htf_2d_context_source": timeframe_context.get("htf_2d_context_source", NA),
     }
@@ -2668,6 +2695,11 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "tp2": setup.tp2,
         "tp3": setup.tp3,
         "rr_to_tp2": setup.rr_to_tp2,
+        "configured_global_minimum_rr": setup.configured_global_minimum_rr,
+        "hard_mode_floor": setup.hard_mode_floor,
+        "effective_minimum_rr": setup.effective_minimum_rr,
+        "candidate_rr": setup.candidate_rr,
+        "rr_rejection_reason": setup.rr_rejection_reason,
         "pullback_failure_reason": setup.pullback_failure_reason,
         "trust_grade": setup.trust_meter.grade,
         "trust_percentage": setup.trust_meter.percentage,
@@ -2714,7 +2746,7 @@ def _target_intelligence_for_setup(
     htf_candles = _target_htf_candles(candles_by_timeframe, setup)
     profile = higher_timeframe_volume_profile or volume_profile
     mode = setup.mode.value
-    required_rr = Decimal("3.0") if mode == "challenge" else Decimal("2.5")
+    required_rr = setup.effective_minimum_rr
     return build_target_intelligence(
         symbol=setup.pullback_zone.symbol if hasattr(setup.pullback_zone, "symbol") else diagnostics.get("symbol", NA),
         mode=mode,

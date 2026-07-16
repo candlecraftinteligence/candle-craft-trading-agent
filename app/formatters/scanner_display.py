@@ -9,6 +9,7 @@ from app.analytics.near_miss_intelligence import NearMissIntelligence, build_nea
 from app.analytics.pullback_intelligence import PullbackIntelligenceResult, build_pullback_intelligence
 from app.analytics.setup_quality import SetupQualityResult, SetupQualityState
 from app.analytics.target_intelligence import TargetIntelligenceResult
+from app.core.minimum_rr import hard_mode_minimum_rr
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 
@@ -1591,10 +1592,16 @@ def _rr_readiness_points(
 
 
 def _required_rr(diagnostics: Mapping[str, Any], failed_gate: str) -> Decimal:
+    effective_minimum_rr = _numeric(diagnostics.get("effective_minimum_rr"))
+    if effective_minimum_rr > 0:
+        return effective_minimum_rr
     mode = _display(diagnostics.get("mode")).lower()
-    if mode == "challenge" or failed_gate.startswith("challenge_"):
-        return Decimal("3.0")
-    return Decimal("2.5")
+    resolved_mode = (
+        "challenge"
+        if failed_gate.startswith("challenge_")
+        else mode if mode in {"challenge", "scalp", "swing"} else "swing"
+    )
+    return hard_mode_minimum_rr(resolved_mode)
 
 
 def _derivatives_readiness_points(

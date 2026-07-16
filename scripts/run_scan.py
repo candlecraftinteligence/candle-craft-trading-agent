@@ -58,6 +58,8 @@ from app.data.dtos import NA  # noqa: E402
 from app.cache.market_data_cache import MarketDataCache  # noqa: E402
 from app.command_center import (  # noqa: E402
     build_command_center_payload,
+    build_minimum_rr_audit,
+    build_minimum_rr_policy_payload,
     format_command_center_report,
     format_command_center_summary,
     format_portfolio_command_summary,
@@ -65,6 +67,11 @@ from app.command_center import (  # noqa: E402
     format_watchlist_export,
 )
 from app.core.config import Settings  # noqa: E402
+from app.core.minimum_rr import (  # noqa: E402
+    DEFAULT_CONFIGURED_MINIMUM_RR,
+    MinimumRRConfigurationError,
+    validate_configured_minimum_rr,
+)
 from app.alerts.telegram_lifecycle import (  # noqa: E402
     TelegramLifecycleDeliveryService,
     TelegramLifecycleDeliverySummary,
@@ -309,6 +316,13 @@ def _non_negative_decimal_arg(value: str) -> Decimal:
     return decimal
 
 
+def _minimum_rr_arg(value: str) -> Decimal:
+    try:
+        return validate_configured_minimum_rr(value)
+    except MinimumRRConfigurationError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def _positive_float_arg(value: str) -> float:
     try:
         number = float(value)
@@ -411,8 +425,25 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
     return explicit
 
 
+def _normalize_minimum_rr_cli_tokens(tokens: Sequence[str]) -> list[str]:
+    normalized: list[str] = []
+    index = 0
+    while index < len(tokens):
+        if (
+            tokens[index] == "--min-rr"
+            and index + 1 < len(tokens)
+            and tokens[index + 1].lower() in {"-inf", "-infinity"}
+        ):
+            normalized.append(f"--min-rr={tokens[index + 1]}")
+            index += 2
+            continue
+        normalized.append(tokens[index])
+        index += 1
+    return normalized
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    tokens = list(sys.argv[1:] if argv is None else argv)
+    tokens = _normalize_minimum_rr_cli_tokens(sys.argv[1:] if argv is None else argv)
     explicit_options = _explicit_cli_options(tokens)
     symbols_explicit = any(token == "--symbols" or token.startswith("--symbols=") for token in tokens)
     diagnostics_level_explicit = any(
@@ -438,7 +469,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--account-equity", default="10000")
     parser.add_argument("--risk-per-trade-pct", default="1")
     parser.add_argument("--min-score-for-idea", default="80")
-    parser.add_argument("--min-rr", type=_non_negative_decimal_arg, default=Decimal("2.5"))
+    parser.add_argument("--min-rr", type=_minimum_rr_arg, default=DEFAULT_CONFIGURED_MINIMUM_RR)
     parser.add_argument("--strategy", choices=["liquidity_grab_pullback"], default="liquidity_grab_pullback")
     parser.add_argument("--modes", nargs="+", choices=["challenge", "swing", "scalp"], default=["challenge", "swing", "scalp"])
     parser.add_argument("--htf-timeframe", default="2d")
@@ -566,7 +597,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--no-resume-skip", action="store_true")
     parser.add_argument("--progress", action="store_true")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(tokens)
     _apply_command_preset(args, explicit_options)
     if args.universe_size < 1:
         parser.error("--universe-size must be at least 1.")
@@ -673,6 +704,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         account_equity=Decimal(args.account_equity),
         risk_per_trade_pct=Decimal(args.risk_per_trade_pct),
         min_score_for_idea=Decimal(args.min_score_for_idea),
+        min_rr=args.min_rr,
         verbose=diagnostics_level == "full",
         strategy_name=args.strategy,
         strategy_modes=args.modes,
@@ -1715,6 +1747,8 @@ def _scan_run_manifest_row(
         "near_miss_count": bucket_counts.get("near_miss", 0),
         "rejected_count": bucket_counts.get("no_setup", 0),
         "failed_symbol_count": result.failed_symbols,
+        "minimum_rr_policy": build_minimum_rr_policy_payload(result),
+        "minimum_rr_audit": build_minimum_rr_audit(result),
         "timeout_count": runtime.timeout_count,
         "failed_stage_counts": dict(sorted(failed_stage_counts.items())),
         "lifecycle_state_counts": dict(sorted(lifecycle_state_counts.items())),
@@ -2074,7 +2108,7 @@ async def _deliver_telegram_manual_signals_if_enabled(
         summary = await TelegramLifecycleDeliveryService(
             database_path=args.database_path,
             settings=settings,
-            min_rr=args.min_rr,
+            min_rr=result.config.min_rr,
             min_score_for_idea=Decimal(args.min_score_for_idea),
         ).deliver_for_run(result, scan_run_id=scan_run_id)
     except StorageError as exc:
@@ -3740,6 +3774,11 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
                 f"{mode} OB/FVG: {_display(diagnostics.get('ob_fvg_diagnostics'))}",
                 f"{mode} fib: {_display(diagnostics.get('fib_diagnostics'))}",
                 f"{mode} RR: {_display(diagnostics.get('rr_diagnostics'))}",
+                f"{mode} configured global RR: {_display(diagnostics.get('configured_global_minimum_rr'))}",
+                f"{mode} hard RR floor: {_display(diagnostics.get('hard_mode_floor'))}",
+                f"{mode} effective RR threshold: {_display(diagnostics.get('effective_minimum_rr'))}",
+                f"{mode} candidate RR: {_display(diagnostics.get('candidate_rr'))}",
+                f"{mode} RR rejection reason: {_display(diagnostics.get('rr_rejection_reason'))}",
                 f"{mode} Trust Meter: {_display(diagnostics.get('trust_meter_diagnostics'))}",
                 f"{mode} derivatives support: {_display(diagnostics.get('derivatives_supports_trade'))}",
                 f"{mode} derivatives conflict: {_display(diagnostics.get('derivatives_conflict_reason'))}",
