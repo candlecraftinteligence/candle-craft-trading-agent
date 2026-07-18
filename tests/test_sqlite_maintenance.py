@@ -233,6 +233,66 @@ def test_wal_initialization_lock_retry_is_bounded_and_closes_connection(
     assert renamed.exists()
 
 
+def test_wal_initialization_retries_transient_lock_then_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_pragma_text = database_module._pragma_text
+    journal_mode_reads = 0
+
+    def release_transient_lock(connection: sqlite3.Connection, expression: str) -> str:
+        nonlocal journal_mode_reads
+        if expression.lower() == "journal_mode":
+            journal_mode_reads += 1
+            if journal_mode_reads <= 2:
+                raise sqlite3.OperationalError("database is busy")
+        return real_pragma_text(connection, expression)
+
+    monkeypatch.setattr(database_module, "_pragma_text", release_transient_lock)
+    path = tmp_path / "transient-wal-lock.sqlite"
+    started_at = time.monotonic()
+    connection = connect_database(path, busy_timeout_ms=250)
+    try:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 250
+    finally:
+        connection.close()
+
+    assert journal_mode_reads == 4
+    assert time.monotonic() - started_at < 1
+    renamed = tmp_path / "transient-wal-lock-closed.sqlite"
+    path.rename(renamed)
+    assert renamed.exists()
+
+
+def test_writable_connection_fails_if_wal_verification_does_not_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_pragma_text = database_module._pragma_text
+    journal_mode_reads = 0
+
+    def lose_wal_after_enable(connection: sqlite3.Connection, expression: str) -> str:
+        nonlocal journal_mode_reads
+        normalized = expression.lower()
+        if normalized == "journal_mode":
+            journal_mode_reads += 1
+            return "delete"
+        if normalized.startswith("journal_mode ="):
+            return "wal"
+        return real_pragma_text(connection, expression)
+
+    monkeypatch.setattr(database_module, "_pragma_text", lose_wal_after_enable)
+    path = tmp_path / "wal-verification-failure.sqlite"
+    with pytest.raises(StorageError, match="did not remain in required WAL"):
+        connect_database(path)
+
+    assert journal_mode_reads == 2
+    renamed = tmp_path / "wal-verification-failure-closed.sqlite"
+    path.rename(renamed)
+    assert renamed.exists()
+
+
 def test_writable_connection_does_not_claim_wal_when_sqlite_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
