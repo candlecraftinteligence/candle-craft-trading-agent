@@ -1319,3 +1319,193 @@ def test_watch_state_persists_deprecation_marker(tmp_path) -> None:
     assert payload["deprecated"] is True
     assert payload["source_of_truth"] == "db_lifecycle_state"
     assert "retained for compatibility" in payload["deprecation_note"]
+
+
+def test_recoverable_universe_iteration_failure_continues_and_later_succeeds(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from app.universe.symbol_universe import UniverseResolutionError
+
+    db_path = _patch_watch_runtime(tmp_path, monkeypatch, symbols=("BTCUSDT",))
+    original_resolver = run_scan.resolve_symbol_universe
+    resolve_calls = 0
+
+    async def flaky_resolver(*args, **kwargs):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        if resolve_calls == 2:
+            raise UniverseResolutionError("temporary universe outage")
+        return await original_resolver(*args, **kwargs)
+
+    monotonic = [1_000.0]
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        monotonic[0] += seconds
+
+    monkeypatch.setattr(run_scan, "resolve_symbol_universe", flaky_resolver)
+    monkeypatch.setattr(run_scan, "time", SimpleNamespace(monotonic=lambda: monotonic[0]))
+    monkeypatch.setattr(run_scan.asyncio, "sleep", fake_sleep)
+    args = _watch_args(db_path, universe_size=1)
+    args[args.index("--watch-max-iterations") + 1] = "2"
+
+    asyncio.run(run_scan.main(args))
+
+    output = capsys.readouterr().out
+    assert resolve_calls == 3
+    assert len(EchoWatchRunner.configs) == 1
+    assert sleeps == [pytest.approx(5.0)]
+    assert "Status: FAILED" in output
+    assert "Status: SUCCESS" in output
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["watch_supervisor"]["status"] for row in rows] == ["FAILED", "SUCCESS"]
+    assert rows[0]["watch_supervisor"]["consecutive_failure_count"] == 1
+    assert rows[1]["watch_supervisor"]["consecutive_failure_count"] == 0
+
+
+def test_repeated_recoverable_iteration_failures_apply_bounded_backoff(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = _patch_watch_runtime(tmp_path, monkeypatch, symbols=("BTCUSDT",))
+    monotonic = [2_000.0]
+    sleeps: list[float] = []
+
+    async def fail_iteration(*args, **kwargs):
+        raise OSError("temporary scanner filesystem failure")
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        monotonic[0] += seconds
+
+    monkeypatch.setattr(run_scan, "_run_watch_scan_iteration", fail_iteration)
+    monkeypatch.setattr(run_scan, "time", SimpleNamespace(monotonic=lambda: monotonic[0]))
+    monkeypatch.setattr(run_scan.asyncio, "sleep", fake_sleep)
+    args = _watch_args(db_path, universe_size=1)
+    args[args.index("--watch-max-iterations") + 1] = "3"
+
+    asyncio.run(run_scan.main(args))
+
+    assert sleeps == [pytest.approx(5.0), pytest.approx(10.0)]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["watch_supervisor"]["consecutive_failure_count"] for row in rows] == [1, 2, 3]
+    assert [row["watch_supervisor"]["selected_backoff_seconds"] for row in rows] == [5, 10, 20]
+
+
+def test_unsupported_schema_failure_is_fatal_to_watch_supervisor(tmp_path, monkeypatch) -> None:
+    from app.storage.database import UnsupportedSchemaVersionError
+
+    db_path = _patch_watch_runtime(tmp_path, monkeypatch, symbols=("BTCUSDT",))
+    attempts = 0
+
+    async def fatal_iteration(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise UnsupportedSchemaVersionError("database schema 17 is unsupported")
+
+    monkeypatch.setattr(run_scan, "_run_watch_scan_iteration", fatal_iteration)
+    args = _watch_args(db_path, universe_size=1)
+    args[args.index("--watch-max-iterations") + 1] = "3"
+
+    with pytest.raises(UnsupportedSchemaVersionError, match="schema 17"):
+        asyncio.run(run_scan.main(args))
+
+    assert attempts == 1
+
+
+def test_scan_storage_failure_is_reported_as_partial(tmp_path, monkeypatch, capsys) -> None:
+    db_path = _patch_watch_runtime(tmp_path, monkeypatch, symbols=("BTCUSDT",))
+
+    def fail_storage(*args, **kwargs):
+        try:
+            raise sqlite3.OperationalError("database is locked")
+        except sqlite3.OperationalError as cause:
+            raise run_scan.StorageError("temporary scan storage failure") from cause
+
+    monkeypatch.setattr(run_scan, "_store_watch_iteration_scan_run", fail_storage)
+
+    asyncio.run(run_scan.main(_watch_args(db_path, universe_size=1)))
+
+    output = capsys.readouterr().out
+    assert "Status: PARTIAL" in output
+    assert '"scan_storage": "FAILED"' in output
+    assert "Database storage: FAILED" in output
+
+
+def test_watch_state_save_failure_is_visible_and_does_not_claim_success(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    db_path = _patch_watch_runtime(tmp_path, monkeypatch, symbols=("BTCUSDT",))
+
+    def fail_state_save(*args, **kwargs):
+        raise run_scan.WatchModeError("temporary watch-state write failure")
+
+    monkeypatch.setattr(run_scan, "save_watch_state", fail_state_save)
+
+    asyncio.run(run_scan.main(_watch_args(db_path, universe_size=1)))
+
+    output = capsys.readouterr().out
+    assert "Status: PARTIAL" in output
+    assert '"watch_state": "FAILED"' in output
+
+
+def test_active_iteration_cancellation_accounts_for_remaining_queue_and_closes_cleanly(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    db_path = _patch_watch_runtime(
+        tmp_path,
+        monkeypatch,
+        symbols=("BTCUSDT", "ETHUSDT"),
+    )
+
+    class CancelDuringQueueRunner:
+        async def run(self, config, after_symbol=None, progress=None, resume_metadata=None):
+            interruption = asyncio.CancelledError()
+            setattr(
+                interruption,
+                "scanner_completed_results",
+                (_rejected_symbol("BTCUSDT"),),
+            )
+            raise interruption
+
+    monkeypatch.setattr(run_scan, "ScannerRunner", CancelDuringQueueRunner)
+
+    asyncio.run(run_scan.main(_watch_args(db_path, universe_size=2)))
+
+    output = capsys.readouterr().out
+    assert "Status: CANCELLED" in output
+    assert "Watch mode stopped by user." in output
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    supervisor = rows[0]["watch_supervisor"]
+    assert supervisor["status"] == "CANCELLED"
+    assert supervisor["queue_total"] == 2
+    assert supervisor["outcome_counts"] == {
+        "evaluated": 0,
+        "rejected": 1,
+        "errored": 0,
+        "timed_out": 0,
+        "not_run": 1,
+    }
+    assert supervisor["symbol_outcomes"]["BTCUSDT"]["outcome"] == "rejected"
+    assert supervisor["symbol_outcomes"]["ETHUSDT"] == {
+        "outcome": "not_run",
+        "reason_code": "cancelled_not_run",
+        "status": "not_run",
+    }

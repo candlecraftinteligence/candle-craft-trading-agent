@@ -11,6 +11,10 @@ class StorageError(RuntimeError):
     """Raised when local scan history cannot be read or written cleanly."""
 
 
+class UnsupportedSchemaVersionError(StorageError):
+    """Raised when a database was created by a newer unsupported runtime."""
+
+
 def connect_database(path: Path | str = DEFAULT_DATABASE_PATH) -> sqlite3.Connection:
     database_path = Path(path)
     try:
@@ -30,6 +34,12 @@ def initialize_database(connection: sqlite3.Connection) -> None:
     try:
         if connection.in_transaction:
             connection.commit()
+        existing_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if existing_version > SCHEMA_VERSION:
+            raise UnsupportedSchemaVersionError(
+                f"Unsupported database schema version {existing_version}; "
+                f"this runtime supports up to version {SCHEMA_VERSION}."
+            )
         connection.executescript(
             """
             BEGIN IMMEDIATE;

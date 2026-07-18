@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -120,6 +121,27 @@ class WatchIterationSummary(BaseModel):
     still_watching: int
     rejected_no_edge: int
     data_issues: int
+    iteration_id: str = NA
+    status: Literal["SUCCESS", "PARTIAL", "FAILED", "CANCELLED", "FATAL"] = "SUCCESS"
+    scheduled_start: str = NA
+    actual_start: str = NA
+    finished_at: str = NA
+    duration_seconds: float = 0.0
+    sleep_seconds: float = 0.0
+    cadence_lag_seconds: float = 0.0
+    overrun_seconds: float = 0.0
+    missed_interval_count: int = 0
+    consecutive_failure_count: int = 0
+    selected_backoff_seconds: float = 0.0
+    next_scheduled_attempt: str = NA
+    queue_total: int = 0
+    outcome_counts: dict[str, int] = Field(default_factory=dict)
+    symbol_outcomes: dict[str, dict[str, str]] = Field(default_factory=dict)
+    phase_statuses: dict[str, str] = Field(default_factory=dict)
+    errors: tuple[str, ...] = ()
+    active_lifecycle_count: int = 0
+    telegram_outbox_status: dict[str, int] = Field(default_factory=dict)
+    database_storage_status: str = "NOT_REQUESTED"
     next_scan_seconds: float | None = None
     activated_symbols: tuple[str, ...] = ()
     alerts: tuple[WatchActivation, ...] = ()
@@ -152,14 +174,38 @@ def load_watch_state(path: Path = DEFAULT_WATCH_STATE_PATH) -> WatchState:
         raise WatchModeError(f"watch state has an invalid shape: {path}") from exc
 
 
-def save_watch_state(path: Path, state: WatchState) -> None:
+def save_watch_state(
+    path: Path,
+    state: WatchState,
+    *,
+    expected_updated_at: str | None = None,
+) -> None:
+    temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
+        if path.exists():
+            current = load_watch_state(path)
+            if (
+                expected_updated_at not in (None, NA)
+                and current.updated_at not in (NA, expected_updated_at)
+                and current.updated_at > expected_updated_at
+            ):
+                raise WatchModeError(f"refusing to overwrite newer watch state: {path}")
+            if current.updated_at != NA and state.updated_at != NA and current.updated_at > state.updated_at:
+                raise WatchModeError(f"refusing to overwrite newer watch state: {path}")
+        temporary_path.write_text(
             json.dumps(state.model_dump(mode="json"), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        temporary_path.replace(path)
     except OSError as exc:
+        try:
+            if temporary_path.exists():
+                temporary_path.unlink()
+        except OSError as cleanup_exc:
+            raise WatchModeError(
+                f"could not write watch state and could not remove temporary file: {path}"
+            ) from cleanup_exc
         raise WatchModeError(f"could not write watch state: {path}") from exc
 
 
@@ -483,11 +529,28 @@ def format_watch_iteration_summary(summary: WatchIterationSummary) -> str:
     return "\n".join(
         (
             f"Watch iteration {summary.iteration}",
+            f"Iteration ID: {summary.iteration_id}",
+            f"Status: {summary.status}",
+            f"Scheduled start: {summary.scheduled_start}",
+            f"Actual start: {summary.actual_start}",
+            f"Finish: {summary.finished_at}",
+            f"Duration: {_seconds_text(summary.duration_seconds)}",
+            f"Sleep duration: {_seconds_text(summary.sleep_seconds)}",
+            f"Cadence lag: {_seconds_text(summary.cadence_lag_seconds)}",
+            f"Overrun: {_seconds_text(summary.overrun_seconds)}",
+            f"Missed intervals: {summary.missed_interval_count}",
+            f"Failure streak/backoff: {summary.consecutive_failure_count}/{_seconds_text(summary.selected_backoff_seconds)}",
             f"Symbols watched: {summary.symbols_watched}",
+            f"Queue outcomes: {summary.queue_total} = {json.dumps(summary.outcome_counts, sort_keys=True)}",
+            f"Symbol outcomes: {json.dumps(summary.symbol_outcomes, sort_keys=True)}",
             f"Valid activations: {summary.valid_activations}",
             f"Still watching: {summary.still_watching}",
             f"Rejected/no edge: {summary.rejected_no_edge}",
             f"Data issues: {summary.data_issues}",
+            f"Phases: {json.dumps(summary.phase_statuses, sort_keys=True)}",
+            f"Telegram outbox: {json.dumps(summary.telegram_outbox_status, sort_keys=True)}",
+            f"Database storage: {summary.database_storage_status}",
+            f"Next scheduled attempt: {summary.next_scheduled_attempt}",
             f"Next scan in {next_scan}",
         )
     )

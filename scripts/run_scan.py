@@ -8,7 +8,8 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -170,6 +171,22 @@ from app.watch_mode import (  # noqa: E402
     state_watch_symbols,
     update_watch_state_for_result,
 )
+from app.watch_iteration import (  # noqa: E402
+    not_run_symbol_result as _not_run_symbol_result,
+    queued_symbol_outcome_counts as _queued_symbol_outcome_counts,
+    queued_symbol_outcomes as _queued_symbol_outcomes,
+    scanner_phase_status as _scanner_phase_status,
+    telegram_outbox_phase_status as _telegram_outbox_phase_status,
+    telegram_outbox_status_summary as _telegram_outbox_status_summary,
+    watch_phase_error as _watch_phase_error,
+)
+from app.watch_supervisor import (  # noqa: E402
+    WatchFailureDisposition,
+    WatchIterationStatus,
+    classify_watch_exception,
+    failure_backoff_seconds,
+    schedule_after_iteration,
+)
 
 
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
@@ -212,6 +229,9 @@ class WatchScanExecution:
     symbol_priority_plan: SymbolPriorityPlan
     queued_symbols: tuple[str, ...]
     storage_run_id: str | None = None
+    phase_statuses: dict[str, str] = field(default_factory=dict)
+    recoverable_errors: tuple[str, ...] = ()
+    telegram_outbox_status: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1557,10 +1577,16 @@ def _combined_run_result(
             if not config.market_regime_enabled
             else default_market_regime_result()
         )
+    queue_total = len(watchlist_symbols)
+    queue_metadata = resume_metadata.get("symbol_queue")
+    if isinstance(queue_metadata, Mapping):
+        queue_total = int(queue_metadata.get("final_queued_count", queue_total))
     return ScannerRunResult(
         config=config,
         results=ordered_results,
-        scanned_symbols=len(ordered_results),
+        scanned_symbols=sum(
+            1 for result in ordered_results if result.iteration_outcome != "not_run"
+        ),
         failed_symbols=sum(1 for result in ordered_results if _result_is_scan_error(result)),
         trade_ideas_created=sum(1 for result in ordered_results if result.trade_idea is not None),
         dry_run_alerts_created=sum(
@@ -1572,7 +1598,7 @@ def _combined_run_result(
         resume_metadata=dict(resume_metadata),
         runtime_stats=_combined_runtime_stats(
             ordered_results,
-            total_symbols=len(watchlist_symbols),
+            total_symbols=queue_total,
             runtime_stats=runtime_stats,
         ),
         market_regime=effective_market_regime,
@@ -1611,9 +1637,13 @@ def _combined_runtime_stats(
     if runtimes:
         slowest_symbol, slowest_seconds = max(runtimes, key=lambda item: item[1])
 
-    errored_symbols = sum(1 for result in results if _result_is_scan_error(result))
-    skipped_symbols = max(0, total_symbols - len(results))
-    timeout_count = sum(1 for result in results if result.timed_out)
+    outcomes = Counter(result.iteration_outcome or "errored" for result in results)
+    evaluated_symbols = outcomes["evaluated"]
+    rejected_symbols = outcomes["rejected"]
+    timed_out_symbols = outcomes["timed_out"]
+    not_run_symbols = outcomes["not_run"]
+    errored_symbols = outcomes["errored"] + timed_out_symbols
+    skipped_symbols = not_run_symbols
     total_runtime = (
         runtime_stats.total_runtime_seconds
         if runtime_stats is not None
@@ -1627,12 +1657,24 @@ def _combined_runtime_stats(
         else 0.0,
         slowest_symbol=slowest_symbol,
         slowest_symbol_seconds=_round_seconds(slowest_seconds),
-        timeout_count=timeout_count,
-        completed_symbols=max(0, len(results) - errored_symbols),
+        timeout_count=timed_out_symbols,
+        completed_symbols=evaluated_symbols + rejected_symbols,
         skipped_symbols=skipped_symbols,
         errored_symbols=errored_symbols,
         skipped_errored_symbols=skipped_symbols + errored_symbols,
         global_timeout_hit=global_timeout_hit,
+        queued_symbols=total_symbols,
+        evaluated_symbols=evaluated_symbols,
+        rejected_symbols=rejected_symbols,
+        timed_out_symbols=timed_out_symbols,
+        not_run_symbols=not_run_symbols,
+        outcome_counts={
+            "evaluated": evaluated_symbols,
+            "rejected": rejected_symbols,
+            "errored": outcomes["errored"],
+            "timed_out": timed_out_symbols,
+            "not_run": not_run_symbols,
+        },
     )
 
 
@@ -1700,6 +1742,7 @@ def _append_scan_run_manifest(
     watch_iteration: int | None = None,
     output_scan_path: Path | None = None,
     latest_scan_path: Path | None = None,
+    watch_summary: WatchIterationSummary | None = None,
 ) -> dict[str, Any]:
     row = _scan_run_manifest_row(
         result,
@@ -1710,6 +1753,8 @@ def _append_scan_run_manifest(
         output_scan_path=output_scan_path,
         latest_scan_path=latest_scan_path,
     )
+    if watch_summary is not None:
+        row["watch_supervisor"] = watch_summary.model_dump(mode="json")
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     with manifest_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False))
@@ -2123,9 +2168,9 @@ async def _deliver_telegram_manual_signals_if_enabled(
     result: ScannerRunResult,
     *,
     scan_run_id: str | None,
-) -> None:
+) -> TelegramLifecycleDeliverySummary | None:
     if not _telegram_lifecycle_public_delivery_enabled(args):
-        return
+        return None
     settings = _telegram_manual_signal_settings()
     try:
         summary = await TelegramLifecycleDeliveryService(
@@ -2137,6 +2182,7 @@ async def _deliver_telegram_manual_signals_if_enabled(
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc
     _print_telegram_manual_lifecycle_summary(summary)
+    return summary
 
 
 def _print_telegram_manual_lifecycle_summary(summary: TelegramLifecycleDeliverySummary) -> None:
@@ -2558,24 +2604,70 @@ async def _run_watch_mode(
     iteration = 0
     completed_iterations = 0
     stored_scan_runs = 0
+    failure_streak = 0
+    iteration_in_progress = False
+    scheduled_start_monotonic = time.monotonic()
     try:
         while True:
             iteration += 1
             iteration_started_at = _watch_iteration_timestamp()
             iteration_started_monotonic = time.monotonic()
-            previous_state = state
-            iteration_watchlist = await _watchlist_for_watch_iteration(args, watchlist)
-            execution = await _run_watch_scan_iteration(
-                args,
-                watchlist=iteration_watchlist,
-                config=config,
-                iteration=iteration,
+            scheduled_start_at = _watch_timestamp_offset(
+                iteration_started_at, scheduled_start_monotonic - iteration_started_monotonic
             )
+            previous_state = state
+            iteration_in_progress = True
+            iteration_watchlist, execution, iteration_error = await _attempt_watch_scan_iteration(
+                args, startup_watchlist=watchlist, config=config, iteration=iteration
+            )
+            if iteration_error is not None:
+                disposition = classify_watch_exception(iteration_error)
+                if disposition == WatchFailureDisposition.RECOVERABLE:
+                    failure_streak += 1
+                selected_backoff = (
+                    failure_backoff_seconds(failure_streak)
+                    if disposition == WatchFailureDisposition.RECOVERABLE
+                    else 0.0
+                )
+                finished_monotonic = time.monotonic()
+                schedule = schedule_after_iteration(
+                    scheduled_start_monotonic=scheduled_start_monotonic,
+                    actual_start_monotonic=iteration_started_monotonic,
+                    finished_monotonic=finished_monotonic,
+                    interval_seconds=args.watch_interval_sec,
+                    backoff_seconds=selected_backoff,
+                )
+                failed_summary = _failed_watch_iteration_summary(
+                    iteration=iteration,
+                    status="FATAL" if disposition == WatchFailureDisposition.FATAL else "FAILED",
+                    watchlist=watchlist,
+                    iteration_error=iteration_error,
+                    scheduled_start_at=scheduled_start_at,
+                    actual_start_at=iteration_started_at,
+                    schedule=schedule,
+                    failure_streak=failure_streak,
+                    selected_backoff=selected_backoff,
+                )
+                _record_failed_watch_iteration(args, failed_summary, watchlist=watchlist)
+                iteration_in_progress = False
+                completed_iterations = iteration
+                if disposition == WatchFailureDisposition.FATAL:
+                    raise iteration_error
+                if args.watch_max_iterations is not None and iteration >= args.watch_max_iterations:
+                    break
+                scheduled_start_monotonic = schedule.next_scheduled_monotonic
+                await asyncio.sleep(max(0.0, scheduled_start_monotonic - time.monotonic()))
+                continue
+            assert iteration_watchlist is not None and execution is not None
             completed_at = _watch_iteration_timestamp()
             activations: list[WatchActivation] = []
             updated_state = previous_state
+            phase_statuses = dict(execution.phase_statuses)
+            iteration_errors = list(execution.recoverable_errors)
 
             for symbol_result in execution.result.results:
+                if symbol_result.iteration_outcome == "not_run":
+                    continue
                 previous_symbol_state = previous_state.symbols.get(symbol_result.symbol)
                 should_alert = legacy_watch_activation_delivery and should_trigger_activation_alert(
                     symbol_result,
@@ -2622,13 +2714,40 @@ async def _run_watch_mode(
 
             state = updated_state
             try:
-                save_watch_state(WATCH_STATE_PATH, state)
+                save_watch_state(
+                    WATCH_STATE_PATH, state, expected_updated_at=previous_state.updated_at
+                )
             except WatchModeError as exc:
-                raise SystemExit(str(exc)) from exc
+                state = previous_state
+                phase_statuses["watch_state"] = "FAILED"
+                iteration_errors.append(_watch_phase_error("watch_state", exc))
+            else:
+                phase_statuses["watch_state"] = "SUCCESS"
 
             continue_watching = args.watch_max_iterations is None or iteration < args.watch_max_iterations
-            next_scan_seconds = args.watch_interval_sec if continue_watching else 0
-            runtime_sec = _round_seconds(time.monotonic() - iteration_started_monotonic)
+            iteration_status = _iteration_status_from_phases(phase_statuses)
+            if iteration_status == "SUCCESS":
+                failure_streak = 0
+            else:
+                failure_streak += 1
+            selected_backoff = (
+                failure_backoff_seconds(failure_streak)
+                if continue_watching and iteration_status != "SUCCESS"
+                else 0.0
+            )
+            finished_monotonic = time.monotonic()
+            completed_at = _watch_iteration_timestamp()
+            schedule = schedule_after_iteration(
+                scheduled_start_monotonic=scheduled_start_monotonic,
+                actual_start_monotonic=iteration_started_monotonic,
+                finished_monotonic=finished_monotonic,
+                interval_seconds=args.watch_interval_sec,
+                backoff_seconds=selected_backoff,
+            )
+            next_scan_seconds = schedule.sleep_seconds if continue_watching else 0
+            runtime_sec = schedule.duration_seconds
+            outcome_counts = _queued_symbol_outcome_counts(execution.result, execution.queued_symbols)
+            symbol_outcomes = _queued_symbol_outcomes(execution.result, execution.queued_symbols)
             summary = build_watch_iteration_summary(
                 iteration=iteration,
                 result=execution.result,
@@ -2636,52 +2755,414 @@ async def _run_watch_mode(
                 next_scan_seconds=next_scan_seconds,
                 scanned_at=completed_at,
             )
-            if args.watch_output_file is not None:
-                append_watch_output(args.watch_output_file, summary)
-            print(format_watch_iteration_summary(summary))
+            summary = summary.model_copy(
+                update={
+                    "iteration_id": execution.storage_run_id or uuid4().hex,
+                    "status": iteration_status,
+                    "scheduled_start": scheduled_start_at,
+                    "actual_start": iteration_started_at,
+                    "finished_at": completed_at,
+                    "duration_seconds": schedule.duration_seconds,
+                    "sleep_seconds": next_scan_seconds,
+                    "cadence_lag_seconds": schedule.cadence_lag_seconds,
+                    "overrun_seconds": schedule.overrun_seconds,
+                    "missed_interval_count": schedule.missed_interval_count,
+                    "consecutive_failure_count": failure_streak,
+                    "selected_backoff_seconds": selected_backoff,
+                    "next_scheduled_attempt": _watch_timestamp_offset(completed_at, next_scan_seconds),
+                    "queue_total": len(execution.queued_symbols),
+                    "outcome_counts": outcome_counts,
+                    "symbol_outcomes": symbol_outcomes,
+                    "phase_statuses": dict(phase_statuses),
+                    "errors": tuple(iteration_errors),
+                    "active_lifecycle_count": len(iteration_watchlist.active_lifecycle_symbols),
+                    "telegram_outbox_status": dict(execution.telegram_outbox_status),
+                    "database_storage_status": "NOT_REQUESTED",
+                }
+            )
             stored_manifest_run_id = execution.storage_run_id
             if args.store_scan:
-                stored_manifest_run_id = _store_watch_iteration_scan_run(
-                    args,
-                    execution=execution,
-                    summary=summary,
-                    started_at=iteration_started_at,
-                    completed_at=completed_at,
-                    runtime_sec=runtime_sec,
-                    command_used=command_used,
-                )
-                stored_scan_runs += 1
-                print(f"Stored watch iteration: {summary.iteration}")
-                print(f"Run ID: {stored_manifest_run_id}")
-            manifest_row = _append_scan_run_manifest(
-                execution.result,
-                watchlist=iteration_watchlist,
-                ranked_results=execution.ranked_results,
-                manifest_path=SCAN_RUN_MANIFEST_PATH,
-                nightly_history_path=NIGHTLY_SCAN_HISTORY_PATH,
-                run_id=stored_manifest_run_id,
-                output_scan_path=args.output_json,
-                latest_scan_path=args.save_run,
-                watch_iteration=summary.iteration,
+                try:
+                    stored_manifest_run_id = _store_watch_iteration_scan_run(
+                        args,
+                        execution=execution,
+                        summary=summary.model_copy(update={"database_storage_status": "PENDING"}),
+                        started_at=iteration_started_at,
+                        completed_at=completed_at,
+                        runtime_sec=runtime_sec,
+                        command_used=command_used,
+                    )
+                except (OSError, StorageError, SystemExit) as exc:
+                    if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
+                        raise
+                    phase_statuses["scan_storage"] = "FAILED"
+                    iteration_errors.append(_watch_phase_error("scan_storage", exc))
+                    database_storage_status = "FAILED"
+                else:
+                    phase_statuses["scan_storage"] = "SUCCESS"
+                    database_storage_status = "SUCCESS"
+                    stored_scan_runs += 1
+                    print(f"Stored watch iteration: {summary.iteration}")
+                    print(f"Run ID: {stored_manifest_run_id}")
+            else:
+                phase_statuses["scan_storage"] = "SKIPPED"
+                database_storage_status = "NOT_REQUESTED"
+
+            phase_statuses["scan_manifest"] = "SUCCESS"
+            status_before_downstream_storage = iteration_status
+            iteration_status = _iteration_status_from_phases(phase_statuses)
+            if iteration_status == "SUCCESS":
+                failure_streak = 0
+            elif status_before_downstream_storage == "SUCCESS":
+                failure_streak = 1
+            selected_backoff = (
+                failure_backoff_seconds(failure_streak)
+                if continue_watching and iteration_status != "SUCCESS"
+                else 0.0
             )
+            finished_monotonic = time.monotonic()
+            completed_at = _watch_iteration_timestamp()
+            schedule = schedule_after_iteration(
+                scheduled_start_monotonic=scheduled_start_monotonic,
+                actual_start_monotonic=iteration_started_monotonic,
+                finished_monotonic=finished_monotonic,
+                interval_seconds=args.watch_interval_sec,
+                backoff_seconds=selected_backoff,
+            )
+            next_scan_seconds = schedule.sleep_seconds if continue_watching else 0.0
+            summary = summary.model_copy(
+                update={
+                    "status": iteration_status,
+                    "finished_at": completed_at,
+                    "duration_seconds": schedule.duration_seconds,
+                    "sleep_seconds": next_scan_seconds,
+                    "next_scan_seconds": next_scan_seconds,
+                    "cadence_lag_seconds": schedule.cadence_lag_seconds,
+                    "overrun_seconds": schedule.overrun_seconds,
+                    "missed_interval_count": schedule.missed_interval_count,
+                    "consecutive_failure_count": failure_streak,
+                    "selected_backoff_seconds": selected_backoff,
+                    "next_scheduled_attempt": _watch_timestamp_offset(completed_at, next_scan_seconds),
+                    "phase_statuses": dict(phase_statuses),
+                    "errors": tuple(iteration_errors),
+                    "database_storage_status": database_storage_status,
+                }
+            )
+            try:
+                manifest_row = _append_scan_run_manifest(
+                    execution.result,
+                    watchlist=iteration_watchlist,
+                    ranked_results=execution.ranked_results,
+                    manifest_path=SCAN_RUN_MANIFEST_PATH,
+                    nightly_history_path=NIGHTLY_SCAN_HISTORY_PATH,
+                    run_id=stored_manifest_run_id,
+                    output_scan_path=args.output_json,
+                    latest_scan_path=args.save_run,
+                    watch_iteration=summary.iteration,
+                    watch_summary=summary,
+                )
+            except OSError as exc:
+                phase_statuses["scan_manifest"] = "FAILED"
+                iteration_errors.append(_watch_phase_error("scan_manifest", exc))
+                if iteration_status == "SUCCESS":
+                    failure_streak = 1
+                iteration_status = _iteration_status_from_phases(phase_statuses)
+                selected_backoff = failure_backoff_seconds(failure_streak) if continue_watching else 0.0
+                schedule = schedule_after_iteration(
+                    scheduled_start_monotonic=scheduled_start_monotonic,
+                    actual_start_monotonic=iteration_started_monotonic,
+                    finished_monotonic=time.monotonic(),
+                    interval_seconds=args.watch_interval_sec,
+                    backoff_seconds=selected_backoff,
+                )
+                next_scan_seconds = schedule.sleep_seconds if continue_watching else 0.0
+                summary = summary.model_copy(
+                    update={
+                        "status": iteration_status,
+                        "sleep_seconds": next_scan_seconds,
+                        "next_scan_seconds": next_scan_seconds,
+                        "consecutive_failure_count": failure_streak,
+                        "selected_backoff_seconds": selected_backoff,
+                        "next_scheduled_attempt": _watch_timestamp_offset(_watch_iteration_timestamp(), next_scan_seconds),
+                        "phase_statuses": dict(phase_statuses),
+                        "errors": tuple(iteration_errors),
+                    }
+                )
+                manifest_row = _scan_run_manifest_row(
+                    execution.result,
+                    watchlist=iteration_watchlist,
+                    ranked_results=execution.ranked_results,
+                    run_id=stored_manifest_run_id,
+                    watch_iteration=summary.iteration,
+                    output_scan_path=args.output_json,
+                    latest_scan_path=args.save_run,
+                )
+                manifest_row["watch_supervisor"] = summary.model_dump(mode="json")
+                print(f"Warning: scan manifest persistence failed safely: {type(exc).__name__}: {exc}")
+
+            if args.watch_output_file is not None:
+                try:
+                    append_watch_output(args.watch_output_file, summary)
+                except OSError as exc:
+                    phase_statuses["watch_output"] = "FAILED"
+                    print(f"Warning: watch output persistence failed safely: {type(exc).__name__}: {exc}")
+                else:
+                    phase_statuses["watch_output"] = "SUCCESS"
+            print(format_watch_iteration_summary(summary))
             await _route_admin_report(
                 execution.result,
                 ranked_results=execution.ranked_results,
                 manifest_row=manifest_row,
             )
             print("")
+            iteration_in_progress = False
             completed_iterations = iteration
 
             if not continue_watching:
                 break
-            await asyncio.sleep(args.watch_interval_sec)
-    except (KeyboardInterrupt, asyncio.CancelledError):
+            scheduled_start_monotonic = schedule.next_scheduled_monotonic
+            await asyncio.sleep(max(0.0, scheduled_start_monotonic - time.monotonic()))
+    except (KeyboardInterrupt, asyncio.CancelledError) as exc:
+        if iteration_in_progress:
+            cancelled_watchlist = getattr(exc, "watch_iteration_watchlist", watchlist)
+            cancelled_summary = _cancelled_watch_iteration_summary(
+                iteration=iteration,
+                watchlist=cancelled_watchlist,
+                queued_symbols=tuple(getattr(exc, "watch_queue_symbols", ())),
+                completed_results=tuple(getattr(exc, "watch_completed_results", ())),
+                scheduled_start_at=scheduled_start_at,
+                actual_start_at=iteration_started_at,
+                actual_start_monotonic=iteration_started_monotonic,
+                scheduled_start_monotonic=scheduled_start_monotonic,
+                interval_seconds=args.watch_interval_sec,
+                interruption=exc,
+            )
+            _record_failed_watch_iteration(args, cancelled_summary, watchlist=cancelled_watchlist)
+            completed_iterations = iteration
         _print_watch_shutdown(
             completed_iterations=completed_iterations,
             stored_scan_runs=stored_scan_runs,
             database_path=args.database_path,
         )
         return
+
+
+async def _attempt_watch_scan_iteration(
+    args: argparse.Namespace,
+    *,
+    startup_watchlist: WatchlistResolution,
+    config: ScannerRunConfig,
+    iteration: int,
+) -> tuple[WatchlistResolution | None, WatchScanExecution | None, Exception | SystemExit | None]:
+    try:
+        watchlist = await _watchlist_for_watch_iteration(args, startup_watchlist)
+        execution = await _run_watch_scan_iteration(
+            args,
+            watchlist=watchlist,
+            config=config,
+            iteration=iteration,
+        )
+    except (Exception, SystemExit) as exc:
+        return None, None, exc
+    return watchlist, execution, None
+
+
+def _iteration_status_from_phases(phase_statuses: Mapping[str, str]) -> str:
+    normalized = {key: str(value).upper() for key, value in phase_statuses.items()}
+    if any(normalized.get(key) == "FAILED" for key in ("universe", "queue", "scanner")):
+        return WatchIterationStatus.FAILED.value
+    if any(value in {"FAILED", "PARTIAL"} for value in normalized.values()):
+        return WatchIterationStatus.PARTIAL.value
+    return WatchIterationStatus.SUCCESS.value
+
+
+def _watch_timestamp_offset(timestamp: str, seconds: float) -> str:
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return NA
+    return (parsed + timedelta(seconds=float(seconds))).replace(microsecond=0).isoformat()
+
+
+def _cancelled_watch_iteration_summary(
+    *,
+    iteration: int,
+    watchlist: WatchlistResolution,
+    queued_symbols: tuple[str, ...],
+    completed_results: tuple[ScannerSymbolResult, ...],
+    scheduled_start_at: str,
+    actual_start_at: str,
+    actual_start_monotonic: float,
+    scheduled_start_monotonic: float,
+    interval_seconds: float,
+    interruption: KeyboardInterrupt | asyncio.CancelledError,
+) -> WatchIterationSummary:
+    finished_monotonic = time.monotonic()
+    decision = schedule_after_iteration(
+        scheduled_start_monotonic=scheduled_start_monotonic,
+        actual_start_monotonic=actual_start_monotonic,
+        finished_monotonic=finished_monotonic,
+        interval_seconds=interval_seconds,
+    )
+    queued_set = set(queued_symbols)
+    completed_by_symbol = {
+        result.symbol: result
+        for result in completed_results
+        if result.symbol in queued_set
+    }
+    raw_counts = Counter(
+        result.iteration_outcome or "errored"
+        for result in completed_by_symbol.values()
+    )
+    raw_counts["not_run"] += len(queued_symbols) - len(completed_by_symbol)
+    outcome_counts = {
+        key: int(raw_counts.get(key, 0))
+        for key in ("evaluated", "rejected", "errored", "timed_out", "not_run")
+    }
+    symbol_outcomes: dict[str, dict[str, str]] = {}
+    for symbol in queued_symbols:
+        result = completed_by_symbol.get(symbol)
+        if result is None:
+            symbol_outcomes[symbol] = {
+                "outcome": "not_run",
+                "reason_code": "cancelled_not_run",
+                "status": ScannerPipelineStatus.NOT_RUN.value,
+            }
+            continue
+        outcome = str(result.iteration_outcome)
+        if outcome == "not_run":
+            reason_code = result.not_run_reason
+        elif outcome == "timed_out":
+            reason_code = result.timeout_status
+        elif outcome == "errored":
+            reason_code = "scan_error"
+        elif outcome == "rejected":
+            reason_code = (
+                result.rejection_stage
+                if result.rejection_stage != NA
+                else "scanner_gate_rejection"
+            )
+        else:
+            reason_code = "evaluated"
+        symbol_outcomes[symbol] = {
+            "outcome": outcome,
+            "reason_code": reason_code,
+            "status": getattr(result.status, "value", str(result.status)),
+        }
+    finished_at = _watch_iteration_timestamp()
+    return WatchIterationSummary(
+        iteration=iteration,
+        scanned_at=finished_at,
+        symbols_watched=len(watchlist.symbols),
+        valid_activations=0,
+        still_watching=0,
+        rejected_no_edge=outcome_counts["rejected"],
+        data_issues=outcome_counts["errored"] + outcome_counts["timed_out"],
+        iteration_id=uuid4().hex,
+        status=WatchIterationStatus.CANCELLED.value,
+        scheduled_start=scheduled_start_at,
+        actual_start=actual_start_at,
+        finished_at=finished_at,
+        duration_seconds=decision.duration_seconds,
+        sleep_seconds=0.0,
+        cadence_lag_seconds=decision.cadence_lag_seconds,
+        overrun_seconds=decision.overrun_seconds,
+        missed_interval_count=decision.missed_interval_count,
+        next_scheduled_attempt=NA,
+        queue_total=len(queued_symbols),
+        outcome_counts=outcome_counts,
+        symbol_outcomes=symbol_outcomes,
+        phase_statuses={"scanner": "CANCELLED"},
+        errors=(_watch_phase_error("iteration", interruption),),
+        active_lifecycle_count=len(watchlist.active_lifecycle_symbols),
+        database_storage_status="NOT_ATTEMPTED",
+        next_scan_seconds=None,
+    )
+
+
+def _failed_watch_iteration_summary(
+    *,
+    iteration: int,
+    status: str,
+    watchlist: WatchlistResolution,
+    iteration_error: Exception | SystemExit,
+    scheduled_start_at: str,
+    actual_start_at: str,
+    schedule: Any,
+    failure_streak: int,
+    selected_backoff: float,
+) -> WatchIterationSummary:
+    finished_at = _watch_iteration_timestamp()
+    error_text = _watch_phase_error("iteration", iteration_error)
+    return WatchIterationSummary(
+        iteration=iteration,
+        scanned_at=finished_at,
+        symbols_watched=len(watchlist.symbols),
+        valid_activations=0,
+        still_watching=0,
+        rejected_no_edge=0,
+        data_issues=0,
+        iteration_id=uuid4().hex,
+        status=status,
+        scheduled_start=scheduled_start_at,
+        actual_start=actual_start_at,
+        finished_at=finished_at,
+        duration_seconds=schedule.duration_seconds,
+        sleep_seconds=schedule.sleep_seconds,
+        cadence_lag_seconds=schedule.cadence_lag_seconds,
+        overrun_seconds=schedule.overrun_seconds,
+        missed_interval_count=schedule.missed_interval_count,
+        consecutive_failure_count=failure_streak,
+        selected_backoff_seconds=selected_backoff,
+        next_scheduled_attempt=_watch_timestamp_offset(finished_at, schedule.sleep_seconds),
+        queue_total=0,
+        outcome_counts={
+            "evaluated": 0,
+            "rejected": 0,
+            "errored": 0,
+            "timed_out": 0,
+            "not_run": 0,
+        },
+        phase_statuses={"iteration": status},
+        errors=(error_text,),
+        active_lifecycle_count=len(watchlist.active_lifecycle_symbols),
+        database_storage_status="NOT_ATTEMPTED",
+        next_scan_seconds=schedule.sleep_seconds,
+    )
+
+
+def _record_failed_watch_iteration(
+    args: argparse.Namespace,
+    summary: WatchIterationSummary,
+    *,
+    watchlist: WatchlistResolution,
+) -> None:
+    print(format_watch_iteration_summary(summary))
+    print(f"Iteration error: {summary.errors[0]}")
+    if args.watch_output_file is not None:
+        try:
+            append_watch_output(args.watch_output_file, summary)
+        except OSError as exc:
+            print(f"Warning: watch output persistence failed safely: {type(exc).__name__}: {exc}")
+
+    row = {
+        "run_id": summary.iteration_id,
+        "timestamp": summary.finished_at,
+        "watch_iteration": summary.iteration,
+        "status": summary.status,
+        "universe_mode": _display(getattr(watchlist.universe, "mode", NA)),
+        "universe_label": _display(getattr(watchlist.universe, "label", watchlist.source_label)),
+        "symbols_scanned": 0,
+        "watch_supervisor": summary.model_dump(mode="json"),
+    }
+    try:
+        SCAN_RUN_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SCAN_RUN_MANIFEST_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False))
+            handle.write("\n")
+        _write_nightly_scan_history(NIGHTLY_SCAN_HISTORY_PATH, row)
+    except OSError as exc:
+        print(f"Warning: failed iteration manifest persistence failed safely: {type(exc).__name__}: {exc}")
 
 
 async def _watchlist_for_watch_iteration(
@@ -2710,6 +3191,9 @@ async def _run_watch_scan_iteration(
     config: ScannerRunConfig,
     iteration: int,
 ) -> WatchScanExecution:
+    phase_statuses = {"universe": "SUCCESS"}
+    recoverable_errors: list[str] = []
+    telegram_outbox_status: dict[str, int] = {}
     cache = (
         MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
         if args.cache_enabled
@@ -2719,6 +3203,7 @@ async def _run_watch_scan_iteration(
     latest_results_by_symbol: dict[str, ScannerSymbolResult] = {}
     symbol_priority_plan = _symbol_priority_plan_for_watchlist(args, watchlist)
     queued_symbols = _queued_symbols_for_scan(args, watchlist, symbol_priority_plan)
+    phase_statuses["queue"] = "SUCCESS"
     symbol_queue_diagnostics = _symbol_queue_diagnostics(args, watchlist, symbol_priority_plan, queued_symbols)
     scan_config = (
         ScannerRunConfig.model_validate({**iteration_config.model_dump(), "symbols": list(queued_symbols)})
@@ -2746,7 +3231,10 @@ async def _run_watch_scan_iteration(
         latest_results_by_symbol[symbol_result.symbol] = symbol_result
         if args.progress:
             print(_progress_line(symbol_result, completed=completed, total=total))
-        if args.save_run is not None:
+        if (
+            args.save_run is not None
+            and phase_statuses.get("checkpoint_output") != "FAILED"
+        ):
             partial_result = _combined_run_result(
                 config=iteration_config,
                 watchlist_symbols=watchlist.symbols,
@@ -2762,22 +3250,43 @@ async def _run_watch_scan_iteration(
                 runtime_stats=None,
                 market_regime=None,
             )
-            _write_run_json(args.save_run, partial_result)
+            try:
+                _write_run_json(args.save_run, partial_result)
+            except OSError as exc:
+                phase_statuses["checkpoint_output"] = "FAILED"
+                recoverable_errors.append(_watch_phase_error("checkpoint_output", exc))
 
     async def progress(message: str) -> None:
         print(message, flush=True)
 
     if queued_symbols:
         runner = _scanner_runner(cache)
-        scan_result = await _run_scanner(
-            runner,
-            scan_config,
-            after_symbol=after_symbol if (args.progress or args.save_run is not None) else None,
-            progress=progress if args.progress else None,
-            resume_metadata=resume_metadata,
-        )
+        try:
+            scan_result = await _run_scanner(
+                runner,
+                scan_config,
+                after_symbol=after_symbol if (args.progress or args.save_run is not None) else None,
+                progress=progress if args.progress else None,
+                resume_metadata=resume_metadata,
+            )
+        except (KeyboardInterrupt, asyncio.CancelledError) as exc:
+            completed_results = tuple(
+                getattr(exc, "scanner_completed_results", ())
+            ) or tuple(latest_results_by_symbol.values())
+            setattr(exc, "watch_queue_symbols", queued_symbols)
+            setattr(exc, "watch_completed_results", completed_results)
+            setattr(exc, "watch_iteration_watchlist", watchlist)
+            raise
         for symbol_result in scan_result.results:
             latest_results_by_symbol[symbol_result.symbol] = symbol_result
+        missing_reason = (
+            "global_timeout_not_run"
+            if scan_result.runtime_stats.global_timeout_hit
+            else "scanner_result_missing_not_run"
+        )
+        for symbol in queued_symbols:
+            if symbol not in latest_results_by_symbol:
+                latest_results_by_symbol[symbol] = _not_run_symbol_result(symbol, reason=missing_reason)
 
         result = _combined_run_result(
             config=iteration_config,
@@ -2806,19 +3315,92 @@ async def _run_watch_scan_iteration(
             market_regime=None,
         )
     storage_run_id = scan_run_id
-    result = _apply_lifecycle_if_enabled(args, result, scan_run_id=storage_run_id)
-    await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=storage_run_id)
-    result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
+    phase_statuses["scanner"] = _scanner_phase_status(result, queued_symbols)
+    if _lifecycle_enabled(args):
+        try:
+            result = _apply_lifecycle_if_enabled(args, result, scan_run_id=storage_run_id)
+        except (Exception, SystemExit) as exc:
+            if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
+                raise
+            phase_statuses["lifecycle"] = "FAILED"
+            recoverable_errors.append(_watch_phase_error("lifecycle", exc))
+        else:
+            lifecycle_summary = result.scanner_process_summary
+            phase_statuses["lifecycle"] = str(lifecycle_summary.get("status", "SUCCESS"))
+            for item in lifecycle_summary.get("errors", ()):
+                if isinstance(item, Mapping):
+                    recoverable_errors.append(
+                        f"lifecycle:{item.get('symbol', NA)}:{item.get('detail', NA)}"
+                    )
+    else:
+        phase_statuses["lifecycle"] = "SKIPPED"
+    if _telegram_lifecycle_public_delivery_enabled(args):
+        try:
+            telegram_summary = await _deliver_telegram_manual_signals_if_enabled(
+                args, result, scan_run_id=storage_run_id
+            )
+        except (Exception, SystemExit) as exc:
+            if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
+                raise
+            phase_statuses["telegram_outbox"] = "FAILED"
+            recoverable_errors.append(_watch_phase_error("telegram_outbox", exc))
+        else:
+            telegram_outbox_status = _telegram_outbox_status_summary(telegram_summary)
+            phase_statuses["telegram_outbox"] = _telegram_outbox_phase_status(telegram_outbox_status)
+    else:
+        phase_statuses["telegram_outbox"] = "SKIPPED"
+    symbol_health_enabled = bool(
+        symbol_priority_plan.enabled or args.show_symbol_health or args.store_scan
+    )
+    try:
+        result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
+    except (Exception, SystemExit) as exc:
+        if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
+            raise
+        phase_statuses["symbol_health"] = "FAILED"
+        recoverable_errors.append(_watch_phase_error("symbol_health", exc))
+    else:
+        phase_statuses["symbol_health"] = "SUCCESS" if symbol_health_enabled else "SKIPPED"
+    outcome_counts = _queued_symbol_outcome_counts(result, queued_symbols)
+    result = result.model_copy(
+        update={
+            "resume_metadata": {
+                **result.resume_metadata,
+                "watch_phase_statuses": dict(phase_statuses),
+                "watch_recoverable_errors": list(recoverable_errors),
+                "telegram_outbox_status": dict(telegram_outbox_status),
+                "queue_outcome_counts": dict(outcome_counts),
+            }
+        }
+    )
     ranked_results = rank_scan_results(result.results, rank_results=args.rank_results)
     portfolio_selection = _portfolio_selection_for_result(args, result) if args.portfolio_select else None
     if portfolio_selection is not None:
         ranked_results = _ranked_results_with_selected_first(ranked_results, portfolio_selection)
 
-    if args.output_json is not None:
-        _write_run_json(args.output_json, result, ranked_results=ranked_results, portfolio_selection=portfolio_selection)
-    if args.save_run is not None:
-        _write_run_json(args.save_run, result, ranked_results=ranked_results, portfolio_selection=portfolio_selection)
+    output_requested = args.output_json is not None or args.save_run is not None
+    try:
+        if args.output_json is not None:
+            _write_run_json(args.output_json, result, ranked_results=ranked_results, portfolio_selection=portfolio_selection)
+        if args.save_run is not None:
+            _write_run_json(args.save_run, result, ranked_results=ranked_results, portfolio_selection=portfolio_selection)
+    except (Exception, SystemExit) as exc:
+        if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
+            raise
+        phase_statuses["output_files"] = "FAILED"
+        recoverable_errors.append(_watch_phase_error("output_files", exc))
+    else:
+        phase_statuses["output_files"] = "SUCCESS" if output_requested else "SKIPPED"
 
+    result = result.model_copy(
+        update={
+            "resume_metadata": {
+                **result.resume_metadata,
+                "watch_phase_statuses": dict(phase_statuses),
+                "watch_recoverable_errors": list(recoverable_errors),
+            }
+        }
+    )
     return WatchScanExecution(
         result=result,
         ranked_results=ranked_results,
@@ -2826,6 +3408,9 @@ async def _run_watch_scan_iteration(
         symbol_priority_plan=symbol_priority_plan,
         queued_symbols=queued_symbols,
         storage_run_id=storage_run_id,
+        phase_statuses=phase_statuses,
+        recoverable_errors=tuple(recoverable_errors),
+        telegram_outbox_status=telegram_outbox_status,
     )
 
 
