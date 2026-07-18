@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from app.alerts.telegram_outbox import SQLitePublicTelegramOutbox
 from app.analytics.setup_quality import validate_setup_quality
 from app.backtesting import (
     ReplayDirection,
@@ -1063,7 +1064,9 @@ def _representative_v14_rows(db_path: Path) -> dict[str, list[tuple[object, ...]
                 """
                 SELECT lifecycle_id, symbol, mode, direction, current_state,
                        previous_state, first_seen_at, last_seen_at,
-                       last_transition_at, confirmed_at, setup_identity
+                       last_transition_at, confirmed_at, entry_low, entry_high,
+                       stop_loss, tp1, tp2, tp3, rr, invalidation_logic,
+                       setup_identity
                 FROM setup_lifecycle_records
                 WHERE lifecycle_id = 'v14-lifecycle'
                 """
@@ -1226,6 +1229,14 @@ def test_schema_v14_fixture_matches_pre_outcome_pre_outbox_contract(
             "2026-07-01T10:00:00Z",
             "2026-07-01T10:00:00Z",
             "2026-07-01T10:00:00Z",
+            "100",
+            "101",
+            "95",
+            "105",
+            "110",
+            "115",
+            "3.0",
+            "Invalid below 95",
             "v14-plan",
         )
     ]
@@ -1308,6 +1319,20 @@ def test_schema_v14_to_v16_preserves_lifecycle_and_telegram_data(
     _create_schema_v14_lifecycle_delivery_fixture(db_path)
     before = _representative_v14_rows(db_path)
 
+    with sqlite3.connect(db_path) as connection:
+        before_counts = {
+            table: int(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            )
+            for table in (
+                "setup_lifecycle_records",
+                "setup_lifecycle_events",
+                "setup_outcome_analytics",
+                "telegram_alert_attempts",
+                "public_alert_events",
+            )
+        }
+
     with open_initialized_database(db_path):
         pass
 
@@ -1345,9 +1370,44 @@ def test_schema_v14_to_v16_preserves_lifecycle_and_telegram_data(
             ORDER BY id
             """
         ).fetchall()
+        after_counts = {
+            table: int(
+                connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            )
+            for table in before_counts
+        }
+        foreign_key_violations = connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+        orphan_event_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM setup_lifecycle_events AS event
+                LEFT JOIN setup_lifecycle_records AS lifecycle
+                  ON lifecycle.lifecycle_id = event.lifecycle_id
+                WHERE lifecycle.lifecycle_id IS NULL
+                """
+            ).fetchone()[0]
+        )
+        orphan_analytics_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM setup_outcome_analytics AS analytics
+                LEFT JOIN setup_lifecycle_records AS lifecycle
+                  ON lifecycle.lifecycle_id = analytics.lifecycle_id
+                WHERE lifecycle.lifecycle_id IS NULL
+                """
+            ).fetchone()[0]
+        )
 
     assert progress_count == 0
     assert part_count == 0
+    assert after_counts == before_counts
+    assert foreign_key_violations == []
+    assert orphan_event_count == 0
+    assert orphan_analytics_count == 0
     assert attempts == [
         ("v14-sent-signal", "SENT", "v14-sent-hash", None, None, 1),
         ("v14-reserved-signal", "UNCERTAIN", "v14-reserved-hash", None, None, 1),
@@ -1374,6 +1434,26 @@ def test_schema_v14_to_v16_preserves_lifecycle_and_telegram_data(
             "legacy_reserved_acceptance_unknown",
         ),
     ]
+
+    with open_initialized_database(db_path) as connection:
+        outbox = SQLitePublicTelegramOutbox(connection)
+        sent = outbox.claim(
+            event_id=71,
+            reservation_id=61,
+            now="2026-07-01T11:00:00Z",
+            attempt_id="should-not-claim-sent",
+        )
+        uncertain = outbox.claim(
+            event_id=72,
+            reservation_id=62,
+            now="2026-07-01T11:00:00Z",
+            attempt_id="should-not-claim-uncertain",
+        )
+
+    assert sent.claim is None
+    assert sent.state == "SENT"
+    assert uncertain.claim is None
+    assert uncertain.state == "UNCERTAIN"
 
 
 def test_schema_v14_to_v16_migration_is_idempotent(tmp_path: Path) -> None:
