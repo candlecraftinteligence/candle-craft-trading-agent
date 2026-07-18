@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
@@ -10,6 +11,8 @@ WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
 WRITABLE_SYNCHRONOUS_LEVEL = 2
 WRITABLE_WAL_AUTOCHECKPOINT_PAGES = 1_000
+WAL_INITIALIZATION_LOCK_SLICE_MS = 250
+WAL_INITIALIZATION_RETRY_INTERVAL_SECONDS = 0.025
 
 
 class StorageError(RuntimeError):
@@ -60,24 +63,11 @@ def connect_database(
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
 
-        current_journal_mode = _pragma_text(connection, "journal_mode")
-        if current_journal_mode != WRITABLE_JOURNAL_MODE:
-            requested_journal_mode = _pragma_text(
-                connection,
-                f"journal_mode = {WRITABLE_JOURNAL_MODE.upper()}",
-            )
-            if requested_journal_mode != WRITABLE_JOURNAL_MODE:
-                raise StorageError(
-                    "SQLite refused required WAL journal mode for writable database "
-                    f"{database_path}: returned {requested_journal_mode or 'no value'}."
-                )
-
-        verified_journal_mode = _pragma_text(connection, "journal_mode")
-        if verified_journal_mode != WRITABLE_JOURNAL_MODE:
-            raise StorageError(
-                "Writable database did not remain in required WAL journal mode "
-                f"for {database_path}: returned {verified_journal_mode or 'no value'}."
-            )
+        _ensure_writable_journal_mode(
+            connection,
+            database_path,
+            timeout_ms=timeout_ms,
+        )
 
         connection.execute(f"PRAGMA synchronous = {WRITABLE_SYNCHRONOUS}")
         connection.execute(
@@ -171,6 +161,69 @@ def _pragma_text(connection: sqlite3.Connection, expression: str) -> str:
     if row is None or row[0] is None:
         return ""
     return str(row[0]).strip().lower()
+
+
+def _ensure_writable_journal_mode(
+    connection: sqlite3.Connection,
+    database_path: Path,
+    *,
+    timeout_ms: int,
+) -> None:
+    """Enable WAL with bounded retries when concurrent first-openers hold SQLite locks."""
+
+    deadline = time.monotonic() + (timeout_ms / 1_000)
+    lock_slice_ms = min(timeout_ms, WAL_INITIALIZATION_LOCK_SLICE_MS)
+    connection.execute(f"PRAGMA busy_timeout = {lock_slice_ms}")
+    try:
+        while True:
+            try:
+                current_journal_mode = _pragma_text(connection, "journal_mode")
+                if current_journal_mode != WRITABLE_JOURNAL_MODE:
+                    requested_journal_mode = _pragma_text(
+                        connection,
+                        f"journal_mode = {WRITABLE_JOURNAL_MODE.upper()}",
+                    )
+                    if requested_journal_mode != WRITABLE_JOURNAL_MODE:
+                        raise StorageError(
+                            "SQLite refused required WAL journal mode for writable database "
+                            f"{database_path}: returned "
+                            f"{requested_journal_mode or 'no value'}."
+                        )
+
+                verified_journal_mode = _pragma_text(connection, "journal_mode")
+                if verified_journal_mode != WRITABLE_JOURNAL_MODE:
+                    raise StorageError(
+                        "Writable database did not remain in required WAL journal mode "
+                        f"for {database_path}: returned "
+                        f"{verified_journal_mode or 'no value'}."
+                    )
+                return
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_lock_error(exc):
+                    raise
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise StorageError(
+                        "Timed out while enabling required WAL journal mode for writable "
+                        f"database {database_path} after {timeout_ms} ms because another "
+                        "SQLite connection retained the initialization lock."
+                    ) from exc
+                time.sleep(
+                    min(
+                        WAL_INITIALIZATION_RETRY_INTERVAL_SECONDS,
+                        remaining_seconds,
+                    )
+                )
+    finally:
+        connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+
+
+def _is_sqlite_lock_error(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if error_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        return True
+    message = str(exc).strip().lower()
+    return "locked" in message or "busy" in message
 
 
 def _verify_writable_profile(
