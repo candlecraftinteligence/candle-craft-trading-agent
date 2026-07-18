@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
@@ -166,20 +167,97 @@ class SetupLifecycleService:
         timestamp = now or now_utc_iso()
         updated_results: list[ScannerSymbolResult] = []
         process_summary = _empty_process_summary(scanned_symbols=len(result.results))
+        prepared: list[tuple[ScannerSymbolResult, LifecycleObservation | None]] = []
+        for symbol_result in result.results:
+            status = getattr(symbol_result.status, "value", symbol_result.status)
+            if status == "not_run":
+                prepared.append((symbol_result, None))
+                process_summary["skipped_not_run_symbols"] += 1
+                continue
+            try:
+                observation = observation_from_symbol_result(
+                    symbol_result, min_score_for_idea=result.config.min_score_for_idea
+                )
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                _record_lifecycle_symbol_error(process_summary, symbol_result.symbol, exc)
+                prepared.append((symbol_result, None))
+                continue
+            prepared.append((symbol_result, observation))
+
         health_records = _load_health_records(self.database_path, tuple(item.symbol for item in result.results))
         with SQLiteSetupLifecycleRepository(self.database_path) as repository:
-            for symbol_result in result.results:
-                updated, meta = self._apply_to_symbol_result_with_meta(
+            connection = repository.connection
+            assert connection is not None
+            connection.execute("BEGIN IMMEDIATE")
+            for symbol_result, observation in prepared:
+                if observation is None:
+                    updated_results.append(symbol_result)
+                    continue
+                updated, meta, error = self._apply_to_symbol_result_isolated(
                     symbol_result,
+                    observation=observation,
                     repository=repository,
                     scan_run_id=scan_run_id,
                     now=timestamp,
                     symbol_health_record=health_records.get(symbol_result.symbol),
                     min_score_for_idea=result.config.min_score_for_idea,
                 )
+                if error is not None:
+                    _record_lifecycle_symbol_error(process_summary, symbol_result.symbol, error)
+                    updated_results.append(symbol_result)
+                    continue
+                assert updated is not None
                 updated_results.append(updated)
                 _add_process_meta(process_summary, meta)
-        return result.model_copy(update={"results": tuple(updated_results), "scanner_process_summary": process_summary})
+        process_summary["processed_symbols"] = (
+            len(updated_results)
+            - process_summary["failed_symbols"]
+            - process_summary["skipped_not_run_symbols"]
+        )
+        process_summary["status"] = "PARTIAL" if process_summary["failed_symbols"] else "SUCCESS"
+        return result.model_copy(
+            update={"results": tuple(updated_results), "scanner_process_summary": process_summary}
+        )
+
+    def _apply_to_symbol_result_isolated(
+        self,
+        symbol_result: ScannerSymbolResult,
+        *,
+        observation: LifecycleObservation,
+        repository: SQLiteSetupLifecycleRepository,
+        scan_run_id: str | None,
+        now: str,
+        symbol_health_record: Any | None,
+        min_score_for_idea: Any,
+    ) -> tuple[
+        ScannerSymbolResult | None,
+        dict[str, Any],
+        Exception | None,
+    ]:
+        connection = repository.connection
+        assert connection is not None
+        connection.execute("SAVEPOINT lifecycle_symbol")
+        try:
+            updated, meta = self._apply_to_symbol_result_with_meta(
+                symbol_result,
+                observation=observation,
+                repository=repository,
+                scan_run_id=scan_run_id,
+                now=now,
+                symbol_health_record=symbol_health_record,
+                min_score_for_idea=min_score_for_idea,
+            )
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            connection.execute("ROLLBACK TO lifecycle_symbol")
+            connection.execute("RELEASE lifecycle_symbol")
+            return None, {}, exc
+        except sqlite3.Error:
+            connection.execute("ROLLBACK TO lifecycle_symbol")
+            connection.execute("RELEASE lifecycle_symbol")
+            raise
+        else:
+            connection.execute("RELEASE lifecycle_symbol")
+            return updated, meta, None
 
     def apply_to_symbol_result(
         self,
@@ -203,13 +281,15 @@ class SetupLifecycleService:
         self,
         symbol_result: ScannerSymbolResult,
         *,
+        observation: LifecycleObservation | None = None,
         repository: SQLiteSetupLifecycleRepository,
         scan_run_id: str | None,
         now: str,
         symbol_health_record: Any | None,
         min_score_for_idea: Any,
     ) -> tuple[ScannerSymbolResult, dict[str, Any]]:
-        observation = observation_from_symbol_result(symbol_result, min_score_for_idea=min_score_for_idea)
+        if observation is None:
+            observation = observation_from_symbol_result(symbol_result, min_score_for_idea=min_score_for_idea)
         existing = repository.get_record(
             symbol=observation.symbol,
             mode=observation.mode,
@@ -555,10 +635,7 @@ def _setup_tolerance_pct(value: Decimal | str | None) -> Decimal:
 def _load_health_records(database_path: Path | str, symbols: Sequence[str]) -> dict[str, Any]:
     if not symbols:
         return {}
-    try:
-        return load_symbol_health_records(database_path, symbols)
-    except Exception:
-        return {}
+    return load_symbol_health_records(database_path, symbols)
 
 
 def _symbol_health_penalty_cycles(record: Any | None) -> int:
@@ -583,6 +660,11 @@ def _symbol_health_penalty_cycles(record: Any | None) -> int:
 def _empty_process_summary(*, scanned_symbols: int) -> dict[str, Any]:
     return {
         "scanned_symbols": scanned_symbols,
+        "processed_symbols": 0,
+        "failed_symbols": 0,
+        "skipped_not_run_symbols": 0,
+        "status": "SUCCESS",
+        "errors": [],
         "new_candidates": 0,
         "merged_duplicates": 0,
         "confirmation_pending": 0,
@@ -592,6 +674,22 @@ def _empty_process_summary(*, scanned_symbols: int) -> dict[str, Any]:
         "actionable_a_grade": 0,
         "symbol_health_penalties_applied": 0,
     }
+
+
+def _record_lifecycle_symbol_error(
+    summary: dict[str, Any],
+    symbol: str,
+    exc: Exception,
+) -> None:
+    summary["failed_symbols"] = int(summary.get("failed_symbols", 0)) + 1
+    errors = summary.setdefault("errors", [])
+    errors.append(
+        {
+            "symbol": symbol,
+            "type": type(exc).__name__,
+            "detail": str(exc).strip() or type(exc).__name__,
+        }
+    )
 
 
 def _add_process_meta(summary: dict[str, Any], meta: Mapping[str, Any]) -> None:

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from decimal import Decimal
 
+import pytest
+
+from app.lifecycle import service as lifecycle_service_module
 from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.analytics.symbol_health import SymbolHealthRecord
@@ -1988,3 +1992,87 @@ def test_phase_37_lifecycle_json_output_includes_analytics_keys(tmp_path, monkey
     ):
         assert key in payload
     assert f"Exported research report: {output_path}" in captured.out
+
+
+def test_one_malformed_lifecycle_candidate_does_not_erase_valid_candidates(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    bad = _near_miss_symbol("BADUSDT")
+    good = _near_miss_symbol("GOODUSDT")
+    single = _scan_result(good)
+    config = ScannerRunConfig.model_validate(
+        {**single.config.model_dump(mode="python"), "symbols": ["BADUSDT", "GOODUSDT"]}
+    )
+    run_result = single.model_copy(
+        update={
+            "config": config,
+            "results": (bad, good),
+            "scanned_symbols": 2,
+        }
+    )
+    original = lifecycle_service_module.observation_from_symbol_result
+
+    def malformed_one(symbol_result, *, min_score_for_idea):
+        if symbol_result.symbol == "BADUSDT":
+            raise ValueError("malformed lifecycle observation")
+        return original(symbol_result, min_score_for_idea=min_score_for_idea)
+
+    monkeypatch.setattr(
+        lifecycle_service_module,
+        "observation_from_symbol_result",
+        malformed_one,
+    )
+    database_path = tmp_path / "isolated_lifecycle.db"
+
+    updated = apply_lifecycle_to_run_result(
+        run_result,
+        database_path=database_path,
+        scan_run_id="run_isolated",
+        now="2026-07-17T10:00:00+00:00",
+    )
+
+    assert updated.results[0].lifecycle_state is None
+    assert updated.results[1].lifecycle_state is not None
+    assert updated.scanner_process_summary["status"] == "PARTIAL"
+    assert updated.scanner_process_summary["failed_symbols"] == 1
+    assert updated.scanner_process_summary["errors"][0]["symbol"] == "BADUSDT"
+    with SQLiteSetupLifecycleRepository(database_path) as repository:
+        assert repository.list_records_for_symbol(symbol="BADUSDT") == ()
+        assert len(repository.list_records_for_symbol(symbol="GOODUSDT")) == 1
+
+
+def test_lifecycle_transaction_failure_propagates_and_rolls_back(tmp_path, monkeypatch) -> None:
+    database_path = tmp_path / "failed_transaction.db"
+    original_upsert = SQLiteSetupLifecycleRepository.upsert_record
+    upsert_calls = 0
+
+    def fail_second_upsert(self, record):
+        nonlocal upsert_calls
+        upsert_calls += 1
+        if upsert_calls == 2:
+            raise sqlite3.OperationalError("database disk I/O failure")
+        return original_upsert(self, record)
+
+    monkeypatch.setattr(SQLiteSetupLifecycleRepository, "upsert_record", fail_second_upsert)
+    first = _near_miss_symbol("ONEUSDT")
+    second = _near_miss_symbol("TWOUSDT")
+    single = _scan_result(first)
+    config = ScannerRunConfig.model_validate(
+        {**single.config.model_dump(mode="python"), "symbols": ["ONEUSDT", "TWOUSDT"]}
+    )
+    run_result = single.model_copy(
+        update={"config": config, "results": (first, second), "scanned_symbols": 2}
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        apply_lifecycle_to_run_result(
+            run_result,
+            database_path=database_path,
+            scan_run_id="run_transaction_failure",
+            now="2026-07-17T10:00:00+00:00",
+        )
+
+    with SQLiteSetupLifecycleRepository(database_path) as repository:
+        assert repository.list_records_for_symbol(symbol="ONEUSDT") == ()
+        assert repository.list_records_for_symbol(symbol="TWOUSDT") == ()

@@ -679,15 +679,76 @@ def test_scan_timeout_stops_gracefully_with_partial_results() -> None:
     )
 
     assert result.scanned_symbols == 1
+    assert len(result.results) == 2
     assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
     assert "full scan timeout exceeded after 0.01 seconds" in str(result.results[0].error_message)
     assert result.results[0].timed_out is True
     assert result.results[0].timeout_status == "global_timeout"
+    assert result.results[1].symbol == "ETHUSDT"
+    assert result.results[1].status == ScannerPipelineStatus.NOT_RUN
+    assert result.results[1].iteration_outcome == "not_run"
+    assert result.results[1].not_run_reason == "global_timeout_not_run"
     assert result.runtime_stats.global_timeout_hit is True
     assert result.runtime_stats.timeout_count == 1
     assert result.runtime_stats.skipped_symbols == 1
+    assert result.runtime_stats.outcome_counts == {
+        "evaluated": 0,
+        "rejected": 0,
+        "errored": 0,
+        "timed_out": 1,
+        "not_run": 1,
+    }
     assert any(symbol == "BTCUSDT" for symbol, _interval in client.started_klines)
     assert all(symbol != "ETHUSDT" for symbol, _interval in client.started_klines)
+
+
+def test_owned_http_client_closes_when_market_regime_fetch_fails(monkeypatch) -> None:
+    class OwnedFailingClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def get_klines(self, symbol: str, interval: str, limit: int):
+            raise OSError("temporary market-regime transport failure")
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    client = OwnedFailingClient()
+    monkeypatch.setattr(
+        scanner_runner_module,
+        "BinanceFuturesClient",
+        lambda *args, **kwargs: client,
+    )
+
+    result = run(ScannerRunner().run(_config(["BTCUSDT"], market_regime_enabled=True)))
+
+    assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
+    assert "market-regime transport" in str(result.results[0].error_message)
+    assert client.closed is True
+
+
+def test_owned_http_client_closes_and_cancellation_propagates(monkeypatch) -> None:
+    class OwnedCancelledClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def get_klines(self, symbol: str, interval: str, limit: int):
+            raise asyncio.CancelledError
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    client = OwnedCancelledClient()
+    monkeypatch.setattr(
+        scanner_runner_module,
+        "BinanceFuturesClient",
+        lambda *args, **kwargs: client,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        run(ScannerRunner().run(_config(["BTCUSDT"], market_regime_enabled=True)))
+
+    assert client.closed is True
 
 
 def test_one_slow_symbol_does_not_stop_full_scan_runtime_stats() -> None:

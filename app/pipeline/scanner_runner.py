@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -116,6 +117,7 @@ TARGET_INTEGRITY_BLOCKING_FAILURE_TYPES = {
 
 
 class ScannerPipelineStatus(str, Enum):
+    NOT_RUN = "not_run"
     SCAN_ERROR = "scan_error"
     SCANNED_NO_SETUP = "scanned_no_setup"
     REJECTED_BY_TECHNICAL = "rejected_by_technical"
@@ -340,6 +342,10 @@ class ScannerSymbolResult(BaseModel):
     runtime_seconds: float | None = None
     timed_out: bool = False
     timeout_status: Literal["none", "request_timeout", "symbol_timeout", "global_timeout"] = "none"
+    iteration_outcome: Literal[
+        "evaluated", "rejected", "errored", "timed_out", "not_run"
+    ] | None = None
+    not_run_reason: str = NA
     candle_count: int = 0
     current_price: MaybeDecimal = NA
     funding_rate: MaybeDecimal = NA
@@ -444,6 +450,32 @@ class ScannerSymbolResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    @model_validator(mode="after")
+    def _derive_iteration_outcome(self) -> ScannerSymbolResult:
+        outcome = self.iteration_outcome
+        if outcome is None:
+            if self.status == ScannerPipelineStatus.NOT_RUN:
+                outcome = "not_run"
+            elif self.timed_out or self.timeout_status != "none":
+                outcome = "timed_out"
+            elif self.status in (ScannerPipelineStatus.SCAN_ERROR, ScannerPipelineStatus.FAILED):
+                outcome = "errored"
+            elif self.status in (
+                ScannerPipelineStatus.SCANNED_NO_SETUP,
+                ScannerPipelineStatus.REJECTED_BY_TECHNICAL,
+                ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,
+                ScannerPipelineStatus.REJECTED_BY_RISK,
+                ScannerPipelineStatus.REJECTED_BY_SCORING,
+                ScannerPipelineStatus.REJECTED_BY_REGIME,
+            ):
+                outcome = "rejected"
+            else:
+                outcome = "evaluated"
+            object.__setattr__(self, "iteration_outcome", outcome)
+        if outcome == "not_run" and self.not_run_reason == NA:
+            raise ValueError("NOT_RUN results require an explicit not_run_reason")
+        return self
+
 
 class ScannerRuntimeStats(BaseModel):
     total_runtime_seconds: float = 0.0
@@ -456,6 +488,12 @@ class ScannerRuntimeStats(BaseModel):
     errored_symbols: int = 0
     skipped_errored_symbols: int = 0
     global_timeout_hit: bool = False
+    queued_symbols: int = 0
+    evaluated_symbols: int = 0
+    rejected_symbols: int = 0
+    timed_out_symbols: int = 0
+    not_run_symbols: int = 0
+    outcome_counts: dict[str, int] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True)
 
@@ -617,18 +655,20 @@ class ScannerRunner:
         total_symbols = len(run_config.symbols)
         scan_started = time.monotonic()
         global_timeout_hit = False
-        market_regime_context = (
-            await self._fetch_market_regime_context(client, run_config, progress=progress)
-            if run_config.market_regime_enabled
-            else {"btc_candles": (), "eth_candles": (), "missing_data": ("market_regime: N/A",)}
-        )
+        market_regime_context = {
+            "btc_candles": (), "eth_candles": (), "missing_data": ("market_regime: N/A",)
+        }
         scan_deadline = (
-            time.monotonic() + run_config.scan_timeout_sec
+            scan_started + run_config.scan_timeout_sec
             if run_config.scan_timeout_sec is not None
             else None
         )
 
         try:
+            if run_config.market_regime_enabled:
+                market_regime_context = await self._fetch_market_regime_context(
+                    client, run_config, progress=progress
+                )
             for symbol_config in run_config.symbols:
                 if scan_deadline is not None and time.monotonic() >= scan_deadline:
                     global_timeout_hit = True
@@ -700,6 +740,18 @@ class ScannerRunner:
                     await _maybe_await(after_symbol(symbol_result, len(results), total_symbols))
                 if stop_after_symbol:
                     break
+            if global_timeout_hit and len(results) < total_symbols:
+                completed_symbols = {result.symbol for result in results}
+                for symbol_config in run_config.symbols:
+                    if symbol_config.symbol in completed_symbols:
+                        continue
+                    not_run_result = _not_run_result(symbol_config.symbol, reason="global_timeout_not_run")
+                    results.append(not_run_result)
+                    if after_symbol is not None:
+                        await _maybe_await(after_symbol(not_run_result, len(results), total_symbols))
+        except (KeyboardInterrupt, asyncio.CancelledError) as exc:
+            setattr(exc, "scanner_completed_results", tuple(results))
+            raise
         finally:
             if owns_client and hasattr(client, "aclose"):
                 await _maybe_await(client.aclose())
@@ -722,7 +774,9 @@ class ScannerRunner:
         return ScannerRunResult(
             config=run_config,
             results=adjusted_results,
-            scanned_symbols=len(adjusted_results),
+            scanned_symbols=sum(
+                1 for result in adjusted_results if result.iteration_outcome != "not_run"
+            ),
             failed_symbols=sum(1 for result in adjusted_results if _is_scan_error(result)),
             trade_ideas_created=sum(1 for result in adjusted_results if result.trade_idea is not None),
             dry_run_alerts_created=sum(
@@ -3468,6 +3522,8 @@ def _apply_market_regime_to_symbol(
     result: ScannerSymbolResult,
     market_regime: MarketRegimeResult,
 ) -> ScannerSymbolResult:
+    if result.status == ScannerPipelineStatus.NOT_RUN:
+        return result
     warnings = _symbol_regime_warnings(result, market_regime)
     setup_quality = _adjust_setup_quality_for_regime(result.setup_quality, result, market_regime)
     mode = _symbol_mode_for_regime(result)
@@ -3861,6 +3917,19 @@ def _is_scan_error(result: ScannerSymbolResult) -> bool:
     return result.status in (ScannerPipelineStatus.SCAN_ERROR, ScannerPipelineStatus.FAILED)
 
 
+def _not_run_result(symbol: str, *, reason: str) -> ScannerSymbolResult:
+    return ScannerSymbolResult(
+        symbol=symbol,
+        status=ScannerPipelineStatus.NOT_RUN,
+        status_history=(ScannerPipelineStatus.NOT_RUN,),
+        error_message=f"Symbol was not run: {reason}.",
+        iteration_outcome="not_run",
+        not_run_reason=reason,
+        rejection_stage=NA,
+        rejection_reasons=(),
+    )
+
+
 def _scan_error_result(
     symbol: str,
     reason: str,
@@ -3924,9 +3993,13 @@ def _runtime_stats_for(
     slowest_seconds = 0.0
     if runtimes:
         slowest_symbol, slowest_seconds = max(runtimes, key=lambda item: item[1])
-    errored_symbols = sum(1 for result in results if _is_scan_error(result))
-    skipped_symbols = max(0, total_symbols - len(results))
-    timeout_count = sum(1 for result in results if result.timed_out)
+    outcomes = Counter(result.iteration_outcome or "errored" for result in results)
+    evaluated_symbols = outcomes["evaluated"]
+    rejected_symbols = outcomes["rejected"]
+    timed_out_symbols = outcomes["timed_out"]
+    not_run_symbols = outcomes["not_run"]
+    errored_symbols = outcomes["errored"] + timed_out_symbols
+    skipped_symbols = not_run_symbols
     return ScannerRuntimeStats(
         total_runtime_seconds=_rounded_seconds(total_runtime_seconds),
         average_seconds_per_symbol=_rounded_seconds(sum(seconds for _symbol, seconds in runtimes) / len(runtimes))
@@ -3934,12 +4007,24 @@ def _runtime_stats_for(
         else 0.0,
         slowest_symbol=slowest_symbol,
         slowest_symbol_seconds=_rounded_seconds(slowest_seconds),
-        timeout_count=timeout_count,
-        completed_symbols=max(0, len(results) - errored_symbols),
+        timeout_count=timed_out_symbols,
+        completed_symbols=evaluated_symbols + rejected_symbols,
         skipped_symbols=skipped_symbols,
         errored_symbols=errored_symbols,
         skipped_errored_symbols=skipped_symbols + errored_symbols,
         global_timeout_hit=global_timeout_hit,
+        queued_symbols=total_symbols,
+        evaluated_symbols=evaluated_symbols,
+        rejected_symbols=rejected_symbols,
+        timed_out_symbols=timed_out_symbols,
+        not_run_symbols=not_run_symbols,
+        outcome_counts={
+            "evaluated": evaluated_symbols,
+            "rejected": rejected_symbols,
+            "errored": outcomes["errored"],
+            "timed_out": timed_out_symbols,
+            "not_run": not_run_symbols,
+        },
     )
 
 

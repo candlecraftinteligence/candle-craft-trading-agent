@@ -293,6 +293,9 @@ def update_symbol_health_records(
     priority = priority_by_symbol or {}
 
     for symbol_result in symbol_results:
+        status = getattr(symbol_result, "status", NA)
+        if _status_key(getattr(status, "value", status)) == "not_run":
+            continue
         symbol = _symbol_from_result(symbol_result)
         if symbol == NA:
             continue
