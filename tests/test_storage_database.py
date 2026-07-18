@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +32,7 @@ from app.storage.database import (
     StorageError,
     open_initialized_database,
 )
+from app.storage.maintenance import create_verified_backup, verify_backup
 from app.storage.models import WatchIterationMetadata
 from app.storage.repositories import export_history_payload, list_scan_history, store_scan_result
 
@@ -846,6 +849,285 @@ def test_corrupted_db_is_reported_cleanly(tmp_path) -> None:
         list_scan_history(db_path, limit=10)
 
 
+def _create_schema_v14_lifecycle_delivery_fixture(db_path: Path) -> None:
+    """Create the representative schema contract immediately before outcome v15."""
+
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            DROP TABLE IF EXISTS public_alert_delivery_parts;
+            DROP TABLE IF EXISTS setup_lifecycle_outcome_progress;
+            DROP TABLE telegram_alert_attempts;
+            DROP TABLE public_alert_events;
+
+            CREATE TABLE telegram_alert_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                previous_state TEXT NOT NULL DEFAULT 'N/A',
+                new_state TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL,
+                sent_at TEXT,
+                attempted_at TEXT NOT NULL DEFAULT 'N/A',
+                telegram_status TEXT NOT NULL,
+                message_hash TEXT NOT NULL,
+                scan_run_id TEXT,
+                attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
+                setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                rr_planned TEXT NOT NULL DEFAULT 'N/A',
+                min_rr TEXT NOT NULL DEFAULT 'N/A',
+                opportunity_score TEXT NOT NULL DEFAULT 'N/A',
+                min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+                technical_score TEXT NOT NULL DEFAULT 'N/A',
+                price_level TEXT NOT NULL DEFAULT 'N/A',
+                entry_low TEXT NOT NULL DEFAULT 'N/A',
+                entry_high TEXT NOT NULL DEFAULT 'N/A',
+                stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                tp1 TEXT NOT NULL DEFAULT 'N/A',
+                tp2 TEXT NOT NULL DEFAULT 'N/A',
+                tp3 TEXT NOT NULL DEFAULT 'N/A',
+                blocked_reason TEXT NOT NULL DEFAULT 'N/A',
+                invalid_target_fields TEXT NOT NULL DEFAULT 'N/A',
+                error_message TEXT NOT NULL DEFAULT 'N/A',
+                first_seen_at TEXT NOT NULL DEFAULT 'N/A',
+                last_seen_at TEXT NOT NULL DEFAULT 'N/A',
+                seen_count INTEGER NOT NULL DEFAULT 1,
+                last_scan_run_id TEXT,
+                last_error_message TEXT NOT NULL DEFAULT 'N/A',
+                public_watchlist_plan_id TEXT NOT NULL DEFAULT 'N/A',
+                public_watchlist_event_key TEXT NOT NULL DEFAULT 'N/A',
+                public_alert_event_type TEXT NOT NULL DEFAULT 'N/A',
+                normalized_entry_zone_low TEXT NOT NULL DEFAULT 'N/A',
+                normalized_entry_zone_high TEXT NOT NULL DEFAULT 'N/A',
+                normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
+                dedupe_status TEXT NOT NULL DEFAULT 'N/A',
+                dedupe_reason TEXT NOT NULL DEFAULT 'N/A',
+                UNIQUE(signal_id, alert_type)
+            );
+
+            CREATE INDEX ix_telegram_alert_attempts_signal
+                ON telegram_alert_attempts(signal_id, alert_type);
+            CREATE INDEX ix_telegram_alert_attempts_scan_run
+                ON telegram_alert_attempts(scan_run_id);
+            CREATE INDEX ix_telegram_alert_attempts_public_plan
+                ON telegram_alert_attempts(public_watchlist_plan_id);
+            CREATE UNIQUE INDEX ux_telegram_alert_attempts_public_event_sent
+                ON telegram_alert_attempts(public_watchlist_event_key)
+                WHERE telegram_status = 'sent'
+                  AND public_watchlist_event_key IS NOT NULL
+                  AND public_watchlist_event_key NOT IN ('', 'N/A');
+            CREATE UNIQUE INDEX ux_telegram_alert_attempts_public_event_active
+                ON telegram_alert_attempts(public_watchlist_event_key)
+                WHERE telegram_status IN ('reserved', 'sent')
+                  AND public_watchlist_event_key IS NOT NULL
+                  AND public_watchlist_event_key NOT IN ('', 'N/A');
+
+            CREATE TABLE public_alert_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_plan_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                event_key TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                setup_family TEXT NOT NULL DEFAULT 'N/A',
+                normalized_zone_low TEXT NOT NULL DEFAULT 'N/A',
+                normalized_zone_high TEXT NOT NULL DEFAULT 'N/A',
+                normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
+                raw_entry_low TEXT NOT NULL DEFAULT 'N/A',
+                raw_entry_high TEXT NOT NULL DEFAULT 'N/A',
+                raw_stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                status TEXT NOT NULL,
+                reserved_at TEXT,
+                sent_at TEXT,
+                source_modes TEXT NOT NULL DEFAULT 'N/A',
+                matched_prior_alert_id INTEGER,
+                matched_prior_event_id INTEGER,
+                failure_reason TEXT NOT NULL DEFAULT 'N/A',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(event_key)
+            );
+
+            CREATE INDEX ix_public_alert_events_symbol_side_setup
+                ON public_alert_events(symbol, side, setup_family, event_type, status);
+            CREATE INDEX ix_public_alert_events_status
+                ON public_alert_events(status);
+
+            INSERT INTO setup_lifecycle_records (
+                lifecycle_id, symbol, mode, direction, current_state, previous_state,
+                first_seen_at, last_seen_at, last_transition_at, readiness_score,
+                quality_score, edge_score, regime_state, action_label, entry_low,
+                entry_high, stop_loss, tp1, tp2, tp3, rr, invalidation_logic,
+                confirmation_count, quality_grade_first_seen, quality_grade_current,
+                quality_grade_confirmed, confirmed_at, setup_identity
+            ) VALUES (
+                'v14-lifecycle', 'BTCUSDT', 'swing', 'long', 'CONFIRMED',
+                'WATCHLISTED', '2026-06-30T09:00:00Z', '2026-07-01T10:00:00Z',
+                '2026-07-01T10:00:00Z', 91, 88, '84', 'TRENDING',
+                'MANAGE', '100', '101', '95', '105', '110', '115', '3.0',
+                'Invalid below 95', 2, 'A', 'A', 'A',
+                '2026-07-01T10:00:00Z', 'v14-plan'
+            );
+
+            INSERT INTO setup_lifecycle_events (
+                event_id, lifecycle_id, timestamp, symbol, from_state, to_state,
+                reason, scan_run_id, readiness_score, quality_score, failed_gate, notes
+            ) VALUES (
+                41, 'v14-lifecycle', '2026-07-01T10:00:00Z', 'BTCUSDT',
+                'WATCHLISTED', 'CONFIRMED', 'confirmation_complete', 'v14-scan',
+                91, 88, 'N/A', 'closed candle confirmation'
+            );
+
+            INSERT INTO setup_outcome_analytics (
+                id, lifecycle_id, symbol, bias, first_seen_at, confirmed_at,
+                entry_zone, stop_loss, tp1, tp2, tp3, quality_at_first_detection,
+                quality_at_confirmation, rr, lifecycle_path, final_outcome,
+                failure_reason, outcome_reason, regime_context,
+                symbol_health_at_detection, raw_payload_json, created_at, updated_at
+            ) VALUES (
+                51, 'v14-lifecycle', 'BTCUSDT', 'long',
+                '2026-06-30T09:00:00Z', '2026-07-01T10:00:00Z', '100-101',
+                '95', '105', '110', '115', 'A', 'A', '3.0',
+                'WATCHLISTED>CONFIRMED>TP1', 'TP1', 'N/A', 'tp1_reached',
+                'TRENDING', '82', '{"fixture":"v14"}',
+                '2026-07-01T10:05:00Z', '2026-07-01T10:05:00Z'
+            );
+
+            INSERT INTO telegram_alert_attempts (
+                id, signal_id, symbol, direction, previous_state, new_state,
+                alert_type, lifecycle_state, sent_at, attempted_at,
+                telegram_status, message_hash, scan_run_id, attempted_alert_type,
+                first_seen_at, last_seen_at, public_watchlist_plan_id,
+                public_watchlist_event_key, public_alert_event_type,
+                normalized_entry_zone_low, normalized_entry_zone_high,
+                normalized_invalidation, dedupe_status, dedupe_reason
+            ) VALUES
+                (
+                    61, 'v14-sent-signal', 'BTCUSDT', 'long', 'N/A',
+                    'WATCHLISTED', 'WATCHLIST', 'WATCHLISTED',
+                    '2026-07-01T10:00:01Z', '2026-07-01T10:00:00Z', 'sent',
+                    'v14-sent-hash', 'v14-scan', 'WATCHLIST',
+                    '2026-07-01T10:00:00Z', '2026-07-01T10:00:01Z',
+                    'v14-sent-plan', 'v14-sent-plan|initial_watchlist',
+                    'initial_watchlist', '100', '101', '95', 'sent', 'N/A'
+                ),
+                (
+                    62, 'v14-reserved-signal', 'ETHUSDT', 'short', 'N/A',
+                    'WATCHLISTED', 'WATCHLIST', 'WATCHLISTED', NULL,
+                    '2026-07-01T10:01:00Z', 'reserved',
+                    'v14-reserved-hash', 'v14-scan', 'WATCHLIST',
+                    '2026-07-01T10:01:00Z', '2026-07-01T10:01:00Z',
+                    'v14-reserved-plan', 'v14-reserved-plan|initial_watchlist',
+                    'initial_watchlist', '200', '201', '205', 'reserved', 'N/A'
+                );
+
+            INSERT INTO public_alert_events (
+                id, canonical_plan_id, event_type, event_key, symbol, side,
+                setup_family, normalized_zone_low, normalized_zone_high,
+                normalized_invalidation, raw_entry_low, raw_entry_high,
+                raw_stop_loss, status, reserved_at, sent_at, source_modes,
+                matched_prior_alert_id, failure_reason, created_at, updated_at
+            ) VALUES
+                (
+                    71, 'v14-sent-plan', 'initial_watchlist',
+                    'v14-sent-plan|initial_watchlist', 'BTCUSDT', 'long',
+                    'swing', '100', '101', '95', '100', '101', '95', 'SENT',
+                    '2026-07-01T10:00:00Z', '2026-07-01T10:00:01Z', 'swing',
+                    61, 'N/A', '2026-07-01T10:00:00Z',
+                    '2026-07-01T10:00:01Z'
+                ),
+                (
+                    72, 'v14-reserved-plan', 'initial_watchlist',
+                    'v14-reserved-plan|initial_watchlist', 'ETHUSDT', 'short',
+                    'swing', '200', '201', '205', '200', '201', '205',
+                    'RESERVED', '2026-07-01T10:01:00Z', NULL, 'swing', 62,
+                    'N/A', '2026-07-01T10:01:00Z',
+                    '2026-07-01T10:01:02Z'
+                );
+
+            PRAGMA user_version = 14;
+            """
+        )
+        connection.commit()
+
+
+def _representative_v14_rows(db_path: Path) -> dict[str, list[tuple[object, ...]]]:
+    with sqlite3.connect(db_path) as connection:
+        return {
+            "lifecycle": connection.execute(
+                """
+                SELECT lifecycle_id, symbol, mode, direction, current_state,
+                       previous_state, first_seen_at, last_seen_at,
+                       last_transition_at, confirmed_at, setup_identity
+                FROM setup_lifecycle_records
+                WHERE lifecycle_id = 'v14-lifecycle'
+                """
+            ).fetchall(),
+            "events": connection.execute(
+                """
+                SELECT event_id, lifecycle_id, timestamp, from_state, to_state,
+                       reason, scan_run_id, notes
+                FROM setup_lifecycle_events
+                WHERE lifecycle_id = 'v14-lifecycle'
+                """
+            ).fetchall(),
+            "analytics": connection.execute(
+                """
+                SELECT id, lifecycle_id, symbol, final_outcome, outcome_reason,
+                       raw_payload_json, created_at, updated_at
+                FROM setup_outcome_analytics
+                WHERE lifecycle_id = 'v14-lifecycle'
+                """
+            ).fetchall(),
+            "attempts": connection.execute(
+                """
+                SELECT id, signal_id, telegram_status, sent_at, attempted_at,
+                       message_hash, public_watchlist_plan_id,
+                       public_watchlist_event_key
+                FROM telegram_alert_attempts
+                ORDER BY id
+                """
+            ).fetchall(),
+            "public_events": connection.execute(
+                """
+                SELECT id, canonical_plan_id, event_key, status, reserved_at,
+                       sent_at, matched_prior_alert_id, created_at, updated_at
+                FROM public_alert_events
+                ORDER BY id
+                """
+            ).fetchall(),
+        }
+
+
+def _schema_contract(db_path: Path) -> tuple[int, set[str], set[str], set[str]]:
+    with sqlite3.connect(db_path) as connection:
+        version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        attempt_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(telegram_alert_attempts)"
+            ).fetchall()
+        }
+        public_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(public_alert_events)"
+            ).fetchall()
+        }
+    return version, tables, attempt_columns, public_columns
+
+
 def _create_schema_v15_delivery_fixture(db_path) -> None:
     with sqlite3.connect(db_path) as connection:
         connection.executescript(
@@ -914,6 +1196,290 @@ def _create_schema_v15_delivery_fixture(db_path) -> None:
             """
         )
         connection.commit()
+
+
+def test_schema_v14_fixture_matches_pre_outcome_pre_outbox_contract(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "v14-contract.db"
+    _create_schema_v14_lifecycle_delivery_fixture(db_path)
+
+    version, tables, attempt_columns, public_columns = _schema_contract(db_path)
+    rows = _representative_v14_rows(db_path)
+
+    assert version == 14
+    assert "setup_lifecycle_outcome_progress" not in tables
+    assert "public_alert_delivery_parts" not in tables
+    assert "delivery_state" not in attempt_columns
+    assert "telegram_message_id" not in attempt_columns
+    assert "delivery_state" not in public_columns
+    assert "payload_text" not in public_columns
+    assert rows["lifecycle"] == [
+        (
+            "v14-lifecycle",
+            "BTCUSDT",
+            "swing",
+            "long",
+            "CONFIRMED",
+            "WATCHLISTED",
+            "2026-06-30T09:00:00Z",
+            "2026-07-01T10:00:00Z",
+            "2026-07-01T10:00:00Z",
+            "2026-07-01T10:00:00Z",
+            "v14-plan",
+        )
+    ]
+    assert rows["events"] == [
+        (
+            41,
+            "v14-lifecycle",
+            "2026-07-01T10:00:00Z",
+            "WATCHLISTED",
+            "CONFIRMED",
+            "confirmation_complete",
+            "v14-scan",
+            "closed candle confirmation",
+        )
+    ]
+    assert rows["analytics"] == [
+        (
+            51,
+            "v14-lifecycle",
+            "BTCUSDT",
+            "TP1",
+            "tp1_reached",
+            '{"fixture":"v14"}',
+            "2026-07-01T10:05:00Z",
+            "2026-07-01T10:05:00Z",
+        )
+    ]
+    assert rows["attempts"] == [
+        (
+            61,
+            "v14-sent-signal",
+            "sent",
+            "2026-07-01T10:00:01Z",
+            "2026-07-01T10:00:00Z",
+            "v14-sent-hash",
+            "v14-sent-plan",
+            "v14-sent-plan|initial_watchlist",
+        ),
+        (
+            62,
+            "v14-reserved-signal",
+            "reserved",
+            None,
+            "2026-07-01T10:01:00Z",
+            "v14-reserved-hash",
+            "v14-reserved-plan",
+            "v14-reserved-plan|initial_watchlist",
+        ),
+    ]
+    assert rows["public_events"] == [
+        (
+            71,
+            "v14-sent-plan",
+            "v14-sent-plan|initial_watchlist",
+            "SENT",
+            "2026-07-01T10:00:00Z",
+            "2026-07-01T10:00:01Z",
+            61,
+            "2026-07-01T10:00:00Z",
+            "2026-07-01T10:00:01Z",
+        ),
+        (
+            72,
+            "v14-reserved-plan",
+            "v14-reserved-plan|initial_watchlist",
+            "RESERVED",
+            "2026-07-01T10:01:00Z",
+            None,
+            62,
+            "2026-07-01T10:01:00Z",
+            "2026-07-01T10:01:02Z",
+        ),
+    ]
+
+
+def test_schema_v14_to_v16_preserves_lifecycle_and_telegram_data(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "v14-to-v16.db"
+    _create_schema_v14_lifecycle_delivery_fixture(db_path)
+    before = _representative_v14_rows(db_path)
+
+    with open_initialized_database(db_path):
+        pass
+
+    assert _representative_v14_rows(db_path) == before
+    version, tables, attempt_columns, public_columns = _schema_contract(db_path)
+    assert version == 16 == SCHEMA_VERSION
+    assert "setup_lifecycle_outcome_progress" in tables
+    assert "public_alert_delivery_parts" in tables
+    assert "delivery_state" in attempt_columns
+    assert "telegram_message_id" in attempt_columns
+    assert "delivery_state" in public_columns
+    assert "payload_text" in public_columns
+
+    with sqlite3.connect(db_path) as connection:
+        progress_count = connection.execute(
+            "SELECT COUNT(*) FROM setup_lifecycle_outcome_progress"
+        ).fetchone()[0]
+        part_count = connection.execute(
+            "SELECT COUNT(*) FROM public_alert_delivery_parts"
+        ).fetchone()[0]
+        attempts = connection.execute(
+            """
+            SELECT signal_id, delivery_state, message_hash,
+                   telegram_chat_id, telegram_message_id, delivery_part_count
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+        events = connection.execute(
+            """
+            SELECT canonical_plan_id, delivery_state, payload_text, message_hash,
+                   telegram_chat_id, telegram_message_id, uncertain_at,
+                   last_error_category
+            FROM public_alert_events
+            ORDER BY id
+            """
+        ).fetchall()
+
+    assert progress_count == 0
+    assert part_count == 0
+    assert attempts == [
+        ("v14-sent-signal", "SENT", "v14-sent-hash", None, None, 1),
+        ("v14-reserved-signal", "UNCERTAIN", "v14-reserved-hash", None, None, 1),
+    ]
+    assert events == [
+        (
+            "v14-sent-plan",
+            "SENT",
+            "N/A",
+            "N/A",
+            None,
+            None,
+            None,
+            "N/A",
+        ),
+        (
+            "v14-reserved-plan",
+            "UNCERTAIN",
+            "N/A",
+            "N/A",
+            None,
+            None,
+            "2026-07-01T10:01:02Z",
+            "legacy_reserved_acceptance_unknown",
+        ),
+    ]
+
+
+def test_schema_v14_to_v16_migration_is_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "v14-v16-idempotent.db"
+    _create_schema_v14_lifecycle_delivery_fixture(db_path)
+
+    with open_initialized_database(db_path):
+        pass
+    first_rows = _representative_v14_rows(db_path)
+    with sqlite3.connect(db_path) as connection:
+        first_delivery = connection.execute(
+            """
+            SELECT id, delivery_state, telegram_message_id
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall()
+
+    with open_initialized_database(db_path):
+        pass
+
+    assert _representative_v14_rows(db_path) == first_rows
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            """
+            SELECT id, delivery_state, telegram_message_id
+            FROM telegram_alert_attempts
+            ORDER BY id
+            """
+        ).fetchall() == first_delivery
+        assert connection.execute(
+            "SELECT COUNT(*) FROM setup_lifecycle_records"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM setup_lifecycle_events"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM telegram_alert_attempts"
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM public_alert_events"
+        ).fetchone()[0] == 2
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_schema_v14_migration_failure_rolls_back_completely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.storage.database as database_module
+
+    db_path = tmp_path / "v14-rollback.db"
+    _create_schema_v14_lifecycle_delivery_fixture(db_path)
+    before = _representative_v14_rows(db_path)
+
+    def fail_migration(connection):
+        raise sqlite3.OperationalError("fault-injected v14 migration failure")
+
+    monkeypatch.setattr(
+        database_module,
+        "_migrate_public_alert_delivery_state_v16",
+        fail_migration,
+    )
+    with pytest.raises(StorageError, match="initialize scan history database schema"):
+        with open_initialized_database(db_path):
+            pass
+
+    version, tables, attempt_columns, public_columns = _schema_contract(db_path)
+    assert version == 14
+    assert "setup_lifecycle_outcome_progress" not in tables
+    assert "public_alert_delivery_parts" not in tables
+    assert "delivery_state" not in attempt_columns
+    assert "delivery_state" not in public_columns
+    assert _representative_v14_rows(db_path) == before
+
+
+def test_verified_v14_backup_restore_migrates_copy_without_changing_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "runtime-v14.db"
+    archive = tmp_path / "archive"
+    restored = tmp_path / "restored-v14.db"
+    _create_schema_v14_lifecycle_delivery_fixture(source)
+    source_rows = _representative_v14_rows(source)
+
+    backup = create_verified_backup(
+        source,
+        archive,
+        allow_unsafe_temp=True,
+        unique_suffix="v14-chain",
+    )
+    snapshot = Path(str(backup["snapshot_path"]))
+
+    assert backup["status"] == "verified"
+    assert backup["manifest"]["source_schema_version"] == 14
+    assert backup["manifest"]["snapshot_schema_version"] == 14
+    assert verify_backup(snapshot)["ok"] is True
+
+    shutil.copy2(snapshot, restored)
+    with open_initialized_database(restored):
+        pass
+
+    assert _representative_v14_rows(restored) == source_rows
+    assert _schema_contract(restored)[0] == SCHEMA_VERSION
+    assert _schema_contract(source)[0] == 14
+    assert _representative_v14_rows(source) == source_rows
 
 
 def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:

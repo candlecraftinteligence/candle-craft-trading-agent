@@ -1,9 +1,11 @@
 # Runtime PC SQLite maintenance
 
 The active Candle Craft database remains selected with `--database-path`. Its archive directory is a separate, explicit location. Keep the active database on a local Windows filesystem; do not host it on a network share, NAS mount, OneDrive/Dropbox/cloud-sync folder, or another concurrently synchronized location. A dedicated external local SSD partition is supported, but it must remain connected for the entire runtime session. An unexpected disconnect is a visible database failure and must be investigated before restarting.
-The writable runtime profile verifies `foreign_keys=ON`, a 5,000 ms busy timeout, `journal_mode=WAL`, `synchronous=FULL`, and a 1,000-page WAL auto-checkpoint on every writable connection. SQLite refusal of WAL or any policy mismatch is a visible storage error. Repository write transactions are committed or rolled back and closed deterministically, and Telegram network calls do not run while a repository write transaction is open.
+The writable runtime profile verifies `foreign_keys=ON`, a 5,000 ms busy timeout, `journal_mode=WAL`, `synchronous=FULL`, and a 1,000-page WAL auto-checkpoint on every writable connection. When concurrent processes first open a database that is not yet in WAL mode, journal initialization retries only SQLite busy/locked failures in short slices until that same bounded timeout expires. SQLite refusal of WAL, timeout exhaustion, or any policy mismatch remains a visible storage error; no Telegram delivery or `UNCERTAIN` state is retried by this storage-open handling. Repository write transactions are committed or rolled back and closed deterministically, and Telegram network calls do not run while a repository write transaction is open.
 
 
+
+Automated migration tests cover a representative v14 lifecycle/Telegram database through the v15 outcome additions and v16 outbox additions, including idempotence, rollback, and verified backup/restore migration on a copy. This evidence does not replace rehearsal against a verified copy of the actual Runtime database.
 
 Before deploying schema v16 to the Runtime PC, create and verify a backup of the existing active database. Do not zip or copy only the live `.sqlite`/`.db` file while the scanner is running. In WAL mode, committed data can still be in `-wal`; a raw main-file copy can therefore be incomplete. The maintenance backup uses SQLite's online backup API and includes committed WAL data without stopping normal committed writers.
 

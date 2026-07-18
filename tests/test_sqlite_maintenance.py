@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import shutil
 import sqlite3
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from app.storage.database import (
     DatabaseMissingError,
     StorageError,
     UnsupportedSchemaVersionError,
+    connect_database,
     identify_schema_version,
     open_initialized_database,
     open_read_only_database,
@@ -46,6 +49,19 @@ def _database(tmp_path: Path, name: str = "runtime.sqlite") -> Path:
     with open_initialized_database(path):
         pass
     return path
+
+
+def _open_initialized_database_in_process(
+    path_text: str,
+    start_at: float,
+) -> tuple[str, int]:
+    while time.time() < start_at:
+        time.sleep(0.005)
+    with open_initialized_database(Path(path_text)) as connection:
+        return (
+            str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower(),
+            int(connection.execute("PRAGMA user_version").fetchone()[0]),
+        )
 
 
 def _insert_scan_run(
@@ -135,6 +151,86 @@ def test_writable_connection_profile_is_explicit_and_verified(tmp_path: Path) ->
         )
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize("preinitialize", [False, True], ids=["fresh", "already-wal"])
+def test_concurrent_thread_database_open_is_wal_safe(
+    tmp_path: Path,
+    preinitialize: bool,
+) -> None:
+    path = tmp_path / f"thread-{preinitialize}.sqlite"
+    if preinitialize:
+        with open_initialized_database(path):
+            pass
+
+    barrier = threading.Barrier(8)
+
+    def open_concurrently() -> tuple[str, int]:
+        barrier.wait()
+        with open_initialized_database(path) as connection:
+            return (
+                str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower(),
+                int(connection.execute("PRAGMA user_version").fetchone()[0]),
+            )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(open_concurrently) for _ in range(8)]
+        results = [future.result(timeout=20) for future in futures]
+
+    assert results == [("wal", SCHEMA_VERSION)] * 8
+
+
+@pytest.mark.parametrize("preinitialize", [False, True], ids=["fresh", "already-wal"])
+def test_concurrent_process_database_open_is_wal_safe_and_closes_handles(
+    tmp_path: Path,
+    preinitialize: bool,
+) -> None:
+    path = tmp_path / f"process-{preinitialize}.sqlite"
+    if preinitialize:
+        with open_initialized_database(path):
+            pass
+
+    context = multiprocessing.get_context("spawn")
+    start_at = time.time() + 1.0
+    with ProcessPoolExecutor(max_workers=4, mp_context=context) as executor:
+        futures = [
+            executor.submit(
+                _open_initialized_database_in_process,
+                str(path),
+                start_at,
+            )
+            for _ in range(4)
+        ]
+        results = [future.result(timeout=30) for future in futures]
+
+    assert results == [("wal", SCHEMA_VERSION)] * 4
+    renamed = path.with_name(f"{path.stem}-closed.sqlite")
+    path.rename(renamed)
+    assert renamed.exists()
+
+
+def test_wal_initialization_lock_retry_is_bounded_and_closes_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_pragma_text = database_module._pragma_text
+
+    def retain_lock(connection: sqlite3.Connection, expression: str) -> str:
+        if expression.lower() == "journal_mode":
+            raise sqlite3.OperationalError("database is locked")
+        return real_pragma_text(connection, expression)
+
+    monkeypatch.setattr(database_module, "_pragma_text", retain_lock)
+    path = tmp_path / "bounded-wal-lock.sqlite"
+    started_at = time.monotonic()
+    with pytest.raises(StorageError, match="Timed out while enabling required WAL"):
+        connect_database(path, busy_timeout_ms=30)
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 1
+    renamed = tmp_path / "bounded-wal-lock-closed.sqlite"
+    path.rename(renamed)
+    assert renamed.exists()
 
 
 def test_writable_connection_does_not_claim_wal_when_sqlite_refuses(
