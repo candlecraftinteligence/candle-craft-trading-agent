@@ -14,6 +14,7 @@ from app.alerts.watchlist_expiry import parse_utc_timestamp, watchlist_expiry_de
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import RANGE_DASH, TelegramAlertType, format_telegram_price, format_telegram_rr
 from app.lifecycle.eligibility import active_signal_eligible, public_watchlist_eligible
+from app.storage.database import StorageError, open_read_only_database
 
 ACTIVE_WATCHLIST_DISPLAY_LIMIT = 10
 WATCHLIST_STAGE_DISPLAY_LIMIT = 8
@@ -365,7 +366,7 @@ def load_active_public_watchlists(
         with _connect_readonly(selected_path) as connection:
             rows = _sent_alert_attempt_rows(connection, alert_types=_WATCHLIST_QUERY_TYPES)
             items = _active_items_from_rows(connection, rows)
-    except (OSError, sqlite3.Error):
+    except (OSError, StorageError, sqlite3.Error):
         return ActiveWatchlistQueryResult(source_available=False)
 
     deduped = _dedupe_active_watchlist_items(items)
@@ -391,7 +392,7 @@ def load_active_public_signals(
         with _connect_readonly(selected_path) as connection:
             rows = _sent_alert_attempt_rows(connection, alert_types=_SIGNAL_QUERY_TYPES)
             items = _active_signal_items_from_rows(connection, rows)
-    except (OSError, sqlite3.Error):
+    except (OSError, StorageError, sqlite3.Error):
         return ActiveSignalQueryResult(source_available=False)
 
     deduped = _dedupe_active_signal_items(items)
@@ -422,7 +423,7 @@ def load_watchlist_stage_dashboard(
             items = _stage_items_from_alert_rows(connection, rows)
             if not items and include_lifecycle_fallback:
                 items = _stage_items_from_lifecycle_records(connection)
-    except (OSError, sqlite3.Error):
+    except (OSError, StorageError, sqlite3.Error):
         return WatchlistStageDashboardResult(source_available=False, bucket_limit=max(1, limit))
 
     return _stage_dashboard_result(_dedupe_stage_items(items), limit=max(1, limit), source_available=True)
@@ -582,7 +583,7 @@ def _has_telegram_alert_attempts(path: Path) -> bool:
     try:
         with _connect_readonly(path) as connection:
             return _table_exists(connection, "telegram_alert_attempts")
-    except (OSError, sqlite3.Error):
+    except (OSError, StorageError, sqlite3.Error):
         return False
 
 
@@ -610,7 +611,7 @@ def _has_sent_alert_attempt(path: Path, *, alert_types: Sequence[str]) -> bool:
                 tuple(alert_types),
             ).fetchone()
             return row is not None
-    except (OSError, sqlite3.Error):
+    except (OSError, StorageError, sqlite3.Error):
         return False
 
 
@@ -636,14 +637,12 @@ def _has_watchlist_lifecycle_records(path: Path) -> bool:
                 tuple(lifecycle_stage_keys),
             ).fetchone()
             return row is not None
-    except (OSError, sqlite3.Error):
+    except (OSError, StorageError, sqlite3.Error):
         return False
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    return connection
+    return open_read_only_database(path)
 
 
 def _sent_alert_attempt_rows(

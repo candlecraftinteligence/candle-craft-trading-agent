@@ -17,7 +17,7 @@ from app.formatters.telegram_signal_detail import (
 from app.formatters.telegram_signal_formatter import FOOTER as SIGNAL_FOOTER
 from app.formatters.telegram_signal_formatter import HEADER_PREFIX as SIGNAL_HEADER_PREFIX
 from app.formatters.telegram_wolf_briefing import build_wolf_briefing_snapshot, format_wolf_briefing
-from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
+from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_read_only_database
 from app.telegram_admin.active_watchlists import (
     ACTIVE_WATCHLIST_DISPLAY_LIMIT,
     ActiveSignalItem,
@@ -520,7 +520,7 @@ class TelegramAdminCommandService:
     def _latest_telegram_alert_rows(self) -> tuple[Mapping[str, Any], ...]:
         connection = None
         try:
-            connection = open_initialized_database(self._database_path)
+            connection = open_read_only_database(self._database_path)
             rows = connection.execute(
                 """
                 SELECT signal_id, symbol, direction, alert_type, sent_at
@@ -541,7 +541,7 @@ class TelegramAdminCommandService:
     def _telegram_alert_counts(self) -> tuple[int, int]:
         connection = None
         try:
-            connection = open_initialized_database(self._database_path)
+            connection = open_read_only_database(self._database_path)
             sent_count = connection.execute(
                 "SELECT COUNT(*) FROM telegram_alert_attempts WHERE telegram_status = 'sent'"
             ).fetchone()[0]

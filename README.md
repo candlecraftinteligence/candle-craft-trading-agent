@@ -1819,6 +1819,9 @@ Use a custom database path:
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT --store-scan --database-path scan_runs/candle_craft.db
 ```
+Writable runtime databases use a verified WAL/foreign-key/`synchronous=FULL` profile. History and maintenance inspection are genuinely read-only and never initialize or migrate a database. For integrity checks, verified online snapshots, checkpointing, disk/growth diagnostics, and external-drive rules, see [Runtime PC SQLite maintenance](docs/RUNTIME_SQLITE_MAINTENANCE.md).
+
+
 
 When storage is enabled, the CLI prints:
 

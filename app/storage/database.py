@@ -5,6 +5,11 @@ from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
 SCHEMA_VERSION = 16
+WRITABLE_BUSY_TIMEOUT_MS = 5_000
+WRITABLE_JOURNAL_MODE = "wal"
+WRITABLE_SYNCHRONOUS = "FULL"
+WRITABLE_SYNCHRONOUS_LEVEL = 2
+WRITABLE_WAL_AUTOCHECKPOINT_PAGES = 1_000
 
 
 class StorageError(RuntimeError):
@@ -15,19 +20,190 @@ class UnsupportedSchemaVersionError(StorageError):
     """Raised when a database was created by a newer unsupported runtime."""
 
 
-def connect_database(path: Path | str = DEFAULT_DATABASE_PATH) -> sqlite3.Connection:
+class DatabaseMissingError(StorageError):
+    """Raised when read-only access is requested for a missing database."""
+
+
+class ManagedSQLiteConnection(sqlite3.Connection):
+    """SQLite connection whose context manager also releases the file handle."""
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object,
+    ) -> bool:
+        try:
+            return bool(super().__exit__(exc_type, exc_value, traceback))
+        finally:
+            self.close()
+
+
+def connect_database(
+    path: Path | str = DEFAULT_DATABASE_PATH,
+    *,
+    busy_timeout_ms: int = WRITABLE_BUSY_TIMEOUT_MS,
+) -> sqlite3.Connection:
+    """Open a writable runtime connection using the verified SQLite safety profile."""
+
     database_path = Path(path)
+    connection: sqlite3.Connection | None = None
     try:
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(database_path)
+        timeout_ms = max(1, int(busy_timeout_ms))
+        connection = sqlite3.connect(
+            database_path,
+            timeout=timeout_ms / 1_000,
+            factory=ManagedSQLiteConnection,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+
+        current_journal_mode = _pragma_text(connection, "journal_mode")
+        if current_journal_mode != WRITABLE_JOURNAL_MODE:
+            requested_journal_mode = _pragma_text(
+                connection,
+                f"journal_mode = {WRITABLE_JOURNAL_MODE.upper()}",
+            )
+            if requested_journal_mode != WRITABLE_JOURNAL_MODE:
+                raise StorageError(
+                    "SQLite refused required WAL journal mode for writable database "
+                    f"{database_path}: returned {requested_journal_mode or 'no value'}."
+                )
+
+        verified_journal_mode = _pragma_text(connection, "journal_mode")
+        if verified_journal_mode != WRITABLE_JOURNAL_MODE:
+            raise StorageError(
+                "Writable database did not remain in required WAL journal mode "
+                f"for {database_path}: returned {verified_journal_mode or 'no value'}."
+            )
+
+        connection.execute(f"PRAGMA synchronous = {WRITABLE_SYNCHRONOUS}")
+        connection.execute(
+            f"PRAGMA wal_autocheckpoint = {WRITABLE_WAL_AUTOCHECKPOINT_PAGES}"
+        )
+        _verify_writable_profile(connection, database_path, timeout_ms=timeout_ms)
         return connection
+    except StorageError:
+        if connection is not None:
+            connection.close()
+        raise
     except sqlite3.Error as exc:
+        if connection is not None:
+            connection.close()
         raise StorageError(f"Unable to open scan history database: {database_path}") from exc
     except OSError as exc:
+        if connection is not None:
+            connection.close()
         raise StorageError(f"Unable to prepare scan history database directory: {database_path}") from exc
+
+
+def open_read_only_database(
+    path: Path | str,
+    *,
+    require_supported_schema: bool = True,
+    busy_timeout_ms: int = WRITABLE_BUSY_TIMEOUT_MS,
+) -> sqlite3.Connection:
+    """Open an existing SQLite database without creating, migrating, or changing it."""
+
+    database_path = Path(path)
+    connection: sqlite3.Connection | None = None
+    try:
+        if not database_path.exists():
+            raise DatabaseMissingError(f"Database does not exist: {database_path}")
+        if not database_path.is_file():
+            raise StorageError(f"Database path is not a file: {database_path}")
+        resolved_path = database_path.resolve(strict=True)
+        wal_path = Path(f"{resolved_path}-wal")
+        shm_path = Path(f"{resolved_path}-shm")
+        if wal_path.exists() and not shm_path.exists():
+            raise StorageError(
+                "Read-only WAL inspection requires the existing -shm sidecar; "
+                f"refusing to create it for {resolved_path}."
+            )
+        uri_options = "mode=ro"
+        if not wal_path.exists() and not shm_path.exists():
+            uri_options += "&immutable=1"
+        timeout_ms = max(1, int(busy_timeout_ms))
+        connection = sqlite3.connect(
+            f"{resolved_path.as_uri()}?{uri_options}",
+            uri=True,
+            timeout=timeout_ms / 1_000,
+            factory=ManagedSQLiteConnection,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+        connection.execute("PRAGMA query_only = ON")
+        schema_version = identify_schema_version(connection)
+        if require_supported_schema and schema_version > SCHEMA_VERSION:
+            raise UnsupportedSchemaVersionError(
+                f"Unsupported database schema version {schema_version}; "
+                f"this runtime supports up to version {SCHEMA_VERSION}."
+            )
+        return connection
+    except StorageError:
+        if connection is not None:
+            connection.close()
+        raise
+    except (OSError, sqlite3.Error) as exc:
+        if connection is not None:
+            connection.close()
+        raise StorageError(f"Unable to open database read-only: {database_path}") from exc
+
+
+def identify_schema_version(connection: sqlite3.Connection) -> int:
+    """Read the SQLite application schema version without changing it."""
+
+    try:
+        row = connection.execute("PRAGMA user_version").fetchone()
+        if row is None:
+            raise StorageError("SQLite did not return a schema version.")
+        return int(row[0])
+    except StorageError:
+        raise
+    except (TypeError, ValueError, sqlite3.Error) as exc:
+        raise StorageError("Unable to identify database schema version.") from exc
+
+
+def _pragma_text(connection: sqlite3.Connection, expression: str) -> str:
+    row = connection.execute(f"PRAGMA {expression}").fetchone()
+    if row is None or row[0] is None:
+        return ""
+    return str(row[0]).strip().lower()
+
+
+def _verify_writable_profile(
+    connection: sqlite3.Connection,
+    database_path: Path,
+    *,
+    timeout_ms: int,
+) -> None:
+    foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+    actual_timeout_ms = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+    synchronous = int(connection.execute("PRAGMA synchronous").fetchone()[0])
+    wal_autocheckpoint = int(
+        connection.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
+    )
+    if foreign_keys != 1:
+        raise StorageError(
+            f"SQLite foreign key enforcement is unavailable for {database_path}."
+        )
+    if actual_timeout_ms != timeout_ms:
+        raise StorageError(
+            f"SQLite busy timeout verification failed for {database_path}: "
+            f"expected {timeout_ms} ms, got {actual_timeout_ms} ms."
+        )
+    if synchronous != WRITABLE_SYNCHRONOUS_LEVEL:
+        raise StorageError(
+            f"SQLite synchronous policy verification failed for {database_path}: "
+            f"expected {WRITABLE_SYNCHRONOUS}, got level {synchronous}."
+        )
+    if wal_autocheckpoint != WRITABLE_WAL_AUTOCHECKPOINT_PAGES:
+        raise StorageError(
+            f"SQLite WAL auto-checkpoint verification failed for {database_path}: "
+            f"expected {WRITABLE_WAL_AUTOCHECKPOINT_PAGES} pages, got {wal_autocheckpoint}."
+        )
 
 
 def initialize_database(connection: sqlite3.Connection) -> None:
