@@ -1023,6 +1023,18 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         self.connection.close()
         self.connection = None
 
+    def commit_before_network_activity(self) -> None:
+        """End any pending write transaction before a sender can perform I/O."""
+
+        try:
+            self._connection.commit()
+        except sqlite3.Error as exc:
+            raise StorageError(
+                "Unable to commit Telegram repository state before network activity."
+            ) from exc
+
+
+
     def has_canonical_lifecycle_outcome_progress(self, *, lifecycle_id: str) -> bool:
         normalized = _text(lifecycle_id)
         if normalized == NA:
@@ -2774,6 +2786,7 @@ async def _deliver_committed_public_watchlist_intent(
                 message_hash=message_hash,
                 error_message="part_in_flight_commit_failed",
             )
+        repository.commit_before_network_activity()
         try:
             send_part = getattr(sender, "send_part", None)
             if callable(send_part):
@@ -3550,6 +3563,7 @@ class TelegramLifecycleDeliveryService:
                 attempt_id="legacy-unreachable-watchlist-path",
             )
 
+        repository.commit_before_network_activity()
         send_result = await self.sender.send_text(
             message_text,
             message_type=_telegram_message_type_for_alert(decision.alert_type, message),
@@ -3807,6 +3821,7 @@ class TelegramLifecycleDeliveryService:
             if send_attempts >= max_per_scan:
                 break
             send_attempts += 1
+            repository.commit_before_network_activity()
             send_result = await self.sender.send_text(
                 message_text,
                 message_type=TelegramMessageType.RESEARCH_WATCH,
@@ -4060,6 +4075,7 @@ class TelegramLifecycleDeliveryService:
 
         message_text = format_telegram_signal_message(alert_type, message)
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
+        repository.commit_before_network_activity()
         send_result = await self.sender.send_text(
             message_text,
             message_type=_telegram_message_type_for_alert(alert_type, message),
@@ -4139,6 +4155,7 @@ class TelegramLifecycleDeliveryService:
     ) -> TelegramLifecycleDelivery:
         message_text = format_telegram_signal_message(outcome.alert_type, outcome.message)
         message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
+        repository.commit_before_network_activity()
         send_result = await self.sender.send_text(
             message_text,
             message_type=_telegram_message_type_for_alert(outcome.alert_type, outcome.message),

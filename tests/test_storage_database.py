@@ -24,7 +24,12 @@ from app.pipeline.scanner_runner import (
     ScannerRuntimeStats,
     ScannerSymbolResult,
 )
-from app.storage.database import SCHEMA_VERSION, StorageError, open_initialized_database
+from app.storage.database import (
+    SCHEMA_VERSION,
+    DatabaseMissingError,
+    StorageError,
+    open_initialized_database,
+)
 from app.storage.models import WatchIterationMetadata
 from app.storage.repositories import export_history_payload, list_scan_history, store_scan_result
 
@@ -824,17 +829,20 @@ def test_json_export(tmp_path) -> None:
     assert payload[0]["near_misses"] == 1
 
 
-def test_missing_db_history_is_empty(tmp_path) -> None:
-    history = list_scan_history(tmp_path / "missing.db", limit=10)
+def test_missing_db_history_fails_without_initializing(tmp_path) -> None:
+    db_path = tmp_path / "missing.db"
 
-    assert history == ()
+    with pytest.raises(DatabaseMissingError, match="Database does not exist"):
+        list_scan_history(db_path, limit=10)
+
+    assert not db_path.exists()
 
 
 def test_corrupted_db_is_reported_cleanly(tmp_path) -> None:
     db_path = tmp_path / "candle_craft.db"
     db_path.write_text("not a sqlite database", encoding="utf-8")
 
-    with pytest.raises(StorageError, match="Unable to initialize scan history database schema"):
+    with pytest.raises(StorageError, match="Unable to identify database schema version"):
         list_scan_history(db_path, limit=10)
 
 

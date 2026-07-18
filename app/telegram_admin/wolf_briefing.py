@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.data.dtos import NA
+from app.storage.database import StorageError, open_read_only_database
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,7 @@ def load_latest_db_scan_artifacts(
                 LIMIT 1
                 """
             ).fetchone()
-    except (OSError, sqlite3.Error):
+    except (OSError, StorageError, sqlite3.Error):
         return WolfScanArtifacts(manifest_row=None, scan_payload=None, source_path=path)
 
     if row is None:
@@ -77,9 +78,7 @@ def load_latest_db_scan_artifacts(
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    return connection
+    return open_read_only_database(path)
 
 
 def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:

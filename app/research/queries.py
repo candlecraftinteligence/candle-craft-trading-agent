@@ -10,10 +10,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from statistics import median
 from typing import Any
-from urllib.parse import quote
-
 from app.data.dtos import NA
-from app.storage.database import DEFAULT_DATABASE_PATH, StorageError
+from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_read_only_database
 
 MISSING_SCAN_DATABASE_MESSAGE = "No scan database found. Run scans with --store-scan first."
 SAMPLE_SIZE_WARNING = "Sample size too small for reliable conclusion."
@@ -291,9 +289,7 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
 
 
 def _connect_read_only(path: Path) -> sqlite3.Connection:
-    normalized = str(path.resolve()).replace("\\", "/")
-    uri = f"file:{quote(normalized, safe='/:')}?mode=ro"
-    return sqlite3.connect(uri, uri=True)
+    return open_read_only_database(path)
 
 
 def _require_schema(connection: sqlite3.Connection) -> None:

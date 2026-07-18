@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import sqlite3
 import sys
 from dataclasses import dataclass, field
@@ -24,7 +23,8 @@ from app.lifecycle.eligibility import (
     is_terminal_state,
     public_watchlist_eligible,
 )
-from app.storage.database import initialize_database
+from app.storage.database import connect_database, initialize_database, open_read_only_database
+from app.storage.maintenance import create_verified_backup
 
 WARNING = (
     "WARNING: This script is for runtime DB hygiene after backup and tested merge. "
@@ -55,13 +55,23 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"Database does not exist: {db_path}")
 
     print(WARNING)
-    if args.apply:
-        backup_path = _create_backup(db_path) if not args.no_backup else None
-        if backup_path is not None:
-            print(f"Backup created: {backup_path}")
+    if args.apply and not args.no_backup:
+        if args.archive_directory is None:
+            raise SystemExit("--archive-directory is required for the automatic verified backup on --apply.")
+        backup = _create_backup(
+            db_path,
+            Path(args.archive_directory),
+            allow_unsafe_temp=args.allow_unsafe_temp,
+        )
+        print(f"Verified backup created: {backup['snapshot_path']}")
+        print(f"Backup manifest created: {backup['manifest_path']}")
 
-    with sqlite3.connect(db_path) as connection:
-        connection.row_factory = sqlite3.Row
+    connection = (
+        connect_database(db_path)
+        if args.apply
+        else open_read_only_database(db_path)
+    )
+    with connection:
         if args.apply:
             initialize_database(connection)
         summary = repair_database(
@@ -229,11 +239,18 @@ def _should_archive_lifecycle_record(record: dict[str, Any]) -> bool:
     return False
 
 
-def _create_backup(db_path: Path) -> Path:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup_path = db_path.with_name(f"{db_path.stem}.{timestamp}.bak{db_path.suffix}")
-    shutil.copy2(db_path, backup_path)
-    return backup_path
+def _create_backup(
+    db_path: Path,
+    archive_directory: Path,
+    *,
+    allow_unsafe_temp: bool = False,
+) -> dict[str, Any]:
+    return create_verified_backup(
+        db_path,
+        archive_directory,
+        label="pre-lifecycle-hygiene",
+        allow_unsafe_temp=allow_unsafe_temp,
+    )
 
 
 def _print_summary(summary: RepairSummary, *, applied: bool) -> None:
@@ -259,7 +276,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--database-path", required=True, help="SQLite database path to inspect or repair.")
     parser.add_argument("--apply", action="store_true", help="Apply repairs. Default is dry-run.")
     parser.add_argument("--backup", action="store_true", help="Accepted for compatibility; backups are automatic on --apply.")
-    parser.add_argument("--no-backup", action="store_true", help="Skip automatic backup when --apply is used.")
+    parser.add_argument("--no-backup", action="store_true", help="Explicitly skip the automatic verified backup on --apply.")
+    parser.add_argument(
+        "--archive-directory",
+        type=Path,
+        help="Explicit durable directory for the verified pre-repair snapshot.",
+    )
+    parser.add_argument(
+        "--allow-unsafe-temp",
+        action="store_true",
+        help="Allow a temporary archive directory for controlled testing only.",
+    )
     parser.add_argument("--limit", type=int, help="Limit rows scanned for inspection/testing.")
     parser.add_argument("--verbose", action="store_true", help="Print sample row identifiers.")
     return parser.parse_args(argv)

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from app.data.dtos import NA
+from app.storage.database import StorageError, open_read_only_database
 
 UNKNOWN_PUBLIC_BLOCK = "UNKNOWN_PUBLIC_BLOCK"
 UNVERIFIED = "Unverified"
@@ -392,7 +393,7 @@ def build_public_alert_funnel_report(
                     "latest_scan_run_counters": _latest_scan_run_counters(connection),
                 }
             )
-    except sqlite3.Error as exc:
+    except (StorageError, sqlite3.Error) as exc:
         report["error"] = f"SQLite read failed: {exc}"
     except OSError as exc:
         report["error"] = f"Database read failed: {exc}"
@@ -981,9 +982,7 @@ def _format_timestamp(value: datetime | None) -> str:
     return _iso_z(value)
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    return connection
+    return open_read_only_database(path)
 
 
 def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:

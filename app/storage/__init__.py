@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from app.storage.database import (
     DEFAULT_DATABASE_PATH,
+    DatabaseMissingError,
     StorageError,
     UnsupportedSchemaVersionError,
+    open_read_only_database,
 )
 from app.storage.models import WatchIterationMetadata
 from app.storage.repositories import (
@@ -19,6 +21,7 @@ from app.storage.symbol_health import (
 )
 
 __all__ = [
+    "DatabaseMissingError",
     "DEFAULT_DATABASE_PATH",
     "StorageError",
     "UnsupportedSchemaVersionError",
@@ -26,6 +29,7 @@ __all__ = [
     "export_history_payload",
     "format_history_table",
     "list_scan_history",
+    "open_read_only_database",
     "load_symbol_health_records",
     "save_symbol_health_records",
     "store_scan_result",

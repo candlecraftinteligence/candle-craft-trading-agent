@@ -20,7 +20,13 @@ from app.backtesting import ReplaySummary
 from app.data.dtos import NA
 from app.formatters.scanner_display import RankedSymbolDisplay, display_fields
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
-from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
+from app.storage.database import (
+    DEFAULT_DATABASE_PATH,
+    DatabaseMissingError,
+    StorageError,
+    open_initialized_database,
+    open_read_only_database,
+)
 from app.storage.models import (
     ReplayResultRecord,
     ScanHistorySummary,
@@ -126,7 +132,7 @@ def list_scan_history(
 ) -> tuple[ScanHistorySummary, ...]:
     limit = max(1, int(limit))
     try:
-        with closing(open_initialized_database(database_path)) as connection:
+        with closing(open_read_only_database(database_path)) as connection:
             rows = connection.execute(
                 """
                 SELECT run_id, timestamp, universe, symbols_scanned, total_valid_setups,
@@ -141,6 +147,8 @@ def list_scan_history(
                 """,
                 (limit,),
             ).fetchall()
+    except DatabaseMissingError:
+        raise
     except sqlite3.Error as exc:
         raise StorageError(f"Unable to read scan history database: {database_path}") from exc
 
