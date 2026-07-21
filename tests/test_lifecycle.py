@@ -31,6 +31,25 @@ def _record(
     direction: str = "long",
     now: str = "2026-05-18T09:00:00+00:00",
 ) -> SetupLifecycleRecord:
+    levels = (
+        {
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "95",
+            "tp1": "110",
+            "tp2": "117",
+            "tp3": "124",
+        }
+        if direction == "long"
+        else {
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "107",
+            "tp1": "92",
+            "tp2": "85",
+            "tp3": "78",
+        }
+    )
     return SetupLifecycleRecord(
         lifecycle_id=lifecycle_id,
         symbol=symbol,
@@ -42,6 +61,11 @@ def _record(
         last_transition_at=now,
         readiness_score=60,
         quality_score=50,
+        invalidation_reason="Closed structure beyond the stored stop invalidates the plan.",
+        invalidation_logic="Closed structure beyond the stored stop invalidates the plan.",
+        rr="3.2",
+        setup_identity=f"{symbol}|{mode}|{direction}|seed",
+        **levels,
     )
 
 
@@ -201,6 +225,14 @@ def _observation(**overrides) -> LifecycleObservation:
         "symbol": "BTCUSDT",
         "mode": "swing",
         "direction": "long",
+        "entry_low": "100",
+        "entry_high": "102",
+        "stop_loss": "95",
+        "tp1": "110",
+        "tp2": "117",
+        "tp3": "124",
+        "rr": "3.2",
+        "invalidation_reason": "Invalid if price accepts below 95.",
         "readiness_score": 70,
         "readiness_label": "WATCH",
         "quality_score": 65,
@@ -1352,8 +1384,9 @@ def test_scanner_integration_and_json_lifecycle_output(tmp_path) -> None:
     payload = result.model_dump(mode="json")
 
     assert symbol_result.lifecycle_state is not None
-    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.STALKING
-    assert payload["results"][0]["lifecycle_state"]["current_state"] == "STALKING"
+    assert symbol_result.lifecycle_state.current_state == SetupLifecycleState.REJECTED
+    assert symbol_result.lifecycle_state.failed_gate.startswith("invalid_stored_plan_geometry:")
+    assert payload["results"][0]["lifecycle_state"]["current_state"] == "REJECTED"
     assert payload["results"][0]["lifecycle_transition"]["event"]["scan_run_id"] == "run_1"
 
 

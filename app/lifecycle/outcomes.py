@@ -35,6 +35,7 @@ from app.lifecycle.outcome_policy import (
     newly_touched_targets as _newly_touched_targets,
     stop_touched as _stop_touched,
     stored_plan_geometry as _stored_plan_geometry,
+    stored_plan_geometry_failure,
 )
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 
@@ -89,6 +90,11 @@ def evaluate_closed_candle_outcomes(
         plan_identity=plan_identity,
     )
 
+    # Malformed legacy plans are preserved as evidence, but never create or
+    # advance outcome progress. Explicit hygiene owns any quarantine transition.
+    if stored_plan_geometry_failure(record) is not None:
+        return LifecycleOutcomeEvaluation(record=record, progress=progress)
+
     if progress is not None and progress.terminal_outcome != NA:
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
     if record.current_state in TERMINAL_OUTCOME_STATES:
@@ -133,17 +139,7 @@ def evaluate_closed_candle_outcomes(
         repository.upsert_outcome_progress(progress)
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
-    try:
-        geometry = _stored_plan_geometry(record)
-    except ValueError as exc:
-        progress = _integrity_failure(
-            progress,
-            status=INTEGRITY_FAILED,
-            diagnostic=f"invalid_stored_plan_geometry:{exc}",
-            evaluated_at=evaluated_at,
-        )
-        repository.upsert_outcome_progress(progress)
-        return LifecycleOutcomeEvaluation(record=record, progress=progress)
+    geometry = _stored_plan_geometry(record)
 
     if not execution_candles:
         progress = _integrity_failure(

@@ -151,6 +151,15 @@ def _record(
         regime_state=NA,
         action_label=NA,
         invalidation_reason="Invalid if price accepts below 95.",
+        invalidation_logic="Invalid if price accepts below 95.",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+        tp2="115",
+        tp3="120",
+
+        setup_identity=f"BTCUSDT|swing|long|{signal_id}",
     )
 
 
@@ -690,7 +699,7 @@ def test_public_v1_target_caution_blocks_integrity_failures() -> None:
                 diagnostics={"tp2": Decimal("109")},
                 tp2="109",
             ),
-            "tp_order",
+            "invalid_stored_plan_geometry:invalid_long_level_order",
         ),
         (
             "wrong_side_target",
@@ -699,7 +708,7 @@ def test_public_v1_target_caution_blocks_integrity_failures() -> None:
                 diagnostics={"tp1": Decimal("99")},
                 tp1="99",
             ),
-            "invalid_target_fields=tp1",
+            "invalid_stored_plan_geometry:invalid_long_level_order",
         ),
         (
             "opposing_structure_block",
@@ -1229,6 +1238,9 @@ def _public_v1_block_reasons(db_path: Path) -> list[tuple[str, str, str]]:
 
 def _assert_target_integrity_blocked(decision, *fields: str) -> None:
     assert decision.eligible is False
+    if decision.reason.startswith("invalid_stored_plan_geometry:"):
+        assert decision.alert_type is None
+        return
     assert "target_integrity_failed" in decision.reason
     for field in fields:
         assert field in decision.reason
@@ -2090,7 +2102,7 @@ def test_public_watchlist_rejects_trade_map_na() -> None:
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert "public_watchlist_fatal_failed_gates=trade_map_na" in decision.reason
     assert "public_watchlist_missing_rr" in decision.reason
-    assert "public_watchlist_missing_entry_zone" in decision.reason
+    assert "public_watchlist_missing_entry_zone" not in decision.reason  # Stored geometry remains the only valid plan source.
 
 
 def test_public_watchlist_blocks_missing_regime_data_gate_code() -> None:
@@ -2145,17 +2157,20 @@ def test_public_watchlist_blocks_malformed_diagnostics() -> None:
 
 
 def test_public_watchlist_blocks_target_integrity_failure() -> None:
+    symbol = _symbol(
+        SetupLifecycleState.WATCHLISTED,
+        diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("99")),
+        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+    )
+    lifecycle = symbol.lifecycle_state.model_copy(update={"tp1": "99"})
+    transition = symbol.lifecycle_transition.model_copy(update={"record": lifecycle})
     decision = telegram_alert_decision_for_symbol(
-        _symbol(
-            SetupLifecycleState.WATCHLISTED,
-            diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("99")),
-            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
-        )
+        symbol.model_copy(update={"lifecycle_state": lifecycle, "lifecycle_transition": transition})
     )
 
     assert decision.eligible is False
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "target_integrity_failed" in decision.reason
+    assert decision.alert_type is None
+    assert decision.reason == "invalid_stored_plan_geometry:invalid_long_level_order"
 
 
 def test_public_watchlist_blocks_fatal_target_failure() -> None:
@@ -2466,7 +2481,7 @@ def test_public_watchlist_rejects_rr_na() -> None:
 
 
 def test_public_watchlist_rejects_missing_entry_zone() -> None:
-    decision = telegram_alert_decision_for_symbol(
+    symbol = _with_lifecycle_fields(
         _symbol(
             SetupLifecycleState.WATCHLISTED,
             diagnostics=_public_ready_watchlist_diagnostics(
@@ -2479,12 +2494,15 @@ def test_public_watchlist_rejects_missing_entry_zone() -> None:
                 watch_zone=NA,
             ),
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
-        )
+        ),
+        entry_low=NA,
+        entry_high=NA,
     )
+    decision = telegram_alert_decision_for_symbol(symbol)
 
     assert decision.eligible is False
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "entry_zone" in decision.reason
+    assert decision.alert_type is None
+    assert decision.reason == "invalid_stored_plan_geometry:missing_entry_low"
 
 
 def test_public_watchlist_rejects_missing_invalidation() -> None:
@@ -2505,8 +2523,8 @@ def test_public_watchlist_rejects_missing_invalidation() -> None:
     decision = telegram_alert_decision_for_symbol(symbol)
 
     assert decision.eligible is False
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "missing_invalidation" in decision.reason
+    assert decision.alert_type is None
+    assert decision.reason == "invalid_stored_plan_geometry:missing_invalidation"
 
 
 def test_public_watchlist_blocks_missing_confirmation_until_actionable_state() -> None:
@@ -2554,7 +2572,7 @@ def test_public_watchlist_rejects_missing_confirmation_without_trade_map() -> No
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert "public_watchlist_missing_rr" in decision.reason
-    assert "public_watchlist_missing_entry_zone" in decision.reason
+    assert "public_watchlist_missing_entry_zone" not in decision.reason  # Stored geometry remains the only valid plan source.
 
 
 def test_public_watchlist_blocks_no_ob_or_fvg_without_zone() -> None:
@@ -2579,7 +2597,7 @@ def test_public_watchlist_blocks_no_ob_or_fvg_without_zone() -> None:
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
     assert "no_ob_or_fvg_zone" in decision.reason
-    assert "entry_zone" in decision.reason
+    assert "public_watchlist_missing_entry_zone" not in decision.reason
 
 
 def test_invalidated_transition_cannot_produce_tp2_hit_alert_type() -> None:
@@ -2754,7 +2772,7 @@ def test_no_ob_fvg_watchlist_near_miss_without_plan_is_blocked() -> None:
         mode="scalp",
     )
 
-    decision = telegram_alert_decision_for_symbol(
+    symbol = _with_lifecycle_fields(
         _symbol(
             SetupLifecycleState.REJECTED,
             status=ScannerPipelineStatus.SCANNED_NO_SETUP,
@@ -2762,12 +2780,19 @@ def test_no_ob_fvg_watchlist_near_miss_without_plan_is_blocked() -> None:
             rejection_reasons=("No valid Liquidity-Grab Pullback setup.",),
             diagnostics=diagnostics,
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
-        )
+        ),
+        entry_low=NA,
+        entry_high=NA,
+        stop_loss=NA,
+        tp1=NA,
+        tp2=NA,
+        tp3=NA,
     )
+    decision = telegram_alert_decision_for_symbol(symbol)
 
     assert decision.eligible is False
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "watchlist_missing_trackable_plan:all_plan_fields_na" in decision.reason
+    assert decision.alert_type is None
+    assert decision.reason == "invalid_stored_plan_geometry:missing_entry_low"
 
 
 def test_watchlist_with_na_direction_is_blocked() -> None:
@@ -2782,8 +2807,8 @@ def test_watchlist_with_na_direction_is_blocked() -> None:
     decision = telegram_alert_decision_for_symbol(symbol)
 
     assert decision.eligible is False
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "watchlist_not_public_ready:missing_public_fields=direction" in decision.reason
+    assert decision.alert_type is None
+    assert decision.reason == "invalid_stored_plan_geometry:unsupported_direction:N/A"
 
 
 def test_btc_bnb_style_na_heavy_watchlists_are_blocked() -> None:
@@ -2804,12 +2829,15 @@ def test_btc_bnb_style_na_heavy_watchlists_are_blocked() -> None:
             diagnostics=diagnostics,
             setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=41),
         ).model_copy(update={"symbol": symbol_name})
+        symbol = _with_lifecycle_fields(
+            symbol, entry_low=NA, entry_high=NA, stop_loss=NA, tp1=NA, tp2=NA, tp3=NA
+        )
 
         decision = telegram_alert_decision_for_symbol(symbol)
 
         assert decision.eligible is False
-        assert decision.alert_type == TelegramAlertType.WATCHLIST
-        assert "watchlist_missing_trackable_plan:all_plan_fields_na" in decision.reason
+        assert decision.alert_type is None
+        assert decision.reason == "invalid_stored_plan_geometry:missing_entry_low"
 
 
 def test_action_watchlist_only_with_all_plan_fields_na_is_blocked() -> None:
@@ -2818,7 +2846,8 @@ def test_action_watchlist_only_with_all_plan_fields_na_is_blocked() -> None:
     )
 
     decision = telegram_alert_decision_for_symbol(
-        _symbol(
+        _with_lifecycle_fields(
+            _symbol(
             SetupLifecycleState.REJECTED,
             status=ScannerPipelineStatus.SCANNED_NO_SETUP,
             rejection_reason="No valid Liquidity-Grab Pullback setup.",
@@ -2832,12 +2861,19 @@ def test_action_watchlist_only_with_all_plan_fields_na_is_blocked() -> None:
                 rr_to_tp2=NA,
             ),
             setup_quality=quality,
+            ),
+            entry_low=NA,
+            entry_high=NA,
+            stop_loss=NA,
+            tp1=NA,
+            tp2=NA,
+            tp3=NA,
         )
     )
 
     assert decision.eligible is False
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "watchlist_missing_trackable_plan:all_plan_fields_na" in decision.reason
+    assert decision.alert_type is None
+    assert decision.reason == "invalid_stored_plan_geometry:missing_entry_low"
 
 
 def test_hype_style_actionable_a_grade_watchlist_sends_public_signal() -> None:
@@ -3029,6 +3065,9 @@ def _near_miss_watchlist_symbol(
         stop_loss=invalidation,
         invalidation_reason=NA if invalidation == NA else f"Invalid if price accepts beyond {invalidation}.",
         invalidation_logic=NA if invalidation == NA else f"Invalid if price accepts beyond {invalidation}.",
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
     )
 
 
@@ -3123,6 +3162,9 @@ def _runtime_public_watchlist_snapshot(
             "entry_low": entry_low,
             "entry_high": entry_high,
             "stop_loss": invalidation,
+            "tp1": diagnostics.get("tp1", tp1),
+            "tp2": diagnostics.get("tp2", tp2),
+            "tp3": diagnostics.get("tp3", tp3),
             "invalidation_reason": NA if invalidation == NA else f"Invalid if price accepts beyond {invalidation}.",
             "invalidation_logic": NA if invalidation == NA else f"Invalid if price accepts beyond {invalidation}.",
         }
@@ -4784,6 +4826,7 @@ def test_near_miss_maps_entry_zone_alias_into_public_watchlist_candidate() -> No
         ),
         trade_idea=None,
     )
+    symbol = _with_lifecycle_fields(symbol, entry_low=NA, entry_high=NA)
 
     candidate = _public_watchlist_candidate_from_symbol(symbol)
 
@@ -7010,29 +7053,24 @@ def test_blocked_target_integrity_persists_invalid_target_fields(tmp_path: Path)
         settings=Settings(_env_file=None),
         sender=sender,
     )
-    symbol = _symbol(
-        SetupLifecycleState.WATCHLISTED,
-        signal_id="blocked-targets",
-        diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("99")),
-        setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+    symbol = _with_lifecycle_fields(
+        _symbol(
+            SetupLifecycleState.WATCHLISTED,
+            signal_id="blocked-targets",
+            diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("99")),
+            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        ),
+        tp1="99",
     )
 
     summary = run(service.deliver_for_run(_run_result(symbol), scan_run_id="run-targets"))
 
-    assert summary.blocked == 1
+    assert summary.ineligible == 1
+    assert summary.blocked == 0
     assert sender.messages == []
     with sqlite3.connect(db_path) as connection:
-        row = connection.execute(
-            """
-            SELECT telegram_status, attempted_alert_type, blocked_reason, invalid_target_fields, scan_run_id
-            FROM telegram_alert_attempts
-            """
-        ).fetchone()
-    assert row[0] == "blocked"
-    assert row[1] == TelegramAlertType.WATCHLIST.value
-    assert "target_integrity_failed" in row[2]
-    assert "tp1" in row[3]
-    assert row[4] == "run-targets"
+        count = connection.execute("SELECT COUNT(*) FROM telegram_alert_attempts").fetchone()[0]
+    assert count == 0
 
 
 def test_blocked_incomplete_watchlist_does_not_spam(tmp_path: Path, monkeypatch) -> None:
@@ -7281,11 +7319,14 @@ def test_confirmed_alert_is_blocked_when_planned_rr_is_below_min_rr() -> None:
 
 def test_long_confirmed_blocks_when_stop_is_above_entry() -> None:
     decision = telegram_alert_decision_for_symbol(
-        _symbol(
-            SetupLifecycleState.CONFIRMED,
-            previous=SetupLifecycleState.TRIGGERED,
-            diagnostics=_diagnostics(stop=Decimal("103")),
-            trade_idea=_trade_idea(stop_loss=Decimal("103")),
+        _with_lifecycle_fields(
+            _symbol(
+                SetupLifecycleState.CONFIRMED,
+                previous=SetupLifecycleState.TRIGGERED,
+                diagnostics=_diagnostics(stop=Decimal("103")),
+                trade_idea=_trade_idea(stop_loss=Decimal("103")),
+            ),
+            stop_loss="103",
         ),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
@@ -7295,11 +7336,14 @@ def test_long_confirmed_blocks_when_stop_is_above_entry() -> None:
 
 def test_long_confirmed_blocks_when_any_target_is_below_entry() -> None:
     decision = telegram_alert_decision_for_symbol(
-        _symbol(
-            SetupLifecycleState.CONFIRMED,
-            previous=SetupLifecycleState.TRIGGERED,
-            diagnostics=_diagnostics(tp2=Decimal("99")),
-            trade_idea=_trade_idea(take_profit_targets=(Decimal("110"), Decimal("99"), Decimal("120"))),
+        _with_lifecycle_fields(
+            _symbol(
+                SetupLifecycleState.CONFIRMED,
+                previous=SetupLifecycleState.TRIGGERED,
+                diagnostics=_diagnostics(tp2=Decimal("99")),
+                trade_idea=_trade_idea(take_profit_targets=(Decimal("110"), Decimal("99"), Decimal("120"))),
+            ),
+            tp2="99",
         ),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
@@ -7309,11 +7353,16 @@ def test_long_confirmed_blocks_when_any_target_is_below_entry() -> None:
 
 def test_long_confirmed_blocks_when_targets_are_not_in_ascending_order() -> None:
     decision = telegram_alert_decision_for_symbol(
-        _symbol(
-            SetupLifecycleState.CONFIRMED,
-            previous=SetupLifecycleState.TRIGGERED,
-            diagnostics=_diagnostics(tp1=Decimal("112"), tp2=Decimal("111"), tp3=Decimal("120")),
-            trade_idea=_trade_idea(take_profit_targets=(Decimal("112"), Decimal("111"), Decimal("120"))),
+        _with_lifecycle_fields(
+            _symbol(
+                SetupLifecycleState.CONFIRMED,
+                previous=SetupLifecycleState.TRIGGERED,
+                diagnostics=_diagnostics(tp1=Decimal("112"), tp2=Decimal("111"), tp3=Decimal("120")),
+                trade_idea=_trade_idea(take_profit_targets=(Decimal("112"), Decimal("111"), Decimal("120"))),
+            ),
+            tp1="112",
+            tp2="111",
+            tp3="120",
         ),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
@@ -7413,28 +7462,36 @@ def test_short_confirmed_blocks_when_targets_are_not_in_descending_order() -> No
 
 def test_watchlist_blocks_wrong_side_targets() -> None:
     decision = telegram_alert_decision_for_symbol(
-        _symbol(
-            SetupLifecycleState.WATCHLISTED,
-            diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("99")),
-            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        _with_lifecycle_fields(
+            _symbol(
+                SetupLifecycleState.WATCHLISTED,
+                diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("99")),
+                setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+            ),
+            tp1="99",
         )
     )
 
     _assert_target_integrity_blocked(decision, "tp1")
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.alert_type is None
 
 
 def test_watchlist_blocks_non_monotonic_targets() -> None:
     decision = telegram_alert_decision_for_symbol(
-        _symbol(
-            SetupLifecycleState.WATCHLISTED,
-            diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("110"), tp2=Decimal("109"), tp3=Decimal("120")),
-            setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+        _with_lifecycle_fields(
+            _symbol(
+                SetupLifecycleState.WATCHLISTED,
+                diagnostics=_public_ready_watchlist_diagnostics(tp1=Decimal("110"), tp2=Decimal("109"), tp3=Decimal("120")),
+                setup_quality=_setup_quality(SetupQualityState.WATCHLIST_NEAR_MISS, quality_score=88),
+            ),
+            tp1="110",
+            tp2="109",
+            tp3="120",
         )
     )
 
     _assert_target_integrity_blocked(decision, "tp_order")
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.alert_type is None
 
 
 def test_confirmed_alert_is_blocked_when_opportunity_score_below_minimum() -> None:
@@ -7577,32 +7634,39 @@ def test_confirmed_signal_blocks_rr_below_min() -> None:
 
 def test_confirmed_signal_blocks_missing_entry_zone() -> None:
     decision = telegram_alert_decision_for_symbol(
-        _symbol(
-            SetupLifecycleState.CONFIRMED,
-            previous=SetupLifecycleState.TRIGGERED,
-            diagnostics=_diagnostics(entry_low=NA, entry_high=NA, entry_zone=NA, watch_zone=NA, entry=NA),
-            trade_idea=_trade_idea(entry_low=None, entry_high=None),
+        _with_lifecycle_fields(
+            _symbol(
+                SetupLifecycleState.CONFIRMED,
+                previous=SetupLifecycleState.TRIGGERED,
+                diagnostics=_diagnostics(entry_low=NA, entry_high=NA, entry_zone=NA, watch_zone=NA, entry=NA),
+                trade_idea=_trade_idea(entry_low=None, entry_high=None),
+            ),
+            entry_low=NA,
+            entry_high=NA,
         ),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
 
     assert decision.eligible is False
-    assert "confirmed_missing_entry_zone" in decision.reason
+    assert decision.reason == "invalid_stored_plan_geometry:missing_entry_low"
 
 
 def test_confirmed_signal_blocks_missing_stop() -> None:
     decision = telegram_alert_decision_for_symbol(
-        _symbol(
-            SetupLifecycleState.CONFIRMED,
-            previous=SetupLifecycleState.TRIGGERED,
-            diagnostics=_diagnostics(stop=NA, stop_loss=NA),
-            trade_idea=_trade_idea(stop_loss=None),
+        _with_lifecycle_fields(
+            _symbol(
+                SetupLifecycleState.CONFIRMED,
+                previous=SetupLifecycleState.TRIGGERED,
+                diagnostics=_diagnostics(stop=NA, stop_loss=NA),
+                trade_idea=_trade_idea(stop_loss=None),
+            ),
+            stop_loss=NA,
         ),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
 
     assert decision.eligible is False
-    assert "confirmed_missing_stop" in decision.reason
+    assert decision.reason == "invalid_stored_plan_geometry:missing_stop_loss"
 
 
 def test_allousdt_style_contradictory_confirmed_alert_is_blocked() -> None:

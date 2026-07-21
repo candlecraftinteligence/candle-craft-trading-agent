@@ -58,48 +58,43 @@ def _db_state(db_path):
     return lifecycle_count, archived_at, sent_at, attempted_at
 
 
-def test_repair_lifecycle_hygiene_dry_run_makes_no_changes(tmp_path) -> None:
+def test_repair_lifecycle_hygiene_dry_run_preserves_historical_evidence(tmp_path) -> None:
+    db_path = _fixture_db(tmp_path)
+    before = _db_state(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        plan = repair_database(connection, apply=False)
+
+    assert len(plan.items) == 1
+    assert plan.historical_preserve[0].lifecycle_id == "life-bad"
+    assert plan.historical_preserve[0].geometry_failure == "unsupported_direction:n/a"
+    assert _db_state(db_path) == before
+
+
+def test_repair_lifecycle_hygiene_apply_does_not_rewrite_historical_or_telegram_rows(tmp_path) -> None:
+    db_path = _fixture_db(tmp_path)
+    before = _db_state(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        applied = repair_database(connection, apply=True)
+
+    assert applied.applied_count == 0
+    assert _db_state(db_path) == before
+
+
+def test_repair_lifecycle_hygiene_is_idempotent_for_historical_rows(tmp_path) -> None:
     db_path = _fixture_db(tmp_path)
 
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
-        summary = repair_database(connection, apply=False)
-
-    assert summary.rows_scanned == 1
-    assert summary.rows_to_archive == 1
-    assert summary.telegram_bad_sent_at == 1
-    assert _db_state(db_path) == (1, None, "2026-06-07T00:00:00Z", "N/A")
-
-
-def test_repair_lifecycle_hygiene_apply_clears_blocked_sent_at_and_preserves_rows(tmp_path) -> None:
-    db_path = _fixture_db(tmp_path)
-
-    with sqlite3.connect(db_path) as connection:
-        connection.row_factory = sqlite3.Row
-        summary = repair_database(connection, apply=True)
-        connection.commit()
-
-    lifecycle_count, archived_at, sent_at, attempted_at = _db_state(db_path)
-    assert summary.rows_archived == 1
-    assert summary.telegram_sent_at_cleared == 1
-    assert lifecycle_count == 1
-    assert archived_at is not None
-    assert sent_at is None
-    assert attempted_at == "2026-06-07T00:00:00Z"
-
-
-def test_repair_lifecycle_hygiene_is_idempotent(tmp_path) -> None:
-    db_path = _fixture_db(tmp_path)
-
-    with sqlite3.connect(db_path) as connection:
-        connection.row_factory = sqlite3.Row
-        repair_database(connection, apply=True)
-        connection.commit()
+        first = repair_database(connection, apply=True)
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
         second = repair_database(connection, apply=True)
-        connection.commit()
 
-    assert second.rows_archived == 0
-    assert second.telegram_sent_at_cleared == 0
+    assert first.applied_count == 0
+    assert second.applied_count == 0
+    assert second.historical_preserve[0].lifecycle_id == "life-bad"
     assert _db_state(db_path)[0] == 1

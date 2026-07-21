@@ -99,6 +99,7 @@ class SetupTransitionReason(str, Enum):
     COOLDOWN_STARTED = "Lifecycle moved into cooldown."
     COOLDOWN_EXPIRED = "Cooldown expired."
     REACTIVATED = "New structure reactivated archived setup."
+    LEGACY_INVALID_STORED_PLAN_GEOMETRY = "legacy_invalid_stored_plan_geometry"
     NO_CHANGE = "No lifecycle transition."
     INVALID_TRANSITION = "Invalid lifecycle transition rejected."
 

@@ -592,10 +592,8 @@ def test_invalid_stored_geometry_is_visible_and_cannot_invent_outcome(tmp_path: 
         result = _evaluate(repository, record, [_baseline("long")])
 
         assert result.record.current_state == record.current_state
-        assert result.progress.integrity_status == "Failed"
-        assert result.progress.diagnostic == "invalid_stored_plan_geometry:invalid_long_level_order"
-        assert result.progress.entry_at is None
-        assert result.progress.terminal_outcome == "N/A"
+        assert result.progress is None
+        assert repository.list_outcome_progress(lifecycle_id=record.lifecycle_id) == ()
 
 
 

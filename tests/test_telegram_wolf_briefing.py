@@ -245,6 +245,7 @@ def _wolf_watch_row(**overrides: Any) -> dict[str, Any]:
         "tp2": "115",
         "tp3": "120",
         "rr": "3",
+        "invalidation_reason": "A close beyond the stored stop invalidates the plan.",
         "quality_grade_current": "A",
     }
     row.update(overrides)

@@ -56,6 +56,7 @@ from app.lifecycle.eligibility import (
     research_watch_eligible,
 )
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
+from app.lifecycle.outcome_policy import stored_plan_geometry_failure
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
@@ -3230,6 +3231,9 @@ class TelegramLifecycleDeliveryService:
         public_watchlist_daily_cap_reached: bool | None = None,
         public_watchlist_hourly_cap_reached: bool | None = None,
     ) -> TelegramLifecycleDelivery | None:
+        lifecycle = symbol_result.lifecycle_state
+        if lifecycle is not None and stored_plan_geometry_failure(lifecycle) is not None:
+            return None
         alert_type_hint = (
             _alert_type_for_transition(symbol_result, symbol_result.lifecycle_transition)
             if symbol_result.lifecycle_transition
@@ -4227,6 +4231,15 @@ def telegram_alert_decision_for_symbol(
     prior_public_alert: TelegramAlertAttemptRecord | None = None,
 ) -> TelegramAlertDecision:
     transition = symbol_result.lifecycle_transition
+    lifecycle = symbol_result.lifecycle_state
+    if lifecycle is not None:
+        geometry_failure = stored_plan_geometry_failure(lifecycle)
+        if geometry_failure is not None:
+            return TelegramAlertDecision(
+                False,
+                f"invalid_stored_plan_geometry:{geometry_failure}",
+                lifecycle_transition=transition,
+            )
     if transition is None:
         return TelegramAlertDecision(False, "missing_lifecycle_transition")
     if not transition.transitioned:
@@ -4341,6 +4354,9 @@ def _public_watchlist_reconciliation_decision_for_symbol(
     symbol_result: ScannerSymbolResult,
     context: TelegramEligibilityContext,
 ) -> TelegramAlertDecision | None:
+    lifecycle = symbol_result.lifecycle_state
+    if lifecycle is not None and stored_plan_geometry_failure(lifecycle) is not None:
+        return None
     candidate = _public_watchlist_candidate_from_symbol(symbol_result)
     if not _explicit_public_watchlist_source(symbol_result, candidate):
         return None
