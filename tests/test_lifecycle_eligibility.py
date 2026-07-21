@@ -36,7 +36,8 @@ def _watch_record(**overrides):
         "failed_gate": "N/A",
         "rejection_reason": "N/A",
         "blocked_reason": "N/A",
-        "invalidation_reason": "N/A",
+        "invalidation_reason": "A close beyond the stored stop invalidates this plan.",
+        "invalidation_logic": "A close beyond the stored stop invalidates this plan.",
     }
     record.update(overrides)
     return record

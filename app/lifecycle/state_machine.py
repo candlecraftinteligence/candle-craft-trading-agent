@@ -15,6 +15,10 @@ from app.lifecycle.models import (
     SetupTransitionReason,
     SetupTransitionResult,
 )
+from app.lifecycle.outcome_policy import (
+    INVALID_STORED_PLAN_GEOMETRY,
+    stored_plan_geometry_failure,
+)
 
 ACTIVE_PROGRESSION = (
     SetupLifecycleState.DISCOVERED,
@@ -443,6 +447,21 @@ def evaluate_lifecycle_transition(
             symbol_health_penalty_cycles=max(0, int(symbol_health_penalty_cycles or 0)),
             setup_identity=_setup_identity(observation),
         )
+
+        geometry_failure = stored_plan_geometry_failure(new_record)
+        if initial_state in ACTIVE_LIFECYCLE_MONITORING_STATES and geometry_failure is not None:
+            geometry_diagnostic = f"{INVALID_STORED_PLAN_GEOMETRY}:{geometry_failure}"
+            initial_state = SetupLifecycleState.REJECTED
+            confirmed_snapshot_valid = False
+            new_record = new_record.model_copy(
+                update={
+                    "current_state": initial_state,
+                    "failed_gate": geometry_diagnostic,
+                    "confirmed_at": None,
+                    "quality_grade_confirmed": NA,
+                }
+            )
+
         event = SetupLifecycleEvent(
             lifecycle_id=lifecycle_id,
             timestamp=timestamp,
@@ -466,6 +485,24 @@ def evaluate_lifecycle_transition(
             notes=event.notes,
             event=event,
             record=new_record,
+        )
+
+    existing_geometry_failure = stored_plan_geometry_failure(record)
+    if (
+        record.current_state in ACTIVE_LIFECYCLE_MONITORING_STATES
+        and existing_geometry_failure is not None
+    ):
+        diagnostic = f"{INVALID_STORED_PLAN_GEOMETRY}:{existing_geometry_failure}"
+        return SetupTransitionResult(
+            lifecycle_id=record.lifecycle_id,
+            symbol=record.symbol,
+            from_state=record.current_state,
+            to_state=record.current_state,
+            reason=SetupTransitionReason.INVALID_TRANSITION,
+            transitioned=False,
+            allowed=False,
+            notes=diagnostic,
+            record=record,
         )
 
     if (
@@ -496,6 +533,18 @@ def evaluate_lifecycle_transition(
         symbol_health_penalty_cycles=symbol_health_penalty_cycles,
     )
     next_state = next_state_for_observation(updated_record, observation, timestamp)
+    geometry_diagnostic = NA
+    geometry_failure = stored_plan_geometry_failure(updated_record)
+    if next_state in ACTIVE_LIFECYCLE_MONITORING_STATES and geometry_failure is not None:
+        geometry_diagnostic = f"{INVALID_STORED_PLAN_GEOMETRY}:{geometry_failure}"
+        if transition_allowed(updated_record.current_state, SetupLifecycleState.REJECTED):
+            next_state = SetupLifecycleState.REJECTED
+        else:
+            next_state = updated_record.current_state
+        updated_record = updated_record.model_copy(
+            update={"failed_gate": geometry_diagnostic}
+        )
+
     next_state, updated_record, decay_reason = _apply_decay_if_needed(
         record,
         updated_record,
@@ -503,6 +552,8 @@ def evaluate_lifecycle_transition(
         next_state,
     )
     reason = _reason_for_state(next_state, observation)
+    if geometry_diagnostic != NA and next_state == updated_record.current_state:
+        reason = SetupTransitionReason.INVALID_TRANSITION
     if decay_reason != NA:
         reason = SetupTransitionReason.SETUP_EXPIRED if next_state == SetupLifecycleState.EXPIRED else SetupTransitionReason.SETUP_DECAYED
     elif (
@@ -520,8 +571,20 @@ def evaluate_lifecycle_transition(
         scan_run_id=scan_run_id,
         readiness_score=observation.readiness_score,
         quality_score=observation.quality_score,
-        failed_gate=updated_record.failed_gate if decay_reason != NA else observation.failed_gate,
-        notes=reason.value if next_state != updated_record.current_state else SetupTransitionReason.NO_CHANGE.value,
+        failed_gate=(
+            geometry_diagnostic
+            if geometry_diagnostic != NA
+            else updated_record.failed_gate
+            if decay_reason != NA
+            else observation.failed_gate
+        ),
+        notes=(
+            geometry_diagnostic
+            if geometry_diagnostic != NA
+            else reason.value
+            if next_state != updated_record.current_state
+            else SetupTransitionReason.NO_CHANGE.value
+        ),
     )
 
 
@@ -858,7 +921,11 @@ def _record_with_observation(
                 record.symbol_health_penalty_cycles,
                 max(0, int(symbol_health_penalty_cycles or 0)),
             ),
-            "setup_identity": _setup_identity(observation),
+            "setup_identity": (
+                record.setup_identity
+                if record.current_state in PLAN_LOCK_STATES
+                else _setup_identity(observation)
+            ),
         }
     )
 

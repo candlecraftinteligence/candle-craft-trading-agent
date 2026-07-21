@@ -25,6 +25,7 @@ from app.lifecycle.models import (
     lifecycle_monitoring_priority,
 )
 from app.lifecycle.outcomes import evaluate_closed_candle_outcomes
+from app.lifecycle.outcome_policy import stored_plan_geometry_failure
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import (
     DEFAULT_CONFIRMATION_CYCLES,
@@ -311,9 +312,13 @@ class SetupLifecycleService:
         final_record = transition.record
         outcome_progress: SetupLifecycleOutcomeProgress | None = None
         effective_transition = transition
-        if final_record is not None:
+        persistence_blocked = (
+            not transition.allowed
+            and transition.notes.startswith("invalid_stored_plan_geometry:")
+        )
+        if final_record is not None and not persistence_blocked:
             repository.upsert_record(final_record)
-        if transition.event is not None:
+        if transition.event is not None and not persistence_blocked:
             repository.insert_event(transition.event)
         _log_lifecycle_actionability_audit(symbol_result, observation, transition)
 
@@ -775,6 +780,8 @@ def _outcome_analytics_record(
 ) -> SetupOutcomeAnalyticsRecord | None:
     record = transition.record
     if record is None:
+        return None
+    if stored_plan_geometry_failure(record) is not None:
         return None
     final_outcome = _final_outcome_for_state(record.current_state)
     if final_outcome == NA:

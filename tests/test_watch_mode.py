@@ -217,7 +217,9 @@ def _watch_lifecycle_record(state: SetupLifecycleState = SetupLifecycleState.ACT
         "quality_grade_current": "A",
         "actionability_state": "A_GRADE_ACTIONABLE",
         "failed_gate": NA,
-        "invalidation_reason": NA,
+        "invalidation_reason": "A close beyond the stored stop invalidates this plan.",
+        "invalidation_logic": "A close beyond the stored stop invalidates this plan.",
+        "setup_identity": f"{updates.get('symbol', 'WATCHUSDT')}|swing|long|watch",
     }
     data.update(updates)
     return SetupLifecycleRecord.model_validate(data)

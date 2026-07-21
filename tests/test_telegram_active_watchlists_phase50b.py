@@ -964,6 +964,12 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
         lifecycle_id="crcl-limit-zone-hit",
         symbol="CRCLUSDT",
         current_state="EXECUTING",
+        entry_low="42.123456",
+        entry_high="42.987654",
+        stop_loss="40.75",
+        tp1="45.25",
+        tp2="47.5",
+        tp3="50",
         invalidation_reason="Invalid if price accepts below 40.75.",
     )
     _insert_lifecycle_event(
@@ -1042,6 +1048,13 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
         symbol="BTCUSDT",
         current_state="EXECUTING",
         direction="long",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="110",
+        tp2="118",
+        tp3="125",
+        invalidation_reason="Price accepts below 95.",
         quality_score=90,
     )
     _insert_lifecycle_event(

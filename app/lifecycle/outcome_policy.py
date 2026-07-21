@@ -11,6 +11,9 @@ from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleOutcomeProgress, SetupLifecycleRecord
 
 
+INVALID_STORED_PLAN_GEOMETRY = "invalid_stored_plan_geometry"
+
+
 @dataclass(frozen=True)
 class StoredPlanGeometry:
     direction: str
@@ -20,37 +23,38 @@ class StoredPlanGeometry:
     targets: tuple[Decimal, Decimal, Decimal]
 
 
-def canonical_plan_identity(record: SetupLifecycleRecord) -> str:
+def canonical_plan_identity(record: Any) -> str:
     values = (
-        record.lifecycle_id,
-        record.symbol,
-        record.mode,
-        record.direction,
-        record.entry_low,
-        record.entry_high,
-        record.stop_loss,
-        record.tp1,
-        record.tp2,
-        record.tp3,
-        record.invalidation_logic,
+        _field(record, "lifecycle_id"),
+        _field(record, "symbol"),
+        _field(record, "mode"),
+        _field(record, "direction"),
+        _field(record, "entry_low"),
+        _field(record, "entry_high"),
+        _field(record, "stop_loss"),
+        _field(record, "tp1"),
+        _field(record, "tp2"),
+        _field(record, "tp3"),
+        _stored_invalidation(record),
     )
     digest = hashlib.sha256("\x1f".join(_text(value) for value in values).encode("utf-8")).hexdigest()
     return f"plan-{digest}"
 
 
-def stored_plan_geometry(record: SetupLifecycleRecord) -> StoredPlanGeometry:
-    direction = _text(record.direction).lower()
+def stored_plan_geometry(record: Any) -> StoredPlanGeometry:
+    direction_value = _field(record, "direction")
+    direction = _text(direction_value).lower()
     if direction not in {"long", "short"}:
-        raise ValueError(f"unsupported_direction:{record.direction}")
+        raise ValueError(f"unsupported_direction:{direction_value}")
     values = {
-        "entry_low": _required_decimal(record.entry_low, "entry_low"),
-        "entry_high": _required_decimal(record.entry_high, "entry_high"),
-        "stop_loss": _required_decimal(record.stop_loss, "stop_loss"),
-        "tp1": _required_decimal(record.tp1, "tp1"),
-        "tp2": _required_decimal(record.tp2, "tp2"),
-        "tp3": _required_decimal(record.tp3, "tp3"),
+        "entry_low": _required_decimal(_field(record, "entry_low"), "entry_low"),
+        "entry_high": _required_decimal(_field(record, "entry_high"), "entry_high"),
+        "stop_loss": _required_decimal(_field(record, "stop_loss"), "stop_loss"),
+        "tp1": _required_decimal(_field(record, "tp1"), "tp1"),
+        "tp2": _required_decimal(_field(record, "tp2"), "tp2"),
+        "tp3": _required_decimal(_field(record, "tp3"), "tp3"),
     }
-    invalidation = _text(record.invalidation_logic or record.invalidation_reason)
+    invalidation = _stored_invalidation(record)
     if invalidation == NA:
         raise ValueError("missing_invalidation")
     low = values["entry_low"]
@@ -70,6 +74,18 @@ def stored_plan_geometry(record: SetupLifecycleRecord) -> StoredPlanGeometry:
         stop_loss=stop,
         targets=targets,
     )
+
+
+def stored_plan_geometry_failure(record: Any) -> str | None:
+    try:
+        stored_plan_geometry(record)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def has_valid_stored_plan_geometry(record: Any) -> bool:
+    return stored_plan_geometry_failure(record) is None
 
 
 def candle_range(causal: CausalCandle) -> tuple[Decimal, Decimal]:
@@ -115,6 +131,14 @@ def _field(value: Any, name: str) -> Any:
     return getattr(value, name, None)
 
 
+def _stored_invalidation(record: Any) -> str:
+    for name in ("invalidation_logic", "invalidation_reason"):
+        value = _text(_field(record, name))
+        if value != NA:
+            return value
+    return NA
+
+
 def _required_decimal(value: Any, name: str) -> Decimal:
     if value in (None, "", NA):
         raise ValueError(f"missing_{name}")
@@ -135,11 +159,14 @@ def _text(value: Any) -> str:
 
 
 __all__ = [
+    "INVALID_STORED_PLAN_GEOMETRY",
     "StoredPlanGeometry",
     "candle_range",
     "canonical_plan_identity",
     "entry_touched",
+    "has_valid_stored_plan_geometry",
     "newly_touched_targets",
     "stop_touched",
     "stored_plan_geometry",
+    "stored_plan_geometry_failure",
 ]

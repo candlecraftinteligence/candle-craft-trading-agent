@@ -1240,6 +1240,7 @@ def _active_signal_eligibility_record(
     lifecycle_row: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
+        "_stored_lifecycle_record": lifecycle_row or None,
         **lifecycle_row,
         **signal_row,
         "current_state": _first_non_na(

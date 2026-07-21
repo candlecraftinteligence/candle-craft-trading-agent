@@ -9,6 +9,7 @@ from typing import Any
 
 from app.analytics.public_signal_quality import MIN_PUBLIC_SIGNAL_GRADE, public_quality_decision
 from app.data.dtos import NA
+from app.lifecycle.outcome_policy import has_valid_stored_plan_geometry
 
 _MISSING = object()
 
@@ -403,6 +404,8 @@ def is_public_watchlist_candidate(
     public_plan_ok = _has_public_watchlist_plan(candidate)
     if not public_plan_ok:
         reasons.append("invalid_or_missing_public_watchlist_plan")
+    if not _has_valid_canonical_lifecycle_plan(candidate):
+        reasons.append("invalid_stored_plan_geometry")
 
     rr_value = _trusted_rr(candidate)
     if rr_value is None:
@@ -445,10 +448,21 @@ def active_signal_eligible(record: Any, config: LifecycleEligibilityConfig | Non
     return (
         has_valid_direction(record)
         and has_valid_trade_map(record)
+        and _has_valid_canonical_lifecycle_plan(record)
         and has_valid_rr(record, eligibility.min_rr)
         and has_public_quality(record, eligibility.min_public_grade)
         and _has_no_public_blockers(record, reject_invalidation_reason=False)
     )
+
+
+def _has_valid_canonical_lifecycle_plan(record: Any) -> bool:
+    if isinstance(record, Mapping) and "_stored_lifecycle_record" in record:
+        lifecycle = record["_stored_lifecycle_record"]
+        return lifecycle in (None, NA) or has_valid_stored_plan_geometry(lifecycle)
+    lifecycle = _field(record, "lifecycle_state")
+    if lifecycle is not None and lifecycle != NA and not isinstance(lifecycle, (str, bytes)):
+        return has_valid_stored_plan_geometry(lifecycle)
+    return has_valid_stored_plan_geometry(record)
 
 
 def research_watch_eligible(record: Any, config: ResearchWatchEligibilityConfig | None = None) -> bool:
