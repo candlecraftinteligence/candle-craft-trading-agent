@@ -6,13 +6,16 @@ from pathlib import Path
 
 import pytest
 
+import app.lifecycle.hygiene as hygiene
+from app.alerts.public_identity import canonical_public_event_key
 from app.alerts.telegram_lifecycle import telegram_alert_decision_for_symbol
 from app.data.dtos import NA
 from app.lifecycle.hygiene import (
-    QUARANTINE_REASON_CODE,
+    DependencyOwnership,
     LifecycleHygieneError,
     apply_invalid_lifecycle_geometry_quarantine,
     audit_invalid_lifecycle_geometry,
+    build_geometry_hygiene_manifest,
 )
 from app.lifecycle.models import (
     SetupLifecycleOutcomeProgress,
@@ -21,7 +24,7 @@ from app.lifecycle.models import (
     SetupTransitionReason,
     SetupTransitionResult,
 )
-from app.lifecycle.outcome_policy import canonical_plan_identity
+from app.lifecycle.outcome_policy import canonical_plan_identity, stored_plan_geometry_failure
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerSymbolResult
 from app.storage.database import SCHEMA_VERSION, open_initialized_database
@@ -88,46 +91,166 @@ def _record(
     )
 
 
+def _valid_historical_plan(record: SetupLifecycleRecord) -> SetupLifecycleRecord:
+    return record.model_copy(
+        update={
+            "direction": "short",
+            "entry_low": "100",
+            "entry_high": "102",
+            "stop_loss": "107",
+            "tp1": "92",
+            "tp2": "85",
+            "tp3": "78",
+            "setup_identity": f"{record.symbol}|scalp|short|historical",
+        }
+    )
+
+
+def _insert_current_progress(
+    repository: SQLiteSetupLifecycleRepository,
+    record: SetupLifecycleRecord,
+    *,
+    plan_identity: str | None = None,
+    diagnostic: str | None = None,
+    integrity_status: str = "Failed",
+    terminal_outcome: str = NA,
+    **timestamps: str | None,
+) -> None:
+    failure = stored_plan_geometry_failure(record)
+    assert failure is not None
+    repository.upsert_outcome_progress(
+        SetupLifecycleOutcomeProgress(
+            lifecycle_id=record.lifecycle_id,
+            plan_identity=plan_identity or canonical_plan_identity(record),
+            symbol=record.symbol,
+            mode=record.mode,
+            direction=record.direction,
+            execution_timeframe="15m",
+            integrity_status=integrity_status,
+            diagnostic=diagnostic or f"invalid_stored_plan_geometry:{failure}",
+            terminal_outcome=terminal_outcome,
+            first_evaluated_at=NOW,
+            last_evaluated_at=NOW,
+            **timestamps,
+        )
+    )
+
+
+def _insert_historical_terminal_progress(
+    repository: SQLiteSetupLifecycleRepository,
+    record: SetupLifecycleRecord,
+) -> str:
+    historical = _valid_historical_plan(record)
+    historical_identity = canonical_plan_identity(historical)
+    repository.upsert_outcome_progress(
+        SetupLifecycleOutcomeProgress(
+            lifecycle_id=record.lifecycle_id,
+            plan_identity=historical_identity,
+            symbol=record.symbol,
+            mode=historical.mode,
+            direction=historical.direction,
+            execution_timeframe="15m",
+            entry_at="2026-07-20T10:00:00Z",
+            invalidated_at="2026-07-20T11:00:00Z",
+            outcome_at="2026-07-20T11:00:00Z",
+            terminal_outcome=SetupLifecycleState.INVALIDATED.value,
+            integrity_status="Verified",
+            diagnostic="historical_terminal_outcome",
+            first_evaluated_at="2026-07-20T09:00:00Z",
+            last_evaluated_at="2026-07-20T11:00:00Z",
+        )
+    )
+    return historical_identity
+
+
 def _insert_attempt(
     connection: sqlite3.Connection,
-    lifecycle_id: str,
+    record: SetupLifecycleRecord,
     *,
     status: str,
+    delivery_state: str = NA,
+    plan_identity: str = NA,
+    event_type: str = NA,
+    event_key: str = NA,
+    signal_id: str | None = None,
     sent_at: str | None = None,
 ) -> None:
     connection.execute(
         """
         INSERT INTO telegram_alert_attempts (
             signal_id, symbol, direction, previous_state, new_state, alert_type,
-            lifecycle_state, sent_at, attempted_at, telegram_status, message_hash
-        ) VALUES (?, 'BADUSDT', 'long', 'N/A', 'TRIGGERED', 'WATCHLIST',
-                  'TRIGGERED', ?, 'N/A', ?, ?)
+            lifecycle_state, sent_at, attempted_at, telegram_status, message_hash,
+            delivery_state, public_watchlist_plan_id, public_watchlist_event_key,
+            public_alert_event_type
+        ) VALUES (?, ?, 'n/a', 'N/A', ?, 'WATCHLIST', ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?)
         """,
-        (lifecycle_id, sent_at, status, f"hash-{lifecycle_id}-{status}"),
+        (
+            signal_id or record.lifecycle_id,
+            record.symbol,
+            record.current_state.value,
+            record.current_state.value,
+            sent_at,
+            NOW,
+            status,
+            f"hash-{record.lifecycle_id}-{status}",
+            delivery_state,
+            plan_identity,
+            event_key,
+            event_type,
+        ),
     )
 
 
-def _insert_malformed_progress(
-    repository: SQLiteSetupLifecycleRepository,
+def _insert_public_event(
+    connection: sqlite3.Connection,
     record: SetupLifecycleRecord,
     *,
-    diagnostic: str = "invalid_stored_plan_geometry:unsupported_direction",
-    entry_at: str | None = None,
+    plan_identity: str,
+    status: str,
+    delivery_state: str,
+    event_type: str = "initial_watchlist",
+    event_key: str | None = None,
+    setup_family: str = "liquidity_grab_pullback",
+    sent_at: str | None = None,
+) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO public_alert_events (
+            canonical_plan_id, event_type, event_key, symbol, side, setup_family,
+            status, delivery_state, sent_at
+        ) VALUES (?, ?, ?, ?, 'short', ?, ?, ?, ?)
+        """,
+        (
+            plan_identity,
+            event_type,
+            event_key or canonical_public_event_key(plan_identity, event_type),
+            record.symbol,
+            setup_family,
+            status,
+            delivery_state,
+            sent_at,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _insert_delivery_part(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int,
+    event_key: str,
+    delivery_state: str,
+    sent_at: str | None = None,
 ) -> None:
-    repository.upsert_outcome_progress(
-        SetupLifecycleOutcomeProgress(
-            lifecycle_id=record.lifecycle_id,
-            plan_identity=canonical_plan_identity(record),
-            symbol=record.symbol,
-            mode=record.mode,
-            direction=record.direction,
-            execution_timeframe="15m",
-            entry_at=entry_at,
-            integrity_status="Failed",
-            diagnostic=diagnostic,
-            first_evaluated_at=NOW,
-            last_evaluated_at=NOW,
-        )
+    connection.execute(
+        """
+        INSERT INTO public_alert_delivery_parts (
+            public_alert_event_id, event_key, part_index, part_count,
+            payload_text, payload_hash, delivery_state, sent_at
+        ) VALUES (?, ?, 1, 1, 'payload', 'payload-hash', ?, ?)
+        """,
+        (event_id, event_key, delivery_state, sent_at),
     )
 
 
@@ -139,187 +262,522 @@ def _logical_rows(connection: sqlite3.Connection, table: str) -> tuple[tuple[obj
     )
 
 
-def _fixture_connection(tmp_path: Path) -> sqlite3.Connection:
-    return open_initialized_database(tmp_path / "geometry.sqlite")
+def _table_snapshot(
+    connection: sqlite3.Connection,
+    tables: tuple[str, ...],
+) -> dict[str, tuple[tuple[object, ...], ...]]:
+    return {table: _logical_rows(connection, table) for table in tables}
 
 
-def test_six_legacy_active_records_are_detected_and_legally_quarantined(tmp_path: Path) -> None:
+def _fixture_connection(tmp_path: Path, name: str = "geometry.sqlite") -> sqlite3.Connection:
+    return open_initialized_database(tmp_path / name)
+
+
+def test_historical_terminal_progress_does_not_block_distinct_current_malformed_plan(
+    tmp_path: Path,
+) -> None:
     connection = _fixture_connection(tmp_path)
     try:
         repository = _repository(connection)
-        records = (
-            _record("b3ce0902d8ea4900b1c466b65b02dcf7", "NEARUSDT", SetupLifecycleState.STALKING),
-            _record("985ec9432371493b8d78f112bbe17863", "BZUSDT", SetupLifecycleState.TRIGGERED),
-            _record("8833d88e94d340c4af3f43cf5776e1c7", "ESPORTSUSDT", SetupLifecycleState.TRIGGERED),
-            _record("43b07bc896954ebda8e7cca3390667ad", "LINKUSDT", SetupLifecycleState.TRIGGERED),
-            _record("793e9d4f50724bf59f3efcabe6fd724f", "MUUSDT", SetupLifecycleState.TRIGGERED),
-            _record("a9b4aafabded4fe7ac1910216ee137ac", "XRPUSDT", SetupLifecycleState.TRIGGERED),
-        )
-        for record in records:
-            repository.upsert_record(record)
+        record = _record("xrp-current", "XRPUSDT", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
+        historical_identity = _insert_historical_terminal_progress(repository, record)
         connection.commit()
-        original_geometry = connection.execute(
-            "SELECT lifecycle_id, direction, entry_low, entry_high, stop_loss, tp1, tp2, tp3, invalidation_logic "
-            "FROM setup_lifecycle_records ORDER BY lifecycle_id"
-        ).fetchall()
 
-        plan = audit_invalid_lifecycle_geometry(connection)
+        item = audit_invalid_lifecycle_geometry(connection).safe_to_quarantine[0]
 
-        assert plan.schema_version == SCHEMA_VERSION == 16
-        assert {item.lifecycle_id for item in plan.safe_to_quarantine} == {record.lifecycle_id for record in records}
-        proposed = {item.symbol: item.proposed_state for item in plan.safe_to_quarantine}
-        assert proposed["NEARUSDT"] == SetupLifecycleState.REJECTED.value
-        assert {proposed[symbol] for symbol in proposed if symbol != "NEARUSDT"} == {
-            SetupLifecycleState.INVALIDATED.value
-        }
-
-        applied = apply_invalid_lifecycle_geometry_quarantine(connection, plan, now=NOW)
-
-        assert applied.applied_count == 6
-        assert connection.execute("SELECT COUNT(*) FROM setup_lifecycle_events").fetchone()[0] == 6
-        states = dict(
-            connection.execute("SELECT symbol, current_state FROM setup_lifecycle_records").fetchall()
+        assert item.plan_identity == canonical_plan_identity(record)
+        assert item.plan_identity != historical_identity
+        assert item.dependency_ownership == (
+            DependencyOwnership.CURRENT_PLAN_IDENTITY.value,
+            DependencyOwnership.HISTORICAL_NON_CURRENT_PLAN_IDENTITY.value,
         )
-        assert states["NEARUSDT"] == SetupLifecycleState.REJECTED.value
-        assert all(states[symbol] == SetupLifecycleState.INVALIDATED.value for symbol in states if symbol != "NEARUSDT")
-        assert connection.execute(
-            "SELECT lifecycle_id, direction, entry_low, entry_high, stop_loss, tp1, tp2, tp3, invalidation_logic "
-            "FROM setup_lifecycle_records ORDER BY lifecycle_id"
-        ).fetchall() == original_geometry
-        assert connection.execute(
-            "SELECT COUNT(*) FROM setup_lifecycle_outcome_progress"
-        ).fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM setup_outcome_analytics").fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM telegram_alert_attempts").fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM public_alert_events").fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM public_alert_delivery_parts").fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0] == 0
-        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert item.reasons == ()
+        assert item.proposed_state == SetupLifecycleState.INVALIDATED.value
     finally:
         connection.close()
 
 
-def test_hygiene_preserves_valid_and_historical_rows_and_escalates_dependencies(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "timestamp_column",
+    ("entry_at", "tp1_at", "tp2_at", "tp3_at", "stop_at", "invalidated_at", "outcome_at"),
+)
+def test_current_plan_market_progress_blocks(
+    tmp_path: Path,
+    timestamp_column: str,
+) -> None:
+    connection = _fixture_connection(tmp_path, f"{timestamp_column}.sqlite")
+    try:
+        repository = _repository(connection)
+        record = _record(f"progress-{timestamp_column}", "PROGRESS", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record, **{timestamp_column: NOW})
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert "current_plan_market_progress" in item.reasons
+    finally:
+        connection.close()
+
+
+def test_current_plan_terminal_outcome_blocks(tmp_path: Path) -> None:
     connection = _fixture_connection(tmp_path)
     try:
         repository = _repository(connection)
-        valid_long = _record("valid-long", "VALIDLONG", SetupLifecycleState.REJECTED, direction="long")
-        valid_short = _record("valid-short", "VALIDSHORT", SetupLifecycleState.REJECTED, direction="short")
-        terminal = _record("terminal", "HISTORY", SetupLifecycleState.REJECTED)
-        quarantined = _record("quarantined", "QUAR", SetupLifecycleState.INVALIDATED)
-        quarantined = quarantined.model_copy(update={"failed_gate": QUARANTINE_REASON_CODE})
-        sent = _record("sent", "SENTUSDT", SetupLifecycleState.TRIGGERED)
-        reserved = _record("reserved", "RESERVED", SetupLifecycleState.TRIGGERED)
-        public_event = _record("public-event", "EVENTUSDT", SetupLifecycleState.TRIGGERED)
-        executing = _record("executing", "EXECUTING", SetupLifecycleState.EXECUTING)
-        managing = _record("managing", "MANAGING", SetupLifecycleState.MANAGING)
-        for record in (valid_long, valid_short, terminal, quarantined, sent, reserved, public_event, executing, managing):
-            repository.upsert_record(record)
-        _insert_malformed_progress(repository, terminal)
-        _insert_attempt(connection, sent.lifecycle_id, status="sent", sent_at=NOW)
-        _insert_attempt(connection, reserved.lifecycle_id, status="reserved")
+        record = _record("terminal-current", "TERMCUR", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(
+            repository,
+            record,
+            terminal_outcome=SetupLifecycleState.INVALIDATED.value,
+        )
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert "current_plan_terminal_outcome" in item.reasons
+    finally:
+        connection.close()
+
+
+def test_verified_current_plan_integrity_blocks(tmp_path: Path) -> None:
+    connection = _fixture_connection(tmp_path)
+    try:
+        repository = _repository(connection)
+        record = _record("verified-current", "VERIFIED", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record, integrity_status="Verified")
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert "current_plan_verified_integrity" in item.reasons
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("identity_case", ("missing", "mismatched", "malformed"))
+def test_missing_mismatched_or_malformed_current_plan_identity_blocks(
+    tmp_path: Path,
+    identity_case: str,
+) -> None:
+    connection = _fixture_connection(tmp_path, f"{identity_case}.sqlite")
+    try:
+        repository = _repository(connection)
+        record = _record(f"identity-{identity_case}", "IDENTITY", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        if identity_case == "mismatched":
+            _insert_historical_terminal_progress(repository, record)
+        elif identity_case == "malformed":
+            _insert_current_progress(repository, record, plan_identity="malformed-plan")
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert "missing_current_plan_outcome_progress" in item.reasons
+        if identity_case == "malformed":
+            assert "ambiguous_or_malformed_outcome_plan_identity" in item.reasons
+            assert DependencyOwnership.AMBIGUOUS_UNPROVEN.value in item.dependency_ownership
+    finally:
+        connection.close()
+
+
+def test_non_geometry_only_current_progress_blocks(tmp_path: Path) -> None:
+    connection = _fixture_connection(tmp_path)
+    try:
+        repository = _repository(connection)
+        record = _record("wrong-diagnostic", "WRONGDIAG", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record, diagnostic="missing_execution_timeframe")
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert "current_plan_progress_not_failed_geometry_only" in item.reasons
+    finally:
+        connection.close()
+
+
+def test_direct_current_plan_sent_attempt_blocks(tmp_path: Path) -> None:
+    connection = _fixture_connection(tmp_path)
+    try:
+        repository = _repository(connection)
+        record = _record("direct-sent", "DIRECT", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
+        plan_identity = canonical_plan_identity(record)
+        event_type = "initial_watchlist"
+        _insert_attempt(
+            connection,
+            record,
+            status="sent",
+            delivery_state="SENT",
+            plan_identity=plan_identity,
+            event_type=event_type,
+            event_key=canonical_public_event_key(plan_identity, event_type),
+            sent_at=NOW,
+        )
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert "confirmed_public_delivery" in item.reasons
+        assert (
+            DependencyOwnership.DIRECT_CURRENT_PLAN_PUBLIC_DELIVERY.value
+            in item.dependency_ownership
+        )
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "delivery_state"),
+    (
+        ("RESERVED", "PENDING"),
+        ("FAILED", "RETRYABLE"),
+        ("RESERVED", "UNCERTAIN"),
+    ),
+)
+def test_reserved_retryable_and_uncertain_direct_delivery_blocks(
+    tmp_path: Path,
+    status: str,
+    delivery_state: str,
+) -> None:
+    connection = _fixture_connection(tmp_path, f"{delivery_state}.sqlite")
+    try:
+        repository = _repository(connection)
+        record = _record(f"delivery-{delivery_state}", "DELIVERY", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
+        _insert_public_event(
+            connection,
+            record,
+            plan_identity=canonical_plan_identity(record),
+            status=status,
+            delivery_state=delivery_state,
+        )
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert "public_delivery_reservation_or_uncertainty" in item.reasons
+    finally:
+        connection.close()
+
+
+def test_direct_current_plan_retryable_delivery_part_blocks(tmp_path: Path) -> None:
+    connection = _fixture_connection(tmp_path)
+    try:
+        repository = _repository(connection)
+        record = _record("part-retry", "PARTRETRY", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
+        plan_identity = canonical_plan_identity(record)
+        event_key = canonical_public_event_key(plan_identity, "initial_watchlist")
+        event_id = _insert_public_event(
+            connection,
+            record,
+            plan_identity=plan_identity,
+            status="FAILED",
+            delivery_state="FAILED_FINAL",
+            event_key=event_key,
+        )
+        _insert_delivery_part(
+            connection,
+            event_id=event_id,
+            event_key=event_key,
+            delivery_state="RETRYABLE",
+        )
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert "public_delivery_reservation_or_uncertainty" in item.reasons
+    finally:
+        connection.close()
+
+
+def test_lifecycle_only_delivery_with_missing_plan_identity_fails_closed(
+    tmp_path: Path,
+) -> None:
+    connection = _fixture_connection(tmp_path)
+    try:
+        repository = _repository(connection)
+        record = _record("ambiguous-delivery", "AMBIG", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
+        _insert_attempt(connection, record, status="sent", sent_at=NOW)
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert "ambiguous_public_delivery_identity" in item.reasons
+        assert DependencyOwnership.AMBIGUOUS_UNPROVEN.value in item.dependency_ownership
+    finally:
+        connection.close()
+
+
+def test_same_symbol_different_plan_xrp_delivery_does_not_block(tmp_path: Path) -> None:
+    connection = _fixture_connection(tmp_path)
+    try:
+        repository = _repository(connection)
+        record = _record("xrp-malformed", "XRPUSDT", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
+        xrp_plan_id = "XRPUSDT|short|e8e2f7760b3797881ed7"
+        xrp_event_key = canonical_public_event_key(xrp_plan_id, "initial_watchlist")
+        _insert_public_event(
+            connection,
+            record,
+            plan_identity=xrp_plan_id,
+            event_key=xrp_event_key,
+            status="SENT",
+            delivery_state="SENT",
+            sent_at=NOW,
+        )
+        _insert_attempt(
+            connection,
+            record,
+            signal_id="XRPUSDT-WATCH-e8e2f7760b3797881ed7",
+            status="sent",
+            delivery_state="SENT",
+            plan_identity=xrp_plan_id,
+            event_type="initial_watchlist",
+            event_key=xrp_event_key,
+            sent_at=NOW,
+        )
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).safe_to_quarantine[0]
+
+        assert "confirmed_public_delivery" not in item.reasons
+        assert item.plan_identity != xrp_plan_id
+        assert (
+            DependencyOwnership.HISTORICAL_NON_CURRENT_PLAN_IDENTITY.value
+            in item.dependency_ownership
+        )
+        assert (
+            DependencyOwnership.DIRECT_CURRENT_PLAN_PUBLIC_DELIVERY.value
+            not in item.dependency_ownership
+        )
+    finally:
+        connection.close()
+
+
+def test_legal_and_illegal_quarantine_transitions_are_distinguished(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _fixture_connection(tmp_path)
+    try:
+        repository = _repository(connection)
+        record = _record("legal-transition", "LEGAL", SetupLifecycleState.STALKING)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
+        connection.commit()
+
+        legal = audit_invalid_lifecycle_geometry(connection).safe_to_quarantine[0]
+        assert legal.proposed_state == SetupLifecycleState.REJECTED.value
+
+        monkeypatch.setitem(
+            hygiene.SAFE_QUARANTINE_TRANSITIONS,
+            SetupLifecycleState.STALKING.value,
+            SetupLifecycleState.INVALIDATED,
+        )
+        illegal = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+        assert illegal.reasons == ("unexpected_illegal_quarantine_transition",)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        SetupLifecycleState.EXECUTING,
+        SetupLifecycleState.MANAGING,
+        SetupLifecycleState.TP_HIT,
+        SetupLifecycleState.SL_HIT,
+    ),
+)
+def test_execution_and_terminal_market_states_block_automatic_quarantine(
+    tmp_path: Path,
+    state: SetupLifecycleState,
+) -> None:
+    connection = _fixture_connection(tmp_path, f"{state.value}.sqlite")
+    try:
+        repository = _repository(connection)
+        record = _record(f"state-{state.value}", "STATEBLOCK", state)
+        repository.upsert_record(record)
+        if state in {SetupLifecycleState.EXECUTING, SetupLifecycleState.MANAGING}:
+            _insert_current_progress(repository, record)
+        connection.commit()
+
+        item = audit_invalid_lifecycle_geometry(connection).requires_manual_review[0]
+
+        assert item.reasons == ("execution_or_terminal_market_state",)
+    finally:
+        connection.close()
+
+
+def test_synthetic_manifest_apply_preserves_all_historical_tables(tmp_path: Path) -> None:
+    connection = _fixture_connection(tmp_path)
+    historical_tables = (
+        "setup_lifecycle_outcome_progress",
+        "setup_outcome_analytics",
+        "telegram_alert_attempts",
+        "public_alert_events",
+        "public_alert_delivery_parts",
+    )
+    try:
+        repository = _repository(connection)
+        record = _record("controlled-apply", "XRPUSDT", SetupLifecycleState.TRIGGERED)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
+        _insert_historical_terminal_progress(repository, record)
         connection.execute(
             """
-            INSERT INTO public_alert_events (
-                canonical_plan_id, event_type, event_key, symbol, side, status, delivery_state
-            ) VALUES ('unmatchable-public-plan', 'INITIAL_WATCHLIST', 'eventusdt-legacy',
-                      'EVENTUSDT', 'long', 'sent', 'SENT')
-            """
+            INSERT INTO setup_outcome_analytics (
+                lifecycle_id, symbol, first_seen_at, final_outcome
+            ) VALUES (?, ?, ?, 'INVALIDATED')
+            """,
+            (record.lifecycle_id, record.symbol, NOW),
+        )
+        historical_plan = "XRPUSDT|short|e8e2f7760b3797881ed7"
+        historical_event_key = canonical_public_event_key(
+            historical_plan,
+            "initial_watchlist",
+        )
+        event_id = _insert_public_event(
+            connection,
+            record,
+            plan_identity=historical_plan,
+            event_key=historical_event_key,
+            status="SENT",
+            delivery_state="SENT",
+            sent_at=NOW,
+        )
+        _insert_delivery_part(
+            connection,
+            event_id=event_id,
+            event_key=historical_event_key,
+            delivery_state="SENT",
+            sent_at=NOW,
+        )
+        _insert_attempt(
+            connection,
+            record,
+            signal_id="XRPUSDT-WATCH-e8e2f7760b3797881ed7",
+            status="sent",
+            delivery_state="SENT",
+            plan_identity=historical_plan,
+            event_type="initial_watchlist",
+            event_key=historical_event_key,
+            sent_at=NOW,
         )
         connection.commit()
-        terminal_before = _logical_rows(connection, "setup_lifecycle_records")
-        progress_before = _logical_rows(connection, "setup_lifecycle_outcome_progress")
-
+        before = _table_snapshot(connection, historical_tables)
         plan = audit_invalid_lifecycle_geometry(connection)
-        classes = {item.lifecycle_id: item for item in plan.items}
+        manifest = build_geometry_hygiene_manifest(plan)
 
-        assert "valid-long" not in classes
-        assert "valid-short" not in classes
-        assert classes[terminal.lifecycle_id].classification == "historical_preserve"
-        assert classes[quarantined.lifecycle_id].reasons == (
-            "non_outcome_eligible_preserve_unchanged",
-            "already_quarantined",
+        applied = apply_invalid_lifecycle_geometry_quarantine(
+            connection,
+            plan,
+            manifest=manifest,
+            now=NOW,
         )
-        assert classes[sent.lifecycle_id].classification == "requires_manual_review"
-        assert "confirmed_public_delivery" in classes[sent.lifecycle_id].reasons
-        assert classes[reserved.lifecycle_id].classification == "requires_manual_review"
-        assert "public_delivery_reservation_or_uncertainty" in classes[reserved.lifecycle_id].reasons
-        assert classes[public_event.lifecycle_id].classification == "requires_manual_review"
-        assert "confirmed_public_delivery" in classes[public_event.lifecycle_id].reasons
-        assert classes[executing.lifecycle_id].classification == "requires_manual_review"
-        assert "execution_or_managing_state" in classes[executing.lifecycle_id].reasons
-        assert classes[managing.lifecycle_id].classification == "requires_manual_review"
-        assert "execution_or_managing_state" in classes[managing.lifecycle_id].reasons
 
-        apply_invalid_lifecycle_geometry_quarantine(connection, plan, now=NOW)
-
-        assert _logical_rows(connection, "setup_lifecycle_records") == terminal_before
-        assert _logical_rows(connection, "setup_lifecycle_outcome_progress") == progress_before
+        assert applied.applied_count == 1
+        assert _table_snapshot(connection, historical_tables) == before
+        assert connection.execute(
+            "SELECT current_state FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+            (record.lifecycle_id,),
+        ).fetchone()[0] == SetupLifecycleState.INVALIDATED.value
+        assert connection.execute("SELECT COUNT(*) FROM setup_lifecycle_events").fetchone()[0] == 1
     finally:
         connection.close()
 
 
-def test_hygiene_dry_run_and_repeated_apply_are_idempotent(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    db_path = tmp_path / "geometry.sqlite"
+def test_dry_run_produces_no_database_writes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    db_path = tmp_path / "dry-run.sqlite"
     connection = open_initialized_database(db_path)
+    tables = (
+        "setup_lifecycle_records",
+        "setup_lifecycle_events",
+        "setup_lifecycle_outcome_progress",
+        "setup_outcome_analytics",
+        "telegram_alert_attempts",
+        "public_alert_events",
+        "public_alert_delivery_parts",
+    )
     try:
-        _repository(connection).upsert_record(
-            _record("repeat", "REPEAT", SetupLifecycleState.STALKING)
-        )
+        repository = _repository(connection)
+        record = _record("dry-run", "DRYRUN", SetupLifecycleState.STALKING)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
         connection.commit()
-        before = _logical_rows(connection, "setup_lifecycle_records")
+        before = _table_snapshot(connection, tables)
     finally:
         connection.close()
 
     assert main(["--database-path", str(db_path)]) == 0
-    first_dry_run = json.loads(capsys.readouterr().out)
-    assert main(["--database-path", str(db_path)]) == 0
-    second_dry_run = json.loads(capsys.readouterr().out)
-    assert first_dry_run["counts"]["safe_to_quarantine"] == 1
-    assert first_dry_run["applied_count"] == 0
-    assert second_dry_run["fingerprint"] == first_dry_run["fingerprint"]
-    assert second_dry_run["applied_count"] == 0
+    payload = json.loads(capsys.readouterr().out)
 
     with sqlite3.connect(db_path) as verify:
         verify.row_factory = sqlite3.Row
-        assert _logical_rows(verify, "setup_lifecycle_records") == before
-
-    assert main(
-        [
-            "--database-path",
-            str(db_path),
-            "--apply",
-            "--confirm",
-            QUARANTINE_REASON_CODE,
-            "--no-backup",
-        ]
-    ) == 0
-    first_apply = json.loads(capsys.readouterr().out)
-    assert first_apply["applied_count"] == 1
-    assert main(
-        [
-            "--database-path",
-            str(db_path),
-            "--apply",
-            "--confirm",
-            QUARANTINE_REASON_CODE,
-            "--no-backup",
-        ]
-    ) == 0
-    second_apply = json.loads(capsys.readouterr().out)
-    assert second_apply["applied_count"] == 0
-    assert second_apply["counts"]["malformed_records"] == 1
+        assert _table_snapshot(verify, tables) == before
+    assert payload["counts"]["safe_to_quarantine"] == 1
+    assert payload["applied_count"] == 0
+    assert payload["manifest_template"]["items"][0]["lifecycle_id"] == record.lifecycle_id
 
 
-def test_hygiene_rejects_stale_plans_without_partial_changes(tmp_path: Path) -> None:
+def test_manifest_mismatch_aborts_without_partial_application(tmp_path: Path) -> None:
+    connection = _fixture_connection(tmp_path)
+    try:
+        repository = _repository(connection)
+        first = _record("manifest-first", "MANONE", SetupLifecycleState.STALKING)
+        second = _record("manifest-second", "MANTWO", SetupLifecycleState.TRIGGERED)
+        for record in (first, second):
+            repository.upsert_record(record)
+            _insert_current_progress(repository, record)
+        connection.commit()
+        plan = audit_invalid_lifecycle_geometry(connection)
+        manifest = build_geometry_hygiene_manifest(plan).as_dict()
+        manifest["items"][1]["current_plan_identity"] = "plan-" + ("0" * 64)
+
+        with pytest.raises(LifecycleHygieneError, match="mismatch"):
+            apply_invalid_lifecycle_geometry_quarantine(
+                connection,
+                plan,
+                manifest=manifest,
+                now=NOW,
+            )
+
+        assert dict(
+            connection.execute("SELECT lifecycle_id, current_state FROM setup_lifecycle_records")
+        ) == {
+            first.lifecycle_id: SetupLifecycleState.STALKING.value,
+            second.lifecycle_id: SetupLifecycleState.TRIGGERED.value,
+        }
+        assert connection.execute("SELECT COUNT(*) FROM setup_lifecycle_events").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_hygiene_rejects_stale_plan_without_partial_changes(tmp_path: Path) -> None:
     connection = _fixture_connection(tmp_path)
     try:
         repository = _repository(connection)
         record = _record("stale", "STALE", SetupLifecycleState.STALKING)
         repository.upsert_record(record)
+        _insert_current_progress(repository, record)
         connection.commit()
         plan = audit_invalid_lifecycle_geometry(connection)
+        manifest = build_geometry_hygiene_manifest(plan)
         connection.execute(
             "UPDATE setup_lifecycle_records SET current_state = 'TRIGGERED' WHERE lifecycle_id = ?",
             (record.lifecycle_id,),
@@ -327,7 +785,12 @@ def test_hygiene_rejects_stale_plans_without_partial_changes(tmp_path: Path) -> 
         connection.commit()
 
         with pytest.raises(LifecycleHygieneError, match="stale"):
-            apply_invalid_lifecycle_geometry_quarantine(connection, plan, now=NOW)
+            apply_invalid_lifecycle_geometry_quarantine(
+                connection,
+                plan,
+                manifest=manifest,
+                now=NOW,
+            )
 
         assert connection.execute(
             "SELECT current_state FROM setup_lifecycle_records WHERE lifecycle_id = ?",
@@ -344,10 +807,12 @@ def test_hygiene_apply_rolls_back_every_record_on_unexpected_failure(tmp_path: P
         repository = _repository(connection)
         first = _record("rollback-first", "ROLLONE", SetupLifecycleState.STALKING)
         second = _record("rollback-second", "ROLLTWO", SetupLifecycleState.TRIGGERED)
-        repository.upsert_record(first)
-        repository.upsert_record(second)
+        for record in (first, second):
+            repository.upsert_record(record)
+            _insert_current_progress(repository, record)
         connection.commit()
         plan = audit_invalid_lifecycle_geometry(connection)
+        manifest = build_geometry_hygiene_manifest(plan)
         connection.execute(
             """
             CREATE TRIGGER fail_second_quarantine_event
@@ -361,10 +826,16 @@ def test_hygiene_apply_rolls_back_every_record_on_unexpected_failure(tmp_path: P
         connection.commit()
 
         with pytest.raises(sqlite3.IntegrityError, match="simulated event failure"):
-            apply_invalid_lifecycle_geometry_quarantine(connection, plan, now=NOW)
+            apply_invalid_lifecycle_geometry_quarantine(
+                connection,
+                plan,
+                manifest=manifest,
+                now=NOW,
+            )
 
-        states = dict(connection.execute("SELECT lifecycle_id, current_state FROM setup_lifecycle_records"))
-        assert states == {
+        assert dict(
+            connection.execute("SELECT lifecycle_id, current_state FROM setup_lifecycle_records")
+        ) == {
             first.lifecycle_id: SetupLifecycleState.STALKING.value,
             second.lifecycle_id: SetupLifecycleState.TRIGGERED.value,
         }
@@ -373,9 +844,12 @@ def test_hygiene_apply_rolls_back_every_record_on_unexpected_failure(tmp_path: P
         connection.close()
 
 
-def test_active_invalid_long_order_is_detected_without_inventing_geometry(tmp_path: Path) -> None:
+def test_active_invalid_long_order_is_classified_without_inventing_geometry(
+    tmp_path: Path,
+) -> None:
     connection = _fixture_connection(tmp_path)
     try:
+        repository = _repository(connection)
         record = _record(
             "bad-long-order",
             "BADLONG",
@@ -383,13 +857,14 @@ def test_active_invalid_long_order_is_detected_without_inventing_geometry(tmp_pa
             direction="long",
             invalid_long_order=True,
         )
-        _repository(connection).upsert_record(record)
+        repository.upsert_record(record)
+        _insert_current_progress(repository, record)
         connection.commit()
 
-        plan = audit_invalid_lifecycle_geometry(connection)
+        item = audit_invalid_lifecycle_geometry(connection).safe_to_quarantine[0]
 
-        assert plan.safe_to_quarantine[0].geometry_failure == "invalid_long_level_order"
-        assert plan.safe_to_quarantine[0].proposed_state == SetupLifecycleState.INVALIDATED.value
+        assert item.geometry_failure == "invalid_long_level_order"
+        assert item.proposed_state == SetupLifecycleState.INVALIDATED.value
         assert connection.execute(
             "SELECT direction, stop_loss FROM setup_lifecycle_records WHERE lifecycle_id = ?",
             (record.lifecycle_id,),
@@ -398,7 +873,7 @@ def test_active_invalid_long_order_is_detected_without_inventing_geometry(tmp_pa
         connection.close()
 
 
-def test_malformed_lifecycle_is_not_eligible_for_telegram_reservation_or_delivery() -> None:
+def test_current_unsupported_na_geometry_remains_fail_closed_in_normal_lifecycle() -> None:
     lifecycle = _record("telegram-block", "TELBLOCK", SetupLifecycleState.TRIGGERED)
     transition = SetupTransitionResult(
         lifecycle_id=lifecycle.lifecycle_id,

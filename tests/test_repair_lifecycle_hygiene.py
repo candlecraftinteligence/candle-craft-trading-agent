@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
+from app.lifecycle.hygiene import LifecycleHygieneError
 from app.storage.database import open_initialized_database
 from scripts.repair_lifecycle_hygiene import repair_database
 
@@ -72,13 +75,32 @@ def test_repair_lifecycle_hygiene_dry_run_preserves_historical_evidence(tmp_path
     assert _db_state(db_path) == before
 
 
-def test_repair_lifecycle_hygiene_apply_does_not_rewrite_historical_or_telegram_rows(tmp_path) -> None:
+def test_repair_apply_requires_explicit_reviewed_manifest(tmp_path) -> None:
     db_path = _fixture_db(tmp_path)
     before = _db_state(db_path)
 
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
-        applied = repair_database(connection, apply=True)
+        with pytest.raises(LifecycleHygieneError, match="manifest"):
+            repair_database(connection, apply=True)
+
+    assert _db_state(db_path) == before
+
+
+def test_repair_lifecycle_hygiene_apply_does_not_rewrite_historical_or_telegram_rows(
+    tmp_path,
+) -> None:
+    db_path = _fixture_db(tmp_path)
+    before = _db_state(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        plan = repair_database(connection, apply=False)
+        applied = repair_database(
+            connection,
+            apply=True,
+            manifest=plan.manifest_template,
+        )
 
     assert applied.applied_count == 0
     assert _db_state(db_path) == before
@@ -89,10 +111,20 @@ def test_repair_lifecycle_hygiene_is_idempotent_for_historical_rows(tmp_path) ->
 
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
-        first = repair_database(connection, apply=True)
+        first_plan = repair_database(connection, apply=False)
+        first = repair_database(
+            connection,
+            apply=True,
+            manifest=first_plan.manifest_template,
+        )
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
-        second = repair_database(connection, apply=True)
+        second_plan = repair_database(connection, apply=False)
+        second = repair_database(
+            connection,
+            apply=True,
+            manifest=second_plan.manifest_template,
+        )
 
     assert first.applied_count == 0
     assert second.applied_count == 0

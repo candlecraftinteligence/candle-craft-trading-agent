@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
 
+from app.alerts.public_identity import canonical_public_event_key
 from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleState, SetupTransitionReason
 from app.lifecycle.outcome_policy import canonical_plan_identity, stored_plan_geometry_failure
@@ -16,6 +20,7 @@ from app.storage.database import SCHEMA_VERSION
 
 
 QUARANTINE_REASON_CODE = SetupTransitionReason.LEGACY_INVALID_STORED_PLAN_GEOMETRY.value
+FAILED_GEOMETRY_DIAGNOSTIC = "invalid_stored_plan_geometry"
 OUTCOME_ELIGIBLE_STATES = frozenset(
     {
         SetupLifecycleState.WATCHLISTED.value,
@@ -26,6 +31,14 @@ OUTCOME_ELIGIBLE_STATES = frozenset(
         SetupLifecycleState.A_GRADE_WATCH.value,
         SetupLifecycleState.EXECUTING.value,
         SetupLifecycleState.MANAGING.value,
+    }
+)
+DEPENDENCY_BLOCKING_STATES = frozenset(
+    {
+        SetupLifecycleState.EXECUTING.value,
+        SetupLifecycleState.MANAGING.value,
+        SetupLifecycleState.TP_HIT.value,
+        SetupLifecycleState.SL_HIT.value,
     }
 )
 SAFE_QUARANTINE_TRANSITIONS = {
@@ -70,9 +83,7 @@ PLAN_CONDITION_COLUMNS = (
     "invalidation_reason",
     "setup_identity",
 )
-MARKET_PROGRESS_COLUMNS = (
-    "evaluation_cursor_open_at",
-    "evaluation_cursor_close_at",
+OUTCOME_TIMESTAMP_COLUMNS = (
     "entry_at",
     "tp1_at",
     "tp2_at",
@@ -81,10 +92,42 @@ MARKET_PROGRESS_COLUMNS = (
     "invalidated_at",
     "outcome_at",
 )
+UNRESOLVED_DELIVERY_STATES = frozenset(
+    {"reserved", "claimed", "pending", "in_flight", "retryable", "uncertain"}
+)
+RESOLVED_NO_DELIVERY_STATES = frozenset(
+    {
+        "blocked",
+        "cancelled",
+        "canceled",
+        "duplicate",
+        "failed",
+        "failed_final",
+        "ineligible",
+        "policy_disabled",
+        "skipped",
+        "skipped_dry_run",
+    }
+)
+CANONICAL_OUTCOME_PLAN_ID = re.compile(r"^plan-[0-9a-f]{64}$")
+CANONICAL_PUBLIC_PLAN_ID = re.compile(r"^[A-Z0-9]+[|](?:long|short)[|][0-9a-f]{20}$")
 
 
 class LifecycleHygieneError(RuntimeError):
     """The requested audited lifecycle hygiene operation is not safe to apply."""
+
+
+class DependencyOwnership(str, Enum):
+    CURRENT_PLAN_IDENTITY = "current_plan_identity"
+    HISTORICAL_NON_CURRENT_PLAN_IDENTITY = "historical_non_current_plan_identity"
+    DIRECT_CURRENT_PLAN_PUBLIC_DELIVERY = "direct_current_plan_public_delivery"
+    AMBIGUOUS_UNPROVEN = "ambiguous_unproven_ownership"
+
+
+@dataclass(frozen=True)
+class DependencyAssessment:
+    ownership: tuple[DependencyOwnership, ...] = ()
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -99,6 +142,7 @@ class GeometryHygieneItem:
     classification: str
     proposed_state: str = NA
     reasons: tuple[str, ...] = ()
+    dependency_ownership: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +156,66 @@ class GeometryHygieneItem:
             "classification": self.classification,
             "proposed_state": self.proposed_state,
             "reasons": list(self.reasons),
+            "dependency_ownership": list(self.dependency_ownership),
+        }
+
+
+@dataclass(frozen=True)
+class GeometryHygieneManifestItem:
+    lifecycle_id: str
+    current_plan_identity: str
+    expected_state: str
+    approved_transition: str
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> GeometryHygieneManifestItem:
+        return cls(
+            lifecycle_id=_required_manifest_text(value, "lifecycle_id"),
+            current_plan_identity=_required_manifest_text(value, "current_plan_identity"),
+            expected_state=_required_manifest_text(value, "expected_state").upper(),
+            approved_transition=_required_manifest_text(value, "approved_transition").upper(),
+        )
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "lifecycle_id": self.lifecycle_id,
+            "current_plan_identity": self.current_plan_identity,
+            "expected_state": self.expected_state,
+            "approved_transition": self.approved_transition,
+        }
+
+
+@dataclass(frozen=True)
+class GeometryHygieneManifest:
+    schema_version: int
+    plan_fingerprint: str
+    items: tuple[GeometryHygieneManifestItem, ...]
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> GeometryHygieneManifest:
+        try:
+            schema_version = int(value["schema_version"])
+            plan_fingerprint = _required_manifest_text(value, "plan_fingerprint")
+            raw_items = value["items"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LifecycleHygieneError("Lifecycle hygiene manifest is malformed.") from exc
+        if not isinstance(raw_items, list):
+            raise LifecycleHygieneError("Lifecycle hygiene manifest items must be a JSON list.")
+        try:
+            items = tuple(GeometryHygieneManifestItem.from_dict(item) for item in raw_items)
+        except (TypeError, AttributeError) as exc:
+            raise LifecycleHygieneError("Lifecycle hygiene manifest item is malformed.") from exc
+        return cls(
+            schema_version=schema_version,
+            plan_fingerprint=plan_fingerprint,
+            items=items,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "plan_fingerprint": self.plan_fingerprint,
+            "items": [item.as_dict() for item in self.items],
         }
 
 
@@ -136,11 +240,16 @@ class GeometryHygienePlan:
     def historical_preserve(self) -> tuple[GeometryHygieneItem, ...]:
         return tuple(item for item in self.items if item.classification == "historical_preserve")
 
+    @property
+    def manifest_template(self) -> GeometryHygieneManifest:
+        return build_geometry_hygiene_manifest(self)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "preflight": self.preflight,
             "fingerprint": self.fingerprint,
+            "manifest_template": self.manifest_template.as_dict(),
             "applied_count": self.applied_count,
             "counts": {
                 "malformed_records": len(self.items),
@@ -174,13 +283,80 @@ def audit_invalid_lifecycle_geometry(connection: sqlite3.Connection) -> Geometry
     )
 
 
+def build_geometry_hygiene_manifest(plan: GeometryHygienePlan) -> GeometryHygieneManifest:
+    return GeometryHygieneManifest(
+        schema_version=plan.schema_version,
+        plan_fingerprint=plan.fingerprint,
+        items=tuple(
+            GeometryHygieneManifestItem(
+                lifecycle_id=item.lifecycle_id,
+                current_plan_identity=item.plan_identity,
+                expected_state=item.current_state,
+                approved_transition=item.proposed_state,
+            )
+            for item in plan.safe_to_quarantine
+        ),
+    )
+
+
+def validate_geometry_hygiene_manifest(
+    plan: GeometryHygienePlan,
+    manifest: GeometryHygieneManifest | Mapping[str, Any],
+) -> GeometryHygieneManifest:
+    normalized = (
+        manifest
+        if isinstance(manifest, GeometryHygieneManifest)
+        else GeometryHygieneManifest.from_dict(manifest)
+    )
+    if normalized.schema_version != plan.schema_version:
+        raise LifecycleHygieneError("Lifecycle hygiene manifest schema version does not match the audit.")
+    if normalized.plan_fingerprint != plan.fingerprint:
+        raise LifecycleHygieneError("Lifecycle hygiene manifest fingerprint does not match the audit.")
+    approved_by_lifecycle: dict[str, GeometryHygieneManifestItem] = {}
+    for item in normalized.items:
+        if item.lifecycle_id in approved_by_lifecycle:
+            raise LifecycleHygieneError(
+                f"Lifecycle hygiene manifest repeats lifecycle {item.lifecycle_id}."
+            )
+        approved_by_lifecycle[item.lifecycle_id] = item
+    safe_by_lifecycle = {item.lifecycle_id: item for item in plan.safe_to_quarantine}
+    if set(approved_by_lifecycle) != set(safe_by_lifecycle):
+        raise LifecycleHygieneError(
+            "Lifecycle hygiene manifest must exactly cover the audited safe quarantine set."
+        )
+    for lifecycle_id, approved in approved_by_lifecycle.items():
+        item = safe_by_lifecycle[lifecycle_id]
+        if (
+            approved.current_plan_identity != item.plan_identity
+            or approved.expected_state != item.current_state
+            or approved.approved_transition != item.proposed_state
+        ):
+            raise LifecycleHygieneError(
+                f"Lifecycle hygiene manifest identity or transition mismatch for {lifecycle_id}."
+            )
+        try:
+            current_state = SetupLifecycleState(approved.expected_state)
+            proposed_state = SetupLifecycleState(approved.approved_transition)
+        except ValueError as exc:
+            raise LifecycleHygieneError(
+                f"Lifecycle hygiene manifest contains an unknown state for {lifecycle_id}."
+            ) from exc
+        if not transition_allowed(current_state, proposed_state):
+            raise LifecycleHygieneError(
+                f"Lifecycle hygiene manifest transition is illegal for {lifecycle_id}."
+            )
+    return normalized
+
+
 def apply_invalid_lifecycle_geometry_quarantine(
     connection: sqlite3.Connection,
     plan: GeometryHygienePlan,
     *,
+    manifest: GeometryHygieneManifest | Mapping[str, Any],
     now: str | None = None,
 ) -> GeometryHygienePlan:
     timestamp = now or _now()
+    approved = validate_geometry_hygiene_manifest(plan, manifest)
     if connection.in_transaction:
         raise LifecycleHygieneError("Lifecycle hygiene apply requires a clean connection.")
     connection.execute("BEGIN IMMEDIATE")
@@ -190,8 +366,10 @@ def apply_invalid_lifecycle_geometry_quarantine(
             raise LifecycleHygieneError(
                 "Lifecycle hygiene plan is stale; audit again before applying any quarantine."
             )
-        for item in plan.safe_to_quarantine:
-            _apply_item(connection, item, timestamp)
+        approved = validate_geometry_hygiene_manifest(current, approved)
+        approvals = {item.lifecycle_id: item for item in approved.items}
+        for item in current.safe_to_quarantine:
+            _apply_item(connection, item, approvals[item.lifecycle_id], timestamp)
         postflight = validate_lifecycle_hygiene_preflight(connection)
         connection.commit()
     except Exception:
@@ -201,8 +379,8 @@ def apply_invalid_lifecycle_geometry_quarantine(
 
     final_postflight = validate_lifecycle_hygiene_preflight(connection)
     return replace(
-        plan,
-        applied_count=len(plan.safe_to_quarantine),
+        current,
+        applied_count=len(current.safe_to_quarantine),
         postflight={"before_commit": postflight, "after_commit": final_postflight},
     )
 
@@ -254,15 +432,22 @@ def _classify_record(
 ) -> GeometryHygieneItem:
     lifecycle_id = _text(record.get("lifecycle_id"))
     current_state = _text(record.get("current_state")).upper()
+    plan_identity = canonical_plan_identity(record)
     base = {
         "lifecycle_id": lifecycle_id,
         "symbol": _text(record.get("symbol")).upper(),
         "mode": _text(record.get("mode")).lower(),
         "current_state": current_state,
         "geometry_failure": failure,
-        "plan_identity": canonical_plan_identity(record),
+        "plan_identity": plan_identity,
         "setup_identity": _text(record.get("setup_identity")),
     }
+    if current_state in DEPENDENCY_BLOCKING_STATES:
+        return GeometryHygieneItem(
+            **base,
+            classification="requires_manual_review",
+            reasons=("execution_or_terminal_market_state",),
+        )
     if current_state not in OUTCOME_ELIGIBLE_STATES:
         reasons = ["non_outcome_eligible_preserve_unchanged"]
         if _text(record.get("failed_gate")) == QUARANTINE_REASON_CODE:
@@ -273,20 +458,32 @@ def _classify_record(
             reasons=tuple(reasons),
         )
 
-    reasons: list[str] = []
+    progress = _outcome_progress_assessment(
+        connection,
+        record=record,
+        plan_identity=plan_identity,
+        geometry_failure=failure,
+    )
+    delivery = _public_delivery_assessment(
+        connection,
+        record=record,
+        plan_identity=plan_identity,
+    )
+    assessment = _merge_assessments(progress, delivery)
+    reasons = list(assessment.reasons)
     proposed = SAFE_QUARANTINE_TRANSITIONS.get(current_state)
     if proposed is None:
-        reasons.append("execution_or_managing_state")
+        reasons.append("execution_or_terminal_market_state")
     if _status_key(record.get("actionability_state")) != "not_a_grade_candidate":
         reasons.append("not_pre_public_not_a_grade_candidate")
-    reasons.extend(_delivery_dependency_reasons(connection, record, base["plan_identity"]))
-    reasons.extend(_outcome_progress_dependency_reasons(connection, lifecycle_id))
+    ownership = tuple(item.value for item in assessment.ownership)
     if reasons:
         return GeometryHygieneItem(
             **base,
             classification="requires_manual_review",
             proposed_state=proposed.value if proposed is not None else NA,
             reasons=tuple(dict.fromkeys(reasons)),
+            dependency_ownership=ownership,
         )
     assert proposed is not None
     if not transition_allowed(SetupLifecycleState(current_state), proposed):
@@ -295,122 +492,343 @@ def _classify_record(
             classification="requires_manual_review",
             proposed_state=proposed.value,
             reasons=("unexpected_illegal_quarantine_transition",),
+            dependency_ownership=ownership,
         )
     return GeometryHygieneItem(
         **base,
         classification="safe_to_quarantine",
         proposed_state=proposed.value,
+        dependency_ownership=ownership,
     )
 
 
-def _delivery_dependency_reasons(
+def _outcome_progress_assessment(
     connection: sqlite3.Connection,
+    *,
     record: dict[str, Any],
     plan_identity: str,
-) -> list[str]:
+    geometry_failure: str,
+) -> DependencyAssessment:
     lifecycle_id = _text(record.get("lifecycle_id"))
-    reasons: list[str] = []
-    attempt_rows = connection.execute(
-        """
-        SELECT telegram_status, sent_at
-        FROM telegram_alert_attempts
-        WHERE signal_id = ?
-        """,
-        (lifecycle_id,),
-    ).fetchall()
-    for row in attempt_rows:
-        status = _status_key(row[0])
-        sent_at = _text(row[1])
-        if status == "sent" or sent_at != NA:
-            reasons.append("confirmed_public_delivery")
-        elif status in {"reserved", "pending", "in_flight", "retryable", "uncertain"}:
-            reasons.append("public_delivery_reservation_or_uncertainty")
-    direction = _status_key(record.get("direction"))
-    if direction in {"long", "short"}:
-        event_rows = connection.execute(
-            """
-            SELECT status, delivery_state, sent_at
-            FROM public_alert_events
-            WHERE canonical_plan_id = ?
-               OR (
-                    symbol = ? AND side = ?
-                AND raw_entry_low IS ? AND raw_entry_high IS ? AND raw_stop_loss IS ?
-               )
-            """,
-            (
-                plan_identity,
-                _text(record.get("symbol")).upper(),
-                direction,
-                record.get("entry_low"),
-                record.get("entry_high"),
-                record.get("stop_loss"),
-            ),
-        ).fetchall()
-    else:
-        # An unsupported side cannot safely be matched to a canonical public plan.
-        # Any same-symbol event is therefore ambiguous and blocks automation.
-        event_rows = connection.execute(
-            "SELECT status, delivery_state, sent_at FROM public_alert_events WHERE symbol = ?",
-            (_text(record.get("symbol")).upper(),),
-        ).fetchall()
-    for row in event_rows:
-        status = _status_key(row[0])
-        delivery = _status_key(row[1])
-        sent_at = _text(row[2])
-        if status == "sent" or sent_at != NA:
-            reasons.append("confirmed_public_delivery")
-        elif status in {"reserved", "pending", "in_flight", "retryable", "uncertain"} or delivery in {
-            "pending",
-            "in_flight",
-            "retryable",
-            "uncertain",
-        }:
-            reasons.append("public_delivery_reservation_or_uncertainty")
-    return list(dict.fromkeys(reasons))
-
-
-def _outcome_progress_dependency_reasons(
-    connection: sqlite3.Connection,
-    lifecycle_id: str,
-) -> list[str]:
     rows = connection.execute(
-        "SELECT * FROM setup_lifecycle_outcome_progress WHERE lifecycle_id = ?",
+        "SELECT * FROM setup_lifecycle_outcome_progress WHERE lifecycle_id = ? ORDER BY id",
         (lifecycle_id,),
     ).fetchall()
+    ownership: list[DependencyOwnership] = []
     reasons: list[str] = []
+    current_rows = 0
     for row in rows:
         progress = dict(row)
-        if any(_text(progress.get(column)) != NA for column in MARKET_PROGRESS_COLUMNS):
-            reasons.append("valid_or_partial_outcome_progress")
-            continue
-        if _text(progress.get("terminal_outcome")) != NA:
-            reasons.append("valid_or_partial_outcome_progress")
-            continue
-        if _status_key(progress.get("integrity_status")) == "verified":
-            reasons.append("valid_or_partial_outcome_progress")
-            continue
-        diagnostic = _text(progress.get("diagnostic"))
-        if not diagnostic.startswith(f"{QUARANTINE_REASON_CODE}:") and not diagnostic.startswith(
-            "invalid_stored_plan_geometry:"
-        ):
-            reasons.append("ambiguous_outcome_progress")
-    return list(dict.fromkeys(reasons))
+        progress_plan_identity = _text(progress.get("plan_identity"))
+        if progress_plan_identity == plan_identity:
+            current_rows += 1
+            ownership.append(DependencyOwnership.CURRENT_PLAN_IDENTITY)
+            reasons.extend(
+                _current_progress_reasons(
+                    record,
+                    progress,
+                    geometry_failure=geometry_failure,
+                )
+            )
+        elif _is_canonical_outcome_plan_identity(progress_plan_identity):
+            ownership.append(DependencyOwnership.HISTORICAL_NON_CURRENT_PLAN_IDENTITY)
+        else:
+            ownership.append(DependencyOwnership.AMBIGUOUS_UNPROVEN)
+            reasons.append("ambiguous_or_malformed_outcome_plan_identity")
+    if current_rows == 0:
+        ownership.append(DependencyOwnership.AMBIGUOUS_UNPROVEN)
+        reasons.append("missing_current_plan_outcome_progress")
+    elif current_rows != 1:
+        ownership.append(DependencyOwnership.AMBIGUOUS_UNPROVEN)
+        reasons.append("ambiguous_current_plan_outcome_progress")
+    return DependencyAssessment(
+        ownership=_ordered_ownership(ownership),
+        reasons=tuple(dict.fromkeys(reasons)),
+    )
 
 
-def _apply_item(connection: sqlite3.Connection, item: GeometryHygieneItem, timestamp: str) -> None:
+def _current_progress_reasons(
+    record: dict[str, Any],
+    progress: dict[str, Any],
+    *,
+    geometry_failure: str,
+) -> list[str]:
+    reasons: list[str] = []
+    if (
+        _text(progress.get("symbol")).upper() != _text(record.get("symbol")).upper()
+        or _text(progress.get("mode")).lower() != _text(record.get("mode")).lower()
+        or _status_key(progress.get("direction")) != _status_key(record.get("direction"))
+    ):
+        reasons.append("current_plan_progress_metadata_mismatch")
+    expected_diagnostic = f"{FAILED_GEOMETRY_DIAGNOSTIC}:{geometry_failure}"
+    if _text(progress.get("diagnostic")) != expected_diagnostic:
+        reasons.append("current_plan_progress_not_failed_geometry_only")
+    if any(_text(progress.get(column)) != NA for column in OUTCOME_TIMESTAMP_COLUMNS):
+        reasons.append("current_plan_market_progress")
+    if _text(progress.get("terminal_outcome")) != NA:
+        reasons.append("current_plan_terminal_outcome")
+    if _status_key(progress.get("integrity_status")) == "verified":
+        reasons.append("current_plan_verified_integrity")
+    return reasons
+
+
+def _public_delivery_assessment(
+    connection: sqlite3.Connection,
+    *,
+    record: dict[str, Any],
+    plan_identity: str,
+) -> DependencyAssessment:
+    lifecycle_id = _text(record.get("lifecycle_id"))
+    symbol = _text(record.get("symbol")).upper()
+    event_prefix = f"{plan_identity}|%"
+    ownership: list[DependencyOwnership] = []
+    reasons: list[str] = []
+
+    attempt_rows = connection.execute(
+        """
+        SELECT signal_id, symbol, telegram_status, sent_at, delivery_state,
+               public_watchlist_plan_id, public_watchlist_event_key,
+               public_alert_event_type
+        FROM telegram_alert_attempts
+        WHERE signal_id = ?
+           OR public_watchlist_plan_id = ?
+           OR public_watchlist_event_key LIKE ?
+           OR symbol = ?
+        ORDER BY id
+        """,
+        (lifecycle_id, plan_identity, event_prefix, symbol),
+    ).fetchall()
+    for row in attempt_rows:
+        attempt = dict(row)
+        direct_lifecycle = _text(attempt.get("signal_id")) == lifecycle_id
+        owner = _public_identity_ownership(
+            plan_identity=plan_identity,
+            candidate_plan_id=attempt.get("public_watchlist_plan_id"),
+            event_type=attempt.get("public_alert_event_type"),
+            event_key=attempt.get("public_watchlist_event_key"),
+            direct_lifecycle=direct_lifecycle,
+            require_setup_identity=False,
+            setup_identity=NA,
+        )
+        if owner is None:
+            continue
+        ownership.append(owner)
+        if owner == DependencyOwnership.DIRECT_CURRENT_PLAN_PUBLIC_DELIVERY:
+            reasons.extend(
+                _delivery_state_reasons(
+                    status=attempt.get("telegram_status"),
+                    delivery_state=attempt.get("delivery_state"),
+                    sent_at=attempt.get("sent_at"),
+                )
+            )
+        elif owner == DependencyOwnership.AMBIGUOUS_UNPROVEN:
+            reasons.append("ambiguous_public_delivery_identity")
+
+    event_rows = connection.execute(
+        """
+        SELECT *
+        FROM public_alert_events
+        WHERE canonical_plan_id = ?
+           OR event_key LIKE ?
+           OR symbol = ?
+        ORDER BY id
+        """,
+        (plan_identity, event_prefix, symbol),
+    ).fetchall()
+    for row in event_rows:
+        event = dict(row)
+        owner = _public_identity_ownership(
+            plan_identity=plan_identity,
+            candidate_plan_id=event.get("canonical_plan_id"),
+            event_type=event.get("event_type"),
+            event_key=event.get("event_key"),
+            direct_lifecycle=False,
+            require_setup_identity=True,
+            setup_identity=event.get("setup_family"),
+        )
+        if owner is None:
+            continue
+        ownership.append(owner)
+        if owner == DependencyOwnership.DIRECT_CURRENT_PLAN_PUBLIC_DELIVERY:
+            reasons.extend(
+                _delivery_state_reasons(
+                    status=event.get("status"),
+                    delivery_state=event.get("delivery_state"),
+                    sent_at=event.get("sent_at"),
+                )
+            )
+            part_rows = connection.execute(
+                """
+                SELECT event_key, delivery_state, sent_at
+                FROM public_alert_delivery_parts
+                WHERE public_alert_event_id = ?
+                ORDER BY part_index
+                """,
+                (event["id"],),
+            ).fetchall()
+            expected_event_key = _text(event.get("event_key"))
+            for part_row in part_rows:
+                part = dict(part_row)
+                if _text(part.get("event_key")) != expected_event_key:
+                    ownership.append(DependencyOwnership.AMBIGUOUS_UNPROVEN)
+                    reasons.append("ambiguous_public_delivery_part_identity")
+                    continue
+                reasons.extend(
+                    _delivery_state_reasons(
+                        status=NA,
+                        delivery_state=part.get("delivery_state"),
+                        sent_at=part.get("sent_at"),
+                    )
+                )
+        elif owner == DependencyOwnership.AMBIGUOUS_UNPROVEN:
+            reasons.append("ambiguous_public_delivery_identity")
+
+    return DependencyAssessment(
+        ownership=_ordered_ownership(ownership),
+        reasons=tuple(dict.fromkeys(reasons)),
+    )
+
+
+def _public_identity_ownership(
+    *,
+    plan_identity: str,
+    candidate_plan_id: Any,
+    event_type: Any,
+    event_key: Any,
+    direct_lifecycle: bool,
+    require_setup_identity: bool,
+    setup_identity: Any,
+) -> DependencyOwnership | None:
+    candidate_plan = _text(candidate_plan_id)
+    candidate_event_type = _status_key(event_type)
+    candidate_event_key = _text(event_key)
+    expected_current_event_key = (
+        canonical_public_event_key(plan_identity, candidate_event_type)
+        if candidate_event_type
+        else NA
+    )
+    plan_matches = candidate_plan == plan_identity
+    event_matches = (
+        expected_current_event_key != NA and candidate_event_key == expected_current_event_key
+    )
+    setup_present = not require_setup_identity or _text(setup_identity) != NA
+    if plan_matches and event_matches and setup_present:
+        return DependencyOwnership.DIRECT_CURRENT_PLAN_PUBLIC_DELIVERY
+    if plan_matches or event_matches:
+        return DependencyOwnership.AMBIGUOUS_UNPROVEN
+
+    complete_identity = (
+        _is_canonical_public_or_outcome_plan_identity(candidate_plan)
+        and bool(candidate_event_type)
+        and candidate_event_key
+        == canonical_public_event_key(candidate_plan, candidate_event_type)
+        and setup_present
+    )
+    if complete_identity:
+        return DependencyOwnership.HISTORICAL_NON_CURRENT_PLAN_IDENTITY
+    if direct_lifecycle:
+        return DependencyOwnership.AMBIGUOUS_UNPROVEN
+    return None
+
+
+def _delivery_state_reasons(
+    *,
+    status: Any,
+    delivery_state: Any,
+    sent_at: Any,
+) -> list[str]:
+    normalized_status = _status_key(status)
+    normalized_delivery = _status_key(delivery_state)
+    if (
+        normalized_status == "sent"
+        or normalized_delivery == "sent"
+        or _text(sent_at) != NA
+    ):
+        return ["confirmed_public_delivery"]
+    if (
+        normalized_status in UNRESOLVED_DELIVERY_STATES
+        or normalized_delivery in UNRESOLVED_DELIVERY_STATES
+    ):
+        return ["public_delivery_reservation_or_uncertainty"]
+    states = {state for state in (normalized_status, normalized_delivery) if state}
+    if not states or not states.issubset(RESOLVED_NO_DELIVERY_STATES):
+        return ["unresolved_public_delivery_state"]
+    return []
+
+
+def _merge_assessments(*assessments: DependencyAssessment) -> DependencyAssessment:
+    ownership = [
+        item
+        for assessment in assessments
+        for item in assessment.ownership
+    ]
+    reasons = [
+        reason
+        for assessment in assessments
+        for reason in assessment.reasons
+    ]
+    return DependencyAssessment(
+        ownership=_ordered_ownership(ownership),
+        reasons=tuple(dict.fromkeys(reasons)),
+    )
+
+
+def _ordered_ownership(
+    values: list[DependencyOwnership],
+) -> tuple[DependencyOwnership, ...]:
+    present = set(values)
+    return tuple(item for item in DependencyOwnership if item in present)
+
+
+def _is_canonical_outcome_plan_identity(value: Any) -> bool:
+    return CANONICAL_OUTCOME_PLAN_ID.fullmatch(_text(value)) is not None
+
+
+def _is_canonical_public_or_outcome_plan_identity(value: Any) -> bool:
+    normalized = _text(value)
+    return (
+        CANONICAL_OUTCOME_PLAN_ID.fullmatch(normalized) is not None
+        or CANONICAL_PUBLIC_PLAN_ID.fullmatch(normalized) is not None
+    )
+
+
+def _apply_item(
+    connection: sqlite3.Connection,
+    item: GeometryHygieneItem,
+    approved: GeometryHygieneManifestItem,
+    timestamp: str,
+) -> None:
+    row = connection.execute(
+        "SELECT * FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+        (item.lifecycle_id,),
+    ).fetchone()
+    if row is None:
+        raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} no longer exists.")
+    record_row = dict(row)
+    failure = stored_plan_geometry_failure(record_row)
+    if failure is None:
+        raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} geometry is no longer malformed.")
+    fresh = _classify_record(connection, record_row, failure)
+    if fresh != item or fresh.classification != "safe_to_quarantine":
+        raise LifecycleHygieneError(
+            f"Lifecycle {item.lifecycle_id} preconditions changed immediately before write."
+        )
+    if (
+        approved.lifecycle_id != fresh.lifecycle_id
+        or approved.current_plan_identity != fresh.plan_identity
+        or approved.expected_state != fresh.current_state
+        or approved.approved_transition != fresh.proposed_state
+    ):
+        raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} is not approved by the manifest.")
+
     repository = SQLiteSetupLifecycleRepository()
     repository.connection = connection
     record = repository.get_record_by_lifecycle_id(item.lifecycle_id)
     if record is None:
         raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} no longer exists.")
-    failure = stored_plan_geometry_failure(record)
-    if failure != item.geometry_failure:
-        raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} geometry changed after audit.")
-    if canonical_plan_identity(record) != item.plan_identity:
-        raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} plan identity changed after audit.")
-    if record.current_state.value != item.current_state or record.setup_identity != item.setup_identity:
-        raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} state changed after audit.")
     proposed = SetupLifecycleState(item.proposed_state)
+    if not transition_allowed(record.current_state, proposed):
+        raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} transition is no longer legal.")
     transition = transition_record(
         record,
         proposed,
@@ -420,7 +838,9 @@ def _apply_item(connection: sqlite3.Connection, item: GeometryHygieneItem, times
         notes=f"{QUARANTINE_REASON_CODE}:{failure}",
     )
     if not transition.transitioned or transition.event is None or transition.record is None:
-        raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} could not make the planned legal transition.")
+        raise LifecycleHygieneError(
+            f"Lifecycle {item.lifecycle_id} could not make the planned legal transition."
+        )
     updated = transition.record
     predicates = ["lifecycle_id = ?", "current_state = ?"]
     predicate_values: list[Any] = [item.lifecycle_id, item.current_state]
@@ -456,6 +876,16 @@ def _plan_fingerprint(items: tuple[GeometryHygieneItem, ...]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _required_manifest_text(value: Mapping[str, Any], key: str) -> str:
+    try:
+        normalized = _text(value[key])
+    except KeyError as exc:
+        raise LifecycleHygieneError(f"Lifecycle hygiene manifest is missing {key}.") from exc
+    if normalized == NA:
+        raise LifecycleHygieneError(f"Lifecycle hygiene manifest {key} must not be N/A.")
+    return normalized
+
+
 def _now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -471,15 +901,23 @@ def _status_key(value: Any) -> str:
     text = _text(value).lower()
     if text == NA.lower():
         return ""
-    return text.replace("-", "_").replace(" ", "_")
+    normalized = text.replace("-", "_").replace(" ", "_")
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    return normalized.strip("_")
 
 
 __all__ = [
+    "DependencyOwnership",
     "GeometryHygieneItem",
+    "GeometryHygieneManifest",
+    "GeometryHygieneManifestItem",
     "GeometryHygienePlan",
     "LifecycleHygieneError",
     "QUARANTINE_REASON_CODE",
     "apply_invalid_lifecycle_geometry_quarantine",
     "audit_invalid_lifecycle_geometry",
+    "build_geometry_hygiene_manifest",
+    "validate_geometry_hygiene_manifest",
     "validate_lifecycle_hygiene_preflight",
 ]
