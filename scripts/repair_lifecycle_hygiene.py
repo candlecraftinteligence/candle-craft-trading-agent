@@ -23,6 +23,7 @@ from app.lifecycle.hygiene import (
     validate_geometry_hygiene_manifest,
 )
 from app.storage.database import connect_database, open_read_only_database
+from app.storage.database import read_only_connection_safety_proof
 from app.storage.maintenance import create_verified_backup
 
 WARNING = (
@@ -41,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(WARNING, file=sys.stderr)
     with open_read_only_database(db_path) as connection:
+        read_only_safety_proof = read_only_connection_safety_proof(connection)
         plan = audit_invalid_lifecycle_geometry(connection)
 
     manifest: GeometryHygieneManifest | None = None
@@ -78,7 +80,13 @@ def main(argv: list[str] | None = None) -> int:
             connection.close()
 
     _print_geometry_report(result, applied=args.apply)
-    payload = json.dumps(result.as_dict(), sort_keys=True, indent=2)
+    result_payload = result.as_dict()
+    if not args.apply:
+        result_payload["dry_run_safety_proof"] = {
+            **read_only_safety_proof,
+            "apply_path_entered": False,
+        }
+    payload = json.dumps(result_payload, sort_keys=True, indent=2)
     if args.json_output is not None:
         Path(args.json_output).write_text(payload + "\n", encoding="utf-8")
     print(payload)

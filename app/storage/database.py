@@ -30,6 +30,8 @@ class DatabaseMissingError(StorageError):
 class ManagedSQLiteConnection(sqlite3.Connection):
     """SQLite connection whose context manager also releases the file handle."""
 
+    read_only_safety_proof: dict[str, str | int | bool] | None = None
+
     def __exit__(
         self,
         exc_type: type[BaseException] | None,
@@ -116,15 +118,23 @@ def open_read_only_database(
         if not wal_path.exists() and not shm_path.exists():
             uri_options += "&immutable=1"
         timeout_ms = max(1, int(busy_timeout_ms))
+        read_only_uri = f"{resolved_path.as_uri()}?{uri_options}"
         connection = sqlite3.connect(
-            f"{resolved_path.as_uri()}?{uri_options}",
+            # URI mode=ro is required for the dry-run inspection connection.
+            read_only_uri,
             uri=True,
             timeout=timeout_ms / 1_000,
             factory=ManagedSQLiteConnection,
         )
+        query_only_readback = _enable_and_verify_query_only(connection)
+        connection.read_only_safety_proof = {
+            "sqlite_uri_mode": "ro",
+            "query_only_readback": query_only_readback,
+            "query_only_verified": True,
+        }
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
-        connection.execute("PRAGMA query_only = ON")
+        # query_only was set and verified before any other connection configuration.
         schema_version = identify_schema_version(connection)
         if require_supported_schema and schema_version > SCHEMA_VERSION:
             raise UnsupportedSchemaVersionError(
@@ -140,6 +150,46 @@ def open_read_only_database(
         if connection is not None:
             connection.close()
         raise StorageError(f"Unable to open database read-only: {database_path}") from exc
+
+
+def read_only_connection_safety_proof(connection: sqlite3.Connection) -> dict[str, str | int | bool]:
+    """Return the verified non-persistent safety settings for a read-only connection."""
+
+    proof = getattr(connection, "read_only_safety_proof", None)
+    if not isinstance(proof, dict):
+        raise StorageError("Read-only safety proof is unavailable; refusing to continue.")
+    if proof.get("sqlite_uri_mode") != "ro":
+        raise StorageError("Read-only safety proof lacks SQLite URI mode=ro; refusing to continue.")
+    if proof.get("query_only_verified") is not True or proof.get("query_only_readback") != 1:
+        raise StorageError("Read-only safety proof lacks verified PRAGMA query_only=1; refusing to continue.")
+    return dict(proof)
+
+
+def _enable_and_verify_query_only(connection: sqlite3.Connection) -> int:
+    """Enable SQLite query-only mode and fail closed unless its exact value is one."""
+
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        row = connection.execute("PRAGMA query_only").fetchone()
+    except (AttributeError, IndexError, TypeError, sqlite3.Error) as exc:
+        raise StorageError(
+            "Read-only safety proof failed: PRAGMA query_only readback was unavailable."
+        ) from exc
+
+    if row is None:
+        raise StorageError("Read-only safety proof failed: PRAGMA query_only returned no value.")
+    try:
+        if len(row) != 1:
+            raise ValueError("unexpected number of query_only columns")
+        query_only = row[0]
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+        raise StorageError("Read-only safety proof failed: PRAGMA query_only returned malformed data.") from exc
+    if type(query_only) is not int or query_only != 1:
+        raise StorageError(
+            "Read-only safety proof failed: PRAGMA query_only must read back exactly 1, "
+            f"got {query_only!r}."
+        )
+    return query_only
 
 
 def identify_schema_version(connection: sqlite3.Connection) -> int:

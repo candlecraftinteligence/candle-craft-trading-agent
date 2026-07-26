@@ -733,7 +733,38 @@ def test_dry_run_produces_no_database_writes(
     assert payload["counts"]["safe_to_quarantine"] == 1
     assert payload["applied_count"] == 0
     assert payload["manifest_template"]["items"][0]["lifecycle_id"] == record.lifecycle_id
+    assert payload["dry_run_safety_proof"] == {
+        "sqlite_uri_mode": "ro",
+        "query_only_readback": 1,
+        "query_only_verified": True,
+        "apply_path_entered": False,
+    }
 
+
+def test_dry_run_rejects_write_sql_on_its_read_only_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "dry-run-write-rejected.sqlite"
+    connection = open_initialized_database(db_path)
+    connection.close()
+
+    def attempt_write(read_only_connection: sqlite3.Connection) -> None:
+        read_only_connection.execute("CREATE TABLE dry_run_write_forbidden(value TEXT)")
+        raise AssertionError("dry-run write unexpectedly succeeded")
+
+    monkeypatch.setattr(
+        "scripts.repair_lifecycle_hygiene.audit_invalid_lifecycle_geometry",
+        attempt_write,
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        main(["--database-path", str(db_path)])
+
+    with sqlite3.connect(db_path) as verify:
+        assert verify.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'dry_run_write_forbidden'"
+        ).fetchone()[0] == 0
 
 def test_manifest_mismatch_aborts_without_partial_application(tmp_path: Path) -> None:
     connection = _fixture_connection(tmp_path)
