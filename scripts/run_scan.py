@@ -78,6 +78,7 @@ from app.alerts.telegram_lifecycle import (  # noqa: E402
     TelegramLifecycleDeliverySummary,
 )
 from app.alerts.telegram_sender import resolve_public_signal_destination  # noqa: E402
+from app.formatters.scanner_console import ScannerConsolePresenter  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
     DisplayBucket,
@@ -232,6 +233,7 @@ class WatchScanExecution:
     phase_statuses: dict[str, str] = field(default_factory=dict)
     recoverable_errors: tuple[str, ...] = ()
     telegram_outbox_status: dict[str, int] = field(default_factory=dict)
+    telegram_delivery_summary: TelegramLifecycleDeliverySummary | None = None
 
 
 @dataclass(frozen=True)
@@ -562,6 +564,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--watch-symbols-from-latest-run", action="store_true")
     parser.add_argument("--watch-only-near-misses", action="store_true")
     parser.add_argument("--watch-output-file", type=Path)
+    parser.add_argument(
+        "--console-mode",
+        choices=["compact", "verbose"],
+        default=None,
+        help="Watch console output: compact summary or verbose diagnostics. Watch defaults to compact.",
+    )
     parser.add_argument("--telegram-live-alerts", nargs="?", const=True, default=False, type=_bool_arg)
     parser.add_argument(
         "--show-near-miss-plan",
@@ -691,6 +699,14 @@ def _apply_command_preset(args: argparse.Namespace, explicit_options: set[str]) 
     for field, value in preset_values.items():
         if field not in explicit_options:
             setattr(args, field, value)
+
+
+def _watch_console_mode(args: argparse.Namespace) -> str:
+    if args.console_mode is not None:
+        return args.console_mode
+    if args.verbose:
+        return "verbose"
+    return "compact"
 
 
 async def main(argv: Sequence[str] | None = None) -> None:
@@ -1930,6 +1946,7 @@ async def _route_admin_report(
     *,
     ranked_results: Sequence[Any],
     manifest_row: Mapping[str, Any],
+    console_presenter: ScannerConsolePresenter | None = None,
 ) -> None:
     try:
         route_result = await route_admin_scan_report(
@@ -1940,10 +1957,24 @@ async def _route_admin_report(
             drafts_dir=ADMIN_DRAFTS_DIR,
         )
     except Exception as exc:
+        if console_presenter is not None:
+            if not console_presenter.compact:
+                console_presenter.emit(f"Telegram admin reporting warning: {type(exc).__name__}")
+            return
         print(f"Warning: Telegram admin reporting failed safely: {type(exc).__name__}")
         return
 
     path_text = route_result.draft_path.as_posix() if route_result.draft_path is not None else "N/A"
+    if console_presenter is not None:
+        if not console_presenter.compact:
+            console_presenter.emit(
+                "Telegram admin drafts: "
+                f"{route_result.delivery_status}; {route_result.drafts_created} new, "
+                f"{route_result.drafts_skipped_duplicate} duplicate; path {path_text}"
+            )
+            if route_result.warning != NA:
+                console_presenter.emit(f"Telegram admin warning: {route_result.warning}")
+        return
     print(
         "Telegram admin drafts: "
         f"{route_result.delivery_status}; "
@@ -2168,6 +2199,7 @@ async def _deliver_telegram_manual_signals_if_enabled(
     result: ScannerRunResult,
     *,
     scan_run_id: str | None,
+    print_summary: bool = True,
 ) -> TelegramLifecycleDeliverySummary | None:
     if not _telegram_lifecycle_public_delivery_enabled(args):
         return None
@@ -2181,7 +2213,8 @@ async def _deliver_telegram_manual_signals_if_enabled(
         ).deliver_for_run(result, scan_run_id=scan_run_id)
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc
-    _print_telegram_manual_lifecycle_summary(summary)
+    if print_summary:
+        _print_telegram_manual_lifecycle_summary(summary)
     return summary
 
 
@@ -2515,11 +2548,14 @@ def _first_mode(symbol_result: ScannerSymbolResult) -> str:
     return NA
 
 
-def _scanner_runner(cache: MarketDataCache | None) -> Any:
+def _scanner_runner(cache: MarketDataCache | None, *, log: Any | None = None) -> Any:
     try:
-        return ScannerRunner(market_data_cache=cache)
+        return ScannerRunner(market_data_cache=cache, log=log)
     except TypeError:
-        return ScannerRunner()
+        try:
+            return ScannerRunner(market_data_cache=cache)
+        except TypeError:
+            return ScannerRunner()
 
 
 async def _run_scanner(
@@ -2584,22 +2620,22 @@ async def _run_watch_mode(
     startup_priority_plan = _symbol_priority_plan_for_watchlist(args, watchlist)
     startup_queued_symbols = _queued_symbols_for_scan(args, watchlist, startup_priority_plan)
 
-    print(_format_universe_header(watchlist.universe))
-    print(f"Watchlist: {watchlist.source_label}")
-    print(f"Symbols queued: {len(startup_queued_symbols)}")
-    _print_symbol_queue_diagnostics(args, watchlist, startup_priority_plan, startup_queued_symbols)
-    print("Watch mode: enabled")
-    print(f"Telegram lifecycle setup alerts: {_telegram_manual_lifecycle_status_label(args)}")
-    print(f"Telegram admin drafts: {_telegram_admin_draft_status_label()}")
+    console = ScannerConsolePresenter(mode=_watch_console_mode(args))
     legacy_alert_status = (
         ("live" if telegram_live else "dry-run")
         if legacy_watch_activation_delivery
         else "suppressed (lifecycle setup route selected)"
     )
-    print(f"Legacy scanner alerts: {legacy_alert_status}")
-    for warning in _startup_warnings(args, effective_candle_limit):
-        print(f"Warning: {warning}")
-    print("")
+    startup_output = console.format_watch_startup(
+        source_label=watchlist.source_label,
+        queued_symbols=len(startup_queued_symbols),
+        lifecycle_alerts=_telegram_manual_lifecycle_status_label(args),
+        admin_drafts=_telegram_admin_draft_status_label(),
+        legacy_alerts=legacy_alert_status,
+        warnings=_startup_warnings(args, effective_candle_limit),
+    )
+    if startup_output:
+        console.emit(startup_output)
 
     iteration = 0
     completed_iterations = 0
@@ -2618,7 +2654,11 @@ async def _run_watch_mode(
             previous_state = state
             iteration_in_progress = True
             iteration_watchlist, execution, iteration_error = await _attempt_watch_scan_iteration(
-                args, startup_watchlist=watchlist, config=config, iteration=iteration
+                args,
+                startup_watchlist=watchlist,
+                config=config,
+                iteration=iteration,
+                console_presenter=console,
             )
             if iteration_error is not None:
                 disposition = classify_watch_exception(iteration_error)
@@ -2648,7 +2688,7 @@ async def _run_watch_mode(
                     failure_streak=failure_streak,
                     selected_backoff=selected_backoff,
                 )
-                _record_failed_watch_iteration(args, failed_summary, watchlist=watchlist)
+                _record_failed_watch_iteration(args, failed_summary, watchlist=watchlist, console_presenter=console)
                 iteration_in_progress = False
                 completed_iterations = iteration
                 if disposition == WatchFailureDisposition.FATAL:
@@ -2699,11 +2739,6 @@ async def _run_watch_mode(
                         ),
                     )
                     activations.append(activation)
-                    if not telegram_live:
-                        print(message)
-                        print("")
-                    elif delivery.status == "failed":
-                        print(f"Telegram watch alert failed for {symbol_result.symbol}: {delivery.detail}")
 
                 updated_state = update_watch_state_for_result(
                     updated_state,
@@ -2802,8 +2837,6 @@ async def _run_watch_mode(
                     phase_statuses["scan_storage"] = "SUCCESS"
                     database_storage_status = "SUCCESS"
                     stored_scan_runs += 1
-                    print(f"Stored watch iteration: {summary.iteration}")
-                    print(f"Run ID: {stored_manifest_run_id}")
             else:
                 phase_statuses["scan_storage"] = "SKIPPED"
                 database_storage_status = "NOT_REQUESTED"
@@ -2898,23 +2931,37 @@ async def _run_watch_mode(
                     latest_scan_path=args.save_run,
                 )
                 manifest_row["watch_supervisor"] = summary.model_dump(mode="json")
-                print(f"Warning: scan manifest persistence failed safely: {type(exc).__name__}: {exc}")
 
+            presentation_summary = summary
             if args.watch_output_file is not None:
                 try:
                     append_watch_output(args.watch_output_file, summary)
                 except OSError as exc:
                     phase_statuses["watch_output"] = "FAILED"
-                    print(f"Warning: watch output persistence failed safely: {type(exc).__name__}: {exc}")
+                    iteration_errors.append(_watch_phase_error("watch_output", exc))
+                    presentation_summary = summary.model_copy(
+                        update={
+                            "phase_statuses": dict(phase_statuses),
+                            "errors": tuple(iteration_errors),
+                        }
+                    )
                 else:
                     phase_statuses["watch_output"] = "SUCCESS"
-            print(format_watch_iteration_summary(summary))
             await _route_admin_report(
                 execution.result,
                 ranked_results=execution.ranked_results,
                 manifest_row=manifest_row,
+                console_presenter=console,
             )
-            print("")
+            console.emit(
+                console.format_watch_iteration(
+                    presentation_summary,
+                    results=execution.result.results,
+                    telegram_deliveries=tuple(
+                        getattr(execution.telegram_delivery_summary, "deliveries", ()) or ()
+                    ),
+                )
+            )
             iteration_in_progress = False
             completed_iterations = iteration
 
@@ -2937,12 +2984,13 @@ async def _run_watch_mode(
                 interval_seconds=args.watch_interval_sec,
                 interruption=exc,
             )
-            _record_failed_watch_iteration(args, cancelled_summary, watchlist=cancelled_watchlist)
+            _record_failed_watch_iteration(args, cancelled_summary, watchlist=cancelled_watchlist, console_presenter=console)
             completed_iterations = iteration
         _print_watch_shutdown(
             completed_iterations=completed_iterations,
             stored_scan_runs=stored_scan_runs,
             database_path=args.database_path,
+            console_presenter=console,
         )
         return
 
@@ -2953,6 +3001,7 @@ async def _attempt_watch_scan_iteration(
     startup_watchlist: WatchlistResolution,
     config: ScannerRunConfig,
     iteration: int,
+    console_presenter: ScannerConsolePresenter | None = None,
 ) -> tuple[WatchlistResolution | None, WatchScanExecution | None, Exception | SystemExit | None]:
     try:
         watchlist = await _watchlist_for_watch_iteration(args, startup_watchlist)
@@ -2961,6 +3010,7 @@ async def _attempt_watch_scan_iteration(
             watchlist=watchlist,
             config=config,
             iteration=iteration,
+            console_presenter=console_presenter,
         )
     except (Exception, SystemExit) as exc:
         return None, None, exc
@@ -3136,9 +3186,13 @@ def _record_failed_watch_iteration(
     summary: WatchIterationSummary,
     *,
     watchlist: WatchlistResolution,
+    console_presenter: ScannerConsolePresenter | None = None,
 ) -> None:
-    print(format_watch_iteration_summary(summary))
-    print(f"Iteration error: {summary.errors[0]}")
+    if console_presenter is not None:
+        console_presenter.emit(console_presenter.format_watch_iteration(summary))
+    else:
+        print(format_watch_iteration_summary(summary))
+        print(f"Iteration error: {summary.errors[0]}")
     if args.watch_output_file is not None:
         try:
             append_watch_output(args.watch_output_file, summary)
@@ -3190,10 +3244,12 @@ async def _run_watch_scan_iteration(
     watchlist: WatchlistResolution,
     config: ScannerRunConfig,
     iteration: int,
+    console_presenter: ScannerConsolePresenter | None = None,
 ) -> WatchScanExecution:
     phase_statuses = {"universe": "SUCCESS"}
     recoverable_errors: list[str] = []
     telegram_outbox_status: dict[str, int] = {}
+    telegram_delivery_summary: TelegramLifecycleDeliverySummary | None = None
     cache = (
         MarketDataCache(enabled=True, ttl_seconds=args.cache_ttl_seconds, file_path=args.cache_file)
         if args.cache_enabled
@@ -3229,8 +3285,11 @@ async def _run_watch_scan_iteration(
 
     async def after_symbol(symbol_result: ScannerSymbolResult, completed: int, total: int) -> None:
         latest_results_by_symbol[symbol_result.symbol] = symbol_result
-        if args.progress:
-            print(_progress_line(symbol_result, completed=completed, total=total))
+        if args.progress and (console_presenter is None or console_presenter.mode == "verbose"):
+            if console_presenter is None:
+                print(_progress_line(symbol_result, completed=completed, total=total))
+            else:
+                console_presenter.emit(_progress_line(symbol_result, completed=completed, total=total))
         if (
             args.save_run is not None
             and phase_statuses.get("checkpoint_output") != "FAILED"
@@ -3257,16 +3316,22 @@ async def _run_watch_scan_iteration(
                 recoverable_errors.append(_watch_phase_error("checkpoint_output", exc))
 
     async def progress(message: str) -> None:
-        print(message, flush=True)
+        if console_presenter is None:
+            print(message, flush=True)
+        else:
+            console_presenter.emit(message)
 
     if queued_symbols:
-        runner = _scanner_runner(cache)
+        runner = _scanner_runner(
+            cache,
+            log=console_presenter.scanner_logger() if console_presenter is not None else None,
+        )
         try:
             scan_result = await _run_scanner(
                 runner,
                 scan_config,
                 after_symbol=after_symbol if (args.progress or args.save_run is not None) else None,
-                progress=progress if args.progress else None,
+                progress=progress if args.progress and (console_presenter is None or console_presenter.mode == "verbose") else None,
                 resume_metadata=resume_metadata,
             )
         except (KeyboardInterrupt, asyncio.CancelledError) as exc:
@@ -3337,7 +3402,10 @@ async def _run_watch_scan_iteration(
     if _telegram_lifecycle_public_delivery_enabled(args):
         try:
             telegram_summary = await _deliver_telegram_manual_signals_if_enabled(
-                args, result, scan_run_id=storage_run_id
+                args,
+                result,
+                scan_run_id=storage_run_id,
+                print_summary=False,
             )
         except (Exception, SystemExit) as exc:
             if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
@@ -3345,6 +3413,7 @@ async def _run_watch_scan_iteration(
             phase_statuses["telegram_outbox"] = "FAILED"
             recoverable_errors.append(_watch_phase_error("telegram_outbox", exc))
         else:
+            telegram_delivery_summary = telegram_summary
             telegram_outbox_status = _telegram_outbox_status_summary(telegram_summary)
             phase_statuses["telegram_outbox"] = _telegram_outbox_phase_status(telegram_outbox_status)
     else:
@@ -3411,6 +3480,7 @@ async def _run_watch_scan_iteration(
         phase_statuses=phase_statuses,
         recoverable_errors=tuple(recoverable_errors),
         telegram_outbox_status=telegram_outbox_status,
+        telegram_delivery_summary=telegram_delivery_summary,
     )
 
 
@@ -3498,7 +3568,17 @@ def _print_watch_shutdown(
     completed_iterations: int,
     stored_scan_runs: int,
     database_path: Path | str,
+    console_presenter: ScannerConsolePresenter | None = None,
 ) -> None:
+    if console_presenter is not None:
+        console_presenter.emit(
+            console_presenter.format_watch_shutdown(
+                completed_iterations=completed_iterations,
+                stored_scan_runs=stored_scan_runs,
+                database_path=_database_path_text(database_path),
+            )
+        )
+        return
     print("Watch mode stopped by user.")
     print(f"Completed iterations: {completed_iterations}")
     print(f"Stored scan runs: {stored_scan_runs}")
