@@ -120,6 +120,31 @@ def _state(path: Path) -> tuple[int, int, str, bool, bool]:
         Path(f"{path}-shm").exists(),
     )
 
+class _ReadOnlySafetyCursor:
+    def __init__(self, row: object) -> None:
+        self._row = row
+
+    def fetchone(self) -> object:
+        return self._row
+
+
+class _ReadOnlySafetyConnection:
+    def __init__(self, query_only_row: object) -> None:
+        self.query_only_row = query_only_row
+        self.statements: list[str] = []
+        self.closed = False
+
+    def execute(self, statement: str) -> _ReadOnlySafetyCursor:
+        self.statements.append(statement)
+        if statement == "PRAGMA query_only":
+            return _ReadOnlySafetyCursor(self.query_only_row)
+        if statement == "PRAGMA user_version":
+            return _ReadOnlySafetyCursor((0,))
+        return _ReadOnlySafetyCursor(None)
+
+    def close(self) -> None:
+        self.closed = True
+
 
 def _backup(
     source: Path,
@@ -416,9 +441,72 @@ def test_read_only_inspection_preserves_size_mtime_hash_and_sidecars(tmp_path: P
 def test_read_only_open_enforces_query_only(tmp_path: Path) -> None:
     path = _database(tmp_path)
     with open_read_only_database(path) as connection:
+        assert database_module.read_only_connection_safety_proof(connection) == {
+            "sqlite_uri_mode": "ro",
+            "query_only_readback": 1,
+            "query_only_verified": True,
+        }
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             connection.execute("CREATE TABLE forbidden(value TEXT)")
 
+
+def test_read_only_open_uses_uri_mode_and_proves_query_only_readback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "query-only-proof.sqlite"
+    with sqlite3.connect(path):
+        pass
+    connection = _ReadOnlySafetyConnection((1,))
+    connect_call: dict[str, object] = {}
+
+    def fake_connect(*args: object, **kwargs: object) -> _ReadOnlySafetyConnection:
+        connect_call["database"] = args[0]
+        connect_call["kwargs"] = kwargs
+        return connection
+
+    monkeypatch.setattr(database_module.sqlite3, "connect", fake_connect)
+
+    opened = open_read_only_database(path, require_supported_schema=False)
+
+    assert opened is connection
+    assert str(connect_call["database"]).startswith("file:")
+    assert "mode=ro" in str(connect_call["database"])
+    assert connect_call["kwargs"] == {
+        "uri": True,
+        "timeout": WRITABLE_BUSY_TIMEOUT_MS / 1_000,
+        "factory": database_module.ManagedSQLiteConnection,
+    }
+    assert connection.statements[:2] == ["PRAGMA query_only = ON", "PRAGMA query_only"]
+    assert database_module.read_only_connection_safety_proof(opened) == {
+        "sqlite_uri_mode": "ro",
+        "query_only_readback": 1,
+        "query_only_verified": True,
+    }
+    opened.close()
+
+@pytest.mark.parametrize("query_only_row", (None, (0,), ("1",), (1, 0)))
+def test_read_only_open_fails_closed_without_exact_query_only_readback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    query_only_row: object,
+) -> None:
+    path = tmp_path / "invalid-query-only-proof.sqlite"
+    with sqlite3.connect(path):
+        pass
+    connection = _ReadOnlySafetyConnection(query_only_row)
+
+    def fake_connect(*args: object, **kwargs: object) -> _ReadOnlySafetyConnection:
+        del args, kwargs
+        return connection
+
+    monkeypatch.setattr(database_module.sqlite3, "connect", fake_connect)
+
+    with pytest.raises(StorageError, match="query_only"):
+        open_read_only_database(path, require_supported_schema=False)
+
+    assert connection.statements == ["PRAGMA query_only = ON", "PRAGMA query_only"]
+    assert connection.closed is True
 
 def test_read_only_open_reports_unsupported_schema_without_migration(tmp_path: Path) -> None:
     path = tmp_path / "future.sqlite"
