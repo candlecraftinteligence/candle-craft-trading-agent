@@ -525,35 +525,10 @@ def build_watch_iteration_summary(
 
 
 def format_watch_iteration_summary(summary: WatchIterationSummary) -> str:
-    next_scan = "N/A" if summary.next_scan_seconds is None else _seconds_text(summary.next_scan_seconds)
-    return "\n".join(
-        (
-            f"Watch iteration {summary.iteration}",
-            f"Iteration ID: {summary.iteration_id}",
-            f"Status: {summary.status}",
-            f"Scheduled start: {summary.scheduled_start}",
-            f"Actual start: {summary.actual_start}",
-            f"Finish: {summary.finished_at}",
-            f"Duration: {_seconds_text(summary.duration_seconds)}",
-            f"Sleep duration: {_seconds_text(summary.sleep_seconds)}",
-            f"Cadence lag: {_seconds_text(summary.cadence_lag_seconds)}",
-            f"Overrun: {_seconds_text(summary.overrun_seconds)}",
-            f"Missed intervals: {summary.missed_interval_count}",
-            f"Failure streak/backoff: {summary.consecutive_failure_count}/{_seconds_text(summary.selected_backoff_seconds)}",
-            f"Symbols watched: {summary.symbols_watched}",
-            f"Queue outcomes: {summary.queue_total} = {json.dumps(summary.outcome_counts, sort_keys=True)}",
-            f"Symbol outcomes: {json.dumps(summary.symbol_outcomes, sort_keys=True)}",
-            f"Valid activations: {summary.valid_activations}",
-            f"Still watching: {summary.still_watching}",
-            f"Rejected/no edge: {summary.rejected_no_edge}",
-            f"Data issues: {summary.data_issues}",
-            f"Phases: {json.dumps(summary.phase_statuses, sort_keys=True)}",
-            f"Telegram outbox: {json.dumps(summary.telegram_outbox_status, sort_keys=True)}",
-            f"Database storage: {summary.database_storage_status}",
-            f"Next scheduled attempt: {summary.next_scheduled_attempt}",
-            f"Next scan in {next_scan}",
-        )
-    )
+    """Compatibility wrapper for callers that still request verbose diagnostics."""
+    from app.formatters.scanner_console import format_watch_iteration_console
+
+    return format_watch_iteration_console(summary, mode="verbose")
 
 
 def append_watch_output(path: Path, summary: WatchIterationSummary) -> None:

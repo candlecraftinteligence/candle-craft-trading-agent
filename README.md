@@ -2280,6 +2280,14 @@ Safety boundaries:
 - Phase 40 is operational reliability and local persistence only.
 - It does not change strategy gates, weaken setup logic, create trades from invalid setups, add order execution, add private exchange API access, add withdrawals or transfers, or send live Telegram by default.
 
+## Human-Readable Scanner Console Output
+
+Watch mode now uses a centralized scanner console presenter. `--watch` defaults to `--console-mode compact`, which emits one flushed, ordered iteration block with pipeline health, real outcome counts, grouped recoverable warnings, visible candidates, schedule status, and a clear next action. Ordinary `scanned_no_setup` results remain a count instead of a per-symbol dump.
+
+Use `--console-mode verbose` when investigating a run. It retains timing, phase, per-symbol outcome, Telegram outbox, and error diagnostics as readable multi-line sections instead of one-line dictionaries. `--verbose` also selects verbose watch-console output unless `--console-mode` is explicitly supplied.
+
+Compact output never emits raw `Phases` or `Symbol outcomes` mappings, respects redirected output and `NO_COLOR`, and narrows safely for constrained PowerShell windows. This is presentation-only: scanner results, strategy gates, scoring, lifecycle, Telegram decisions, database writes, timeout handling, exit codes, and cadence calculations are unchanged.
+
 ## Phase 41 - Wick vs Close Structural Intelligence
 
 Purpose:

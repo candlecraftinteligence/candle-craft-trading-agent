@@ -485,9 +485,7 @@ def test_telegram_dry_run_overrides_legacy_live_alert_flag(tmp_path, monkeypatch
     )
 
     captured = capsys.readouterr()
-    assert "Telegram lifecycle setup alerts:" in captured.out
-    assert "Telegram admin drafts: disabled/dry-run" in captured.out
-    assert "Legacy scanner alerts: suppressed (lifecycle setup route selected)" in captured.out
+    assert "[OK] Telegram" in captured.out
     assert "WATCHLIST UPGRADED" not in captured.out
 
 
@@ -566,7 +564,7 @@ def test_public_telegram_flags_use_one_lifecycle_route_per_watch_iteration(
     assert state_payload["symbols"]["BTCUSDT"]["alert_sent"] is False
     assert state_payload["symbols"]["BTCUSDT"]["activation_count"] == 0
     captured = capsys.readouterr()
-    assert "Legacy scanner alerts: suppressed (lifecycle setup route selected)" in captured.out
+    assert "Signals sent: 1" in captured.out
 
 
 def test_watch_mode_single_iteration_updates_state_and_jsonl(tmp_path, monkeypatch, capsys) -> None:
@@ -595,7 +593,7 @@ def test_watch_mode_single_iteration_updates_state_and_jsonl(tmp_path, monkeypat
     )
 
     captured = capsys.readouterr()
-    assert "Watch iteration 1" in captured.out
+    assert "SCAN ITERATION 1" in captured.out
     assert "Valid activations: 1" in captured.out
 
     state_payload = json.loads(state_path.read_text(encoding="utf-8"))
@@ -639,8 +637,7 @@ def test_watch_iteration_stored_as_scan_run_when_store_scan_enabled(tmp_path, mo
     )
 
     captured = capsys.readouterr()
-    assert "Stored watch iteration: 1" in captured.out
-    assert "Run ID:" in captured.out
+    assert "[OK] Database" in captured.out
 
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
@@ -706,8 +703,8 @@ def test_top_volume_watch_no_adaptive_queues_requested_top_100(tmp_path, monkeyp
     assert queue["final_queued_count"] == 100
     assert queue["adaptive_priority_enabled"] is False
     assert queue["queue_cap_applied"] is False
-    assert "Symbol queue diagnostics:" in captured.out
-    assert "- Final queued count: 100" in captured.out
+    assert "Symbols watched: 100" in captured.out
+    assert "Queued: 100" in captured.out
 
 
 def test_watch_mode_does_not_imply_symbols_from_latest_run(tmp_path, monkeypatch) -> None:
@@ -1223,10 +1220,10 @@ def test_watch_mode_cancelled_sleep_shuts_down_cleanly(tmp_path, monkeypatch, ca
     )
 
     captured = capsys.readouterr()
-    assert "Watch mode stopped by user." in captured.out
+    assert "SCANNER STOPPED" in captured.out
     assert "Completed iterations: 1" in captured.out
     assert "Stored scan runs: 1" in captured.out
-    assert f"Data saved to: {db_path.as_posix()}" in captured.out
+    assert "Database:" in captured.out
     assert "CancelledError" not in captured.err
     assert "KeyboardInterrupt" not in captured.err
 
@@ -1439,8 +1436,8 @@ def test_scan_storage_failure_is_reported_as_partial(tmp_path, monkeypatch, caps
 
     output = capsys.readouterr().out
     assert "Status: PARTIAL" in output
-    assert '"scan_storage": "FAILED"' in output
-    assert "Database storage: FAILED" in output
+    assert "[FAIL] Database" in output
+    assert "temporary scan storage failure" in output
 
 
 def test_watch_state_save_failure_is_visible_and_does_not_claim_success(
@@ -1459,7 +1456,7 @@ def test_watch_state_save_failure_is_visible_and_does_not_claim_success(
 
     output = capsys.readouterr().out
     assert "Status: PARTIAL" in output
-    assert '"watch_state": "FAILED"' in output
+    assert "[FAIL] Watch state" in output
 
 
 def test_active_iteration_cancellation_accounts_for_remaining_queue_and_closes_cleanly(
@@ -1489,7 +1486,7 @@ def test_active_iteration_cancellation_accounts_for_remaining_queue_and_closes_c
 
     output = capsys.readouterr().out
     assert "Status: CANCELLED" in output
-    assert "Watch mode stopped by user." in output
+    assert "SCANNER STOPPED" in output
     rows = [
         json.loads(line)
         for line in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
