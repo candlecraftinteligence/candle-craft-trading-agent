@@ -218,7 +218,8 @@ def _diagnostics(**overrides: object) -> dict[str, object]:
         "rr_to_tp2": Decimal("3"),
         "invalidation": "Invalid if price accepts below 95.",
         "structure_reason": "Sweep and reclaim into valid pullback.",
-        "confirmation_needed": "5m BOS/CHoCH.",
+        "confirmation_needed": "15m BOS/CHoCH.",
+        "confirmation_timeframe": "15m",
         "htf_2d_trend": "bullish",
         "selected_zone_type": "OB valid",
         "volume_profile_source": "12h",
@@ -373,7 +374,7 @@ def _research_symbol(
     symbol: str = "FILUSDT",
     quality_score: int = 70,
     missing_trade_map: bool = True,
-    next_trigger: str = "Wait for failed gate to clear / 5m BOS/CHoCH.",
+    next_trigger: str = "Wait for failed gate to clear / 15m BOS/CHoCH.",
     signal_id: str = "research-src",
 ) -> ScannerSymbolResult:
     diagnostics = _public_ready_watchlist_diagnostics(
@@ -2535,7 +2536,7 @@ def test_public_watchlist_blocks_missing_confirmation_until_actionable_state() -
                 first_failed_gate="missing_confirmation_structure_shift",
                 gates_failed=("missing_confirmation_structure_shift",),
                 rr_to_tp2=Decimal("2.6"),
-                confirmation_needed="Wait for 5m BOS/CHoCH before activation.",
+                confirmation_needed="Wait for 15m BOS/CHoCH before activation.",
             ),
             setup_quality=_setup_quality_with_grade(
                 SetupQualityGrade.B_PLUS,
@@ -2763,7 +2764,7 @@ def test_no_ob_fvg_watchlist_near_miss_without_plan_is_blocked() -> None:
         gates_failed=("no_ob_or_fvg_zone",),
         execution_sweep_status="passed",
         confirmation_structure_shift_status="passed",
-        pullback_failure_reason="No valid OB or FVG was found inside the 5m displacement impulse.",
+        pullback_failure_reason="No valid OB or FVG was found inside the 15m displacement impulse.",
         next_required_conditions=(
             "A valid OB or FVG must be found inside the displacement impulse.",
             "The OB/FVG zone must overlap the preferred fib pullback zone.",
@@ -2942,7 +2943,7 @@ def test_public_signal_context_extracts_specific_diagnostics_for_message() -> No
     assert "CTXUSDT · LONG · SWING" in text
     assert "Downside liquidity was swept" in text
     assert "Downside liquidity was swept and reclaimed." in text
-    assert "5m structure shifted bullish" in text
+    assert "15m structure shifted bullish" in text
     assert "FVG + fib reaction zone" in text
     assert "fib reaction zone" in text
     assert "clean RR path" not in text
@@ -5886,7 +5887,7 @@ def test_fallback_signal_id_is_stable_for_same_watchlist_candidate() -> None:
         tp3=NA,
         rr_to_tp2=NA,
         first_failed_gate="no_ob_or_fvg_zone",
-        pullback_failure_reason="No valid OB or FVG was found inside the 5m displacement impulse.",
+        pullback_failure_reason="No valid OB or FVG was found inside the 15m displacement impulse.",
         mode="scalp",
         sweep_level=Decimal("0.16406"),
     )

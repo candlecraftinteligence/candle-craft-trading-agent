@@ -31,7 +31,8 @@ def _message(**overrides: object) -> TelegramSignalMessage:
         "tp3": Decimal("120"),
         "planned_rr": Decimal("2.91918017"),
         "structure_reason": "Sweep and reclaim into valid pullback.",
-        "confirmation_needed": "5m BOS/CHoCH.",
+        "confirmation_needed": "15m BOS/CHoCH.",
+        "confirmation_timeframe": "15m",
         "needs_next": ("Price must trade into the Limit Zone.",),
         "invalidation_reason": "Invalid if price accepts below 95.",
         "confluence": "LTF BOS/CHoCH confirmed.",
@@ -68,7 +69,7 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
     assert "TP3: 120" in text
     assert "🧠 Edge" in text
     assert "Downside liquidity was swept and reclaimed." in text
-    assert "5m structure shifted bullish." in text
+    assert "15m structure shifted bullish." in text
     assert "⚠️ Execution" in text
     assert "No chase. Entry only inside the mapped zone." in text
     assert "Invalid if price body-closes and accepts below 95." in text
@@ -79,6 +80,15 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
     assert "What we want " + "next" not in text
     assert "Signal ID" not in text
 
+
+def test_signal_formatter_uses_explicit_m5_confirmation_override() -> None:
+    text = format_telegram_signal_message(
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        _message(confirmation_timeframe="5m"),
+    )
+
+    assert "5m structure shifted bullish." in text
+    assert "15m structure shifted bullish." not in text
 
 def test_public_watchlist_formatter_matches_compact_watch_shape() -> None:
     text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message())
@@ -409,7 +419,7 @@ def test_structured_why_points_replace_generic_fallback_text() -> None:
                 source_modes=("scalp",),
                 why_it_matters_points=(
                     "Downside liquidity was swept before the setup mapped.",
-                    "5m BOS/CHoCH confirms the structure shift.",
+                    "15m BOS/CHoCH confirms the structure shift.",
                     "Pullback is mapped into an OB/FVG reaction zone.",
                     "Pullback depth aligns with the fib pocket.",
                     "Target integrity leaves a clean RR path toward TP2.",
@@ -419,7 +429,7 @@ def test_structured_why_points_replace_generic_fallback_text() -> None:
     )
 
     assert "Downside liquidity was swept." in text
-    assert "5m structure shifted bullish, with pullback aligned inside OB/FVG + fib reaction zone." in text
+    assert "15m structure shifted bullish, with pullback aligned inside OB/FVG + fib reaction zone." in text
     assert "Setup quality does not provide enough deterministic edge" not in text
     assert "clean RR path" not in text
 def test_rejected_no_setup_output_is_not_converted_to_valid_signal() -> None:

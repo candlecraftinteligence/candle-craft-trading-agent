@@ -71,6 +71,7 @@ from app.lifecycle.models import (
 )
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
 from app.strategies.liquidity_grab_pullback import (
+    DEFAULT_CONFIRMATION_TIMEFRAME,
     LiquidityGrabEngine,
     LiquidityGrabInput,
     LiquidityGrabMode,
@@ -88,7 +89,7 @@ DEFAULT_STRATEGY_MODES = (
     LiquidityGrabMode.swing,
     LiquidityGrabMode.scalp,
 )
-DIRECT_STRATEGY_TIMEFRAMES = ("12h", "4h", "1h", "15m", "5m")
+DIRECT_STRATEGY_TIMEFRAMES = ("12h", "4h", "1h", "15m")
 SYNTHETIC_2D_SOURCE_TIMEFRAME = "1d"
 NO_VALID_STRATEGY_SETUP_REASON = "No valid Liquidity-Grab Pullback setup."
 MIN_12H_VOLUME_PROFILE_CANDLES = 20
@@ -192,7 +193,7 @@ class ScannerRunConfig(BaseModel):
     htf_timeframe: str = "2d"
     bias_timeframe: str = "12h"
     execution_timeframe: str = "15m"
-    confirmation_timeframe: str = "5m"
+    confirmation_timeframe: str = DEFAULT_CONFIRMATION_TIMEFRAME
     cache_enabled: bool = True
     cache_ttl_seconds: int | None = None
     cache_file: Path | None = None
@@ -1893,6 +1894,7 @@ def _setup_quality_for_result(
             required_rr=required_rr,
             sweep_passed=_diagnostic_passed(diagnostics, "execution_sweep_status", "sweep"),
             confirmation_passed=_diagnostic_passed(diagnostics, "confirmation_structure_shift_status", "bos_choch"),
+            confirmation_timeframe=_display_decimal_or_text(diagnostics.get("confirmation_timeframe")) if diagnostics else DEFAULT_CONFIRMATION_TIMEFRAME,
             pullback_valid=_pullback_valid_for_quality(diagnostics),
             ob_or_fvg_valid="ob_fvg" in gates_passed or _display_decimal_or_text(diagnostics.get("selected_zone_type")) != NA,
             fib_valid="fib_alignment" in gates_passed
@@ -2869,7 +2871,7 @@ def _target_candles_for_timeframe(
     confirmation_timeframe: str,
     execution_timeframe: str,
 ) -> Sequence[Any]:
-    for timeframe in (calculation_timeframe, confirmation_timeframe, execution_timeframe, "15m", "5m"):
+    for timeframe in (calculation_timeframe, confirmation_timeframe, execution_timeframe, "15m"):
         normalized = _display_decimal_or_text(timeframe).lower()
         if normalized != NA.lower() and candles_by_timeframe.get(normalized):
             return candles_by_timeframe[normalized]

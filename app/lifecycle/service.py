@@ -525,6 +525,7 @@ def observation_from_symbol_result(
         failed_gate=failed_gate,
         regime_state=_first_non_na(symbol_result.regime_state, symbol_result.regime_diagnostics.get("state")),
         action_label=display.action_label,
+        confirmation_timeframe=_display(diagnostics.get('confirmation_timeframe')),
         invalidation_reason=_invalidation_reason(
             symbol_result,
             diagnostics,

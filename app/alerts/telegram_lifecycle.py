@@ -4463,6 +4463,7 @@ def telegram_signal_message_from_symbol(symbol_result: ScannerSymbolResult) -> T
         direction=direction,
         signal_id=_signal_id(symbol_result),
         mode=mode,
+        confirmation_timeframe=_confirmation_timeframe(diagnostics),
         quality=quality,
         watch_zone=_first_non_na(_entry_zone_text(entry_low, entry_high), _watch_zone_text(symbol_result, diagnostics)),
         entry_low=entry_low,
@@ -4979,6 +4980,7 @@ def _signal_message_context_from_symbol(
         quality_score=_signal_context_quality_score(symbol_result, diagnostics, message),
         lifecycle_state=_signal_context_lifecycle_state(symbol_result, candidate),
         actionability_state=actionability_state,
+        confirmation_timeframe=message.confirmation_timeframe,
         entry_low=message.entry_low,
         entry_high=message.entry_high,
         stop_loss=message.stop_loss,
@@ -5192,7 +5194,7 @@ def _signal_context_why_points(
         "bos_choch_status",
     ) or bool(getattr(symbol_result, "bos_detected", False)) or bool(getattr(symbol_result, "choch_detected", False))
     if structure_shift:
-        points.append("5m BOS/CHoCH confirms the structure shift.")
+        points.append(f"{_confirmation_timeframe(diagnostics)} BOS/CHoCH confirms the structure shift.")
 
     zone_type = _status_key(_first_non_na(diagnostics.get("selected_zone_type"), diagnostics.get("ob_fvg_status")))
     has_ob = "ob" in zone_type or "order_block" in zone_type or _context_contains_any(passed_tokens, ("ob", "order_block"))
@@ -5263,12 +5265,12 @@ def _signal_context_next_points(context: SignalMessageContext, diagnostics: Mapp
     elif actionability in {"a_grade_actionable", "actionable_a_grade"} or lifecycle == "actionable_a_grade":
         points.append("Hold entry zone and continue displacement toward TP1.")
     elif lifecycle in {"watch", "watchlisted", "stalking"}:
-        points.append("Wait for 5m BOS/CHoCH confirmation after sweep.")
+        points.append(f"Wait for {_confirmation_timeframe(diagnostics)} BOS/CHoCH confirmation after sweep.")
     elif lifecycle == "triggered":
         points.append("Need confirmation candle close and target path expansion.")
 
     actionable_state = actionability in {"a_grade_actionable", "a_grade_actionable_target_caution", "actionable_a_grade"} or lifecycle == "actionable_a_grade"
-    gate_point = _signal_context_gate_next_point(failed_gate)
+    gate_point = _signal_context_gate_next_point(failed_gate, confirmation_timeframe=_confirmation_timeframe(diagnostics))
     if gate_point != NA and not actionable_state:
         points.append(gate_point)
     if warning != NA and (actionability == "a_grade_actionable_target_caution" or _status_key(context.target_integrity_status) == "warning"):
@@ -5280,13 +5282,13 @@ def _signal_context_next_points(context: SignalMessageContext, diagnostics: Mapp
     return tuple(_dedupe_public_points(points))
 
 
-def _signal_context_gate_next_point(failed_gate: str) -> str:
+def _signal_context_gate_next_point(failed_gate: str, *, confirmation_timeframe: str = "15m") -> str:
     if not failed_gate:
         return NA
     if "limit_zone" in failed_gate or "entry_zone" in failed_gate or "pullback" in failed_gate:
         return "Wait for pullback into entry zone. No market chase."
     if "confirmation" in failed_gate or "bos" in failed_gate or "choch" in failed_gate:
-        return "Wait for 5m BOS/CHoCH confirmation after sweep."
+        return f"Wait for {confirmation_timeframe} BOS/CHoCH confirmation after sweep."
     if "target" in failed_gate or "rr" in failed_gate:
         return "Need target path expansion before treating the setup as clean."
     return NA
@@ -12003,10 +12005,15 @@ def _message_level_metadata(message: TelegramSignalMessage | None) -> dict[str, 
     }
 
 
+def _confirmation_timeframe(diagnostics: Mapping[str, Any]) -> str:
+    timeframe = _text(diagnostics.get("confirmation_timeframe"))
+    return timeframe if timeframe != NA else "15m"
+
+
 def _confirmation_needed(diagnostics: Mapping[str, Any]) -> str:
     failed_gate = _text(diagnostics.get("first_failed_gate"))
     if failed_gate == "missing_confirmation_structure_shift":
-        return "5m BOS/CHoCH confirmation."
+        return f"{_confirmation_timeframe(diagnostics)} BOS/CHoCH confirmation."
     if failed_gate != NA:
         return failed_gate
     return NA

@@ -213,13 +213,18 @@ def _scan_result() -> ScannerRunResult:
 
 def test_command_preset_configuration_defaults() -> None:
     daily = run_scan.parse_args(["--command-preset", "daily"])
+    swing = run_scan.parse_args(["--command-preset", "swing"])
+    challenge = run_scan.parse_args(["--command-preset", "challenge"])
     scalp = run_scan.parse_args(["--command-preset", "scalp"])
     override = run_scan.parse_args(["--command-preset", "daily", "--modes", "swing", "--no-continue-watch"])
 
     assert daily.htf_timeframe == "2d"
     assert daily.bias_timeframe == "12h"
     assert daily.execution_timeframe == "15m"
-    assert daily.confirmation_timeframe == "5m"
+    assert daily.confirmation_timeframe == "15m"
+    assert swing.confirmation_timeframe == "15m"
+    assert challenge.confirmation_timeframe == "15m"
+    assert scalp.confirmation_timeframe == "15m"
     assert daily.min_score_for_idea == "80"
     assert daily.min_rr == Decimal("2.5")
     assert daily.rank_results is True

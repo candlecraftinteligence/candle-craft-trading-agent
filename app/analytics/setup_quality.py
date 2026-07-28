@@ -113,6 +113,7 @@ class SetupQualityInput(BaseModel):
     required_rr: Decimal = DEFAULT_REQUIRED_RR
     sweep_passed: bool = False
     confirmation_passed: bool = False
+    confirmation_timeframe: str = "15m"
     pullback_valid: bool = False
     ob_or_fvg_valid: bool = False
     fib_valid: bool = False
@@ -167,6 +168,7 @@ class SetupQualityInput(BaseModel):
         "symbol",
         "mode",
         "bias",
+        "confirmation_timeframe",
         "htf_2d_trend",
         "mtf_12h_trend",
         "trend",
@@ -311,6 +313,7 @@ def validate_setup_quality(quality_input: SetupQualityInput | Mapping[str, Any] 
         weakest=weakest,
     )
     reason = _decision_reason(
+        data,
         state,
         confirmation_missing=confirmation_missing,
         severe_derivatives=severe_derivatives,
@@ -597,12 +600,17 @@ def _grade(state: SetupQualityState, quality_score: int) -> SetupQualityGrade:
     return SetupQualityGrade.REJECT
 
 
+def _confirmation_timeframe(data: SetupQualityInput) -> str:
+    timeframe = _display(data.confirmation_timeframe)
+    return timeframe if timeframe != NA else "15m"
+
+
 def _strongest_factors(data: SetupQualityInput, factors: Sequence[SetupQualityFactor]) -> tuple[str, ...]:
     values: list[str] = []
     if data.sweep_passed:
         values.append("clean sweep")
     if data.confirmation_passed:
-        values.append("clean 5m BOS/CHoCH")
+        values.append(f"clean {_confirmation_timeframe(data)} BOS/CHoCH")
     if data.pullback_valid:
         values.append("pullback zone valid")
     if _best_rr_value(data) != NA and _best_rr_value(data) >= data.required_rr and not _final_rr_validation_failed(data):
@@ -677,6 +685,7 @@ def _action_label(
 
 
 def _decision_reason(
+    data: SetupQualityInput,
     state: SetupQualityState,
     *,
     confirmation_missing: bool,
@@ -686,11 +695,11 @@ def _decision_reason(
     if state == SetupQualityState.DATA_ISSUE:
         return "Required market data is missing; validation is unreliable."
     if confirmation_missing:
-        return "Sweep passed but 5m BOS/CHoCH confirmation is missing."
+        return f"Sweep passed but {_confirmation_timeframe(data)} BOS/CHoCH confirmation is missing."
     if state == SetupQualityState.HIGH_QUALITY_TRADE:
         return "Valid setup has clean structure, acceptable RR, supportive context, and manageable execution risk."
     if state == SetupQualityState.WATCHLIST_NEAR_MISS:
-        return "Sweep and 5m BOS/CHoCH passed, but later quality gates still need improvement."
+        return f"Sweep and {_confirmation_timeframe(data)} BOS/CHoCH passed, but later quality gates still need improvement."
     if severe_derivatives:
         return "Technical gates progressed, but derivatives conflict removes the edge."
     if state == SetupQualityState.VALID_BUT_LOWER_QUALITY:
@@ -701,7 +710,7 @@ def _decision_reason(
 
 def _structure_note(data: SetupQualityInput) -> str:
     if data.sweep_passed and data.confirmation_passed:
-        return "Sweep and 5m BOS/CHoCH passed."
+        return f"Sweep and {_confirmation_timeframe(data)} BOS/CHoCH passed."
     if data.sweep_passed:
         return "Sweep passed but confirmation is missing."
     return "Core sweep/confirmation structure is incomplete."

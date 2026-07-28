@@ -16,6 +16,10 @@ TWO_DAYS_MS = 2 * 24 * 60 * 60_000
 CONFIRMATION_START_MS = BASE_TIMESTAMP_MS + (36 * (FIFTEEN_MINUTES_MS - FIVE_MINUTES_MS))
 
 
+def test_replay_default_confirmation_timeframe_matches_live_scanner() -> None:
+    assert ReplayConfig().confirmation_timeframe == "15m"
+
+
 def _time_aligned(
     candles: list[dict[str, Decimal | int]],
     *,

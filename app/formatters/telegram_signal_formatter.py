@@ -59,6 +59,7 @@ class SignalMessageContext:
     quality_score: Any = NA
     lifecycle_state: Any = NA
     actionability_state: Any = NA
+    confirmation_timeframe: Any = NA
     entry_low: Any = NA
     entry_high: Any = NA
     stop_loss: Any = NA
@@ -121,6 +122,7 @@ class TelegramSignalMessage:
     regime_confidence: Any = NA
     watchlist_status: Any = NA
     actionability_state: Any = NA
+    confirmation_timeframe: Any = NA
     target_integrity_status: Any = NA
     target_failure: Any = NA
     target_failure_severity: Any = NA
@@ -242,6 +244,7 @@ def _effective_signal_context(message: TelegramSignalMessage) -> SignalMessageCo
         quality_score=message.quality_score,
         lifecycle_state=message.lifecycle_state,
         actionability_state=message.actionability_state,
+        confirmation_timeframe=message.confirmation_timeframe,
         entry_low=message.entry_low,
         entry_high=message.entry_high,
         stop_loss=message.stop_loss,
@@ -437,12 +440,13 @@ def _public_edge_liquidity_line(message: TelegramSignalMessage) -> str:
 
 
 def _public_edge_confluence_line(message: TelegramSignalMessage) -> str:
+    context = _effective_signal_context(message)
     evidence = _public_edge_evidence_text(message)
     direction = _direction_key(_first_display(_effective_signal_context(message).direction, message.direction))
     direction_word = "bullish" if direction == "long" else "bearish" if direction == "short" else "directional"
     structure = _has_structure_shift_evidence(evidence)
     zone = _public_reaction_zone_label(evidence)
-    structure_text = f"5m structure shifted {direction_word}" if structure else NA
+    structure_text = f"{_confirmation_timeframe(message, context)} structure shifted {direction_word}" if structure else NA
     if structure_text != NA and zone != NA:
         return f"{structure_text}, with pullback aligned {zone}."
     if structure_text != NA:
@@ -450,6 +454,11 @@ def _public_edge_confluence_line(message: TelegramSignalMessage) -> str:
     if zone != NA:
         return f"Pullback aligned {zone}."
     return NA
+
+
+def _confirmation_timeframe(message: TelegramSignalMessage, context: SignalMessageContext) -> str:
+    timeframe = _display(_first_display(context.confirmation_timeframe, message.confirmation_timeframe))
+    return timeframe if timeframe != NA else "15m"
 
 
 def _has_structure_shift_evidence(evidence: str) -> bool:

@@ -39,7 +39,7 @@ def _base_diagnostics(**overrides: object) -> dict[str, object]:
         "htf_2d_trend": "bullish",
         "mtf_12h_trend": "bullish",
         "execution_timeframe": "15m",
-        "confirmation_timeframe": "5m",
+        "confirmation_timeframe": "15m",
         "execution_sweep_status": "passed",
         "confirmation_structure_shift_status": "passed",
         "pullback_zone_status": "valid",
@@ -174,7 +174,7 @@ def test_next_trigger_text_is_deterministic() -> None:
     cases = (
         (_normal_watch(), "Wait for clean OB/FVG pullback"),
         (_hot_watch(), "Wait for RR expansion above minimum"),
-        (missing_confirmation, "Wait for 5m BOS/CHoCH"),
+        (missing_confirmation, "Wait for 15m BOS/CHoCH"),
         (_missing_sweep(), "Wait for new sweep"),
         (derivatives_conflict, "Avoid: derivatives conflict"),
         (_data_issue(), "Avoid: data unreliable"),

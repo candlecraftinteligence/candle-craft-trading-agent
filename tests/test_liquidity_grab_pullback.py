@@ -5,7 +5,9 @@ from decimal import Decimal
 from app.analytics.derivatives_enrichment import enrich_derivatives
 from app.data.dtos import NA
 from app.strategies.liquidity_grab_pullback import (
+    DEFAULT_CONFIRMATION_TIMEFRAME,
     LiquidityGrabEngine,
+    LiquidityGrabInput,
     LiquidityGrabMode,
     analyze_liquidity_grab_pullback,
     calculate_fib_alignment,
@@ -381,13 +383,13 @@ def test_liquidity_diagnostics_explain_failed_bos_choch() -> None:
 
     assert result.swing.gates_failed[0] == "missing_confirmation_structure_shift"
     assert "Sweep: passed" in result.swing.strategy_diagnostics
-    assert "5m BOS/CHoCH: failed" in result.swing.strategy_diagnostics
-    assert "No 5m BOS/CHoCH close beyond the required LTF swing." in result.swing.structure_shift_diagnostics
+    assert "15m BOS/CHoCH: failed" in result.swing.strategy_diagnostics
+    assert "No 15m BOS/CHoCH close beyond the required LTF swing." in result.swing.structure_shift_diagnostics
 
 
 def test_liquidity_diagnostics_explain_missing_ob_fvg() -> None:
     result = analyze_liquidity_grab_pullback(
-        {"symbol": "BTCUSDT", "candles_15m": _full_bullish_setup_candles(), "candles_5m": _missing_ob_fvg_candles()}
+        {"symbol": "BTCUSDT", "confirmation_timeframe": "5m", "candles_15m": _full_bullish_setup_candles(), "candles_5m": _missing_ob_fvg_candles()}
     )
 
     assert result.swing.gates_failed[0] == "no_ob_or_fvg_zone"
@@ -398,7 +400,7 @@ def test_liquidity_diagnostics_explain_missing_ob_fvg() -> None:
 
 def test_liquidity_diagnostics_explain_failed_fib_alignment() -> None:
     result = analyze_liquidity_grab_pullback(
-        {"symbol": "BTCUSDT", "candles_15m": _full_bullish_setup_candles(), "candles_5m": _fib_failure_candles()}
+        {"symbol": "BTCUSDT", "confirmation_timeframe": "5m", "candles_15m": _full_bullish_setup_candles(), "candles_5m": _fib_failure_candles()}
     )
 
     assert result.swing.gates_failed[0] == "body_acceptance_failure"
@@ -468,6 +470,11 @@ def test_invalid_swing_and_scalp_outputs_remain_exact_messages() -> None:
     assert result.formatted_output.scalp_setup == "No valid scalp setup."
 
 
+def test_default_confirmation_timeframe_is_m15() -> None:
+    assert DEFAULT_CONFIRMATION_TIMEFRAME == "15m"
+    assert LiquidityGrabInput(symbol="BTCUSDT").confirmation_timeframe == "15m"
+
+
 def test_rejects_setup_when_ltf_confirmation_is_missing() -> None:
     result = LiquidityGrabEngine().analyze(
         {
@@ -485,28 +492,29 @@ def test_rejects_setup_when_ltf_confirmation_is_missing() -> None:
     assert result.challenge.htf_2d_context_source == "synthetic_from_1d"
 
 
-def test_missing_5m_candles_rejects_with_na_confirmation_timeframe() -> None:
+def test_explicit_m5_confirmation_override_rejects_when_m5_candles_are_missing() -> None:
     result = LiquidityGrabEngine().analyze(
         {
             "symbol": "BTCUSDT",
             "mode": "swing",
-            "candles_15m": _full_bullish_setup_candles(),
+            "confirmation_timeframe": "5m",
+            "candles_15m": _mtf_execution_sweep_candles(),
+            "candles_2d": _trend_candles(),
         }
     )
 
     assert result.swing.is_valid is False
     assert result.swing.first_failed_gate == "missing_confirmation_candles"
-    assert result.swing.confirmation_timeframe == NA
-    assert result.swing.ltf_confirmation_timeframe == NA
-    assert result.swing.confirmation_bos_choch_reason == "5m confirmation candles missing."
-    assert "5m confirmation candles missing." in result.swing.hard_rejection_reasons
+    assert result.swing.confirmation_timeframe == "5m"
+    assert result.swing.ltf_confirmation_timeframe == "5m"
 
 
-def test_valid_5m_confirmation_allows_ob_fvg_checks_to_run() -> None:
+def test_explicit_m5_confirmation_allows_ob_fvg_checks_to_run() -> None:
     result = LiquidityGrabEngine().analyze(
         {
             "symbol": "BTCUSDT",
             "mode": "swing",
+            "confirmation_timeframe": "5m",
             "candles_15m": _full_bullish_setup_candles(),
             "candles_5m": _missing_ob_fvg_candles(),
         }
@@ -522,6 +530,7 @@ def test_5m_bos_passed_uses_confirmation_indices_for_pullback() -> None:
         {
             "symbol": "BTCUSDT",
             "mode": "swing",
+            "confirmation_timeframe": "5m",
             "candles_15m": _mtf_execution_sweep_candles(),
             "candles_5m": _mtf_confirmation_bos_candles(),
             "candles_2d": _trend_candles(),
@@ -550,6 +559,7 @@ def test_5m_bos_passed_with_candles_gets_specific_pullback_rejection() -> None:
         {
             "symbol": "BTCUSDT",
             "mode": "swing",
+            "confirmation_timeframe": "5m",
             "candles_15m": _mtf_execution_sweep_candles(),
             "candles_5m": confirmation,
             "candles_2d": _trend_candles(),
@@ -564,7 +574,7 @@ def test_5m_bos_passed_with_candles_gets_specific_pullback_rejection() -> None:
 def test_eth_style_failed_bos_choch_still_rejects_before_pullback() -> None:
     result = LiquidityGrabEngine().analyze(
         {
-            "symbol": "ETHUSDT",
+            "symbol": "ETHUSDT", "confirmation_timeframe": "5m",
             "mode": "swing",
             "candles_15m": _mtf_execution_sweep_candles(),
             "candles_5m": _base_candles(100),
