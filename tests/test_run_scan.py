@@ -30,6 +30,7 @@ from scripts import run_scan
 
 class FakeScannerRunner:
     async def run(self, config):
+        confirmation_timeframe = config.confirmation_timeframe
         volume_profile = VolumeProfileResult(
             symbol="BTCUSDT",
             timeframe="15m",
@@ -103,15 +104,15 @@ class FakeScannerRunner:
                     "htf_timeframe": "2d",
                     "bias_timeframe": "12h",
                     "execution_timeframe": "15m",
-                    "confirmation_timeframe": "5m",
+                    "confirmation_timeframe": confirmation_timeframe,
                     "htf_2d_context_source": "synthetic_from_1d",
                     "candles_2d_count": 125,
                     "candles_12h_count": 250,
                     "candles_15m_count": 250,
-                    "candles_5m_count": 250,
+                    "candles_5m_count": 0,
                     "htf_2d_trend": "bearish",
                     "mtf_12h_trend": "neutral",
-                    "ltf_confirmation_timeframe": "5m",
+                    "ltf_confirmation_timeframe": confirmation_timeframe,
                     "ltf_confirmation_status": "missing",
                     "execution_sweep_status": "passed",
                     "confirmation_structure_shift_status": "failed",
@@ -132,15 +133,15 @@ class FakeScannerRunner:
                     "tp3": "N/A",
                     "rr_to_tp2": "N/A",
                     "pullback_failure_reason": "N/A",
-                    "confirmation_bos_choch_reason": "No 5m BOS/CHoCH close beyond the required LTF swing.",
+                    "confirmation_bos_choch_reason": f"No {confirmation_timeframe} BOS/CHoCH close beyond the required LTF swing.",
                     "first_failed_gate": "missing_confirmation_structure_shift",
                     "volume_profile_source": VOLUME_PROFILE_SOURCE,
                     "poc": Decimal("80750"),
                     "poc_diagnostics": "POC available from estimated candle volume profile.",
                     "gates_failed": ("missing_confirmation_structure_shift",),
-                    "hard_rejection_reasons": ("No 5m BOS/CHoCH close beyond the required LTF swing.",),
+                    "hard_rejection_reasons": (f"No {confirmation_timeframe} BOS/CHoCH close beyond the required LTF swing.",),
                     "sweep_diagnostics": "passed: bullish sweep at candle 30; magnitude 5 (0.5 ATR).",
-                    "bos_choch_diagnostics": "failed: No 5m BOS/CHoCH close beyond the required LTF swing.",
+                    "bos_choch_diagnostics": f"failed: No {confirmation_timeframe} BOS/CHoCH close beyond the required LTF swing.",
                     "derivatives_supports_trade": True,
                     "derivatives_conflict_reason": "N/A",
                     "funding_context": {"funding_status": "normal"},
@@ -159,6 +160,7 @@ class FakeScannerRunner:
                     "bias": "long",
                     "sweep_passed": True,
                     "confirmation_passed": False,
+                    "confirmation_timeframe": confirmation_timeframe,
                     "pullback_valid": False,
                     "rr_to_tp2": NA,
                     "best_rr": NA,
@@ -171,7 +173,7 @@ class FakeScannerRunner:
                     "first_failed_gate": "missing_confirmation_structure_shift",
                     "gates_passed": ("sweep",),
                     "gates_failed": ("missing_confirmation_structure_shift",),
-                    "rejection_reason": "No 5m BOS/CHoCH close beyond the required LTF swing.",
+                    "rejection_reason": f"No {confirmation_timeframe} BOS/CHoCH close beyond the required LTF swing.",
                 }
             ),
         )
@@ -1499,7 +1501,7 @@ def test_no_ob_or_fvg_after_sweep_and_confirmation_is_near_miss() -> None:
                 "pullback_zone_status": "failed",
                 "rr_to_tp2": NA,
                 "first_failed_gate": "no_ob_or_fvg_zone",
-                "pullback_failure_reason": "No valid OB or FVG was found inside the 5m displacement impulse.",
+                "pullback_failure_reason": "No valid OB or FVG was found inside the 15m displacement impulse.",
             }
         },
         rejected_strategy_modes=("swing",),
@@ -1569,7 +1571,7 @@ def test_no_setup_classification_for_early_core_gate_failure() -> None:
     assert display.failed_checks == ("15m sweep",)
 
 
-def test_failed_5m_confirmation_is_not_near_miss() -> None:
+def test_failed_m15_confirmation_is_not_near_miss() -> None:
     symbol_result = ScannerSymbolResult(
         symbol="BTCUSDT",
         status=ScannerPipelineStatus.SCANNED_NO_SETUP,
@@ -1580,7 +1582,7 @@ def test_failed_5m_confirmation_is_not_near_miss() -> None:
                 "confirmation_structure_shift_status": "failed",
                 "first_failed_gate": "missing_confirmation_structure_shift",
                 "gates_failed": ("missing_confirmation_structure_shift",),
-                "confirmation_bos_choch_reason": "No 5m BOS/CHoCH close beyond the required LTF swing.",
+                "confirmation_bos_choch_reason": "No 15m BOS/CHoCH close beyond the required LTF swing.",
             }
         },
         rejected_strategy_modes=("challenge",),
@@ -1602,7 +1604,7 @@ def test_data_incomplete_classification_for_missing_required_market_data() -> No
                 "execution_sweep_status": "passed",
                 "confirmation_structure_shift_status": NA,
                 "first_failed_gate": "missing_confirmation_candles",
-                "confirmation_bos_choch_reason": "5m confirmation candles missing.",
+                "confirmation_bos_choch_reason": "15m confirmation candles missing.",
             }
         },
         rejected_strategy_modes=("challenge",),
@@ -1613,7 +1615,7 @@ def test_data_incomplete_classification_for_missing_required_market_data() -> No
     assert display.display_status == "data_issue"
     assert display.display_status_label == "\U0001f534 DATA ISSUE"
     assert display.display_bucket == "data_issue"
-    assert display.short_reason == "5m confirmation candles missing."
+    assert display.short_reason == "15m confirmation candles missing."
 
 
 def test_strategy_cli_flags_accepted() -> None:
@@ -1717,18 +1719,18 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["htf_timeframe"] == "2d"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["bias_timeframe"] == "12h"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["execution_timeframe"] == "15m"
-    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["confirmation_timeframe"] == "5m"
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["confirmation_timeframe"] == "15m"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["htf_2d_context_source"] == "synthetic_from_1d"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["candles_12h_count"] == 250
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["candles_15m_count"] == 250
-    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["candles_5m_count"] == 250
+    assert payload["results"][0]["strategy_diagnostics"]["challenge"]["candles_5m_count"] == 0
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["execution_sweep_status"] == "passed"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["confirmation_structure_shift_status"] == "failed"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["pullback_zone_status"] == "N/A"
     assert payload["results"][0]["strategy_diagnostics"]["challenge"]["rr_to_tp2"] == "N/A"
     assert (
         payload["results"][0]["strategy_diagnostics"]["challenge"]["confirmation_bos_choch_reason"]
-        == "No 5m BOS/CHoCH close beyond the required LTF swing."
+        == "No 15m BOS/CHoCH close beyond the required LTF swing."
     )
     assert (
         payload["results"][0]["strategy_diagnostics"]["challenge"]["first_failed_gate"]
@@ -1740,7 +1742,7 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert isinstance(payload["results"][0]["display_priority_score"], int)
     assert (
         payload["results"][0]["display_reason"]
-        == "No 5m BOS/CHoCH close beyond the required LTF swing."
+        == "No 15m BOS/CHoCH close beyond the required LTF swing."
     )
     assert payload["results"][0]["hidden_by_default"] is True
     assert payload["results"][0]["failed_stage"] == "structure"
@@ -1749,8 +1751,8 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["setup_progress_total"] == 4
     assert payload["results"][0]["setup_progress_passed"] == 1
     assert payload["results"][0]["passed_checks"] == ["15m sweep"]
-    assert payload["results"][0]["failed_checks"] == ["5m BOS/CHoCH"]
-    assert payload["results"][0]["short_reason"] == "No 5m BOS/CHoCH close beyond the required LTF swing."
+    assert payload["results"][0]["failed_checks"] == ["15m BOS/CHoCH"]
+    assert payload["results"][0]["short_reason"] == "No 15m BOS/CHoCH close beyond the required LTF swing."
     assert payload["results"][0]["action_label"] == "Wait for confirmation"
     assert payload["results"][0]["near_miss_intelligence"]["primary_failed_gate"] == (
         "missing_confirmation_structure_shift"
@@ -1760,7 +1762,7 @@ def test_output_json_writes_mocked_scanner_result(tmp_path, monkeypatch) -> None
     assert payload["results"][0]["setup_quality"]["quality_grade"] == "Reject"
     assert payload["results"][0]["setup_quality"]["action_label"] == "Wait for confirmation"
     assert payload["results"][0]["setup_quality"]["decision_reason"] == (
-        "Sweep passed but 5m BOS/CHoCH confirmation is missing."
+        "Sweep passed but 15m BOS/CHoCH confirmation is missing."
     )
 
 
@@ -1911,7 +1913,7 @@ def test_show_strategy_output_with_telegram_format_prints_clean_message(monkeypa
     assert "BTCUSDT Candle Craft strategy output:" in captured.out
     assert "🐺🟠 NO TRADE — BTCUSDT" in captured.out
     assert "The wolf is watching, but not entering." in captured.out
-    assert "Reason: Sweep passed but 5m BOS/CHoCH confirmation is missing." in captured.out
+    assert "Reason: Sweep passed but 15m BOS/CHoCH confirmation is missing." in captured.out
     assert "Candle Craft | Signal. Structure. Execution." in captured.out
     assert "Challenge: No valid challenge setup." not in captured.out
 
@@ -2041,7 +2043,7 @@ def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "Candle Craft Scanner" in captured.out
     assert "Strategy: Liquidity Grab Pullback" in captured.out
-    assert "Timeframes: 2D → 12H → 15m → 5m" in captured.out
+    assert "Timeframes: 2D → 12H → 15m → 15m" in captured.out
     assert "🟢 Valid setups: 0" in captured.out
     assert "⚪ Hidden rejected/no-setup symbols: 0" in captured.out
     assert "Phase 12 Scanner Runner" not in captured.out
@@ -2053,7 +2055,7 @@ def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
     assert "• Edge:" in captured.out
     assert "• Risk:" in captured.out
     assert "• Action: Wait for confirmation" in captured.out
-    assert "• Reason: Sweep passed but 5m BOS/CHoCH confirmation is missing." in captured.out
+    assert "• Reason: Sweep passed but 15m BOS/CHoCH confirmation is missing." in captured.out
     assert "📍 Context" in captured.out
     assert "• 2D HTF: Bearish" in captured.out
     assert "• 12H Bias: Neutral" in captured.out
@@ -2064,7 +2066,7 @@ def test_display_normal_prints_premium_card(monkeypatch, capsys) -> None:
     assert "• Context score: 90" in captured.out
     assert "Derivatives score:" not in captured.out
     assert "❌ Failed" in captured.out
-    assert "• 5m BOS/CHoCH: failed" in captured.out
+    assert "• 15m BOS/CHoCH: failed" in captured.out
     assert "📊 Setup Progress: 1/4" in captured.out
     assert "🧠 Reason" in captured.out
     assert "🎯 Action" in captured.out
@@ -2082,7 +2084,7 @@ def test_display_full_preserves_detailed_diagnostics(monkeypatch, capsys) -> Non
     assert "challenge 12H bias: direct" in captured.out
     assert "challenge POC: 80750" in captured.out
     assert "challenge 15m execution sweep: passed" in captured.out
-    assert "challenge 5m confirmation BOS/CHoCH: failed" in captured.out
+    assert "challenge 15m confirmation BOS/CHoCH: failed" in captured.out
     assert "challenge Pullback Zone: N/A | OB/FVG: N/A | Fib: N/A | RR: N/A" in captured.out
     assert "Derivatives enrichment:" in captured.out
     assert "Derivatives context score: 90" in captured.out
@@ -2124,12 +2126,12 @@ def test_normal_block_prints_single_failed_gate_reason_for_pullback() -> None:
                 "execution_sweep_status": "passed",
                 "confirmation_structure_shift_status": "passed",
                 "pullback_zone_status": "failed",
-                "pullback_calculation_timeframe": "5m",
+                "pullback_calculation_timeframe": "15m",
                 "selected_zone_type": "N/A",
                 "fib_alignment_status": "N/A",
                 "rr_to_tp2": "N/A",
                 "first_failed_gate": "no_ob_or_fvg_zone",
-                "pullback_failure_reason": "No valid OB or FVG was found inside the 5m displacement impulse.",
+                "pullback_failure_reason": "No valid OB or FVG was found inside the 15m displacement impulse.",
                 "sweep_diagnostics": "passed: bullish sweep at candle 30; magnitude 5 (0.5 ATR).",
             }
         },
@@ -2141,7 +2143,7 @@ def test_normal_block_prints_single_failed_gate_reason_for_pullback() -> None:
     assert text.count("Failed gate: no_ob_or_fvg_zone") == 1
     assert text.count("Reason") == 1
     assert "Reject: no_ob_or_fvg_zone" not in text
-    assert "No valid OB or FVG was found inside the 5m displacement impulse." in text
+    assert "No valid OB or FVG was found inside the 15m displacement impulse." in text
     assert "🟡 BTCUSDT — NEAR MISS" in text
     assert "Needs next:" in text
     assert "Action: Watchlist only" in text
@@ -2154,7 +2156,7 @@ def test_verbose_maps_to_full_diagnostics(monkeypatch, capsys) -> None:
 
     captured = capsys.readouterr()
     assert "Strategy diagnostics:" in captured.out
-    assert "challenge 5m confirmation BOS/CHoCH: failed" in captured.out
+    assert "challenge 15m confirmation BOS/CHoCH: failed" in captured.out
 
 
 def test_diagnostics_level_overrides_verbose(monkeypatch, capsys) -> None:

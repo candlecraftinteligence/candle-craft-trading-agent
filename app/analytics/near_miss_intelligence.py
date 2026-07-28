@@ -110,6 +110,7 @@ def build_near_miss_intelligence(
     data = diagnostics or {}
     sweep_passed = _sweep_passed(data)
     confirmation_passed = _confirmation_passed(data)
+    confirmation_timeframe = _confirmation_timeframe(data)
     core_passed = sweep_passed and confirmation_passed
     reason = _reason_for_gate(gate, short_reason, data)
 
@@ -199,7 +200,7 @@ def build_near_miss_intelligence(
             watchlist_status=REJECTED,
             next_required_conditions=(
                 "15m sweep must pass first.",
-                "5m BOS/CHoCH must confirm after the sweep.",
+                f"{confirmation_timeframe} BOS/CHoCH must confirm after the sweep.",
                 "Then a valid OB/FVG must appear inside the displacement impulse.",
             ),
             activation_hint="Core sweep and BOS/CHoCH gates must pass before OB/FVG quality matters.",
@@ -214,11 +215,11 @@ def build_near_miss_intelligence(
             short_reason=reason,
             watchlist_status=WAIT_FOR_CONFIRMATION,
             next_required_conditions=(
-                "Wait for a 5m BOS/CHoCH close beyond the required LTF swing.",
+                f"Wait for a {confirmation_timeframe} BOS/CHoCH close beyond the required LTF swing.",
                 "Keep the 15m sweep context intact before confirmation.",
                 "Only reassess pullback, OB/FVG, fib, RR, and risk after confirmation.",
             ),
-            activation_hint="A 5m BOS/CHoCH confirmation must print before this can become interesting.",
+            activation_hint=f"A {confirmation_timeframe} BOS/CHoCH confirmation must print before this can become interesting.",
             invalidation_hint="Invalidated if price reverses through the sweep context before confirmation or the setup times out.",
             quality_note="The idea is unconfirmed; no pullback or RR plan is valid yet.",
             action_label=WAIT_FOR_CONFIRMATION,
@@ -339,7 +340,7 @@ def _reason_for_gate(gate: str, short_reason: Any, diagnostics: Mapping[str, Any
         reason = _first_text(diagnostics.get("confirmation_bos_choch_reason"), short_reason)
         if reason != NA:
             return reason
-        return "5m BOS/CHoCH confirmation is still missing."
+        return f"{_confirmation_timeframe(diagnostics)} BOS/CHoCH confirmation is still missing."
 
     if gate in FINAL_QUALITY_GATES:
         reason = _first_text(diagnostics.get("trust_meter_diagnostics"), short_reason)
@@ -355,6 +356,11 @@ def _reason_for_gate(gate: str, short_reason: Any, diagnostics: Mapping[str, Any
     if hard_rejections:
         return hard_rejections[0]
     return "No valid setup."
+
+
+def _confirmation_timeframe(diagnostics: Mapping[str, Any]) -> str:
+    timeframe = _display(diagnostics.get("confirmation_timeframe"))
+    return timeframe if timeframe != NA else "15m"
 
 
 def _sweep_passed(diagnostics: Mapping[str, Any]) -> bool:

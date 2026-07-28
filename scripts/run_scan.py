@@ -102,6 +102,7 @@ from app.lifecycle.service import (  # noqa: E402
 )
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository  # noqa: E402
 from app.pipeline.scanner_runner import (  # noqa: E402
+    DEFAULT_CONFIRMATION_TIMEFRAME,
     BINANCE_KLINE_LIMIT_MAX,
     BINANCE_KLINE_LIMIT_MIN,
     DEFAULT_REPLAY_CANDLES,
@@ -266,7 +267,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
         htf_timeframe="2d",
         bias_timeframe="12h",
         execution_timeframe="15m",
-        confirmation_timeframe="5m",
+        confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="80",
         min_rr=Decimal("2.5"),
         diagnostics_level="normal",
@@ -282,7 +283,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
         htf_timeframe="2d",
         bias_timeframe="12h",
         execution_timeframe="15m",
-        confirmation_timeframe="5m",
+        confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="80",
         min_rr=Decimal("2.5"),
         diagnostics_level="normal",
@@ -298,7 +299,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
         htf_timeframe="2d",
         bias_timeframe="12h",
         execution_timeframe="15m",
-        confirmation_timeframe="5m",
+        confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="85",
         min_rr=Decimal("3.0"),
         diagnostics_level="normal",
@@ -314,7 +315,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
         htf_timeframe="12h",
         bias_timeframe="4h",
         execution_timeframe="15m",
-        confirmation_timeframe="5m",
+        confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="80",
         min_rr=Decimal("2.5"),
         diagnostics_level="summary",
@@ -501,7 +502,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--htf-timeframe", default="2d")
     parser.add_argument("--bias-timeframe", default="12h")
     parser.add_argument("--execution-timeframe", default="15m")
-    parser.add_argument("--confirmation-timeframe", default="5m")
+    parser.add_argument("--confirmation-timeframe", default=DEFAULT_CONFIRMATION_TIMEFRAME)
     parser.add_argument("--aggressive-toggle", action="store_true")
     parser.add_argument("--replay", "--backtest", dest="replay", action="store_true")
     parser.add_argument("--replay-candles", "--backtest-candles", dest="replay_candles", type=int, default=DEFAULT_REPLAY_CANDLES)
@@ -4465,7 +4466,7 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
                 f"{mode} candles: 2D={_display(diagnostics.get('candles_2d_count'))}, "
                 f"12H={_display(diagnostics.get('candles_12h_count'))}, "
                 f"15m={_display(diagnostics.get('candles_15m_count'))}, "
-                f"5m={_display(diagnostics.get('candles_5m_count'))}",
+                f"{confirmation_timeframe} confirmation={_display(diagnostics.get('candles_5m_count') if confirmation_timeframe == '5m' else diagnostics.get('candles_15m_count'))}",
                 f"{mode} HTF/MTF trend: 2D={_display(diagnostics.get('htf_2d_trend'))}, "
                 f"12H={_display(diagnostics.get('mtf_12h_trend'))}",
                 f"{mode} {execution_timeframe} execution sweep: {_status_text(diagnostics.get('execution_sweep_status'))}",

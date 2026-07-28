@@ -44,6 +44,7 @@ VOLUME_CONFIRMATION_MULTIPLIER = Decimal("1.5")
 BASE_MIN_RR = SWING_HARD_MINIMUM_RR
 CHALLENGE_MIN_RR = CHALLENGE_HARD_MINIMUM_RR
 TICK_SIZE = Decimal("0.00000001")
+DEFAULT_CONFIRMATION_TIMEFRAME = "15m"
 RISK_WARNING = (
     "This is not financial advice. Pullback ideas are conditional and must be invalidated at the stop."
 )
@@ -322,7 +323,7 @@ class LiquidityGrabInput(BaseModel):
     htf_timeframe: str = "2d"
     bias_timeframe: str = "12h"
     execution_timeframe: str = "15m"
-    confirmation_timeframe: str = "5m"
+    confirmation_timeframe: str = DEFAULT_CONFIRMATION_TIMEFRAME
     candles_2d: Sequence[Any] | None = None
     candles_12h: Sequence[Any] | None = None
     candles_6h: Sequence[Any] | None = None
@@ -524,7 +525,7 @@ class LiquidityGrabEngine:
             return _rejected_setup(
                 mode,
                 "missing_confirmation_candles",
-                "5m confirmation candles missing.",
+                f"{data.confirmation_timeframe} confirmation candles missing.",
                 missing_data,
                 unverified_data,
                 rotation,
@@ -589,7 +590,10 @@ class LiquidityGrabEngine:
             lookback=self.swing_lookback,
         )
         if not structure_shift.is_present:
-            structure_shift = _confirmation_failure_shift(structure_shift)
+            structure_shift = _confirmation_failure_shift(
+                structure_shift,
+                confirmation_timeframe=confirmation.timeframe,
+            )
             context_fields = _timeframe_context_fields(
                 data,
                 normalized,
@@ -1917,7 +1921,7 @@ def _confirmation_bos_choch_reason(setup: LiquidityGrabSetup) -> str:
         for violation in setup.gate_result.violations:
             if violation.code in ("missing_confirmation_structure_shift", "missing_confirmation_candles"):
                 return violation.message
-        return "5m confirmation candles missing."
+        return f"{setup.confirmation_timeframe} confirmation candles missing."
     if not setup.sweep.is_present:
         return "N/A because 15m execution sweep failed."
     return setup.structure_shift.reason
@@ -2318,10 +2322,14 @@ def _map_candle_index(
     return min(max(mapped, 0), len(target_candles) - 1)
 
 
-def _confirmation_failure_shift(structure_shift: StructureShiftSignal) -> StructureShiftSignal:
+def _confirmation_failure_shift(
+    structure_shift: StructureShiftSignal,
+    *,
+    confirmation_timeframe: str,
+) -> StructureShiftSignal:
     reason = structure_shift.reason
     if reason in (StructureShiftSignal().reason, "No BOS/CHoCH close beyond the required LTF swing."):
-        reason = "No 5m BOS/CHoCH close beyond the required LTF swing."
+        reason = f"No {confirmation_timeframe} BOS/CHoCH close beyond the required LTF swing."
     return structure_shift.model_copy(update={"reason": reason})
 
 
@@ -2350,7 +2358,7 @@ def _timeframe_context_fields(
     candles_15m = normalized.get("15m", ())
     candles_5m = normalized.get("5m", ())
     source = data.htf_2d_context_source if candles_2d and data.htf_2d_context_source != NA else NA
-    confirmation_timeframe = confirmation.timeframe if confirmation is not None else NA
+    confirmation_timeframe = confirmation.timeframe if confirmation is not None else data.confirmation_timeframe
     if confirmation is None:
         ltf_status = NA
     elif structure_shift is not None and structure_shift.is_present:
@@ -2428,7 +2436,8 @@ def _missing_context(data: LiquidityGrabInput, normalized: Mapping[str, tuple[_C
     ):
         if _is_missing(getattr(data, field)):
             missing.append(f"{field}: N/A")
-    for timeframe in ("2d", "12h", "15m", "5m"):
+    required_timeframes = ("2d", "12h", data.execution_timeframe, data.confirmation_timeframe)
+    for timeframe in dict.fromkeys(required_timeframes):
         if not normalized.get(timeframe):
             missing.append(f"candles_{timeframe}: N/A")
     if not normalized:

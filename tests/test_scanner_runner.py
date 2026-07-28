@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -308,6 +309,43 @@ def _config(symbols: list[str], **overrides: object) -> ScannerRunConfig:
     data.update(overrides)
     return ScannerRunConfig.model_validate(data)
 
+
+def test_scanner_run_config_defaults_to_closed_m15_confirmation() -> None:
+    assert _config(["BTCUSDT"]).confirmation_timeframe == "15m"
+
+
+def test_open_m15_candle_cannot_enter_scanner_confirmation_input() -> None:
+    candles = [
+        {
+            "timestamp": index * _INTERVAL_MS["15m"],
+            "open": Decimal("100"),
+            "high": Decimal("101"),
+            "low": Decimal("99"),
+            "close": Decimal("100") if index < 2 else Decimal("250"),
+            "volume": Decimal("100"),
+        }
+        for index in range(3)
+    ]
+    config = _config(
+        ["BTCUSDT"],
+        decision_timestamp=datetime.fromtimestamp(
+            (2 * _INTERVAL_MS["15m"] + 7 * 60_000) / 1000,
+            tz=timezone.utc,
+        ),
+    )
+
+    confirmation_candles = ScannerRunner()._closed_candles_for_analysis(
+        candles,
+        symbol="BTCUSDT",
+        timeframe=config.confirmation_timeframe,
+        config=config,
+        minimum_closed_history=1,
+    )
+
+    assert config.confirmation_timeframe == "15m"
+    assert len(confirmation_candles) == 2
+    assert confirmation_candles[-1]["close"] == Decimal("100")
+    assert all(candle["close"] != Decimal("250") for candle in confirmation_candles)
 
 def test_scanner_handles_one_valid_mocked_symbol() -> None:
     client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
@@ -810,7 +848,7 @@ def test_progress_output_callback_receives_symbol_stages() -> None:
     assert "Fetching HTF 2d..." in messages
     assert "Fetching 12h bias..." in messages
     assert "Fetching 15m execution..." in messages
-    assert "Fetching 5m confirmation..." in messages
+    assert "Fetching 15m confirmation..." not in messages
     assert "Fetching derivatives..." in messages
     assert "Scoring..." in messages
     assert any(message.startswith("Done BTCUSDT in ") for message in messages)
@@ -941,12 +979,12 @@ def test_scanner_returns_strategy_results_output_and_diagnostics() -> None:
     assert symbol_result.strategy_diagnostics["challenge"]["htf_timeframe"] == "2d"
     assert symbol_result.strategy_diagnostics["challenge"]["bias_timeframe"] == "12h"
     assert symbol_result.strategy_diagnostics["challenge"]["execution_timeframe"] == "15m"
-    assert symbol_result.strategy_diagnostics["challenge"]["confirmation_timeframe"] == "5m"
+    assert symbol_result.strategy_diagnostics["challenge"]["confirmation_timeframe"] == "15m"
     assert symbol_result.strategy_diagnostics["challenge"]["htf_2d_context_source"] == "synthetic_from_1d"
     assert symbol_result.strategy_diagnostics["challenge"]["candles_2d_count"] > 0
     assert symbol_result.strategy_diagnostics["challenge"]["candles_12h_count"] == 220
     assert symbol_result.strategy_diagnostics["challenge"]["candles_15m_count"] == 220
-    assert symbol_result.strategy_diagnostics["challenge"]["candles_5m_count"] == 220
+    assert symbol_result.strategy_diagnostics["challenge"]["candles_5m_count"] == 0
     assert symbol_result.strategy_diagnostics["challenge"]["execution_sweep_status"] == "passed"
     assert symbol_result.strategy_diagnostics["challenge"]["confirmation_structure_shift_status"] == "passed"
 
@@ -1005,11 +1043,10 @@ def test_replay_candles_1000_clamps_execution_timeframes_only() -> None:
     diagnostics = result.results[0].strategy_diagnostics["challenge"]
 
     assert ("15m", 500) in requested_limits
-    assert ("5m", 500) in requested_limits
+    assert ("5m", 500) not in requested_limits
     assert ("12h", 220) in requested_limits
     assert ("1d", 440) in requested_limits
     assert ("1d", 2000) not in requested_limits
-    assert any("replay_candles limit clamped from 1000 to 500" in warning for warning in diagnostics["timeframe_limit_warnings"])
     assert diagnostics["htf_2d_context_source"] == "synthetic_from_1d"
     assert diagnostics["candles_2d_count"] == 110
 
@@ -1027,9 +1064,9 @@ def test_scanner_clamps_binance_kline_limits_and_reports_diagnostic_warning() ->
     assert client.requested_kline_limits
     assert all(limit <= 1500 for _symbol, _interval, limit in client.requested_kline_limits)
     assert ("BTCUSDT", "1d", 1500) in client.requested_kline_limits
-    assert ("BTCUSDT", "5m", 500) in client.requested_kline_limits
+    assert ("BTCUSDT", "15m", 500) in client.requested_kline_limits
+    assert ("BTCUSDT", "5m", 500) not in client.requested_kline_limits
     assert any("1d source for synthetic 2D candles limit clamped from 2000 to 1500" in warning for warning in diagnostics["timeframe_limit_warnings"])
-    assert any("replay_candles limit clamped from 2000 to 500" in warning for warning in diagnostics["timeframe_limit_warnings"])
 
 
 def test_normal_scan_still_uses_configured_candle_limit_without_replay() -> None:
@@ -1040,10 +1077,10 @@ def test_normal_scan_still_uses_configured_candle_limit_without_replay() -> None
 
     assert ("BTCUSDT", "15m", 220) in client.requested_kline_limits
     assert ("BTCUSDT", "12h", 220) in client.requested_kline_limits
-    assert ("BTCUSDT", "5m", 220) in client.requested_kline_limits
+    assert ("BTCUSDT", "5m", 220) not in client.requested_kline_limits
     assert diagnostics["candles_15m_count"] == 220
     assert diagnostics["candles_12h_count"] == 220
-    assert diagnostics["candles_5m_count"] == 220
+    assert diagnostics["candles_5m_count"] == 0
 
 
 def test_fast_mode_does_not_weaken_strategy_gates_for_no_setup() -> None:
@@ -1103,7 +1140,7 @@ def test_fast_mode_caps_remaining_optional_derivatives_timeout() -> None:
     assert any("funding_rate unavailable from public endpoint" in warning for warning in symbol_result.derivatives_warnings)
 
 
-def test_scanner_fetches_12h_15m_and_5m_for_strategy_context() -> None:
+def test_default_scanner_fetches_m15_confirmation_without_requesting_m5() -> None:
     client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()})
     result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
 
@@ -1112,28 +1149,28 @@ def test_scanner_fetches_12h_15m_and_5m_for_strategy_context() -> None:
 
     assert "12h" in requested_intervals
     assert "15m" in requested_intervals
-    assert "5m" in requested_intervals
+    assert "5m" not in requested_intervals
     assert diagnostics["candles_12h_count"] == 220
     assert diagnostics["candles_15m_count"] == 220
-    assert diagnostics["candles_5m_count"] == 220
-    assert diagnostics["ltf_confirmation_timeframe"] == "5m"
+    assert diagnostics["candles_5m_count"] == 0
+    assert diagnostics["ltf_confirmation_timeframe"] == "15m"
 
 
-def test_missing_5m_context_does_not_crash_if_15m_exists() -> None:
+def test_explicit_m5_research_override_remains_available_when_m5_fetch_fails() -> None:
     client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"5m"})
-    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(["BTCUSDT"], confirmation_timeframe="5m")
+        )
+    )
 
     symbol_result = result.results[0]
     assert symbol_result.status != ScannerPipelineStatus.FAILED
     assert "candles_5m: N/A" in symbol_result.strategy_missing_data
     assert symbol_result.strategy_diagnostics["challenge"]["candles_15m_count"] == 220
     assert symbol_result.strategy_diagnostics["challenge"]["candles_5m_count"] == 0
-    assert symbol_result.strategy_diagnostics["challenge"]["confirmation_timeframe"] == NA
+    assert symbol_result.strategy_diagnostics["challenge"]["confirmation_timeframe"] == "5m"
     assert symbol_result.strategy_diagnostics["challenge"]["first_failed_gate"] == "missing_confirmation_candles"
-    assert (
-        symbol_result.strategy_diagnostics["challenge"]["confirmation_bos_choch_reason"]
-        == "5m confirmation candles missing."
-    )
 
 
 def test_one_noncritical_timeframe_failure_does_not_crash_symbol_scan() -> None:

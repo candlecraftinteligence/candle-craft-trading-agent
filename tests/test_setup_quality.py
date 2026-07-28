@@ -108,7 +108,7 @@ def test_missing_confirmation_waits_for_confirmation() -> None:
 
     assert result.quality_state == SetupQualityState.REJECTED_NO_EDGE
     assert result.action_label == "Wait for confirmation"
-    assert result.decision_reason == "Sweep passed but 5m BOS/CHoCH confirmation is missing."
+    assert result.decision_reason == "Sweep passed but 15m BOS/CHoCH confirmation is missing."
 
 
 def test_rr_below_required_minimum_cannot_be_high_quality() -> None:

@@ -22,6 +22,7 @@ from app.analytics.edge_analytics import (
 from app.data.candle_integrity import closed_candles_as_of, validate_candle_sequence
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
 from app.strategies.liquidity_grab_pullback import (
+    DEFAULT_CONFIRMATION_TIMEFRAME,
     LiquidityGrabEngine,
     LiquidityGrabMode,
     LiquidityGrabResult,
@@ -60,7 +61,7 @@ class ReplayConfig(BaseModel):
     strategy_name: str = DEFAULT_REPLAY_STRATEGY
     modes: tuple[LiquidityGrabMode, ...] = (LiquidityGrabMode.swing,)
     execution_timeframe: str = "15m"
-    confirmation_timeframe: str = "5m"
+    confirmation_timeframe: str = DEFAULT_CONFIRMATION_TIMEFRAME
     htf_timeframe: str = "2d"
     bias_timeframe: str = "12h"
     replay_candles: int = 300

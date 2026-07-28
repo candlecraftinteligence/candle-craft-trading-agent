@@ -922,9 +922,9 @@ Phase 11 adds `LiquidityGrabEngine` under `app/strategies` for deterministic set
 
 Supported modes:
 
-- `challenge`: strictest mode. Uses 2D HTF structure, 12H/4H bias, and 15m/5m execution. Requires Trust Meter >= 85, RR >= 3.0, fixed 5% risk text, limit pullback entries only, no meme/illiquid token classification, and no active BTC/event guard when provided. Invalid Challenge output exposes the exact message `No valid challenge setup.`
-- `swing`: uses 2D/12H structure with 4H or 1H execution where available, with 15m/5m fallback, and applies the base RR >= 2.5 gate. Invalid Swing output exposes the exact message `No valid swing setup.`
-- `scalp`: uses 12H/4H bias with 15m/5m execution and requires the pullback entry to remain valid within the short LTF window. Invalid Scalp output exposes the exact message `No valid scalp setup.`
+- `challenge`: strictest mode. Uses 2D HTF structure, 12H/4H bias, and 15m execution and confirmation. Requires Trust Meter >= 85, RR >= 3.0, fixed 5% risk text, limit pullback entries only, no meme/illiquid token classification, and no active BTC/event guard when provided. Invalid Challenge output exposes the exact message `No valid challenge setup.`
+- `swing`: uses 2D/12H structure with 4H or 1H execution where available, with 15m confirmation fallback, and applies the base RR >= 2.5 gate. Invalid Swing output exposes the exact message `No valid swing setup.`
+- `scalp`: uses 12H/4H bias with 15m execution and confirmation and requires the pullback entry to remain valid within the short LTF window. Invalid Scalp output exposes the exact message `No valid scalp setup.`
 
 Trust Meter scoring totals 12 points:
 
@@ -992,7 +992,7 @@ Phase 12 connects the Phase 11 Liquidity-Grab Pullback Engine into the Phase 10 
 
 - `ScannerRunConfig` now supports `strategy_name`, `strategy_modes`, `enable_strategy_output`, `include_formatted_strategy_output`, `aggressive_toggle`, `htf_timeframe`, `bias_timeframe`, `execution_timeframe`, and `confirmation_timeframe`.
 - The default strategy is `liquidity_grab_pullback` with `challenge`, `swing`, and `scalp` modes.
-- For each symbol, the scanner collects Phase 12.1 multi-timeframe context: synthetic 2D from 1D candles, direct 12H bias candles, direct 15m execution candles, and direct 5m confirmation candles. Existing 4H and 1H context remains optional when available.
+- For each symbol, the scanner collects Phase 12.1 multi-timeframe context: synthetic 2D from 1D candles, direct 12H bias candles, direct 15m execution candles, and direct 15m confirmation candles. Existing 4H and 1H context remains optional when available.
 - Strategy results, formatted Candle Craft output, diagnostics, valid/rejected modes, missing data, and unverified data are included in the scanner result and JSON export.
 - A trade idea is created only when the strategy returns at least one valid A/B setup and the existing technical, derivatives, risk, scoring, and trade-idea gates also pass.
 - If no valid Liquidity-Grab Pullback setup exists, the symbol returns `scanned_no_setup`, `rejection_stage = strategy`, and `No valid Liquidity-Grab Pullback setup.`
@@ -1003,7 +1003,7 @@ Phase 12 connects the Phase 11 Liquidity-Grab Pullback Engine into the Phase 10 
 Run the scanner with strategy output:
 
 ```powershell
-python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --interval 15m --candle-limit 250 --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --verbose --show-strategy-output
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --interval 15m --candle-limit 250 --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --verbose --show-strategy-output
 ```
 
 CLI behavior:
@@ -1014,14 +1014,14 @@ CLI behavior:
 - `--verbose` maps to `--diagnostics-level full` unless `--diagnostics-level` is explicitly provided.
 - `--show-strategy-output` prints the formatted Challenge, Swing, and Scalp Candle Craft sections for each symbol.
 - `--telegram-format` changes `--show-strategy-output` to print Telegram-ready Candle Craft messages. It formats text only and does not send Telegram messages.
-- `--htf-timeframe`, `--bias-timeframe`, `--execution-timeframe`, and `--confirmation-timeframe` default to `2d`, `12h`, `15m`, and `5m`.
+- `--htf-timeframe`, `--bias-timeframe`, `--execution-timeframe`, and `--confirmation-timeframe` default to `2d`, `12h`, `15m`, and `15m`.
 - `--output-json scan_output.json` writes the full scanner result, including strategy results, formatted output, diagnostics, `missing_data`, and `unverified_data`, without secrets or API keys.
 
 Missing data policy:
 
 - Missing data is always marked `N/A`; unreliable supplied data is preserved as `Unverified`.
 - Missing synthetic 2D or direct 12H context is marked `N/A`.
-- Missing 5m confirmation candles are marked `N/A`, reject the setup, and do not crash the scan if 15m execution candles are available.
+- Missing 15m confirmation candles are marked `N/A`, reject the setup, and do not crash the scan if 15m execution candles are available.
 - Missing CVD and liquidation context remain `N/A` unless supplied by a caller.
 - Malformed required candles reject the affected symbol with a clear failure reason, and the scanner continues to the next symbol.
 
@@ -1032,18 +1032,20 @@ Phase 12.1 updates the scanner and Liquidity-Grab Pullback integration to match 
 - `2D` is high-timeframe structure: trend, major support/resistance, and macro sweep zones.
 - `12H` is active directional bias and liquidity context.
 - `15m` is primary execution: sweep, OB/FVG pullback, fib alignment, RR, volume/delta when available, and Trust Meter gates.
-- `5m` is mandatory lower-timeframe BOS/CHoCH confirmation after the sweep.
+- `15m` is mandatory lower-timeframe BOS/CHoCH confirmation after the sweep.
+- Only candles closed at or before the scanner decision timestamp can supply confirmation; an in-progress M15 candle is excluded.
+- An explicit `5m` confirmation remains a research override. Existing stored scan and lifecycle records containing `5m` remain readable without migration.
 - `4H` and `1H` remain extra context only where the scanner already supports them.
 
 Binance Futures does not support `2d` on `/klines`, so the scanner does not request Binance interval `2d`. It fetches `1d` candles, merges every two complete daily candles into one synthetic 2D candle, and marks `htf_2d_context_source = synthetic_from_1d`. If a complete synthetic 2D series cannot be created, `candles_2d: N/A` is preserved.
 
-The strategy never creates a setup from 2D or 12H alone. Higher timeframes provide context only; execution confirmation still requires the strict setup gates: confirmed 15m sweep, mandatory 5m BOS/CHoCH, 15m OB/FVG pullback, fib alignment, volume/delta confirmation when available, RR gate, and Trust Meter gate. Weak setups remain rejected.
+The strategy never creates a setup from 2D or 12H alone. Higher timeframes provide context only; execution confirmation still requires the strict setup gates: confirmed 15m sweep, mandatory 15m BOS/CHoCH, 15m OB/FVG pullback, fib alignment, volume/delta confirmation when available, RR gate, and Trust Meter gate. Weak setups remain rejected.
 
 Verbose and JSON diagnostics include:
 
 - `htf_timeframe`, `bias_timeframe`, `execution_timeframe`, `confirmation_timeframe`
 - `htf_2d_context_source`
-- `candles_2d_count`, `candles_12h_count`, `candles_15m_count`, `candles_5m_count`
+- `candles_2d_count`, `candles_12h_count`, `candles_15m_count`, `candles_5m_count` (the latter only for an explicit legacy research override)
 - `htf_2d_trend`, `mtf_12h_trend`
 - `ltf_confirmation_timeframe`, `ltf_confirmation_status`
 - `execution_sweep_status`, `confirmation_structure_shift_status`, `confirmation_bos_choch_reason`
@@ -1058,16 +1060,16 @@ Phase 12.2 tightens the multi-timeframe confirmation path and makes scanner outp
 - `2D` is HTF structure and major sweep-zone context.
 - `12H` is active directional bias.
 - `15m` is execution: sweep, OB/FVG, fib, entry, stop, RR, and execution-side trade mapping.
-- `5m` is mandatory BOS/CHoCH confirmation after the 15m sweep.
+- `15m` is mandatory BOS/CHoCH confirmation after the 15m sweep.
 - No setup is created from 2D or 12H context alone.
-- If 5m BOS/CHoCH confirmation fails, the setup is rejected with `first_failed_gate = missing_confirmation_structure_shift`.
-- If 5m candles are missing, confirmation timeframe is marked `N/A`, the setup is rejected, and the reason is `5m confirmation candles missing.`
+- If 15m BOS/CHoCH confirmation fails, the setup is rejected with `first_failed_gate = missing_confirmation_structure_shift`.
+- If 15m candles are missing, confirmation timeframe is marked `N/A`, the setup is rejected, and the reason is `15m confirmation candles missing.`
 
 Scanner JSON diagnostics now include the configured and resolved timeframe context:
 
 - `htf_timeframe`, `bias_timeframe`, `execution_timeframe`, `confirmation_timeframe`
 - `htf_2d_context_source`
-- `candles_2d_count`, `candles_12h_count`, `candles_15m_count`, `candles_5m_count`
+- `candles_2d_count`, `candles_12h_count`, `candles_15m_count`, `candles_5m_count` (the latter only for an explicit legacy research override)
 - `execution_sweep_status`
 - `confirmation_structure_shift_status`
 - `confirmation_bos_choch_reason`
@@ -1088,7 +1090,7 @@ Rejected formatted strategy output stays concise:
 Run Phase 12.2 scanner output:
 
 ```powershell
-python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output
 ```
 
 ## Phase 13 Volume Profile / POC Engine
@@ -1100,7 +1102,7 @@ Phase 13 adds a deterministic candle-based Volume Profile / POC engine under `ap
 - Candle volume is allocated across price buckets using each candle's high/low range.
 - Missing volume keeps POC, VAH, VAL, HVN, and LVN context as `N/A`; the scanner does not invent profile levels.
 - POC, VAH, VAL, high-volume nodes, and low-volume nodes are diagnostics and confluence only.
-- POC alone never creates a setup, never loosens strategy gates, and never bypasses sweep, 5m BOS/CHoCH, OB/FVG, fib, RR, or Trust Meter requirements.
+- POC alone never creates a setup, never loosens strategy gates, and never bypasses sweep, 15m BOS/CHoCH, OB/FVG, fib, RR, or Trust Meter requirements.
 - Rejected setups stay rejected even when POC is available.
 - Scanner JSON includes the volume profile result and source without secrets or API keys.
 - Alert behavior remains dry-run by default.
@@ -1110,12 +1112,12 @@ Scanner summary mode shows `POC` only when available. Normal mode shows `POC`, `
 Run Phase 13 scanner output:
 
 ```powershell
-python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output
 ```
 
 ## Phase 14 Pullback Zone Engine
 
-Phase 14 adds `app/analytics/pullback_zones.py` for the Liquidity-Grab Pullback strategy. The engine runs only after the 15m sweep and 5m BOS/CHoCH confirmation have passed.
+Phase 14 adds `app/analytics/pullback_zones.py` for the Liquidity-Grab Pullback strategy. The engine runs only after the 15m sweep and 15m BOS/CHoCH confirmation have passed.
 
 - The engine identifies the displacement impulse from the sweep wick to the BOS/CHoCH impulse extreme.
 - Bullish and bearish FVGs are detected from the displacement candles and marked with high, low, midpoint, creation index, and freshness.
@@ -1143,7 +1145,7 @@ Reason: rejection reason or N/A
 Run Phase 14 scanner output:
 
 ```powershell
-python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output
 ```
 
 ## Phase 15 Derivatives Enrichment Layer
@@ -1164,7 +1166,7 @@ Phase 15 adds `app/analytics/derivatives_enrichment.py` and threads `Derivatives
 Derivatives are confluence/filter only. They never create a trade setup by themselves and never override hard technical gates:
 
 - No sweep means no trade.
-- No 5m BOS/CHoCH means no trade.
+- No 15m BOS/CHoCH means no trade.
 - No OB/FVG/fib alignment means no trade.
 - RR below the strategy threshold means no trade.
 - Trust Meter requirements still apply.
@@ -1174,7 +1176,7 @@ The Liquidity-Grab Pullback strategy can reject only severe derivatives conflict
 Scanner summary output includes compact derivatives context when available:
 
 ```text
-BTCUSDT | No Setup | 2D: bearish | 12H: bearish | POC: 79704 | Funding: negative/normal | OI: rising | 15m sweep: passed | 5m BOS/CHoCH: passed | Pullback: failed | Reject: body_acceptance_failure
+BTCUSDT | No Setup | 2D: bearish | 12H: bearish | POC: 79704 | Funding: negative/normal | OI: rising | 15m sweep: passed | 15m BOS/CHoCH: passed | Pullback: failed | Reject: body_acceptance_failure
 ```
 
 Normal CLI output includes a `Derivatives` block with funding, OI, price/OI, crowding, squeeze, and context score. Full diagnostics and JSON output include the nested `derivatives_enrichment` object.
@@ -1182,7 +1184,7 @@ Normal CLI output includes a `Derivatives` block with funding, OI, price/OI, cro
 Run Phase 15 scanner output:
 
 ```powershell
-python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output
+python scripts/run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output
 ```
 
 ## Phase 15.1 Scanner Output Cleanup
@@ -1196,7 +1198,7 @@ Phase 15.1 keeps scanner behavior and JSON field names backward compatible while
 
 Phase 15.2 fixes the multi-timeframe confirmation-to-pullback handoff:
 
-- The Liquidity-Grab Pullback strategy keeps the 15m execution sweep context while using the 5m confirmation BOS/CHoCH displacement for pullback-zone calculation.
+- The Liquidity-Grab Pullback strategy keeps the 15m execution sweep context while using the 15m confirmation BOS/CHoCH displacement for pullback-zone calculation.
 - Pullback diagnostics now expose the calculation timeframe, sweep index, BOS/CHoCH index, and displacement start/end indices.
 - Rejection reasons are more specific, including `missing_confirmation_candles`, `no_displacement_candle`, `no_ob_or_fvg_zone`, `wick_sweep_reclaim`, `body_acceptance_failure`, `structural_breakdown`, and `rr_below_minimum`.
 - Normal CLI output prints one failed gate, one reason, and one action instead of duplicating pullback rejection lines.
@@ -1206,7 +1208,7 @@ Phase 15.2 fixes the multi-timeframe confirmation-to-pullback handoff:
 Phase 16 adds `app/formatters/telegram_formatter.py` for Telegram-ready Liquidity-Grab Pullback scanner output:
 
 - Valid setups are formatted as concise Candle Craft trade-map messages with HTF structure, orderflow/derivatives context, entry, stop, targets, RR, Trust Meter, invalidation, and risk warning.
-- Rejected setups are formatted as no-valid-setup messages with 2D/12H context, 15m sweep status, 5m BOS/CHoCH status, pullback status, failed gate, clean reason, and no-trade action.
+- Rejected setups are formatted as no-valid-setup messages with 2D/12H context, 15m sweep status, 15m BOS/CHoCH status, pullback status, failed gate, clean reason, and no-trade action.
 - Missing values remain `N/A`; unreliable values remain `Unverified` when present in scanner output.
 - Compact and full diagnostic formatter modes are available. `--diagnostics-level full` keeps diagnostic detail available when printing Telegram-ready strategy output.
 - The formatter is output-only. It does not call Telegram, create alerts, place orders, use private exchange endpoints, withdrawals, transfers, or change strategy gates.
@@ -1214,7 +1216,7 @@ Phase 16 adds `app/formatters/telegram_formatter.py` for Telegram-ready Liquidit
 Run Phase 16 Telegram-ready scanner output:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level summary --show-strategy-output --telegram-format
+.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level summary --show-strategy-output --telegram-format
 ```
 
 ## Phase 17 Premium Scanner Display
@@ -1223,7 +1225,7 @@ Phase 17 adds `app/formatters/scanner_display.py` for clean Candle Craft scanner
 
 - Console output starts with a scanner dashboard and classifies each symbol with display metadata. Phase 18 extends this with ranked `valid`, `near_miss`, `no_setup`, and `data_issue` buckets.
 - `--display compact|normal|full` controls output shape. `compact` prints the dashboard plus one result line per symbol, `normal` prints dashboard plus premium cards, and `full` adds detailed diagnostics after each card.
-- Near misses are diagnostics only: they require the 15m sweep and 5m BOS/CHoCH confirmation to pass while a later pullback/RR/quality gate fails. They do not create signals, alerts, journal entries, or trade ideas.
+- Near misses are diagnostics only: they require the 15m sweep and 15m BOS/CHoCH confirmation to pass while a later pullback/RR/quality gate fails. They do not create signals, alerts, journal entries, or trade ideas.
 - `--telegram-format` now prints shorter Telegram-ready diagnosis blocks with bias, passed checks, failed checks, reason, action, and the Candle Craft footer.
 - `--output-json` preserves existing scanner fields and adds `display_status`, `display_status_label`, `setup_progress_total`, `setup_progress_passed`, `passed_checks`, `failed_checks`, `short_reason`, `action_label`, and Phase 22 `near_miss_intelligence` when applicable.
 - This phase is formatting/output UX only. It does not change strategy gates, sweep/BOS/CHoCH/OB/FVG/RR rules, exchange access, alert sending, order execution, withdrawals, or transfers.
@@ -1231,7 +1233,7 @@ Phase 17 adds `app/formatters/scanner_display.py` for clean Candle Craft scanner
 Run Phase 17 premium scanner output:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level summary --show-strategy-output --telegram-format --display normal
+.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level summary --show-strategy-output --telegram-format --display normal
 ```
 
 ## Phase 18 Scanner Result Ranking
@@ -1241,8 +1243,8 @@ Phase 18 adds an output-only ranking and filtering layer for scanner results so 
 Buckets:
 
 - `valid` / `🟢 VALID SETUP`: a trade idea was created after scanner gates passed.
-- `near_miss` / `🟡 NEAR MISS`: the 15m sweep and 5m BOS/CHoCH confirmation passed, then a later pullback, OB/FVG, fib, RR, or final confluence gate failed.
-- `no_setup` / `⚪ REJECTED`: the setup failed before sweep or 5m structure confirmation, or otherwise never became near-actionable.
+- `near_miss` / `🟡 NEAR MISS`: the 15m sweep and 15m BOS/CHoCH confirmation passed, then a later pullback, OB/FVG, fib, RR, or final confluence gate failed.
+- `no_setup` / `⚪ REJECTED`: the setup failed before sweep or 15m structure confirmation, or otherwise never became near-actionable.
 - `data_issue` / `🔴 DATA ISSUE`: required scanner data was missing, unavailable, malformed, or otherwise insufficient.
 
 Default display behavior:
@@ -1289,25 +1291,25 @@ List presets:
 Scan majors:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --preset majors --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset majors --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output --rank-results --display normal
 ```
 
 Scan large caps with a symbol cap:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output --rank-results --display normal
 ```
 
 Scan a preset with exclusions:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --exclude-symbols DOGEUSDT XRPUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --exclude-symbols DOGEUSDT XRPUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output --rank-results --display normal
 ```
 
 Scan a custom preset file:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --preset-file .\custom_watchlist.json --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset-file .\custom_watchlist.json --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output --rank-results --display normal
 ```
 
 Safety note: Phase 19 only resolves scanner inputs. It does not create trades, loosen or modify Liquidity-Grab Pullback strategy gates, alter sweep/BOS/CHoCH/OB/FVG/fib/RR/Trust Meter/risk rules, place orders, use private exchange endpoints, send live Telegram messages, or add withdrawals/transfers.
@@ -1330,21 +1332,21 @@ Phase 20 improves larger watchlist scans without changing strategy gates, result
 Large preset scan with concise progress:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress
 ```
 
 Save and resume a large scan:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress --save-run scan_runs\latest_scan.json
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress --save-run scan_runs\latest_scan.json
 
-.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress --resume-from scan_runs\latest_scan.json
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset large_caps --max-symbols 10 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress --resume-from scan_runs\latest_scan.json
 ```
 
 Disable caching completely:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --preset majors --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress --no-cache
+.\.venv\Scripts\python.exe scripts\run_scan.py --preset majors --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --show-strategy-output --rank-results --display normal --progress --no-cache
 ```
 
 Safety note: Phase 20 is reliability and output persistence only. It does not create trades, change Phase 18 ranking, change Phase 19 preset resolution, loosen sweep/BOS/CHoCH/pullback/fib/RR/Trust Meter/risk rules, place orders, use private exchange endpoints, send live Telegram messages, or add withdrawals/transfers.
@@ -1373,13 +1375,13 @@ Example A - manual scan:
 Example B - top 50 Binance USDT perpetuals by quote volume/tradability:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_tradable --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --display normal --rank-results --max-display-results 10 --save-run
+.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_tradable --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --display normal --rank-results --max-display-results 10 --save-run
 ```
 
 Example C - top 50 Binance USDT perpetuals by public market cap:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_market_cap --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --diagnostics-level normal --display normal --rank-results --max-display-results 10 --save-run
+.\.venv\Scripts\python.exe scripts\run_scan.py --universe binance_usdt_perp_top_market_cap --universe-size 50 --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --diagnostics-level normal --display normal --rank-results --max-display-results 10 --save-run
 ```
 
 Safety note: Phase 21 resolves scanner inputs from public market data only. It does not create trades, weaken strategy gates, use private exchange API keys, call private/account/order endpoints, place orders, send live Telegram messages, withdraw funds, or transfer funds.
@@ -1404,7 +1406,7 @@ Behavior examples:
 - `rr_below_minimum`: status is `Watchlist only`; the plan explains that RR must improve through a better pullback entry, wider TP2 distance, or cleaner opposing liquidity target before the setup can become valid.
 - `pullback_too_deep`, `body_acceptance_failure`, or `structural_breakdown`: status is `Rejected`; the plan explains that body acceptance or structural breakdown beyond 0.786 requires fresh structure.
 - `no_ob_or_fvg_zone`: status is `Watchlist only` only when the sweep and BOS/CHoCH passed; otherwise it stays `Rejected`.
-- `missing_confirmation_structure_shift`: status is `Wait for confirmation`; the plan waits for a 5m BOS/CHoCH close before any pullback, RR, risk, or trade-idea logic can matter.
+- `missing_confirmation_structure_shift`: status is `Wait for confirmation`; the plan waits for a 15m BOS/CHoCH close before any pullback, RR, risk, or trade-idea logic can matter.
 
 Normal near-miss cards now include a short action plan:
 
@@ -1436,9 +1438,9 @@ Phase 23 adds `app/analytics/setup_quality.py`, a deterministic post-strategy qu
 
 Quality states:
 
-- `HIGH_QUALITY_TRADE`: valid scanner setup with clean sweep, clean 5m BOS/CHoCH, valid pullback, RR at or above the required threshold, strong context, non-conflicting derivatives, and acceptable execution risk.
+- `HIGH_QUALITY_TRADE`: valid scanner setup with clean sweep, clean 15m BOS/CHoCH, valid pullback, RR at or above the required threshold, strong context, non-conflicting derivatives, and acceptable execution risk.
 - `VALID_BUT_LOWER_QUALITY`: valid scanner setup with one or more weaknesses such as marginal RR, weak context, mixed derivatives, late pullback, wide stop, weak volume/POC alignment, or trend conflict.
-- `WATCHLIST_NEAR_MISS`: sweep and 5m BOS/CHoCH passed, but a later pullback, RR, or quality gate still needs improvement.
+- `WATCHLIST_NEAR_MISS`: sweep and 15m BOS/CHoCH passed, but a later pullback, RR, or quality gate still needs improvement.
 - `REJECTED_NO_EDGE`: setup quality does not provide enough deterministic edge.
 - `DATA_ISSUE`: required market data is missing, unavailable, or unreliable enough to prevent validation.
 
@@ -1446,7 +1448,7 @@ The result includes `quality_grade`, `quality_score`, `tradeability_score`, `pro
 
 Scoring model:
 
-- Structure quality: 25 points from sweep, 5m BOS/CHoCH, and direction alignment.
+- Structure quality: 25 points from sweep, 15m BOS/CHoCH, and direction alignment.
 - Pullback quality: 20 points from valid OB/FVG, fib alignment, and non-late pullback behavior.
 - RR / profit potential: 20 points from RR versus the mode-specific minimum and target reach.
 - Context quality: 15 points from 2D/12H alignment, Trust Meter/context score, and POC/VAH/VAL availability.
@@ -1474,7 +1476,7 @@ Safety boundaries:
 Example command:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 5m --display normal --rank-results
+.\.venv\Scripts\python.exe scripts\run_scan.py --symbols BTCUSDT ETHUSDT SOLUSDT --exchange binance --account-equity 1000 --risk-per-trade-pct 1 --min-score-for-idea 80 --strategy liquidity_grab_pullback --modes challenge swing scalp --htf-timeframe 2d --bias-timeframe 12h --execution-timeframe 15m --confirmation-timeframe 15m --display normal --rank-results
 ```
 
 ## Phase 24 Historical Replay / Backtest Validation
@@ -1514,7 +1516,7 @@ Example replay command:
   --replay `
   --replay-candles 1000 `
   --execution-timeframe 15m `
-  --confirmation-timeframe 5m `
+  --confirmation-timeframe 15m `
   --htf-timeframe 2d `
   --bias-timeframe 12h `
   --display normal
@@ -1950,7 +1952,7 @@ Transition rules:
 
 - `REJECTED` can move to `WATCHLISTED` only when readiness improves.
 - `WATCHLISTED` moves to `STALKING` when an execution sweep appears.
-- `STALKING` moves to `TRIGGERED` when 5m BOS/CHoCH appears after the sweep.
+- `STALKING` moves to `TRIGGERED` when 15m BOS/CHoCH appears after the sweep.
 - `TRIGGERED` moves to `CONFIRMED` when pullback zone and RR are valid.
 - `CONFIRMED` moves to `EXECUTING` only when a valid trade idea already exists.
 - `EXECUTING` moves to `MANAGING` only after an entry fill is simulated or confirmed by lifecycle input.
@@ -1970,7 +1972,7 @@ Lifecycle:
 - State: TRIGGERED
 - Previous: STALKING
 - Transition: STALKING -> TRIGGERED
-- Reason: 5m BOS/CHoCH confirmed after sweep.
+- Reason: 15m BOS/CHoCH confirmed after sweep.
 - First seen: 2026-05-18T09:00:00+00:00
 - Last updated: 2026-05-18T09:10:00+00:00
 ```

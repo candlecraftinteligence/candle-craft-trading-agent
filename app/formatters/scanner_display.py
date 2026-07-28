@@ -792,7 +792,7 @@ def _progress_items(
     if execution_tf == NA:
         execution_tf = "15m"
     if confirmation_tf == NA:
-        confirmation_tf = "5m"
+        confirmation_tf = "15m"
 
     sweep_status = _display(diagnostics.get("execution_sweep_status"))
     confirmation_status = _display(diagnostics.get("confirmation_structure_shift_status"))
@@ -1279,7 +1279,7 @@ def _next_trigger_needed(
     if failed_gate == "missing_confirmed_sweep":
         return "Wait for new sweep"
     if failed_gate in ("missing_confirmation_structure_shift", "missing_confirmation_candles"):
-        return "Wait for 5m BOS/CHoCH"
+        return f"Wait for {_confirmation_timeframe_label(diagnostics)} BOS/CHoCH"
     if failed_gate in PULLBACK_FAIL_GATES or failed_gate in {"missing_displacement_impulse", "missing_stop"}:
         return "Wait for clean OB/FVG pullback"
     if failed_gate in RR_FAIL_GATES:
@@ -1524,7 +1524,7 @@ def _execution_summary(diagnostics: Mapping[str, Any]) -> str:
     if execution_tf == NA:
         execution_tf = "15m"
     if confirmation_tf == NA:
-        confirmation_tf = "5m"
+        confirmation_tf = "15m"
     return " | ".join(
         (
             f"2D HTF {_title_value(diagnostics.get('htf_2d_trend'))}",
@@ -2225,6 +2225,11 @@ def _unique_strings(values: Sequence[str]) -> tuple[str, ...]:
         if text != NA and text not in output:
             output.append(text)
     return tuple(output)
+
+
+def _confirmation_timeframe_label(diagnostics: Mapping[str, Any]) -> str:
+    timeframe = _display(diagnostics.get("confirmation_timeframe"))
+    return timeframe if timeframe != NA else "15m"
 
 
 def _display(value: object) -> str:

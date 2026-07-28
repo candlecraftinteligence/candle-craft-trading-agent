@@ -112,28 +112,28 @@ def test_pullback_too_deep_rejection_plan() -> None:
     assert "intent is weak" in intelligence.quality_note
 
 
-def test_missing_5m_confirmation_plan_waits_for_confirmation() -> None:
+def test_missing_default_m15_confirmation_plan_waits_for_confirmation() -> None:
     intelligence = build_near_miss_intelligence(
         failed_gate="missing_confirmation_structure_shift",
-        short_reason="No 5m BOS/CHoCH close beyond the required LTF swing.",
+        short_reason="No 15m BOS/CHoCH close beyond the required LTF swing.",
         diagnostics={
             "execution_sweep_status": "passed",
             "confirmation_structure_shift_status": "failed",
-            "confirmation_bos_choch_reason": "No 5m BOS/CHoCH close beyond the required LTF swing.",
+            "confirmation_bos_choch_reason": "No 15m BOS/CHoCH close beyond the required LTF swing.",
         },
     )
 
     assert intelligence is not None
     assert intelligence.watchlist_status == "Wait for confirmation"
     assert intelligence.action_label == "Wait for confirmation"
-    assert "5m BOS/CHoCH close" in intelligence.next_required_conditions[0]
+    assert "15m BOS/CHoCH close" in intelligence.next_required_conditions[0]
     assert "before this can become interesting" in intelligence.activation_hint
 
 
 def test_no_ob_or_fvg_plan_depends_on_core_structure() -> None:
     watchlist = build_near_miss_intelligence(
         failed_gate="no_ob_or_fvg_zone",
-        short_reason="No valid OB or FVG was found inside the 5m displacement impulse.",
+        short_reason="No valid OB or FVG was found inside the 15m displacement impulse.",
         diagnostics={
             "execution_sweep_status": "passed",
             "confirmation_structure_shift_status": "passed",
@@ -141,7 +141,7 @@ def test_no_ob_or_fvg_plan_depends_on_core_structure() -> None:
     )
     rejected = build_near_miss_intelligence(
         failed_gate="no_ob_or_fvg_zone",
-        short_reason="No valid OB or FVG was found inside the 5m displacement impulse.",
+        short_reason="No valid OB or FVG was found inside the 15m displacement impulse.",
         diagnostics={
             "execution_sweep_status": "failed",
             "confirmation_structure_shift_status": "not_evaluated",

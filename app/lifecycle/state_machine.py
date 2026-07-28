@@ -232,6 +232,7 @@ class LifecycleObservation:
     actionability_state: str = NA
     regime_state: str = NA
     action_label: str = NA
+    confirmation_timeframe: str = NA
     invalidation_reason: str = NA
     sweep_detected: bool = False
     structure_shift_detected: bool = False
@@ -473,7 +474,7 @@ def evaluate_lifecycle_transition(
             readiness_score=new_record.readiness_score,
             quality_score=new_record.quality_score,
             failed_gate=new_record.failed_gate,
-            notes=_reason_for_state(initial_state, observation, initialized=True).value,
+            notes=_transition_notes(_reason_for_state(initial_state, observation, initialized=True), observation),
         )
         return SetupTransitionResult(
             lifecycle_id=lifecycle_id,
@@ -581,7 +582,7 @@ def evaluate_lifecycle_transition(
         notes=(
             geometry_diagnostic
             if geometry_diagnostic != NA
-            else reason.value
+            else _transition_notes(reason, observation)
             if next_state != updated_record.current_state
             else SetupTransitionReason.NO_CHANGE.value
         ),
@@ -1400,6 +1401,13 @@ def _setup_identity(observation: LifecycleObservation) -> str:
 def _identity_text(value: Any) -> str:
     text = _text(value).lower()
     return text if text != NA.lower() else NA
+
+
+def _transition_notes(reason: SetupTransitionReason, observation: LifecycleObservation) -> str:
+    timeframe = _text(observation.confirmation_timeframe)
+    if reason == SetupTransitionReason.STRUCTURE_SHIFT_CONFIRMED and timeframe != NA:
+        return f"{timeframe} BOS/CHoCH confirmed after sweep."
+    return reason.value
 
 
 def _reason_for_state(

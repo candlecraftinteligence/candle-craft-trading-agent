@@ -604,6 +604,36 @@ def _apply_single_lifecycle(symbol_result: ScannerSymbolResult, tmp_path, *, now
     ).results[0]
 
 
+def test_lifecycle_structure_shift_notes_follow_configured_timeframe_and_read_legacy_m5() -> None:
+    stalking = _record(SetupLifecycleState.STALKING)
+    transition = evaluate_lifecycle_transition(
+        stalking,
+        _observation(
+            sweep_detected=True,
+            structure_shift_detected=True,
+            confirmation_timeframe="15m",
+        ),
+        lifecycle_id=stalking.lifecycle_id,
+        now="2026-05-18T09:10:00+00:00",
+    )
+
+    assert transition.reason == SetupTransitionReason.STRUCTURE_SHIFT_CONFIRMED
+    assert transition.notes == "15m BOS/CHoCH confirmed after sweep."
+
+    historical_event = SetupLifecycleEvent.model_validate(
+        {
+            "lifecycle_id": "legacy_5m",
+            "timestamp": "2026-05-01T09:10:00+00:00",
+            "symbol": "BTCUSDT",
+            "from_state": SetupLifecycleState.STALKING.value,
+            "to_state": SetupLifecycleState.TRIGGERED.value,
+            "reason": SetupTransitionReason.STRUCTURE_SHIFT_CONFIRMED.value,
+            "notes": "5m BOS/CHoCH confirmed after sweep.",
+        }
+    )
+
+    assert historical_event.notes == "5m BOS/CHoCH confirmed after sweep."
+
 def test_valid_state_progression() -> None:
     initial = evaluate_lifecycle_transition(
         None,
