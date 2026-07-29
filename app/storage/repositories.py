@@ -232,6 +232,7 @@ def _scan_run_record(
             {
                 "htf": result.config.htf_timeframe,
                 "bias": result.config.bias_timeframe,
+                "structure": result.config.structure_timeframe,
                 "execution": result.config.execution_timeframe,
                 "confirmation": result.config.confirmation_timeframe,
             }

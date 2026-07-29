@@ -72,6 +72,7 @@ from app.lifecycle.models import (
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
 from app.strategies.liquidity_grab_pullback import (
     DEFAULT_CONFIRMATION_TIMEFRAME,
+    DEFAULT_STRUCTURE_TIMEFRAME,
     LiquidityGrabEngine,
     LiquidityGrabInput,
     LiquidityGrabMode,
@@ -192,6 +193,7 @@ class ScannerRunConfig(BaseModel):
     aggressive_toggle: bool = False
     htf_timeframe: str = "2d"
     bias_timeframe: str = "12h"
+    structure_timeframe: str = DEFAULT_STRUCTURE_TIMEFRAME
     execution_timeframe: str = "15m"
     confirmation_timeframe: str = DEFAULT_CONFIRMATION_TIMEFRAME
     cache_enabled: bool = True
@@ -260,7 +262,7 @@ class ScannerRunConfig(BaseModel):
             return tuple(value)
         return value
 
-    @field_validator("interval", "htf_timeframe", "bias_timeframe", "execution_timeframe", "confirmation_timeframe")
+    @field_validator("interval", "htf_timeframe", "bias_timeframe", "structure_timeframe", "execution_timeframe", "confirmation_timeframe")
     @classmethod
     def _interval_not_blank(cls, value: str) -> str:
         normalized = value.strip()
@@ -1347,6 +1349,7 @@ class ScannerRunner:
             aggressive_toggle=config.aggressive_toggle,
             min_rr=config.min_rr,
             htf_timeframe=config.htf_timeframe,
+            structure_timeframe=config.structure_timeframe,
             bias_timeframe=config.bias_timeframe,
             execution_timeframe=config.execution_timeframe,
             confirmation_timeframe=config.confirmation_timeframe,
@@ -2511,6 +2514,7 @@ def _liquidity_grab_input(
     min_rr: Decimal,
     htf_timeframe: str,
     bias_timeframe: str,
+    structure_timeframe: str,
     execution_timeframe: str,
     confirmation_timeframe: str,
     volume_profile: VolumeProfileResult,
@@ -2524,8 +2528,11 @@ def _liquidity_grab_input(
         "symbol": symbol,
         "htf_timeframe": htf_timeframe,
         "bias_timeframe": bias_timeframe,
+        "structure_timeframe": structure_timeframe,
         "execution_timeframe": execution_timeframe,
         "confirmation_timeframe": confirmation_timeframe,
+        "structure_candles": candles_by_timeframe.get(structure_timeframe.strip().lower()),
+        "structure_analysis_required": True,
         "candles_2d": candles_by_timeframe.get("2d"),
         "candles_12h": candles_by_timeframe.get("12h"),
         "candles_4h": candles_by_timeframe.get("4h"),
@@ -2641,6 +2648,7 @@ def _fast_mode_skips_timeframe(config: ScannerRunConfig, timeframe: str) -> bool
     normalized = timeframe.strip().lower()
     required_timeframes = {
         config.bias_timeframe.strip().lower(),
+        config.structure_timeframe.strip().lower(),
         config.execution_timeframe.strip().lower(),
         config.confirmation_timeframe.strip().lower(),
     }
@@ -2659,6 +2667,8 @@ def _progress_message_for_timeframe(config: ScannerRunConfig, timeframe: str) ->
         return f"Fetching HTF {normalized}..."
     if normalized == config.bias_timeframe.strip().lower():
         return f"Fetching {normalized} bias..."
+    if normalized == config.structure_timeframe.strip().lower():
+        return f"Fetching {normalized} structure..."
     if normalized == config.execution_timeframe.strip().lower():
         return f"Fetching {normalized} execution..."
     if normalized == config.confirmation_timeframe.strip().lower():
@@ -2682,6 +2692,7 @@ def _exchange_kline_limit(*, exchange: str, requested_limit: int, label: str, wa
 def _direct_strategy_timeframes(config: ScannerRunConfig) -> tuple[str, ...]:
     timeframes = (
         config.bias_timeframe,
+        config.structure_timeframe,
         *DIRECT_STRATEGY_TIMEFRAMES,
         config.execution_timeframe,
         config.confirmation_timeframe,

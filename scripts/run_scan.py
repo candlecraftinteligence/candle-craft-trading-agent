@@ -103,6 +103,7 @@ from app.lifecycle.service import (  # noqa: E402
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository  # noqa: E402
 from app.pipeline.scanner_runner import (  # noqa: E402
     DEFAULT_CONFIRMATION_TIMEFRAME,
+    DEFAULT_STRUCTURE_TIMEFRAME,
     BINANCE_KLINE_LIMIT_MAX,
     BINANCE_KLINE_LIMIT_MIN,
     DEFAULT_REPLAY_CANDLES,
@@ -243,6 +244,7 @@ class CommandPreset:
     modes: tuple[str, ...]
     htf_timeframe: str
     bias_timeframe: str
+    structure_timeframe: str
     execution_timeframe: str
     confirmation_timeframe: str
     min_score_for_idea: str
@@ -266,6 +268,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
         modes=("challenge", "swing", "scalp"),
         htf_timeframe="2d",
         bias_timeframe="12h",
+        structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
         execution_timeframe="15m",
         confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="80",
@@ -282,6 +285,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
         modes=("swing",),
         htf_timeframe="2d",
         bias_timeframe="12h",
+        structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
         execution_timeframe="15m",
         confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="80",
@@ -298,6 +302,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
         modes=("challenge",),
         htf_timeframe="2d",
         bias_timeframe="12h",
+        structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
         execution_timeframe="15m",
         confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="85",
@@ -314,6 +319,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
         modes=("scalp",),
         htf_timeframe="12h",
         bias_timeframe="4h",
+        structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
         execution_timeframe="15m",
         confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
         min_score_for_idea="80",
@@ -381,6 +387,7 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--modes": "modes",
         "--htf-timeframe": "htf_timeframe",
         "--bias-timeframe": "bias_timeframe",
+        "--structure-timeframe": "structure_timeframe",
         "--execution-timeframe": "execution_timeframe",
         "--confirmation-timeframe": "confirmation_timeframe",
         "--min-score-for-idea": "min_score_for_idea",
@@ -501,6 +508,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--modes", nargs="+", choices=["challenge", "swing", "scalp"], default=["challenge", "swing", "scalp"])
     parser.add_argument("--htf-timeframe", default="2d")
     parser.add_argument("--bias-timeframe", default="12h")
+    parser.add_argument("--structure-timeframe", default=DEFAULT_STRUCTURE_TIMEFRAME)
     parser.add_argument("--execution-timeframe", default="15m")
     parser.add_argument("--confirmation-timeframe", default=DEFAULT_CONFIRMATION_TIMEFRAME)
     parser.add_argument("--aggressive-toggle", action="store_true")
@@ -676,6 +684,7 @@ def _apply_command_preset(args: argparse.Namespace, explicit_options: set[str]) 
         "modes": list(preset.modes),
         "htf_timeframe": preset.htf_timeframe,
         "bias_timeframe": preset.bias_timeframe,
+        "structure_timeframe": preset.structure_timeframe,
         "execution_timeframe": preset.execution_timeframe,
         "confirmation_timeframe": preset.confirmation_timeframe,
         "min_score_for_idea": preset.min_score_for_idea,
@@ -755,6 +764,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         aggressive_toggle=args.aggressive_toggle,
         htf_timeframe=args.htf_timeframe,
         bias_timeframe=args.bias_timeframe,
+        structure_timeframe=args.structure_timeframe,
         execution_timeframe=args.execution_timeframe,
         confirmation_timeframe=args.confirmation_timeframe,
         cache_enabled=args.cache_enabled,
@@ -786,6 +796,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
     print(_format_universe_header(watchlist.universe))
     print(f"Watchlist: {watchlist.source_label}")
     print(f"Symbols queued: {len(queued_symbols)}")
+    print(f"Timeframe hierarchy: context={args.htf_timeframe} -> bias={args.bias_timeframe} -> structure={args.structure_timeframe} -> execution={args.execution_timeframe} -> confirmation={args.confirmation_timeframe}")
     _print_symbol_queue_diagnostics(args, watchlist, symbol_priority_plan, queued_symbols)
     for warning in _startup_warnings(args, effective_candle_limit):
         print(f"Warning: {warning}")
@@ -1139,6 +1150,7 @@ def _format_available_command_presets() -> str:
         lines.append(
             f"- {name}: modes {','.join(preset.modes)}; "
             f"timeframes {preset.htf_timeframe}>{preset.bias_timeframe}>"
+            f"{preset.structure_timeframe}>"
             f"{preset.execution_timeframe}>{preset.confirmation_timeframe}; "
             f"min score {preset.min_score_for_idea}; min RR {_display(preset.min_rr)}"
         )
@@ -3697,6 +3709,7 @@ async def _run_replay(
         confirmation_timeframe=args.confirmation_timeframe,
         htf_timeframe=args.htf_timeframe,
         bias_timeframe=args.bias_timeframe,
+        structure_timeframe=args.structure_timeframe,
         replay_candles=replay_candles,
         same_candle_policy=args.same_candle_policy,
         max_hold_candles=args.replay_max_hold_candles,

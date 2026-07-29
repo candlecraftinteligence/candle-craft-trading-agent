@@ -92,6 +92,7 @@ SOURCE_COLUMN_ALLOWLIST: dict[str, frozenset[str]] = {
 OPTIONAL_JSON_COLUMNS = frozenset({"timeframes_json", "runtime_stats_json", "symbols_json", "raw_result_json"})
 TIMEFRAME_COMPACT_FIELDS = frozenset({
     "htf_timeframe", "bias_timeframe", "execution_timeframe", "confirmation_timeframe",
+    "context", "htf", "bias", "structure", "execution", "confirmation",
     "structure_timeframe", "structure_context_timeframe", "structure_analysis_timeframe",
 })
 
@@ -1555,7 +1556,7 @@ def _timeframe_verification(
 ) -> dict[str, Any]:
     observed: dict[str, list[str]] = defaultdict(list)
     structure_observations = 0
-    structure_fields = ("structure_timeframe", "structure_context_timeframe", "structure_analysis_timeframe")
+    structure_fields = ("structure", "structure_timeframe", "structure_context_timeframe", "structure_analysis_timeframe")
     unrelated_2h_fields: set[str] = set()
     for row in scan_rows:
         payload = _json_mapping(row.get("timeframes_json"), "scan_runs.timeframes_json", malformed)
@@ -1570,14 +1571,16 @@ def _timeframe_verification(
             structure_observations += 1
     repository_evidence = _repository_timeframe_evidence(repository_root)
     definitions = {
-        "2D_context": ("htf_timeframe", "2d"),
-        "12H_bias": ("bias_timeframe", "12h"),
-        "M15_execution": ("execution_timeframe", "15m"),
-        "M15_confirmation": ("confirmation_timeframe", "15m"),
+        "2D_context": (("context", "htf", "htf_timeframe"), "2d"),
+        "12H_bias": (("bias", "bias_timeframe"), "12h"),
+        "M15_execution": (("execution", "execution_timeframe"), "15m"),
+        "M15_confirmation": (("confirmation", "confirmation_timeframe"), "15m"),
     }
     result: dict[str, Any] = {}
-    for label, (field, expected) in definitions.items():
-        values = sorted(set(observed.get(field, [])))
+    for label, (fields, expected) in definitions.items():
+        values = sorted({value for field in fields for value in observed.get(field, [])})
+        matching_fields = [field for field in fields if expected in observed.get(field, [])]
+        field = matching_fields[0] if matching_fields else fields[0]
         result[label] = {
             "status": "ACTIVE_AND_VERIFIED" if expected in values else "NOT_VERIFIABLE",
             "persisted_field": f"scan_runs.timeframes_json.{field}",

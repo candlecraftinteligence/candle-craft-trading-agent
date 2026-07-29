@@ -45,6 +45,7 @@ BASE_MIN_RR = SWING_HARD_MINIMUM_RR
 CHALLENGE_MIN_RR = CHALLENGE_HARD_MINIMUM_RR
 TICK_SIZE = Decimal("0.00000001")
 DEFAULT_CONFIRMATION_TIMEFRAME = "15m"
+DEFAULT_STRUCTURE_TIMEFRAME = "2h"
 RISK_WARNING = (
     "This is not financial advice. Pullback ideas are conditional and must be invalidated at the stop."
 )
@@ -322,8 +323,11 @@ class LiquidityGrabInput(BaseModel):
     mode: LiquidityGrabMode = LiquidityGrabMode.swing
     htf_timeframe: str = "2d"
     bias_timeframe: str = "12h"
+    structure_timeframe: str = DEFAULT_STRUCTURE_TIMEFRAME
     execution_timeframe: str = "15m"
     confirmation_timeframe: str = DEFAULT_CONFIRMATION_TIMEFRAME
+    structure_candles: Sequence[Any] | None = None
+    structure_analysis_required: bool = False
     candles_2d: Sequence[Any] | None = None
     candles_12h: Sequence[Any] | None = None
     candles_6h: Sequence[Any] | None = None
@@ -372,7 +376,13 @@ class LiquidityGrabInput(BaseModel):
     def _minimum_rr_is_safe(cls, value: Any) -> Decimal:
         return validate_configured_minimum_rr(value)
 
-    @field_validator("htf_timeframe", "bias_timeframe", "execution_timeframe", "confirmation_timeframe")
+    @field_validator(
+        "htf_timeframe",
+        "bias_timeframe",
+        "structure_timeframe",
+        "execution_timeframe",
+        "confirmation_timeframe",
+    )
     @classmethod
     def _timeframe_not_blank(cls, value: str) -> str:
         normalized = value.strip().lower()
@@ -506,6 +516,9 @@ class LiquidityGrabEngine:
         unverified_data: tuple[str, ...],
         rotation: RotationContext,
     ) -> LiquidityGrabSetup:
+        structure = _select_structure_candles(data)
+        if data.structure_analysis_required and structure is not None:
+            _analyze_structure_layer(structure, lookback=self.swing_lookback)
         execution = _select_execution_candles(normalized, data)
         confirmation = _select_confirmation_candles(normalized, data)
         context_fields = _timeframe_context_fields(data, normalized, execution, confirmation)
@@ -1098,6 +1111,11 @@ def _normalize_all_timeframes(data: LiquidityGrabInput) -> dict[str, tuple[_Cand
         if errors:
             raise ValueError(errors[0])
         output[timeframe] = candles
+    if data.structure_analysis_required and data.structure_candles is not None:
+        candles, errors = _normalize_candles(data.structure_candles, f"structure_candles_{data.structure_timeframe}")
+        if errors:
+            raise ValueError(errors[0])
+        output[data.structure_timeframe] = candles
     return output
 
 
@@ -2268,6 +2286,37 @@ def _select_execution_candles(
     return None
 
 
+def _select_structure_candles(data: LiquidityGrabInput) -> _SelectedCandles | None:
+    raw = data.structure_candles
+    if raw is None:
+        return None
+    candles, errors = _normalize_candles(raw, f"structure_candles_{data.structure_timeframe}")
+    if errors:
+        raise ValueError(errors[0])
+    if candles:
+        return _SelectedCandles(data.structure_timeframe, candles)
+    return None
+
+
+def _analyze_structure_layer(structure: _SelectedCandles, *, lookback: int) -> StructureShiftSignal:
+    """Apply the established BOS/CHoCH analyzer to the dedicated structure dataset.
+
+    This is informational only. Qualification remains governed by the existing
+    execution-sweep and confirmation-shift contract.
+    """
+
+    sweep = detect_liquidity_sweep(
+        structure.candles,
+        atr_period=DEFAULT_ATR_PERIOD,
+        lookback=lookback,
+    )
+    return detect_structure_shift(
+        structure.candles,
+        sweep=sweep if sweep.is_present else None,
+        lookback=lookback,
+    )
+
+
 def _select_confirmation_candles(
     normalized: Mapping[str, tuple[_Candle, ...]],
     data: LiquidityGrabInput,
@@ -2436,7 +2485,9 @@ def _missing_context(data: LiquidityGrabInput, normalized: Mapping[str, tuple[_C
     ):
         if _is_missing(getattr(data, field)):
             missing.append(f"{field}: N/A")
-    required_timeframes = ("2d", "12h", data.execution_timeframe, data.confirmation_timeframe)
+    required_timeframes = ["2d", "12h", data.execution_timeframe, data.confirmation_timeframe]
+    if data.structure_analysis_required:
+        required_timeframes.append(data.structure_timeframe)
     for timeframe in dict.fromkeys(required_timeframes):
         if not normalized.get(timeframe):
             missing.append(f"candles_{timeframe}: N/A")
