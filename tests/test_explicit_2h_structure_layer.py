@@ -192,7 +192,8 @@ def test_structure_audit_requires_explicit_structure_evidence_and_keeps_history_
         None,
     )
 
-    assert explicit["timeframes"]["2H_structure"]["status"] == "ACTIVE_AND_VERIFIED"
+    assert explicit["timeframes"]["2H_structure"]["status"] == "NOT_VERIFIABLE"
+    assert explicit["timeframes"]["2H_structure"]["configuration_evidence"]["status"] == "CONFIGURED"
     assert historical["timeframes"]["2H_structure"]["status"] == "NOT_VERIFIABLE"
     structure = unrelated["timeframes"]["2H_structure"]
     assert structure["status"] == "NOT_VERIFIABLE"
@@ -200,13 +201,14 @@ def test_structure_audit_requires_explicit_structure_evidence_and_keeps_history_
 
 
 def test_insufficient_structure_history_is_reported_by_the_established_analyzer() -> None:
-    selected = strategy_module._select_structure_candles(
-        LiquidityGrabInput(
-            symbol="BTCUSDT",
-            structure_candles=_candles("200", count=3),
-        )
+    data = LiquidityGrabInput(
+        symbol="BTCUSDT",
+        structure_analysis_required=True,
+        structure_candles=_candles("200", count=3),
     )
+    selected = strategy_module._select_structure_candles(data)
 
     assert selected is not None
-    signal = strategy_module._analyze_structure_layer(selected, lookback=2)
-    assert signal.is_present is False
+    analysis = strategy_module._analyze_structure_layer(data, selected, atr_period=14, lookback=2)
+    assert analysis.status == "INSUFFICIENT_DATA"
+    assert analysis.structure_shift.is_present is False

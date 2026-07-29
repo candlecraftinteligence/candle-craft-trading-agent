@@ -32,6 +32,13 @@ DecimalLike = Decimal | int | str
 Direction = Literal["bullish", "bearish", "N/A"]
 TradeBias = Literal["long", "short", "N/A"]
 ShiftKind = Literal["BOS", "CHoCH", "N/A"]
+StructureLayerStatus = Literal[
+    "NOT_REQUESTED",
+    "MISSING_DATA",
+    "INSUFFICIENT_DATA",
+    "ANALYZED_NO_SHIFT",
+    "ANALYZED_SHIFT_PRESENT",
+]
 SetupStatus = Literal["Pending", "Filled", "TP1", "TP2", "TP3", "Closed", "Rejected"]
 TrustGrade = Literal["A", "B", "No trade"]
 RiskTier = Literal["conservative", "base", "aggressive", "no_trade"]
@@ -81,6 +88,20 @@ class StructureShiftSignal(BaseModel):
     level: MaybeDecimal = NA
     close: MaybeDecimal = NA
     reason: str = "No BOS/CHoCH detected."
+
+    model_config = ConfigDict(frozen=True)
+
+
+class StructureLayerAnalysis(BaseModel):
+    """Informational structure result for the dedicated structure timeframe."""
+
+    timeframe: str = DEFAULT_STRUCTURE_TIMEFRAME
+    candle_count: int = 0
+    status: StructureLayerStatus = "NOT_REQUESTED"
+    sweep: LiquiditySweepSignal = LiquiditySweepSignal()
+    structure_shift: StructureShiftSignal = StructureShiftSignal()
+    direction: Direction = NA
+    reason: str = "Structure analysis was not requested."
 
     model_config = ConfigDict(frozen=True)
 
@@ -173,6 +194,7 @@ class LiquidityGrabSetup(BaseModel):
     trend: TrendLabel = NA
     htf_timeframe: str = NA
     bias_timeframe: str = NA
+    structure_timeframe: str = NA
     execution_timeframe: str = NA
     confirmation_timeframe: str = NA
     htf_2d_context_source: str = NA
@@ -194,6 +216,7 @@ class LiquidityGrabSetup(BaseModel):
     poc_diagnostics: str = NA
     sweep: LiquiditySweepSignal = LiquiditySweepSignal()
     structure_shift: StructureShiftSignal = StructureShiftSignal()
+    structure_layer_analysis: StructureLayerAnalysis = StructureLayerAnalysis()
     order_block: OrderBlockZone = OrderBlockZone()
     fair_value_gap: FairValueGapZone = FairValueGapZone()
     fib_alignment: FibAlignmentResult = FibAlignmentResult()
@@ -302,6 +325,7 @@ class LiquidityGrabResult(BaseModel):
     momentum_diagnostics: str = NA
     rr_diagnostics: str = NA
     trust_meter_diagnostics: str = NA
+    structure_layer_analysis: StructureLayerAnalysis = StructureLayerAnalysis()
     challenge_diagnostics: str = NA
     swing_diagnostics: str = NA
     scalp_diagnostics: str = NA
@@ -449,6 +473,12 @@ class LiquidityGrabEngine:
             key_play=_key_play(data),
         )
 
+        structure_layer_analysis = _analyze_structure_layer(
+            data,
+            _select_structure_candles(data, normalized),
+            atr_period=self.atr_period,
+            lookback=self.swing_lookback,
+        )
         challenge = self._analyze_mode(
             data,
             normalized,
@@ -456,6 +486,7 @@ class LiquidityGrabEngine:
             missing_data,
             unverified_data,
             rotation,
+            structure_layer_analysis,
         )
         swing = self._analyze_mode(
             data,
@@ -464,6 +495,7 @@ class LiquidityGrabEngine:
             missing_data,
             unverified_data,
             rotation,
+            structure_layer_analysis,
         )
         scalp = self._analyze_mode(
             data,
@@ -472,6 +504,7 @@ class LiquidityGrabEngine:
             missing_data,
             unverified_data,
             rotation,
+            structure_layer_analysis,
         )
         challenge = _with_minimum_rr_policy(data.min_rr, challenge)
         swing = _with_minimum_rr_policy(data.min_rr, swing)
@@ -502,6 +535,7 @@ class LiquidityGrabEngine:
             momentum_diagnostics=requested_setup.momentum_diagnostics,
             rr_diagnostics=requested_setup.rr_diagnostics,
             trust_meter_diagnostics=requested_setup.trust_meter_diagnostics,
+            structure_layer_analysis=structure_layer_analysis,
             challenge_diagnostics=challenge.strategy_diagnostics,
             swing_diagnostics=swing.strategy_diagnostics,
             scalp_diagnostics=scalp.strategy_diagnostics,
@@ -515,13 +549,17 @@ class LiquidityGrabEngine:
         missing_data: tuple[str, ...],
         unverified_data: tuple[str, ...],
         rotation: RotationContext,
+        structure_layer_analysis: StructureLayerAnalysis,
     ) -> LiquidityGrabSetup:
-        structure = _select_structure_candles(data)
-        if data.structure_analysis_required and structure is not None:
-            _analyze_structure_layer(structure, lookback=self.swing_lookback)
         execution = _select_execution_candles(normalized, data)
         confirmation = _select_confirmation_candles(normalized, data)
-        context_fields = _timeframe_context_fields(data, normalized, execution, confirmation)
+        context_fields = _timeframe_context_fields(
+            data,
+            normalized,
+            execution,
+            confirmation,
+            structure_layer_analysis=structure_layer_analysis,
+        )
         if execution is None:
             return _rejected_setup(
                 mode,
@@ -613,6 +651,7 @@ class LiquidityGrabEngine:
                 execution,
                 confirmation,
                 structure_shift=structure_shift,
+                structure_layer_analysis=structure_layer_analysis,
             )
             return _rejected_setup(
                 mode,
@@ -633,6 +672,7 @@ class LiquidityGrabEngine:
             execution,
             confirmation,
             structure_shift=structure_shift,
+            structure_layer_analysis=structure_layer_analysis,
         )
 
         direction: Direction = structure_shift.direction
@@ -2286,8 +2326,18 @@ def _select_execution_candles(
     return None
 
 
-def _select_structure_candles(data: LiquidityGrabInput) -> _SelectedCandles | None:
+def _select_structure_candles(
+    data: LiquidityGrabInput,
+    normalized: Mapping[str, tuple[_Candle, ...]] | None = None,
+) -> _SelectedCandles | None:
     raw = data.structure_candles
+    timeframe = data.structure_timeframe
+    if normalized is not None:
+        candles = normalized.get(timeframe, ())
+        if candles:
+            return _SelectedCandles(timeframe, candles)
+        return None
+
     if raw is None:
         return None
     candles, errors = _normalize_candles(raw, f"structure_candles_{data.structure_timeframe}")
@@ -2298,22 +2348,84 @@ def _select_structure_candles(data: LiquidityGrabInput) -> _SelectedCandles | No
     return None
 
 
-def _analyze_structure_layer(structure: _SelectedCandles, *, lookback: int) -> StructureShiftSignal:
+def _analyze_structure_layer(
+    data: LiquidityGrabInput,
+    structure: _SelectedCandles | None,
+    *,
+    atr_period: int,
+    lookback: int,
+) -> StructureLayerAnalysis:
     """Apply the established BOS/CHoCH analyzer to the dedicated structure dataset.
 
     This is informational only. Qualification remains governed by the existing
     execution-sweep and confirmation-shift contract.
     """
 
+    timeframe = data.structure_timeframe
+    if not data.structure_analysis_required:
+        reason = "Structure analysis was not requested."
+        return StructureLayerAnalysis(
+            timeframe=timeframe,
+            status="NOT_REQUESTED",
+            reason=reason,
+            sweep=LiquiditySweepSignal(reason=reason),
+            structure_shift=StructureShiftSignal(reason=reason),
+        )
+
+    if structure is None:
+        reason = f"{timeframe} structure candles are missing."
+        return StructureLayerAnalysis(
+            timeframe=timeframe,
+            status="MISSING_DATA",
+            reason=reason,
+            sweep=LiquiditySweepSignal(reason=reason),
+            structure_shift=StructureShiftSignal(reason=reason),
+        )
+
+    candles = structure.candles
     sweep = detect_liquidity_sweep(
-        structure.candles,
-        atr_period=DEFAULT_ATR_PERIOD,
+        candles,
+        atr_period=atr_period,
         lookback=lookback,
     )
-    return detect_structure_shift(
-        structure.candles,
+    structure_shift = detect_structure_shift(
+        candles,
         sweep=sweep if sweep.is_present else None,
         lookback=lookback,
+    )
+    minimum_candles = max(
+        atr_period + lookback + 2,
+        lookback * 2 + 2,
+    )
+    if len(candles) < minimum_candles:
+        return StructureLayerAnalysis(
+            timeframe=timeframe,
+            candle_count=len(candles),
+            status="INSUFFICIENT_DATA",
+            sweep=sweep,
+            structure_shift=structure_shift,
+            reason=sweep.reason,
+        )
+
+    direction: Direction = (
+        structure_shift.direction
+        if structure_shift.is_present
+        else sweep.direction
+        if sweep.is_present
+        else NA
+    )
+    status: StructureLayerStatus = (
+        "ANALYZED_SHIFT_PRESENT" if structure_shift.is_present else "ANALYZED_NO_SHIFT"
+    )
+    reason = structure_shift.reason
+    return StructureLayerAnalysis(
+        timeframe=timeframe,
+        candle_count=len(candles),
+        status=status,
+        sweep=sweep,
+        structure_shift=structure_shift,
+        direction=direction,
+        reason=reason,
     )
 
 
@@ -2401,6 +2513,7 @@ def _timeframe_context_fields(
     confirmation: _SelectedCandles | None,
     *,
     structure_shift: StructureShiftSignal | None = None,
+    structure_layer_analysis: StructureLayerAnalysis,
 ) -> dict[str, Any]:
     candles_2d = normalized.get("2d", ())
     candles_12h = normalized.get("12h", ())
@@ -2418,6 +2531,8 @@ def _timeframe_context_fields(
     return {
         "htf_timeframe": data.htf_timeframe,
         "bias_timeframe": data.bias_timeframe,
+        "structure_timeframe": data.structure_timeframe,
+        "structure_layer_analysis": structure_layer_analysis,
         "execution_timeframe": execution.timeframe if execution is not None else NA,
         "confirmation_timeframe": confirmation_timeframe,
         "htf_2d_context_source": source,

@@ -101,6 +101,7 @@ RAW_RESULT_COMPACT_FIELDS = frozenset({
     "opportunity_score", "technical_score", "readiness_score", "score", "quality_grade",
     "final_quality_grade", "candidate_quality_grade", "grade", "direction", "side", "bias",
     "mode", "strategy_mode", "lifecycle_state",
+    "strategy_diagnostics",
 })
 NA_VALUES = frozenset({"", "n/a", "na", "none", "null", "not_recorded"})
 TERMINAL_STATES = frozenset(
@@ -460,7 +461,7 @@ def build_post_restart_funnel_report(
     )
     duplicate_cooldown = _duplicate_and_cooldown(telegram_rows, tables)
     telegram = _telegram_funnel(telegram_rows, tables, telegram_scope)
-    timeframe = _timeframe_verification(scan_rows, malformed, repository_root)
+    timeframe = _timeframe_verification(scan_rows, malformed, repository_root, symbol_rows=symbol_rows)
     verdict = _verdict(
         window=window,
         scan_health=scan_health,
@@ -891,6 +892,13 @@ def _compact_query_row(row: dict[str, Any], source: str, limits: QueryLimits) ->
                         "readiness_score", "quality_grade", "final_quality_grade", "candidate_quality_grade",
                     )
                     if key in value
+                }
+            elif field == "strategy_diagnostics" and isinstance(value, Mapping):
+                compact[field] = {
+                    mode: {"structure_layer_analysis": diagnostics["structure_layer_analysis"]}
+                    for mode in ("challenge", "swing", "scalp")
+                    if isinstance((diagnostics := value.get(mode)), Mapping)
+                    and "structure_layer_analysis" in diagnostics
                 }
             elif field in raw:
                 compact[field] = value
@@ -1553,6 +1561,7 @@ def _timeframe_verification(
     scan_rows: Sequence[Mapping[str, Any]],
     malformed: Counter[str],
     repository_root: Path | str | None,
+    *, symbol_rows: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     observed: dict[str, list[str]] = defaultdict(list)
     structure_observations = 0
@@ -1569,6 +1578,31 @@ def _timeframe_verification(
                     unrelated_2h_fields.add(normalized_key)
         if any(_text(payload.get(field)) for field in structure_fields):
             structure_observations += 1
+    execution_statuses: Counter[str] = Counter()
+    execution_records = 0
+    verified_execution_records = 0
+    verified_statuses = frozenset({"ANALYZED_NO_SHIFT", "ANALYZED_SHIFT_PRESENT"})
+    for row in symbol_rows:
+        raw = _json_mapping(row.get("raw_result_json"), "symbol_results.raw_result_json", malformed)
+        diagnostics_by_mode = raw.get("strategy_diagnostics")
+        if not isinstance(diagnostics_by_mode, Mapping):
+            continue
+        for mode in ("challenge", "swing", "scalp"):
+            diagnostics = diagnostics_by_mode.get(mode)
+            if not isinstance(diagnostics, Mapping):
+                continue
+            analysis = diagnostics.get("structure_layer_analysis")
+            if not isinstance(analysis, Mapping):
+                continue
+            timeframe = (_text(analysis.get("timeframe")) or "").lower()
+            if timeframe != "2h":
+                continue
+            execution_records += 1
+            status = (_text(analysis.get("status")) or "NOT_RECORDED").upper()
+            execution_statuses[status] += 1
+            if status in verified_statuses:
+                verified_execution_records += 1
+
     repository_evidence = _repository_timeframe_evidence(repository_root)
     definitions = {
         "2D_context": (("context", "htf", "htf_timeframe"), "2d"),
@@ -1589,9 +1623,30 @@ def _timeframe_verification(
             "exact_evidence": f"scan_runs.timeframes_json.{field}" if values else "NOT_RECORDED",
         }
     structure_values = sorted({value for field in structure_fields for value in observed.get(field, [])})
-    if any(value == "2h" for value in structure_values):
+    configured_2h = any(value == "2h" for value in structure_values)
+    configuration_status = (
+        "CONFIGURED"
+        if configured_2h
+        else "CONFIGURED_OTHER_TIMEFRAME"
+        if structure_values
+        else "NOT_RECORDED"
+    )
+    configuration_evidence = [
+        f"scan_runs.timeframes_json.{field}"
+        for field in structure_fields
+        if "2h" in observed.get(field, [])
+    ]
+    if verified_execution_records:
         structure_status = "ACTIVE_AND_VERIFIED"
-        structure_evidence = [f"scan_runs.timeframes_json.{field}" for field in structure_fields if "2h" in observed.get(field, [])]
+        structure_evidence = [
+            "symbol_results.raw_result_json.strategy_diagnostics.<mode>.structure_layer_analysis records an analyzed 2h structure timeframe."
+        ]
+    elif configured_2h:
+        structure_status = "NOT_VERIFIABLE"
+        structure_evidence = [
+            "2h structure configuration is persisted, but no retained structure-analysis execution evidence was observed.",
+            *configuration_evidence,
+        ]
     elif scan_rows and structure_observations == len(scan_rows):
         structure_status = "ABSENT"
         structure_evidence = [
@@ -1610,12 +1665,23 @@ def _timeframe_verification(
         "status": structure_status,
         "structure_specific_fields_checked": [f"scan_runs.timeframes_json.{field}" for field in structure_fields],
         "structure_specific_persisted_values": structure_values or ["NOT_RECORDED"],
+        "configuration_evidence": {
+            "status": configuration_status,
+            "persisted_values": structure_values or ["NOT_RECORDED"],
+            "exact_evidence": configuration_evidence or ["NOT_RECORDED"],
+        },
+        "execution_evidence": {
+            "observed_structure_diagnostic_records": execution_records,
+            "verified_analysis_records": verified_execution_records,
+            "observed_statuses": dict(sorted(execution_statuses.items())),
+            "persisted_field": "symbol_results.raw_result_json.strategy_diagnostics.<mode>.structure_layer_analysis",
+        },
         "exact_evidence": structure_evidence,
     }
     return {
         "timeframes": result,
         "repository_configuration_evidence": repository_evidence,
-        "interpretation_limit": "2H is active only with structure-specific persisted evidence or verified structure wiring; arbitrary 2h values and project intent are not activation evidence.",
+        "interpretation_limit": "2H is verified only by retained structure-specific analysis execution evidence; configuration, arbitrary 2h values, and repository intent are not execution evidence.",
     }
 
 
