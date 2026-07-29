@@ -2,7 +2,7 @@
 
 `scripts/audit_post_restart_funnel.py` is an observational, read-only report for determining whether low scanner activity is associated with recorded market scarcity, a concentrated quality gate, lifecycle progression, Telegram delivery, or missing evidence. It does not change strategy qualification, scoring, quality gates, timeframes, lifecycle transitions, Telegram behaviour, symbol selection, market-data acquisition, or any database writes.
 
-The audit opens the supplied SQLite file only through SQLite URI `mode=ro` and verifies `PRAGMA query_only=1`. It never migrates, copies, checkpoints, vacuums, repairs, compacts, backs up, or changes the database. It uses timestamp-filtered scan-run queries, bounded run-ID and lifecycle-ID child queries, and symbol-plus-timestamp lifecycle-event queries. If a metric would require an unsafe unbounded query, it is reported as `NOT_RECORDED` or `NOT_VERIFIABLE` instead.
+The audit opens the supplied SQLite file only through SQLite URI `mode=ro`, verifies `PRAGMA query_only=1`, and, for the live-mutable audit path, explicitly does not request `immutable=1`. It starts a bounded read transaction to pin a coherent snapshot; if that cannot be established safely, it fails rather than falling back to a writable connection. It never migrates, copies, checkpoints, vacuums, repairs, compacts, backs up, or changes the database. It verifies an existing indexed query plan before every high-volume source, selects only an explicit compact column allowlist, fetches in batches, and caps/normalizes required JSON evidence. If a metric would require an unsafe table scan or incomplete capped evidence, it is reported as `NOT_RECORDED`, `NOT_VERIFIABLE`, or `DATA_INSUFFICIENT` instead.
 
 Run it only against the Runtime database from the Runtime PC after the requested checkpoint. Do not copy the Runtime database to Dev, and do not use the full Runtime M: drive for output.
 
@@ -10,12 +10,25 @@ Run it only against the Runtime database from the Runtime PC after the requested
 .\.venv\Scripts\python.exe scripts\audit_post_restart_funnel.py `
   --database-path scan_runs\main_live_runtime.sqlite `
   --window-start-utc 2026-07-29T08:40:54Z `
+  --window-end-utc 2026-08-01T08:40:54Z `
   --expected-watch-interval-sec 300 `
   --output-dir S:\CCI_SCANS\phase1_funnel_audits `
   --report-label snapshot-b-72h
 ```
 
-Leave `--window-end-utc` out only when the exact invocation time should be the endpoint; the resolved UTC end is recorded in both reports. The command produces one deterministic-order text report and one JSON report. It refuses to overwrite either output file.
+Snapshot C uses the same arguments except for its exact seven-day endpoint and label:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_post_restart_funnel.py `
+  --database-path scan_runs\main_live_runtime.sqlite `
+  --window-start-utc 2026-07-29T08:40:54Z `
+  --window-end-utc 2026-08-05T08:40:54Z `
+  --expected-watch-interval-sec 300 `
+  --output-dir S:\CCI_SCANS\phase1_funnel_audits `
+  --report-label snapshot-c-7d
+```
+
+The command produces one deterministic-order text report and one JSON report. It refuses to overwrite either output file.
 
 ## Identity and checkpoints
 

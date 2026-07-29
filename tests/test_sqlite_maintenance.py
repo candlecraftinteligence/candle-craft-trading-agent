@@ -472,6 +472,7 @@ def test_read_only_open_uses_uri_mode_and_proves_query_only_readback(
     assert opened is connection
     assert str(connect_call["database"]).startswith("file:")
     assert "mode=ro" in str(connect_call["database"])
+    assert "immutable=1" in str(connect_call["database"])
     assert connect_call["kwargs"] == {
         "uri": True,
         "timeout": WRITABLE_BUSY_TIMEOUT_MS / 1_000,
@@ -484,6 +485,53 @@ def test_read_only_open_uses_uri_mode_and_proves_query_only_readback(
         "query_only_verified": True,
     }
     opened.close()
+
+def test_live_mutable_read_only_option_never_requests_immutable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "live-mutable.sqlite"
+    with sqlite3.connect(path):
+        pass
+    connection = _ReadOnlySafetyConnection((1,))
+    connect_call: dict[str, object] = {}
+
+    def fake_connect(*args: object, **kwargs: object) -> _ReadOnlySafetyConnection:
+        connect_call["database"] = args[0]
+        connect_call["kwargs"] = kwargs
+        return connection
+
+    monkeypatch.setattr(database_module.sqlite3, "connect", fake_connect)
+    opened = open_read_only_database(
+        path,
+        require_supported_schema=False,
+        assume_immutable_when_sidecars_absent=False,
+    )
+
+    assert "mode=ro" in str(connect_call["database"])
+    assert "immutable=1" not in str(connect_call["database"])
+    assert database_module.read_only_connection_safety_proof(opened)["immutable_requested"] is False
+    assert database_module.read_only_connection_safety_proof(opened)["live_mutable_source"] is True
+    opened.close()
+
+
+def test_live_mutable_snapshot_allows_wal_writer_and_remains_coherent(tmp_path: Path) -> None:
+    path = _database(tmp_path, "live-wal.sqlite")
+    with connect_database(path) as writer:
+        _insert_scan_run(writer, "before")
+        writer.commit()
+        with open_read_only_database(
+            path,
+            assume_immutable_when_sidecars_absent=False,
+            require_consistent_snapshot=True,
+        ) as reader:
+            before = reader.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0]
+            _insert_scan_run(writer, "after")
+            writer.commit()
+            assert reader.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0] == before
+            proof = database_module.read_only_connection_safety_proof(reader)
+            assert proof["consistent_read_snapshot"] == "transaction_read_snapshot"
+            assert proof["immutable_requested"] is False
+    with open_read_only_database(path) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0] == 2
+
 
 @pytest.mark.parametrize("query_only_row", (None, (0,), ("1",), (1, 0)))
 def test_read_only_open_fails_closed_without_exact_query_only_readback(

@@ -33,6 +33,50 @@ DEFAULT_MINIMUM_MEANINGFUL_WINDOW_SECONDS = 72 * 60 * 60
 DEFAULT_MAX_ROWS_PER_SOURCE = 250_000
 DEFAULT_MAX_DETAIL_RECORDS = 1_000
 DEFAULT_DOMINANT_BLOCKER_SHARE = Decimal("0.5")
+QUERY_BATCH_SIZE = 1_000
+MAX_JSON_FIELD_BYTES = 16 * 1024
+
+# The audit never SELECTs every column. These compact evidence allowlists omit
+# raw market, derivatives, volume-profile, message, and metadata payloads.
+SOURCE_COLUMN_ALLOWLIST: dict[str, frozenset[str]] = {
+    "scan_runs": frozenset({
+        "run_id", "timestamp", "symbols_requested", "symbols_completed", "symbols_json",
+        "timeframes_json", "runtime_stats_json",
+    }),
+    "symbol_results": frozenset({
+        "id", "run_id", "symbol", "failed_gate", "final_failed_gate", "readiness_score",
+        "opportunity_score", "technical_score", "score", "setup_quality_score", "quality_grade",
+        "final_quality_grade", "candidate_quality_grade", "grade", "direction", "side", "bias",
+        "mode", "strategy_mode", "raw_result_json",
+    }),
+    "setup_candidates": frozenset({
+        "id", "run_id", "symbol", "mode", "direction", "failed_gate", "final_failed_gate",
+        "target_failure", "readiness_score", "opportunity_score", "technical_score", "score",
+        "setup_quality_score", "quality_grade", "final_quality_grade", "candidate_quality_grade", "grade",
+    }),
+    "setup_lifecycle_events": frozenset({
+        "event_id", "lifecycle_id", "timestamp", "symbol", "from_state", "to_state", "scan_run_id",
+    }),
+    "setup_lifecycle_records": frozenset({
+        "lifecycle_id", "symbol", "mode", "direction", "current_state", "first_seen_at", "last_seen_at",
+        "last_transition_at",
+    }),
+    "setup_lifecycle_outcome_progress": frozenset({
+        "id", "lifecycle_id", "tp1_at", "tp2_at", "tp3_at", "stop_at", "invalidated_at", "outcome_at",
+        "terminal_outcome", "integrity_status", "plan_identity",
+    }),
+    "telegram_alert_attempts": frozenset({
+        "id", "signal_id", "attempted_at", "sent_at", "telegram_status", "scan_run_id", "dedupe_status",
+        "dedupe_reason", "message_hash", "error_message", "last_error_message",
+    }),
+}
+CAPPED_JSON_COLUMNS = frozenset({"timeframes_json", "runtime_stats_json", "symbols_json", "raw_result_json"})
+RAW_RESULT_COMPACT_FIELDS = frozenset({
+    "failed_gate", "final_failed_gate", "gates_failed", "failed_gates", "min_score_for_idea",
+    "opportunity_score", "technical_score", "readiness_score", "score", "quality_grade",
+    "final_quality_grade", "candidate_quality_grade", "grade", "direction", "side", "bias",
+    "mode", "strategy_mode", "lifecycle_state",
+})
 NA_VALUES = frozenset({"", "n/a", "na", "none", "null", "not_recorded"})
 TERMINAL_STATES = frozenset(
     {
@@ -89,6 +133,9 @@ class AuditWindow:
 class QueryLimits:
     max_rows_per_source: int
     truncated_sources: set[str]
+    payload_truncated_sources: set[str]
+    malformed: Counter[str]
+    observed_rows_by_source: dict[str, int]
 
 
 def parse_utc_timestamp(value: str | datetime, *, argument_name: str) -> datetime:
@@ -165,9 +212,20 @@ def build_post_restart_funnel_report(
     except OSError as exc:
         raise FunnelAuditError(f"Unable to inspect database file metadata: {database}") from exc
 
-    limits = QueryLimits(max_rows_per_source=max_rows_per_source, truncated_sources=set())
+    limits = QueryLimits(
+        max_rows_per_source=max_rows_per_source,
+        truncated_sources=set(),
+        payload_truncated_sources=set(),
+        malformed=Counter(),
+        observed_rows_by_source={},
+    )
     try:
-        with open_read_only_database(database, require_supported_schema=False) as connection:
+        with open_read_only_database(
+            database,
+            require_supported_schema=False,
+            assume_immutable_when_sidecars_absent=False,
+            require_consistent_snapshot=True,
+        ) as connection:
             safety = read_only_connection_safety_proof(connection)
             schema_version = identify_schema_version(connection)
             tables = _table_columns(connection)
@@ -175,21 +233,43 @@ def build_post_restart_funnel_report(
                 raise IncompatibleFunnelSchemaError(
                     "Incompatible schema: scan_runs with run_id and timestamp is required for a bounded scanner-funnel audit."
                 )
-            scan_rows = _load_scan_runs(connection, tables, window, limits)
+            query_safety = _verify_query_safety(connection, tables)
+            scan_rows = (
+                _load_scan_runs(connection, tables, window, limits)
+                if _query_is_verified(query_safety, "scan_runs_timestamp")
+                else []
+            )
             scan_rows = _strict_window_rows(scan_rows, "timestamp", window, source="scan_runs")
             run_ids = [str(row["run_id"]) for row in scan_rows if _text(row.get("run_id"))]
-            symbol_rows = _load_rows_for_run_ids(connection, tables, "symbol_results", run_ids, limits)
-            candidate_rows = _load_rows_for_run_ids(connection, tables, "setup_candidates", run_ids, limits)
+            symbol_rows = (
+                _load_rows_for_run_ids(connection, tables, "symbol_results", run_ids, limits)
+                if _query_is_verified(query_safety, "symbol_results_run_id")
+                else []
+            )
+            candidate_rows = (
+                _load_rows_for_run_ids(connection, tables, "setup_candidates", run_ids, limits)
+                if _query_is_verified(query_safety, "setup_candidates_run_id")
+                else []
+            )
             symbols = _observed_symbols(scan_rows, symbol_rows)
-            lifecycle_events = _load_lifecycle_events(connection, tables, symbols, window, limits)
+            lifecycle_events = (
+                _load_lifecycle_events(connection, tables, symbols, window, limits)
+                if _query_is_verified(query_safety, "lifecycle_events_symbol_timestamp")
+                else []
+            )
             lifecycle_events = _strict_window_rows(lifecycle_events, "timestamp", window, source="setup_lifecycle_events")
-            lifecycle_records = _load_lifecycle_records(
-                connection,
-                tables,
-                symbols,
-                [str(row["lifecycle_id"]) for row in lifecycle_events if _text(row.get("lifecycle_id"))],
-                window,
-                limits,
+            lifecycle_records = (
+                _load_lifecycle_records(
+                    connection,
+                    tables,
+                    symbols,
+                    [str(row["lifecycle_id"]) for row in lifecycle_events if _text(row.get("lifecycle_id"))],
+                    window,
+                    limits,
+                )
+                if _query_is_verified(query_safety, "lifecycle_records_lifecycle_id")
+                and _query_is_verified(query_safety, "lifecycle_records_symbol")
+                else []
             )
             lifecycle_ids = sorted(
                 {
@@ -198,24 +278,32 @@ def build_post_restart_funnel_report(
                     if _text(row.get("lifecycle_id"))
                 }
             )
-            outcome_rows = _load_rows_for_lifecycle_ids(
-                connection,
-                tables,
-                "setup_lifecycle_outcome_progress",
-                lifecycle_ids,
-                limits,
+            outcome_rows = (
+                _load_rows_for_lifecycle_ids(
+                    connection,
+                    tables,
+                    "setup_lifecycle_outcome_progress",
+                    lifecycle_ids,
+                    limits,
+                )
+                if _query_is_verified(query_safety, "lifecycle_outcome_lifecycle_id")
+                else []
             )
-            telegram_rows, telegram_scope = _load_telegram_rows(
-                connection,
-                tables,
-                run_ids,
-                window,
-                limits,
-            )
+            if _query_is_verified(query_safety, "telegram_scan_run_id"):
+                telegram_rows, telegram_scope = _load_telegram_rows(
+                    connection,
+                    tables,
+                    run_ids,
+                    window,
+                    limits,
+                )
+            else:
+                telegram_rows = []
+                telegram_scope = _query_skip_reason(query_safety, "telegram_scan_run_id")
     except StorageError as exc:
         raise FunnelAuditError(f"Read-only database audit failed safely: {exc}") from exc
 
-    malformed: Counter[str] = Counter()
+    malformed = limits.malformed
     coverage = _data_coverage(
         tables=tables,
         scan_rows=scan_rows,
@@ -228,6 +316,7 @@ def build_post_restart_funnel_report(
         limits=limits,
         malformed=malformed,
         window=window,
+        query_safety=query_safety,
     )
     scan_health = _scan_health(scan_rows, symbol_rows, candidate_rows, window, expected_watch_interval_sec, malformed)
     scan_time_by_id = {
@@ -368,6 +457,78 @@ def _table_columns(connection: sqlite3.Connection) -> dict[str, set[str]]:
         columns = connection.execute(f"PRAGMA table_info({_identifier(table)})").fetchall()
         tables[table] = {str(column[1]) for column in columns}
     return tables
+
+
+def _verify_query_safety(
+    connection: sqlite3.Connection,
+    tables: Mapping[str, set[str]],
+) -> dict[str, dict[str, Any]]:
+    """Verify bounded access paths before any high-volume runtime query."""
+
+    requirements = (
+        ("scan_runs_timestamp", "scan_runs", {"run_id", "timestamp"},
+         "SELECT run_id FROM scan_runs WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp ASC LIMIT 1", ("", "~")),
+        ("symbol_results_run_id", "symbol_results", {"run_id"},
+         "SELECT run_id FROM symbol_results WHERE run_id = ? LIMIT 1", ("",)),
+        ("setup_candidates_run_id", "setup_candidates", {"run_id"},
+         "SELECT run_id FROM setup_candidates WHERE run_id = ? LIMIT 1", ("",)),
+        ("lifecycle_events_symbol_timestamp", "setup_lifecycle_events", {"symbol", "timestamp"},
+         "SELECT lifecycle_id FROM setup_lifecycle_events WHERE symbol = ? AND timestamp >= ? AND timestamp < ? LIMIT 1", ("", "", "~")),
+        ("lifecycle_records_lifecycle_id", "setup_lifecycle_records", {"lifecycle_id"},
+         "SELECT lifecycle_id FROM setup_lifecycle_records WHERE lifecycle_id = ? LIMIT 1", ("",)),
+        ("lifecycle_records_symbol", "setup_lifecycle_records", {"symbol", "first_seen_at", "last_seen_at"},
+         "SELECT lifecycle_id FROM setup_lifecycle_records WHERE symbol = ? AND last_seen_at >= ? AND first_seen_at < ? LIMIT 1", ("", "", "~")),
+        ("lifecycle_outcome_lifecycle_id", "setup_lifecycle_outcome_progress", {"lifecycle_id"},
+         "SELECT lifecycle_id FROM setup_lifecycle_outcome_progress WHERE lifecycle_id = ? LIMIT 1", ("",)),
+        ("telegram_scan_run_id", "telegram_alert_attempts", {"scan_run_id"},
+         "SELECT scan_run_id FROM telegram_alert_attempts WHERE scan_run_id = ? LIMIT 1", ("",)),
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for key, table, required, sql, parameters in requirements:
+        if table not in tables:
+            result[key] = {"status": "NOT_RECORDED", "table": table, "reason": f"{table} table is absent."}
+            continue
+        missing = sorted(required - tables[table])
+        if missing:
+            result[key] = {
+                "status": "NOT_VERIFIABLE",
+                "table": table,
+                "reason": f"Required bounded-query columns are absent: {', '.join(missing)}.",
+            }
+            continue
+        try:
+            plan_rows = connection.execute(f"EXPLAIN QUERY PLAN {sql}", parameters).fetchall()
+        except sqlite3.Error as exc:
+            result[key] = {
+                "status": "NOT_VERIFIABLE",
+                "table": table,
+                "reason": f"Unable to verify a bounded query plan safely: {type(exc).__name__}.",
+            }
+            continue
+        details = [str(row[3]) for row in plan_rows]
+        safe_search = any("SEARCH" in detail.upper() and "USING" in detail.upper() for detail in details)
+        unsafe_scan = any(f"SCAN {table.upper()}" in detail.upper() for detail in details)
+        if safe_search and not unsafe_scan:
+            result[key] = {"status": "VERIFIED", "table": table, "plan": details}
+        else:
+            result[key] = {
+                "status": "NOT_VERIFIABLE",
+                "table": table,
+                "plan": details,
+                "reason": "Refused high-volume metric: SQLite did not verify an indexed bounded access path.",
+            }
+    return {key: result[key] for key in sorted(result)}
+
+
+def _query_is_verified(query_safety: Mapping[str, Mapping[str, Any]], key: str) -> bool:
+    return query_safety.get(key, {}).get("status") == "VERIFIED"
+
+
+def _query_skip_reason(query_safety: Mapping[str, Mapping[str, Any]], key: str) -> str:
+    evidence = query_safety.get(key, {})
+    status = str(evidence.get("status", "NOT_VERIFIABLE"))
+    reason = str(evidence.get("reason", "An indexed bounded access path was not verified."))
+    return f"{status}: {reason}"
 
 
 def _load_scan_runs(
@@ -557,13 +718,53 @@ def _query_rows(
     *,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    remaining = limits.max_rows_per_source if limit is None else limit
-    cursor = connection.execute(sql, (*parameters, remaining + 1))
-    rows = [dict(row) for row in cursor.fetchmany(remaining + 1)]
-    if len(rows) > remaining:
+    """Fetch compact evidence in bounded batches without retaining raw payloads."""
+
+    requested = limits.max_rows_per_source if limit is None else limit
+    already_observed = limits.observed_rows_by_source.get(source, 0)
+    remaining = min(requested, limits.max_rows_per_source - already_observed)
+    if remaining <= 0:
         limits.truncated_sources.add(source)
-        return rows[:remaining]
+        return []
+    cursor = connection.execute(sql, (*parameters, remaining + 1))
+    rows: list[dict[str, Any]] = []
+    while len(rows) <= remaining:
+        batch = cursor.fetchmany(min(QUERY_BATCH_SIZE, remaining + 1 - len(rows)))
+        if not batch:
+            break
+        for row in batch:
+            if len(rows) >= remaining:
+                limits.truncated_sources.add(source)
+                limits.observed_rows_by_source[source] = already_observed + len(rows)
+                return rows
+            rows.append(_compact_query_row(dict(row), source, limits))
+    limits.observed_rows_by_source[source] = already_observed + len(rows)
     return rows
+
+
+def _compact_query_row(row: dict[str, Any], source: str, limits: QueryLimits) -> dict[str, Any]:
+    for field in CAPPED_JSON_COLUMNS:
+        if row.pop(f"{field}_truncated_for_audit", 0):
+            limits.payload_truncated_sources.add(source)
+            limits.malformed[f"{source}.{field}_truncated_for_audit"] += 1
+    if source == "symbol_results" and "raw_result_json" in row:
+        raw = _json_mapping(row.get("raw_result_json"), "symbol_results.raw_result_json", limits.malformed)
+        compact: dict[str, Any] = {}
+        for field in RAW_RESULT_COMPACT_FIELDS:
+            value = raw.get(field)
+            if field == "lifecycle_state" and isinstance(value, Mapping):
+                compact[field] = {
+                    key: value[key]
+                    for key in (
+                        "failed_gate", "final_failed_gate", "opportunity_score", "technical_score",
+                        "readiness_score", "quality_grade", "final_quality_grade", "candidate_quality_grade",
+                    )
+                    if key in value
+                }
+            elif field in raw:
+                compact[field] = value
+        row["raw_result_json"] = json.dumps(compact, sort_keys=True, separators=(",", ":"))
+    return row
 
 
 def _data_coverage(
@@ -579,6 +780,7 @@ def _data_coverage(
     limits: QueryLimits,
     malformed: Counter[str],
     window: AuditWindow,
+    query_safety: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
     sources = {
         "scan_runs": scan_rows,
@@ -592,7 +794,7 @@ def _data_coverage(
     relevant_tables = tuple(sources)
     missing_tables = sorted(table for table in relevant_tables if table not in tables)
     missing_fields = {
-        "scan_runs": sorted({"run_id", "timestamp", "timeframes_json"} - tables.get("scan_runs", set())),
+        "scan_runs": sorted({"run_id", "timestamp", "symbols_requested", "symbols_completed", "timeframes_json"} - tables.get("scan_runs", set())),
         "symbol_results": sorted({"run_id", "symbol", "failed_gate", "raw_result_json"} - tables.get("symbol_results", set())),
         "setup_candidates": sorted({"run_id", "symbol", "mode", "direction", "failed_gate"} - tables.get("setup_candidates", set())),
         "setup_lifecycle_events": sorted({"lifecycle_id", "timestamp", "symbol", "from_state", "to_state"} - tables.get("setup_lifecycle_events", set())),
@@ -611,11 +813,6 @@ def _data_coverage(
     for row in scan_rows:
         _json_mapping(row.get("runtime_stats_json"), "scan_runs.runtime_stats_json", malformed)
         _json_mapping(row.get("timeframes_json"), "scan_runs.timeframes_json", malformed)
-        _json_mapping(row.get("raw_payload_json"), "scan_runs.raw_payload_json", malformed)
-    for row in symbol_rows:
-        _json_mapping(row.get("raw_result_json"), "symbol_results.raw_result_json", malformed)
-    for row in candidate_rows:
-        _json_mapping(row.get("raw_candidate_json"), "setup_candidates.raw_candidate_json", malformed)
     null_rates = {
         source: _null_rates(rows, _critical_fields_for_source(source))
         for source, rows in sorted(sources.items())
@@ -640,15 +837,17 @@ def _data_coverage(
         "lifecycle_event_identity_definition": "setup_lifecycle_events.event_id when present, otherwise lifecycle_id + timestamp + to_state",
         "observation_method": "All reported database metrics are direct observations except explicitly labelled NOT_VERIFIABLE or inferred_from_current_record.",
         "query_performance_safeguards": {
-            "timestamp_filtered_scan_runs": True,
-            "run_id_bounded_child_queries": True,
-            "symbol_and_timestamp_bounded_lifecycle_event_queries": True,
-            "lifecycle_id_bounded_outcome_queries": True,
+            "query_plan_index_verification": {key: query_safety[key] for key in sorted(query_safety)},
+            "explicit_selected_column_allowlists": {
+                source: sorted(SOURCE_COLUMN_ALLOWLIST[source]) for source in sorted(SOURCE_COLUMN_ALLOWLIST)
+            },
+            "high_volume_fetch_batch_size": QUERY_BATCH_SIZE,
             "max_rows_per_source": limits.max_rows_per_source,
             "truncated_sources": sorted(limits.truncated_sources),
+            "payload_truncated_sources": sorted(limits.payload_truncated_sources),
             "warning": (
-                "A source listed in truncated_sources is incomplete; conclusions depending on it are DATA_INSUFFICIENT. "
-                "The audit does not add indexes or perform an unbounded table scan."
+                "Sources listed as truncated or payload-truncated are incomplete for dependent conclusions. "
+                "A NOT_VERIFIABLE plan is skipped rather than triggering an unbounded scan; the audit never adds indexes."
             ),
         },
         "window_boundary_policy": {
@@ -669,7 +868,7 @@ def _scan_health(
     malformed: Counter[str],
 ) -> dict[str, Any]:
     timestamps = [timestamp for row in scan_rows if (timestamp := _row_timestamp(row, "timestamp")) is not None]
-    expected_cycles = (window.seconds // interval_sec) + 1
+    expected_cycles = (window.seconds + interval_sec - 1) // interval_sec
     complete = 0
     partial = 0
     zero_completed = 0
@@ -1183,12 +1382,20 @@ def _timeframe_verification(
     repository_root: Path | str | None,
 ) -> dict[str, Any]:
     observed: dict[str, list[str]] = defaultdict(list)
+    structure_observations = 0
+    structure_fields = ("structure_timeframe", "structure_context_timeframe", "structure_analysis_timeframe")
+    unrelated_2h_fields: set[str] = set()
     for row in scan_rows:
         payload = _json_mapping(row.get("timeframes_json"), "scan_runs.timeframes_json", malformed)
         for key, value in payload.items():
-            text = _text(value)
-            if text:
-                observed[_status_key(key)].append(text.lower())
+            normalized_key = _status_key(key)
+            value_text = _text(value)
+            if value_text:
+                observed[normalized_key].append(value_text.lower())
+                if value_text.lower() == "2h" and normalized_key not in structure_fields:
+                    unrelated_2h_fields.add(normalized_key)
+        if any(_text(payload.get(field)) for field in structure_fields):
+            structure_observations += 1
     repository_evidence = _repository_timeframe_evidence(repository_root)
     definitions = {
         "2D_context": ("htf_timeframe", "2d"),
@@ -1199,36 +1406,41 @@ def _timeframe_verification(
     result: dict[str, Any] = {}
     for label, (field, expected) in definitions.items():
         values = sorted(set(observed.get(field, [])))
-        status = "ACTIVE_AND_VERIFIED" if expected in values else "NOT_VERIFIABLE"
         result[label] = {
-            "status": status,
-            "persisted_field": field,
+            "status": "ACTIVE_AND_VERIFIED" if expected in values else "NOT_VERIFIABLE",
+            "persisted_field": f"scan_runs.timeframes_json.{field}",
             "persisted_values": values or ["NOT_RECORDED"],
             "expected_value": expected,
-            "exact_evidence": "scan_runs.timeframes_json" if values else "NOT_RECORDED",
+            "exact_evidence": f"scan_runs.timeframes_json.{field}" if values else "NOT_RECORDED",
         }
-    all_values = {value for values in observed.values() for value in values}
-    if not scan_rows:
-        structure_status = "NOT_VERIFIABLE"
-        structure_evidence = "NOT_RECORDED: no scan_runs in the requested window."
-    elif "2h" in all_values:
+    structure_values = sorted({value for field in structure_fields for value in observed.get(field, [])})
+    if any(value == "2h" for value in structure_values):
         structure_status = "ACTIVE_AND_VERIFIED"
-        structure_evidence = "A persisted timeframes_json value is 2h."
-    elif repository_evidence["explicit_2h_literal"] is False:
+        structure_evidence = [f"scan_runs.timeframes_json.{field}" for field in structure_fields if "2h" in observed.get(field, [])]
+    elif scan_rows and structure_observations == len(scan_rows):
         structure_status = "ABSENT"
-        structure_evidence = "No persisted timeframe value is 2h and scripts/run_scan.py has no explicit quoted 2h timeframe literal."
+        structure_evidence = [
+            f"scan_runs.timeframes_json.{field} persisted for every observed scan without value 2h"
+            for field in structure_fields
+            if observed.get(field)
+        ]
     else:
         structure_status = "NOT_VERIFIABLE"
-        structure_evidence = "Repository source contains a 2h literal, but no persisted structure-specific 2h field proves it was active."
+        structure_evidence = [
+            "No structure-specific persisted timeframe field covers every observed scan.",
+            *(f"Unrelated scan_runs.timeframes_json.{field}=2h is not structure evidence." for field in sorted(unrelated_2h_fields)),
+            f"Repository review: {repository_evidence['source']} is related configuration, not verified structure wiring.",
+        ]
     result["2H_structure"] = {
         "status": structure_status,
-        "persisted_values": sorted(all_values) or ["NOT_RECORDED"],
+        "structure_specific_fields_checked": [f"scan_runs.timeframes_json.{field}" for field in structure_fields],
+        "structure_specific_persisted_values": structure_values or ["NOT_RECORDED"],
         "exact_evidence": structure_evidence,
     }
     return {
         "timeframes": result,
         "repository_configuration_evidence": repository_evidence,
-        "interpretation_limit": "Repository configuration and persisted runtime values are the only evidence used. Project intent is not treated as activation evidence.",
+        "interpretation_limit": "2H is active only with structure-specific persisted evidence or verified structure wiring; arbitrary 2h values and project intent are not activation evidence.",
     }
 
 
@@ -1245,94 +1457,131 @@ def _verdict(
     dominant_share: Decimal,
     stall_threshold_sec: int | None,
 ) -> dict[str, Any]:
+    del telegram
     labels: list[dict[str, Any]] = []
     duration_ready = window.seconds >= minimum_meaningful_window_sec
-    source_truncated = bool(coverage["query_performance_safeguards"]["truncated_sources"])
-    if not duration_ready or source_truncated or scan_health["observed_scan_cycles"] == 0:
+    safeguards = coverage["query_performance_safeguards"]
+    truncated_sources = sorted({*safeguards["truncated_sources"], *safeguards["payload_truncated_sources"]})
+    query_safety = safeguards["query_plan_index_verification"]
+    critical_issues: list[str] = []
+    for key in ("scan_runs_timestamp", "symbol_results_run_id", "setup_candidates_run_id"):
+        if query_safety.get(key, {}).get("status") != "VERIFIED":
+            critical_issues.append(f"{key} is not index-verified")
+    required_fields = {
+        "scan_runs": {"run_id", "timestamp", "symbols_requested", "symbols_completed"},
+        "symbol_results": {"run_id", "symbol", "failed_gate"},
+        "setup_candidates": {"run_id", "symbol"},
+    }
+    for source, required in required_fields.items():
+        missing = set(coverage["missing_fields"].get(source, []))
+        if absent := required & missing:
+            critical_issues.append(f"{source} missing {', '.join(sorted(absent))}")
+    if any(source in truncated_sources for source in required_fields):
+        critical_issues.append("critical funnel evidence was truncated")
+    malformed = coverage["malformed_or_unparseable_records"]
+    if any(value for key, value in malformed.items() if key.startswith("timestamp") or key.startswith("symbol_results.raw_result_json")):
+        critical_issues.append("critical timestamp or gate evidence is malformed")
+    if scan_health["complete_cycles_from_recorded_completion_counts"] != scan_health["observed_scan_cycles"]:
+        critical_issues.append("not every observed scan has a recorded complete completion count")
+    if scan_health["observed_scan_cycles"] != scan_health["expected_scan_cycles"]:
+        critical_issues.append("observed scan-cycle coverage is incomplete")
+    data_insufficient = (
+        not duration_ready
+        or bool(truncated_sources)
+        or scan_health["observed_scan_cycles"] == 0
+        or bool(critical_issues)
+    )
+    if data_insufficient:
         labels.append(
             {
                 "label": "DATA_INSUFFICIENT",
                 "confidence": "PROVISIONAL",
                 "evidence": {
+                    "numerator": scan_health["observed_scan_cycles"],
+                    "denominator": scan_health["expected_scan_cycles"],
                     "window_seconds": window.seconds,
                     "minimum_meaningful_window_seconds": minimum_meaningful_window_sec,
-                    "observed_scan_cycles": scan_health["observed_scan_cycles"],
-                    "truncated_sources": coverage["query_performance_safeguards"]["truncated_sources"],
+                    "critical_data_availability_issues": critical_issues,
+                    "truncated_sources": truncated_sources,
                 },
-                "limitations": "Snapshot A is intentionally provisional until at least the documented 72-hour checkpoint.",
+                "configured_threshold": "NOT_APPLICABLE",
+                "limitations": "A strong diagnosis is declined until dependent evidence is present, parseable, untruncated, and index-verified.",
             }
         )
-    if duration_ready and scan_health["observed_scan_cycles"] and scan_health["complete_cycles_from_recorded_completion_counts"] == scan_health["observed_scan_cycles"]:
-        stage_rows = funnel["stages"]
-        candidate_count = next(item["event_count"] for item in stage_rows if item["stage"] == "CANDIDATE")
-        if candidate_count == 0 and gates["denominator_failure_observations"] == 0:
-            labels.append(
-                {
-                    "label": "MARKET_SCARCITY",
-                    "confidence": "MODERATE",
-                    "evidence": "All observed cycles have recorded complete completion counts, with zero persisted candidates and zero persisted gate-failure observations.",
+    candidate_count = next(item["event_count"] for item in funnel["stages"] if item["stage"] == "CANDIDATE")
+    if duration_ready and not critical_issues and not truncated_sources and candidate_count == 0 and gates["denominator_failure_observations"] == 0:
+        labels.append(
+            {
+                "label": "MARKET_SCARCITY",
+                "confidence": "MODERATE",
+                "evidence": {
+                    "numerator": 0,
                     "denominator": scan_health["observed_scan_cycles"],
-                    "limitations": "This classification is observational and cannot prove unpersisted scanner work.",
-                }
-            )
+                    "candidate_events": candidate_count,
+                    "gate_failure_observations": gates["denominator_failure_observations"],
+                    "relevant_data_availability": "complete, parseable, untruncated, and index-verified",
+                    "window_seconds": window.seconds,
+                },
+                "configured_threshold": "zero persisted candidates and zero gate failures after complete observed scan coverage",
+                "limitations": "Observational classification cannot prove scanner work that was never persisted.",
+            }
+        )
     exclusive = gates["exclusive_failures_by_gate"]
-    total_failure_observations = gates["denominator_failure_observations"]
-    if duration_ready and exclusive and total_failure_observations:
+    total = gates["denominator_failure_observations"]
+    gate_evidence_safe = query_safety.get("symbol_results_run_id", {}).get("status") == "VERIFIED" and "symbol_results" not in truncated_sources
+    if duration_ready and gate_evidence_safe and exclusive and total:
         gate, count = sorted(exclusive.items(), key=lambda item: (-item[1], item[0]))[0]
-        share = Decimal(count) / Decimal(total_failure_observations)
+        share = Decimal(count) / Decimal(total)
         if share >= dominant_share:
             labels.append(
                 {
                     "label": "DOMINANT_GATE_BLOCKER",
                     "confidence": "MODERATE",
-                    "evidence": {"gate": gate, "exclusive_failure_occurrences": count, "share": _decimal_text(share)},
-                    "denominator": total_failure_observations,
-                    "configured_minimum_share": _decimal_text(dominant_share),
-                    "limitations": "Exclusive means exactly one recorded gate on an evaluation; it does not infer causal blockers from notes.",
+                    "evidence": {
+                        "gate": gate,
+                        "numerator": count,
+                        "denominator": total,
+                        "share": _decimal_text(share),
+                        "relevant_data_availability": "index-verified, untruncated symbol-result gate evidence",
+                        "window_seconds": window.seconds,
+                    },
+                    "configured_threshold": {"exclusive_share_minimum": _decimal_text(dominant_share)},
+                    "limitations": "Exclusive means exactly one persisted gate in an evaluation; notes are not blockers.",
                 }
             )
     stalled = lifecycle["stalled_setups"]
-    if duration_ready and isinstance(stalled, Mapping) and lifecycle["open_unresolved_setups"]:
-        stalled_count = int(stalled["count"])
-        if stalled_count:
-            labels.append(
-                {
-                    "label": "LIFECYCLE_BLOCKER",
-                    "confidence": "PROVISIONAL",
-                    "evidence": {"stalled_setups": stalled_count, "stall_threshold_seconds": stall_threshold_sec},
+    if duration_ready and isinstance(stalled, Mapping) and lifecycle["open_unresolved_setups"] and int(stalled["count"]):
+        labels.append(
+            {
+                "label": "LIFECYCLE_BLOCKER",
+                "confidence": "PROVISIONAL",
+                "evidence": {
+                    "numerator": int(stalled["count"]),
                     "denominator": lifecycle["open_unresolved_setups"],
-                    "limitations": "A lifecycle blocker is reported only under the user-supplied stall threshold; this is not a claim about trading quality.",
-                }
-            )
-    attempted = telegram.get("attempted") if isinstance(telegram, Mapping) else None
-    failed = telegram.get("failed") if isinstance(telegram, Mapping) else None
-    if duration_ready and isinstance(attempted, Mapping) and isinstance(failed, Mapping) and attempted["event_count"]:
-        if failed["event_count"]:
-            labels.append(
-                {
-                    "label": "DELIVERY_BLOCKER",
-                    "confidence": "PROVISIONAL",
-                    "evidence": {"failed_delivery_events": failed["event_count"]},
-                    "denominator": attempted["event_count"],
-                    "limitations": "Only explicit persisted failed Telegram attempts are counted; eligibility and delivery are not inferred.",
-                }
-            )
+                    "relevant_data_availability": "persisted lifecycle records under the supplied stall threshold",
+                    "window_seconds": window.seconds,
+                },
+                "configured_threshold": {"stall_threshold_seconds": stall_threshold_sec},
+                "limitations": "This is reported only under the explicit supplied stall threshold.",
+            }
+        )
     if not labels:
         labels.append(
             {
                 "label": "DATA_INSUFFICIENT",
                 "confidence": "PROVISIONAL",
-                "evidence": "No evidence-backed diagnostic condition was met.",
-                "denominator": scan_health["observed_scan_cycles"],
-                "limitations": "The audit declines a strong diagnosis when persisted evidence is inadequate.",
+                "evidence": {"numerator": scan_health["observed_scan_cycles"], "denominator": scan_health["expected_scan_cycles"], "window_seconds": window.seconds},
+                "configured_threshold": "NOT_RECORDED: no delivery-blocker policy is configured.",
+                "limitations": "The audit declines a strong diagnosis when evidence or policy is inadequate.",
             }
         )
-    confidence = "HIGH" if duration_ready and window.seconds >= 7 * 24 * 60 * 60 and not source_truncated else "MODERATE" if duration_ready else "PROVISIONAL"
+    confidence = "HIGH" if duration_ready and window.seconds >= 7 * 24 * 60 * 60 and not truncated_sources and not critical_issues else "MODERATE" if duration_ready else "PROVISIONAL"
     return {
         "labels": labels,
         "overall_confidence": confidence,
         "audit_window_seconds": window.seconds,
         "minimum_meaningful_window_seconds": minimum_meaningful_window_sec,
+        "delivery_blocker_policy": "NOT_RECORDED: failed Telegram attempts are measured but no threshold is invented.",
         "checkpoint_guidance": "Snapshot A remains DATA_INSUFFICIENT before 72 hours; compare Snapshot B at 72 hours and Snapshot C at seven days using identical arguments except end time and label.",
     }
 
@@ -1485,14 +1734,8 @@ def _repository_timeframe_evidence(repository_root: Path | str | None) -> dict[s
 
 
 def _source_commit(rows: Sequence[Mapping[str, Any]], malformed: Counter[str]) -> str:
-    commits: set[str] = set()
-    for row in rows:
-        raw = _json_mapping(row.get("raw_payload_json"), "scan_runs.raw_payload_json", malformed)
-        for field in ("source_commit", "git_commit", "commit", "deployed_commit"):
-            text = _text(raw.get(field))
-            if text:
-                commits.add(text)
-    return next(iter(sorted(commits))) if len(commits) == 1 else "NOT_RECORDED" if not commits else "NOT_VERIFIABLE: multiple persisted source commits."
+    del rows, malformed
+    return "NOT_RECORDED: raw scan payload is intentionally not selected by the live-safe audit."
 
 
 def _repository_commit(repository_root: Path | str | None) -> str:
@@ -1513,10 +1756,23 @@ def _repository_commit(repository_root: Path | str | None) -> str:
 
 
 def _selected_columns(columns: Iterable[str], table: str) -> str:
-    selected = sorted(column for column in columns if SAFE_IDENTIFIER.fullmatch(column))
+    allowed = SOURCE_COLUMN_ALLOWLIST.get(table, frozenset())
+    selected = sorted(column for column in columns if column in allowed and SAFE_IDENTIFIER.fullmatch(column))
     if not selected:
-        raise IncompatibleFunnelSchemaError(f"Incompatible schema: {table} has no readable columns.")
-    return ", ".join(_identifier(column) for column in selected)
+        raise IncompatibleFunnelSchemaError(f"Incompatible schema: {table} has no readable allowlisted columns.")
+    expressions: list[str] = []
+    for column in selected:
+        identifier = _identifier(column)
+        if column in CAPPED_JSON_COLUMNS:
+            expressions.extend(
+                (
+                    f"CASE WHEN length({identifier}) > {MAX_JSON_FIELD_BYTES} THEN substr({identifier}, 1, {MAX_JSON_FIELD_BYTES}) ELSE {identifier} END AS {identifier}",
+                    f"CASE WHEN length({identifier}) > {MAX_JSON_FIELD_BYTES} THEN 1 ELSE 0 END AS {_identifier(f'{column}_truncated_for_audit')}",
+                )
+            )
+        else:
+            expressions.append(identifier)
+    return ", ".join(expressions)
 
 
 def _identifier(value: str) -> str:

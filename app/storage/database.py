@@ -96,8 +96,17 @@ def open_read_only_database(
     *,
     require_supported_schema: bool = True,
     busy_timeout_ms: int = WRITABLE_BUSY_TIMEOUT_MS,
+    assume_immutable_when_sidecars_absent: bool = True,
+    require_consistent_snapshot: bool = False,
 ) -> sqlite3.Connection:
-    """Open an existing SQLite database without creating, migrating, or changing it."""
+    """Open an existing SQLite database without creating, migrating, or changing it.
+
+    ``assume_immutable_when_sidecars_absent`` deliberately retains the historic
+    inspection default for existing callers. Audits of a live mutable source
+    must pass ``False``: absent WAL sidecars do not prove that a writer will not
+    resume later. ``require_consistent_snapshot`` starts and proves a bounded
+    read transaction after ``query_only`` has been verified.
+    """
 
     database_path = Path(path)
     connection: sqlite3.Connection | None = None
@@ -115,7 +124,10 @@ def open_read_only_database(
                 f"refusing to create it for {resolved_path}."
             )
         uri_options = "mode=ro"
-        if not wal_path.exists() and not shm_path.exists():
+        immutable_requested = (
+            assume_immutable_when_sidecars_absent and not wal_path.exists() and not shm_path.exists()
+        )
+        if immutable_requested:
             uri_options += "&immutable=1"
         timeout_ms = max(1, int(busy_timeout_ms))
         read_only_uri = f"{resolved_path.as_uri()}?{uri_options}"
@@ -134,6 +146,24 @@ def open_read_only_database(
         }
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+        if require_consistent_snapshot:
+            _begin_and_verify_read_snapshot(connection)
+            connection.read_only_safety_proof.update(
+                {
+                    "immutable_requested": False,
+                    "live_mutable_source": True,
+                    "consistent_read_snapshot": "transaction_read_snapshot",
+                    "busy_timeout_ms": timeout_ms,
+                }
+            )
+        elif not assume_immutable_when_sidecars_absent:
+            connection.read_only_safety_proof.update(
+                {
+                    "immutable_requested": False,
+                    "live_mutable_source": True,
+                    "busy_timeout_ms": timeout_ms,
+                }
+            )
         # query_only was set and verified before any other connection configuration.
         schema_version = identify_schema_version(connection)
         if require_supported_schema and schema_version > SCHEMA_VERSION:
@@ -191,6 +221,20 @@ def _enable_and_verify_query_only(connection: sqlite3.Connection) -> int:
         )
     return query_only
 
+
+def _begin_and_verify_read_snapshot(connection: sqlite3.Connection) -> None:
+    """Pin a read snapshot or fail closed without attempting a writable fallback."""
+
+    try:
+        connection.execute("BEGIN")
+        # BEGIN is deferred. This harmless catalog read establishes the actual
+        # snapshot while query_only remains enabled.
+        connection.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+    except sqlite3.Error as exc:
+        raise StorageError(
+            "Unable to establish a bounded, consistent read snapshot safely; "
+            "the database may be locked or use an unsupported live journal state."
+        ) from exc
 
 def identify_schema_version(connection: sqlite3.Connection) -> int:
     """Read the SQLite application schema version without changing it."""

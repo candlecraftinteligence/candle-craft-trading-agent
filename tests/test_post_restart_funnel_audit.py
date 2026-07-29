@@ -7,6 +7,7 @@ import sqlite3
 
 import pytest
 
+import app.analytics.post_restart_funnel_audit as audit_module
 from app.analytics.post_restart_funnel_audit import (
     FunnelAuditError,
     IncompatibleFunnelSchemaError,
@@ -325,3 +326,98 @@ def test_incompatible_schema_and_invalid_window_fail_usefully(tmp_path: Path) ->
             expected_watch_interval_sec=300,
             report_label="invalid",
         )
+
+
+def test_live_mutable_audit_explicitly_disables_immutable_assumption(tmp_path: Path) -> None:
+    report = _report(_fixture_database(tmp_path))
+    safety = report["audit_identity"]["read_only_status"]
+
+    assert safety["sqlite_uri_mode"] == "ro"
+    assert safety["query_only_verified"] is True
+    assert safety["immutable_requested"] is False
+    assert safety["live_mutable_source"] is True
+    assert safety["consistent_read_snapshot"] == "transaction_read_snapshot"
+
+
+def test_72_hour_end_exclusive_window_reports_exactly_864_cycles(tmp_path: Path) -> None:
+    report = build_post_restart_funnel_report(
+        _fixture_database(tmp_path),
+        window_start_utc="2026-07-29T08:40:54Z",
+        window_end_utc="2026-08-01T08:40:54Z",
+        expected_watch_interval_sec=300,
+        report_label="72h",
+        generated_at_utc=GENERATED_AT,
+    )
+
+    assert report["scan_health"]["expected_scan_cycles"] == 864
+
+
+def test_missing_critical_funnel_sources_prevent_market_scarcity(tmp_path: Path) -> None:
+    database = tmp_path / "missing-critical.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE scan_runs (run_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, symbols_requested INTEGER, symbols_completed INTEGER)"
+        )
+        connection.execute("CREATE INDEX ix_scan_runs_timestamp ON scan_runs(timestamp)")
+        connection.execute(
+            "INSERT INTO scan_runs VALUES ('run-1', '2026-07-29T00:00:00+00:00', 100, 100)"
+        )
+    report = _report(database)
+
+    labels = {item["label"] for item in report["verdict"]["labels"]}
+    assert "DATA_INSUFFICIENT" in labels
+    assert "MARKET_SCARCITY" not in labels
+
+
+def test_single_telegram_failure_does_not_invent_delivery_blocker(tmp_path: Path) -> None:
+    report = _report(_fixture_database(tmp_path))
+
+    assert report["telegram_delivery_funnel"]["failed"]["event_count"] == 1
+    assert "DELIVERY_BLOCKER" not in {item["label"] for item in report["verdict"]["labels"]}
+    assert report["verdict"]["delivery_blocker_policy"].startswith("NOT_RECORDED")
+
+
+def test_unrelated_2h_timeframe_value_does_not_verify_structure(tmp_path: Path) -> None:
+    database = _fixture_database(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE scan_runs SET timeframes_json = ? WHERE run_id = 'run-1'",
+            (json.dumps({"htf_timeframe": "2d", "unrelated_metric_timeframe": "2h"}),),
+        )
+    report = _report(database)
+
+    structure = report["timeframe_verification"]["timeframes"]["2H_structure"]
+    assert structure["status"] == "NOT_VERIFIABLE"
+    assert any("unrelated_metric_timeframe" in item for item in structure["exact_evidence"])
+
+
+def test_missing_index_support_refuses_source_without_large_table_scan(tmp_path: Path) -> None:
+    database = tmp_path / "unindexed.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE scan_runs (run_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL)")
+        connection.execute("INSERT INTO scan_runs VALUES ('run-1', '2026-07-29T00:00:00+00:00')")
+    report = _report(database)
+
+    evidence = report["data_coverage_and_reliability"]["query_performance_safeguards"]["query_plan_index_verification"]
+    assert evidence["scan_runs_timestamp"]["status"] == "NOT_VERIFIABLE"
+    assert report["scan_health"]["observed_scan_cycles"] == 0
+
+
+def test_unused_large_payload_columns_are_not_selected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    database = _fixture_database(tmp_path)
+    captured_sql: list[str] = []
+    original_query_rows = audit_module._query_rows
+
+    def spy_query_rows(*args, **kwargs):
+        captured_sql.append(str(args[1]))
+        return original_query_rows(*args, **kwargs)
+
+    monkeypatch.setattr(audit_module, "_query_rows", spy_query_rows)
+    _report(database)
+
+    selected = " ".join(captured_sql).lower()
+    assert "derivatives_context_json" not in selected
+    assert "volume_profile_context_json" not in selected
+    assert "raw_payload_json" not in selected
+    assert "metadata_json" not in selected
+    assert "raw_result_json" in selected
