@@ -17,6 +17,7 @@ from app.analytics.post_restart_funnel_audit import (
     DEFAULT_MAX_ROWS_PER_SOURCE,
     DEFAULT_MINIMUM_MEANINGFUL_WINDOW_SECONDS,
     FunnelAuditError,
+    SOURCE_MODE_QUIESCENT_IMMUTABLE,
     build_post_restart_funnel_report,
     write_post_restart_funnel_reports,
 )
@@ -45,11 +46,17 @@ def _positive_int(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Read an existing SQLite database in verified mode=ro/query_only mode and write a post-restart scanner funnel audit. "
+            "Read a verified quiescent SQLite source in immutable mode=ro/query_only mode and write a post-restart scanner funnel audit. "
             "This command never migrates, copies, repairs, checkpoints, vacuums, or writes to the supplied database."
         )
     )
     parser.add_argument("--database-path", required=True, type=Path)
+    parser.add_argument(
+        "--source-mode",
+        required=True,
+        choices=(SOURCE_MODE_QUIESCENT_IMMUTABLE,),
+        help="Requires a stopped scanner and no SQLite -wal/-shm sidecars; active-writer audits are refused.",
+    )
     parser.add_argument("--window-start-utc", required=True)
     parser.add_argument(
         "--window-end-utc",
@@ -92,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             window_end_utc=resolved_end,
             expected_watch_interval_sec=args.expected_watch_interval_sec,
             report_label=args.report_label,
+            source_mode=args.source_mode,
             minimum_meaningful_window_sec=args.minimum_meaningful_window_sec,
             dominant_blocker_minimum_share=args.dominant_blocker_minimum_share,
             stall_threshold_sec=args.stall_threshold_sec,

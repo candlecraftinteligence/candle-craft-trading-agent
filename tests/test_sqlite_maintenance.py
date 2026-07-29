@@ -486,6 +486,41 @@ def test_read_only_open_uses_uri_mode_and_proves_query_only_readback(
     }
     opened.close()
 
+
+def test_required_immutable_source_proves_immutable_without_changing_default_contract(tmp_path: Path) -> None:
+    path = _database(tmp_path, "quiescent-immutable.sqlite")
+    before = _state(path)
+
+    with open_read_only_database(
+        path,
+        require_immutable_source=True,
+        include_immutable_safety_proof=True,
+    ) as connection:
+        proof = database_module.read_only_connection_safety_proof(connection)
+        assert proof["immutable_requested"] is True
+        assert proof["live_mutable_source"] is False
+        assert proof["sqlite_uri_mode"] == "ro"
+        assert proof["query_only_verified"] is True
+
+    assert _state(path) == before
+
+
+def test_required_immutable_source_refuses_existing_sidecars_before_connect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _database(tmp_path, "immutable-sidecar.sqlite")
+    Path(f"{path}-wal").write_bytes(b"fixture-sidecar")
+    Path(f"{path}-shm").write_bytes(b"fixture-sidecar")
+
+    def must_not_connect(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        pytest.fail("required immutable source must refuse before sqlite3.connect")
+
+    monkeypatch.setattr(database_module.sqlite3, "connect", must_not_connect)
+    with pytest.raises(StorageError, match="required immutable source"):
+        open_read_only_database(path, require_immutable_source=True)
+
+
 def test_live_mutable_read_only_option_never_requests_immutable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "live-mutable.sqlite"
     with sqlite3.connect(path):

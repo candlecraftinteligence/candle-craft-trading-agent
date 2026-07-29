@@ -35,19 +35,38 @@ DEFAULT_MAX_DETAIL_RECORDS = 1_000
 DEFAULT_DOMINANT_BLOCKER_SHARE = Decimal("0.5")
 QUERY_BATCH_SIZE = 1_000
 MAX_JSON_FIELD_BYTES = 16 * 1024
+SOURCE_MODE_QUIESCENT_IMMUTABLE = "quiescent-immutable"
+MARKET_SCARCITY_SCAN_COUNTER_FIELDS = (
+    "symbols_scanned", "symbols_requested", "symbols_completed", "total_valid_setups",
+    "near_misses", "rejected", "data_issues", "valid_activations", "still_watching",
+    "rejected_no_edge", "actionable_setups", "confirmed_setups",
+    "blocked_a_grade_by_scoring", "blocked_a_grade_by_target",
+    "blocked_a_grade_by_entry_window", "blocked_a_grade_by_trust",
+    "fatal_target_blocks", "soft_target_warnings",
+)
+MARKET_SCARCITY_DISPOSITION_FIELDS = (
+    "status", "display_bucket", "failed_gate", "rejection_reason",
+    "next_trigger_needed", "action_label", "pullback_status", "portfolio_decision",
+)
+DIRECT_EVIDENCE_SAMPLE_LIMIT = 100
 
 # The audit never SELECTs every column. These compact evidence allowlists omit
 # raw market, derivatives, volume-profile, message, and metadata payloads.
 SOURCE_COLUMN_ALLOWLIST: dict[str, frozenset[str]] = {
     "scan_runs": frozenset({
-        "run_id", "timestamp", "symbols_requested", "symbols_completed", "symbols_json",
+        "run_id", "timestamp", "symbols_scanned", "symbols_requested", "symbols_completed",
+        "total_valid_setups", "near_misses", "rejected", "data_issues", "valid_activations",
+        "still_watching", "rejected_no_edge", "actionable_setups", "confirmed_setups",
+        "blocked_a_grade_by_scoring", "blocked_a_grade_by_target", "blocked_a_grade_by_entry_window",
+        "blocked_a_grade_by_trust", "fatal_target_blocks", "soft_target_warnings", "symbols_json",
         "timeframes_json", "runtime_stats_json",
     }),
     "symbol_results": frozenset({
-        "id", "run_id", "symbol", "failed_gate", "final_failed_gate", "readiness_score",
-        "opportunity_score", "technical_score", "score", "setup_quality_score", "quality_grade",
-        "final_quality_grade", "candidate_quality_grade", "grade", "direction", "side", "bias",
-        "mode", "strategy_mode", "raw_result_json",
+        "id", "run_id", "symbol", "status", "display_bucket", "failed_gate", "final_failed_gate",
+        "rejection_reason", "next_trigger_needed", "action_label", "pullback_status", "portfolio_decision",
+        "readiness_score", "opportunity_score", "technical_score", "score", "setup_quality_score",
+        "quality_grade", "final_quality_grade", "candidate_quality_grade", "grade", "direction", "side",
+        "bias", "mode", "strategy_mode", "raw_result_json",
     }),
     "setup_candidates": frozenset({
         "id", "run_id", "symbol", "mode", "direction", "failed_gate", "final_failed_gate",
@@ -70,7 +89,12 @@ SOURCE_COLUMN_ALLOWLIST: dict[str, frozenset[str]] = {
         "dedupe_reason", "message_hash", "error_message", "last_error_message",
     }),
 }
-CAPPED_JSON_COLUMNS = frozenset({"timeframes_json", "runtime_stats_json", "symbols_json", "raw_result_json"})
+OPTIONAL_JSON_COLUMNS = frozenset({"timeframes_json", "runtime_stats_json", "symbols_json", "raw_result_json"})
+TIMEFRAME_COMPACT_FIELDS = frozenset({
+    "htf_timeframe", "bias_timeframe", "execution_timeframe", "confirmation_timeframe",
+    "structure_timeframe", "structure_context_timeframe", "structure_analysis_timeframe",
+})
+
 RAW_RESULT_COMPACT_FIELDS = frozenset({
     "failed_gate", "final_failed_gate", "gates_failed", "failed_gates", "min_score_for_idea",
     "opportunity_score", "technical_score", "readiness_score", "score", "quality_grade",
@@ -129,11 +153,26 @@ class AuditWindow:
         return int((self.end - self.start).total_seconds())
 
 
+@dataclass(frozen=True)
+class QuiescentSourceMetadata:
+    database_path: Path
+    size_bytes: int
+    mtime_ns: int
+    ctime_ns: int
+
+    def as_report_value(self) -> dict[str, int]:
+        return {
+            "size_bytes": self.size_bytes,
+            "mtime_ns": self.mtime_ns,
+            "ctime_ns": self.ctime_ns,
+        }
+
+
 @dataclass
 class QueryLimits:
     max_rows_per_source: int
     truncated_sources: set[str]
-    payload_truncated_sources: set[str]
+    optional_json_unavailable_sources: set[str]
     malformed: Counter[str]
     observed_rows_by_source: dict[str, int]
 
@@ -160,6 +199,70 @@ def parse_utc_timestamp(value: str | datetime, *, argument_name: str) -> datetim
     return parsed.astimezone(UTC)
 
 
+def _prepare_quiescent_immutable_source(
+    database: Path,
+    source_mode: str,
+) -> QuiescentSourceMetadata:
+    if source_mode != SOURCE_MODE_QUIESCENT_IMMUTABLE:
+        raise FunnelAuditError(
+            "NO-GO: this audit supports only source_mode=quiescent-immutable; "
+            "it never uses immutable mode against an active writer."
+        )
+    try:
+        resolved = database.resolve(strict=True)
+    except OSError as exc:
+        raise FunnelAuditError(f"NO-GO: database source is unavailable: {database}") from exc
+    if not resolved.is_file():
+        raise FunnelAuditError(f"NO-GO: database source is not a file: {resolved}")
+    sidecars = _sqlite_sidecars(resolved)
+    if any(path.exists() for path in sidecars):
+        raise FunnelAuditError(
+            "NO-GO: quiescent immutable source requires both SQLite -wal and -shm sidecars to be absent "
+            f"before opening: {resolved}. Stop the scanner and verify it is absent before retrying."
+        )
+    try:
+        stat = resolved.stat()
+    except OSError as exc:
+        raise FunnelAuditError(f"NO-GO: unable to capture source metadata: {resolved}") from exc
+    return QuiescentSourceMetadata(
+        database_path=resolved,
+        size_bytes=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+        ctime_ns=stat.st_ctime_ns,
+    )
+
+
+def _verify_quiescent_immutable_source(
+    before: QuiescentSourceMetadata,
+) -> QuiescentSourceMetadata:
+    sidecars = _sqlite_sidecars(before.database_path)
+    if any(path.exists() for path in sidecars):
+        raise FunnelAuditError(
+            "NO-GO: a SQLite -wal or -shm sidecar appeared during the audit; "
+            "the source was not quiescent and no report was written."
+        )
+    try:
+        stat = before.database_path.stat()
+    except OSError as exc:
+        raise FunnelAuditError("NO-GO: source metadata could not be rechecked after the audit.") from exc
+    after = QuiescentSourceMetadata(
+        database_path=before.database_path,
+        size_bytes=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+        ctime_ns=stat.st_ctime_ns,
+    )
+    if after != before:
+        raise FunnelAuditError(
+            "NO-GO: source metadata changed during the audit; "
+            "the source was not quiescent and no report was written."
+        )
+    return after
+
+
+def _sqlite_sidecars(database_path: Path) -> tuple[Path, Path]:
+    return (Path(f"{database_path}-wal"), Path(f"{database_path}-shm"))
+
+
 def build_post_restart_funnel_report(
     database_path: Path | str,
     *,
@@ -174,6 +277,7 @@ def build_post_restart_funnel_report(
     max_detail_records: int = DEFAULT_MAX_DETAIL_RECORDS,
     generated_at_utc: str | datetime | None = None,
     repository_root: Path | str | None = None,
+    source_mode: str = SOURCE_MODE_QUIESCENT_IMMUTABLE,
 ) -> dict[str, Any]:
     """Build an observational report without changing the supplied SQLite file.
 
@@ -207,24 +311,22 @@ def build_post_restart_funnel_report(
         if generated_at_utc is not None
         else datetime.now(UTC)
     )
-    try:
-        database_stat = database.stat()
-    except OSError as exc:
-        raise FunnelAuditError(f"Unable to inspect database file metadata: {database}") from exc
+    source_before = _prepare_quiescent_immutable_source(database, source_mode)
 
     limits = QueryLimits(
         max_rows_per_source=max_rows_per_source,
         truncated_sources=set(),
-        payload_truncated_sources=set(),
+        optional_json_unavailable_sources=set(),
         malformed=Counter(),
         observed_rows_by_source={},
     )
     try:
         with open_read_only_database(
-            database,
+            source_before.database_path,
             require_supported_schema=False,
-            assume_immutable_when_sidecars_absent=False,
-            require_consistent_snapshot=True,
+            assume_immutable_when_sidecars_absent=True,
+            require_immutable_source=True,
+            include_immutable_safety_proof=True,
         ) as connection:
             safety = read_only_connection_safety_proof(connection)
             schema_version = identify_schema_version(connection)
@@ -302,6 +404,10 @@ def build_post_restart_funnel_report(
                 telegram_scope = _query_skip_reason(query_safety, "telegram_scan_run_id")
     except StorageError as exc:
         raise FunnelAuditError(f"Read-only database audit failed safely: {exc}") from exc
+    except sqlite3.Error as exc:
+        raise FunnelAuditError(f"Read-only database audit failed safely: {type(exc).__name__}.") from exc
+    finally:
+        source_after = _verify_quiescent_immutable_source(source_before)
 
     malformed = limits.malformed
     coverage = _data_coverage(
@@ -319,6 +425,15 @@ def build_post_restart_funnel_report(
         query_safety=query_safety,
     )
     scan_health = _scan_health(scan_rows, symbol_rows, candidate_rows, window, expected_watch_interval_sec, malformed)
+    market_scarcity_evidence = _market_scarcity_direct_evidence(
+        scan_rows=scan_rows,
+        symbol_rows=symbol_rows,
+        candidate_rows=candidate_rows,
+        tables=tables,
+        limits=limits,
+        query_safety=query_safety,
+    )
+    scan_health["market_scarcity_direct_evidence"] = market_scarcity_evidence
     scan_time_by_id = {
         str(row["run_id"]): timestamp
         for row in scan_rows
@@ -328,6 +443,11 @@ def build_post_restart_funnel_report(
     lifecycle = _lifecycle_quality(lifecycle_events, lifecycle_records, window, stall_threshold_sec)
     funnel = _funnel(symbol_rows, candidate_rows, lifecycle_events)
     gates = _gate_failures(gate_observations)
+    if "symbol_results" in limits.optional_json_unavailable_sources:
+        gates["optional_raw_json_evidence"] = (
+            "NOT_VERIFIABLE: oversized optional raw_result_json was not selected or parsed; "
+            "direct scalar failed_gate evidence remains separately observed."
+        )
     outcomes = _outcomes(outcome_rows, lifecycle_events, lifecycle_records, window)
     target_inside_chop = _target_inside_chop_review(
         gate_observations,
@@ -348,6 +468,7 @@ def build_post_restart_funnel_report(
         lifecycle=lifecycle,
         telegram=telegram,
         coverage=coverage,
+        market_scarcity_evidence=market_scarcity_evidence,
         minimum_meaningful_window_sec=minimum_meaningful_window_sec,
         dominant_share=dominant_share,
         stall_threshold_sec=stall_threshold_sec,
@@ -363,14 +484,21 @@ def build_post_restart_funnel_report(
             "effective_window_start_utc": _utc_text(window.start),
             "effective_window_end_utc": _utc_text(window.end),
             "window_seconds": window.seconds,
-            "database_path": str(database.resolve()),
-            "database_file_size_bytes": database_stat.st_size,
+            "database_path": str(source_before.database_path),
+            "database_file_size_bytes": source_before.size_bytes,
             "schema_version": schema_version,
             "source_commit": source_commit,
             "repository_commit": _repository_commit(repository_root),
             "read_only_status": {
                 "status": "VERIFIED_READ_ONLY",
                 **safety,
+                "source_mode": "QUIESCENT_IMMUTABLE",
+                "immutable_requested": True,
+                "sidecars_absent_before": True,
+                "sidecars_absent_after": True,
+                "source_metadata_before": source_before.as_report_value(),
+                "source_metadata_after": source_after.as_report_value(),
+                "source_metadata_unchanged": True,
                 "no_database_copy_backup_checkpoint_vacuum_or_migration_performed": True,
             },
         },
@@ -743,10 +871,12 @@ def _query_rows(
 
 
 def _compact_query_row(row: dict[str, Any], source: str, limits: QueryLimits) -> dict[str, Any]:
-    for field in CAPPED_JSON_COLUMNS:
+    for field in OPTIONAL_JSON_COLUMNS:
         if row.pop(f"{field}_truncated_for_audit", 0):
-            limits.payload_truncated_sources.add(source)
-            limits.malformed[f"{source}.{field}_truncated_for_audit"] += 1
+            limits.optional_json_unavailable_sources.add(source)
+            limits.malformed[f"{source}.{field}_optional_json_oversized"] += 1
+    if source == "scan_runs":
+        _compact_scan_run_optional_json(row, limits)
     if source == "symbol_results" and "raw_result_json" in row:
         raw = _json_mapping(row.get("raw_result_json"), "symbol_results.raw_result_json", limits.malformed)
         compact: dict[str, Any] = {}
@@ -765,6 +895,48 @@ def _compact_query_row(row: dict[str, Any], source: str, limits: QueryLimits) ->
                 compact[field] = value
         row["raw_result_json"] = json.dumps(compact, sort_keys=True, separators=(",", ":"))
     return row
+
+
+def _compact_scan_run_optional_json(row: dict[str, Any], limits: QueryLimits) -> None:
+    if "runtime_stats_json" in row:
+        payload = _json_mapping(row.get("runtime_stats_json"), "scan_runs.runtime_stats_json", limits.malformed)
+        errors = payload.get("errors")
+        compact_errors = dict(errors) if isinstance(errors, Mapping) else {}
+        row["runtime_stats_json"] = json.dumps({"errors": compact_errors}, sort_keys=True, separators=(",", ":"))
+    if "timeframes_json" in row:
+        payload = _json_mapping(row.get("timeframes_json"), "scan_runs.timeframes_json", limits.malformed)
+        compact_timeframes = {
+            str(key): value
+            for key, value in payload.items()
+            if _status_key(key) in TIMEFRAME_COMPACT_FIELDS or (_text(value) or "").lower() == "2h"
+        }
+        row["timeframes_json"] = json.dumps(compact_timeframes, sort_keys=True, separators=(",", ":"))
+    if "symbols_json" in row:
+        row["symbols_json"] = _compact_symbols_json(row.get("symbols_json"), limits.malformed)
+
+
+def _compact_symbols_json(value: Any, malformed: Counter[str]) -> str:
+    if value is None or value == "":
+        return "[]"
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, json.JSONDecodeError):
+        malformed["scan_runs.symbols_json_malformed_json"] += 1
+        return "[]"
+    if not isinstance(parsed, list):
+        malformed["scan_runs.symbols_json_not_array"] += 1
+        return "[]"
+    symbols = sorted(
+        {
+            text
+            for item in parsed
+            for text in (
+                _text(item) if isinstance(item, str) else _text(item.get("symbol")) if isinstance(item, Mapping) else None,
+            )
+            if text
+        }
+    )
+    return json.dumps(symbols, separators=(",", ":"))
 
 
 def _data_coverage(
@@ -795,7 +967,7 @@ def _data_coverage(
     missing_tables = sorted(table for table in relevant_tables if table not in tables)
     missing_fields = {
         "scan_runs": sorted({"run_id", "timestamp", "symbols_requested", "symbols_completed", "timeframes_json"} - tables.get("scan_runs", set())),
-        "symbol_results": sorted({"run_id", "symbol", "failed_gate", "raw_result_json"} - tables.get("symbol_results", set())),
+        "symbol_results": sorted({"run_id", "symbol", "status", "display_bucket", "failed_gate"} - tables.get("symbol_results", set())),
         "setup_candidates": sorted({"run_id", "symbol", "mode", "direction", "failed_gate"} - tables.get("setup_candidates", set())),
         "setup_lifecycle_events": sorted({"lifecycle_id", "timestamp", "symbol", "from_state", "to_state"} - tables.get("setup_lifecycle_events", set())),
         "setup_lifecycle_records": sorted({"lifecycle_id", "current_state", "first_seen_at", "last_seen_at"} - tables.get("setup_lifecycle_records", set())),
@@ -844,10 +1016,10 @@ def _data_coverage(
             "high_volume_fetch_batch_size": QUERY_BATCH_SIZE,
             "max_rows_per_source": limits.max_rows_per_source,
             "truncated_sources": sorted(limits.truncated_sources),
-            "payload_truncated_sources": sorted(limits.payload_truncated_sources),
+            "optional_json_evidence_unavailable_sources": sorted(limits.optional_json_unavailable_sources),
             "warning": (
-                "Sources listed as truncated or payload-truncated are incomplete for dependent conclusions. "
-                "A NOT_VERIFIABLE plan is skipped rather than triggering an unbounded scan; the audit never adds indexes."
+                "Row-limit truncation is incomplete for dependent conclusions. Oversized optional JSON is not parsed; "
+                "only metrics requiring that JSON are NOT_VERIFIABLE. A NOT_VERIFIABLE plan is skipped rather than an unbounded scan."
             ),
         },
         "window_boundary_policy": {
@@ -1453,6 +1625,7 @@ def _verdict(
     lifecycle: Mapping[str, Any],
     telegram: Mapping[str, Any],
     coverage: Mapping[str, Any],
+    market_scarcity_evidence: Mapping[str, Any],
     minimum_meaningful_window_sec: int,
     dominant_share: Decimal,
     stall_threshold_sec: int | None,
@@ -1461,7 +1634,7 @@ def _verdict(
     labels: list[dict[str, Any]] = []
     duration_ready = window.seconds >= minimum_meaningful_window_sec
     safeguards = coverage["query_performance_safeguards"]
-    truncated_sources = sorted({*safeguards["truncated_sources"], *safeguards["payload_truncated_sources"]})
+    truncated_sources = sorted(safeguards["truncated_sources"])
     query_safety = safeguards["query_plan_index_verification"]
     critical_issues: list[str] = []
     for key in ("scan_runs_timestamp", "symbol_results_run_id", "setup_candidates_run_id"):
@@ -1469,7 +1642,7 @@ def _verdict(
             critical_issues.append(f"{key} is not index-verified")
     required_fields = {
         "scan_runs": {"run_id", "timestamp", "symbols_requested", "symbols_completed"},
-        "symbol_results": {"run_id", "symbol", "failed_gate"},
+        "symbol_results": {"run_id", "symbol", "status", "display_bucket", "failed_gate"},
         "setup_candidates": {"run_id", "symbol"},
     }
     for source, required in required_fields.items():
@@ -1479,17 +1652,23 @@ def _verdict(
     if any(source in truncated_sources for source in required_fields):
         critical_issues.append("critical funnel evidence was truncated")
     malformed = coverage["malformed_or_unparseable_records"]
-    if any(value for key, value in malformed.items() if key.startswith("timestamp") or key.startswith("symbol_results.raw_result_json")):
-        critical_issues.append("critical timestamp or gate evidence is malformed")
+    if any(value for key, value in malformed.items() if key.startswith("timestamp")):
+        critical_issues.append("critical timestamp evidence is malformed")
     if scan_health["complete_cycles_from_recorded_completion_counts"] != scan_health["observed_scan_cycles"]:
         critical_issues.append("not every observed scan has a recorded complete completion count")
     if scan_health["observed_scan_cycles"] != scan_health["expected_scan_cycles"]:
         critical_issues.append("observed scan-cycle coverage is incomplete")
+
+    scarcity_issues = list(market_scarcity_evidence["market_scarcity_eligibility_issues"])
+    scarcity_issues.append(
+        "No persisted scalar supplies a deterministic attribution from zero candidates and zero gates to genuine market scarcity; no threshold is invented."
+    )
     data_insufficient = (
         not duration_ready
         or bool(truncated_sources)
         or scan_health["observed_scan_cycles"] == 0
         or bool(critical_issues)
+        or bool(scarcity_issues)
     )
     if data_insufficient:
         labels.append(
@@ -1502,33 +1681,21 @@ def _verdict(
                     "window_seconds": window.seconds,
                     "minimum_meaningful_window_seconds": minimum_meaningful_window_sec,
                     "critical_data_availability_issues": critical_issues,
+                    "market_scarcity_eligibility_issues": scarcity_issues,
                     "truncated_sources": truncated_sources,
                 },
-                "configured_threshold": "NOT_APPLICABLE",
-                "limitations": "A strong diagnosis is declined until dependent evidence is present, parseable, untruncated, and index-verified.",
+                "configured_threshold": "NOT_APPLICABLE: no automatic market-scarcity threshold is configured.",
+                "limitations": "MARKET_SCARCITY is deliberately not emitted automatically. Strong diagnoses require complete, bounded, directly persisted evidence.",
             }
         )
-    candidate_count = next(item["event_count"] for item in funnel["stages"] if item["stage"] == "CANDIDATE")
-    if duration_ready and not critical_issues and not truncated_sources and candidate_count == 0 and gates["denominator_failure_observations"] == 0:
-        labels.append(
-            {
-                "label": "MARKET_SCARCITY",
-                "confidence": "MODERATE",
-                "evidence": {
-                    "numerator": 0,
-                    "denominator": scan_health["observed_scan_cycles"],
-                    "candidate_events": candidate_count,
-                    "gate_failure_observations": gates["denominator_failure_observations"],
-                    "relevant_data_availability": "complete, parseable, untruncated, and index-verified",
-                    "window_seconds": window.seconds,
-                },
-                "configured_threshold": "zero persisted candidates and zero gate failures after complete observed scan coverage",
-                "limitations": "Observational classification cannot prove scanner work that was never persisted.",
-            }
-        )
+
     exclusive = gates["exclusive_failures_by_gate"]
     total = gates["denominator_failure_observations"]
-    gate_evidence_safe = query_safety.get("symbol_results_run_id", {}).get("status") == "VERIFIED" and "symbol_results" not in truncated_sources
+    gate_evidence_safe = (
+        query_safety.get("symbol_results_run_id", {}).get("status") == "VERIFIED"
+        and "symbol_results" not in truncated_sources
+        and "symbol_results" not in safeguards["optional_json_evidence_unavailable_sources"]
+    )
     if duration_ready and gate_evidence_safe and exclusive and total:
         gate, count = sorted(exclusive.items(), key=lambda item: (-item[1], item[0]))[0]
         share = Decimal(count) / Decimal(total)
@@ -1565,24 +1732,145 @@ def _verdict(
                 "limitations": "This is reported only under the explicit supplied stall threshold.",
             }
         )
-    if not labels:
-        labels.append(
-            {
-                "label": "DATA_INSUFFICIENT",
-                "confidence": "PROVISIONAL",
-                "evidence": {"numerator": scan_health["observed_scan_cycles"], "denominator": scan_health["expected_scan_cycles"], "window_seconds": window.seconds},
-                "configured_threshold": "NOT_RECORDED: no delivery-blocker policy is configured.",
-                "limitations": "The audit declines a strong diagnosis when evidence or policy is inadequate.",
-            }
-        )
-    confidence = "HIGH" if duration_ready and window.seconds >= 7 * 24 * 60 * 60 and not truncated_sources and not critical_issues else "MODERATE" if duration_ready else "PROVISIONAL"
+    strong_labels = {item["label"] for item in labels} - {"DATA_INSUFFICIENT"}
+    confidence = "MODERATE" if duration_ready and strong_labels else "PROVISIONAL"
     return {
         "labels": labels,
         "overall_confidence": confidence,
         "audit_window_seconds": window.seconds,
         "minimum_meaningful_window_seconds": minimum_meaningful_window_sec,
+        "market_scarcity_policy": (
+            "DATA_INSUFFICIENT: zero persisted candidates and gates cannot by themselves prove genuine market scarcity. "
+            "No automatic MARKET_SCARCITY criterion is configured."
+        ),
         "delivery_blocker_policy": "NOT_RECORDED: failed Telegram attempts are measured but no threshold is invented.",
         "checkpoint_guidance": "Snapshot A remains DATA_INSUFFICIENT before 72 hours; compare Snapshot B at 72 hours and Snapshot C at seven days using identical arguments except end time and label.",
+    }
+
+
+def _market_scarcity_direct_evidence(
+    *,
+    scan_rows: Sequence[Mapping[str, Any]],
+    symbol_rows: Sequence[Mapping[str, Any]],
+    candidate_rows: Sequence[Mapping[str, Any]],
+    tables: Mapping[str, set[str]],
+    limits: QueryLimits,
+    query_safety: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    available_counters = tuple(
+        field for field in MARKET_SCARCITY_SCAN_COUNTER_FIELDS if field in tables.get("scan_runs", set())
+    )
+    counter_totals: dict[str, int] = {}
+    counter_invalid_rows: dict[str, int] = {}
+    for field in available_counters:
+        values = [_integer_or_none(row.get(field)) for row in scan_rows]
+        counter_totals[field] = sum(value for value in values if value is not None)
+        invalid_count = sum(value is None for value in values)
+        if invalid_count:
+            counter_invalid_rows[field] = invalid_count
+
+    completed_by_run: dict[str, int] = {}
+    completion_not_recorded: list[str] = []
+    for row in scan_rows:
+        run_id = _text(row.get("run_id"))
+        if not run_id:
+            continue
+        completed = _integer_or_none(row.get("symbols_completed"))
+        if completed is None:
+            completion_not_recorded.append(run_id)
+        else:
+            completed_by_run[run_id] = completed
+    persisted_by_run: Counter[str] = Counter(
+        run_id for row in symbol_rows if (run_id := _text(row.get("run_id")))
+    )
+    completion_mismatches = [
+        {
+            "run_id": run_id,
+            "symbols_completed": completed,
+            "persisted_symbol_results": persisted_by_run.get(run_id, 0),
+        }
+        for run_id, completed in sorted(completed_by_run.items())
+        if persisted_by_run.get(run_id, 0) != completed
+    ]
+    unmatched_symbol_result_runs = sorted(set(persisted_by_run) - set(completed_by_run))
+    disposition_fields_present = tuple(
+        field for field in MARKET_SCARCITY_DISPOSITION_FIELDS if field in tables.get("symbol_results", set())
+    )
+    core_disposition_fields = ("status", "display_bucket")
+    missing_core_disposition_fields = [
+        field for field in core_disposition_fields if field not in disposition_fields_present
+    ]
+    unreliable_disposition_rows = [
+        _evaluation_id(row) or "NOT_VERIFIABLE"
+        for row in symbol_rows
+        if any(_text(row.get(field)) is None for field in core_disposition_fields)
+    ]
+    eligibility_issues: list[str] = []
+    if query_safety.get("scan_runs_timestamp", {}).get("status") != "VERIFIED":
+        eligibility_issues.append("scan_runs timestamp path is not index-verified")
+    if query_safety.get("symbol_results_run_id", {}).get("status") != "VERIFIED":
+        eligibility_issues.append("symbol_results run_id path is not index-verified")
+    if query_safety.get("setup_candidates_run_id", {}).get("status") != "VERIFIED":
+        eligibility_issues.append("setup_candidates run_id path is not index-verified")
+    if any(source in limits.truncated_sources for source in ("scan_runs", "symbol_results", "setup_candidates")):
+        eligibility_issues.append("critical direct funnel source was row-limit truncated")
+    if not scan_rows:
+        eligibility_issues.append("no scan_runs rows are available in the requested window")
+    if not completed_by_run or completion_not_recorded:
+        eligibility_issues.append("symbols_completed is absent or non-integral for one or more observed scan runs")
+    if sum(completed_by_run.values()) <= 0:
+        eligibility_issues.append("completed symbol evaluations are zero")
+    if not symbol_rows:
+        eligibility_issues.append("symbol_results contains no persisted evaluations for observed runs")
+    if completion_mismatches or unmatched_symbol_result_runs:
+        eligibility_issues.append("symbols_completed does not agree with persisted symbol_results coverage")
+    if missing_core_disposition_fields:
+        eligibility_issues.append("required direct disposition fields are absent: " + ", ".join(missing_core_disposition_fields))
+    if unreliable_disposition_rows:
+        eligibility_issues.append("one or more persisted symbol evaluations lack a reliable direct status/display_bucket disposition")
+    if "setup_candidates" not in tables:
+        eligibility_issues.append("setup_candidates table is absent")
+    if "failed_gate" not in tables.get("symbol_results", set()):
+        eligibility_issues.append("symbol_results.failed_gate is absent")
+
+    return {
+        "direct_scalar_evidence_paths": {
+            "scan_run_counters": "app/storage/repositories.py:_scan_run_record and _scan_summary_metadata",
+            "symbol_result_dispositions": "app/storage/repositories.py:_symbol_result_record",
+            "display_bucket_interpretation": "app/research/queries.py uses persisted display_bucket for valid, near_miss, no_setup, and data_issue reporting",
+        },
+        "scan_run_counter_fields_available": list(available_counters),
+        "scan_run_counter_totals": dict(sorted(counter_totals.items())),
+        "scan_run_counter_non_integral_or_null_rows": dict(sorted(counter_invalid_rows.items())),
+        "completion_cross_check": {
+            "recorded_symbols_completed": sum(completed_by_run.values()),
+            "persisted_symbol_result_rows": len(symbol_rows),
+            "runs_with_unrecorded_symbols_completed": completion_not_recorded[:DIRECT_EVIDENCE_SAMPLE_LIMIT],
+            "completion_mismatch_count": len(completion_mismatches),
+            "completion_mismatch_samples": completion_mismatches[:DIRECT_EVIDENCE_SAMPLE_LIMIT],
+            "unmatched_symbol_result_run_ids": unmatched_symbol_result_runs[:DIRECT_EVIDENCE_SAMPLE_LIMIT],
+            "coverage_agrees": bool(completed_by_run) and not completion_not_recorded and not completion_mismatches and not unmatched_symbol_result_runs,
+        },
+        "direct_disposition_coverage": {
+            "scalar_fields_present": list(disposition_fields_present),
+            "required_core_fields": list(core_disposition_fields),
+            "missing_core_fields": missing_core_disposition_fields,
+            "persisted_symbol_evaluations": len(symbol_rows),
+            "unreliable_disposition_count": len(unreliable_disposition_rows),
+            "unreliable_disposition_samples": unreliable_disposition_rows[:DIRECT_EVIDENCE_SAMPLE_LIMIT],
+            "all_evaluations_have_reliable_direct_disposition": bool(symbol_rows) and not missing_core_disposition_fields and not unreliable_disposition_rows,
+        },
+        "candidate_and_gate_evidence": {
+            "candidate_row_events": len(candidate_rows),
+            "candidate_source_complete": "setup_candidates" in tables and "setup_candidates" not in limits.truncated_sources,
+            "direct_failed_gate_column_present": "failed_gate" in tables.get("symbol_results", set()),
+            "raw_json_is_not_required_for_this_cross_check": True,
+        },
+        "market_scarcity_eligibility_issues": eligibility_issues,
+        "automatic_market_scarcity_criterion": (
+            "NOT_VERIFIABLE: no persisted scalar establishes that zero candidates and zero gates are attributable to genuine market scarcity; no threshold is invented."
+        ),
+        "automatic_market_scarcity_verdict": "DATA_INSUFFICIENT",
     }
 
 
@@ -1763,10 +2051,10 @@ def _selected_columns(columns: Iterable[str], table: str) -> str:
     expressions: list[str] = []
     for column in selected:
         identifier = _identifier(column)
-        if column in CAPPED_JSON_COLUMNS:
+        if column in OPTIONAL_JSON_COLUMNS:
             expressions.extend(
                 (
-                    f"CASE WHEN length({identifier}) > {MAX_JSON_FIELD_BYTES} THEN substr({identifier}, 1, {MAX_JSON_FIELD_BYTES}) ELSE {identifier} END AS {identifier}",
+                    f"CASE WHEN length({identifier}) <= {MAX_JSON_FIELD_BYTES} THEN {identifier} ELSE NULL END AS {identifier}",
                     f"CASE WHEN length({identifier}) > {MAX_JSON_FIELD_BYTES} THEN 1 ELSE 0 END AS {_identifier(f'{column}_truncated_for_audit')}",
                 )
             )
@@ -1945,7 +2233,7 @@ def _null_rates(rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> dic
 def _critical_fields_for_source(source: str) -> tuple[str, ...]:
     return {
         "scan_runs": ("run_id", "timestamp", "symbols_requested", "symbols_completed", "timeframes_json"),
-        "symbol_results": ("run_id", "symbol", "failed_gate", "raw_result_json"),
+        "symbol_results": ("run_id", "symbol", "status", "display_bucket", "failed_gate"),
         "setup_candidates": ("run_id", "symbol", "mode", "direction", "failed_gate"),
         "setup_lifecycle_events": ("lifecycle_id", "timestamp", "from_state", "to_state"),
         "setup_lifecycle_records": ("lifecycle_id", "current_state", "first_seen_at", "last_seen_at"),

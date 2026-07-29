@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sqlite3
 
@@ -201,6 +202,18 @@ def _fixture_database(tmp_path: Path, *, malformed: bool = False) -> Path:
     return database
 
 
+def _quiesce_fixture(database: Path) -> None:
+    """Checkpoint fixture-only changes so the audit sees a quiescent source."""
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    connection.close()
+    for sidecar in (Path(f"{database}-wal"), Path(f"{database}-shm")):
+        sidecar.unlink(missing_ok=True)
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+
+
 def _report(database: Path) -> dict:
     return build_post_restart_funnel_report(
         database,
@@ -219,10 +232,19 @@ def test_read_only_audit_preserves_fixture_database_hash_and_metadata(tmp_path: 
 
     report = _report(database)
 
-    assert report["audit_identity"]["read_only_status"]["status"] == "VERIFIED_READ_ONLY"
-    assert report["audit_identity"]["read_only_status"]["sqlite_uri_mode"] == "ro"
+    safety = report["audit_identity"]["read_only_status"]
+    assert safety["status"] == "VERIFIED_READ_ONLY"
+    assert safety["sqlite_uri_mode"] == "ro"
+    assert safety["source_mode"] == "QUIESCENT_IMMUTABLE"
+    assert safety["immutable_requested"] is True
+    assert safety["query_only_verified"] is True
+    assert safety["sidecars_absent_before"] is True
+    assert safety["sidecars_absent_after"] is True
+    assert safety["source_metadata_unchanged"] is True
     assert (database.stat().st_size, database.stat().st_mtime_ns, _sha256(database)) == before
     assert not database.with_name(f"{database.name}-journal").exists()
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
 
 
 def test_window_is_start_inclusive_end_exclusive_and_uses_no_outside_rows(tmp_path: Path) -> None:
@@ -295,6 +317,8 @@ def test_reports_are_deterministic_and_cli_writes_both_formats(tmp_path: Path, c
         [
             "--database-path",
             str(database),
+            "--source-mode",
+            "quiescent-immutable",
             "--window-start-utc",
             WINDOW_START,
             "--window-end-utc",
@@ -328,15 +352,61 @@ def test_incompatible_schema_and_invalid_window_fail_usefully(tmp_path: Path) ->
         )
 
 
-def test_live_mutable_audit_explicitly_disables_immutable_assumption(tmp_path: Path) -> None:
+def test_quiescent_immutable_audit_reports_verified_source_safety(tmp_path: Path) -> None:
     report = _report(_fixture_database(tmp_path))
     safety = report["audit_identity"]["read_only_status"]
 
     assert safety["sqlite_uri_mode"] == "ro"
     assert safety["query_only_verified"] is True
-    assert safety["immutable_requested"] is False
-    assert safety["live_mutable_source"] is True
-    assert safety["consistent_read_snapshot"] == "transaction_read_snapshot"
+    assert safety["immutable_requested"] is True
+    assert safety["live_mutable_source"] is False
+    assert safety["source_mode"] == "QUIESCENT_IMMUTABLE"
+
+
+def test_existing_sqlite_sidecar_refuses_before_audit_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _fixture_database(tmp_path)
+    Path(f"{database}-wal").write_bytes(b"sidecar-present")
+
+    def must_not_connect(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("the audit must refuse a non-quiescent source before sqlite3.connect")
+
+    monkeypatch.setattr(audit_module, "open_read_only_database", must_not_connect)
+    with pytest.raises(FunnelAuditError, match="NO-GO"):
+        _report(database)
+
+
+def test_source_change_during_audit_fails_and_cli_writes_no_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = _fixture_database(tmp_path)
+    original_query_safety = audit_module._verify_query_safety
+
+    def mutate_source(connection, tables):
+        result = original_query_safety(connection, tables)
+        with sqlite3.connect(database) as writer:
+            writer.execute("PRAGMA user_version = 15")
+        return result
+
+    monkeypatch.setattr(audit_module, "_verify_query_safety", mutate_source)
+    output = tmp_path / "must_not_exist"
+    code = audit_post_restart_funnel.main(
+        [
+            "--database-path", str(database),
+            "--source-mode", "quiescent-immutable",
+            "--window-start-utc", WINDOW_START,
+            "--window-end-utc", WINDOW_END,
+            "--expected-watch-interval-sec", "300",
+            "--output-dir", str(output),
+            "--report-label", "changed-source",
+        ]
+    )
+
+    assert code == 2
+    assert "NO-GO" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def test_72_hour_end_exclusive_window_reports_exactly_864_cycles(tmp_path: Path) -> None:
@@ -384,6 +454,8 @@ def test_unrelated_2h_timeframe_value_does_not_verify_structure(tmp_path: Path) 
             "UPDATE scan_runs SET timeframes_json = ? WHERE run_id = 'run-1'",
             (json.dumps({"htf_timeframe": "2d", "unrelated_metric_timeframe": "2h"}),),
         )
+    connection.close()
+    _quiesce_fixture(database)
     report = _report(database)
 
     structure = report["timeframe_verification"]["timeframes"]["2H_structure"]
@@ -421,3 +493,98 @@ def test_unused_large_payload_columns_are_not_selected(tmp_path: Path, monkeypat
     assert "raw_payload_json" not in selected
     assert "metadata_json" not in selected
     assert "raw_result_json" in selected
+
+
+def test_complete_scan_runs_with_empty_child_sources_cannot_produce_market_scarcity(tmp_path: Path) -> None:
+    database = _fixture_database(tmp_path)
+    start = datetime(2026, 7, 29, 8, 40, 54, tzinfo=UTC)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM symbol_results")
+        connection.execute("DELETE FROM setup_candidates")
+        for index in range(864):
+            _insert_scan_run(
+                connection,
+                f"complete-{index:04d}",
+                (start + timedelta(seconds=index * 300)).isoformat(),
+            )
+    connection.close()
+    _quiesce_fixture(database)
+    report = build_post_restart_funnel_report(
+        database,
+        window_start_utc="2026-07-29T08:40:54Z",
+        window_end_utc="2026-08-01T08:40:54Z",
+        expected_watch_interval_sec=300,
+        report_label="empty-children",
+        generated_at_utc=GENERATED_AT,
+    )
+
+    labels = {item["label"] for item in report["verdict"]["labels"]}
+    direct = report["scan_health"]["market_scarcity_direct_evidence"]
+    assert "MARKET_SCARCITY" not in labels
+    assert "DATA_INSUFFICIENT" in labels
+    assert direct["completion_cross_check"]["persisted_symbol_result_rows"] == 0
+    assert "symbol_results contains no persisted evaluations for observed runs" in direct["market_scarcity_eligibility_issues"]
+
+
+def test_na_direct_dispositions_cannot_produce_market_scarcity(tmp_path: Path) -> None:
+    database = _fixture_database(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE symbol_results SET status = 'N/A', display_bucket = 'N/A'")
+    connection.close()
+    _quiesce_fixture(database)
+    report = _report(database)
+
+    direct = report["scan_health"]["market_scarcity_direct_evidence"]
+    labels = {item["label"] for item in report["verdict"]["labels"]}
+    assert direct["direct_disposition_coverage"]["unreliable_disposition_count"] == 3
+    assert "MARKET_SCARCITY" not in labels
+
+
+def test_symbols_completed_mismatch_prevents_market_scarcity(tmp_path: Path) -> None:
+    database = _fixture_database(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE scan_runs SET symbols_completed = 3 WHERE run_id = 'run-1'")
+    connection.close()
+    _quiesce_fixture(database)
+    report = _report(database)
+
+    direct = report["scan_health"]["market_scarcity_direct_evidence"]
+    assert direct["completion_cross_check"]["coverage_agrees"] is False
+    assert direct["completion_cross_check"]["completion_mismatch_count"] >= 1
+    assert "MARKET_SCARCITY" not in {item["label"] for item in report["verdict"]["labels"]}
+
+
+def test_zero_candidates_and_zero_direct_gates_remain_data_insufficient(tmp_path: Path) -> None:
+    database = _fixture_database(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DELETE FROM setup_candidates")
+        connection.execute("UPDATE symbol_results SET failed_gate = 'N/A', raw_result_json = '{}'")
+    connection.close()
+    _quiesce_fixture(database)
+    report = _report(database)
+
+    assert report["scan_health"]["candidate_row_events"] == 0
+    assert report["gate_failures"]["denominator_failure_observations"] == 0
+    assert report["scan_health"]["market_scarcity_direct_evidence"]["automatic_market_scarcity_verdict"] == "DATA_INSUFFICIENT"
+    assert "MARKET_SCARCITY" not in {item["label"] for item in report["verdict"]["labels"]}
+    assert "DATA_INSUFFICIENT" in {item["label"] for item in report["verdict"]["labels"]}
+
+
+def test_oversized_optional_json_is_not_parsed_and_direct_scalar_evidence_survives(tmp_path: Path) -> None:
+    database = _fixture_database(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE symbol_results SET raw_result_json = ? WHERE run_id = 'run-1' AND symbol = 'BTCUSDT'",
+            (json.dumps({"unused": "x" * (audit_module.MAX_JSON_FIELD_BYTES + 1)}),),
+        )
+    connection.close()
+    _quiesce_fixture(database)
+    report = _report(database)
+
+    malformed = report["data_coverage_and_reliability"]["malformed_or_unparseable_records"]
+    safeguards = report["data_coverage_and_reliability"]["query_performance_safeguards"]
+    assert malformed["symbol_results.raw_result_json_optional_json_oversized"] == 1
+    assert "symbol_results.raw_result_json_malformed_json" not in malformed
+    assert "symbol_results" in safeguards["optional_json_evidence_unavailable_sources"]
+    assert report["gate_failures"]["failure_occurrences_by_normalized_gate"]["target_inside_chop"] >= 1
+    assert report["gate_failures"]["optional_raw_json_evidence"].startswith("NOT_VERIFIABLE")
