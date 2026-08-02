@@ -89,7 +89,7 @@ def test_cli_live_send_is_forwarded_only_when_explicit(monkeypatch) -> None:
     assert captured["dry_run"] is False
 
 
-def test_default_run_uses_mocked_rss_and_zero_telegram_transport_calls(tmp_path, monkeypatch, capsys) -> None:
+def test_default_run_uses_mocked_rss_and_never_constructs_telegram_sender(tmp_path, monkeypatch, capsys) -> None:
     rss_calls = 0
 
     def rss_handler(request: httpx.Request) -> httpx.Response:
@@ -100,10 +100,10 @@ def test_default_run_uses_mocked_rss_and_zero_telegram_transport_calls(tmp_path,
 
     rss_client = httpx.Client(transport=httpx.MockTransport(rss_handler))
 
-    def fail_if_telegram_transport_is_created(*args, **kwargs):
-        raise AssertionError("default invocation must not create a Telegram HTTP transport")
+    def fail_if_telegram_sender_is_created(*args, **kwargs):
+        raise AssertionError("default invocation must not construct the Telegram sender")
 
-    monkeypatch.setattr(telegram_sender_module.httpx, "Client", fail_if_telegram_transport_is_created)
+    monkeypatch.setattr(runner_module, "TelegramXHypeSender", fail_if_telegram_sender_is_created)
 
     try:
         summary = run_once(

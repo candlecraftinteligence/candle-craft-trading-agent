@@ -20,7 +20,7 @@ from .config import (
 from .config import ConfigError, telegram_chat_id as configured_telegram_chat_id, telegram_token
 from .hype_scorer import build_scoring_context, score_item
 from .logging_utils import configure_logging
-from .models import AgentRunSummary, ScoredItem, utc_now
+from .models import AgentRunSummary, ScoredItem, TelegramSendResult, utc_now
 from .news_sources import fetch_news_from_sources
 from .normalizer import deduplicate_items
 from .prompt_builder import build_chatgpt_prompt, build_telegram_message
@@ -128,9 +128,11 @@ def run_once(
         if print_top:
             _print_top(scored_records, print_top)
 
-        sender = TelegramXHypeSender(
-            disable_web_page_preview=cfg.telegram_disable_web_page_preview,
-        )
+        sender = None
+        if not dry_run:
+            sender = TelegramXHypeSender(
+                disable_web_page_preview=cfg.telegram_disable_web_page_preview,
+            )
         sent_today = storage.count_sent_today(now=now)
         for scored, news_item_id, scored_item_id in scored_records:
             if prompts_selected >= cfg.max_prompts_per_run:
@@ -167,7 +169,12 @@ def run_once(
                     print(f"Reasons: {reason}")
                 continue
 
-            result = sender.send_message(telegram_text, dry_run=dry_run)
+            if dry_run:
+                print(telegram_text)
+                result = TelegramSendResult(status="dry_run", detail="Safe mode printed the Telegram message.")
+            else:
+                assert sender is not None
+                result = sender.send_message(telegram_text, dry_run=False)
             prompts_selected += 1
             if result.sent:
                 storage.store_sent_prompt(
