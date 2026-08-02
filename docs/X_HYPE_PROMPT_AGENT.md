@@ -2,7 +2,7 @@
 
 ## 1. What This Agent Does
 
-The X Hype Prompt Agent is a standalone Telegram news-intelligence process. It scans configured free RSS feeds, normalizes and deduplicates crypto news, classifies narratives, scores each story for likely X engagement, and sends a private Telegram message containing a copy-ready ChatGPT prompt.
+The X Hype Prompt Agent is a standalone Telegram news-intelligence process. It scans configured free RSS feeds, normalizes and deduplicates crypto news, classifies narratives, scores each story for likely X engagement, and previews a copy-ready ChatGPT prompt. It sends to Telegram only when `--live-send` is explicitly provided.
 
 The user manually pastes that prompt into ChatGPT Pro, reviews the output, and manually posts on X.
 
@@ -110,7 +110,7 @@ X_HYPE_AGENT_DB_PATH=scan_runs/x_hype_prompt_agent.sqlite
 X_HYPE_AGENT_LOG_LEVEL=INFO
 ```
 
-Dry-run mode does not require the Telegram token or chat ID.
+Safe preview mode is the default and does not require the Telegram token or chat ID. `--dry-run` remains an optional compatibility flag.
 
 ## 11. Configure RSS Sources
 
@@ -142,21 +142,21 @@ Tier guidance:
 
 If a feed is down or malformed, the agent logs the error and continues.
 
-## 12. Run Dry-Run Mode
+## 12. Run Safe Preview Mode (Default)
 
 ```powershell
-python scripts/run_x_hype_prompt_agent.py --once --dry-run --min-score 80 --max-prompts-per-run 3 --print-top 10 --include-rejected
+python scripts/run_x_hype_prompt_agent.py --once --min-score 80 --max-prompts-per-run 3 --print-top 10 --include-rejected
 ```
 
-Dry-run mode prints the Telegram message to the console and does not send anything.
+Without `--live-send`, the agent prints the Telegram message to the console and never calls the Telegram transport. Adding `--dry-run` produces the same safe behavior.
 
-## 13. Run Once And Send Telegram Prompts
+## 13. Explicitly Send Telegram Prompts
 
 ```powershell
-python scripts/run_x_hype_prompt_agent.py --once --min-score 82 --max-prompts-per-run 2
+python scripts/run_x_hype_prompt_agent.py --once --live-send --min-score 82 --max-prompts-per-run 2
 ```
 
-Send mode requires:
+Live-send mode requires the explicit `--live-send` opt-in and:
 
 - `TELEGRAM_X_HYPE_BOT_TOKEN`
 - `TELEGRAM_X_HYPE_CHAT_ID`
@@ -167,7 +167,9 @@ Send mode requires:
 python scripts/run_x_hype_prompt_agent.py --watch --watch-interval-sec 3600 --min-score 80 --max-prompts-per-run 2
 ```
 
-If neither `--once` nor `--watch` is provided, the runner defaults to one scan and exits.
+This watch command remains in safe preview mode. Add `--live-send` only after configuring and verifying the dedicated X Hype bot credentials. `--dry-run` and `--live-send` cannot be combined.
+
+If neither `--once` nor `--watch` is provided, the runner defaults to one safe preview scan and exits.
 
 ## 15. Windows Task Scheduler Setup
 
@@ -323,7 +325,7 @@ Useful tuning levers:
 
 No Telegram message:
 
-- Run with `--dry-run` first
+- Run without `--live-send` first (or add the compatibility `--dry-run` flag)
 - Confirm the new bot is in the private group
 - Confirm `TELEGRAM_X_HYPE_BOT_TOKEN`
 - Confirm `TELEGRAM_X_HYPE_CHAT_ID`

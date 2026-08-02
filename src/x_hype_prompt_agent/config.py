@@ -9,6 +9,7 @@ from .models import AgentConfig, NewsSourceConfig
 DEFAULT_AGENT_CONFIG_PATH = Path("config") / "x_hype_agent.yaml"
 DEFAULT_SOURCES_CONFIG_PATH = Path("config") / "x_hype_sources.yaml"
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "x_hype_prompt_agent.sqlite"
+BLOCKED_DATABASE_FILENAMES = frozenset({"main_live_runtime.sqlite"})
 
 
 class ConfigError(RuntimeError):
@@ -77,7 +78,19 @@ def load_source_configs(path: Path | str = DEFAULT_SOURCES_CONFIG_PATH) -> tuple
 
 def configured_database_path(explicit_path: str | None = None) -> Path:
     raw = explicit_path or os.getenv("X_HYPE_AGENT_DB_PATH")
-    return Path(raw).expanduser() if raw else DEFAULT_DATABASE_PATH
+    database_path = Path(raw).expanduser() if raw else DEFAULT_DATABASE_PATH
+    validate_database_path(database_path)
+    return database_path
+
+
+def validate_database_path(path: Path | str) -> Path:
+    database_path = Path(path)
+    if database_path.name.casefold() in BLOCKED_DATABASE_FILENAMES:
+        raise ConfigError(
+            "Refusing to use the live Runtime database for the X hype prompt agent; "
+            "choose a separate SQLite path."
+        )
+    return database_path
 
 
 def configured_log_level(explicit_level: str | None = None) -> str:

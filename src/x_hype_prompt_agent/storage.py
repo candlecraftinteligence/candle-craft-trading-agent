@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_DATABASE_PATH
+from .config import DEFAULT_DATABASE_PATH, validate_database_path
 from .models import NewsItem, ScoredItem, parse_iso_datetime, to_iso, utc_now
 from .normalizer import normalize_news_item, title_similarity
 
@@ -19,6 +19,7 @@ class StorageError(RuntimeError):
 
 def connect_database(path: Path | str = DEFAULT_DATABASE_PATH) -> sqlite3.Connection:
     database_path = Path(path)
+    database_path = validate_database_path(database_path)
     try:
         database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(database_path)
@@ -136,6 +137,7 @@ def open_initialized_database(path: Path | str = DEFAULT_DATABASE_PATH) -> sqlit
 class XHypeStorage:
     def __init__(self, path: Path | str = DEFAULT_DATABASE_PATH) -> None:
         self.path = Path(path)
+        self.path = validate_database_path(self.path)
 
     def store_news_item(self, item: NewsItem) -> int:
         normalized = normalize_news_item(item)

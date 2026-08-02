@@ -39,7 +39,7 @@ class TelegramXHypeSender:
         self._retry_delay_sec = max(0.0, float(retry_delay_sec))
         self._disable_web_page_preview = disable_web_page_preview
 
-    def send_message(self, text: str, *, chat_id: str | None = None, dry_run: bool = False) -> TelegramSendResult:
+    def send_message(self, text: str, *, chat_id: str | None = None, dry_run: bool = True) -> TelegramSendResult:
         target_chat_id = _clean(chat_id) or self._chat_id
         if dry_run:
             print(text)

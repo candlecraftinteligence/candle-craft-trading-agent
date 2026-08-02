@@ -17,6 +17,7 @@ from .config import (
     load_dotenv_if_available,
     load_source_configs,
 )
+from .config import ConfigError, telegram_chat_id as configured_telegram_chat_id, telegram_token
 from .hype_scorer import build_scoring_context, score_item
 from .logging_utils import configure_logging
 from .models import AgentRunSummary, ScoredItem, utc_now
@@ -33,10 +34,10 @@ logger = logging.getLogger(__name__)
 def run_once(
     *,
     dry_run: bool = False,
+    live_send: bool = False,
     min_score: int | None = None,
     max_prompts_per_run: int | None = None,
     max_prompts_per_day: int | None = None,
-    telegram_chat_id: str | None = None,
     database_path: str | None = None,
     sources_config: str | None = None,
     agent_config: str | None = None,
@@ -45,7 +46,18 @@ def run_once(
     log_level: str | None = None,
     http_client: httpx.Client | None = None,
 ) -> AgentRunSummary:
+    if dry_run and live_send:
+        raise ConfigError("--dry-run and --live-send cannot be used together.")
+
+    dry_run = not live_send
+
     load_dotenv_if_available()
+    if live_send and (not telegram_token() or not configured_telegram_chat_id()):
+        raise ConfigError(
+            "Live Telegram sending requires TELEGRAM_X_HYPE_BOT_TOKEN and "
+            "TELEGRAM_X_HYPE_CHAT_ID."
+        )
+
     configure_logging(configured_log_level(log_level))
     now = utc_now()
 
@@ -117,7 +129,6 @@ def run_once(
             _print_top(scored_records, print_top)
 
         sender = TelegramXHypeSender(
-            chat_id=telegram_chat_id,
             disable_web_page_preview=cfg.telegram_disable_web_page_preview,
         )
         sent_today = storage.count_sent_today(now=now)
@@ -156,7 +167,7 @@ def run_once(
                     print(f"Reasons: {reason}")
                 continue
 
-            result = sender.send_message(telegram_text, chat_id=telegram_chat_id, dry_run=dry_run)
+            result = sender.send_message(telegram_text, dry_run=dry_run)
             prompts_selected += 1
             if result.sent:
                 storage.store_sent_prompt(
@@ -226,6 +237,8 @@ def run_watch(
             logger.info("Watch iteration complete", extra={"summary": summary})
         except KeyboardInterrupt:
             raise
+        except ConfigError:
+            raise
         except Exception as exc:
             logger.exception("Watch iteration failed", extra={"error": exc.__class__.__name__})
         interval = int(watch_interval_sec or kwargs.get("watch_interval_sec") or 3600)
@@ -234,14 +247,18 @@ def run_watch(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the standalone Candle Craft X hype prompt agent.")
-    parser.add_argument("--dry-run", action="store_true", help="Print Telegram messages instead of sending them.")
+    parser.add_argument("--dry-run", action="store_true", help="Compatibility option; safe preview is the default.")
     parser.add_argument("--once", action="store_true", help="Run one scan and exit.")
+    parser.add_argument(
+        "--live-send",
+        action="store_true",
+        help="Explicitly opt in to sending through the dedicated X Hype Telegram bot.",
+    )
     parser.add_argument("--watch", action="store_true", help="Run continuously.")
     parser.add_argument("--watch-interval-sec", type=int, default=None)
     parser.add_argument("--min-score", type=int, default=None)
     parser.add_argument("--max-prompts-per-run", type=int, default=None)
     parser.add_argument("--max-prompts-per-day", type=int, default=None)
-    parser.add_argument("--telegram-chat-id", default=None)
     parser.add_argument("--database-path", default=None)
     parser.add_argument("--sources-config", default=None)
     parser.add_argument("--agent-config", default=None)
@@ -254,12 +271,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    if args.dry_run and args.live_send:
+        parser.error("--dry-run and --live-send cannot be used together.")
+    if args.live_send:
+        load_dotenv_if_available()
+        if not telegram_token() or not configured_telegram_chat_id():
+            parser.error(
+                "--live-send requires TELEGRAM_X_HYPE_BOT_TOKEN and TELEGRAM_X_HYPE_CHAT_ID."
+            )
     kwargs = {
         "dry_run": args.dry_run,
         "min_score": args.min_score,
         "max_prompts_per_run": args.max_prompts_per_run,
         "max_prompts_per_day": args.max_prompts_per_day,
-        "telegram_chat_id": args.telegram_chat_id,
+        "live_send": args.live_send,
         "database_path": args.database_path,
         "sources_config": args.sources_config,
         "agent_config": args.agent_config,
