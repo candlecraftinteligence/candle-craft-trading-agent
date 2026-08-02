@@ -1,0 +1,11 @@
+min_score_to_send: 80
+breaking_news_score: 90
+max_prompts_per_run: 2
+max_prompts_per_day: 6
+lookback_hours: 24
+freshness_half_life_hours: 8
+duplicate_window_days: 7
+watch_interval_sec: 3600
+allow_tier_3_only_items: false
+require_source_url: true
+telegram_disable_web_page_preview: false
