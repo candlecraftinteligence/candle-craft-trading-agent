@@ -23,6 +23,7 @@ from app.data.candle_integrity import closed_candles_as_of, validate_candle_sequ
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
 from app.strategies.liquidity_grab_pullback import (
     DEFAULT_CONFIRMATION_TIMEFRAME,
+    DEFAULT_STRUCTURE_TIMEFRAME,
     LiquidityGrabEngine,
     LiquidityGrabMode,
     LiquidityGrabResult,
@@ -64,6 +65,7 @@ class ReplayConfig(BaseModel):
     confirmation_timeframe: str = DEFAULT_CONFIRMATION_TIMEFRAME
     htf_timeframe: str = "2d"
     bias_timeframe: str = "12h"
+    structure_timeframe: str = DEFAULT_STRUCTURE_TIMEFRAME
     replay_candles: int = 300
     same_candle_policy: Literal["conservative", "optimistic"] = "conservative"
     max_hold_candles: int | None = None
@@ -93,7 +95,7 @@ class ReplayConfig(BaseModel):
             return tuple(value)
         return value
 
-    @field_validator("execution_timeframe", "confirmation_timeframe", "htf_timeframe", "bias_timeframe")
+    @field_validator("execution_timeframe", "confirmation_timeframe", "htf_timeframe", "bias_timeframe", "structure_timeframe")
     @classmethod
     def _timeframe_not_blank(cls, value: str) -> str:
         normalized = value.strip().lower()
@@ -729,8 +731,11 @@ def _strategy_input(
         "symbol": symbol,
         "htf_timeframe": config.htf_timeframe,
         "bias_timeframe": config.bias_timeframe,
+        "structure_timeframe": config.structure_timeframe,
         "execution_timeframe": config.execution_timeframe,
         "confirmation_timeframe": config.confirmation_timeframe,
+        "structure_candles": candles_by_timeframe.get(config.structure_timeframe),
+        "structure_analysis_required": True,
         "candles_2d": candles_by_timeframe.get("2d"),
         "candles_12h": candles_by_timeframe.get("12h"),
         "candles_6h": candles_by_timeframe.get("6h"),
