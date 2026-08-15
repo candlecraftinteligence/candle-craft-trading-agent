@@ -3,7 +3,8 @@
 Audit date: 2026-08-15
 Branch: `audit/candle-craft-reliability-validation`
 Baseline: `aca528fe7a227eb43146120ffecb168cb439994f` (`origin/main`)
-Validated source: `0440015` before this report-only commit
+Validated production source: `0440015` before report-only commits
+Clean-checkout verification source: `5206cea` (production source plus the initial report)
 
 ## 1. Executive verdict
 
@@ -118,6 +119,10 @@ A separate mocked, offline repeated-scan probe used `tracemalloc`, two warmups, 
 
 That bounded result is not an RSS measurement, not a Runtime soak, and not a leak verdict. It only shows that the deterministic mocked path completes repeatedly with small bounded Python allocation growth over the sampled window.
 
+A final detached clean worktree at `5206cea` repeated the bounded probe after two warmups. Eight measured scans all completed as deterministic no-setup scans in 3.531 to 3.672 seconds, averaging 3.57825 seconds. Native RSS sampling succeeded 24/24 times with no failures. RSS starts ranged from 63,799,296 to 69,632,000 bytes, ends ranged from 69,390,336 to 70,688,768 bytes, and the maximum observed peak was 70,688,768 bytes. Per-scan deltas ranged from 204,800 to 5,591,040 bytes and averaged 1,778,688 bytes. Traced current allocations ended 20,220 bytes above the pre-measurement baseline with a 13,880-byte measured range.
+
+All eight short-run RSS deltas were positive, so this result does not prove stable memory. It proves that clean-checkout sampling, timing, and repeated mocked scans work as designed; Runtime stability remains pending the 72-hour and seven-day observations.
+
 ## 8. Strategy and replay result
 
 The tracked replay matrix passed twice, 184 tests per run. It verifies closed-candle decision boundaries, higher-timeframe close availability, resistance to future-candle mutation, deterministic event ordering, conservative ambiguous-candle handling, and no proportional outcome fallback.
@@ -136,6 +141,8 @@ Accordingly, empirical win rate, expectancy, profit factor, drawdown, target-ins
 | Additional targeted reliability checks | 29 passed |
 | Replay matrix, run 1 | 184 passed in 3.33 s |
 | Replay matrix, run 2 | 184 passed in 3.15 s |
+| Detached clean-worktree acceptance matrix | 22 passed in 7.06 s |
+| Detached clean-worktree scanner probe | 2 warmups; 8 measured cycles; 24/24 RSS samples; 0 sample failures; observational only |
 | Final complete suite | 1,869 passed, 1 warning in 113.27 s |
 | Dependency consistency | `pip check`: no broken requirements |
 | Compilation | `compileall` across `app`, `scripts`, `src`, and `tests`: pass |
