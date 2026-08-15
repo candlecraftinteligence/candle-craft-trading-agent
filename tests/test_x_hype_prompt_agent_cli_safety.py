@@ -91,6 +91,7 @@ def test_cli_live_send_is_forwarded_only_when_explicit(monkeypatch) -> None:
 
 def test_default_run_uses_mocked_rss_and_never_constructs_telegram_sender(tmp_path, monkeypatch, capsys) -> None:
     rss_calls = 0
+    monkeypatch.setattr(runner_module, "utc_now", lambda: NOW)
 
     def rss_handler(request: httpx.Request) -> httpx.Response:
         nonlocal rss_calls

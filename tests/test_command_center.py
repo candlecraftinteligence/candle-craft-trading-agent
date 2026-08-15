@@ -16,12 +16,14 @@ from app.analytics.portfolio_selection import (
 )
 from app.analytics.setup_quality import validate_setup_quality
 from app.command_center import (
+    build_command_center_payload,
     format_command_center_summary,
     format_portfolio_command_summary,
     format_top_setup_spotlight,
 )
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
+    ScannerProcessMemoryStats,
     ScannerRunConfig,
     ScannerRunResult,
     ScannerRuntimeStats,
@@ -207,6 +209,17 @@ def _scan_result() -> ScannerRunResult:
             slowest_symbol="BTCUSDT",
             slowest_symbol_seconds=1.2,
             completed_symbols=2,
+            process_memory=ScannerProcessMemoryStats(
+                measurement_status="Verified",
+                source="test:rss",
+                rss_start_bytes=100_000_000,
+                rss_end_bytes=105_000_000,
+                rss_observed_peak_bytes=110_000_000,
+                rss_delta_bytes=5_000_000,
+                samples_attempted=4,
+                samples_succeeded=4,
+                samples_failed=0,
+            ),
         ),
     )
 
@@ -240,6 +253,10 @@ def test_command_preset_configuration_defaults() -> None:
 def test_command_center_summary_and_runtime_metrics() -> None:
     result = _scan_result()
     ranked = run_scan.rank_scan_results(result.results)
+    payload = build_command_center_payload(result, ranked_results=ranked)
+    process_memory = payload["runtime_metrics"]["process_memory"]
+    assert process_memory["measurement_status"] == "Verified"
+    assert process_memory["rss_observed_peak_bytes"] == 110_000_000
 
     text = format_command_center_summary(
         result,

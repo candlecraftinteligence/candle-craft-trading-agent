@@ -11,6 +11,7 @@ from app.agents.alert_agent import AlertAgent
 from app.analytics.setup_quality import SetupQualityState
 from app.analytics.target_intelligence import TargetFailureType, TargetIntelligenceResult, TargetQualityGrade
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE
+from app.core.process_memory import ProcessMemoryReading
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, display_fields
 from app.pipeline import scanner_runner as scanner_runner_module
@@ -633,6 +634,78 @@ def test_scanner_continues_if_one_symbol_fails() -> None:
     assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
     assert result.results[0].error_message == "mocked kline failure for FAILUSDT"
     assert result.results[1].status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+
+
+def test_scanner_runtime_records_verified_process_memory() -> None:
+    readings = iter(
+        (
+            ProcessMemoryReading(rss_bytes=100_000_000, source="test:rss"),
+            ProcessMemoryReading(rss_bytes=125_000_000, source="test:rss"),
+            ProcessMemoryReading(rss_bytes=110_000_000, source="test:rss"),
+        )
+    )
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        failing_timeframes={"2d"},
+    )
+
+    result = run(
+        ScannerRunner(
+            exchange_client=client,
+            process_memory_sampler=lambda: next(readings),
+        ).run(_config(["BTCUSDT"]))
+    )
+
+    assert result.runtime_stats.process_memory.model_dump() == {
+        "measurement_status": "Verified",
+        "source": "test:rss",
+        "rss_start_bytes": 100_000_000,
+        "rss_end_bytes": 110_000_000,
+        "rss_observed_peak_bytes": 125_000_000,
+        "rss_delta_bytes": 10_000_000,
+        "samples_attempted": 3,
+        "samples_succeeded": 3,
+        "samples_failed": 0,
+        "failure_codes": (),
+    }
+
+
+def test_scanner_memory_sampling_failure_is_unverified_and_non_fatal() -> None:
+    readings: list[ProcessMemoryReading | Exception] = [
+        ProcessMemoryReading(rss_bytes=100_000_000, source="test:rss"),
+        OSError("sampler unavailable"),
+        ProcessMemoryReading(rss_bytes=105_000_000, source="test:rss"),
+    ]
+
+    def sample_memory() -> ProcessMemoryReading:
+        reading = readings.pop(0)
+        if isinstance(reading, Exception):
+            raise reading
+        return reading
+
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        failing_timeframes={"2d"},
+    )
+    result = run(
+        ScannerRunner(
+            exchange_client=client,
+            process_memory_sampler=sample_memory,
+        ).run(_config(["BTCUSDT"]))
+    )
+
+    memory = result.runtime_stats.process_memory
+    assert result.results[0].status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert memory.measurement_status == "Unverified"
+    assert memory.rss_start_bytes == 100_000_000
+    assert memory.rss_end_bytes == 105_000_000
+    assert memory.rss_observed_peak_bytes == 105_000_000
+    assert memory.rss_delta_bytes == 5_000_000
+    assert memory.samples_attempted == 3
+    assert memory.samples_succeeded == 2
+    assert memory.samples_failed == 1
+    assert memory.failure_codes == ("OSError",)
+
 
 
 def test_request_timeout_marks_symbol_scan_error() -> None:

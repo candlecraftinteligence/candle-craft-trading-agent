@@ -430,6 +430,11 @@ def test_weak_regime_blocks_high_confidence_setup_with_diagnostics() -> None:
     adjusted = _apply_market_regime_to_results((_valid_symbol(),), regime)[0]
 
     assert adjusted.status == ScannerPipelineStatus.REJECTED_BY_REGIME
+    assert adjusted.status_history == (
+        ScannerPipelineStatus.IDEA_CREATED,
+        ScannerPipelineStatus.JOURNAL_ENTRY_CREATED,
+        ScannerPipelineStatus.REJECTED_BY_REGIME,
+    )
     assert adjusted.valid_strategy_modes == ()
     assert adjusted.rejected_strategy_modes == ("challenge",)
     assert adjusted.regime_blocked is True

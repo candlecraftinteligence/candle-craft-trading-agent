@@ -54,6 +54,7 @@ from app.analytics.target_intelligence import (
 )
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
+from app.core.process_memory import ProcessMemoryReading, read_process_rss
 from app.data.candle_integrity import CandleIntegrityError, closed_candles_as_of, normalize_utc_timestamp
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exceptions import ExchangeTimeoutError
@@ -480,6 +481,21 @@ class ScannerSymbolResult(BaseModel):
         return self
 
 
+class ScannerProcessMemoryStats(BaseModel):
+    measurement_status: Literal["Verified", "Unverified", "N/A"] = NA
+    source: str = NA
+    rss_start_bytes: MaybeInt = NA
+    rss_end_bytes: MaybeInt = NA
+    rss_observed_peak_bytes: MaybeInt = NA
+    rss_delta_bytes: MaybeInt = NA
+    samples_attempted: int = 0
+    samples_succeeded: int = 0
+    samples_failed: int = 0
+    failure_codes: tuple[str, ...] = ()
+
+    model_config = ConfigDict(frozen=True)
+
+
 class ScannerRuntimeStats(BaseModel):
     total_runtime_seconds: float = 0.0
     average_seconds_per_symbol: float = 0.0
@@ -497,6 +513,7 @@ class ScannerRuntimeStats(BaseModel):
     timed_out_symbols: int = 0
     not_run_symbols: int = 0
     outcome_counts: dict[str, int] = Field(default_factory=dict)
+    process_memory: ScannerProcessMemoryStats = Field(default_factory=ScannerProcessMemoryStats)
 
     model_config = ConfigDict(frozen=True)
 
@@ -620,6 +637,7 @@ class ScannerRunner:
         journal_agent: JournalAgent | None = None,
         market_data_cache: MarketDataCache | None = None,
         clock: Callable[[], datetime] | None = None,
+        process_memory_sampler: Callable[[], ProcessMemoryReading] | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         self.exchange_client = exchange_client
@@ -633,6 +651,7 @@ class ScannerRunner:
         self.journal_agent = journal_agent or JournalAgent()
         self.market_data_cache = market_data_cache
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.process_memory_sampler = process_memory_sampler or read_process_rss
         self.logger = log or logger
 
     async def run(
@@ -653,6 +672,9 @@ class ScannerRunner:
                     )
                 }
             )
+        process_memory_readings: list[ProcessMemoryReading] = [
+            _safe_process_memory_reading(self.process_memory_sampler)
+        ]
         client, owns_client = self._exchange_client_for(run_config)
         results: list[ScannerSymbolResult] = []
         total_symbols = len(run_config.symbols)
@@ -741,6 +763,9 @@ class ScannerRunner:
                 )
                 if after_symbol is not None:
                     await _maybe_await(after_symbol(symbol_result, len(results), total_symbols))
+                process_memory_readings.append(
+                    _safe_process_memory_reading(self.process_memory_sampler)
+                )
                 if stop_after_symbol:
                     break
             if global_timeout_hit and len(results) < total_symbols:
@@ -773,6 +798,9 @@ class ScannerRunner:
             market_regime_context=market_regime_context,
         )
         adjusted_results = _apply_market_regime_to_results(results, market_regime)
+        process_memory_readings.append(
+            _safe_process_memory_reading(self.process_memory_sampler)
+        )
 
         return ScannerRunResult(
             config=run_config,
@@ -794,6 +822,7 @@ class ScannerRunner:
                 total_symbols=total_symbols,
                 total_runtime_seconds=total_runtime_seconds,
                 global_timeout_hit=global_timeout_hit,
+                process_memory=_process_memory_stats_for(process_memory_readings),
             ),
             market_regime=market_regime,
             regime_adjustments=market_regime.adjustment,
@@ -3568,7 +3597,10 @@ def _apply_market_regime_to_symbol(
         update.update(
             {
                 "status": ScannerPipelineStatus.REJECTED_BY_REGIME,
-                "status_history": (ScannerPipelineStatus.REJECTED_BY_REGIME,),
+                "status_history": (
+                    *result.status_history,
+                    ScannerPipelineStatus.REJECTED_BY_REGIME,
+                ),
                 "rejection_reason": reason,
                 "rejection_stage": "regime",
                 "rejection_reasons": _unique_strings((*result.rejection_reasons, reason)),
@@ -3992,12 +4024,84 @@ def _with_symbol_runtime(
     )
 
 
+def _safe_process_memory_reading(
+    sampler: Callable[[], ProcessMemoryReading],
+) -> ProcessMemoryReading:
+    try:
+        reading = sampler()
+    except Exception as exc:
+        return ProcessMemoryReading(
+            rss_bytes=None,
+            source=NA,
+            error_code=type(exc).__name__,
+        )
+    if not isinstance(reading, ProcessMemoryReading):
+        return ProcessMemoryReading(
+            rss_bytes=None,
+            source=NA,
+            error_code="invalid_reading_type",
+        )
+    rss_bytes = reading.rss_bytes
+    if rss_bytes is not None and (
+        isinstance(rss_bytes, bool) or not isinstance(rss_bytes, int) or rss_bytes < 0
+    ):
+        return ProcessMemoryReading(
+            rss_bytes=None,
+            source=reading.source,
+            error_code="invalid_rss_value",
+        )
+    return reading
+
+
+def _process_memory_stats_for(
+    readings: Sequence[ProcessMemoryReading],
+) -> ScannerProcessMemoryStats:
+    successful = tuple(reading for reading in readings if reading.rss_bytes is not None)
+    sources = tuple(dict.fromkeys(reading.source for reading in readings if reading.source != NA))
+    failures = tuple(reading for reading in readings if reading.rss_bytes is None)
+    failure_codes = tuple(
+        dict.fromkeys(reading.error_code or "unknown_error" for reading in failures)
+    )
+    if not successful:
+        measurement_status: Literal["Verified", "Unverified", "N/A"] = NA
+    elif failures or len(sources) != 1:
+        measurement_status = "Unverified"
+    else:
+        measurement_status = "Verified"
+
+    start_rss = readings[0].rss_bytes if readings and readings[0].rss_bytes is not None else NA
+    end_rss = readings[-1].rss_bytes if readings and readings[-1].rss_bytes is not None else NA
+    rss_delta = (
+        end_rss - start_rss
+        if isinstance(start_rss, int) and isinstance(end_rss, int)
+        else NA
+    )
+    return ScannerProcessMemoryStats(
+        measurement_status=measurement_status,
+        source=";".join(sources) if sources else NA,
+        rss_start_bytes=start_rss,
+        rss_end_bytes=end_rss,
+        rss_observed_peak_bytes=(
+            max(reading.rss_bytes for reading in successful)
+            if successful
+            else NA
+        ),
+        rss_delta_bytes=rss_delta,
+        samples_attempted=len(readings),
+        samples_succeeded=len(successful),
+        samples_failed=len(failures),
+        failure_codes=failure_codes,
+    )
+
+
+
 def _runtime_stats_for(
     results: Sequence[ScannerSymbolResult],
     *,
     total_symbols: int,
     total_runtime_seconds: float,
     global_timeout_hit: bool,
+    process_memory: ScannerProcessMemoryStats,
 ) -> ScannerRuntimeStats:
     runtimes = tuple(
         (result.symbol, result.runtime_seconds)
@@ -4040,6 +4144,7 @@ def _runtime_stats_for(
             "timed_out": timed_out_symbols,
             "not_run": not_run_symbols,
         },
+        process_memory=process_memory,
     )
 
 
@@ -4160,6 +4265,7 @@ __all__ = [
     "FAST_OPTIONAL_REQUEST_TIMEOUT_SEC",
     "FAST_REPLAY_CANDLES",
     "ScannerPipelineStatus",
+    "ScannerProcessMemoryStats",
     "ScannerRiskConfig",
     "ScannerRuntimeStats",
     "ScannerRunConfig",

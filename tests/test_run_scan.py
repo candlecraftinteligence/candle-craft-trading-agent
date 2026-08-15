@@ -18,6 +18,7 @@ from app.formatters.scanner_display import build_symbol_display, display_fields,
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
+    ScannerProcessMemoryStats,
     ScannerRunConfig,
     ScannerRunResult,
     ScannerRuntimeStats,
@@ -197,6 +198,17 @@ class RuntimeStatsScannerRunner(FakeScannerRunner):
                     total_runtime_seconds=1.25,
                     average_seconds_per_symbol=1.25,
                     completed_symbols=1,
+                    process_memory=ScannerProcessMemoryStats(
+                        measurement_status="Verified",
+                        source="test:rss",
+                        rss_start_bytes=100_000_000,
+                        rss_end_bytes=105_000_000,
+                        rss_observed_peak_bytes=110_000_000,
+                        rss_delta_bytes=5_000_000,
+                        samples_attempted=3,
+                        samples_succeeded=3,
+                        samples_failed=0,
+                    ),
                 )
             }
         )
@@ -652,6 +664,8 @@ def test_scan_run_manifest_appends_one_compact_row_per_scan_loop(tmp_path, monke
     assert row["trade_ideas_created"] == 0
     assert isinstance(row["runtime_seconds"], float)
     assert isinstance(row["average_seconds_per_symbol"], float)
+    assert row["process_memory"]["measurement_status"] == "N/A"
+    assert row["process_memory"]["rss_observed_peak_bytes"] == "N/A"
 
     history = json.loads(history_path.read_text(encoding="utf-8"))
     assert history["schema_version"] == "nightly_scan_history_v1"
@@ -935,6 +949,8 @@ def test_store_scan_persists_normal_scan_summary_metadata(tmp_path, monkeypatch,
     runtime_stats = json.loads(row["runtime_stats_json"])
     assert runtime_stats["completed_symbols"] == 1
     assert runtime_stats["total_runtime_seconds"] == 1.25
+    assert runtime_stats["process_memory"]["measurement_status"] == "Verified"
+    assert runtime_stats["process_memory"]["rss_observed_peak_bytes"] == 110_000_000
     assert row["symbols_requested"] > 0
     assert row["symbols_queued"] > 0
     assert row["symbols_completed"] > 0

@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+from statistics import median
 import subprocess
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -28,7 +29,7 @@ from app.storage.database import (
 )
 
 
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.1.0"
 DEFAULT_MINIMUM_MEANINGFUL_WINDOW_SECONDS = 72 * 60 * 60
 DEFAULT_MAX_ROWS_PER_SOURCE = 250_000
 DEFAULT_MAX_DETAIL_RECORDS = 1_000
@@ -95,6 +96,51 @@ TIMEFRAME_COMPACT_FIELDS = frozenset({
     "context", "htf", "bias", "structure", "execution", "confirmation",
     "structure_timeframe", "structure_context_timeframe", "structure_analysis_timeframe",
 })
+
+PROCESS_MEMORY_COMPACT_FIELDS = frozenset({
+    "measurement_status",
+    "source",
+    "rss_start_bytes",
+    "rss_end_bytes",
+    "rss_observed_peak_bytes",
+    "rss_delta_bytes",
+    "samples_attempted",
+    "samples_succeeded",
+    "samples_failed",
+})
+
+PROCESS_MEMORY_SAMPLING_BOUNDARY: dict[str, Any] = {
+    "start_sample": (
+        "Taken after ScannerRunConfig validation and decision-timestamp resolution, immediately before "
+        "exchange-client creation and scanner work."
+    ),
+    "per_symbol_samples": (
+        "Taken after each completed symbol result, progress emission, and optional after_symbol callback. "
+        "When run_scan uses --save-run, the callback's partial JSON checkpoint is included."
+    ),
+    "final_sample": (
+        "Taken after owned exchange-client closure and market-regime computation/application, immediately "
+        "before ScannerRunResult construction."
+    ),
+    "included_operations": (
+        "exchange-client creation and owned-client closure",
+        "market-regime input fetch and final regime application",
+        "per-symbol market-data/cache access, analysis, qualification gates, scoring, and dry-run agent work",
+        "progress and after_symbol callbacks, including partial --save-run JSON checkpoints when enabled",
+        "timeout, scan-error, and not-run result construction completed before the final sample",
+    ),
+    "excluded_operations": (
+        "argument/config parsing and decision-timestamp resolution before the first sample",
+        "ScannerRunResult construction and runtime-stat assembly after the final sample",
+        "resume-result combination in scripts/run_scan.py after ScannerRunner.run returns",
+        "replay, edge analytics, and performance-memory enrichment",
+        "lifecycle application, Telegram delivery, symbol-health updates, ranking, and portfolio selection",
+        "final JSON/report/export/database persistence, manifest/admin routing, and dashboard formatting",
+        "watch-loop sleep, supervisor overhead, listener memory, and other process work outside ScannerRunner.run",
+    ),
+}
+
+
 
 RAW_RESULT_COMPACT_FIELDS = frozenset({
     "failed_gate", "final_failed_gate", "gates_failed", "failed_gates", "min_score_for_idea",
@@ -177,6 +223,23 @@ class QueryLimits:
     optional_json_unavailable_sources: set[str]
     malformed: Counter[str]
     observed_rows_by_source: dict[str, int]
+
+
+@dataclass(frozen=True)
+class _ProcessMemoryObservation:
+    scan_timestamp: datetime | None
+    run_id: str
+    runtime_payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _VerifiedProcessMemoryObservation:
+    scan_timestamp: datetime
+    run_id: str
+    rss_start_bytes: int
+    rss_end_bytes: int
+    rss_observed_peak_bytes: int
+    rss_delta_bytes: int
 
 
 def parse_utc_timestamp(value: str | datetime, *, argument_name: str) -> datetime:
@@ -412,6 +475,7 @@ def build_post_restart_funnel_report(
         source_after = _verify_quiescent_immutable_source(source_before)
 
     malformed = limits.malformed
+    scan_health = _scan_health(scan_rows, symbol_rows, candidate_rows, window, expected_watch_interval_sec, malformed)
     coverage = _data_coverage(
         tables=tables,
         scan_rows=scan_rows,
@@ -426,7 +490,6 @@ def build_post_restart_funnel_report(
         window=window,
         query_safety=query_safety,
     )
-    scan_health = _scan_health(scan_rows, symbol_rows, candidate_rows, window, expected_watch_interval_sec, malformed)
     market_scarcity_evidence = _market_scarcity_direct_evidence(
         scan_rows=scan_rows,
         symbol_rows=symbol_rows,
@@ -911,7 +974,17 @@ def _compact_scan_run_optional_json(row: dict[str, Any], limits: QueryLimits) ->
         payload = _json_mapping(row.get("runtime_stats_json"), "scan_runs.runtime_stats_json", limits.malformed)
         errors = payload.get("errors")
         compact_errors = dict(errors) if isinstance(errors, Mapping) else {}
-        row["runtime_stats_json"] = json.dumps({"errors": compact_errors}, sort_keys=True, separators=(",", ":"))
+        compact_payload: dict[str, Any] = {"errors": compact_errors}
+        raw_memory = payload.get("process_memory")
+        if isinstance(raw_memory, Mapping):
+            compact_payload["process_memory"] = {
+                key: raw_memory[key]
+                for key in PROCESS_MEMORY_COMPACT_FIELDS
+                if key in raw_memory
+            }
+        elif "process_memory" in payload:
+            compact_payload["process_memory"] = "INVALID_TYPE"
+        row["runtime_stats_json"] = json.dumps(compact_payload, sort_keys=True, separators=(",", ":"))
     if "timeframes_json" in row:
         payload = _json_mapping(row.get("timeframes_json"), "scan_runs.timeframes_json", limits.malformed)
         compact_timeframes = {
@@ -1048,14 +1121,18 @@ def _scan_health(
     interval_sec: int,
     malformed: Counter[str],
 ) -> dict[str, Any]:
-    timestamps = [timestamp for row in scan_rows if (timestamp := _row_timestamp(row, "timestamp")) is not None]
+    timestamps: list[datetime] = []
     expected_cycles = (window.seconds + interval_sec - 1) // interval_sec
     complete = 0
     partial = 0
     zero_completed = 0
     completion_not_recorded = 0
     error_counts: Counter[str] = Counter()
+    runtime_observations: list[_ProcessMemoryObservation] = []
     for row in scan_rows:
+        scan_timestamp = _row_timestamp(row, "timestamp")
+        if scan_timestamp is not None:
+            timestamps.append(scan_timestamp)
         requested = _integer_or_none(row.get("symbols_requested"))
         completed = _integer_or_none(row.get("symbols_completed"))
         if requested is None or completed is None:
@@ -1066,7 +1143,16 @@ def _scan_health(
             zero_completed += 1
         elif requested > 0:
             partial += 1
-        _count_runtime_errors(row.get("runtime_stats_json"), error_counts, malformed)
+        runtime_payload = _count_runtime_errors(
+            row.get("runtime_stats_json"), error_counts, malformed
+        )
+        runtime_observations.append(
+            _ProcessMemoryObservation(
+                scan_timestamp=scan_timestamp,
+                run_id=_text(row.get("run_id")) or "N/A",
+                runtime_payload=runtime_payload,
+            )
+        )
     gaps = _scan_gaps(timestamps, window, interval_sec)
     evaluated_symbols = {str(row["symbol"]) for row in symbol_rows if _text(row.get("symbol"))}
     total_evaluations = len(symbol_rows)
@@ -1088,6 +1174,7 @@ def _scan_health(
         "scan_gaps": gaps,
         "longest_scan_gap_seconds": max((gap["gap_seconds"] for gap in gaps), default=0),
         "recorded_errors_by_type": dict(sorted(error_counts.items())),
+        "process_memory": _process_memory_health(runtime_observations, malformed),
         "timestamp_count": len(timestamps),
         "timestamp_parse_failures": malformed.get("timestamp_unparseable", 0),
         "interval_assumption": f"Expected cycles assume a cycle at window start and every {interval_sec} seconds thereafter.",
@@ -1986,7 +2073,7 @@ def _scan_gaps(timestamps: Sequence[datetime], window: AuditWindow, interval: in
     return gaps
 
 
-def _count_runtime_errors(value: Any, counts: Counter[str], malformed: Counter[str]) -> None:
+def _count_runtime_errors(value: Any, counts: Counter[str], malformed: Counter[str]) -> Mapping[str, Any]:
     payload = _json_mapping(value, "scan_runs.runtime_stats_json", malformed)
     errors = payload.get("errors")
     if isinstance(errors, Mapping):
@@ -1996,6 +2083,431 @@ def _count_runtime_errors(value: Any, counts: Counter[str], malformed: Counter[s
     elif isinstance(errors, list):
         for item in errors:
             counts[_safe_text(item)] += 1
+    return payload
+
+
+def _process_memory_health(
+    runtime_observations: Sequence[_ProcessMemoryObservation],
+    malformed: Counter[str],
+) -> dict[str, Any]:
+    malformed_prefix = "scan_runs.runtime_stats_json.process_memory"
+    memory_blocks: list[Mapping[str, Any]] = []
+    status_counts: Counter[str] = Counter()
+    starts: list[int] = []
+    ends: list[int] = []
+    peaks: list[int] = []
+    deltas: list[int] = []
+    verified_observations: list[_VerifiedProcessMemoryObservation] = []
+    samples_attempted = 0
+    samples_succeeded = 0
+    samples_failed = 0
+    cycles_with_sampling_failures = 0
+    invalid_status_cycles = 0
+    invalid_verified_contract_cycles = 0
+
+    for observation in runtime_observations:
+        runtime_payload = observation.runtime_payload
+        if "process_memory" not in runtime_payload:
+            continue
+        raw_memory = runtime_payload.get("process_memory")
+        if not isinstance(raw_memory, Mapping):
+            malformed[f"{malformed_prefix}_wrong_type"] += 1
+            continue
+
+        memory_blocks.append(raw_memory)
+        raw_status_value = raw_memory.get("measurement_status")
+        raw_status_text = (
+            str(raw_status_value).strip()
+            if raw_status_value is not None
+            else ""
+        )
+        status_key = _status_key(raw_status_value)
+        if status_key == "verified":
+            status = "Verified"
+        elif status_key == "unverified":
+            status = "Unverified"
+        elif (
+            status_key == "not_recorded"
+            or (
+                bool(raw_status_text)
+                and raw_status_text.lower() in NA_VALUES
+            )
+        ):
+            status = "N/A"
+        else:
+            status = "Unverified"
+            invalid_status_cycles += 1
+            malformed[f"{malformed_prefix}.measurement_status_missing_or_invalid"] += 1
+        status_counts[status] += 1
+
+        rss_start = _process_memory_integer(
+            raw_memory,
+            "rss_start_bytes",
+            malformed,
+            allow_negative=False,
+        )
+        rss_end = _process_memory_integer(
+            raw_memory,
+            "rss_end_bytes",
+            malformed,
+            allow_negative=False,
+        )
+        rss_peak = _process_memory_integer(
+            raw_memory,
+            "rss_observed_peak_bytes",
+            malformed,
+            allow_negative=False,
+        )
+        rss_delta = _process_memory_integer(
+            raw_memory,
+            "rss_delta_bytes",
+            malformed,
+            allow_negative=True,
+        )
+        if rss_start is not None:
+            starts.append(rss_start)
+        if rss_end is not None:
+            ends.append(rss_end)
+        if rss_peak is not None:
+            peaks.append(rss_peak)
+        if rss_delta is not None:
+            deltas.append(rss_delta)
+
+        attempted = _process_memory_integer(
+            raw_memory,
+            "samples_attempted",
+            malformed,
+            allow_negative=False,
+        )
+        succeeded = _process_memory_integer(
+            raw_memory,
+            "samples_succeeded",
+            malformed,
+            allow_negative=False,
+        )
+        failed = _process_memory_integer(
+            raw_memory,
+            "samples_failed",
+            malformed,
+            allow_negative=False,
+        )
+        samples_attempted += attempted or 0
+        samples_succeeded += succeeded or 0
+        samples_failed += failed or 0
+        if failed is not None and failed > 0:
+            cycles_with_sampling_failures += 1
+
+        if status == "Verified":
+            contract_issues = _verified_process_memory_contract_issues(
+                observation,
+                rss_start=rss_start,
+                rss_end=rss_end,
+                rss_peak=rss_peak,
+                rss_delta=rss_delta,
+                samples_attempted=attempted,
+                samples_succeeded=succeeded,
+                samples_failed=failed,
+            )
+            if contract_issues:
+                invalid_verified_contract_cycles += 1
+                for issue in contract_issues:
+                    malformed[f"{malformed_prefix}.verified_contract.{issue}"] += 1
+            else:
+                assert observation.scan_timestamp is not None
+                assert rss_start is not None
+                assert rss_end is not None
+                assert rss_peak is not None
+                assert rss_delta is not None
+                verified_observations.append(
+                    _VerifiedProcessMemoryObservation(
+                        scan_timestamp=observation.scan_timestamp,
+                        run_id=observation.run_id,
+                        rss_start_bytes=rss_start,
+                        rss_end_bytes=rss_end,
+                        rss_observed_peak_bytes=rss_peak,
+                        rss_delta_bytes=rss_delta,
+                    )
+                )
+
+    observed_cycles = len(runtime_observations)
+    verified_cycles = status_counts["Verified"]
+    unverified_cycles = status_counts["Unverified"]
+    not_available_cycles = status_counts["N/A"]
+    fully_verified_cycles = len(verified_observations)
+    if not memory_blocks:
+        measurement_status = "NOT_RECORDED"
+    elif (
+        fully_verified_cycles == observed_cycles
+        and observed_cycles > 0
+        and invalid_status_cycles == 0
+        and invalid_verified_contract_cycles == 0
+    ):
+        measurement_status = "Verified"
+    elif not_available_cycles == observed_cycles and observed_cycles > 0:
+        measurement_status = "N/A"
+    else:
+        measurement_status = "Unverified"
+
+    stability_assessment = (
+        "WAITING_FOR_RUNTIME_EVIDENCE: fewer than 2 fully verified chronological per-scan RSS records; "
+        "no automatic memory-leak or stability verdict is inferred."
+        if fully_verified_cycles < 2
+        else (
+            "OBSERVATIONAL_ONLY: chronological RSS evidence is reported for human review; "
+            "no automatic memory-leak or stability verdict is inferred."
+        )
+    )
+    chronological_evidence = _chronological_process_memory_evidence(
+        verified_observations,
+        measurement_status=measurement_status,
+    )
+    return {
+        "measurement_status": measurement_status,
+        "observed_scan_cycles": observed_cycles,
+        "cycles_with_memory_block": len(memory_blocks),
+        "cycles_without_memory_block": observed_cycles - len(memory_blocks),
+        "memory_block_coverage_percentage": _percentage(len(memory_blocks), observed_cycles),
+        "status_counts": dict(sorted(status_counts.items())),
+        "verified_cycles": verified_cycles,
+        "unverified_cycles": unverified_cycles,
+        "not_available_cycles": not_available_cycles,
+        "fully_verified_cycles": fully_verified_cycles,
+        "verified_cycles_without_required_evidence": max(
+            verified_cycles - fully_verified_cycles,
+            0,
+        ),
+        "fully_verified_memory_coverage_percentage": _percentage(
+            fully_verified_cycles,
+            observed_cycles,
+        ),
+        "rss_start_min_bytes": min(starts) if starts else "NOT_RECORDED",
+        "rss_start_max_bytes": max(starts) if starts else "NOT_RECORDED",
+        "rss_end_min_bytes": min(ends) if ends else "NOT_RECORDED",
+        "rss_end_max_bytes": max(ends) if ends else "NOT_RECORDED",
+        "rss_observed_peak_max_bytes": max(peaks) if peaks else "NOT_RECORDED",
+        "rss_delta_min_bytes": min(deltas) if deltas else "NOT_RECORDED",
+        "rss_delta_max_bytes": max(deltas) if deltas else "NOT_RECORDED",
+        "rss_delta_average_bytes": (
+            round(sum(deltas) / len(deltas), 3)
+            if deltas
+            else "NOT_RECORDED"
+        ),
+        "cycles_with_positive_rss_delta": sum(1 for value in deltas if value > 0),
+        "samples_attempted_total": samples_attempted,
+        "samples_succeeded_total": samples_succeeded,
+        "samples_failed_total": samples_failed,
+        "cycles_with_sampling_failures": cycles_with_sampling_failures,
+        "sampling_failure_rate_percentage": _percentage(
+            samples_failed,
+            samples_attempted,
+        ),
+        "malformed_memory_field_count": sum(
+            count
+            for key, count in malformed.items()
+            if key.startswith(malformed_prefix)
+        ),
+        "chronological_evidence": chronological_evidence,
+        "sampling_boundary": {
+            key: list(value) if isinstance(value, tuple) else value
+            for key, value in PROCESS_MEMORY_SAMPLING_BOUNDARY.items()
+        },
+        "stability_assessment": stability_assessment,
+    }
+
+
+def _verified_process_memory_contract_issues(
+    observation: _ProcessMemoryObservation,
+    *,
+    rss_start: int | None,
+    rss_end: int | None,
+    rss_peak: int | None,
+    rss_delta: int | None,
+    samples_attempted: int | None,
+    samples_succeeded: int | None,
+    samples_failed: int | None,
+) -> tuple[str, ...]:
+    issues: list[str] = []
+    if observation.scan_timestamp is None:
+        issues.append("scan_timestamp_missing_or_invalid")
+
+    required_values = {
+        "rss_start_bytes": rss_start,
+        "rss_end_bytes": rss_end,
+        "rss_observed_peak_bytes": rss_peak,
+        "rss_delta_bytes": rss_delta,
+        "samples_attempted": samples_attempted,
+        "samples_succeeded": samples_succeeded,
+        "samples_failed": samples_failed,
+    }
+    for key, value in required_values.items():
+        if value is None:
+            issues.append(f"{key}_missing_or_invalid")
+
+    if any(value is None for value in required_values.values()):
+        return tuple(issues)
+
+    assert rss_start is not None
+    assert rss_end is not None
+    assert rss_peak is not None
+    assert rss_delta is not None
+    assert samples_attempted is not None
+    assert samples_succeeded is not None
+    assert samples_failed is not None
+    if samples_attempted <= 0:
+        issues.append("samples_attempted_not_positive")
+    if samples_succeeded <= 0:
+        issues.append("samples_succeeded_not_positive")
+    if samples_succeeded + samples_failed != samples_attempted:
+        issues.append("sample_counts_inconsistent")
+    if samples_failed != 0:
+        issues.append("verified_status_has_sampling_failures")
+    if rss_peak < max(rss_start, rss_end):
+        issues.append("rss_peak_below_boundary_reading")
+    if rss_delta != rss_end - rss_start:
+        issues.append("rss_delta_inconsistent")
+    return tuple(issues)
+
+
+def _chronological_process_memory_evidence(
+    observations: Sequence[_VerifiedProcessMemoryObservation],
+    *,
+    measurement_status: str,
+) -> dict[str, Any]:
+    ordering_method = (
+        "Fully verified observations sorted by parsed UTC scan timestamp ascending, "
+        "then run_id ascending; malformed, missing, N/A, and Unverified records are excluded."
+    )
+    if not observations:
+        missing_value = (
+            "N/A"
+            if measurement_status == "N/A"
+            else "Unverified"
+            if measurement_status == "Unverified"
+            else "NOT_RECORDED"
+        )
+        return {
+            "status": measurement_status,
+            "verified_observation_count": 0,
+            "ordering_method": ordering_method,
+            "chronological_reorder_applied": False,
+            "first_verified_scan_timestamp_utc": missing_value,
+            "first_verified_scan_run_id": missing_value,
+            "last_verified_scan_timestamp_utc": missing_value,
+            "last_verified_scan_run_id": missing_value,
+            "first_verified_rss_start_bytes": missing_value,
+            "last_verified_rss_end_bytes": missing_value,
+            "net_rss_change_bytes": missing_value,
+            "verified_window_seconds": missing_value,
+            "highest_observed_peak": missing_value,
+            "early_late_comparison": _early_late_process_memory_comparison(
+                (),
+                evidence_status=measurement_status,
+            ),
+        }
+
+    original = list(observations)
+    ordered = sorted(
+        original,
+        key=lambda item: (item.scan_timestamp, item.run_id),
+    )
+    first = ordered[0]
+    last = ordered[-1]
+    highest_peak = max(ordered, key=lambda item: item.rss_observed_peak_bytes)
+    evidence_status = "Verified" if measurement_status == "Verified" else "Unverified"
+    return {
+        "status": evidence_status,
+        "verified_observation_count": len(ordered),
+        "ordering_method": ordering_method,
+        "chronological_reorder_applied": original != ordered,
+        "first_verified_scan_timestamp_utc": _utc_text(first.scan_timestamp),
+        "first_verified_scan_run_id": first.run_id,
+        "last_verified_scan_timestamp_utc": _utc_text(last.scan_timestamp),
+        "last_verified_scan_run_id": last.run_id,
+        "first_verified_rss_start_bytes": first.rss_start_bytes,
+        "last_verified_rss_end_bytes": last.rss_end_bytes,
+        "net_rss_change_bytes": last.rss_end_bytes - first.rss_start_bytes,
+        "verified_window_seconds": int(
+            (last.scan_timestamp - first.scan_timestamp).total_seconds()
+        ),
+        "highest_observed_peak": {
+            "scan_timestamp_utc": _utc_text(highest_peak.scan_timestamp),
+            "scan_run_id": highest_peak.run_id,
+            "rss_observed_peak_bytes": highest_peak.rss_observed_peak_bytes,
+            "tie_break_policy": "Earliest timestamp, then run_id, when peak values tie.",
+        },
+        "early_late_comparison": _early_late_process_memory_comparison(
+            ordered,
+            evidence_status=evidence_status,
+        ),
+    }
+
+
+def _early_late_process_memory_comparison(
+    observations: Sequence[_VerifiedProcessMemoryObservation],
+    *,
+    evidence_status: str,
+) -> dict[str, Any]:
+    methodology = (
+        "Median rss_end_bytes in disjoint chronological buckets: the earliest and latest "
+        "ceil(verified_observation_count / 4) observations (25% buckets). At least two fully "
+        "verified observations are required. Middle observations are excluded from this comparison."
+    )
+    if len(observations) < 2:
+        return {
+            "status": "DATA_INSUFFICIENT",
+            "evidence_status": evidence_status,
+            "methodology": methodology,
+            "bucket_size": 0,
+            "early_bucket": "NOT_AVAILABLE",
+            "late_bucket": "NOT_AVAILABLE",
+            "late_minus_early_median_rss_end_bytes": "NOT_AVAILABLE",
+        }
+
+    bucket_size = min((len(observations) + 3) // 4, len(observations) // 2)
+    early = observations[:bucket_size]
+    late = observations[-bucket_size:]
+    early_median = median(item.rss_end_bytes for item in early)
+    late_median = median(item.rss_end_bytes for item in late)
+    return {
+        "status": evidence_status,
+        "evidence_status": evidence_status,
+        "methodology": methodology,
+        "bucket_size": bucket_size,
+        "early_bucket": _process_memory_bucket(early, early_median),
+        "late_bucket": _process_memory_bucket(late, late_median),
+        "late_minus_early_median_rss_end_bytes": late_median - early_median,
+    }
+
+
+def _process_memory_bucket(
+    observations: Sequence[_VerifiedProcessMemoryObservation],
+    median_rss_end_bytes: int | float,
+) -> dict[str, Any]:
+    return {
+        "observation_count": len(observations),
+        "first_scan_timestamp_utc": _utc_text(observations[0].scan_timestamp),
+        "last_scan_timestamp_utc": _utc_text(observations[-1].scan_timestamp),
+        "median_rss_end_bytes": median_rss_end_bytes,
+    }
+
+def _process_memory_integer(
+    memory: Mapping[str, Any],
+    key: str,
+    malformed: Counter[str],
+    *,
+    allow_negative: bool,
+) -> int | None:
+    raw_value = memory.get(key)
+    value = _integer_or_none(raw_value)
+    if value is None:
+        if raw_value not in (None, "", "N/A", "NOT_RECORDED"):
+            malformed[f"scan_runs.runtime_stats_json.process_memory.{key}_invalid"] += 1
+        return None
+    if not allow_negative and value < 0:
+        malformed[f"scan_runs.runtime_stats_json.process_memory.{key}_invalid"] += 1
+        return None
+    return value
+
 
 
 def _candidate_context(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str | None, str | None], dict[str, str]]:
