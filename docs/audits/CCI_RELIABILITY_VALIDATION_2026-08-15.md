@@ -101,7 +101,11 @@ The persisted `process_memory` block records:
 
 Unavailable values remain `N/A`; partial or unreliable evidence remains `Unverified`. The fields flow through scanner runtime JSON, resumed/combined runs, the command center, JSONL manifests, and human diagnostics.
 
-The post-restart audit selects only a compact allowlist from persisted runtime JSON. It aggregates record coverage, verified/unverified counts, RSS ranges and deltas, positive-delta cycle count, and sampling failures. It deliberately reports `OBSERVATIONAL_ONLY` after enough records to aggregate and never declares a memory leak or stability automatically.
+The post-restart audit selects only a compact allowlist from persisted runtime JSON. The PR #78 pre-merge revision adds bounded chronological evidence from fully verified contracts only: first/last verified timestamps and run IDs, first RSS start, last RSS end, net RSS change, highest peak with timestamp/run ID, verified duration, coverage, sample success/failure totals, failure rate, and malformed-evidence counts.
+
+The early/late comparison uses median rss_end_bytes in disjoint earliest/latest ceil(n / 4) chronological buckets. Missing evidence remains NOT_RECORDED, explicitly unavailable evidence remains N/A, and partial, unknown, or malformed claimed-verified evidence remains Unverified. Malformed claimed-verified records are counted but excluded from chronology. Fewer than two fully verified records is DATA_INSUFFICIENT for the comparison.
+
+The report remains observational only. It does not declare a leak, warm-up, or stability from net change, a peak, per-scan deltas, or the early/late comparison.
 
 ## 7. Bounded Dev memory observations
 
@@ -144,12 +148,21 @@ Accordingly, empirical win rate, expectancy, profit factor, drawdown, target-ins
 | Detached clean-worktree acceptance matrix | 22 passed in 7.06 s |
 | Detached clean-worktree scanner probe | 2 warmups; 8 measured cycles; 24/24 RSS samples; 0 sample failures; observational only |
 | Final complete suite | 1,869 passed, 1 warning in 113.27 s |
+| PR #78 chronological-memory focused audit file | 27 passed in 4.90 s |
+| RSS sampler, persistence, and display matrix | 8 passed in 2.94 s |
+| PR #78 pre-merge complete suite | 1,873 passed, 1 warning in 106.09 s |
 | Dependency consistency | `pip check`: no broken requirements |
 | Compilation | `compileall` across `app`, `scripts`, `src`, and `tests`: pass |
 | CI syntax and safety assertions | pass |
 | Tracked high-confidence secret patterns | none found |
 | Tracked database/log/archive/bytecode artifacts | none found |
 | Whitespace and Git state | clean |
+
+### PR #78 pre-merge chronological-memory revision
+
+This revision changed only the read-only audit report, its focused tests, and its operator documentation. It did not restructure ScannerRunner sampling. The reviewed boundary starts immediately before exchange-client creation, samples after each symbol callback, and ends after owned-client closure and final regime application but before ScannerRunResult construction. Whole-process work outside ScannerRunner.run remains excluded and is documented explicitly.
+
+The refreshed PR-wide diff against origin/main showed no changes in the strategy, scoring, timeframe, regime-score, replay, or target-intelligence implementation paths. A changed-line search found no score, target, stop, RR, timeframe, qualification-gate, withdrawal, transfer, or live-order behavior addition; the only score-related deletion is the predeclared byte-for-byte duplicate helper cleanup. No protected Runtime database, sidecar, environment, log, JSONL, or archive artifact appears in the diff. No Runtime data was accessed, and no merge or deployment was performed.
 
 The sole final warning is the existing Starlette `TestClient` deprecation notice about its httpx integration. It is not a test failure, but dependency modernization should address it separately.
 
@@ -176,11 +189,11 @@ After review and only after separate authorization to adopt the code on Runtime,
 
 1. Record the exact restart timestamp, code SHA, unchanged watch interval, and approved command.
 2. Preserve normal scanner output; do not reset performance memory or mutate historical records for the audit.
-3. Take Snapshot B after at least 72 hours and Snapshot C after seven days, keeping the same start boundary, source, interval, and audit options except end time and label.
+3. Use the deployment-recorded restart timestamp as T0. Snapshot B must cover [T0, T0 + 72 hours) and Snapshot C must cover [T0, T0 + seven days), keeping source, interval, and audit options unchanged except end time and label. Never invent T0 or reuse the legacy July 29 boundary for PR #78.
 4. On the Runtime PC, stop the scanner and verify its process is absent before audit access. If WAL/SHM sidecars exist or quiescence cannot be proven, stop and report NO-GO.
 5. Run only `scripts/audit_post_restart_funnel.py --source-mode quiescent-immutable` under the documented procedure. It must verify immutable `mode=ro`, `query_only=1`, absent sidecars, and unchanged source metadata.
 6. Review scan-cycle coverage, errors, gate concentration, lifecycle progression, explicit Telegram sent evidence, terminal outcomes, and the new process-memory block.
-7. Treat fewer than two verified RSS records as `WAITING_FOR_RUNTIME_EVIDENCE`. Treat two or more only as `OBSERVATIONAL_ONLY`; evaluate the 72-hour and seven-day patterns manually, including coverage, failures, workload changes, starts, ends, peaks, and deltas.
+7. Treat fewer than two fully verified chronological RSS records as WAITING_FOR_RUNTIME_EVIDENCE. With two or more, review the first/last boundary values, net change, peak, earliest/latest ceil(n / 4) median rss_end_bytes buckets, coverage, sampling failures, workload, and exact sampling boundary. The result remains OBSERVATIONAL_ONLY and cannot automatically declare leak, warm-up, or stability.
 8. Do not infer that rejected `target_inside_chop` setups would have won. Any tuning still requires attributable, time-ordered terminal outcomes and an out-of-sample cohort.
 
 Until those artifacts are returned and reviewed, the terminal project state is:

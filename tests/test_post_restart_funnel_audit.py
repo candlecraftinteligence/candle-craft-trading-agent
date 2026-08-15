@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sqlite3
@@ -247,6 +248,44 @@ def test_read_only_audit_preserves_fixture_database_hash_and_metadata(tmp_path: 
     assert not Path(f"{database}-shm").exists()
 
 
+def _verified_process_memory(
+    *,
+    start: int,
+    end: int,
+    peak: int,
+    samples: int = 3,
+) -> dict[str, object]:
+    return {
+        "measurement_status": "Verified",
+        "source": "test:rss",
+        "rss_start_bytes": start,
+        "rss_end_bytes": end,
+        "rss_observed_peak_bytes": peak,
+        "rss_delta_bytes": end - start,
+        "samples_attempted": samples,
+        "samples_succeeded": samples,
+        "samples_failed": 0,
+        "failure_codes": [],
+    }
+
+
+def _set_process_memory(
+    database: Path,
+    memory_by_run: dict[str, dict[str, object]],
+) -> None:
+    connection = sqlite3.connect(database)
+    try:
+        for run_id, process_memory in memory_by_run.items():
+            connection.execute(
+                "UPDATE scan_runs SET runtime_stats_json = ? WHERE run_id = ?",
+                (json.dumps({"errors": {}, "process_memory": process_memory}), run_id),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+    _quiesce_fixture(database)
+
+
 def test_window_is_start_inclusive_end_exclusive_and_uses_no_outside_rows(tmp_path: Path) -> None:
     report = _report(_fixture_database(tmp_path))
 
@@ -254,68 +293,255 @@ def test_window_is_start_inclusive_end_exclusive_and_uses_no_outside_rows(tmp_pa
     assert report["scan_health"]["distinct_symbols_evaluated"] == 2
     assert report["scan_health"]["total_symbol_evaluations"] == 3
     memory = report["scan_health"]["process_memory"]
+    chronology = memory["chronological_evidence"]
     assert memory["measurement_status"] == "NOT_RECORDED"
+    assert memory["samples_attempted_total"] == 0
+    assert memory["samples_succeeded_total"] == 0
+    assert memory["samples_failed_total"] == 0
+    assert memory["sampling_failure_rate_percentage"] == "NOT_RECORDED"
+    assert chronology["status"] == "NOT_RECORDED"
+    assert chronology["first_verified_scan_timestamp_utc"] == "NOT_RECORDED"
+    assert chronology["early_late_comparison"]["status"] == "DATA_INSUFFICIENT"
     assert memory["stability_assessment"].startswith("WAITING_FOR_RUNTIME_EVIDENCE")
     assert report["gate_failures"]["failure_occurrences_by_normalized_gate"]["target_inside_chop"] == 2
     assert report["target_inside_chop_review"]["occurrences"] == 2
 
 
-def test_process_memory_is_aggregated_without_inferring_a_leak_verdict(tmp_path: Path) -> None:
+def test_process_memory_reports_bounded_chronological_verified_evidence(tmp_path: Path) -> None:
     database = _fixture_database(tmp_path)
-    memory_by_run = {
-        "run-1": {
-            "measurement_status": "Verified",
-            "source": "test:rss",
-            "rss_start_bytes": 100_000_000,
-            "rss_end_bytes": 110_000_000,
-            "rss_observed_peak_bytes": 120_000_000,
-            "rss_delta_bytes": 10_000_000,
-            "samples_attempted": 3,
-            "samples_succeeded": 3,
-            "samples_failed": 0,
-            "failure_codes": [],
-        },
-        "run-2": {
-            "measurement_status": "Verified",
-            "source": "test:rss",
-            "rss_start_bytes": 110_000_000,
-            "rss_end_bytes": 108_000_000,
-            "rss_observed_peak_bytes": 125_000_000,
-            "rss_delta_bytes": -2_000_000,
-            "samples_attempted": 3,
-            "samples_succeeded": 3,
-            "samples_failed": 0,
-            "failure_codes": [],
-        },
-    }
     with sqlite3.connect(database) as connection:
-        for run_id, process_memory in memory_by_run.items():
-            connection.execute(
-                "UPDATE scan_runs SET runtime_stats_json = ? WHERE run_id = ?",
-                (json.dumps({"errors": {}, "process_memory": process_memory}), run_id),
-            )
+        for run_id, timestamp in (
+            ("run-peak", "2026-07-29T00:07:00+00:00"),
+            ("run-early", "2026-07-29T00:01:00+00:00"),
+            ("run-last", "2026-07-29T00:08:00+00:00"),
+            ("run-mid-a", "2026-07-29T00:02:00+00:00"),
+            ("run-late-a", "2026-07-29T00:06:00+00:00"),
+            ("run-mid-b", "2026-07-29T00:03:00+00:00"),
+        ):
+            _insert_scan_run(connection, run_id, timestamp)
     connection.close()
-    _quiesce_fixture(database)
+
+    memory_by_run = {
+        "run-1": _verified_process_memory(start=100_000_000, end=110_000_000, peak=120_000_000),
+        "run-early": _verified_process_memory(start=105_000_000, end=112_000_000, peak=122_000_000),
+        "run-mid-a": _verified_process_memory(start=110_000_000, end=115_000_000, peak=125_000_000),
+        "run-mid-b": _verified_process_memory(start=112_000_000, end=116_000_000, peak=126_000_000),
+        "run-2": _verified_process_memory(start=115_000_000, end=118_000_000, peak=128_000_000),
+        "run-late-a": _verified_process_memory(start=120_000_000, end=125_000_000, peak=130_000_000),
+        "run-peak": _verified_process_memory(start=125_000_000, end=130_000_000, peak=150_000_000),
+        "run-last": _verified_process_memory(start=128_000_000, end=132_000_000, peak=140_000_000),
+    }
+    _set_process_memory(database, memory_by_run)
 
     report = _report(database)
     memory = report["scan_health"]["process_memory"]
+    chronology = memory["chronological_evidence"]
+    comparison = chronology["early_late_comparison"]
 
     assert memory["measurement_status"] == "Verified"
-    assert memory["cycles_with_memory_block"] == 2
+    assert memory["cycles_with_memory_block"] == 8
     assert memory["memory_block_coverage_percentage"] == 100.0
-    assert memory["verified_cycles"] == 2
+    assert memory["verified_cycles"] == 8
+    assert memory["fully_verified_cycles"] == 8
+    assert memory["fully_verified_memory_coverage_percentage"] == 100.0
     assert memory["rss_start_min_bytes"] == 100_000_000
-    assert memory["rss_end_max_bytes"] == 110_000_000
-    assert memory["rss_observed_peak_max_bytes"] == 125_000_000
-    assert memory["rss_delta_min_bytes"] == -2_000_000
+    assert memory["rss_end_max_bytes"] == 132_000_000
+    assert memory["rss_observed_peak_max_bytes"] == 150_000_000
+    assert memory["rss_delta_min_bytes"] == 3_000_000
     assert memory["rss_delta_max_bytes"] == 10_000_000
-    assert memory["rss_delta_average_bytes"] == 4_000_000.0
-    assert memory["cycles_with_positive_rss_delta"] == 1
-    assert memory["samples_attempted_total"] == 6
+    assert memory["rss_delta_average_bytes"] == 5_375_000.0
+    assert memory["cycles_with_positive_rss_delta"] == 8
+    assert memory["samples_attempted_total"] == 24
+    assert memory["samples_succeeded_total"] == 24
     assert memory["samples_failed_total"] == 0
+    assert memory["sampling_failure_rate_percentage"] == 0.0
+    assert chronology["status"] == "Verified"
+    assert chronology["verified_observation_count"] == 8
+    assert chronology["first_verified_scan_timestamp_utc"] == "2026-07-29T00:00:00Z"
+    assert chronology["last_verified_scan_timestamp_utc"] == "2026-07-29T00:08:00Z"
+    assert chronology["first_verified_rss_start_bytes"] == 100_000_000
+    assert chronology["last_verified_rss_end_bytes"] == 132_000_000
+    assert chronology["net_rss_change_bytes"] == 32_000_000
+    assert chronology["verified_window_seconds"] == 480
+    assert chronology["highest_observed_peak"] == {
+        "scan_timestamp_utc": "2026-07-29T00:07:00Z",
+        "scan_run_id": "run-peak",
+        "rss_observed_peak_bytes": 150_000_000,
+        "tie_break_policy": "Earliest timestamp, then run_id, when peak values tie.",
+    }
+    assert comparison["status"] == "Verified"
+    assert comparison["bucket_size"] == 2
+    assert comparison["early_bucket"]["median_rss_end_bytes"] == 111_000_000
+    assert comparison["late_bucket"]["median_rss_end_bytes"] == 131_000_000
+    assert comparison["late_minus_early_median_rss_end_bytes"] == 20_000_000
+    assert "ceil(verified_observation_count / 4)" in comparison["methodology"]
     assert memory["stability_assessment"].startswith("OBSERVATIONAL_ONLY")
+    assert "no automatic memory-leak or stability verdict" in memory["stability_assessment"]
 
 
+def test_process_memory_partial_evidence_stays_unverified_and_reports_sampling_failures(
+    tmp_path: Path,
+) -> None:
+    database = _fixture_database(tmp_path)
+    _set_process_memory(
+        database,
+        {
+            "run-1": _verified_process_memory(
+                start=100_000_000,
+                end=110_000_000,
+                peak=120_000_000,
+            ),
+            "run-2": {
+                "measurement_status": "Unverified",
+                "source": "test:rss",
+                "rss_start_bytes": "N/A",
+                "rss_end_bytes": 108_000_000,
+                "rss_observed_peak_bytes": 125_000_000,
+                "rss_delta_bytes": "N/A",
+                "samples_attempted": 3,
+                "samples_succeeded": 2,
+                "samples_failed": 1,
+            },
+        },
+    )
+
+    memory = _report(database)["scan_health"]["process_memory"]
+    chronology = memory["chronological_evidence"]
+
+    assert memory["measurement_status"] == "Unverified"
+    assert memory["verified_cycles"] == 1
+    assert memory["unverified_cycles"] == 1
+    assert memory["fully_verified_cycles"] == 1
+    assert memory["fully_verified_memory_coverage_percentage"] == 50.0
+    assert memory["samples_attempted_total"] == 6
+    assert memory["samples_succeeded_total"] == 5
+    assert memory["samples_failed_total"] == 1
+    assert memory["cycles_with_sampling_failures"] == 1
+    assert memory["sampling_failure_rate_percentage"] == 16.6667
+    assert memory["malformed_memory_field_count"] == 0
+    assert chronology["status"] == "Unverified"
+    assert chronology["verified_observation_count"] == 1
+    assert chronology["first_verified_scan_run_id"] == "run-1"
+    assert chronology["last_verified_scan_run_id"] == "run-1"
+    assert chronology["early_late_comparison"]["status"] == "DATA_INSUFFICIENT"
+
+
+def test_process_memory_explicit_na_remains_na_and_retains_failure_coverage(
+    tmp_path: Path,
+) -> None:
+    database = _fixture_database(tmp_path)
+    unavailable = {
+        "measurement_status": "N/A",
+        "source": "N/A",
+        "rss_start_bytes": "N/A",
+        "rss_end_bytes": "N/A",
+        "rss_observed_peak_bytes": "N/A",
+        "rss_delta_bytes": "N/A",
+        "samples_attempted": 3,
+        "samples_succeeded": 0,
+        "samples_failed": 3,
+    }
+    _set_process_memory(database, {"run-1": unavailable, "run-2": unavailable})
+
+    memory = _report(database)["scan_health"]["process_memory"]
+    chronology = memory["chronological_evidence"]
+
+    assert memory["measurement_status"] == "N/A"
+    assert memory["not_available_cycles"] == 2
+    assert memory["fully_verified_cycles"] == 0
+    assert memory["samples_attempted_total"] == 6
+    assert memory["samples_succeeded_total"] == 0
+    assert memory["samples_failed_total"] == 6
+    assert memory["cycles_with_sampling_failures"] == 2
+    assert memory["sampling_failure_rate_percentage"] == 100.0
+    assert chronology["status"] == "N/A"
+    assert chronology["first_verified_scan_timestamp_utc"] == "N/A"
+    assert chronology["net_rss_change_bytes"] == "N/A"
+
+
+def test_process_memory_malformed_verified_contract_is_excluded_and_counted(
+    tmp_path: Path,
+) -> None:
+    database = _fixture_database(tmp_path)
+    malformed_verified = _verified_process_memory(
+        start=110_000_000,
+        end=108_000_000,
+        peak=125_000_000,
+    )
+    malformed_verified["rss_start_bytes"] = "broken"
+    _set_process_memory(
+        database,
+        {
+            "run-1": _verified_process_memory(
+                start=100_000_000,
+                end=110_000_000,
+                peak=120_000_000,
+            ),
+            "run-2": malformed_verified,
+        },
+    )
+
+    report = _report(database)
+    memory = report["scan_health"]["process_memory"]
+    chronology = memory["chronological_evidence"]
+    malformed = report["data_coverage_and_reliability"]["malformed_or_unparseable_records"]
+
+    assert memory["measurement_status"] == "Unverified"
+    assert memory["verified_cycles"] == 2
+    assert memory["fully_verified_cycles"] == 1
+    assert memory["verified_cycles_without_required_evidence"] == 1
+    assert memory["malformed_memory_field_count"] == 2
+    assert chronology["status"] == "Unverified"
+    assert chronology["verified_observation_count"] == 1
+    assert chronology["first_verified_scan_run_id"] == "run-1"
+    assert malformed[
+        "scan_runs.runtime_stats_json.process_memory.rss_start_bytes_invalid"
+    ] == 1
+    assert malformed[
+        "scan_runs.runtime_stats_json.process_memory.verified_contract.rss_start_bytes_missing_or_invalid"
+    ] == 1
+
+
+def test_process_memory_chronology_sorts_out_of_order_verified_evidence() -> None:
+    early = audit_module._ProcessMemoryObservation(
+        scan_timestamp=datetime(2026, 7, 29, 0, 0, tzinfo=UTC),
+        run_id="run-early",
+        runtime_payload={
+            "process_memory": _verified_process_memory(
+                start=100_000_000,
+                end=105_000_000,
+                peak=110_000_000,
+                samples=2,
+            )
+        },
+    )
+    late = audit_module._ProcessMemoryObservation(
+        scan_timestamp=datetime(2026, 7, 29, 0, 5, tzinfo=UTC),
+        run_id="run-late",
+        runtime_payload={
+            "process_memory": _verified_process_memory(
+                start=106_000_000,
+                end=109_000_000,
+                peak=112_000_000,
+                samples=2,
+            )
+        },
+    )
+
+    memory = audit_module._process_memory_health((late, early), Counter())
+    chronology = memory["chronological_evidence"]
+    comparison = chronology["early_late_comparison"]
+
+    assert memory["measurement_status"] == "Verified"
+    assert chronology["chronological_reorder_applied"] is True
+    assert chronology["first_verified_scan_run_id"] == "run-early"
+    assert chronology["last_verified_scan_run_id"] == "run-late"
+    assert chronology["net_rss_change_bytes"] == 9_000_000
+    assert chronology["highest_observed_peak"]["scan_run_id"] == "run-late"
+    assert comparison["bucket_size"] == 1
+    assert comparison["early_bucket"]["median_rss_end_bytes"] == 105_000_000
+    assert comparison["late_bucket"]["median_rss_end_bytes"] == 109_000_000
+    assert comparison["late_minus_early_median_rss_end_bytes"] == 4_000_000
 
 def test_empty_window_and_missing_optional_tables_are_reported(tmp_path: Path) -> None:
     empty = tmp_path / "minimal.sqlite"
