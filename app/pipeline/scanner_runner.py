@@ -3568,7 +3568,10 @@ def _apply_market_regime_to_symbol(
         update.update(
             {
                 "status": ScannerPipelineStatus.REJECTED_BY_REGIME,
-                "status_history": (ScannerPipelineStatus.REJECTED_BY_REGIME,),
+                "status_history": (
+                    *result.status_history,
+                    ScannerPipelineStatus.REJECTED_BY_REGIME,
+                ),
                 "rejection_reason": reason,
                 "rejection_stage": "regime",
                 "rejection_reasons": _unique_strings((*result.rejection_reasons, reason)),
