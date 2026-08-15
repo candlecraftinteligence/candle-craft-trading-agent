@@ -71,6 +71,7 @@ def build_command_center_payload(
             "retry_count": len(result.retry_diagnostics),
             "cache_efficiency": _cache_efficiency(cache_stats),
             "runtime_warnings": list(runtime_warnings),
+            "process_memory": runtime.process_memory.model_dump(mode="json"),
         },
         "performance_memory_summary": _performance_memory_payload(result),
     }

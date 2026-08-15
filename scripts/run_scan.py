@@ -113,6 +113,7 @@ from app.pipeline.scanner_runner import (  # noqa: E402
     FAST_REPLAY_CANDLES,
     SAFE_REPLAY_CANDLE_LIMIT_MAX,
     ScannerPipelineStatus,
+    ScannerProcessMemoryStats,
     ScannerRunConfig,
     ScannerRunResult,
     ScannerRuntimeStats,
@@ -1704,6 +1705,11 @@ def _combined_runtime_stats(
             "timed_out": timed_out_symbols,
             "not_run": not_run_symbols,
         },
+        process_memory=(
+            runtime_stats.process_memory
+            if runtime_stats is not None
+            else ScannerProcessMemoryStats()
+        ),
     )
 
 
@@ -1857,6 +1863,7 @@ def _scan_run_manifest_row(
         "regime_confidence": _json_scalar(result.market_regime.confidence_score),
         "runtime_seconds": runtime.total_runtime_seconds,
         "average_seconds_per_symbol": runtime.average_seconds_per_symbol,
+        "process_memory": runtime.process_memory.model_dump(mode="json"),
     }
     if watch_iteration is not None:
         row["watch_iteration"] = watch_iteration
@@ -4097,6 +4104,7 @@ def _format_regime_details(result: ScannerRunResult) -> str:
 def _format_run_diagnostics(result: ScannerRunResult) -> str:
     cache_stats = result.cache_stats or {}
     runtime = result.runtime_stats
+    process_memory = runtime.process_memory
     retry_events = tuple(result.retry_diagnostics or ())
     retry_lines = [f"Retry events: {len(retry_events)}"]
     for event in retry_events[:10]:
@@ -4122,6 +4130,17 @@ def _format_run_diagnostics(result: ScannerRunResult) -> str:
             f"Skipped symbols: {runtime.skipped_symbols}",
             f"Errored symbols: {runtime.errored_symbols}",
             f"Global timeout hit: {_bool_text(runtime.global_timeout_hit)}",
+            "Process RSS diagnostics:",
+            f"Measurement status: {process_memory.measurement_status}",
+            f"Source: {process_memory.source}",
+            f"RSS start bytes: {process_memory.rss_start_bytes}",
+            f"RSS end bytes: {process_memory.rss_end_bytes}",
+            f"RSS observed peak bytes: {process_memory.rss_observed_peak_bytes}",
+            f"RSS delta bytes: {process_memory.rss_delta_bytes}",
+            (
+                f"Samples: {process_memory.samples_succeeded}/"
+                f"{process_memory.samples_attempted} succeeded"
+            ),
             "Per-symbol timing:",
             *_runtime_symbol_lines(result),
             "Cache diagnostics:",

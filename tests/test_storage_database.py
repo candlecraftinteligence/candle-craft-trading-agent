@@ -22,6 +22,7 @@ from app.backtesting import (
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
+    ScannerProcessMemoryStats,
     ScannerRunConfig,
     ScannerRunResult,
     ScannerRuntimeStats,
@@ -643,6 +644,17 @@ def test_normal_scan_run_persists_summary_metadata_from_runtime_stats(tmp_path) 
         total_runtime_seconds=1.234,
         average_seconds_per_symbol=0.411,
         completed_symbols=3,
+        process_memory=ScannerProcessMemoryStats(
+            measurement_status="Verified",
+            source="test:rss",
+            rss_start_bytes=100_000_000,
+            rss_end_bytes=105_000_000,
+            rss_observed_peak_bytes=110_000_000,
+            rss_delta_bytes=5_000_000,
+            samples_attempted=5,
+            samples_succeeded=5,
+            samples_failed=0,
+        ),
     )
     result = _scan_result(
         runtime_stats=runtime_stats,
@@ -668,6 +680,18 @@ def test_normal_scan_run_persists_summary_metadata_from_runtime_stats(tmp_path) 
 
     stored_runtime = json.loads(row["runtime_stats_json"])
     assert stored_runtime["total_runtime_seconds"] == 1.234
+    assert stored_runtime["process_memory"] == {
+        "measurement_status": "Verified",
+        "source": "test:rss",
+        "rss_start_bytes": 100_000_000,
+        "rss_end_bytes": 105_000_000,
+        "rss_observed_peak_bytes": 110_000_000,
+        "rss_delta_bytes": 5_000_000,
+        "samples_attempted": 5,
+        "samples_succeeded": 5,
+        "samples_failed": 0,
+        "failure_codes": [],
+    }
     assert row["symbols_requested"] == 3
     assert row["symbols_queued"] == 3
     assert row["symbols_completed"] == 3

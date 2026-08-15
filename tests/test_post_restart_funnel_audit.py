@@ -253,8 +253,68 @@ def test_window_is_start_inclusive_end_exclusive_and_uses_no_outside_rows(tmp_pa
     assert report["scan_health"]["observed_scan_cycles"] == 2
     assert report["scan_health"]["distinct_symbols_evaluated"] == 2
     assert report["scan_health"]["total_symbol_evaluations"] == 3
+    memory = report["scan_health"]["process_memory"]
+    assert memory["measurement_status"] == "NOT_RECORDED"
+    assert memory["stability_assessment"].startswith("WAITING_FOR_RUNTIME_EVIDENCE")
     assert report["gate_failures"]["failure_occurrences_by_normalized_gate"]["target_inside_chop"] == 2
     assert report["target_inside_chop_review"]["occurrences"] == 2
+
+
+def test_process_memory_is_aggregated_without_inferring_a_leak_verdict(tmp_path: Path) -> None:
+    database = _fixture_database(tmp_path)
+    memory_by_run = {
+        "run-1": {
+            "measurement_status": "Verified",
+            "source": "test:rss",
+            "rss_start_bytes": 100_000_000,
+            "rss_end_bytes": 110_000_000,
+            "rss_observed_peak_bytes": 120_000_000,
+            "rss_delta_bytes": 10_000_000,
+            "samples_attempted": 3,
+            "samples_succeeded": 3,
+            "samples_failed": 0,
+            "failure_codes": [],
+        },
+        "run-2": {
+            "measurement_status": "Verified",
+            "source": "test:rss",
+            "rss_start_bytes": 110_000_000,
+            "rss_end_bytes": 108_000_000,
+            "rss_observed_peak_bytes": 125_000_000,
+            "rss_delta_bytes": -2_000_000,
+            "samples_attempted": 3,
+            "samples_succeeded": 3,
+            "samples_failed": 0,
+            "failure_codes": [],
+        },
+    }
+    with sqlite3.connect(database) as connection:
+        for run_id, process_memory in memory_by_run.items():
+            connection.execute(
+                "UPDATE scan_runs SET runtime_stats_json = ? WHERE run_id = ?",
+                (json.dumps({"errors": {}, "process_memory": process_memory}), run_id),
+            )
+    connection.close()
+    _quiesce_fixture(database)
+
+    report = _report(database)
+    memory = report["scan_health"]["process_memory"]
+
+    assert memory["measurement_status"] == "Verified"
+    assert memory["cycles_with_memory_block"] == 2
+    assert memory["memory_block_coverage_percentage"] == 100.0
+    assert memory["verified_cycles"] == 2
+    assert memory["rss_start_min_bytes"] == 100_000_000
+    assert memory["rss_end_max_bytes"] == 110_000_000
+    assert memory["rss_observed_peak_max_bytes"] == 125_000_000
+    assert memory["rss_delta_min_bytes"] == -2_000_000
+    assert memory["rss_delta_max_bytes"] == 10_000_000
+    assert memory["rss_delta_average_bytes"] == 4_000_000.0
+    assert memory["cycles_with_positive_rss_delta"] == 1
+    assert memory["samples_attempted_total"] == 6
+    assert memory["samples_failed_total"] == 0
+    assert memory["stability_assessment"].startswith("OBSERVATIONAL_ONLY")
+
 
 
 def test_empty_window_and_missing_optional_tables_are_reported(tmp_path: Path) -> None:

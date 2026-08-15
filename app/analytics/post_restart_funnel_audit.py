@@ -96,6 +96,20 @@ TIMEFRAME_COMPACT_FIELDS = frozenset({
     "structure_timeframe", "structure_context_timeframe", "structure_analysis_timeframe",
 })
 
+PROCESS_MEMORY_COMPACT_FIELDS = frozenset({
+    "measurement_status",
+    "source",
+    "rss_start_bytes",
+    "rss_end_bytes",
+    "rss_observed_peak_bytes",
+    "rss_delta_bytes",
+    "samples_attempted",
+    "samples_succeeded",
+    "samples_failed",
+})
+
+
+
 RAW_RESULT_COMPACT_FIELDS = frozenset({
     "failed_gate", "final_failed_gate", "gates_failed", "failed_gates", "min_score_for_idea",
     "opportunity_score", "technical_score", "readiness_score", "score", "quality_grade",
@@ -412,6 +426,7 @@ def build_post_restart_funnel_report(
         source_after = _verify_quiescent_immutable_source(source_before)
 
     malformed = limits.malformed
+    scan_health = _scan_health(scan_rows, symbol_rows, candidate_rows, window, expected_watch_interval_sec, malformed)
     coverage = _data_coverage(
         tables=tables,
         scan_rows=scan_rows,
@@ -426,7 +441,6 @@ def build_post_restart_funnel_report(
         window=window,
         query_safety=query_safety,
     )
-    scan_health = _scan_health(scan_rows, symbol_rows, candidate_rows, window, expected_watch_interval_sec, malformed)
     market_scarcity_evidence = _market_scarcity_direct_evidence(
         scan_rows=scan_rows,
         symbol_rows=symbol_rows,
@@ -911,7 +925,17 @@ def _compact_scan_run_optional_json(row: dict[str, Any], limits: QueryLimits) ->
         payload = _json_mapping(row.get("runtime_stats_json"), "scan_runs.runtime_stats_json", limits.malformed)
         errors = payload.get("errors")
         compact_errors = dict(errors) if isinstance(errors, Mapping) else {}
-        row["runtime_stats_json"] = json.dumps({"errors": compact_errors}, sort_keys=True, separators=(",", ":"))
+        compact_payload: dict[str, Any] = {"errors": compact_errors}
+        raw_memory = payload.get("process_memory")
+        if isinstance(raw_memory, Mapping):
+            compact_payload["process_memory"] = {
+                key: raw_memory[key]
+                for key in PROCESS_MEMORY_COMPACT_FIELDS
+                if key in raw_memory
+            }
+        elif "process_memory" in payload:
+            compact_payload["process_memory"] = "INVALID_TYPE"
+        row["runtime_stats_json"] = json.dumps(compact_payload, sort_keys=True, separators=(",", ":"))
     if "timeframes_json" in row:
         payload = _json_mapping(row.get("timeframes_json"), "scan_runs.timeframes_json", limits.malformed)
         compact_timeframes = {
@@ -1055,6 +1079,7 @@ def _scan_health(
     zero_completed = 0
     completion_not_recorded = 0
     error_counts: Counter[str] = Counter()
+    runtime_payloads: list[Mapping[str, Any]] = []
     for row in scan_rows:
         requested = _integer_or_none(row.get("symbols_requested"))
         completed = _integer_or_none(row.get("symbols_completed"))
@@ -1066,7 +1091,9 @@ def _scan_health(
             zero_completed += 1
         elif requested > 0:
             partial += 1
-        _count_runtime_errors(row.get("runtime_stats_json"), error_counts, malformed)
+        runtime_payloads.append(
+            _count_runtime_errors(row.get("runtime_stats_json"), error_counts, malformed)
+        )
     gaps = _scan_gaps(timestamps, window, interval_sec)
     evaluated_symbols = {str(row["symbol"]) for row in symbol_rows if _text(row.get("symbol"))}
     total_evaluations = len(symbol_rows)
@@ -1088,6 +1115,7 @@ def _scan_health(
         "scan_gaps": gaps,
         "longest_scan_gap_seconds": max((gap["gap_seconds"] for gap in gaps), default=0),
         "recorded_errors_by_type": dict(sorted(error_counts.items())),
+        "process_memory": _process_memory_health(runtime_payloads, malformed),
         "timestamp_count": len(timestamps),
         "timestamp_parse_failures": malformed.get("timestamp_unparseable", 0),
         "interval_assumption": f"Expected cycles assume a cycle at window start and every {interval_sec} seconds thereafter.",
@@ -1986,7 +2014,7 @@ def _scan_gaps(timestamps: Sequence[datetime], window: AuditWindow, interval: in
     return gaps
 
 
-def _count_runtime_errors(value: Any, counts: Counter[str], malformed: Counter[str]) -> None:
+def _count_runtime_errors(value: Any, counts: Counter[str], malformed: Counter[str]) -> Mapping[str, Any]:
     payload = _json_mapping(value, "scan_runs.runtime_stats_json", malformed)
     errors = payload.get("errors")
     if isinstance(errors, Mapping):
@@ -1996,6 +2024,143 @@ def _count_runtime_errors(value: Any, counts: Counter[str], malformed: Counter[s
     elif isinstance(errors, list):
         for item in errors:
             counts[_safe_text(item)] += 1
+    return payload
+
+
+def _process_memory_health(
+    runtime_payloads: Sequence[Mapping[str, Any]],
+    malformed: Counter[str],
+) -> dict[str, Any]:
+    memory_blocks: list[Mapping[str, Any]] = []
+    status_counts: Counter[str] = Counter()
+    starts: list[int] = []
+    ends: list[int] = []
+    peaks: list[int] = []
+    deltas: list[int] = []
+    samples_attempted = 0
+    samples_failed = 0
+
+    for runtime_payload in runtime_payloads:
+        if "process_memory" not in runtime_payload:
+            continue
+        raw_memory = runtime_payload.get("process_memory")
+        if not isinstance(raw_memory, Mapping):
+            malformed["scan_runs.runtime_stats_json.process_memory_wrong_type"] += 1
+            continue
+
+        memory_blocks.append(raw_memory)
+        status = _text(raw_memory.get("measurement_status")) or "N/A"
+        status_counts[status] += 1
+        for key, values, allow_negative in (
+            ("rss_start_bytes", starts, False),
+            ("rss_end_bytes", ends, False),
+            ("rss_observed_peak_bytes", peaks, False),
+            ("rss_delta_bytes", deltas, True),
+        ):
+            value = _process_memory_integer(
+                raw_memory,
+                key,
+                malformed,
+                allow_negative=allow_negative,
+            )
+            if value is not None:
+                values.append(value)
+
+        attempted = _process_memory_integer(
+            raw_memory,
+            "samples_attempted",
+            malformed,
+            allow_negative=False,
+        )
+        failed = _process_memory_integer(
+            raw_memory,
+            "samples_failed",
+            malformed,
+            allow_negative=False,
+        )
+        samples_attempted += attempted or 0
+        samples_failed += failed or 0
+
+    observed_cycles = len(runtime_payloads)
+    verified_cycles = sum(
+        count
+        for status, count in status_counts.items()
+        if status.strip().lower() == "verified"
+    )
+    unverified_cycles = sum(
+        count
+        for status, count in status_counts.items()
+        if status.strip().lower() == "unverified"
+    )
+    not_available_cycles = sum(
+        count
+        for status, count in status_counts.items()
+        if status.strip().lower() in {"n/a", "na", "not_recorded"}
+    )
+    if not memory_blocks:
+        measurement_status = "NOT_RECORDED"
+    elif verified_cycles == observed_cycles and observed_cycles > 0:
+        measurement_status = "Verified"
+    elif not_available_cycles == observed_cycles and observed_cycles > 0:
+        measurement_status = "N/A"
+    else:
+        measurement_status = "Unverified"
+
+    stability_assessment = (
+        "WAITING_FOR_RUNTIME_EVIDENCE: fewer than 2 verified per-scan RSS records."
+        if verified_cycles < 2
+        else (
+            "OBSERVATIONAL_ONLY: per-scan RSS deltas are recorded; "
+            "no automatic memory-leak verdict is inferred."
+        )
+    )
+    return {
+        "measurement_status": measurement_status,
+        "observed_scan_cycles": observed_cycles,
+        "cycles_with_memory_block": len(memory_blocks),
+        "cycles_without_memory_block": observed_cycles - len(memory_blocks),
+        "memory_block_coverage_percentage": _percentage(len(memory_blocks), observed_cycles),
+        "status_counts": dict(sorted(status_counts.items())),
+        "verified_cycles": verified_cycles,
+        "unverified_cycles": unverified_cycles,
+        "not_available_cycles": not_available_cycles,
+        "rss_start_min_bytes": min(starts) if starts else "NOT_RECORDED",
+        "rss_start_max_bytes": max(starts) if starts else "NOT_RECORDED",
+        "rss_end_min_bytes": min(ends) if ends else "NOT_RECORDED",
+        "rss_end_max_bytes": max(ends) if ends else "NOT_RECORDED",
+        "rss_observed_peak_max_bytes": max(peaks) if peaks else "NOT_RECORDED",
+        "rss_delta_min_bytes": min(deltas) if deltas else "NOT_RECORDED",
+        "rss_delta_max_bytes": max(deltas) if deltas else "NOT_RECORDED",
+        "rss_delta_average_bytes": (
+            round(sum(deltas) / len(deltas), 3)
+            if deltas
+            else "NOT_RECORDED"
+        ),
+        "cycles_with_positive_rss_delta": sum(1 for value in deltas if value > 0),
+        "samples_attempted_total": samples_attempted,
+        "samples_failed_total": samples_failed,
+        "stability_assessment": stability_assessment,
+    }
+
+
+def _process_memory_integer(
+    memory: Mapping[str, Any],
+    key: str,
+    malformed: Counter[str],
+    *,
+    allow_negative: bool,
+) -> int | None:
+    raw_value = memory.get(key)
+    value = _integer_or_none(raw_value)
+    if value is None:
+        if raw_value not in (None, "", "N/A", "NOT_RECORDED"):
+            malformed[f"scan_runs.runtime_stats_json.process_memory.{key}_invalid"] += 1
+        return None
+    if not allow_negative and value < 0:
+        malformed[f"scan_runs.runtime_stats_json.process_memory.{key}_invalid"] += 1
+        return None
+    return value
+
 
 
 def _candidate_context(rows: Sequence[Mapping[str, Any]]) -> dict[tuple[str | None, str | None], dict[str, str]]:
