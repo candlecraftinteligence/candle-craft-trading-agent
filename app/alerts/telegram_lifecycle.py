@@ -8413,17 +8413,6 @@ def _public_setup_quality_score_decimal(symbol_result: ScannerSymbolResult) -> D
         getattr(lifecycle, "quality_score", NA) if lifecycle is not None else NA,
     )
 
-def _public_setup_quality_score_decimal(symbol_result: ScannerSymbolResult) -> Decimal | None:
-    diagnostics = _representative_diagnostics(symbol_result)
-    lifecycle = symbol_result.lifecycle_state
-    setup_quality = symbol_result.setup_quality
-    return _first_decimal(
-        getattr(setup_quality, "quality_score", NA),
-        diagnostics.get("setup_quality_score"),
-        diagnostics.get("quality_score"),
-        getattr(lifecycle, "quality_score", NA) if lifecycle is not None else NA,
-    )
-
 def _public_watchlist_v1_blockers(
     symbol_result: ScannerSymbolResult,
     message: TelegramSignalMessage,

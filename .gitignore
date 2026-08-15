@@ -30,6 +30,18 @@ postgres_data/
 *.log
 
 scan_output.json
+scan_runs/*.db
+scan_runs/*.sqlite
+scan_runs/*.sqlite3
+scan_runs/*.db-wal
+scan_runs/*.db-shm
+scan_runs/*.db-journal
+scan_runs/*.sqlite-wal
+scan_runs/*.sqlite-shm
+scan_runs/*.sqlite-journal
+scan_runs/*.sqlite3-wal
+scan_runs/*.sqlite3-shm
+scan_runs/*.sqlite3-journal
 scan_runs/*.json
 scan_runs/*.jsonl
 scan_runs/admin_drafts/
