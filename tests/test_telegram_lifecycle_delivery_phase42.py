@@ -834,6 +834,65 @@ def test_public_v1_scan_cap_sends_best_one_and_persists_loser_reason(tmp_path: P
     assert any(row[0] == "ETHUSDT" and row[1] == "skipped" and row[2] == "public_block_scan_cap" for row in rows)
 
 
+def test_public_v1_cooldown_candidate_does_not_consume_fresh_scan_slot(tmp_path: Path) -> None:
+    db_path = tmp_path / "public-v1-cooldown-slot.db"
+    sender = FakeSender()
+    service = TelegramLifecycleDeliveryService(database_path=db_path, settings=Settings(), sender=sender)
+
+    first = run(
+        service.deliver_for_run(
+            _run_result(
+                _public_v1_symbol(
+                    symbol="BTCUSDT",
+                    signal_id="cooldown-slot-seed",
+                    quality_score=95,
+                    rr=Decimal("4"),
+                    technical_score=Decimal("99"),
+                    opportunity_score=Decimal("99"),
+                )
+            ),
+            scan_run_id="cooldown-slot-seed",
+        )
+    )
+    repeated_top = _public_v1_symbol(
+        symbol="BTCUSDT",
+        signal_id="cooldown-slot-repeat",
+        quality_score=99,
+        rr=Decimal("5"),
+        technical_score=Decimal("99"),
+        opportunity_score=Decimal("99"),
+    )
+    fresh_next = _public_v1_symbol(
+        symbol="ETHUSDT",
+        signal_id="cooldown-slot-fresh",
+        quality_score=95,
+        rr=Decimal("4"),
+        technical_score=Decimal("98"),
+        opportunity_score=Decimal("98"),
+    )
+
+    second = run(
+        service.deliver_for_run(
+            _run_result_many(repeated_top, fresh_next),
+            scan_run_id="cooldown-slot-second",
+        )
+    )
+
+    assert first.sent == 1
+    assert second.sent == 1
+    assert second.skipped == 1
+    assert len(sender.messages) == 2
+    assert "ETHUSDT" in sender.messages[-1]
+    rows = _public_v1_block_reasons(db_path)
+    assert any(
+        row[0] == "BTCUSDT"
+        and row[1] == "skipped"
+        and row[2] == "public_block_same_symbol_same_side_cooldown"
+        for row in rows
+    )
+    assert not any(row[0] == "ETHUSDT" and row[2] == "public_block_scan_cap" for row in rows)
+
+
 def test_public_v1_allows_15th_daily_signal_when_hourly_cap_not_exceeded(tmp_path: Path) -> None:
     db_path = tmp_path / "public-v1-daily-cap-allows-15.db"
     _seed_public_cap_history(db_path, 14)
