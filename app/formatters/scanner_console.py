@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Any, Literal, TextIO
 
 from app.data.dtos import NA
-from app.formatters.scanner_display import build_symbol_display
+from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
 from app.pipeline.scanner_runner import ScannerSymbolResult
 
 
@@ -179,6 +179,19 @@ class ScannerConsolePresenter:
             if candidate_rows:
                 lines.extend(("", " WATCH"))
                 lines.extend(self._setup_table(candidate_rows))
+        if candidate_rows:
+            lines.append(" Q/T/O = setup quality / technical / opportunity. One high score alone is not Telegram eligibility.")
+            blocker_lines = self._candidate_blocker_lines(candidate_rows)
+            if blocker_lines:
+                lines.extend(("", " WHY NOT SENT", *blocker_lines))
+        if _show_persistent_state_note(summary, candidate_rows):
+            lines.extend(
+                (
+                    "",
+                    " STATE NOTE",
+                    " Iteration 1 is process-local. Reusing the runtime DB preserves lifecycle, cooldown, and Telegram history.",
+                )
+            )
 
         warning_groups = _warning_groups(summary, results)
         failure_groups = _failure_groups(results)
@@ -272,10 +285,15 @@ class ScannerConsolePresenter:
         if telegram_deliveries:
             lines.append("TELEGRAM DELIVERIES")
             for delivery in sorted(telegram_deliveries, key=lambda item: _safe_text(getattr(item, "symbol", NA))):
+                reason = _first_non_na_text(
+                    getattr(delivery, "error_message", NA),
+                    getattr(delivery, "detail", NA),
+                )
                 lines.append(
                     f"  {_safe_text(getattr(delivery, 'symbol', NA))}: "
-                    f"{_safe_text(getattr(delivery, 'status', NA))}; "
-                    f"{_safe_text(getattr(delivery, 'detail', NA))}"
+                    f"status={_safe_text(getattr(delivery, 'status', NA))}; "
+                    f"alert={_safe_text(getattr(delivery, 'alert_type', NA))}; "
+                    f"reason={reason}"
                 )
         errors = tuple(getattr(summary, "errors", ()) or ())
         if errors:
@@ -314,7 +332,8 @@ class ScannerConsolePresenter:
         third = (
             f" Valid activations: {getattr(summary, 'valid_activations', 0)} | "
             f"Still watching: {getattr(summary, 'still_watching', 0)} | "
-            f"Signals sent: {_count(outbox, 'sent')} | Repeats blocked: {_count(outbox, 'blocked_repeat')}"
+            f"Signals sent: {_count(outbox, 'sent')} | "
+            f"Blocked retries compacted: {_count(outbox, 'blocked_repeat')}"
         )
         return [first, second, third]
 
@@ -345,21 +364,21 @@ class ScannerConsolePresenter:
         ]
 
     def _setup_table(self, rows: Sequence[dict[str, str | bool]]) -> list[str]:
-        headings = ("Symbol", "Mode", "Side", "Grade", "Score", "State", "RR", "Telegram")
+        headings = ("Symbol", "Mode", "Side", "Grade", "Q/T/O", "State", "RR", "Telegram")
         cells = [
             (
                 str(row["symbol"]),
                 str(row["mode"]),
                 str(row["side"]),
                 str(row["grade"]),
-                str(row["score"]),
+                str(row["scores"]),
                 str(row["state"]),
                 str(row["rr"]),
                 str(row["telegram"]),
             )
             for row in rows
         ]
-        max_widths = (9, 8, 5, 5, 5, 9, 5, 8)
+        max_widths = (9, 8, 5, 5, 9, 9, 5, 10)
         widths = tuple(
             min(limit, max(len(heading), *(len(_truncate(cell[index], limit)) for cell in cells)))
             for index, (heading, limit) in enumerate(zip(headings, max_widths, strict=True))
@@ -382,6 +401,17 @@ class ScannerConsolePresenter:
                     for index, value in enumerate(row)
                 )
             )
+        return lines
+
+    def _candidate_blocker_lines(self, rows: Sequence[Mapping[str, Any]]) -> list[str]:
+        blockers = [
+            (str(row["symbol"]), str(row["blocker"]))
+            for row in rows
+            if row.get("telegram") not in {"SENT", "DRY_RUN"} and row.get("blocker") != NA
+        ]
+        lines = [f" {symbol}: {reason}" for symbol, reason in blockers[:8]]
+        if len(blockers) > len(lines):
+            lines.append(f" ...and {len(blockers) - len(lines)} more blocked/watch reasons")
         return lines
 
     def _format_lines(self, lines: Iterable[str]) -> str:
@@ -416,15 +446,26 @@ def _candidate_rows(
     results: Sequence[ScannerSymbolResult],
     telegram_deliveries: Sequence[Any],
 ) -> list[dict[str, str | bool]]:
-    telegram_by_symbol: dict[str, str] = {}
+    telegram_by_symbol: dict[str, tuple[str, str]] = {}
     for delivery in telegram_deliveries:
         symbol = _safe_text(getattr(delivery, "symbol", NA)).upper()
         if symbol != NA:
-            telegram_by_symbol[symbol] = _safe_text(getattr(delivery, "status", NA)).upper()
+            candidate = (
+                _safe_text(getattr(delivery, "status", NA)).upper(),
+                _first_non_na_text(
+                    getattr(delivery, "error_message", NA),
+                    getattr(delivery, "detail", NA),
+                ),
+            )
+            telegram_by_symbol[symbol] = _preferred_delivery(telegram_by_symbol.get(symbol), candidate)
     for activation in tuple(getattr(summary, "alerts", ()) or ()):
         symbol = _safe_text(getattr(activation, "symbol", NA)).upper()
         if symbol != NA:
-            telegram_by_symbol[symbol] = _safe_text(getattr(activation, "delivery_status", NA)).upper()
+            candidate = (
+                _safe_text(getattr(activation, "delivery_status", NA)).upper(),
+                _safe_text(getattr(activation, "delivery_detail", NA)),
+            )
+            telegram_by_symbol[symbol] = _preferred_delivery(telegram_by_symbol.get(symbol), candidate)
 
     rows: list[dict[str, str | bool]] = []
     for result in results:
@@ -436,26 +477,161 @@ def _candidate_rows(
             continue
         trade_idea = result.trade_idea
         score_result = result.score_result
-        mode = _first_text(result.valid_strategy_modes) or _first_text(result.rejected_strategy_modes) or NA
-        grade = _safe_text(getattr(score_result, "grade", getattr(trade_idea, "grade", NA)))
-        score = _number_text(getattr(score_result, "total_score", getattr(trade_idea, "confidence_score", NA)))
-        side = _safe_text(getattr(trade_idea, "direction", NA))
-        rr = _number_text(getattr(trade_idea, "best_rr", NA))
+        lifecycle = result.lifecycle_state
+        diagnostics = representative_strategy_diagnostics(result)
+        mode = _first_non_na_text(
+            getattr(lifecycle, "mode", NA),
+            _first_text(result.valid_strategy_modes),
+            _first_text(result.rejected_strategy_modes),
+            diagnostics.get("mode"),
+        )
+        grade = _first_non_na_text(
+            getattr(getattr(result.setup_quality, "quality_grade", None), "value", NA),
+            getattr(lifecycle, "quality_grade_current", NA),
+            getattr(lifecycle, "candidate_quality_grade", NA),
+            diagnostics.get("watchlist_grade"),
+            diagnostics.get("quality_grade"),
+            getattr(score_result, "grade", NA),
+            getattr(trade_idea, "grade", NA),
+        )
+        side = _side_text(
+            getattr(lifecycle, "direction", NA),
+            diagnostics.get("side"),
+            diagnostics.get("bias"),
+            diagnostics.get("direction"),
+            diagnostics.get("trade_side"),
+            getattr(trade_idea, "direction", NA),
+        )
+        rr = _number_text(
+            _first_non_na_text(
+                getattr(lifecycle, "rr", NA),
+                diagnostics.get("potential_rr"),
+                diagnostics.get("public_watchlist_rr"),
+                diagnostics.get("rr"),
+                diagnostics.get("rr_to_tp1"),
+                diagnostics.get("rr_to_tp2"),
+                diagnostics.get("planned_rr"),
+                diagnostics.get("rr_planned"),
+                getattr(trade_idea, "best_rr", NA),
+            )
+        )
+        scores = "/".join(
+            (
+                _number_text(
+                    _first_non_na_text(
+                        getattr(result.setup_quality, "quality_score", NA),
+                        diagnostics.get("setup_quality_score"),
+                        diagnostics.get("quality_score"),
+                        getattr(lifecycle, "quality_score", NA),
+                    )
+                ),
+                _number_text(result.technical_score),
+                _number_text(
+                    _first_non_na_text(
+                        getattr(score_result, "total_score", NA),
+                        getattr(trade_idea, "confidence_score", NA),
+                        diagnostics.get("opportunity_score"),
+                        diagnostics.get("total_score"),
+                    )
+                ),
+            )
+        )
         state = lifecycle_text if lifecycle_text != NA else _safe_text(display.readiness_label)
+        telegram_status, telegram_reason = telegram_by_symbol.get(result.symbol.upper(), (NA, NA))
+        blocker = _candidate_blocker(
+            result,
+            display_failed_gate=display.failed_gate,
+            side=side,
+            rr=rr,
+            telegram_status=telegram_status,
+            telegram_reason=telegram_reason,
+        )
         rows.append(
             {
                 "symbol": result.symbol,
                 "mode": mode,
                 "side": side,
                 "grade": grade,
-                "score": score,
+                "scores": scores,
                 "state": state,
                 "rr": rr,
-                "telegram": telegram_by_symbol.get(result.symbol.upper(), NA),
+                "telegram": telegram_status,
+                "blocker": blocker,
                 "valid": display.display_bucket == "valid",
             }
         )
     return rows
+
+
+def _preferred_delivery(
+    current: tuple[str, str] | None,
+    candidate: tuple[str, str],
+) -> tuple[str, str]:
+    if current is None:
+        return candidate
+    priority = {
+        "SENT": 7,
+        "DRY_RUN": 6,
+        "FAILED": 5,
+        "BLOCKED": 4,
+        "BLOCKED_REPEAT": 3,
+        "SKIPPED": 2,
+        "DUPLICATE": 1,
+        NA: 0,
+    }
+    return candidate if priority.get(candidate[0], 0) > priority.get(current[0], 0) else current
+
+
+def _candidate_blocker(
+    result: ScannerSymbolResult,
+    *,
+    display_failed_gate: Any,
+    side: str,
+    rr: str,
+    telegram_status: str,
+    telegram_reason: str,
+) -> str:
+    if telegram_status != "SENT" and telegram_reason != NA:
+        return telegram_reason
+    lifecycle = result.lifecycle_state
+    explicit = _first_non_na_text(
+        result.final_block_reason,
+        getattr(lifecycle, "final_block_reason", NA),
+        result.final_failed_gate,
+        getattr(lifecycle, "final_failed_gate", NA),
+    )
+    if explicit != NA:
+        return explicit
+    missing: list[str] = []
+    if side == NA:
+        missing.append("missing_side")
+    if rr == NA:
+        missing.append("missing_rr")
+    if missing:
+        return ",".join(missing)
+    return _first_non_na_text(
+        getattr(lifecycle, "failed_gate", NA),
+        display_failed_gate,
+        result.rejection_reason,
+    )
+
+
+def _show_persistent_state_note(summary: Any, rows: Sequence[Mapping[str, Any]]) -> bool:
+    try:
+        first_iteration = int(getattr(summary, "iteration", 0)) == 1
+    except (TypeError, ValueError):
+        return False
+    if not first_iteration:
+        return False
+    outbox = _mapping(getattr(summary, "telegram_outbox_status", {}))
+    active_lifecycle_count = _count(
+        {"active_lifecycle_count": getattr(summary, "active_lifecycle_count", 0)},
+        "active_lifecycle_count",
+    )
+    if _count(outbox, "blocked_repeat") > 0 or active_lifecycle_count > 0:
+        return True
+    persisted_states = {"ARCHIVED", "COOLDOWN", "STALKING", "TRIGGERED", "CONFIRMED", "EXECUTING"}
+    return any(_safe_text(row.get("state", NA)).upper() in persisted_states for row in rows)
 
 
 def _warning_groups(summary: Any, results: Sequence[ScannerSymbolResult]) -> tuple[_WarningGroup, ...]:
@@ -668,6 +844,22 @@ def _first_text(values: Sequence[Any]) -> str:
         if text != NA:
             return text
     return ""
+
+
+def _first_non_na_text(*values: Any) -> str:
+    for value in values:
+        text = _safe_text(value)
+        if text != NA:
+            return text
+    return NA
+
+
+def _side_text(*values: Any) -> str:
+    for value in values:
+        text = _safe_text(value).strip().lower()
+        if text in {"long", "short"}:
+            return text.upper()
+    return NA
 
 
 def _truncate(value: str, limit: int) -> str:

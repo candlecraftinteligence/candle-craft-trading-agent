@@ -721,6 +721,12 @@ class PublicWatchlistPrefilterResult:
 
 
 @dataclass(frozen=True)
+class _PublicWatchlistScanSelection:
+    selected_signal_ids: frozenset[str] = frozenset()
+    preexisting_cooldown_reasons: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ConfirmedAlertPrefilterResult:
     passed: bool
     blocking_reasons: tuple[str, ...] = ()
@@ -3086,7 +3092,7 @@ class TelegramLifecycleDeliveryService:
                 )
                 public_watchlist_daily_cap_reached: bool | None = None
                 public_watchlist_hourly_cap_reached: bool | None = None
-                selected_public_watchlist_scan_ids = _selected_public_watchlist_scan_signal_ids(
+                public_watchlist_scan_selection = _public_watchlist_scan_selection(
                     result.results,
                     eligibility_context,
                     repository=repository,
@@ -3145,12 +3151,24 @@ class TelegramLifecycleDeliveryService:
                                     )
                     if self.setup_only_public_delivery and alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED:
                         continue
+                    public_watchlist_scan_signal_id = _public_watchlist_scan_signal_id(
+                        symbol_result,
+                        eligibility_context,
+                    )
                     delivery = await self.deliver_for_symbol(
                         symbol_result,
                         repository=repository,
                         scan_run_id=scan_run_id,
                         eligibility_context=eligibility_context,
-                        allow_public_watchlist=_public_watchlist_scan_signal_id(symbol_result, eligibility_context) in selected_public_watchlist_scan_ids,
+                        allow_public_watchlist=(
+                            public_watchlist_scan_signal_id
+                            in public_watchlist_scan_selection.selected_signal_ids
+                        ),
+                        public_watchlist_preexisting_cooldown_reason=(
+                            public_watchlist_scan_selection.preexisting_cooldown_reasons.get(
+                                public_watchlist_scan_signal_id
+                            )
+                        ),
                         public_watchlist_daily_cap_reached=public_watchlist_daily_cap_reached,
                         public_watchlist_hourly_cap_reached=public_watchlist_hourly_cap_reached,
                     )
@@ -3228,6 +3246,7 @@ class TelegramLifecycleDeliveryService:
         scan_run_id: str | None = None,
         eligibility_context: TelegramEligibilityContext | None = None,
         allow_public_watchlist: bool = True,
+        public_watchlist_preexisting_cooldown_reason: str | None = None,
         public_watchlist_daily_cap_reached: bool | None = None,
         public_watchlist_hourly_cap_reached: bool | None = None,
     ) -> TelegramLifecycleDelivery | None:
@@ -3338,6 +3357,15 @@ class TelegramLifecycleDeliveryService:
                 )
             ):
                 return None
+            if public_watchlist_preexisting_cooldown_reason is not None:
+                return _persist_skipped_public_watchlist_attempt(
+                    repository,
+                    symbol_result,
+                    decision=decision,
+                    reason=public_watchlist_preexisting_cooldown_reason,
+                    scan_run_id=scan_run_id,
+                    eligibility_context=context,
+                )
             rate_block_reason = _public_watchlist_delivery_rate_block_reason(
                 repository,
                 decision.message,
@@ -5922,11 +5950,15 @@ def _public_watchlist_symbol_cooldown_block_reason(
     message: TelegramSignalMessage,
     *,
     attempted_at: str,
+    same_side_cooldown_hours: int = PUBLIC_SIGNAL_SAME_SIDE_COOLDOWN_HOURS,
 ) -> str | None:
     side = _status_key(message.direction)
     if side not in {"long", "short"}:
         return None
-    same_side_since = _public_watchlist_cooldown_cutoff(attempted_at, PUBLIC_SIGNAL_SAME_SIDE_COOLDOWN_HOURS)
+    same_side_since = _public_watchlist_cooldown_cutoff(
+        attempted_at,
+        max(0, int(same_side_cooldown_hours)),
+    )
     if repository.has_recent_public_signal_for_symbol_direction(
         symbol=message.symbol,
         direction=side,
@@ -5976,7 +6008,7 @@ def _public_watchlist_delivery_rate_block_reason(
         return cooldown_reason
     return None
 
-def _selected_public_watchlist_scan_signal_ids(
+def _public_watchlist_scan_selection(
     symbol_results: Sequence[ScannerSymbolResult],
     context: TelegramEligibilityContext,
     *,
@@ -5986,9 +6018,9 @@ def _selected_public_watchlist_scan_signal_ids(
     attempted_at: str | None,
     daily_cap_reached: bool | None,
     hourly_cap_reached: bool | None,
-) -> frozenset[str]:
+) -> _PublicWatchlistScanSelection:
     if max_per_scan <= 0:
-        return frozenset()
+        return _PublicWatchlistScanSelection()
     candidates_before_rate_limits: list[tuple[tuple[Any, ...], str, TelegramSignalMessage]] = []
     for symbol_result in symbol_results:
         signal_id = _public_watchlist_scan_signal_id(symbol_result, context)
@@ -6007,21 +6039,34 @@ def _selected_public_watchlist_scan_signal_ids(
             message,
         ))
     if not candidates_before_rate_limits:
-        return frozenset()
+        return _PublicWatchlistScanSelection()
     checked_at = attempted_at or now_utc_iso()
     if daily_cap_reached is None:
         daily_cap_reached = _public_watchlist_daily_cap_reached(repository, context, attempted_at=checked_at)
     if daily_cap_reached:
-        return frozenset()
+        return _PublicWatchlistScanSelection()
     if hourly_cap_reached is None:
         hourly_cap_reached = _public_watchlist_hourly_cap_reached(repository, context, attempted_at=checked_at)
     if hourly_cap_reached:
-        return frozenset()
+        return _PublicWatchlistScanSelection()
     candidates: list[tuple[tuple[Any, ...], str]] = []
+    cooldown_reasons: dict[str, str] = {}
     for sort_key, signal_id, message in candidates_before_rate_limits:
+        cooldown_reason = _public_watchlist_symbol_cooldown_block_reason(
+            repository,
+            message,
+            attempted_at=checked_at,
+            same_side_cooldown_hours=cooldown_hours,
+        )
+        if cooldown_reason is not None:
+            cooldown_reasons[signal_id] = cooldown_reason
+            continue
         candidates.append((sort_key, signal_id))
     selected = [signal_id for _, signal_id in sorted(candidates, key=lambda item: item[0])[:max_per_scan]]
-    return frozenset(selected)
+    return _PublicWatchlistScanSelection(
+        selected_signal_ids=frozenset(selected),
+        preexisting_cooldown_reasons=cooldown_reasons,
+    )
 
 
 def _public_watchlist_scan_signal_id(

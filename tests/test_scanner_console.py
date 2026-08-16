@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 from io import StringIO
+from types import SimpleNamespace
 
 from app.agents.trade_idea import TradeIdeaAgent
 from app.analytics.setup_quality import validate_setup_quality
 from app.formatters.scanner_console import ScannerConsolePresenter, format_watch_iteration_console
+from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerSymbolResult
 from app.watch_mode import WatchActivation, WatchIterationSummary
 
@@ -236,3 +238,52 @@ def test_redirected_no_color_narrow_and_verbose_output_are_readable(monkeypatch)
     assert all(len(line) <= 48 for line in compact.splitlines())
     assert "SYMBOL OUTCOMES" in verbose
     assert "BTCUSDT: outcome=rejected" in verbose
+
+
+def test_compact_uses_canonical_lifecycle_fields_and_shows_exact_telegram_blocker() -> None:
+    result = _valid_result("NEARUSDT").model_copy(
+        update={
+            "trade_idea": None,
+            "technical_score": 97,
+            "lifecycle_state": SetupLifecycleRecord(
+                lifecycle_id="near-lifecycle",
+                symbol="NEARUSDT",
+                mode="scalp",
+                direction="long",
+                current_state=SetupLifecycleState.STALKING,
+                first_seen_at="2026-08-16T08:00:00+00:00",
+                last_seen_at="2026-08-16T08:21:00+00:00",
+                last_transition_at="2026-08-16T08:00:00+00:00",
+                quality_score=94,
+                quality_grade_current="A+",
+                rr="3.4",
+            ),
+        }
+    )
+    delivery = SimpleNamespace(
+        symbol="NEARUSDT",
+        status="blocked_repeat",
+        alert_type="WATCHLIST",
+        error_message="public_block_same_symbol_same_side_cooldown",
+        detail="Repeated blocked Telegram alert attempt compacted.",
+    )
+    summary = _summary(
+        iteration=1,
+        active_lifecycle_count=1,
+        telegram_outbox_status={"sent": 0, "blocked_repeat": 1},
+    )
+
+    output = format_watch_iteration_console(
+        summary,
+        results=(result,),
+        telegram_deliveries=(delivery,),
+        width=160,
+    )
+
+    assert "Q/T/O" in output
+    assert "LONG" in output
+    assert "3.4" in output
+    assert "public_block_same_symbol_same_side_cooldown" in output
+    assert "Blocked retries compacted: 1" in output
+    assert "Iteration 1 is process-local" in output
+    assert "One high score alone is not Telegram eligibility" in output
