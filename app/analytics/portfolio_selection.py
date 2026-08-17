@@ -423,10 +423,11 @@ def _candidate_from_symbol_result(symbol_result: Any, *, default_risk_pct: Maybe
         memory_confidence=_memory_confidence(symbol_result),
         memory_preference_adjustment=_memory_preference_adjustment(symbol_result),
         regime_compatibility_score=_int_score(getattr(symbol_result, "regime_compatibility_score", 50), default=50),
+        # Only use current-run regime diagnostic adjustment; never fall back to historical regime_penalty
         regime_confidence_adjustment=_int_score(
-            getattr(symbol_result, "regime_diagnostics", {}).get("portfolio_confidence_adjustment")
+            (getattr(symbol_result, "regime_diagnostics", {}) or {}).get("portfolio_confidence_adjustment", 0)
             if isinstance(getattr(symbol_result, "regime_diagnostics", {}), Mapping)
-            else getattr(symbol_result, "regime_penalty", 0),
+            else 0,
             default=0,
             lower=-20,
             upper=10,

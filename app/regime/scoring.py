@@ -214,7 +214,6 @@ def score_compatibility(
             + Decimal(volatility) * Decimal("0.20")
             + Decimal(trend) * Decimal("0.25")
             + Decimal(execution) * Decimal("0.20")
-            + Decimal(confidence_score - 50) * Decimal("0.20")
         )
         notes = _compatibility_notes(mode, state, evidence, volatility, trend, execution)
         allowed = score >= threshold
@@ -243,32 +242,26 @@ def build_adjustment(
     strictness: RegimeStrictness,
     notes: Sequence[str],
 ) -> RegimeAdjustment:
-    penalty = _regime_penalty(confidence_score, strictness)
+    # Regime confidence no longer gates or downgrades candidates.
+    # Keep compatibility-based mode permissions and state-based risk/rate adjustments,
+    # but avoid any numeric penalty or readiness/edge/trust adjustments derived from
+    # the scan-level confidence_score.
+    penalty = 0
     compatibility_scores = {mode: item.score for mode, item in compatibility.items()}
     risk_multiplier = min((item.risk_multiplier for item in compatibility.values()), default=Decimal("1"))
     if state == RegimeState.HIGH_VOLATILITY:
         risk_multiplier = min(risk_multiplier, Decimal("0.5"))
     elif state in (RegimeState.CHOP, RegimeState.RISK_OFF):
         risk_multiplier = min(risk_multiplier, Decimal("0.65"))
-    elif confidence_score <= 50:
-        risk_multiplier = min(risk_multiplier, Decimal("0.75"))
     if strictness == RegimeStrictness.NORMAL and state in (RegimeState.HIGH_VOLATILITY, RegimeState.CHOP):
         risk_multiplier = max(risk_multiplier, Decimal("0.5"))
 
-    min_quality_adjustment = penalty
-    if confidence_score <= 30:
-        min_quality_adjustment += 8
-    elif confidence_score <= 50:
-        min_quality_adjustment += 4
-    if strictness == RegimeStrictness.HIGH and confidence_score <= 70:
-        min_quality_adjustment += 3
+    # Do not apply confidence-derived minimum quality adjustments
+    min_quality_adjustment = 0
 
+    # Minimum RR adjustments remain driven by regime state (not confidence)
     min_rr_adjustment = Decimal("0")
-    if confidence_score <= 30:
-        min_rr_adjustment = Decimal("0.75")
-    elif confidence_score <= 50:
-        min_rr_adjustment = Decimal("0.35")
-    elif state in (RegimeState.RANGE_COMPRESSION, RegimeState.HIGH_VOLATILITY, RegimeState.CHOP):
+    if state in (RegimeState.RANGE_COMPRESSION, RegimeState.HIGH_VOLATILITY, RegimeState.CHOP):
         min_rr_adjustment = Decimal("0.25")
     if strictness == RegimeStrictness.NORMAL and state == RegimeState.HIGH_VOLATILITY:
         min_rr_adjustment = Decimal("0.5")
@@ -281,11 +274,11 @@ def build_adjustment(
         min_quality_score_adjustment=min(30, min_quality_adjustment),
         min_rr_adjustment=min_rr_adjustment,
         risk_multiplier=risk_multiplier.quantize(OUTPUT_QUANT),
-        readiness_score_adjustment=-min(25, penalty + max(0, 55 - confidence_score) // 3),
-        edge_score_adjustment=-min(20, penalty + max(0, 60 - confidence_score) // 4),
-        trust_score_adjustment=-min(20, penalty + max(0, 60 - confidence_score) // 5),
-        portfolio_confidence_adjustment=-min(20, penalty + max(0, 65 - confidence_score) // 4),
-        regime_penalty=min(100, penalty),
+        readiness_score_adjustment=0,
+        edge_score_adjustment=0,
+        trust_score_adjustment=0,
+        portfolio_confidence_adjustment=0,
+        regime_penalty=0,
         compatibility_scores=compatibility_scores,
         explanation=explanation,
     )
