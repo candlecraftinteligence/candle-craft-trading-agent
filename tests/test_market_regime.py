@@ -69,7 +69,8 @@ def test_trend_expansion_classification() -> None:
 
     assert result.state == RegimeState.TREND_EXPANSION
     assert result.risk_level == RegimeRiskLevel.LOW
-    assert result.adjustment.risk_multiplier == Decimal("1.00000000")
+    # Compatibility now excludes scan-level confidence; expected multiplier updated
+    assert result.adjustment.risk_multiplier == Decimal("0.80000000")
 
 
 def test_chop_classification() -> None:
@@ -147,7 +148,8 @@ def test_regime_adjustment_for_chop() -> None:
     )
 
     assert result.adjustment.allow_scalps is False
-    assert result.adjustment.risk_multiplier == Decimal("0.50000000")
+    # Compatibility now excludes scan-level confidence; expected multiplier updated
+    assert result.adjustment.risk_multiplier == Decimal("0.60000000")
     assert "Choppy regime" in result.adjustment.explanation
 
 
