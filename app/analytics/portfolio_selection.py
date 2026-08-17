@@ -439,9 +439,6 @@ def _candidate_from_symbol_result(symbol_result: Any, *, default_risk_pct: Maybe
 
 
 def _preselection_decision(candidate: PortfolioCandidate) -> tuple[PortfolioDecision, str] | None:
-    if candidate.regime_blocked:
-        reason = candidate.regime_warnings[0] if candidate.regime_warnings else "Market climate blocks this setup mode."
-        return PortfolioDecision.WATCHLIST_ONLY, reason
     if candidate.data_incomplete:
         return PortfolioDecision.DATA_INCOMPLETE, "Required setup or risk data is incomplete."
     if candidate.near_miss:
@@ -465,8 +462,6 @@ def _candidate_sort_key(candidate: PortfolioCandidate) -> tuple[Any, ...]:
         -candidate.quality_score,
         -_ranking_edge(candidate),
         -candidate.memory_preference_adjustment,
-        -candidate.regime_confidence_adjustment,
-        -candidate.regime_compatibility_score,
         -_decimal_score(candidate.rr),
         -candidate.tradeability_score,
         -_derivatives_cleanliness_score(candidate),
@@ -563,31 +558,16 @@ def _apply_regime_to_candidate(candidate: PortfolioCandidate, adjustment: Any | 
     updates: dict[str, Any] = {
         "regime_confidence_adjustment": int(getattr(adjustment, "portfolio_confidence_adjustment", 0) or 0),
     }
-    mode_allowed = _mode_allowed_by_regime(candidate.mode, adjustment)
-    if candidate.valid_trade and not mode_allowed:
-        warnings.append(f"Market climate blocks {candidate.mode} setups: {_display(getattr(adjustment, 'explanation', NA))}")
-        updates.update(
-            {
-                "valid_trade": False,
-                "near_miss": True,
-                "regime_blocked": True,
-                "regime_warnings": _unique_strings(warnings),
-            }
-        )
-        return candidate.model_copy(update=updates)
-    risk_multiplier = _regime_risk_multiplier(adjustment)
-    if candidate.valid_trade and risk_multiplier < Decimal("1"):
-        warnings.append(
-            f"Market climate risk multiplier {risk_multiplier} applies: {_display(getattr(adjustment, 'explanation', NA))}"
-        )
-        updates.update(
-            {
-                "risk_pct": _quantize(candidate.risk_pct * risk_multiplier),
-                "regime_warnings": _unique_strings(warnings),
-            }
-        )
-        return candidate.model_copy(update=updates)
-    if updates["regime_confidence_adjustment"] != 0:
+    if candidate.valid_trade and adjustment is not None:
+        risk_multiplier = _regime_risk_multiplier(adjustment)
+        if risk_multiplier < Decimal("1"):
+            warnings.append(
+                f"Market climate risk multiplier {risk_multiplier} is informational only: "
+                f"{_display(getattr(adjustment, 'explanation', NA))}"
+            )
+    if warnings != list(candidate.regime_warnings):
+        updates["regime_warnings"] = _unique_strings(warnings)
+    if updates["regime_confidence_adjustment"] != 0 or "regime_warnings" in updates:
         return candidate.model_copy(update=updates)
     return candidate
 
@@ -602,13 +582,7 @@ def _regime_risk_multiplier(adjustment: Any | None) -> Decimal:
 
 
 def _mode_allowed_by_regime(mode: str, adjustment: Any) -> bool:
-    normalized = _display(mode).lower()
-    if normalized == "challenge":
-        return bool(getattr(adjustment, "allow_challenge", True))
-    if normalized == "swing":
-        return bool(getattr(adjustment, "allow_swings", True))
-    if normalized == "scalp":
-        return bool(getattr(adjustment, "allow_scalps", True))
+    # Regime compatibility is not a live gate for portfolio selection or trade validity.
     return True
 
 

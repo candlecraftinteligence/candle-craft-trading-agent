@@ -69,8 +69,8 @@ def test_trend_expansion_classification() -> None:
 
     assert result.state == RegimeState.TREND_EXPANSION
     assert result.risk_level == RegimeRiskLevel.LOW
-    # Compatibility now excludes scan-level confidence; expected multiplier updated
-    assert result.adjustment.risk_multiplier == Decimal("0.80000000")
+    # Regime compatibility remains informational-only; live risk and RR are neutral.
+    assert result.adjustment.risk_multiplier == Decimal("1.00000000")
 
 
 def test_chop_classification() -> None:
@@ -131,8 +131,8 @@ def test_regime_adjustment_for_high_volatility() -> None:
     result = evaluate_market_regime(MarketRegimeInput(btc_candles=_panic_candles(), eth_candles=_panic_candles()))
 
     assert result.adjustment.allow_challenge is False
-    assert result.adjustment.risk_multiplier == Decimal("0.50000000")
-    assert result.adjustment.min_rr_adjustment == Decimal("0.50000000")
+    assert result.adjustment.risk_multiplier == Decimal("1.00000000")
+    assert result.adjustment.min_rr_adjustment == Decimal("0")
     assert "Panic volatility detected" in result.adjustment.explanation
 
 
@@ -148,8 +148,8 @@ def test_regime_adjustment_for_chop() -> None:
     )
 
     assert result.adjustment.allow_scalps is False
-    # Compatibility now excludes scan-level confidence; expected multiplier updated
-    assert result.adjustment.risk_multiplier == Decimal("0.60000000")
+    assert result.adjustment.risk_multiplier == Decimal("1.00000000")
+    assert result.adjustment.min_rr_adjustment == Decimal("0")
     assert "Choppy regime" in result.adjustment.explanation
 
 

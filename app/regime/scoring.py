@@ -242,29 +242,13 @@ def build_adjustment(
     strictness: RegimeStrictness,
     notes: Sequence[str],
 ) -> RegimeAdjustment:
-    # Regime confidence no longer gates or downgrades candidates.
-    # Keep compatibility-based mode permissions and state-based risk/rate adjustments,
-    # but avoid any numeric penalty or readiness/edge/trust adjustments derived from
-    # the scan-level confidence_score.
-    penalty = 0
+    # Regime compatibility and state remain diagnostic-only for the live decision path.
+    # Keep compatibility/gating metadata for display but do not alter live RR, risk,
+    # setup quality, or candidate ranking.
     compatibility_scores = {mode: item.score for mode, item in compatibility.items()}
-    risk_multiplier = min((item.risk_multiplier for item in compatibility.values()), default=Decimal("1"))
-    if state == RegimeState.HIGH_VOLATILITY:
-        risk_multiplier = min(risk_multiplier, Decimal("0.5"))
-    elif state in (RegimeState.CHOP, RegimeState.RISK_OFF):
-        risk_multiplier = min(risk_multiplier, Decimal("0.65"))
-    if strictness == RegimeStrictness.NORMAL and state in (RegimeState.HIGH_VOLATILITY, RegimeState.CHOP):
-        risk_multiplier = max(risk_multiplier, Decimal("0.5"))
-
-    # Do not apply confidence-derived minimum quality adjustments
     min_quality_adjustment = 0
-
-    # Minimum RR adjustments remain driven by regime state (not confidence)
     min_rr_adjustment = Decimal("0")
-    if state in (RegimeState.RANGE_COMPRESSION, RegimeState.HIGH_VOLATILITY, RegimeState.CHOP):
-        min_rr_adjustment = Decimal("0.25")
-    if strictness == RegimeStrictness.NORMAL and state == RegimeState.HIGH_VOLATILITY:
-        min_rr_adjustment = Decimal("0.5")
+    risk_multiplier = Decimal("1")
 
     explanation = _adjustment_explanation(state, confidence_score, notes)
     return RegimeAdjustment(
