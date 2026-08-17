@@ -414,7 +414,7 @@ def test_regime_strictness_changes_trade_permission() -> None:
     assert high.adjustment.regime_penalty >= low.adjustment.regime_penalty
 
 
-def test_weak_regime_blocks_high_confidence_setup_with_diagnostics() -> None:
+def test_weak_regime_warns_but_does_not_block_high_confidence_setup() -> None:
     regime = evaluate_market_regime(
         MarketRegimeInput(
             btc_candles=_trend_candles(step="0.4"),
@@ -429,38 +429,38 @@ def test_weak_regime_blocks_high_confidence_setup_with_diagnostics() -> None:
 
     adjusted = _apply_market_regime_to_results((_valid_symbol(),), regime)[0]
 
-    assert adjusted.status == ScannerPipelineStatus.REJECTED_BY_REGIME
+    assert adjusted.status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
     assert adjusted.status_history == (
         ScannerPipelineStatus.IDEA_CREATED,
         ScannerPipelineStatus.JOURNAL_ENTRY_CREATED,
-        ScannerPipelineStatus.REJECTED_BY_REGIME,
     )
-    assert adjusted.valid_strategy_modes == ()
-    assert adjusted.rejected_strategy_modes == ("challenge",)
-    assert adjusted.regime_blocked is True
-    assert adjusted.setup_quality.quality_state == SetupQualityState.WATCHLIST_NEAR_MISS
+    assert adjusted.valid_strategy_modes == ("challenge",)
+    assert adjusted.rejected_strategy_modes == ()
+    assert adjusted.regime_blocked is False
+    assert adjusted.setup_quality.quality_state == SetupQualityState.VALID_BUT_LOWER_QUALITY
     assert adjusted.regime_diagnostics["confidence_score"] == regime.confidence_score
-    assert "penalty" in adjusted.rejection_reason
+    assert adjusted.regime_warnings
+    assert "Market climate" in adjusted.regime_warnings[0]
+    assert adjusted.rejection_reason is None
 
 
 @pytest.mark.parametrize("mode", SCANNER_CONTRACT_MODES)
-def test_strategy_mode_blocks_public_watchlist_when_only_regime_blocks(mode: str) -> None:
+def test_strategy_mode_regime_warnings_do_not_block_public_watchlist(mode: str) -> None:
     blocked = _scanner_regime_blocked_symbol(mode, rr=Decimal("2.5"))
     candidate = _with_lifecycle(blocked, signal_id=f"{mode}-regime-only")
     diagnostics = blocked.strategy_diagnostics[mode]
     raw_codes = _public_watchlist_failed_gate_codes(candidate)
     gate = _public_watchlist_gate(candidate)
 
-    assert blocked.status == ScannerPipelineStatus.REJECTED_BY_REGIME
-    assert blocked.rejected_strategy_modes == (mode,)
-    assert diagnostics["first_failed_gate"] == "regime_compatibility"
-    assert diagnostics["gates_failed"] == ("regime_compatibility",)
-    assert raw_codes == ("regime_compatibility",)
-    assert raw_codes[0] not in PUBLIC_WATCHLIST_REGIME_PENDING_GATE_CODES
-    assert {classify_failed_gate_code(code) for code in raw_codes} == {"FATAL_PUBLIC_WATCHLIST_GATE"}
+    assert blocked.status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
+    assert blocked.rejected_strategy_modes == ()
+    assert diagnostics["first_failed_gate"] == "N/A"
+    assert diagnostics["gates_failed"] == ()
+    assert raw_codes == ()
+    assert "regime_compatibility" not in raw_codes
     assert gate.allowed is False
-    assert gate.allowed_missing_gate is None
-    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in gate.blocking_reasons
+    assert gate.allowed_missing_gate in {None, TIMING_CONFIRMATION_PENDING}
+    assert "regime_compatibility" not in " ".join(gate.blocking_reasons)
     assert gate.rr == 2.5
 
 
@@ -508,10 +508,10 @@ def test_strategy_mode_mixed_failures_block_public_watchlist() -> None:
     candidate = _with_lifecycle(blocked, signal_id="mixed-regime-target")
     gate = _public_watchlist_gate(candidate)
 
-    assert _public_watchlist_failed_gate_codes(candidate) == ("regime_compatibility", "target_integrity")
+    assert _public_watchlist_failed_gate_codes(candidate) == ("target_integrity",)
     assert gate.failed_gate_classes == ("FATAL_PUBLIC_WATCHLIST_GATE",)
     assert gate.allowed is False
-    assert "public_watchlist_fatal_failed_gates=regime_compatibility,target_integrity" in gate.blocking_reasons
+    assert "public_watchlist_fatal_failed_gates=target_integrity" in gate.blocking_reasons
 
 
 def test_strategy_mode_rr_failure_blocks_public_watchlist() -> None:
@@ -520,9 +520,9 @@ def test_strategy_mode_rr_failure_blocks_public_watchlist() -> None:
     gate = _public_watchlist_gate(candidate)
 
     assert gate.allowed is False
-    assert gate.failed_gate_classes == ("FATAL_PUBLIC_WATCHLIST_GATE",)
-    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in gate.blocking_reasons
+    assert gate.failed_gate_classes == ()
     assert "public_watchlist_rr_below_min:1.99<3" in gate.blocking_reasons
+    assert "regime_compatibility" not in " ".join(gate.blocking_reasons)
 
 
 def test_strategy_mode_missing_regime_data_still_blocks_as_regime_failure() -> None:
@@ -539,7 +539,8 @@ def test_strategy_mode_missing_regime_data_still_blocks_as_regime_failure() -> N
     gate = _public_watchlist_gate(candidate)
 
     assert gate.allowed is False
-    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in gate.blocking_reasons
+    assert "public_watchlist_missing_explicit_timing_gate" in gate.blocking_reasons
+    assert "regime_compatibility" not in " ".join(gate.blocking_reasons)
 
 
 @pytest.mark.parametrize(
@@ -575,7 +576,8 @@ def test_strategy_mode_regime_blocked_candidate_is_not_public_watchlist_copy() -
 
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "public_watchlist_fatal_failed_gates=regime_compatibility" in decision.reason
+    assert "public_block_non_actionable_state" in decision.reason
+    assert "regime_compatibility" not in decision.reason
 
 
 def test_strategy_mode_public_watchlist_does_not_create_active_execution_signal() -> None:

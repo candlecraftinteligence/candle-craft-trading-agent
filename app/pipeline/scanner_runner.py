@@ -3569,15 +3569,9 @@ def _apply_market_regime_to_symbol(
     if result.status == ScannerPipelineStatus.NOT_RUN:
         return result
     warnings = _symbol_regime_warnings(result, market_regime)
-    setup_quality = _adjust_setup_quality_for_regime(result.setup_quality, result, market_regime)
+    setup_quality = result.setup_quality
     mode = _symbol_mode_for_regime(result)
     compatibility = _compatibility_for_mode(market_regime, mode)
-    mode_blocked = (
-        _symbol_has_actionable_setup(result)
-        and mode != NA
-        and compatibility is not None
-        and not compatibility.allowed
-    )
     update: dict[str, Any] = {
         "setup_quality": setup_quality,
         "regime_warnings": warnings,
@@ -3592,28 +3586,7 @@ def _apply_market_regime_to_symbol(
         update["regime_compatibility_label"] = compatibility.label
     if mode != NA and result.strategy_diagnostics:
         update["strategy_diagnostics"] = _strategy_diagnostics_with_regime_overlay(result, mode, market_regime, compatibility)
-    if mode_blocked:
-        reason = _regime_block_reason(market_regime, mode, compatibility)
-        update.update(
-            {
-                "status": ScannerPipelineStatus.REJECTED_BY_REGIME,
-                "status_history": (
-                    *result.status_history,
-                    ScannerPipelineStatus.REJECTED_BY_REGIME,
-                ),
-                "rejection_reason": reason,
-                "rejection_stage": "regime",
-                "rejection_reasons": _unique_strings((*result.rejection_reasons, reason)),
-                "valid_strategy_modes": (),
-                "rejected_strategy_modes": _unique_strings((*result.rejected_strategy_modes, *result.valid_strategy_modes, mode)),
-                "strategy_diagnostics": _strategy_diagnostics_with_regime_block(result, mode, reason, compatibility),
-                "trade_idea": None,
-                "alert_result": None,
-                "journal_entry": None,
-                "regime_blocked": True,
-            }
-        )
-    if not warnings and setup_quality == result.setup_quality and not mode_blocked:
+    if not warnings and setup_quality == result.setup_quality:
         unchanged_keys = {
             "regime_state",
             "regime_confidence_score",
@@ -3647,9 +3620,9 @@ def _symbol_regime_warnings(
     if mode != NA and compatibility is not None and not compatibility.allowed:
         warnings.append(_regime_block_reason(market_regime, mode, compatibility))
     elif mode != NA and not _mode_allowed_by_regime(mode, adjustment):
-        warnings.append(f"Market climate blocks {mode} setups: {adjustment.explanation}")
+        warnings.append(f"Market climate warns that {mode} setups are less suitable: {adjustment.explanation}")
     elif adjustment.risk_multiplier < Decimal("1"):
-        warnings.append(f"Market climate risk multiplier {adjustment.risk_multiplier} applies: {adjustment.explanation}")
+        warnings.append(f"Market climate risk multiplier {adjustment.risk_multiplier} is informational only: {adjustment.explanation}")
     return _unique_strings(warnings)
 
 
@@ -3661,11 +3634,11 @@ def _compatibility_for_mode(market_regime: MarketRegimeResult, mode: str) -> Any
 
 def _regime_block_reason(market_regime: MarketRegimeResult, mode: str, compatibility: Any | None) -> str:
     if compatibility is None:
-        return f"Setup rejected by regime weakness: {market_regime.adjustment.explanation}"
+        return f"Market climate warning: {market_regime.adjustment.explanation}"
     conflicting = "; ".join(compatibility.notes) if compatibility.notes else market_regime.adjustment.explanation
     return (
-        f"Setup rejected by regime weakness: penalty {market_regime.adjustment.regime_penalty}; "
-        f"{mode} compatibility {compatibility.label} ({compatibility.score}/100). {conflicting}"
+        f"Market climate warning: {mode} compatibility is {compatibility.label} ({compatibility.score}/100). "
+        f"{conflicting}"
     )
 
 
@@ -3761,51 +3734,8 @@ def _adjust_setup_quality_for_regime(
     result: ScannerSymbolResult,
     market_regime: MarketRegimeResult,
 ) -> SetupQualityResult:
-    if (
-        not quality.is_evaluated
-        or market_regime.risk_level == RegimeRiskLevel.NA
-        or quality.quality_state
-        not in (
-            SetupQualityState.HIGH_QUALITY_TRADE,
-            SetupQualityState.VALID_BUT_LOWER_QUALITY,
-            SetupQualityState.WATCHLIST_NEAR_MISS,
-        )
-    ):
-        return quality
-
-    adjustment = market_regime.adjustment
-    mode = _symbol_mode_for_regime(result)
-    mode_blocked = mode != NA and not _mode_allowed_by_regime(mode, adjustment)
-    score_penalty = adjustment.min_quality_score_adjustment
-    if score_penalty == 0 and not mode_blocked and adjustment.risk_multiplier == Decimal("1"):
-        return quality
-
-    quality_score = max(0, quality.quality_score - score_penalty)
-    tradeability_score = max(0, quality.tradeability_score - score_penalty)
-    edge_score = max(0, quality.profitability_edge_score - max(0, score_penalty // 2))
-    execution_risk_score = min(100, quality.execution_risk_score + score_penalty)
-    state = quality.quality_state
-    if mode_blocked and state in (SetupQualityState.HIGH_QUALITY_TRADE, SetupQualityState.VALID_BUT_LOWER_QUALITY):
-        state = SetupQualityState.WATCHLIST_NEAR_MISS
-    elif state == SetupQualityState.HIGH_QUALITY_TRADE and quality_score < 85:
-        state = SetupQualityState.VALID_BUT_LOWER_QUALITY
-
-    weakest = _unique_strings((*quality.weakest_factors, "market climate risk"))
-    decision_reason = f"{quality.decision_reason} Market climate overlay: {adjustment.explanation}"
-    action_label = "Wait for cleaner regime" if mode_blocked else quality.action_label
-    return quality.model_copy(
-        update={
-            "quality_state": state,
-            "quality_grade": _regime_adjusted_grade(state, quality_score),
-            "quality_score": quality_score,
-            "tradeability_score": tradeability_score,
-            "profitability_edge_score": edge_score,
-            "execution_risk_score": execution_risk_score,
-            "weakest_factors": weakest,
-            "decision_reason": decision_reason,
-            "action_label": action_label,
-        }
-    )
+    # Regime compatibility is informational only; keep the original setup-quality state.
+    return quality
 
 
 def _regime_adjusted_grade(state: SetupQualityState, quality_score: int) -> SetupQualityGrade:
@@ -3856,13 +3786,7 @@ def _symbol_mode_for_regime(result: ScannerSymbolResult) -> str:
 
 
 def _mode_allowed_by_regime(mode: str, adjustment: RegimeAdjustment) -> bool:
-    normalized = mode.lower()
-    if normalized == "challenge":
-        return adjustment.allow_challenge
-    if normalized == "swing":
-        return adjustment.allow_swings
-    if normalized == "scalp":
-        return adjustment.allow_scalps
+    # Regime compatibility is advisory only; never suppress a valid setup by mode.
     return True
 
 
