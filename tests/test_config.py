@@ -19,9 +19,9 @@ def test_default_settings_are_safe() -> None:
     assert settings.telegram_admin_reports_enabled is None
     assert settings.telegram_dry_run is True
     assert settings.telegram_signals_enabled is False
-    assert settings.telegram_public_signal_policy == "setup_only"
+    assert settings.telegram_public_signal_policy == "lifecycle"
     assert settings.telegram_signal_channel_invite_link is None
-    assert settings.telegram_public_watchlist_enabled is True
+    assert settings.telegram_public_watchlist_enabled is False
     assert settings.public_watchlist_min_grade == "A"
     assert settings.public_watchlist_min_score == 88
     assert str(settings.public_watchlist_min_rr) == "3.0"
@@ -74,8 +74,14 @@ def test_order_execution_enabled_fails_safely() -> None:
 
 
 def test_unsupported_public_signal_policy_fails_safely() -> None:
-    with pytest.raises(ValueError, match="setup_only"):
+    with pytest.raises(ValueError, match="lifecycle"):
         Settings(_env_file=None, telegram_public_signal_policy="confirmed_updates")
+
+
+def test_legacy_setup_only_policy_maps_to_lifecycle() -> None:
+    settings = Settings(_env_file=None, telegram_public_signal_policy="setup_only")
+
+    assert settings.telegram_public_signal_policy == "lifecycle"
 
 
 def test_signal_channel_invite_link_loads_from_environment(monkeypatch) -> None:

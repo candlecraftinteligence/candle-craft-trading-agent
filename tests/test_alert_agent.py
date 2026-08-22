@@ -55,7 +55,7 @@ def test_formats_valid_trade_idea() -> None:
     assert message.startswith("🐺 Candle Craft Intelligence")
     assert "BTCUSDT · LONG · SETUP" in message
     assert "Grade: A | Score: N/A | RR: 3.50R" in message
-    assert "Status: 🟢 Entry Zone Active" in message
+    assert "Status: 🟢 CONFIRMED SIGNAL" in message
     assert "Entry: 100 – 102" in message
     assert "Stop: 95" in message
     assert "TP1: 112" in message

@@ -21,6 +21,7 @@ DEFAULT_MIN_RR_DISPLAY = Decimal("3")
 class TelegramAlertType(str, Enum):
     RESEARCH_WATCH = "RESEARCH_WATCH"
     WATCHLIST = "WATCHLIST"
+    SETUP_TRIGGERED = "SETUP_TRIGGERED"
     SIGNAL_CONFIRMED = "SIGNAL_CONFIRMED"
     LIMIT_HIT = "LIMIT_HIT"
     TP1_HIT = "TP1_HIT"
@@ -35,6 +36,7 @@ class TelegramAlertType(str, Enum):
 PUBLIC_STATUS_BY_ALERT_TYPE = {
     TelegramAlertType.RESEARCH_WATCH: "RESEARCH WATCH",
     TelegramAlertType.WATCHLIST: "WATCHLIST",
+    TelegramAlertType.SETUP_TRIGGERED: "TRIGGERED",
     TelegramAlertType.SIGNAL_CONFIRMED: "CONFIRMED",
     TelegramAlertType.LIMIT_HIT: "ENTRY ZONE TOUCHED",
     TelegramAlertType.TP1_HIT: "TP1 HIT",
@@ -147,6 +149,8 @@ def format_telegram_signal_message(
         return format_research_watch_message(message)
     if normalized == TelegramAlertType.WATCHLIST:
         return format_simple_public_signal_message(message)
+    if normalized == TelegramAlertType.SETUP_TRIGGERED:
+        return format_triggered_setup_message(message)
     if normalized == TelegramAlertType.SIGNAL_CONFIRMED:
         return format_premium_public_signal_message(message)
     if normalized == TelegramAlertType.LIMIT_HIT:
@@ -202,13 +206,23 @@ def format_simple_public_signal_message(message: TelegramSignalMessage) -> str:
     return _format_public_signal_message(message, confirmed=False)
 
 
-def _format_public_signal_message(message: TelegramSignalMessage, *, confirmed: bool) -> str:
+def format_triggered_setup_message(message: TelegramSignalMessage) -> str:
+    return _format_public_signal_message(message, confirmed=False, triggered=True)
+
+
+def _format_public_signal_message(
+    message: TelegramSignalMessage,
+    *,
+    confirmed: bool,
+    triggered: bool = False,
+) -> str:
     return _join(
         "\U0001F43A Candle Craft Intelligence",
         "",
         f"{format_symbol(message.symbol)} {MIDDLE_DOT} {format_direction(message.direction)} {MIDDLE_DOT} {_public_setup_style(message)}",
         _public_grade_score_rr_line(message),
-        f"Status: {_public_status_display(message, confirmed=confirmed)}",
+        f"Status: {_public_status_display(message, confirmed=confirmed, triggered=triggered)}",
+        *_public_state_summary_lines(confirmed=confirmed, triggered=triggered),
         "",
         *_public_liquidity_lines(message),
         "",
@@ -223,7 +237,7 @@ def _format_public_signal_message(message: TelegramSignalMessage, *, confirmed: 
         *_public_edge_lines(message),
         "",
         "\u26A0\ufe0f Execution",
-        *_public_execution_lines(message, confirmed=confirmed),
+        *_public_execution_lines(message, confirmed=confirmed, triggered=triggered),
         "",
         _public_compact_invalidation_line(message),
         "",
@@ -299,15 +313,32 @@ def _public_grade_score_rr_line(message: TelegramSignalMessage) -> str:
     return f"Grade: {grade} | Score: {score} | RR: {rr}"
 
 
-def _public_status_display(message: TelegramSignalMessage, *, confirmed: bool) -> str:
+def _public_status_display(
+    message: TelegramSignalMessage,
+    *,
+    confirmed: bool,
+    triggered: bool = False,
+) -> str:
     if _public_is_invalidated(message):
         return "\U0001F534 Invalidated"
+    if confirmed:
+        suffix = f" {MIDDLE_DOT} TP1 Priority" if _has_target_caution(message) else ""
+        return f"\U0001F7E2 CONFIRMED SIGNAL{suffix}"
+    if triggered:
+        return f"\U0001F7E0 TRIGGERED {EM_DASH} Awaiting Final Confirmation"
     if _has_target_caution(message):
         return f"\U0001F7E0 A-Grade Setup {MIDDLE_DOT} TP1 Priority"
     if _public_requires_confirmation(message, confirmed=confirmed):
         return f"\U0001F7E1 Watch {MIDDLE_DOT} Confirmation Needed"
     return "\U0001F7E2 Entry Zone Active"
 
+
+def _public_state_summary_lines(*, confirmed: bool, triggered: bool) -> tuple[str, ...]:
+    if confirmed:
+        return ("Confirmation criteria satisfied.",)
+    if triggered:
+        return ("Setup has activated. Final confirmation is still required.",)
+    return ()
 
 def _public_is_invalidated(message: TelegramSignalMessage) -> bool:
     context = _effective_signal_context(message)
@@ -514,7 +545,17 @@ def _public_fallback_edge_lines(message: TelegramSignalMessage) -> tuple[str, ..
     return tuple(lines) if lines else (NA,)
 
 
-def _public_execution_lines(message: TelegramSignalMessage, *, confirmed: bool) -> tuple[str, ...]:
+def _public_execution_lines(
+    message: TelegramSignalMessage,
+    *,
+    confirmed: bool,
+    triggered: bool = False,
+) -> tuple[str, ...]:
+    if triggered:
+        return (
+            "Await final confirmation. This is not a confirmed signal.",
+            "Do not enter blindly or chase price.",
+        )
     if _public_requires_confirmation(message, confirmed=confirmed):
         return ("Wait for confirmation. No entry until structure accepts back through the trigger zone.",)
     lines = ["No chase. Entry only inside the mapped zone."]

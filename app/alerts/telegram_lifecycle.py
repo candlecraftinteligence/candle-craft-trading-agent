@@ -65,23 +65,31 @@ from app.storage.models import PublicAlertEventRecord, TelegramAlertAttemptRecor
 
 logger = logging.getLogger(__name__)
 
+PUBLIC_SIGNAL_POLICY_LIFECYCLE = "lifecycle"
 PUBLIC_SIGNAL_POLICY_SETUP_ONLY = "setup_only"
 CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON = (
     "confirmed_public_delivery_disabled_by_setup_only_policy"
 )
+CONFIRMED_LIFECYCLE_MIN_GRADE = "B+"
 
-WATCH_ALERT_STATES = {
+PUBLIC_INITIAL_ALERT_BY_STATE = {
+    SetupLifecycleState.TRIGGERED: TelegramAlertType.SETUP_TRIGGERED,
+    SetupLifecycleState.CONFIRMED: TelegramAlertType.SIGNAL_CONFIRMED,
+}
+PUBLIC_INITIAL_LIFECYCLE_STATES = frozenset(PUBLIC_INITIAL_ALERT_BY_STATE)
+PUBLIC_TERMINAL_PREDECESSOR_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
     SetupLifecycleState.ACTIONABLE_A_GRADE,
     SetupLifecycleState.A_GRADE_WATCH,
     SetupLifecycleState.TRIGGERED,
-}
-SIGNAL_ALERT_STATES = {
     SetupLifecycleState.CONFIRMED,
+    SetupLifecycleState.EXECUTING,
+    SetupLifecycleState.MANAGING,
 }
 PRIOR_ACTIVE_ALERT_TYPES = {
     TelegramAlertType.WATCHLIST.value,
+    TelegramAlertType.SETUP_TRIGGERED.value,
     TelegramAlertType.SIGNAL_CONFIRMED.value,
 }
 PRIOR_PUBLIC_SIGNAL_ALERT_TYPES = {
@@ -738,7 +746,7 @@ class TelegramEligibilityContext:
     min_rr: Decimal = DEFAULT_CONFIRMED_MIN_RR
     min_score_for_idea: Decimal | None = None
     min_technical_score: Decimal = DEFAULT_MIN_TECHNICAL_SCORE
-    public_watchlist_enabled: bool = True
+    public_watchlist_enabled: bool = False
     public_watchlist_min_grade: str = PUBLIC_WATCHLIST_MIN_GRADE
     public_watchlist_min_score: Decimal = PUBLIC_WATCHLIST_MIN_SCORE
     public_watchlist_min_rr: Decimal = PUBLIC_WATCHLIST_MIN_RR
@@ -763,7 +771,7 @@ class TelegramLifecycleDelivery:
 
 @dataclass(frozen=True)
 class ConfirmedAlertAuditSummary:
-    public_signal_policy: str = PUBLIC_SIGNAL_POLICY_SETUP_ONLY
+    public_signal_policy: str = PUBLIC_SIGNAL_POLICY_LIFECYCLE
     confirmed_candidates_seen: int = 0
     confirmed_prefilter_passed: int = 0
     confirmed_policy_disabled: int = 0
@@ -2912,7 +2920,7 @@ class TelegramLifecycleDeliveryService:
 
     @property
     def public_watchlist_enabled(self) -> bool:
-        return bool(getattr(self.settings, "telegram_public_watchlist_enabled", True))
+        return bool(getattr(self.settings, "telegram_public_watchlist_enabled", False))
 
     @property
     def public_signal_policy(self) -> str:
@@ -2920,17 +2928,20 @@ class TelegramLifecycleDeliveryService:
             getattr(
                 self.settings,
                 "telegram_public_signal_policy",
-                PUBLIC_SIGNAL_POLICY_SETUP_ONLY,
+                PUBLIC_SIGNAL_POLICY_LIFECYCLE,
             )
         )
-        if configured != PUBLIC_SIGNAL_POLICY_SETUP_ONLY:
-            logger.warning("Unsupported public signal policy ignored; enforcing setup_only.")
-            return PUBLIC_SIGNAL_POLICY_SETUP_ONLY
+        if configured == PUBLIC_SIGNAL_POLICY_SETUP_ONLY:
+            logger.warning("Deprecated setup_only public signal policy mapped to lifecycle.")
+            return PUBLIC_SIGNAL_POLICY_LIFECYCLE
+        if configured != PUBLIC_SIGNAL_POLICY_LIFECYCLE:
+            logger.warning("Unsupported public signal policy ignored; enforcing lifecycle.")
+            return PUBLIC_SIGNAL_POLICY_LIFECYCLE
         return configured
 
     @property
     def setup_only_public_delivery(self) -> bool:
-        return self.public_signal_policy == PUBLIC_SIGNAL_POLICY_SETUP_ONLY
+        return False
 
     @property
     def public_watchlist_min_score(self) -> Decimal:
@@ -3060,10 +3071,7 @@ class TelegramLifecycleDeliveryService:
                 blocked_repeat += 1
             else:
                 skipped += 1
-            if (
-                not self.setup_only_public_delivery
-                and delivery.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value
-            ):
+            if delivery.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value:
                 if delivery.status in {"sent", "failed", "skipped", "blocked"}:
                     signal_confirmed_attempts_created += 1
                 if delivery.status == "sent":
@@ -3120,37 +3128,23 @@ class TelegramLifecycleDeliveryService:
                     )
                     if alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED:
                         confirmed_candidates_seen += 1
-                        if self.setup_only_public_delivery:
-                            confirmed_policy_disabled += 1
-                            confirmed_policy_disabled_by_reason[
-                                CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON
-                            ] = (
-                                confirmed_policy_disabled_by_reason.get(
-                                    CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON,
-                                    0,
-                                )
-                                + 1
-                            )
+                        confirmed_message = _telegram_signal_message_for_alert(
+                            symbol_result,
+                            TelegramAlertType.SIGNAL_CONFIRMED,
+                            eligibility_context,
+                        )
+                        confirmed_prefilter = _confirmed_alert_attempt_prefilter(
+                            symbol_result,
+                            confirmed_message,
+                            eligibility_context,
+                        )
+                        if confirmed_prefilter.passed:
+                            confirmed_prefilter_passed += 1
                         else:
-                            confirmed_message = _telegram_signal_message_for_alert(
-                                symbol_result,
-                                TelegramAlertType.SIGNAL_CONFIRMED,
-                                eligibility_context,
-                            )
-                            confirmed_prefilter = _confirmed_alert_attempt_prefilter(
-                                symbol_result,
-                                confirmed_message,
-                                eligibility_context,
-                            )
-                            if confirmed_prefilter.passed:
-                                confirmed_prefilter_passed += 1
-                            else:
-                                for reason in confirmed_prefilter.reason_buckets:
-                                    confirmed_blocked_before_attempt[reason] = (
-                                        confirmed_blocked_before_attempt.get(reason, 0) + 1
-                                    )
-                    if self.setup_only_public_delivery and alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED:
-                        continue
+                            for reason in confirmed_prefilter.reason_buckets:
+                                confirmed_blocked_before_attempt[reason] = (
+                                    confirmed_blocked_before_attempt.get(reason, 0) + 1
+                                )
                     public_watchlist_scan_signal_id = _public_watchlist_scan_signal_id(
                         symbol_result,
                         eligibility_context,
@@ -3258,34 +3252,17 @@ class TelegramLifecycleDeliveryService:
             if symbol_result.lifecycle_transition
             else None
         )
-        if (
-            self.setup_only_public_delivery
-            and alert_type_hint is not None
-            and alert_type_hint != TelegramAlertType.WATCHLIST
-        ):
-            return None
-        if (
-            self.setup_only_public_delivery
-            and alert_type_hint == TelegramAlertType.WATCHLIST
-            and symbol_result.lifecycle_transition is not None
-            and symbol_result.lifecycle_transition.to_state not in WATCH_ALERT_STATES
-        ):
-            return None
+
         terminal_bridge = (
             _terminal_identity_bridge(repository, symbol_result, alert_type_hint)
             if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES
-            else _terminal_identity_bridge(
-                repository,
-                symbol_result,
-                alert_type_hint,
-                watchlist_only=True,
-            )
+            else _triggered_identity_bridge(repository, symbol_result)
             if alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED
             else TerminalIdentityBridge()
         )
         prior_active_alert = terminal_bridge.prior_alert
         prior_public_signal_alert = (
-            repository.get_prior_public_signal_alert(signal_ids=(_signal_id(symbol_result),))
+            repository.get_prior_public_signal_alert(signal_ids=_signal_id_candidates(symbol_result))
             if alert_type_hint == TelegramAlertType.LIMIT_HIT
             else None
         )
@@ -3294,7 +3271,7 @@ class TelegramLifecycleDeliveryService:
             if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES
             else prior_public_signal_alert is not None
             if alert_type_hint == TelegramAlertType.LIMIT_HIT
-            else repository.has_prior_active_alert(signal_id=_signal_id(symbol_result))
+            else repository.get_prior_public_alert(signal_ids=_signal_id_candidates(symbol_result)) is not None
         )
         context = _minimum_rr_context_for_symbol(
             symbol_result, eligibility_context or TelegramEligibilityContext()
@@ -3306,10 +3283,7 @@ class TelegramLifecycleDeliveryService:
             terminal_identity_failure_reason=terminal_bridge.blocked_reason,
             prior_public_alert=prior_public_signal_alert if alert_type_hint == TelegramAlertType.LIMIT_HIT else prior_active_alert,
         )
-        if _can_try_public_watchlist_reconciliation(decision, alert_type_hint):
-            reconciled_decision = _public_watchlist_reconciliation_decision_for_symbol(symbol_result, context)
-            if reconciled_decision is not None:
-                decision = reconciled_decision
+
         if not decision.eligible or decision.alert_type is None or decision.message is None:
             if decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and decision.message is not None:
                 prefilter = _confirmed_alert_attempt_prefilter(symbol_result, decision.message, context)
@@ -3384,25 +3358,6 @@ class TelegramLifecycleDeliveryService:
                     scan_run_id=scan_run_id,
                     eligibility_context=context,
                 )
-        if (
-            _public_watchlist_follow_up_alert_suppressed(decision.alert_type)
-            and prior_active_alert is not None
-            and (
-                self.setup_only_public_delivery
-                or prior_active_alert.alert_type == TelegramAlertType.WATCHLIST.value
-            )
-        ):
-            return _persist_suppressed_watchlist_terminal_update(
-                repository,
-                prior_alert=prior_active_alert,
-                symbol_result=symbol_result,
-                alert_type=decision.alert_type,
-                message=decision.message,
-                scan_run_id=scan_run_id,
-                eligibility_context=context,
-            )
-        if self.setup_only_public_delivery and _public_watchlist_follow_up_alert_suppressed(decision.alert_type):
-            return None
 
         message = decision.message
         signal_id = _delivery_signal_id_for_decision(symbol_result, decision)
@@ -3444,10 +3399,12 @@ class TelegramLifecycleDeliveryService:
             signal_id = prior_limit_alert.signal_id
             message = _message_with_prior_public_plan(message, prior_limit_alert)
         elif decision.alert_type in TP_SL_ALERT_TYPES:
-            prior_tp_sl_alert = repository.get_prior_public_alert(signal_ids=(signal_id,))
+            prior_tp_sl_alert = repository.get_prior_public_alert(signal_ids=_signal_id_candidates(symbol_result))
             if prior_tp_sl_alert is not None:
                 signal_id = prior_tp_sl_alert.signal_id
                 message = _message_with_prior_public_plan(message, prior_tp_sl_alert)
+
+        message = replace(message, signal_id=signal_id)
 
         if decision.alert_type in TP_SL_ALERT_TYPES:
             blockers = _tp_sl_delivery_blockers(
@@ -3770,24 +3727,6 @@ class TelegramLifecycleDeliveryService:
             message_text = format_research_watch_alert(message_candidate)
             message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
 
-            if self.setup_only_public_delivery:
-                deliveries.append(
-                    _persist_research_watch_attempt(
-                        repository,
-                        message_candidate,
-                        signal_id=signal_id,
-                        scan_run_id=scan_run_id,
-                        attempted_at=attempted_at,
-                        status="skipped",
-                        detail="Research Watch public delivery is disabled by the setup-only policy.",
-                        message_hash=message_hash,
-                        blocked_reason=RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON,
-                        error_message=RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON,
-                    )
-                )
-                if len(deliveries) >= max_per_scan:
-                    break
-                continue
 
             if not self.research_watch_enabled:
                 deliveries.append(
@@ -3969,13 +3908,7 @@ class TelegramLifecycleDeliveryService:
             current_result = _current_result_for_lifecycle_record(match.record, prior_alert, current_results)
             if current_result is None:
                 current_result = current_result_for_prior
-            if (
-                self.setup_only_public_delivery
-                and _terminal_alert_type_for_lifecycle_state(
-                    _lifecycle_record_state_key(match.record)
-                ) is None
-            ):
-                continue
+
             outcome = _sent_watchlist_reconciliation_outcome(
                 prior_alert,
                 match.record,
@@ -3993,22 +3926,6 @@ class TelegramLifecycleDeliveryService:
                 eligibility_context=eligibility_context,
             )
             if outcome is None:
-                continue
-            if (
-                _public_watchlist_follow_up_alert_suppressed(outcome.alert_type)
-                and prior_alert.alert_type == TelegramAlertType.WATCHLIST.value
-            ):
-                deliveries.append(
-                    _persist_suppressed_watchlist_terminal_update(
-                        repository,
-                        prior_alert=prior_alert,
-                        symbol_result=outcome.symbol_result,
-                        alert_type=outcome.alert_type,
-                        message=outcome.message,
-                        scan_run_id=scan_run_id,
-                        eligibility_context=eligibility_context,
-                    )
-                )
                 continue
 
             signal_id = prior_alert.signal_id
@@ -6477,15 +6394,30 @@ def _near_miss_intelligence(symbol_result: ScannerSymbolResult, diagnostics: Map
     return payload if isinstance(payload, Mapping) else None
 
 
+def is_public_lifecycle_event(state: SetupLifecycleState | str) -> bool:
+    try:
+        normalized = state if isinstance(state, SetupLifecycleState) else SetupLifecycleState(_text(state).upper())
+    except ValueError:
+        return False
+    return normalized in PUBLIC_INITIAL_LIFECYCLE_STATES or normalized in {
+        SetupLifecycleState.MANAGING,
+        SetupLifecycleState.TP_HIT,
+        SetupLifecycleState.SL_HIT,
+        SetupLifecycleState.INVALIDATED,
+        SetupLifecycleState.EXPIRED,
+    }
+
+
 def _alert_type_for_transition(
     symbol_result: ScannerSymbolResult,
     transition: SetupTransitionResult,
 ) -> TelegramAlertType | None:
     state = transition.to_state
-    if state in WATCH_ALERT_STATES:
-        return TelegramAlertType.WATCHLIST
-    if state in SIGNAL_ALERT_STATES:
-        return TelegramAlertType.SIGNAL_CONFIRMED
+    initial_alert = PUBLIC_INITIAL_ALERT_BY_STATE.get(state)
+    if initial_alert is not None:
+        return initial_alert
+    if not is_public_lifecycle_event(state):
+        return None
     if state == SetupLifecycleState.MANAGING:
         return TelegramAlertType.LIMIT_HIT
     if state == SetupLifecycleState.TP_HIT:
@@ -6496,10 +6428,6 @@ def _alert_type_for_transition(
         return TelegramAlertType.INVALIDATED
     if state == SetupLifecycleState.EXPIRED:
         return TelegramAlertType.EXPIRED
-    if state == SetupLifecycleState.COOLDOWN:
-        return TelegramAlertType.NO_LONGER_TRACKING
-    if _explicit_watchlist_candidate(symbol_result):
-        return TelegramAlertType.WATCHLIST
     return None
 
 
@@ -6522,7 +6450,11 @@ def _tp_alert_type(symbol_result: ScannerSymbolResult) -> TelegramAlertType | No
 
 
 def _requires_prior_active_alert(alert_type: TelegramAlertType) -> bool:
-    return alert_type not in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED}
+    return alert_type not in {
+        TelegramAlertType.WATCHLIST,
+        TelegramAlertType.SETUP_TRIGGERED,
+        TelegramAlertType.SIGNAL_CONFIRMED,
+    }
 
 
 def _telegram_message_type_for_alert(
@@ -6535,7 +6467,7 @@ def _telegram_message_type_for_alert(
         return TelegramMessageType.WATCHLIST_CONFIRMED
     if alert_type == TelegramAlertType.WATCHLIST:
         return TelegramMessageType.PUBLIC_WATCHLIST
-    if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
+    if alert_type in {TelegramAlertType.SETUP_TRIGGERED, TelegramAlertType.SIGNAL_CONFIRMED}:
         return TelegramMessageType.PUBLIC_SIGNAL
     if alert_type == TelegramAlertType.LIMIT_HIT:
         return TelegramMessageType.LIMIT_ZONE_HIT
@@ -6559,12 +6491,13 @@ def _terminal_transition_blockers(
     if previous is None:
         return ("terminal_transition_missing_previous_state",)
 
-    if alert_type == TelegramAlertType.INVALIDATED:
-        allowed = WATCH_ALERT_STATES | SIGNAL_ALERT_STATES | {SetupLifecycleState.EXECUTING, SetupLifecycleState.MANAGING}
-    elif alert_type == TelegramAlertType.EXPIRED:
-        allowed = WATCH_ALERT_STATES | SIGNAL_ALERT_STATES | {SetupLifecycleState.EXECUTING, SetupLifecycleState.MANAGING}
+    if alert_type in {TelegramAlertType.INVALIDATED, TelegramAlertType.EXPIRED}:
+        allowed = PUBLIC_TERMINAL_PREDECESSOR_STATES
     elif alert_type == TelegramAlertType.NO_LONGER_TRACKING:
-        allowed = WATCH_ALERT_STATES | {SetupLifecycleState.INVALIDATED, SetupLifecycleState.EXPIRED}
+        allowed = PUBLIC_TERMINAL_PREDECESSOR_STATES | {
+            SetupLifecycleState.INVALIDATED,
+            SetupLifecycleState.EXPIRED,
+        }
     else:
         allowed = set()
 
@@ -7021,7 +6954,11 @@ def _public_signal_gate_result(
     *,
     prior_public_alert: TelegramAlertAttemptRecord | None = None,
 ) -> PublicSignalGateResult:
-    if alert_type not in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}:
+    if alert_type not in {
+        TelegramAlertType.SETUP_TRIGGERED,
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        TelegramAlertType.LIMIT_HIT,
+    }:
         return PublicSignalGateResult(True)
 
     state = _public_gate_state(symbol_result)
@@ -7030,7 +6967,10 @@ def _public_signal_gate_result(
     symbol = _symbol(message.symbol)
     reasons: list[str] = []
 
-    if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
+    if alert_type == TelegramAlertType.SETUP_TRIGGERED:
+        if state_key != "triggered":
+            reasons.append(f"public_triggered_state_not_triggered:{state_key or 'missing'}")
+    elif alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
         if not is_public_signal_eligible_state(state_key):
             reasons.append(f"public_signal_state_not_confirmed:{state_key or 'missing'}")
         if is_internal_touch_state(state_key):
@@ -7042,7 +6982,7 @@ def _public_signal_gate_result(
             reasons.append(f"limit_hit_state_not_public_active:{state_key or 'missing'}")
         if is_internal_touch_state(state_key):
             reasons.append(f"limit_hit_internal_touch_state:{state_key}")
-        if prior_public_alert is not None and setup_id != NA and prior_public_alert.signal_id != setup_id:
+        if prior_public_alert is not None and prior_public_alert.signal_id not in _signal_id_candidates(symbol_result):
             reasons.append("limit_hit_signal_id_mismatch")
 
     missing = _missing_required_fields(alert_type, message)
@@ -7058,7 +6998,7 @@ def _public_signal_gate_result(
             if "invalidation_reason" in missing:
                 reasons.append("confirmed_missing_invalidation")
 
-    if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
+    if alert_type == TelegramAlertType.LIMIT_HIT:
         if _text(symbol_result.rejection_reason) != NA:
             reasons.append("rejection_reason_present")
         if any(_text(reason) != NA for reason in symbol_result.rejection_reasons):
@@ -8254,6 +8194,16 @@ def _public_watchlist_signal_id(symbol_result: ScannerSymbolResult, message: Tel
     return f"{plan.symbol}-WATCH-{plan.plan_hash}"
 
 
+def _lifecycle_setup_delivery_signal_id(symbol_result: ScannerSymbolResult) -> str:
+    signal_id = _signal_id(symbol_result)
+    lifecycle = symbol_result.lifecycle_state
+    setup_identity = _text(getattr(lifecycle, "setup_identity", NA))
+    if setup_identity == NA:
+        return signal_id
+    digest = hashlib.sha256(setup_identity.encode("utf-8")).hexdigest()[:16]
+    return f"{signal_id}-SETUP-{digest}"
+
+
 def _signal_id_for_alert(
     symbol_result: ScannerSymbolResult,
     alert_type: TelegramAlertType,
@@ -8261,6 +8211,8 @@ def _signal_id_for_alert(
 ) -> str:
     if alert_type == TelegramAlertType.WATCHLIST and message is not None:
         return _public_watchlist_signal_id(symbol_result, message)
+    if alert_type in {TelegramAlertType.SETUP_TRIGGERED, TelegramAlertType.SIGNAL_CONFIRMED}:
+        return _lifecycle_setup_delivery_signal_id(symbol_result)
     return _signal_id(symbol_result)
 
 
@@ -9086,7 +9038,7 @@ def _missing_required_fields(alert_type: TelegramAlertType, message: TelegramSig
     if alert_type in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}:
         required.extend((("tp1", message.tp1), ("tp2", message.tp2), ("tp3", message.tp3)))
     if alert_type == TelegramAlertType.TP1_HIT:
-        required.append(("tp1", message.tp1))
+        required.extend((("tp1", message.tp1), ("tp2", message.tp2), ("tp3", message.tp3)))
     if alert_type == TelegramAlertType.TP2_HIT:
         required.append(("tp2", message.tp2))
     if alert_type == TelegramAlertType.TP3_HIT:
@@ -9105,6 +9057,9 @@ def _defensive_delivery_blockers(
     if alert_type == TelegramAlertType.WATCHLIST:
         return _public_watchlist_gate_result(symbol_result, message, context).blocking_reasons
 
+    if alert_type == TelegramAlertType.SETUP_TRIGGERED:
+        return _target_integrity_blockers(symbol_result, alert_type, message)
+
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
         blockers = list(_terminal_transition_blockers(symbol_result, alert_type))
         missing = _missing_required_fields(alert_type, message)
@@ -9117,7 +9072,10 @@ def _defensive_delivery_blockers(
 
     blockers: list[str] = []
     rejection_context = _confirmed_rejection_context(symbol_result, message)
-    quality_blockers = _public_quality_gate_blockers(symbol_result)
+    quality_blockers = _public_quality_gate_blockers(
+        symbol_result,
+        min_grade=CONFIRMED_LIFECYCLE_MIN_GRADE,
+    )
     blockers.extend(quality_blockers)
     if quality_blockers:
         blockers.append("confirmed_grade_below_min")
@@ -9192,7 +9150,12 @@ def _target_integrity_blockers(
     alert_type: TelegramAlertType,
     message: TelegramSignalMessage,
 ) -> tuple[str, ...]:
-    if alert_type not in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}:
+    if alert_type not in {
+        TelegramAlertType.WATCHLIST,
+        TelegramAlertType.SETUP_TRIGGERED,
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        TelegramAlertType.LIMIT_HIT,
+    }:
         return ()
     side = _status_key(message.direction)
     if side not in {"long", "short"}:
@@ -9617,9 +9580,11 @@ def _persist_blocked_decision(decision: TelegramAlertDecision) -> bool:
         return decision.reason.startswith("blocked:")
     if decision.alert_type == TelegramAlertType.LIMIT_HIT:
         return decision.reason.startswith("blocked:")
-    return decision.alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED} and decision.reason.startswith(
-        "blocked:"
-    )
+    return decision.alert_type in {
+        TelegramAlertType.WATCHLIST,
+        TelegramAlertType.SETUP_TRIGGERED,
+        TelegramAlertType.SIGNAL_CONFIRMED,
+    } and decision.reason.startswith("blocked:")
 
 
 def _invalid_target_fields_from_reason(reason: str) -> str:
@@ -11620,15 +11585,6 @@ def _terminal_alert_type_for_lifecycle_state(state_key: str) -> TelegramAlertTyp
         return TelegramAlertType.INVALIDATED
     if state_key == "expired":
         return TelegramAlertType.EXPIRED
-    if state_key in {
-        "cooldown",
-        "cooled_down",
-        "no_longer_tracking",
-        "removed",
-        "cancelled",
-        "canceled",
-    }:
-        return TelegramAlertType.NO_LONGER_TRACKING
     return None
 
 
@@ -11743,6 +11699,23 @@ def _minimum_rr_context_for_symbol(
     if effective_minimum_rr is None:
         return context
     return replace(context, min_rr=effective_minimum_rr)
+
+
+def _triggered_identity_bridge(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    symbol_result: ScannerSymbolResult,
+) -> TerminalIdentityBridge:
+    setup_delivery_id = _lifecycle_setup_delivery_signal_id(symbol_result)
+    candidates = (setup_delivery_id,)
+    if setup_delivery_id == _signal_id(symbol_result):
+        candidates = _signal_id_candidates(symbol_result)
+    prior = repository.get_prior_public_alert(signal_ids=candidates)
+    if prior is None or prior.alert_type not in {
+        TelegramAlertType.WATCHLIST.value,
+        TelegramAlertType.SETUP_TRIGGERED.value,
+    }:
+        return TerminalIdentityBridge()
+    return TerminalIdentityBridge(prior_alert=prior)
 
 
 def _terminal_identity_bridge(
@@ -11866,6 +11839,7 @@ def _preferred_prior_active_record(
     priority = {signal_id: index for index, signal_id in enumerate(signal_id_priority)}
     alert_priority = {
         TelegramAlertType.WATCHLIST.value: 0,
+        TelegramAlertType.SETUP_TRIGGERED.value: 0,
         TelegramAlertType.SIGNAL_CONFIRMED.value: 1,
         TelegramAlertType.LIMIT_HIT.value: 2,
     }
@@ -11893,9 +11867,16 @@ def _unique_prior_public_records(
 
 
 def _signal_id_candidates(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
+    setup_delivery_id = _lifecycle_setup_delivery_signal_id(symbol_result)
     lifecycle_id = _lifecycle_signal_id(symbol_result)
     fallback_id = _fallback_signal_id(symbol_result)
-    return tuple(dict.fromkeys(value for value in (lifecycle_id, fallback_id) if _text(value) != NA))
+    return tuple(
+        dict.fromkeys(
+            value
+            for value in (setup_delivery_id, lifecycle_id, fallback_id)
+            if _text(value) != NA
+        )
+    )
 
 
 def _signal_id(symbol_result: ScannerSymbolResult) -> str:
@@ -12445,6 +12426,7 @@ __all__ = [
     "TelegramLifecycleDeliverySummary",
     "classify_failed_gate_code",
     "format_research_watch_alert",
+    "is_public_lifecycle_event",
     "reserve_public_watchlist_event",
     "normalize_failed_gate_code",
     "telegram_alert_decision_for_symbol",

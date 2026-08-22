@@ -26,11 +26,11 @@ class Settings(BaseSettings):
     telegram_signal_channel_invite_link: str | None = None
     telegram_vip_channel_id: str | None = None
     telegram_signals_enabled: bool = False
-    telegram_public_signal_policy: Literal["setup_only"] = "setup_only"
+    telegram_public_signal_policy: Literal["lifecycle"] = "lifecycle"
     telegram_public_ui_enabled: bool | None = None
     telegram_watchlist_outcome_tracking_enabled: bool = True
     telegram_public_watchlist_terminal_updates_enabled: bool = False
-    telegram_public_watchlist_enabled: bool = True
+    telegram_public_watchlist_enabled: bool = False
     public_watchlist_min_grade: str = "A"
     public_watchlist_min_score: int = 88
     public_watchlist_min_rr: Decimal = Decimal("3.0")
@@ -77,6 +77,14 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_log_level(cls, value: str) -> str:
         return str(value).upper()
+
+    @field_validator("telegram_public_signal_policy", mode="before")
+    @classmethod
+    def normalize_telegram_public_signal_policy(cls, value: str) -> str:
+        normalized = str(value).strip().lower().replace("-", "_")
+        if normalized == "setup_only":
+            return "lifecycle"
+        return normalized
 
     @field_validator("scanner_confirmation_cycles")
     @classmethod
