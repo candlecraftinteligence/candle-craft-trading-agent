@@ -514,6 +514,14 @@ def test_selected_setup_features_repair_stale_generic_technical_score_for_scorin
     assert score > stale_technical.structure_score
 
 
+def test_weak_technical_score_has_distinct_invalid_rejection_stage() -> None:
+    violation = type("Violation", (), {"code": "weak_technical_score"})()
+    hard_filter = type("HardFilter", (), {"violations": (violation,)})()
+    score_result = type("ScoreResult", (), {"hard_filter_result": hard_filter})()
+
+    assert scanner_runner_module._scoring_rejection_stage(score_result) == "technical_invalid"
+
+
 def test_tp_sequence_enforces_directional_reward_order() -> None:
     assert scanner_runner_module._tp_sequence_valid(
         direction="long",
@@ -574,6 +582,8 @@ def test_scanner_handles_no_setup() -> None:
 
     symbol_result = result.results[0]
     assert symbol_result.status == ScannerPipelineStatus.SCANNED_NO_SETUP
+    assert symbol_result.technical_status == "VALID"
+    assert symbol_result.technical_score != NA
     assert symbol_result.trade_idea is None
     assert symbol_result.rejection_reason == "No valid Liquidity-Grab Pullback setup."
     assert symbol_result.rejection_stage == "strategy"
@@ -651,6 +661,8 @@ def test_scanner_continues_if_one_symbol_fails() -> None:
 
     assert result.scanned_symbols == 2
     assert result.results[0].status == ScannerPipelineStatus.SCAN_ERROR
+    assert result.results[0].rejection_stage == "scanner"
+    assert result.results[0].technical_status == NA
     assert result.results[0].error_message == "mocked kline failure for FAILUSDT"
     assert result.results[1].status == ScannerPipelineStatus.JOURNAL_ENTRY_CREATED
 
@@ -1275,3 +1287,73 @@ def test_one_noncritical_timeframe_failure_does_not_crash_symbol_scan() -> None:
     symbol_result = result.results[0]
     assert symbol_result.status != ScannerPipelineStatus.FAILED
     assert "candles_4h: N/A" in symbol_result.strategy_missing_data
+
+
+def test_strategy_valid_plus_199_technical_bars_is_explicitly_insufficient() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"], candle_limit=199)))
+    symbol_result = result.results[0]
+
+    assert symbol_result.status == ScannerPipelineStatus.REJECTED_BY_TECHNICAL
+    assert symbol_result.technical_status == "INSUFFICIENT_DATA"
+    assert symbol_result.technical_score == NA
+    assert symbol_result.technical_required_bars == 200
+    assert symbol_result.technical_available_bars == 199
+    assert symbol_result.rejection_stage == "technical_insufficient_data"
+    assert symbol_result.valid_strategy_modes == ("swing", "scalp")
+    assert symbol_result.setup_quality.quality_state == SetupQualityState.DATA_ISSUE
+    assert any("status=INSUFFICIENT_DATA" in item for item in symbol_result.missing_data)
+    assert symbol_result.trade_idea is None
+    persisted_payload = symbol_result.model_dump(mode="json")
+    assert persisted_payload["technical_score"] == NA
+    assert persisted_payload["technical_result"]["data_quality"] == "insufficient_data"
+
+
+@pytest.mark.parametrize("strategy_mode", ("scalp", "swing"))
+def test_new_listing_short_history_is_explicit_in_each_mode(strategy_mode: str) -> None:
+    client = FakeExchangeClient({"NEWUSDT": _flat_candles()[:83]}, failing_timeframes={"2d"})
+    config = _config(["NEWUSDT"], candle_limit=83, strategy_modes=(strategy_mode,))
+    symbol_result = run(ScannerRunner(exchange_client=client).run(config)).results[0]
+
+    assert symbol_result.status == ScannerPipelineStatus.REJECTED_BY_TECHNICAL
+    assert symbol_result.technical_status == "INSUFFICIENT_DATA"
+    assert symbol_result.technical_required_bars == 200
+    assert symbol_result.technical_available_bars == 83
+    assert symbol_result.rejection_stage == "technical_insufficient_data"
+
+
+def test_malformed_primary_candle_is_technical_data_error_not_bad_structure() -> None:
+    candles = _flat_candles()
+    del candles[10]["high"]
+    client = FakeExchangeClient({"BADUSDT": candles}, failing_timeframes={"2d"})
+    symbol_result = run(ScannerRunner(exchange_client=client).run(_config(["BADUSDT"]))).results[0]
+
+    assert symbol_result.status == ScannerPipelineStatus.REJECTED_BY_TECHNICAL
+    assert symbol_result.technical_status == "DATA_ERROR"
+    assert symbol_result.technical_score == NA
+    assert symbol_result.rejection_stage == "technical_data_error"
+    assert symbol_result.technical_available_bars == 220
+    assert symbol_result.setup_quality.quality_state == SetupQualityState.DATA_ISSUE
+    assert any("status=DATA_ERROR" in item for item in symbol_result.unverified_data)
+    assert symbol_result.trade_idea is None
+
+
+def test_high_score_cannot_override_missing_required_technical_evidence() -> None:
+    technical_result = (
+        ScannerRunner()
+        .technical_agent.analyze(_flat_candles()[:199], timeframe="15m")
+        .model_copy(update={"structure_score": 100})
+    )
+
+    class HighScoreInsufficientAgent:
+        def analyze(self, candles, *, timeframe=NA):
+            return technical_result.model_copy(update={"timeframe": timeframe})
+
+    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    runner = ScannerRunner(exchange_client=client, technical_agent=HighScoreInsufficientAgent())
+    symbol_result = run(runner.run(_config(["BTCUSDT"]))).results[0]
+
+    assert symbol_result.status == ScannerPipelineStatus.REJECTED_BY_TECHNICAL
+    assert symbol_result.technical_score == 100
+    assert symbol_result.rejection_stage == "technical_insufficient_data"
+    assert symbol_result.trade_idea is None

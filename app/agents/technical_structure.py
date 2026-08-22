@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -14,6 +15,7 @@ SignalDirection = Literal["bullish", "bearish", "N/A"]
 TrendContext = Literal["bullish", "bearish", "neutral", "N/A"]
 RangePosition = Literal["lower", "middle", "upper", "N/A"]
 SwingKind = Literal["high", "low"]
+TechnicalComponentStatus = Literal["available", "unavailable", "invalid"]
 
 OUTPUT_QUANT = Decimal("0.00000001")
 
@@ -72,11 +74,33 @@ class VolumeAnomalySignal(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class TechnicalAnalysisStatus(str, Enum):
+    VALID = "VALID"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    DATA_ERROR = "DATA_ERROR"
+
+
+class TechnicalComponentAvailability(BaseModel):
+    component: str
+    timeframe: str = NA
+    required_bars: int
+    available_bars: int
+    required: bool
+    status: TechnicalComponentStatus
+
+    model_config = ConfigDict(frozen=True)
+
+
 class TechnicalStructureResult(BaseModel):
     is_valid: bool
-    data_quality: Literal["valid", "invalid"]
+    analysis_status: TechnicalAnalysisStatus
+    data_quality: Literal["valid", "insufficient_data", "data_error"]
     errors: tuple[str, ...] = ()
     candle_count: int = 0
+    required_candles: int
+    available_candles: int
+    timeframe: str = NA
+    component_availability: tuple[TechnicalComponentAvailability, ...] = ()
     lookback: int
     atr: MaybeDecimal = NA
     ema_50: MaybeDecimal = NA
@@ -95,7 +119,7 @@ class TechnicalStructureResult(BaseModel):
     bos: BosSignal = BosSignal()
     choch: ChochSignal = ChochSignal()
     volume_anomaly: VolumeAnomalySignal = VolumeAnomalySignal()
-    structure_score: int = 0
+    structure_score: MaybeInt = NA
 
     model_config = ConfigDict(frozen=True)
 
@@ -161,19 +185,40 @@ class TechnicalStructureAgent:
             self.range_window,
         )
 
-    def analyze(self, candles: Sequence[Any]) -> TechnicalStructureResult:
+    def analyze(self, candles: Sequence[Any], *, timeframe: str = NA) -> TechnicalStructureResult:
         normalized, errors = _normalize_candles(candles)
+        supplied_count = (
+            len(candles)
+            if isinstance(candles, Sequence) and not isinstance(candles, (str, bytes))
+            else 0
+        )
         if errors:
-            return self._invalid_result(candle_count=len(candles), errors=errors)
+            return self._unavailable_result(
+                status=TechnicalAnalysisStatus.DATA_ERROR,
+                candle_count=supplied_count,
+                errors=errors,
+                timeframe=timeframe,
+            )
 
         candle_count = len(normalized)
+        volume_available = _volume_window_available(normalized, self.volume_zscore_window)
+        if candle_count == 0:
+            return self._unavailable_result(
+                status=TechnicalAnalysisStatus.DATA_ERROR,
+                candle_count=0,
+                errors=("No candle data was supplied for technical analysis.",),
+                timeframe=timeframe,
+            )
         if candle_count < self.min_required_candles:
-            return self._invalid_result(
+            return self._unavailable_result(
+                status=TechnicalAnalysisStatus.INSUFFICIENT_DATA,
                 candle_count=candle_count,
                 errors=(
                     f"Not enough candles: received {candle_count}, "
                     f"required at least {self.min_required_candles}.",
                 ),
+                timeframe=timeframe,
+                volume_available=volume_available,
             )
 
         closes = tuple(candle.close for candle in normalized)
@@ -223,8 +268,17 @@ class TechnicalStructureAgent:
 
         return TechnicalStructureResult(
             is_valid=True,
+            analysis_status=TechnicalAnalysisStatus.VALID,
             data_quality="valid",
             candle_count=candle_count,
+            required_candles=self.min_required_candles,
+            available_candles=candle_count,
+            timeframe=timeframe,
+            component_availability=self._component_availability(
+                candle_count,
+                timeframe,
+                volume_available=volume_z_score != NA,
+            ),
             lookback=self.lookback,
             atr=atr,
             ema_50=ema_fast,
@@ -246,15 +300,80 @@ class TechnicalStructureAgent:
             structure_score=score,
         )
 
-    def _invalid_result(self, *, candle_count: int, errors: tuple[str, ...]) -> TechnicalStructureResult:
+    def _unavailable_result(
+        self,
+        *,
+        status: TechnicalAnalysisStatus,
+        candle_count: int,
+        errors: tuple[str, ...],
+        timeframe: str,
+        volume_available: bool | None = None,
+    ) -> TechnicalStructureResult:
         return TechnicalStructureResult(
             is_valid=False,
-            data_quality="invalid",
+            analysis_status=status,
+            data_quality=(
+                "insufficient_data"
+                if status == TechnicalAnalysisStatus.INSUFFICIENT_DATA
+                else "data_error"
+            ),
             errors=errors,
             candle_count=candle_count,
+            required_candles=self.min_required_candles,
+            available_candles=candle_count,
+            timeframe=timeframe,
+            component_availability=self._component_availability(
+                candle_count,
+                timeframe,
+                invalid=status == TechnicalAnalysisStatus.DATA_ERROR,
+                volume_available=volume_available,
+            ),
             lookback=self.lookback,
         )
 
+
+    def _component_availability(
+        self,
+        candle_count: int,
+        timeframe: str,
+        *,
+        invalid: bool = False,
+        volume_available: bool | None = None,
+    ) -> tuple[TechnicalComponentAvailability, ...]:
+        requirements = (
+            ("atr", self.atr_period + 1, True),
+            (f"ema_{self.ema_fast_period}", self.ema_fast_period, True),
+            (f"ema_{self.ema_slow_period}", self.ema_slow_period, True),
+            ("pivot_structure", self.lookback * 2 + 2, True),
+            ("recent_range", self.range_window, True),
+            ("volume_anomaly", self.volume_zscore_window, False),
+        )
+        return tuple(
+            TechnicalComponentAvailability(
+                component=component,
+                timeframe=timeframe,
+                required_bars=required_bars,
+                available_bars=candle_count,
+                required=required,
+                status=(
+                    "invalid"
+                    if invalid
+                    else "unavailable"
+                    if component == "volume_anomaly" and volume_available is False
+                    else "available"
+                    if candle_count >= required_bars
+                    else "unavailable"
+                ),
+            )
+            for component, required_bars, required in requirements
+        )
+
+
+def _volume_window_available(candles: Sequence[_Candle], window: int) -> bool:
+    if len(candles) < window:
+        return False
+    sample = candles[-window:]
+    return all(candle.volume != NA for candle in sample)
 
 def calculate_ema(values: Sequence[DecimalLike], period: int) -> MaybeDecimal:
     decimals = tuple(_decimal_from(value, f"values[{index}]") for index, value in enumerate(values))
@@ -348,6 +467,12 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_Candle, ...], tup
             continue
         if required["high"] < required["low"]:
             errors.append(f"Malformed candle candles[{index}]: high is lower than low.")
+            continue
+        if required["high"] < max(required["open"], required["close"]):
+            errors.append(f"Malformed candle candles[{index}]: high is below open or close.")
+            continue
+        if required["low"] > min(required["open"], required["close"]):
+            errors.append(f"Malformed candle candles[{index}]: low is above open or close.")
             continue
 
         timestamp = _get_field(candle, "timestamp")

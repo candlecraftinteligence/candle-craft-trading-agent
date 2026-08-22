@@ -18,7 +18,11 @@ from app.agents.alert_agent import AlertAgent, AlertResult
 from app.agents.derivatives_orderflow import DerivativesOrderflowAgent, DerivativesOrderflowResult
 from app.agents.journal_agent import JournalAgent, JournalEntryResult, JournalStatus
 from app.agents.risk_manager import RiskDecision, RiskManagerAgent, RiskManagerInput
-from app.agents.technical_structure import TechnicalStructureAgent, TechnicalStructureResult
+from app.agents.technical_structure import (
+    TechnicalAnalysisStatus,
+    TechnicalStructureAgent,
+    TechnicalStructureResult,
+)
 from app.agents.trade_idea import TradeIdeaAgent, TradeIdeaResult
 from app.analytics.derivatives_enrichment import (
     DerivativesEnrichmentInput,
@@ -55,7 +59,11 @@ from app.analytics.target_intelligence import (
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
 from app.core.process_memory import ProcessMemoryReading, read_process_rss
-from app.data.candle_integrity import CandleIntegrityError, closed_candles_as_of, normalize_utc_timestamp
+from app.data.candle_integrity import (
+    CandleIntegrityError,
+    closed_candles_as_of,
+    normalize_utc_timestamp,
+)
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exceptions import ExchangeTimeoutError
 from app.data.exchange_clients import BaseExchangeClient, BinanceFuturesClient, BybitLinearClient
@@ -360,6 +368,10 @@ class ScannerSymbolResult(BaseModel):
     latest_high: MaybeDecimal = NA
     latest_low: MaybeDecimal = NA
     technical_score: MaybeInt = NA
+    technical_status: str = NA
+    technical_timeframe: str = NA
+    technical_required_bars: MaybeInt = NA
+    technical_available_bars: MaybeInt = NA
     derivatives_score: MaybeInt = NA
     trend_context: str = NA
     recent_range_high: MaybeDecimal = NA
@@ -871,9 +883,13 @@ class ScannerRunner:
         if ticker_price != NA:
             current_price = ticker_price
 
-        technical = self.technical_agent.analyze(technical_candles)
+        technical = self.technical_agent.analyze(technical_candles, timeframe=config.interval)
         base_missing = list(optional_data.missing_data)
         base_unverified = list(optional_data.unverified_data)
+        if technical.analysis_status == TechnicalAnalysisStatus.INSUFFICIENT_DATA:
+            base_missing.append(_technical_data_diagnostic(technical))
+        elif technical.analysis_status == TechnicalAnalysisStatus.DATA_ERROR:
+            base_unverified.append(_technical_data_diagnostic(technical))
         derivatives_enrichment = enrich_derivatives(
             _derivatives_enrichment_input(
                 symbol=symbol,
@@ -886,17 +902,23 @@ class ScannerRunner:
         )
         base_missing.extend(derivatives_enrichment.missing_data)
         base_unverified.extend(derivatives_enrichment.unverified_data)
-        strategy_execution = await self._run_strategy(
-            client=client,
-            symbol=symbol,
-            config=config,
-            primary_candles=candles,
-            current_price=current_price,
-            optional_data=optional_data,
-            technical=technical,
-            derivatives_enrichment=derivatives_enrichment,
-            progress=progress,
-        )
+        if technical.analysis_status == TechnicalAnalysisStatus.DATA_ERROR:
+            strategy_execution = _StrategyExecution(
+                strategy_name=config.strategy_name or NA,
+                decision_timestamp=config.decision_timestamp,
+            )
+        else:
+            strategy_execution = await self._run_strategy(
+                client=client,
+                symbol=symbol,
+                config=config,
+                primary_candles=candles,
+                current_price=current_price,
+                optional_data=optional_data,
+                technical=technical,
+                derivatives_enrichment=derivatives_enrichment,
+                progress=progress,
+            )
         base_missing.extend(strategy_execution.strategy_missing_data)
         base_unverified.extend(strategy_execution.strategy_unverified_data)
         await _emit_progress(progress, "Scoring...")
@@ -913,6 +935,7 @@ class ScannerRunner:
                 missing_data=base_missing,
                 unverified_data=base_unverified,
                 rejection_reason=reason,
+                rejection_stage_override=_technical_rejection_stage(technical),
                 technical_result=technical,
                 derivatives_enrichment=derivatives_enrichment,
                 strategy_execution=strategy_execution,
@@ -1100,6 +1123,7 @@ class ScannerRunner:
                 risk_decision=risk_decision,
                 score_result=score_result,
                 strategy_execution=strategy_execution,
+                rejection_stage_override=_scoring_rejection_stage(score_result),
                 technical_score_override=effective_technical_score,
             )
 
@@ -1266,7 +1290,7 @@ class ScannerRunner:
                 symbol=symbol,
                 timeframe="2d",
                 config=config,
-                minimum_closed_history=self.technical_agent.min_required_candles,
+                minimum_closed_history=0,
             )
         fetch_limit = _timeframe_fetch_limit(config, primary_timeframe, limit_warnings)
         for warning in _unique_strings(limit_warnings):
@@ -1281,7 +1305,7 @@ class ScannerRunner:
             symbol=symbol,
             timeframe=primary_timeframe,
             config=config,
-            minimum_closed_history=self.technical_agent.min_required_candles,
+            minimum_closed_history=0,
         )
 
     async def _fetch_market_regime_context(
@@ -1487,6 +1511,7 @@ class ScannerRunner:
 
         if config.htf_timeframe.strip().lower() == "2d":
             source_candles: Sequence[Any] = ()
+            synthetic_data_error = False
             await _emit_progress(progress, "Fetching HTF 2d...")
             try:
                 if primary_timeframe == SYNTHETIC_2D_SOURCE_TIMEFRAME:
@@ -1512,22 +1537,33 @@ class ScannerRunner:
                     exc,
                 )
                 synthetic_2d = []
+                synthetic_data_error = True
 
             if synthetic_2d:
-                candles_by_timeframe["2d"] = self._closed_candles_for_analysis(
+                closed_synthetic_2d = self._closed_candles_for_analysis(
                     synthetic_2d,
                     symbol=symbol,
                     timeframe="2d",
                     config=config,
-                    minimum_closed_history=MIN_STRATEGY_CLOSED_CANDLES,
+                    minimum_closed_history=0,
                 )
-                htf_source = "synthetic_from_1d"
+                if len(closed_synthetic_2d) >= MIN_STRATEGY_CLOSED_CANDLES:
+                    candles_by_timeframe["2d"] = closed_synthetic_2d
+                    htf_source = "synthetic_from_1d"
+                else:
+                    missing_data.extend(_strategy_history_diagnostics("2d", len(closed_synthetic_2d)))
             else:
-                missing_data.append("candles_2d: N/A")
+                if synthetic_data_error or not source_candles:
+                    missing_data.extend(_strategy_data_error_diagnostics("2d"))
+                else:
+                    missing_data.extend(_strategy_history_diagnostics("2d", 0))
 
         for timeframe in _direct_strategy_timeframes(config):
             if timeframe == primary_timeframe:
-                candles_by_timeframe[timeframe] = primary_candles
+                if len(primary_candles) >= MIN_STRATEGY_CLOSED_CANDLES:
+                    candles_by_timeframe[timeframe] = primary_candles
+                else:
+                    missing_data.extend(_strategy_history_diagnostics(timeframe, len(primary_candles)))
                 continue
 
             if config.fast_mode and _fast_mode_skips_timeframe(config, timeframe):
@@ -1545,22 +1581,26 @@ class ScannerRunner:
                 )
             except Exception as exc:
                 self.logger.warning("Optional strategy candles fetch failed for symbol=%s timeframe=%s: %s", symbol, timeframe, exc)
-                missing_data.append(f"candles_{timeframe}: N/A")
+                missing_data.extend(_strategy_data_error_diagnostics(timeframe))
                 continue
 
             if not candles:
-                missing_data.append(f"candles_{timeframe}: N/A")
+                missing_data.extend(_strategy_data_error_diagnostics(timeframe))
                 continue
             try:
-                candles_by_timeframe[timeframe] = self._closed_candles_for_analysis(
+                closed_candles = self._closed_candles_for_analysis(
                     candles,
                     symbol=symbol,
                     timeframe=timeframe,
                     config=config,
-                    minimum_closed_history=MIN_STRATEGY_CLOSED_CANDLES,
+                    minimum_closed_history=0,
                 )
             except CandleIntegrityError:
                 raise
+            if len(closed_candles) >= MIN_STRATEGY_CLOSED_CANDLES:
+                candles_by_timeframe[timeframe] = closed_candles
+            else:
+                missing_data.extend(_strategy_history_diagnostics(timeframe, len(closed_candles)))
 
         return (
             candles_by_timeframe,
@@ -1721,6 +1761,7 @@ class ScannerRunner:
             status=status,
             rejection_reason=rejection_reason,
             strategy_execution=strategy_execution,
+            technical_result=technical_result,
             derivatives_enrichment=derivatives_enrichment,
             risk_decision=risk_decision,
             score_result=score_result,
@@ -1755,6 +1796,16 @@ class ScannerRunner:
             else technical_result.structure_score
             if technical_result is not None
             else NA,
+            technical_status=(
+                technical_result.analysis_status.value if technical_result is not None else NA
+            ),
+            technical_timeframe=technical_result.timeframe if technical_result is not None else NA,
+            technical_required_bars=(
+                technical_result.required_candles if technical_result is not None else NA
+            ),
+            technical_available_bars=(
+                technical_result.available_candles if technical_result is not None else NA
+            ),
             derivatives_score=derivatives_enrichment.derivatives_score
             if derivatives_enrichment is not None
             else derivatives_result.derivatives_score
@@ -1857,6 +1908,7 @@ def _setup_quality_for_result(
     status: ScannerPipelineStatus,
     rejection_reason: str | None,
     strategy_execution: _StrategyExecution,
+    technical_result: TechnicalStructureResult | None,
     derivatives_enrichment: DerivativesEnrichmentResult | None,
     risk_decision: RiskDecision | None,
     score_result: OpportunityScoreResult | None,
@@ -1870,7 +1922,14 @@ def _setup_quality_for_result(
     setup = strategy_execution.selected_setup
     mode = setup.mode.value if setup is not None else _strategy_mode_from_execution(strategy_execution)
     failed_gate = _strategy_failed_gate(diagnostics) if diagnostics else NA
-    if failed_gate == NA:
+    if status == ScannerPipelineStatus.REJECTED_BY_TECHNICAL and technical_result is not None:
+        failed_gate = _technical_rejection_stage(technical_result)
+    elif (
+        status == ScannerPipelineStatus.REJECTED_BY_SCORING
+        and _score_has_violation(score_result, "weak_technical_score")
+    ):
+        failed_gate = "technical_invalid"
+    elif failed_gate == NA:
         if status == ScannerPipelineStatus.REJECTED_BY_DERIVATIVES:
             failed_gate = "derivatives_conflict"
         elif status == ScannerPipelineStatus.REJECTED_BY_RISK:
@@ -2563,6 +2622,64 @@ def _rejection_reasons_for(status: ScannerPipelineStatus, rejection_reason: str 
     if status == ScannerPipelineStatus.SCANNED_NO_SETUP:
         return ("No deterministic setup context was detected.",)
     return ()
+
+
+def _score_has_violation(result: OpportunityScoreResult | None, code: str) -> bool:
+    return result is not None and any(
+        violation.code == code
+        for violation in result.hard_filter_result.violations
+    )
+
+
+def _scoring_rejection_stage(result: OpportunityScoreResult) -> str:
+    if _score_has_violation(result, "weak_technical_score"):
+        return "technical_invalid"
+    return "scoring"
+
+
+def _technical_rejection_stage(result: TechnicalStructureResult) -> str:
+    if result.analysis_status == TechnicalAnalysisStatus.INSUFFICIENT_DATA:
+        return "technical_insufficient_data"
+    if result.analysis_status == TechnicalAnalysisStatus.DATA_ERROR:
+        return "technical_data_error"
+    return "technical_invalid"
+
+
+def _technical_data_diagnostic(result: TechnicalStructureResult) -> str:
+    timeframe = result.timeframe if result.timeframe != NA else "unknown"
+    unavailable = tuple(
+        component.component
+        for component in result.component_availability
+        if component.required and component.status != "available"
+    )
+    components = ",".join(unavailable) if unavailable else "all"
+    reliability = (
+        "N/A"
+        if result.analysis_status == TechnicalAnalysisStatus.INSUFFICIENT_DATA
+        else "Unverified"
+    )
+    return (
+        f"technical_candles[{timeframe}]: {reliability} "
+        f"(status={result.analysis_status.value}, component={components}, "
+        f"required_bars={result.required_candles}, available_bars={result.available_candles})"
+    )
+
+
+def _strategy_history_diagnostics(timeframe: str, available_bars: int) -> tuple[str, str]:
+    return (
+        f"candles_{timeframe}: N/A",
+        f"candle_sufficiency[{timeframe}]: N/A (status=INSUFFICIENT_DATA, "
+        f"component=strategy, required_bars={MIN_STRATEGY_CLOSED_CANDLES}, "
+        f"available_bars={available_bars})",
+    )
+
+
+def _strategy_data_error_diagnostics(timeframe: str) -> tuple[str, str]:
+    return (
+        f"candles_{timeframe}: N/A",
+        f"candle_sufficiency[{timeframe}]: N/A (status=DATA_ERROR, "
+        f"component=strategy, required_bars={MIN_STRATEGY_CLOSED_CANDLES}, available_bars=0)",
+    )
 
 
 def _technical_candles(candles: Sequence[Any]) -> tuple[dict[str, Any], ...]:

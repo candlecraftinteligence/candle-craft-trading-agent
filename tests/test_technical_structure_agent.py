@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from app.agents.technical_structure import TechnicalStructureAgent, calculate_ema
+from app.agents.technical_structure import (
+    TechnicalAnalysisStatus,
+    TechnicalStructureAgent,
+    calculate_ema,
+)
 from app.data.dtos import NA
 
 
@@ -189,13 +193,20 @@ def test_missing_volume_handling_marks_volume_anomaly_na() -> None:
     assert result.volume_z_score == NA
     assert result.volume_anomaly.status == NA
     assert result.volume_anomaly.is_present is False
+    volume_component = next(item for item in result.component_availability if item.component == "volume_anomaly")
+    assert volume_component.required is False
+    assert volume_component.status == "unavailable"
 
 
 def test_not_enough_candles_handling() -> None:
     result = TechnicalStructureAgent().analyze(_flat_candles(50))
 
     assert result.is_valid is False
-    assert result.data_quality == "invalid"
+    assert result.analysis_status == TechnicalAnalysisStatus.INSUFFICIENT_DATA
+    assert result.data_quality == "insufficient_data"
+    assert result.structure_score == NA
+    assert result.required_candles == 200
+    assert result.available_candles == 50
     assert "Not enough candles" in result.errors[0]
 
 
@@ -206,7 +217,9 @@ def test_malformed_candle_handling() -> None:
     result = TechnicalStructureAgent().analyze(candles)
 
     assert result.is_valid is False
-    assert result.data_quality == "invalid"
+    assert result.analysis_status == TechnicalAnalysisStatus.DATA_ERROR
+    assert result.data_quality == "data_error"
+    assert result.structure_score == NA
     assert result.errors == ("Missing required OHLC field candles[10].high.",)
 
 
@@ -215,6 +228,7 @@ def test_range_detection_and_nearest_levels() -> None:
     candles[170]["low"] = Decimal("94")
     candles[180]["high"] = Decimal("108")
     candles[-1]["close"] = Decimal("107")
+    candles[-1]["high"] = Decimal("108")
 
     result = TechnicalStructureAgent(lookback=2, range_window=50).analyze(candles)
 
@@ -223,3 +237,99 @@ def test_range_detection_and_nearest_levels() -> None:
     assert result.nearest_support == Decimal("94.00000000")
     assert result.nearest_resistance == Decimal("108.00000000")
     assert result.range_position == "upper"
+
+
+def test_zero_candles_are_a_data_error() -> None:
+    result = TechnicalStructureAgent().analyze([], timeframe="15m")
+
+    assert result.analysis_status == TechnicalAnalysisStatus.DATA_ERROR
+    assert result.data_quality == "data_error"
+    assert result.available_candles == 0
+    assert result.structure_score == NA
+
+
+def test_199_bars_preserve_partial_component_availability_without_scoring() -> None:
+    result = TechnicalStructureAgent().analyze(_flat_candles(199), timeframe="15m")
+
+    assert result.analysis_status == TechnicalAnalysisStatus.INSUFFICIENT_DATA
+    assert result.is_valid is False
+    assert result.required_candles == 200
+    assert result.available_candles == 199
+    assert result.structure_score == NA
+    components = {item.component: item for item in result.component_availability}
+    assert components["ema_50"].status == "available"
+    assert components["ema_200"].status == "unavailable"
+
+
+def test_exactly_200_bars_runs_normal_analysis() -> None:
+    result = TechnicalStructureAgent().analyze(_flat_candles(200), timeframe="15m")
+
+    assert result.analysis_status == TechnicalAnalysisStatus.VALID
+    assert result.is_valid is True
+    assert result.available_candles == 200
+
+
+def test_201_bars_runs_normal_analysis() -> None:
+    result = TechnicalStructureAgent().analyze(_flat_candles(201), timeframe="15m")
+
+    assert result.analysis_status == TechnicalAnalysisStatus.VALID
+    assert result.is_valid is True
+    assert result.available_candles == 201
+
+
+def test_nan_ohlc_is_a_data_error() -> None:
+    candles = _flat_candles()
+    candles[10]["close"] = Decimal("NaN")
+    result = TechnicalStructureAgent().analyze(candles)
+
+    assert result.analysis_status == TechnicalAnalysisStatus.DATA_ERROR
+    assert result.structure_score == NA
+    assert any("invalid decimal" in error for error in result.errors)
+
+
+def test_impossible_ohlc_geometry_is_a_data_error() -> None:
+    candles = _flat_candles()
+    candles[10]["close"] = Decimal("105")
+    result = TechnicalStructureAgent().analyze(candles)
+
+    assert result.analysis_status == TechnicalAnalysisStatus.DATA_ERROR
+    assert result.structure_score == NA
+    assert result.errors == ("Malformed candle candles[10]: high is below open or close.",)
+
+
+def test_wick_only_penetration_does_not_count_as_bos() -> None:
+    candles = _flat_candles()
+    candles[180]["high"] = Decimal("110")
+    candles[-1]["high"] = Decimal("112")
+    candles[-1]["close"] = Decimal("109")
+    result = TechnicalStructureAgent().analyze(candles)
+
+    assert result.bos.is_present is False
+    assert result.sweep.is_present is True
+
+
+def test_bos_on_previous_candle_is_not_persisted_by_secondary_analyzer() -> None:
+    candles = _flat_candles()
+    candles[180]["high"] = Decimal("110")
+    candles[-2]["high"] = Decimal("112")
+    candles[-2]["close"] = Decimal("111")
+    result = TechnicalStructureAgent().analyze(candles)
+
+    assert result.bos.is_present is False
+
+
+def test_unconfirmed_future_dependent_pivot_is_not_detected() -> None:
+    candles = _flat_candles()
+    candles[-2]["high"] = Decimal("110")
+    result = TechnicalStructureAgent(lookback=2).analyze(candles)
+
+    assert all(point.index != len(candles) - 2 for point in result.swing_points)
+
+
+def test_same_data_produces_same_technical_classification() -> None:
+    candles = _flat_candles(199)
+    agent = TechnicalStructureAgent()
+    first = agent.analyze(candles, timeframe="15m")
+    second = agent.analyze(candles, timeframe="15m")
+
+    assert first.model_dump(mode="json") == second.model_dump(mode="json")
