@@ -66,6 +66,12 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
             raise ExchangeResponseError("Expected list response at binance.tickers_24h")
         return payload
 
+    async def get_exchange_info(self) -> Mapping[str, Any]:
+        payload = await self._get_json("/fapi/v1/exchangeInfo")
+        if not isinstance(payload, Mapping):
+            raise ExchangeResponseError("Expected object response at binance.exchange_info")
+        return payload
+
     async def get_funding_rate(self, symbol: str) -> FundingDTO:
         normalized_symbol = symbol.upper()
         history = await self.get_funding_rate_history(normalized_symbol, limit=1)

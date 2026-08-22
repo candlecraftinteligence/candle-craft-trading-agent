@@ -128,8 +128,8 @@ def test_market_cap_universe_intersects_public_rankings_with_binance_usdt_perps(
 
     assert universe.mode == BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE
     assert universe.source == COINPAPRIKA_MARKET_CAP_SOURCE
-    assert universe.resolved_symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT")
-    assert universe.market_cap_rank_by_symbol == {"BTCUSDT": 1, "ETHUSDT": 2, "SOLUSDT": 5}
+    assert universe.resolved_symbols == ("BTCUSDT", "ETHUSDT")
+    assert universe.market_cap_rank_by_symbol == {"BTCUSDT": 1, "ETHUSDT": 2}
     assert "USDCUSDT" in universe.excluded_symbols
 
 
@@ -260,4 +260,5 @@ def test_json_payload_includes_universe_block() -> None:
         "min_quote_volume": "10",
         "market_cap_rank_by_symbol": {},
         "market_cap_usd_by_symbol": {},
+        "diagnostics": {},
     }
