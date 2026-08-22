@@ -6,6 +6,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
+from app.core.price_precision import quantize_public_price
 from app.data.dtos import NA
 
 HEADER_PREFIX = "\U0001F43A\U0001F7E0"
@@ -1334,28 +1335,9 @@ def _price_display(value: Any) -> str:
     number = _decimal_value(value)
     if number is None:
         return NA
-    places = _price_decimal_places(number)
-    quantum = Decimal(1).scaleb(-places)
-    rounded = number.quantize(quantum, rounding=ROUND_HALF_UP)
+    rounded = quantize_public_price(number)
     output = format(rounded, "f")
     return output.rstrip("0").rstrip(".") if "." in output else output
-
-
-def _price_decimal_places(value: Decimal) -> int:
-    magnitude = abs(value)
-    if magnitude >= Decimal("1000"):
-        return 2
-    if magnitude >= Decimal("100"):
-        return 2
-    if magnitude >= Decimal("10"):
-        return 2
-    if magnitude >= Decimal("1"):
-        return 4
-    if magnitude >= Decimal("0.1"):
-        return 5
-    if magnitude >= Decimal("0.01"):
-        return 5
-    return 8
 
 
 def _price_range_text(value: Any) -> str:

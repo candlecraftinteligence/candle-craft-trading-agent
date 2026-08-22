@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.minimum_rr import hard_mode_minimum_rr
+from app.core.trade_plan_integrity import validate_trade_plan
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
 from app.lifecycle.identity import generation_rotation_reason, new_setup_generation_id
@@ -1509,22 +1510,18 @@ def _trade_map_geometry_valid(
     stop: Decimal,
     targets: Sequence[Decimal],
 ) -> bool:
-    entry_reference = (min(entry_low, entry_high) + max(entry_low, entry_high)) / Decimal("2")
-    if side == "long" and stop >= entry_reference:
-        return False
-    if side == "short" and stop <= entry_reference:
-        return False
-    for target in targets:
-        if side == "long" and target <= entry_reference:
-            return False
-        if side == "short" and target >= entry_reference:
-            return False
-    for left, right in zip(targets, targets[1:]):
-        if side == "long" and left >= right:
-            return False
-        if side == "short" and left <= right:
-            return False
-    return True
+    target_values = tuple(targets)
+    return validate_trade_plan(
+        direction=side,
+        entry_low=entry_low,
+        entry_high=entry_high,
+        entry_reference=entry_low if side == "long" else entry_high,
+        stop_loss=stop,
+        tp1=target_values[0] if len(target_values) > 0 else None,
+        tp2=target_values[1] if len(target_values) > 1 else None,
+        tp3=target_values[2] if len(target_values) > 2 else None,
+        entry_reference_type="favorable_zone_edge",
+    ).valid
 
 
 def _entry_zone_touched_for_result(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> bool:

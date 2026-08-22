@@ -150,9 +150,9 @@ def test_closed_long_and_short_replay_geometry_remains_directional() -> None:
     short_candidate = summary.symbols[1].trades[0].candidate
     assert long_candidate.direction == ReplayDirection.LONG
     assert long_candidate.entry == Decimal("97.00000000")
-    assert long_candidate.stop == Decimal("83.87142857")
-    assert long_candidate.tp2 == Decimal("131.92200000")
+    assert long_candidate.stop == Decimal("83.87000000")
+    assert long_candidate.tp2 == Decimal("131.92000000")
     assert short_candidate.direction == ReplayDirection.SHORT
     assert short_candidate.entry == Decimal("103.00000000")
-    assert short_candidate.stop == Decimal("116.12857143")
-    assert short_candidate.tp2 == Decimal("68.07800000")
+    assert short_candidate.stop == Decimal("116.13000000")
+    assert short_candidate.tp2 == Decimal("68.08000000")

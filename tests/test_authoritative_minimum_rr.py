@@ -256,8 +256,11 @@ def test_higher_override_is_enforced_by_strategy_evaluation() -> None:
     assert setup.configured_global_minimum_rr == Decimal("4.0")
     assert setup.hard_mode_floor == Decimal("2.5")
     assert setup.effective_minimum_rr == Decimal("4.0")
-    assert setup.candidate_rr == Decimal("2.66000000")
-    assert setup.rr_rejection_reason.startswith("rr_below_minimum:candidate_rr=2.66000000;")
+    assert setup.candidate_rr == Decimal("2.65955826")
+    assert setup.candidate_rr == (
+        (setup.tp2 - setup.entry) / (setup.entry - setup.stop)
+    ).quantize(Decimal("0.00000001"))
+    assert setup.rr_rejection_reason.startswith("rr_below_minimum:candidate_rr=2.65955826;")
 
 
 @pytest.mark.parametrize(

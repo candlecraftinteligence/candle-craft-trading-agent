@@ -190,3 +190,19 @@ def test_dangerous_leverage_warning_included() -> None:
     result = _idea(leverage=Decimal("51"))
 
     assert "Dangerous leverage risk." in result.risk_warning
+
+
+def test_rejects_trade_idea_target_inside_entry_zone() -> None:
+    result = _idea(
+        take_profit_targets=(Decimal("101"), Decimal("112"), Decimal("120")),
+    )
+
+    assert result.status == "rejected"
+    assert _has_violation(result, "trade_plan_integrity_failed")
+
+
+def test_rejects_trade_idea_stop_inside_entry_zone() -> None:
+    result = _idea(stop_loss=Decimal("101"))
+
+    assert result.status == "rejected"
+    assert _has_violation(result, "trade_plan_integrity_failed")

@@ -514,7 +514,7 @@ def test_selected_setup_features_repair_stale_generic_technical_score_for_scorin
     assert score > stale_technical.structure_score
 
 
-def test_tp_sequence_uses_absolute_reward_distance() -> None:
+def test_tp_sequence_enforces_directional_reward_order() -> None:
     assert scanner_runner_module._tp_sequence_valid(
         direction="long",
         entry=Decimal("100"),
@@ -534,6 +534,25 @@ def test_tp_sequence_uses_absolute_reward_distance() -> None:
         direction="long",
         entry=Decimal("100"),
         take_profit_targets=(Decimal("100"), Decimal("110"), Decimal("120")),
+    )
+
+
+def test_tp_sequence_rejects_target_inside_full_entry_zone() -> None:
+    assert not scanner_runner_module._tp_sequence_valid(
+        direction="long",
+        entry=Decimal("100"),
+        entry_low=Decimal("100"),
+        entry_high=Decimal("102"),
+        stop_loss=Decimal("95"),
+        take_profit_targets=(Decimal("101"), Decimal("115"), Decimal("120")),
+    )
+    assert not scanner_runner_module._tp_sequence_valid(
+        direction="short",
+        entry=Decimal("100"),
+        entry_low=Decimal("98"),
+        entry_high=Decimal("100"),
+        stop_loss=Decimal("105"),
+        take_profit_targets=(Decimal("99"), Decimal("85"), Decimal("80")),
     )
 
 

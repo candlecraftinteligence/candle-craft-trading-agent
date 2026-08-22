@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.core.trade_plan_integrity import validate_trade_plan
 from app.data.candle_integrity import CausalCandle
 from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleOutcomeProgress, SetupLifecycleRecord
@@ -63,10 +64,23 @@ def stored_plan_geometry(record: Any) -> StoredPlanGeometry:
     targets = (values["tp1"], values["tp2"], values["tp3"])
     if low > high:
         raise ValueError("entry_low_above_entry_high")
-    if direction == "long" and not (stop < low <= high < targets[0] < targets[1] < targets[2]):
-        raise ValueError("invalid_long_level_order")
-    if direction == "short" and not (stop > high >= low > targets[0] > targets[1] > targets[2]):
-        raise ValueError("invalid_short_level_order")
+    integrity = validate_trade_plan(
+        direction=direction,
+        entry_low=low,
+        entry_high=high,
+        entry_reference=low if direction == "long" else high,
+        stop_loss=stop,
+        tp1=targets[0],
+        tp2=targets[1],
+        tp3=targets[2],
+        entry_reference_type="favorable_zone_edge",
+    )
+    if not integrity.valid:
+        raise ValueError(
+            "invalid_long_level_order"
+            if direction == "long"
+            else "invalid_short_level_order"
+        )
     return StoredPlanGeometry(
         direction=direction,
         entry_low=low,
