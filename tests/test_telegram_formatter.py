@@ -75,7 +75,7 @@ def test_valid_setup_formatting_is_premium_telegram_ready() -> None:
     assert text.startswith("🐺 Candle Craft Intelligence")
     assert "BTCUSDT · LONG · SCALP" in text
     assert "Grade: A | Score: N/A | RR: 3.25R" in text
-    assert "Status: 🟢 Entry Zone Active" in text
+    assert "Status: 🟢 CONFIRMED SIGNAL" in text
     assert "Entry: 103100 – 103300" in text
     assert "TP1: 104800" in text
     assert "TP2: 106000" in text

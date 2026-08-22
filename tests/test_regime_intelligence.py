@@ -575,9 +575,8 @@ def test_strategy_mode_regime_blocked_candidate_is_not_public_watchlist_copy() -
     decision = telegram_alert_decision_for_symbol(candidate)
 
     assert decision.eligible is False
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
-    assert "public_block_non_actionable_state" in decision.reason
-    assert "regime_compatibility" not in decision.reason
+    assert decision.alert_type is None
+    assert decision.reason == "lifecycle_state_not_eligible"
 
 
 def test_strategy_mode_public_watchlist_does_not_create_active_execution_signal() -> None:
@@ -585,7 +584,8 @@ def test_strategy_mode_public_watchlist_does_not_create_active_execution_signal(
     decision = telegram_alert_decision_for_symbol(candidate)
 
     assert decision.eligible is False
-    assert decision.alert_type == TelegramAlertType.WATCHLIST
+    assert decision.alert_type is None
+    assert decision.reason == "lifecycle_state_not_eligible"
     assert candidate.lifecycle_transition is not None
     assert candidate.lifecycle_transition.to_state == SetupLifecycleState.WATCHLISTED
     assert candidate.lifecycle_state is not None

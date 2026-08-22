@@ -45,7 +45,11 @@ def test_all_public_signal_messages_end_with_candle_craft_footer() -> None:
     for alert_type in TelegramAlertType:
         text = format_telegram_signal_message(alert_type, _message())
 
-        if alert_type in {TelegramAlertType.WATCHLIST, TelegramAlertType.SIGNAL_CONFIRMED}:
+        if alert_type in {
+            TelegramAlertType.WATCHLIST,
+            TelegramAlertType.SETUP_TRIGGERED,
+            TelegramAlertType.SIGNAL_CONFIRMED,
+        }:
             assert text.startswith("🐺 Candle Craft Intelligence")
         else:
             assert text.startswith((HEADER_PREFIX, "\U0001F7E1"))
@@ -58,7 +62,8 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
     assert text.startswith("🐺 Candle Craft Intelligence")
     assert "BTCUSDT · LONG · SCALP" in text
     assert "Grade: A | Score: N/A | RR: 2.92R" in text
-    assert "Status: 🟢 Entry Zone Active" in text
+    assert "Status: 🟢 CONFIRMED SIGNAL" in text
+    assert "Confirmation criteria satisfied." in text
     assert "🐺 Wolf found downside liquidity." in text
     assert "Now we track the reaction." in text
     assert "🎯 Trade Map" in text
