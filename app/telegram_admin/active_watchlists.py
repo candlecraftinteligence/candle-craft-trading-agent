@@ -627,11 +627,13 @@ def _has_watchlist_lifecycle_records(path: Path) -> bool:
                 return False
             lifecycle_stage_keys = (*_WATCH_STATE_KEYS, *_STALKING_STATE_KEYS, *_PUBLIC_COOLDOWN_STATE_KEYS)
             placeholders = ",".join("?" for _ in lifecycle_stage_keys)
+            current_clause = "AND is_current = 1" if "is_current" in columns else ""
             row = connection.execute(
                 f"""
                 SELECT 1
                 FROM setup_lifecycle_records
                 WHERE LOWER(REPLACE(REPLACE(current_state, '-', '_'), ' ', '_')) IN ({placeholders})
+                  {current_clause}
                 LIMIT 1
                 """,
                 tuple(lifecycle_stage_keys),
@@ -800,6 +802,7 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
     required = {"lifecycle_id", "symbol", "current_state"}
     if not required <= columns:
         return ()
+    current_clause = "WHERE is_current = 1" if "is_current" in columns else ""
     select_columns = [
         "lifecycle_id",
         "symbol",
@@ -822,6 +825,7 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
         f"""
         SELECT {", ".join(select_columns)}
         FROM setup_lifecycle_records
+        {current_clause}
         ORDER BY last_transition_at DESC, last_seen_at DESC, symbol ASC
         """
     ).fetchall()
@@ -2061,6 +2065,7 @@ def _lifecycle_row_for_attempt(connection: sqlite3.Connection, row: Mapping[str,
     symbol = _clean(row.get("symbol"))
     if symbol == NA:
         return {}
+    current_fallback_clause = "AND is_current = 1" if "is_current" in columns else ""
     direction = _clean(row.get("direction"))
     if "direction" in columns and direction != NA:
         records = connection.execute(
@@ -2069,6 +2074,7 @@ def _lifecycle_row_for_attempt(connection: sqlite3.Connection, row: Mapping[str,
             FROM setup_lifecycle_records
             WHERE UPPER(symbol) = UPPER(?)
               AND UPPER(direction) = UPPER(?)
+              {current_fallback_clause}
             ORDER BY last_seen_at DESC, lifecycle_id DESC
             """,
             (symbol, direction),
@@ -2079,6 +2085,7 @@ def _lifecycle_row_for_attempt(connection: sqlite3.Connection, row: Mapping[str,
             SELECT {", ".join(select_columns)}
             FROM setup_lifecycle_records
             WHERE UPPER(symbol) = UPPER(?)
+              {current_fallback_clause}
             ORDER BY last_seen_at DESC, lifecycle_id DESC
             """,
             (symbol,),

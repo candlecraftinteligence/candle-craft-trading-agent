@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.data.dtos import NA
+from app.lifecycle.identity import setup_geometry_identity
 from app.lifecycle.models import (
     ACTIVE_LIFECYCLE_MONITORING_STATES,
     SetupLifecycleEvent,
@@ -260,6 +261,7 @@ class LifecycleObservation:
     invalidated: bool = False
     expired: bool = False
     closed_candle_outcomes_managed: bool = False
+    structural_anchor: str = NA
 
     @property
     def pullback_and_rr_valid(self) -> bool:
@@ -447,6 +449,8 @@ def evaluate_lifecycle_transition(
             symbol_health_score_at_detection=_text(symbol_health_score),
             symbol_health_penalty_cycles=max(0, int(symbol_health_penalty_cycles or 0)),
             setup_identity=_setup_identity(observation),
+            structural_anchor=_text(observation.structural_anchor),
+            is_current=True,
         )
 
         geometry_failure = stored_plan_geometry_failure(new_record)
@@ -927,6 +931,11 @@ def _record_with_observation(
                 if record.current_state in PLAN_LOCK_STATES
                 else _setup_identity(observation)
             ),
+            "structural_anchor": (
+                record.structural_anchor
+                if _text(record.structural_anchor) != NA
+                else _text(observation.structural_anchor)
+            ),
         }
     )
 
@@ -1384,17 +1393,14 @@ def _grade_label(key: str) -> str:
 
 
 def _setup_identity(observation: LifecycleObservation) -> str:
-    return "|".join(
-        _text(value)
-        for value in (
-            observation.symbol.upper(),
-            _identity_text(observation.mode),
-            _identity_text(observation.direction),
-            observation.entry_low,
-            observation.entry_high,
-            observation.stop_loss,
-            observation.invalidation_reason,
-        )
+    return setup_geometry_identity(
+        symbol=observation.symbol,
+        mode=observation.mode,
+        direction=observation.direction,
+        entry_low=observation.entry_low,
+        entry_high=observation.entry_high,
+        stop_loss=observation.stop_loss,
+        invalidation_reason=observation.invalidation_reason,
     )
 
 

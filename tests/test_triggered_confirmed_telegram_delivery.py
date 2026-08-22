@@ -355,3 +355,83 @@ def test_telegram_lifecycle_delivery_contains_no_order_execution_calls() -> None
 
     for forbidden in ("execute_order", "place_order", "create_order"):
         assert forbidden not in source
+
+
+def test_same_geometry_triggered_and_confirmed_deliver_once_per_generation(tmp_path) -> None:
+    db_path = tmp_path / "same-geometry-generations.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    geometry = (
+        "BTCUSDT|swing|long|100|102|95|"
+        "Invalid if price accepts below 95."
+    )
+
+    def generation_symbol(
+        state: SetupLifecycleState,
+        *,
+        previous: SetupLifecycleState,
+        generation_id: str,
+    ):
+        symbol = _symbol(
+            state,
+            previous=previous,
+            signal_id=generation_id,
+            setup_quality=_setup_quality_with_grade(
+                SetupQualityGrade.B_PLUS,
+                quality_score=78,
+            ),
+        )
+        return _with_lifecycle_fields(symbol, setup_identity=geometry)
+
+    generation_a_triggered = generation_symbol(
+        SetupLifecycleState.TRIGGERED,
+        previous=SetupLifecycleState.STALKING,
+        generation_id="generation-a",
+    )
+    generation_a_confirmed = generation_symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        generation_id="generation-a",
+    )
+    generation_b_triggered = generation_symbol(
+        SetupLifecycleState.TRIGGERED,
+        previous=SetupLifecycleState.STALKING,
+        generation_id="generation-b",
+    )
+    generation_b_confirmed = generation_symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        generation_id="generation-b",
+    )
+
+    deliveries = []
+    for scan_run_id, symbol in (
+        ("a-triggered", generation_a_triggered),
+        ("a-confirmed", generation_a_confirmed),
+        ("b-triggered", generation_b_triggered),
+        ("b-confirmed", generation_b_confirmed),
+    ):
+        first = run(
+            service.deliver_for_run(
+                _run_result(symbol),
+                scan_run_id=scan_run_id,
+            )
+        )
+        repeated = run(
+            service.deliver_for_run(
+                _run_result(symbol),
+                scan_run_id=f"{scan_run_id}-repeat",
+            )
+        )
+        assert first.sent == 1
+        assert repeated.sent == 0
+        deliveries.append(first.deliveries[0])
+
+    assert len(sender.messages) == 4
+    assert "TRIGGERED" in sender.messages[0]
+    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "TRIGGERED" in sender.messages[2]
+    assert "CONFIRMED SIGNAL" in sender.messages[3]
+    assert deliveries[0].signal_id == deliveries[1].signal_id
+    assert deliveries[2].signal_id == deliveries[3].signal_id
+    assert deliveries[0].signal_id != deliveries[2].signal_id

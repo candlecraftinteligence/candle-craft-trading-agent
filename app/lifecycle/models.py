@@ -153,6 +153,8 @@ class SetupLifecycleRecord(BaseModel):
     symbol_health_score_at_detection: str = NA
     symbol_health_penalty_cycles: int = Field(default=0, ge=0)
     setup_identity: str = NA
+    structural_anchor: str = NA
+    is_current: bool = True
 
     model_config = ConfigDict(frozen=True)
 
@@ -197,6 +199,7 @@ class SetupLifecycleRecord(BaseModel):
         "decay_reason",
         "symbol_health_score_at_detection",
         "setup_identity",
+        "structural_anchor",
     )
     @classmethod
     def _normalize_text(cls, value: str | None) -> str:
@@ -204,6 +207,12 @@ class SetupLifecycleRecord(BaseModel):
             return NA
         text = str(value).strip()
         return text if text else NA
+
+    @property
+    def setup_generation_id(self) -> str:
+        """Expose the immutable lifecycle primary key as the setup generation ID."""
+
+        return self.lifecycle_id
 
 
 class SetupLifecycleEvent(BaseModel):

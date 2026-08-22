@@ -13,6 +13,7 @@ from app.pipeline.scanner_runner import (
     ScannerSymbolResult,
 )
 from app.storage.database import (
+    SCHEMA_VERSION,
     UnsupportedSchemaVersionError,
     open_initialized_database,
 )
@@ -133,8 +134,9 @@ def test_failure_classification(error, expected) -> None:
 
 def test_unsupported_schema_is_fatal_and_left_untouched(tmp_path) -> None:
     database_path = tmp_path / "newer.sqlite"
+    unsupported_version = SCHEMA_VERSION + 1
     connection = sqlite3.connect(database_path)
-    connection.execute("PRAGMA user_version = 17")
+    connection.execute(f"PRAGMA user_version = {unsupported_version}")
     connection.close()
 
     with pytest.raises(UnsupportedSchemaVersionError):
@@ -142,7 +144,7 @@ def test_unsupported_schema_is_fatal_and_left_untouched(tmp_path) -> None:
 
     verification = sqlite3.connect(database_path)
     try:
-        assert verification.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert verification.execute("PRAGMA user_version").fetchone()[0] == unsupported_version
         assert verification.execute(
             "SELECT count(*) FROM sqlite_master WHERE type = 'table'"
         ).fetchone()[0] == 0
