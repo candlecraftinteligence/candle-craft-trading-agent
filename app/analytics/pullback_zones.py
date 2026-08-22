@@ -15,6 +15,8 @@ from app.analytics.wick_close_structure import (
     wick_close_fields,
 )
 from app.core.minimum_rr import CHALLENGE_HARD_MINIMUM_RR, SWING_HARD_MINIMUM_RR
+from app.core.price_precision import quantize_public_price
+from app.core.trade_plan_integrity import validate_trade_plan
 
 OUTPUT_QUANT = Decimal("0.00000001")
 BASE_MIN_RR = SWING_HARD_MINIMUM_RR
@@ -172,6 +174,13 @@ class PullbackZoneResult(BaseModel):
     tp2: MaybeDecimal = NA
     tp3: MaybeDecimal = NA
     rr_to_tp2: MaybeDecimal = NA
+    trade_plan_integrity: Literal["PASS", "FAIL", "N/A"] = NA
+    trade_plan_integrity_reason: str = NA
+    rr_entry_reference_type: str = NA
+    rr_entry_reference_price: MaybeDecimal = NA
+    rr_target_reference: str = NA
+    rr_risk_distance: MaybeDecimal = NA
+    rr_reward_distance: MaybeDecimal = NA
     atr_stop_buffer: MaybeDecimal = NA
     warnings: tuple[str, ...] = ()
 
@@ -382,12 +391,36 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         )
 
     tp1, tp2, tp3 = _targets(data, entry, impulse_start, impulse_end)
-    rr_to_tp2 = _risk_reward(data.direction, entry, _decimal_from(stop, "stop"), tp2)
-    if rr_to_tp2 == NA:
+    entry_reference_type = "zone_low_limit" if data.direction == "long" else "zone_high_limit"
+    plan_integrity = validate_trade_plan(
+        direction=data.direction,
+        entry_low=selected.entry_low,
+        entry_high=selected.entry_high,
+        entry_reference=entry,
+        stop_loss=stop,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        entry_reference_type=entry_reference_type,
+    )
+    integrity_update = {
+        "trade_plan_integrity": "PASS" if plan_integrity.valid else "FAIL",
+        "trade_plan_integrity_reason": plan_integrity.reason,
+        "rr_entry_reference_type": entry_reference_type,
+        "rr_entry_reference_price": _quantize(entry),
+        "rr_target_reference": "tp2",
+        "rr_risk_distance": (
+            _quantize(plan_integrity.risk_distance) if plan_integrity.risk_distance is not None else NA
+        ),
+        "rr_reward_distance": (
+            _quantize(plan_integrity.reward_distance) if plan_integrity.reward_distance is not None else NA
+        ),
+    }
+    if not plan_integrity.valid or plan_integrity.rr is None:
         return _failed_result(
             data,
-            "missing_target",
-            "Target or RR is N/A after pullback zone selection.",
+            "trade_plan_integrity",
+            plan_integrity.reason,
             **base_update,
             selected_zone=selected,
             selected_zone_type=selected.zone_type,
@@ -400,9 +433,71 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
             tp3=tp3,
             atr_stop_buffer=atr_stop_buffer,
             fib_alignment=fib_alignment,
+            **integrity_update,
         )
 
-    if _decimal_from(rr_to_tp2, "rr_to_tp2") < data.minimum_rr:
+    publishable_plan = validate_trade_plan(
+        direction=data.direction,
+        entry_low=quantize_public_price(_decimal_from(selected.entry_low, "selected.entry_low")),
+        entry_high=quantize_public_price(_decimal_from(selected.entry_high, "selected.entry_high")),
+        entry_reference=quantize_public_price(entry),
+        stop_loss=quantize_public_price(_decimal_from(stop, "stop")),
+        tp1=quantize_public_price(_decimal_from(tp1, "tp1")),
+        tp2=quantize_public_price(_decimal_from(tp2, "tp2")),
+        tp3=quantize_public_price(_decimal_from(tp3, "tp3")),
+        entry_reference_type=entry_reference_type,
+    )
+    if not publishable_plan.valid or publishable_plan.rr is None:
+        publishable_update = {
+            **integrity_update,
+            "trade_plan_integrity": "FAIL",
+            "trade_plan_integrity_reason": f"publishable_{publishable_plan.reason}",
+        }
+        return _failed_result(
+            data,
+            "trade_plan_integrity",
+            f"publishable_{publishable_plan.reason}",
+            **base_update,
+            selected_zone=selected,
+            selected_zone_type=selected.zone_type,
+            entry_low=publishable_plan.entry_low if publishable_plan.entry_low is not None else selected.entry_low,
+            entry_high=publishable_plan.entry_high if publishable_plan.entry_high is not None else selected.entry_high,
+            entry=publishable_plan.entry_reference if publishable_plan.entry_reference is not None else _quantize(entry),
+            stop=publishable_plan.stop_loss if publishable_plan.stop_loss is not None else stop,
+            tp1=publishable_plan.tp1 if publishable_plan.tp1 is not None else tp1,
+            tp2=publishable_plan.tp2 if publishable_plan.tp2 is not None else tp2,
+            tp3=publishable_plan.tp3 if publishable_plan.tp3 is not None else tp3,
+            atr_stop_buffer=atr_stop_buffer,
+            fib_alignment=fib_alignment,
+            **publishable_update,
+        )
+
+    entry = publishable_plan.entry_reference
+    stop = publishable_plan.stop_loss
+    tp1 = publishable_plan.tp1
+    tp2 = publishable_plan.tp2
+    tp3 = publishable_plan.tp3
+    assert all(value is not None for value in (entry, stop, tp1, tp2, tp3))
+    assert publishable_plan.risk_distance is not None
+    assert publishable_plan.reward_distance is not None
+    selected = selected.model_copy(
+        update={
+            "entry_low": publishable_plan.entry_low,
+            "entry_high": publishable_plan.entry_high,
+        }
+    )
+    integrity_update.update(
+        {
+            "trade_plan_integrity": "PASS",
+            "trade_plan_integrity_reason": NA,
+            "rr_entry_reference_price": entry,
+            "rr_risk_distance": _quantize(publishable_plan.risk_distance),
+            "rr_reward_distance": _quantize(publishable_plan.reward_distance),
+        }
+    )
+
+    rr_to_tp2 = _quantize(publishable_plan.rr)
+    if publishable_plan.rr < data.minimum_rr:
         return _failed_result(
             data,
             "rr_below_minimum",
@@ -420,6 +515,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
             rr_to_tp2=rr_to_tp2,
             atr_stop_buffer=atr_stop_buffer,
             fib_alignment=fib_alignment,
+            **integrity_update,
         )
 
     selected = selected.model_copy(
@@ -465,6 +561,7 @@ def analyze_pullback_zone(input_data: PullbackZoneInput | Mapping[str, Any]) -> 
         tp2=tp2,
         tp3=tp3,
         rr_to_tp2=rr_to_tp2,
+        **integrity_update,
         atr_stop_buffer=atr_stop_buffer,
         warnings=selected.warnings,
     )
@@ -792,14 +889,13 @@ def _risk_reward(direction: TradeDirection, entry: Decimal, stop: Decimal, targe
     if target == NA:
         return NA
     target_decimal = _decimal_from(target, "target")
-    risk = abs(entry - stop)
+    risk = entry - stop if direction == "long" else stop - entry
     if risk <= 0:
         return NA
-    if direction == "long" and target_decimal <= entry:
+    reward = target_decimal - entry if direction == "long" else entry - target_decimal
+    if reward <= 0:
         return NA
-    if direction == "short" and target_decimal >= entry:
-        return NA
-    return _quantize(abs(target_decimal - entry) / risk)
+    return _quantize(reward / risk)
 
 
 def _fib_alignment_for_levels(

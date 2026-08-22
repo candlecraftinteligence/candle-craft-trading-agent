@@ -439,7 +439,11 @@ def _trade_idea(
             "entry_low": entry_low,
             "entry_high": entry_high,
             "stop_loss": stop,
-            "take_profit_targets": (Decimal("110"), Decimal("117"), Decimal("124")),
+            "take_profit_targets": (
+                (entry_high + Decimal("8"), entry_high + Decimal("15"), entry_high + Decimal("22"))
+                if direction == "long"
+                else (entry_low - Decimal("8"), entry_low - Decimal("15"), entry_low - Decimal("22"))
+            ),
             "invalidation": f"Invalid if price accepts beyond {stop}.",
             "opportunity_score": opportunity_score,
             "opportunity_grade": "A",
@@ -539,9 +543,9 @@ def _confirmed_candidate_symbol(
                 "entry_low": entry_low,
                 "entry_high": entry_high,
                 "stop": stop,
-                "tp1": Decimal("110"),
-                "tp2": Decimal("117"),
-                "tp3": Decimal("124"),
+                "tp1": entry_high + Decimal("8") if direction == "long" else entry_low - Decimal("8"),
+                "tp2": entry_high + Decimal("15") if direction == "long" else entry_low - Decimal("15"),
+                "tp3": entry_high + Decimal("22") if direction == "long" else entry_low - Decimal("22"),
                 "rr_to_tp2": rr,
                 "opportunity_score": opportunity_score,
                 "invalidation": f"Invalid if price accepts beyond {stop}.",

@@ -4187,6 +4187,7 @@ def test_limit_hit_decision_is_allowed_only_after_prior_public_signal() -> None:
         sent_at="2026-06-02T00:00:00Z",
         telegram_status="sent",
         message_hash="hash",
+        rr_planned="3",
         entry_low="100",
         entry_high="102",
         stop_loss="95",
@@ -4212,6 +4213,7 @@ def test_limit_hit_decision_is_allowed_only_after_prior_public_signal() -> None:
     assert decision.message is not None
     assert decision.message.entry_low == "100"
     assert decision.message.entry_high == "102"
+    assert decision.message.planned_rr == "3"
 
 
 

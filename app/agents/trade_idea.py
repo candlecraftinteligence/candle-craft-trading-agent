@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.core.trade_plan_integrity import validate_trade_plan
 from app.data.dtos import NA, MaybeDecimal
 
 Direction = Literal["long", "short"]
@@ -33,6 +34,7 @@ class TradeIdeaInput(BaseModel):
     setup_type: str
     entry_low: Decimal | None = None
     entry_high: Decimal | None = None
+    entry_reference: Decimal | None = None
     stop_loss: Decimal | None = None
     take_profit_targets: tuple[Decimal, ...] = ()
     invalidation: str | None = None
@@ -59,7 +61,7 @@ class TradeIdeaInput(BaseModel):
             raise ValueError("decimal value must be finite")
         return value
 
-    @field_validator("entry_low", "entry_high", "stop_loss", "leverage")
+    @field_validator("entry_low", "entry_high", "entry_reference", "stop_loss", "leverage")
     @classmethod
     def _optional_decimal_is_finite(cls, value: Decimal | None) -> Decimal | None:
         if value is not None and not value.is_finite():
@@ -283,6 +285,36 @@ def _quality_gate_result(trade_input: TradeIdeaInput) -> TradeIdeaQualityGate:
                 message="At least one take profit target is required.",
             )
         )
+    elif (
+        trade_input.entry_low is not None
+        and trade_input.entry_high is not None
+        and trade_input.stop_loss is not None
+    ):
+        targets = trade_input.take_profit_targets
+        entry_reference = trade_input.entry_reference
+        if entry_reference is None:
+            entry_reference = (
+                trade_input.entry_low if trade_input.direction == "long" else trade_input.entry_high
+            )
+        plan_integrity = validate_trade_plan(
+            direction=trade_input.direction,
+            entry_low=trade_input.entry_low,
+            entry_high=trade_input.entry_high,
+            entry_reference=entry_reference,
+            stop_loss=trade_input.stop_loss,
+            tp1=targets[0] if len(targets) > 0 else None,
+            tp2=targets[1] if len(targets) > 1 else None,
+            tp3=targets[2] if len(targets) > 2 else None,
+            require_all_targets=False,
+            entry_reference_type="explicit_entry" if trade_input.entry_reference is not None else "favorable_zone_edge",
+        )
+        if not plan_integrity.valid:
+            violations.append(
+                TradeIdeaQualityGateViolation(
+                    code="trade_plan_integrity_failed",
+                    message=f"Trade plan integrity failed: {plan_integrity.reason}.",
+                )
+            )
     if trade_input.best_rr < MIN_RISK_REWARD_RATIO:
         violations.append(
             TradeIdeaQualityGateViolation(

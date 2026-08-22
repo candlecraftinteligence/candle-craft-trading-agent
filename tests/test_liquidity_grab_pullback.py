@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from app.analytics.derivatives_enrichment import enrich_derivatives
 from app.data.dtos import NA
 from app.strategies.liquidity_grab_pullback import (
@@ -761,3 +763,42 @@ def test_output_includes_all_sections_and_closing_line() -> None:
     assert "🔵 Swing Setup" in output
     assert "🔴 Scalp Setup" in output
     assert output.endswith("⚔️ Candle Craft | Signal. Structure. Execution.")
+
+
+@pytest.mark.parametrize("mode", ("swing", "scalp"))
+def test_trade_plan_integrity_passes_on_valid_shared_mode_path(mode: str) -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": mode,
+            "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
+            "candles_2d": _trend_candles(),
+        }
+    )
+    setup = getattr(result, mode)
+
+    assert setup.is_valid is True
+    assert setup.pullback_zone.trade_plan_integrity == "PASS"
+    assert setup.pullback_zone.rr_entry_reference_type == "zone_low_limit"
+    assert setup.pullback_zone.rr_target_reference == "tp2"
+
+
+@pytest.mark.parametrize("mode", ("swing", "scalp"))
+def test_tp1_inside_zone_is_rejected_on_shared_mode_path(mode: str) -> None:
+    result = LiquidityGrabEngine().analyze(
+        {
+            "symbol": "BTCUSDT",
+            "mode": mode,
+            "candles_15m": _full_bullish_setup_candles(),
+            "candles_5m": _full_bullish_setup_candles(),
+            "candles_2d": _trend_candles(),
+            "user_resistance_levels": (Decimal("98"),),
+        }
+    )
+    setup = getattr(result, mode)
+
+    assert setup.is_valid is False
+    assert setup.first_failed_gate == "trade_plan_integrity"
+    assert setup.pullback_zone.trade_plan_integrity == "FAIL"
+    assert setup.pullback_zone.trade_plan_integrity_reason == "tp1_target_inside_entry_zone"

@@ -200,6 +200,51 @@ def _hard_rule_violations(setup: RiskManagerInput) -> list[RiskRuleViolation]:
                 message="At least one take profit target is required.",
             )
         )
+    elif any(target <= 0 for target in setup.take_profit_targets):
+        violations.append(
+            RiskRuleViolation(
+                code="invalid_take_profit_target",
+                message="Every take profit target must be greater than zero.",
+            )
+        )
+    else:
+        wrong_side_target = any(
+            target <= setup.entry_price
+            if setup.direction == "long"
+            else target >= setup.entry_price
+            for target in setup.take_profit_targets
+        )
+        if wrong_side_target:
+            violations.append(
+                RiskRuleViolation(
+                    code="wrong_side_take_profit",
+                    message="Every take profit target must have positive directional reward.",
+                )
+            )
+        if len(set(setup.take_profit_targets)) != len(setup.take_profit_targets):
+            violations.append(
+                RiskRuleViolation(
+                    code="duplicate_take_profit_targets",
+                    message="Take profit targets must be unique.",
+                )
+            )
+        targets_ordered = all(
+            current < following
+            if setup.direction == "long"
+            else current > following
+            for current, following in zip(
+                setup.take_profit_targets,
+                setup.take_profit_targets[1:],
+                strict=False,
+            )
+        )
+        if not targets_ordered:
+            violations.append(
+                RiskRuleViolation(
+                    code="take_profit_order_invalid",
+                    message="Take profit targets must be strictly ordered by direction.",
+                )
+            )
     if _normalized_invalidation(setup) == NA:
         violations.append(
             RiskRuleViolation(

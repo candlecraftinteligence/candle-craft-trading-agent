@@ -65,6 +65,7 @@ from app.core.minimum_rr import (
     hard_mode_minimum_rr,
     validate_configured_minimum_rr,
 )
+from app.core.trade_plan_integrity import TradePlanIntegrityResult, validate_trade_plan
 from app.lifecycle.models import (
     SetupLifecycleOutcomeProgress,
     SetupLifecycleRecord,
@@ -1041,12 +1042,13 @@ class ScannerRunner:
         )
         effective_technical_score = _technical_score_for_scoring(technical, strategy_execution)
         strategy_catalyst_score = _strategy_catalyst_score(strategy_execution.selected_setup)
+        qualification_rr = _qualification_rr_for_scoring(strategy_execution, risk_decision)
         score_result = self.scoring_engine.score(
             {
                 "technical_score": Decimal(effective_technical_score),
                 "derivatives_score": _scoring_derivatives_score(derivatives_enrichment),
                 "risk_approved": risk_decision.approved,
-                "best_rr": _best_rr_for_scoring(risk_decision),
+                "best_rr": qualification_rr,
                 "liquidity_score": _liquidity_score(candles, optional_data.ticker),
                 "catalyst_score": strategy_catalyst_score,
                 "data_quality_score": data_quality_score,
@@ -1111,6 +1113,7 @@ class ScannerRunner:
                 "setup_type": candidate.setup_type,
                 "entry_low": candidate.entry_low,
                 "entry_high": candidate.entry_high,
+                "entry_reference": candidate.entry_price,
                 "stop_loss": candidate.stop_loss,
                 "take_profit_targets": candidate.take_profit_targets,
                 "invalidation": candidate.invalidation,
@@ -1118,7 +1121,7 @@ class ScannerRunner:
                 "opportunity_grade": score_result.grade,
                 "opportunity_decision": score_result.decision,
                 "risk_approved": risk_decision.approved,
-                "best_rr": _best_rr_for_scoring(risk_decision),
+                "best_rr": qualification_rr,
                 "technical_summary": candidate.technical_summary,
                 "derivatives_summary": _derivatives_enrichment_summary(derivatives_enrichment),
                 "confirmed_facts": candidate.confirmed_facts,
@@ -2195,13 +2198,24 @@ def _target_integrity_decision(
         elif failure_type in TARGET_INTEGRITY_BLOCKING_FAILURE_TYPES:
             reasons.append(_target_block_reason(target_intelligence))
 
+    plan_integrity = _candidate_trade_plan_integrity(candidate)
     if not _tp_sequence_valid(
         direction=candidate.direction,
         entry=candidate.entry_price,
+        entry_low=candidate.entry_low,
+        entry_high=candidate.entry_high,
+        stop_loss=candidate.stop_loss,
         take_profit_targets=candidate.take_profit_targets,
     ):
-        reasons.append(INVALID_TP_SEQUENCE_WARNING)
-        warnings.append(INVALID_TP_SEQUENCE_WARNING)
+        integrity_reason = (
+            f"Trade plan integrity failed: {plan_integrity.reason}."
+            if not plan_integrity.valid
+            else INVALID_TP_SEQUENCE_WARNING
+        )
+        reasons.append(integrity_reason)
+        warnings.append(integrity_reason)
+        if not plan_integrity.valid:
+            target_failure = plan_integrity.reason
 
     if reasons:
         reason = _unique_strings(reasons)[0]
@@ -2420,19 +2434,54 @@ def _target_block_reason(target_intelligence: TargetIntelligenceResult) -> str:
     return "Target integrity guard blocked alert creation because target quality is reject."
 
 
+def _candidate_trade_plan_integrity(candidate: _CandidateSetup) -> TradePlanIntegrityResult:
+    targets = tuple(candidate.take_profit_targets)
+    return validate_trade_plan(
+        direction=candidate.direction,
+        entry_low=candidate.entry_low,
+        entry_high=candidate.entry_high,
+        entry_reference=candidate.entry_price,
+        stop_loss=candidate.stop_loss,
+        tp1=targets[0] if len(targets) > 0 else None,
+        tp2=targets[1] if len(targets) > 1 else None,
+        tp3=targets[2] if len(targets) > 2 else None,
+        entry_reference_type=(
+            "zone_low_limit"
+            if candidate.direction == "long" and candidate.entry_price == candidate.entry_low
+            else "zone_high_limit"
+            if candidate.direction == "short" and candidate.entry_price == candidate.entry_high
+            else "explicit_entry"
+        ),
+    )
+
+
 def _tp_sequence_valid(
     *,
     direction: Literal["long", "short"],
     entry: Decimal,
     take_profit_targets: Sequence[Decimal],
+    entry_low: Decimal | None = None,
+    entry_high: Decimal | None = None,
+    stop_loss: Decimal | None = None,
 ) -> bool:
-    rewards: list[Decimal] = []
-    for target in take_profit_targets:
-        reward = abs(_decimal_from(target, "take_profit_target") - entry)
-        if reward <= 0:
-            return False
-        rewards.append(reward)
-    return all(left < right for left, right in zip(rewards, rewards[1:]))
+    targets = tuple(take_profit_targets)
+    point_low = entry if entry_low is None else entry_low
+    point_high = entry if entry_high is None else entry_high
+    synthetic_stop = (
+        entry - Decimal("1")
+        if direction == "long"
+        else entry + Decimal("1")
+    )
+    return validate_trade_plan(
+        direction=direction,
+        entry_low=point_low,
+        entry_high=point_high,
+        entry_reference=entry,
+        stop_loss=synthetic_stop if stop_loss is None else stop_loss,
+        tp1=targets[0] if len(targets) > 0 else None,
+        tp2=targets[1] if len(targets) > 1 else None,
+        tp3=targets[2] if len(targets) > 2 else None,
+    ).valid
 
 
 def _enum_text(value: Any) -> str:
@@ -2815,6 +2864,13 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "tp2": setup.tp2,
         "tp3": setup.tp3,
         "rr_to_tp2": setup.rr_to_tp2,
+        "trade_plan_integrity": setup.pullback_zone.trade_plan_integrity,
+        "trade_plan_integrity_reason": setup.pullback_zone.trade_plan_integrity_reason,
+        "rr_entry_reference_type": setup.pullback_zone.rr_entry_reference_type,
+        "rr_entry_reference_price": setup.pullback_zone.rr_entry_reference_price,
+        "rr_target_reference": setup.pullback_zone.rr_target_reference,
+        "rr_risk_distance": setup.pullback_zone.rr_risk_distance,
+        "rr_reward_distance": setup.pullback_zone.rr_reward_distance,
         "configured_global_minimum_rr": setup.configured_global_minimum_rr,
         "hard_mode_floor": setup.hard_mode_floor,
         "effective_minimum_rr": setup.effective_minimum_rr,
@@ -3331,7 +3387,17 @@ def _trade_idea_rejection_reason(result: TradeIdeaResult) -> str:
     return "Trade idea quality gate rejected the setup."
 
 
-def _best_rr_for_scoring(result: RiskDecision) -> Decimal:
+def _qualification_rr_for_scoring(
+    strategy_execution: _StrategyExecution,
+    result: RiskDecision,
+) -> Decimal:
+    setup = strategy_execution.selected_setup
+    if setup is not None and setup.rr_to_tp2 != NA:
+        return _decimal_from(setup.rr_to_tp2, "setup.rr_to_tp2")
+    diagnostics = _representative_strategy_diagnostics(strategy_execution)
+    diagnostic_rr = _first_decimal(diagnostics.get("rr_to_tp2"))
+    if diagnostic_rr != NA:
+        return diagnostic_rr
     if result.best_risk_reward_ratio == NA:
         return Decimal("0")
     return result.best_risk_reward_ratio

@@ -39,6 +39,7 @@ from app.alerts.watchlist_expiry import (
     watchlist_expiry_decision,
 )
 from app.core.config import Settings
+from app.core.trade_plan_integrity import validate_trade_plan
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
     SignalMessageContext,
@@ -9162,50 +9163,75 @@ def _target_integrity_blockers(
         return ()
 
     confirmed = alert_type in {TelegramAlertType.SIGNAL_CONFIRMED, TelegramAlertType.LIMIT_HIT}
-    entry_reference = _entry_reference(symbol_result, message)
+    entry_zone = _decimal_pair_values(message.entry_low, message.entry_high)
+    if entry_zone is None:
+        entry_zone = _decimal_pair_text(message.watch_zone)
     stop_loss = _decimal_or_none(message.stop_loss)
     targets = (
-        ("tp1", _decimal_or_none(message.tp1)),
-        ("tp2", _decimal_or_none(message.tp2)),
-        ("tp3", _decimal_or_none(message.tp3)),
+        _decimal_or_none(message.tp1),
+        _decimal_or_none(message.tp2),
+        _decimal_or_none(message.tp3),
     )
+
     invalid_fields: list[str] = []
+    if entry_zone is None:
+        if confirmed:
+            invalid_fields.append("entry_reference")
+    else:
+        entry_low, entry_high = entry_zone
+        entry_reference = _entry_reference(symbol_result, message)
+        if entry_reference is None or not entry_low <= entry_reference <= entry_high:
+            entry_reference = entry_low if side == "long" else entry_high
+        if confirmed and stop_loss is None:
+            invalid_fields.append("stop_loss")
+        if confirmed:
+            invalid_fields.extend(f"tp{index}" for index, value in enumerate(targets, start=1) if value is None)
 
-    if confirmed and entry_reference is None:
-        invalid_fields.append("entry_reference")
-    if confirmed and stop_loss is None:
-        invalid_fields.append("stop_loss")
-    if confirmed:
-        invalid_fields.extend(name for name, value in targets if value is None)
-
-    if entry_reference is not None:
-        if stop_loss is not None:
-            if side == "long" and stop_loss >= entry_reference:
-                invalid_fields.append("stop_loss")
-            elif side == "short" and stop_loss <= entry_reference:
-                invalid_fields.append("stop_loss")
-        for name, target in targets:
-            if target is None:
-                continue
-            if side == "long" and target <= entry_reference:
-                invalid_fields.append(name)
-            elif side == "short" and target >= entry_reference:
-                invalid_fields.append(name)
-
-    numeric_targets = tuple((name, value) for name, value in targets if value is not None)
-    if len(numeric_targets) >= 2:
-        for (_, left), (_, right) in zip(numeric_targets, numeric_targets[1:]):
-            if side == "long" and left >= right:
-                invalid_fields.append("tp_order")
-                break
-            if side == "short" and left <= right:
-                invalid_fields.append("tp_order")
-                break
+        if not invalid_fields:
+            geometry_stop = stop_loss
+            if geometry_stop is None:
+                geometry_stop = (
+                    entry_low - Decimal("1")
+                    if side == "long"
+                    else entry_high + Decimal("1")
+                )
+            integrity = validate_trade_plan(
+                direction=side,
+                entry_low=entry_low,
+                entry_high=entry_high,
+                entry_reference=entry_reference,
+                stop_loss=geometry_stop,
+                tp1=targets[0],
+                tp2=targets[1],
+                tp3=targets[2],
+                require_all_targets=confirmed,
+                entry_reference_type="validated_message_entry",
+            )
+            if not integrity.valid:
+                invalid_fields.extend(_trade_plan_invalid_fields(integrity.reason))
 
     invalid = tuple(dict.fromkeys(invalid_fields))
     if not invalid:
         return ()
     return (f"target_integrity_failed:invalid_target_fields={','.join(invalid)}",)
+
+
+def _trade_plan_invalid_fields(reason: str) -> tuple[str, ...]:
+    if reason.startswith("tp1_"):
+        return ("tp1",)
+    if reason.startswith("tp2_"):
+        return ("tp2",)
+    if reason.startswith("tp3_"):
+        return ("tp3",)
+    if reason in {"duplicate_targets", "target_order_invalid"}:
+        return ("tp_order",)
+    if reason.startswith("stop_") or reason in {"zero_risk", "negative_risk"}:
+        return ("stop_loss",)
+    if reason.startswith("entry_"):
+        return ("entry_reference",)
+    if reason.startswith("missing_required_plan_component:"):
+        return (reason.split(":", 1)[1],)
+    return ("trade_plan",)
 
 
 def _entry_reference(symbol_result: ScannerSymbolResult, message: TelegramSignalMessage) -> Decimal | None:
@@ -11797,6 +11823,7 @@ def _message_with_prior_public_plan(
         tp1=prior_alert.tp1,
         tp2=prior_alert.tp2,
         tp3=prior_alert.tp3,
+        planned_rr=prior_alert.rr_planned,
     )
 
 

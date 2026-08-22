@@ -191,3 +191,30 @@ def test_liquidation_placeholder_stays_na() -> None:
 
     assert result.leverage_risk.liquidation_distance == NA
     assert result.leverage_risk.liquidation_message == LIQUIDATION_MESSAGE
+
+
+def test_rejects_wrong_side_target_even_when_later_target_has_high_rr() -> None:
+    result = _agent().analyze(
+        _base_long_setup(
+            take_profit_targets=(Decimal("99"), Decimal("115"), Decimal("120")),
+        )
+    )
+
+    assert result.approved is False
+    assert _has_violation(result, "wrong_side_take_profit")
+
+
+def test_rejects_duplicate_and_misordered_targets() -> None:
+    duplicate = _agent().analyze(
+        _base_long_setup(
+            take_profit_targets=(Decimal("110"), Decimal("110"), Decimal("120")),
+        )
+    )
+    misordered = _agent().analyze(
+        _base_short_setup(
+            take_profit_targets=(Decimal("90"), Decimal("95"), Decimal("80")),
+        )
+    )
+
+    assert _has_violation(duplicate, "duplicate_take_profit_targets")
+    assert _has_violation(misordered, "take_profit_order_invalid")

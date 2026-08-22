@@ -109,7 +109,7 @@ def test_open_fake_bos_is_ineligible_until_its_real_close() -> None:
     assert at_close.is_valid is True
     assert at_close.bias == "long"
     assert at_close.entry == Decimal("97.00000000")
-    assert at_close.stop == Decimal("83.87142857")
+    assert at_close.stop == Decimal("83.87000000")
 
 
 @pytest.mark.parametrize(
