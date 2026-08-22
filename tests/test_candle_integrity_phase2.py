@@ -148,6 +148,8 @@ def test_insufficient_closed_history_has_precise_reason_and_accepts_naive_decisi
 
     assert exc_info.value.reason == CandleIntegrityReason.INSUFFICIENT_CLOSED_HISTORY
     assert "only 0 were closed" in str(exc_info.value)
+    assert exc_info.value.available_count == 0
+    assert exc_info.value.required_count == 1
 
 
 def test_regime_excludes_unclosed_btc_and_eth_candles() -> None:
@@ -229,3 +231,36 @@ def test_bad_symbol_candle_integrity_does_not_stop_other_symbols() -> None:
     assert "candle_integrity:duplicate_timestamp" in str(result.results[0].error_message)
     assert result.results[1].status != ScannerPipelineStatus.SCAN_ERROR
     assert result.results[1].strategy_diagnostics["challenge"]["confirmation_structure_shift_status"] == "passed"
+
+
+def test_secondary_bos_waits_for_latest_candle_close() -> None:
+    candles = [_bar(BASE_MS + index * FIFTEEN_MINUTES_MS) for index in range(201)]
+    candles[180]["high"] = Decimal("110")
+    candles[-1].update(
+        {
+            "open": Decimal("100"),
+            "high": Decimal("112"),
+            "low": Decimal("99"),
+            "close": Decimal("111"),
+        }
+    )
+    runner = ScannerRunner()
+    before = closed_candles_as_of(
+        candles,
+        timeframe="15m",
+        decision_timestamp=BASE_MS + (200 * FIFTEEN_MINUTES_MS) + (7 * MINUTE_MS),
+        minimum_closed_history=0,
+    ).candles
+    after = closed_candles_as_of(
+        candles,
+        timeframe="15m",
+        decision_timestamp=BASE_MS + (201 * FIFTEEN_MINUTES_MS),
+        minimum_closed_history=0,
+    ).candles
+    before_result = runner.technical_agent.analyze(before, timeframe="15m")
+    after_result = runner.technical_agent.analyze(after, timeframe="15m")
+
+    assert len(before) == 200
+    assert before_result.bos.is_present is False
+    assert after_result.bos.is_present is True
+    assert after_result.bos.direction == "bullish"

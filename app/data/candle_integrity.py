@@ -38,10 +38,14 @@ class CandleIntegrityError(ValueError):
         *,
         timeframe: str,
         index: int | None = None,
+        available_count: int | None = None,
+        required_count: int | None = None,
     ) -> None:
         self.reason = reason
         self.timeframe = timeframe
         self.index = index
+        self.available_count = available_count
+        self.required_count = required_count
         location = f" index={index}" if index is not None else ""
         super().__init__(f"candle_integrity:{reason.value} timeframe={timeframe}{location}: {message}")
 
@@ -233,6 +237,8 @@ def closed_candles_as_of(
                 f"{decision_utc.isoformat()}; required at least {minimum_closed_history}"
             ),
             timeframe=normalized_timeframe,
+            available_count=len(eligible),
+            required_count=minimum_closed_history,
         )
     return ClosedCandleWindow(
         candles=tuple(item.source for item in eligible),

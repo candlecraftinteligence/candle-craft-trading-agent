@@ -29,6 +29,8 @@ DATA_ISSUE_GATES = {
     "atr_unavailable",
     "current_price",
     "scanner_error",
+    "technical_insufficient_data",
+    "technical_data_error",
 }
 CONFIRMATION_GATES = {"missing_confirmation_structure_shift"}
 PULLBACK_GATES = {
