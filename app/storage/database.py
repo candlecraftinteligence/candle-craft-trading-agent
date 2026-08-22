@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -569,7 +569,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 symbol_health_score_at_detection TEXT NOT NULL DEFAULT 'N/A',
                 symbol_health_penalty_cycles INTEGER NOT NULL DEFAULT 0,
                 setup_identity TEXT NOT NULL DEFAULT 'N/A',
-                UNIQUE(symbol, mode, direction)
+                structural_anchor TEXT NOT NULL DEFAULT 'N/A',
+                is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0, 1))
             );
 
             CREATE TABLE IF NOT EXISTS setup_lifecycle_events (
@@ -1026,6 +1027,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             "INTEGER NOT NULL DEFAULT 0",
         )
         _ensure_column(connection, "symbol_health", "duplicate_noisy_setup_count", "INTEGER NOT NULL DEFAULT 0")
+        _migrate_lifecycle_generation_identity_v17(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
@@ -1051,6 +1053,167 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
     }
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_lifecycle_generation_identity_v17(connection: sqlite3.Connection) -> None:
+    """Retain historical lifecycle rows while allowing one current generation."""
+
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
+    }
+    if {"structural_anchor", "is_current"} <= columns and not _has_legacy_lifecycle_tuple_unique(
+        connection
+    ):
+        _ensure_lifecycle_generation_indexes(connection)
+        return
+
+    if connection.in_transaction:
+        connection.commit()
+    foreign_keys_enabled = int(connection.execute("PRAGMA foreign_keys").fetchone()[0]) == 1
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP TABLE IF EXISTS setup_lifecycle_records_v17")
+        connection.execute(
+            """
+            CREATE TABLE setup_lifecycle_records_v17 (
+                lifecycle_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                current_state TEXT NOT NULL,
+                previous_state TEXT NOT NULL DEFAULT 'N/A',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                last_transition_at TEXT NOT NULL,
+                failed_gate TEXT NOT NULL DEFAULT 'N/A',
+                candidate_quality_grade TEXT NOT NULL DEFAULT 'N/A',
+                final_quality_grade TEXT NOT NULL DEFAULT 'N/A',
+                technical_score TEXT NOT NULL DEFAULT 'N/A',
+                opportunity_score TEXT NOT NULL DEFAULT 'N/A',
+                final_failed_gate TEXT NOT NULL DEFAULT 'N/A',
+                final_block_reason TEXT NOT NULL DEFAULT 'N/A',
+                target_integrity_status TEXT NOT NULL DEFAULT 'N/A',
+                target_failure TEXT NOT NULL DEFAULT 'N/A',
+                target_failure_severity TEXT NOT NULL DEFAULT 'N/A',
+                target_warning_reason TEXT NOT NULL DEFAULT 'N/A',
+                actionability_state TEXT NOT NULL DEFAULT 'N/A',
+                readiness_score INTEGER NOT NULL DEFAULT 0,
+                quality_score INTEGER NOT NULL DEFAULT 0,
+                edge_score TEXT NOT NULL DEFAULT 'N/A',
+                regime_state TEXT NOT NULL DEFAULT 'N/A',
+                action_label TEXT NOT NULL DEFAULT 'N/A',
+                invalidation_reason TEXT NOT NULL DEFAULT 'N/A',
+                cooldown_until TEXT,
+                archived_at TEXT,
+                entry_low TEXT NOT NULL DEFAULT 'N/A',
+                entry_high TEXT NOT NULL DEFAULT 'N/A',
+                stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                tp1 TEXT NOT NULL DEFAULT 'N/A',
+                tp2 TEXT NOT NULL DEFAULT 'N/A',
+                tp3 TEXT NOT NULL DEFAULT 'N/A',
+                rr TEXT NOT NULL DEFAULT 'N/A',
+                invalidation_logic TEXT NOT NULL DEFAULT 'N/A',
+                confirmation_count INTEGER NOT NULL DEFAULT 0,
+                required_confirmation_cycles INTEGER NOT NULL DEFAULT 2,
+                quality_grade_first_seen TEXT NOT NULL DEFAULT 'N/A',
+                quality_grade_current TEXT NOT NULL DEFAULT 'N/A',
+                quality_grade_confirmed TEXT NOT NULL DEFAULT 'N/A',
+                confirmed_at TEXT,
+                decay_count INTEGER NOT NULL DEFAULT 0,
+                decay_reason TEXT NOT NULL DEFAULT 'N/A',
+                symbol_health_score_at_detection TEXT NOT NULL DEFAULT 'N/A',
+                symbol_health_penalty_cycles INTEGER NOT NULL DEFAULT 0,
+                setup_identity TEXT NOT NULL DEFAULT 'N/A',
+                structural_anchor TEXT NOT NULL DEFAULT 'N/A',
+                is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0, 1))
+            )
+            """
+        )
+        legacy_columns = (
+            "lifecycle_id", "symbol", "mode", "direction", "current_state", "previous_state",
+            "first_seen_at", "last_seen_at", "last_transition_at", "failed_gate",
+            "candidate_quality_grade", "final_quality_grade", "technical_score",
+            "opportunity_score", "final_failed_gate", "final_block_reason",
+            "target_integrity_status", "target_failure", "target_failure_severity",
+            "target_warning_reason", "actionability_state", "readiness_score", "quality_score",
+            "edge_score", "regime_state", "action_label", "invalidation_reason",
+            "cooldown_until", "archived_at", "entry_low", "entry_high", "stop_loss", "tp1",
+            "tp2", "tp3", "rr", "invalidation_logic", "confirmation_count",
+            "required_confirmation_cycles", "quality_grade_first_seen", "quality_grade_current",
+            "quality_grade_confirmed", "confirmed_at", "decay_count", "decay_reason",
+            "symbol_health_score_at_detection", "symbol_health_penalty_cycles", "setup_identity",
+        )
+        column_sql = ", ".join(legacy_columns)
+        connection.execute(
+            f"""
+            INSERT INTO setup_lifecycle_records_v17 (
+                {column_sql}, structural_anchor, is_current
+            )
+            SELECT {column_sql}, 'N/A', 1
+            FROM setup_lifecycle_records
+            """
+        )
+        connection.execute("DROP TABLE setup_lifecycle_records")
+        connection.execute(
+            "ALTER TABLE setup_lifecycle_records_v17 RENAME TO setup_lifecycle_records"
+        )
+        _ensure_lifecycle_generation_indexes(connection)
+        connection.commit()
+    except sqlite3.Error:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        connection.execute(
+            f"PRAGMA foreign_keys = {'ON' if foreign_keys_enabled else 'OFF'}"
+        )
+
+    if foreign_keys_enabled:
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise StorageError(
+                "Lifecycle generation migration failed foreign-key verification."
+            )
+
+
+def _has_legacy_lifecycle_tuple_unique(connection: sqlite3.Connection) -> bool:
+    for row in connection.execute("PRAGMA index_list(setup_lifecycle_records)").fetchall():
+        if int(row[2]) != 1 or int(row[4]) != 0:
+            continue
+        index_name = str(row[1]).replace('"', '""')
+        indexed_columns = tuple(
+            str(index_row[2])
+            for index_row in connection.execute(
+                f'PRAGMA index_info("{index_name}")'
+            ).fetchall()
+        )
+        if indexed_columns == ("symbol", "mode", "direction"):
+            return True
+    return False
+
+
+def _ensure_lifecycle_generation_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_symbol_mode_direction
+            ON setup_lifecycle_records(symbol, mode, direction)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_records_current_symbol_mode_direction
+            ON setup_lifecycle_records(symbol, mode, direction)
+            WHERE is_current = 1
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_generation_lookup
+            ON setup_lifecycle_records(symbol, mode, direction, is_current, last_seen_at)
+        """
+    )
 
 
 def _ensure_telegram_alert_attempt_indexes(connection: sqlite3.Connection) -> None:

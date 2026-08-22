@@ -40,6 +40,8 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
             """
             SELECT * FROM setup_lifecycle_records
             WHERE symbol = ? AND mode = ? AND direction = ?
+              AND is_current = 1
+            LIMIT 1
             """,
             (_symbol(symbol), _identity_text(mode), _identity_text(direction)),
         ).fetchone()
@@ -110,12 +112,23 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         rows = self._connection.execute(
             f"""
             SELECT * FROM setup_lifecycle_records
-            WHERE current_state IN ({placeholders})
+            WHERE is_current = 1
+              AND current_state IN ({placeholders})
             ORDER BY symbol ASC, last_seen_at DESC, lifecycle_id ASC
             """,
             normalized,
         ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
+
+    def supersede_record(self, lifecycle_id: str) -> None:
+        self._connection.execute(
+            """
+            UPDATE setup_lifecycle_records
+            SET is_current = 0
+            WHERE lifecycle_id = ? AND is_current = 1
+            """,
+            (_lifecycle_id_text(lifecycle_id),),
+        )
 
     def upsert_record(self, record: SetupLifecycleRecord) -> None:
         params = _record_params(record)
@@ -132,7 +145,8 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 stop_loss, tp1, tp2, tp3, rr, invalidation_logic, confirmation_count,
                 required_confirmation_cycles, quality_grade_first_seen, quality_grade_current,
                 quality_grade_confirmed, confirmed_at, decay_count, decay_reason,
-                symbol_health_score_at_detection, symbol_health_penalty_cycles, setup_identity
+                symbol_health_score_at_detection, symbol_health_penalty_cycles, setup_identity,
+                structural_anchor, is_current
             ) VALUES ({placeholders})
             ON CONFLICT(lifecycle_id) DO UPDATE SET
                 symbol = excluded.symbol,
@@ -181,7 +195,9 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 decay_reason = excluded.decay_reason,
                 symbol_health_score_at_detection = excluded.symbol_health_score_at_detection,
                 symbol_health_penalty_cycles = excluded.symbol_health_penalty_cycles,
-                setup_identity = excluded.setup_identity
+                setup_identity = excluded.setup_identity,
+                structural_anchor = excluded.structural_anchor,
+                is_current = excluded.is_current
             """,
             params,
         )
@@ -461,6 +477,8 @@ def _record_params(record: SetupLifecycleRecord) -> tuple[Any, ...]:
         record.symbol_health_score_at_detection,
         record.symbol_health_penalty_cycles,
         record.setup_identity,
+        record.structural_anchor,
+        int(record.is_current),
     )
 
 
@@ -531,6 +549,8 @@ def _record_from_row(row: sqlite3.Row) -> SetupLifecycleRecord:
         symbol_health_score_at_detection=row["symbol_health_score_at_detection"],
         symbol_health_penalty_cycles=int(row["symbol_health_penalty_cycles"] or 0),
         setup_identity=row["setup_identity"],
+        structural_anchor=row["structural_anchor"],
+        is_current=bool(row["is_current"]),
     )
 
 

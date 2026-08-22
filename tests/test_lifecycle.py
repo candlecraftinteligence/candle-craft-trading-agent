@@ -12,6 +12,7 @@ from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.analytics.symbol_health import SymbolHealthRecord
 from app.data.dtos import NA
+from app.lifecycle.identity import generation_rotation_reason, new_setup_generation_id
 from app.lifecycle.models import SetupLifecycleEvent, SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.service import apply_lifecycle_to_run_result, prioritize_watch_symbols
@@ -2139,3 +2140,368 @@ def test_lifecycle_transaction_failure_propagates_and_rolls_back(tmp_path, monke
     with SQLiteSetupLifecycleRepository(database_path) as repository:
         assert repository.list_records_for_symbol(symbol="ONEUSDT") == ()
         assert repository.list_records_for_symbol(symbol="TWOUSDT") == ()
+
+
+def _with_generation_anchor(
+    symbol_result: ScannerSymbolResult,
+    anchor: str,
+) -> ScannerSymbolResult:
+    diagnostics = {
+        mode: {**dict(payload), "setup_generation_anchor": anchor}
+        for mode, payload in symbol_result.strategy_diagnostics.items()
+    }
+    return symbol_result.model_copy(update={"strategy_diagnostics": diagnostics})
+
+
+def test_generation_id_is_deterministic_for_market_anchor_and_isolated_by_tuple() -> None:
+    inputs = {
+        "symbol": "BTCUSDT",
+        "mode": "swing",
+        "direction": "long",
+        "structural_anchor": "execution_sweep|15m|1789987200000",
+    }
+
+    generation = new_setup_generation_id(**inputs)
+
+    assert new_setup_generation_id(**inputs) == generation
+    assert new_setup_generation_id(**{**inputs, "direction": "short"}) != generation
+    assert new_setup_generation_id(**{**inputs, "mode": "scalp"}) != generation
+
+
+def test_generation_id_remains_stable_through_active_and_terminal_transitions() -> None:
+    generation_id = "generation-a"
+    anchor = "execution_sweep|15m|1789987200000"
+    watch = evaluate_lifecycle_transition(
+        None,
+        _observation(
+            readiness_score=55,
+            readiness_label="WATCH",
+            structural_anchor=anchor,
+        ),
+        lifecycle_id=generation_id,
+        now="2026-05-18T09:00:00+00:00",
+    )
+    stalking = evaluate_lifecycle_transition(
+        watch.record,
+        _observation(sweep_detected=True, structural_anchor=anchor),
+        lifecycle_id=generation_id,
+        now="2026-05-18T09:05:00+00:00",
+    )
+    triggered = evaluate_lifecycle_transition(
+        stalking.record,
+        _observation(
+            sweep_detected=True,
+            structure_shift_detected=True,
+            structural_anchor=anchor,
+        ),
+        lifecycle_id=generation_id,
+        now="2026-05-18T09:10:00+00:00",
+    )
+    pending = evaluate_lifecycle_transition(
+        triggered.record,
+        _confirmed_observation(
+            invalidation_reason="Invalid below stop.",
+            structural_anchor=anchor,
+        ),
+        lifecycle_id=generation_id,
+        now="2026-05-18T09:15:00+00:00",
+    )
+    confirmed = evaluate_lifecycle_transition(
+        pending.record,
+        _confirmed_observation(
+            invalidation_reason="Invalid below stop.",
+            structural_anchor=anchor,
+        ),
+        lifecycle_id=generation_id,
+        now="2026-05-18T09:20:00+00:00",
+    )
+    executing = evaluate_lifecycle_transition(
+        confirmed.record,
+        _confirmed_observation(
+            invalidation_reason="Invalid below stop.",
+            structural_anchor=anchor,
+        ),
+        lifecycle_id=generation_id,
+        now="2026-05-18T09:25:00+00:00",
+    )
+    managing = transition_record(
+        executing.record,
+        SetupLifecycleState.MANAGING,
+        reason=SetupTransitionReason.ENTRY_ACTIVATED,
+        now="2026-05-18T09:30:00+00:00",
+    )
+
+    records = (
+        watch.record,
+        stalking.record,
+        triggered.record,
+        pending.record,
+        confirmed.record,
+        executing.record,
+        managing.record,
+    )
+    assert all(record is not None for record in records)
+    assert {record.setup_generation_id for record in records if record is not None} == {
+        generation_id
+    }
+    assert all(record.structural_anchor == anchor for record in records if record is not None)
+
+    terminal_reasons = {
+        SetupLifecycleState.TP_HIT: SetupTransitionReason.TAKE_PROFIT_HIT,
+        SetupLifecycleState.SL_HIT: SetupTransitionReason.STOP_LOSS_HIT,
+        SetupLifecycleState.INVALIDATED: SetupTransitionReason.SETUP_INVALIDATED,
+        SetupLifecycleState.EXPIRED: SetupTransitionReason.SETUP_EXPIRED,
+    }
+    for terminal_state, reason in terminal_reasons.items():
+        terminal = transition_record(
+            managing.record,
+            terminal_state,
+            reason=reason,
+            now="2026-05-18T09:35:00+00:00",
+        )
+        assert terminal.record is not None
+        assert terminal.record.setup_generation_id == generation_id
+        assert terminal.event is not None
+        assert terminal.event.lifecycle_id == generation_id
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        SetupLifecycleState.TRIGGERED,
+        SetupLifecycleState.CONFIRMED,
+        SetupLifecycleState.MANAGING,
+        SetupLifecycleState.TP_HIT,
+        SetupLifecycleState.SL_HIT,
+        SetupLifecycleState.INVALIDATED,
+        SetupLifecycleState.EXPIRED,
+        SetupLifecycleState.COOLDOWN,
+        SetupLifecycleState.ARCHIVED,
+    ),
+)
+def test_same_known_structural_anchor_never_rotates_generation(state) -> None:
+    anchor = "execution_sweep|15m|1789987200000"
+    record = _record(state, lifecycle_id="generation-a").model_copy(
+        update={
+            "structural_anchor": anchor,
+            "cooldown_until": "2026-05-18T09:30:00+00:00",
+        }
+    )
+
+    reason = generation_rotation_reason(
+        record,
+        observed_structural_anchor=anchor,
+        setup_observable=True,
+        terminal_observation=state
+        in {
+            SetupLifecycleState.TP_HIT,
+            SetupLifecycleState.SL_HIT,
+            SetupLifecycleState.INVALIDATED,
+            SetupLifecycleState.EXPIRED,
+        },
+        now="2026-05-18T10:00:00+00:00",
+    )
+
+    assert reason is None
+
+
+def test_restart_reuses_active_generation_and_confirmation_progress(tmp_path) -> None:
+    db_path = tmp_path / "generation-restart.db"
+    candidate = _with_generation_anchor(_confirmed_candidate_symbol(), "sweep-a")
+
+    first = apply_lifecycle_to_run_result(
+        _scan_result(candidate),
+        database_path=db_path,
+        scan_run_id="generation-a-1",
+        now="2026-05-18T09:00:00+00:00",
+        confirmation_cycles=2,
+    )
+    first_record = first.results[0].lifecycle_state
+    assert first_record is not None
+    assert first_record.current_state == SetupLifecycleState.TRIGGERED
+    assert first_record.confirmation_count == 1
+
+    second = apply_lifecycle_to_run_result(
+        _scan_result(candidate),
+        database_path=db_path,
+        scan_run_id="generation-a-2",
+        now="2026-05-18T09:05:00+00:00",
+        confirmation_cycles=2,
+    )
+    second_record = second.results[0].lifecycle_state
+    assert second_record is not None
+    assert second_record.current_state == SetupLifecycleState.CONFIRMED
+    assert second_record.confirmation_count == 2
+    assert second_record.lifecycle_id == first_record.lifecycle_id
+    assert second_record.structural_anchor == "setup_generation_anchor|sweep-a"
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        restored = repository.get_record(
+            symbol="BTCUSDT",
+            mode="swing",
+            direction="long",
+        )
+    assert restored is not None
+    assert restored.lifecycle_id == first_record.lifecycle_id
+    assert restored.confirmation_count == 2
+
+
+def test_completed_same_geometry_new_sweep_creates_isolated_generation(tmp_path) -> None:
+    db_path = tmp_path / "generation-isolation.db"
+    setup_a = _with_generation_anchor(_confirmed_candidate_symbol(), "sweep-a")
+    first = apply_lifecycle_to_run_result(
+        _scan_result(setup_a),
+        database_path=db_path,
+        scan_run_id="generation-a",
+        now="2026-05-18T09:00:00+00:00",
+        confirmation_cycles=2,
+    )
+    generation_a = first.results[0].lifecycle_state
+    assert generation_a is not None
+
+    completed_a = generation_a.model_copy(
+        update={
+            "current_state": SetupLifecycleState.COOLDOWN,
+            "previous_state": SetupLifecycleState.SL_HIT,
+            "confirmation_count": 2,
+            "confirmed_at": "2026-05-18T09:05:00+00:00",
+            "cooldown_until": "2026-06-08T10:00:00+00:00",
+        }
+    )
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(completed_a)
+
+    setup_b = _with_generation_anchor(_confirmed_candidate_symbol(), "sweep-b")
+    second = apply_lifecycle_to_run_result(
+        _scan_result(setup_b),
+        database_path=db_path,
+        scan_run_id="generation-b",
+        now="2026-06-08T09:00:00+00:00",
+        confirmation_cycles=2,
+    )
+    generation_b = second.results[0].lifecycle_state
+    assert generation_b is not None
+    assert generation_b.lifecycle_id != generation_a.lifecycle_id
+    assert generation_b.setup_identity == generation_a.setup_identity
+    assert generation_b.current_state == SetupLifecycleState.TRIGGERED
+    assert generation_b.confirmation_count == 1
+    assert generation_b.confirmed_at is None
+    assert generation_b.cooldown_until is None
+    assert generation_b.first_seen_at == "2026-06-08T09:00:00+00:00"
+    assert generation_b.structural_anchor == "setup_generation_anchor|sweep-b"
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        current = repository.get_record(
+            symbol="BTCUSDT",
+            mode="swing",
+            direction="long",
+        )
+        historical = repository.get_record_by_lifecycle_id(generation_a.lifecycle_id)
+        generations = repository.list_records_for_symbol(symbol="BTCUSDT")
+
+    assert current is not None
+    assert current.lifecycle_id == generation_b.lifecycle_id
+    assert current.is_current is True
+    assert historical is not None
+    assert historical.is_current is False
+    assert historical.confirmation_count == 2
+    assert historical.cooldown_until == "2026-06-08T10:00:00+00:00"
+    assert len(generations) == 2
+
+
+def test_legacy_active_generation_is_reused_and_backfilled_conservatively() -> None:
+    legacy = _record(
+        SetupLifecycleState.TRIGGERED,
+        lifecycle_id="legacy-generation",
+    ).model_copy(update={"structural_anchor": NA, "confirmation_count": 1})
+
+    assert generation_rotation_reason(
+        legacy,
+        observed_structural_anchor="execution_sweep|15m|1789987200000",
+        setup_observable=True,
+        terminal_observation=False,
+        now="2026-05-18T09:05:00+00:00",
+    ) is None
+
+
+def test_structural_anchor_uses_execution_sweep_candle_timestamp() -> None:
+    candidate = _confirmed_candidate_symbol()
+    diagnostics = {
+        "swing": {
+            **dict(candidate.strategy_diagnostics["swing"]),
+            "execution_sweep_candle_index": 1,
+            "execution_timeframe": "15m",
+        }
+    }
+    anchored = candidate.model_copy(
+        update={
+            "strategy_diagnostics": diagnostics,
+            "lifecycle_execution_candles": (
+                {"timestamp": 1789986300000},
+                {"timestamp": 1789987200000},
+            ),
+            "lifecycle_execution_timeframe": "15m",
+        }
+    )
+
+    observation = lifecycle_service_module.observation_from_symbol_result(anchored)
+
+    assert observation.structural_anchor == (
+        "execution_sweep|15m|1789987200000"
+    )
+
+
+def test_new_generation_does_not_inherit_locked_plan(tmp_path) -> None:
+    db_path = tmp_path / "generation-plan-isolation.db"
+    setup_a = _with_generation_anchor(_confirmed_candidate_symbol(), "sweep-a")
+    first = apply_lifecycle_to_run_result(
+        _scan_result(setup_a),
+        database_path=db_path,
+        scan_run_id="plan-a",
+        now="2026-05-18T09:00:00+00:00",
+        confirmation_cycles=2,
+    )
+    generation_a = first.results[0].lifecycle_state
+    assert generation_a is not None
+    locked_a = generation_a.model_copy(
+        update={
+            "current_state": SetupLifecycleState.CONFIRMED,
+            "confirmation_count": 2,
+            "confirmed_at": "2026-05-18T09:05:00+00:00",
+        }
+    )
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(locked_a)
+
+    setup_b = _with_generation_anchor(
+        _confirmed_candidate_symbol(
+            entry_low=Decimal("104"),
+            entry_high=Decimal("106"),
+            stop=Decimal("99"),
+        ),
+        "sweep-b",
+    )
+    second = apply_lifecycle_to_run_result(
+        _scan_result(setup_b),
+        database_path=db_path,
+        scan_run_id="plan-b",
+        now="2026-06-08T09:00:00+00:00",
+        confirmation_cycles=2,
+    )
+    generation_b = second.results[0].lifecycle_state
+    assert generation_b is not None
+    assert generation_b.lifecycle_id != generation_a.lifecycle_id
+    assert generation_b.entry_low == "104"
+    assert generation_b.entry_high == "106"
+    assert generation_b.stop_loss == "99"
+    assert generation_b.invalidation_logic != locked_a.invalidation_logic
+    assert generation_b.confirmation_count == 1
+    assert generation_b.confirmed_at is None
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        historical = repository.get_record_by_lifecycle_id(generation_a.lifecycle_id)
+    assert historical is not None
+    assert historical.entry_low == "100"
+    assert historical.entry_high == "102"
+    assert historical.stop_loss == "95"
+    assert historical.is_current is False

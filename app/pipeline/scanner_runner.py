@@ -2765,6 +2765,7 @@ def _strategy_diagnostics_for_setup(setup: LiquidityGrabSetup) -> dict[str, Any]
         "ltf_confirmation_timeframe": setup.ltf_confirmation_timeframe,
         "ltf_confirmation_status": setup.ltf_confirmation_status,
         "execution_sweep_status": setup.execution_sweep_status,
+        "execution_sweep_candle_index": setup.sweep.candle_index,
         "sweep_magnitude_atr": setup.sweep.magnitude_atr,
         "confirmation_structure_shift_status": setup.confirmation_structure_shift_status,
         "confirmation_bos_choch_reason": setup.confirmation_bos_choch_reason,

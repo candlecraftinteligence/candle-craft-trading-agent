@@ -20,6 +20,7 @@ from app.backtesting import (
     ReplayTradeResult,
 )
 from app.data.dtos import NA
+from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
     ScannerProcessMemoryStats,
@@ -1336,10 +1337,10 @@ def test_schema_v14_fixture_matches_pre_outcome_pre_outbox_contract(
     ]
 
 
-def test_schema_v14_to_v16_preserves_lifecycle_and_telegram_data(
+def test_schema_v14_to_v17_preserves_lifecycle_and_telegram_data(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "v14-to-v16.db"
+    db_path = tmp_path / "v14-to-v17.db"
     _create_schema_v14_lifecycle_delivery_fixture(db_path)
     before = _representative_v14_rows(db_path)
 
@@ -1362,7 +1363,7 @@ def test_schema_v14_to_v16_preserves_lifecycle_and_telegram_data(
 
     assert _representative_v14_rows(db_path) == before
     version, tables, attempt_columns, public_columns = _schema_contract(db_path)
-    assert version == 16 == SCHEMA_VERSION
+    assert version == 17 == SCHEMA_VERSION
     assert "setup_lifecycle_outcome_progress" in tables
     assert "public_alert_delivery_parts" in tables
     assert "delivery_state" in attempt_columns
@@ -1480,8 +1481,8 @@ def test_schema_v14_to_v16_preserves_lifecycle_and_telegram_data(
     assert uncertain.state == "UNCERTAIN"
 
 
-def test_schema_v14_to_v16_migration_is_idempotent(tmp_path: Path) -> None:
-    db_path = tmp_path / "v14-v16-idempotent.db"
+def test_schema_v14_to_v17_migration_is_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "v14-v17-idempotent.db"
     _create_schema_v14_lifecycle_delivery_fixture(db_path)
 
     with open_initialized_database(db_path):
@@ -1621,7 +1622,7 @@ def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:
         "v15-plan", "SENT", "2026-07-01T10:00:01Z", "SENT"
     )
     assert "public_alert_delivery_parts" in tables
-    assert version == 16 == SCHEMA_VERSION
+    assert version == 17 == SCHEMA_VERSION
 
 
 def test_schema_v16_migration_is_idempotent_for_v15_delivery_data(tmp_path) -> None:
@@ -1681,3 +1682,120 @@ def test_schema_v16_migration_failure_rolls_back_completely(tmp_path, monkeypatc
     assert "public_alert_delivery_parts" not in tables
     assert version == 15
     assert event_count == 1
+
+
+def test_schema_v14_lifecycle_row_migrates_to_current_legacy_generation(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "v14-lifecycle-generation.db"
+    _create_schema_v14_lifecycle_delivery_fixture(db_path)
+
+    with open_initialized_database(db_path):
+        pass
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        legacy = repository.get_record_by_lifecycle_id("v14-lifecycle")
+
+    assert legacy is not None
+    assert legacy.setup_generation_id == "v14-lifecycle"
+    assert legacy.structural_anchor == NA
+    assert legacy.is_current is True
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(setup_lifecycle_records)"
+            ).fetchall()
+        }
+        index_sql = connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'index'
+              AND name = 'ux_lifecycle_records_current_symbol_mode_direction'
+            """
+        ).fetchone()
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 17
+
+    assert {"structural_anchor", "is_current"} <= columns
+    assert index_sql is not None
+    assert "WHERE is_current = 1" in str(index_sql[0])
+
+    new_generation = legacy.model_copy(
+        update={
+            "lifecycle_id": "v17-generation",
+            "structural_anchor": "execution_sweep|15m|1789987200000",
+            "first_seen_at": "2026-08-22T09:00:00+00:00",
+            "last_seen_at": "2026-08-22T09:00:00+00:00",
+            "last_transition_at": "2026-08-22T09:00:00+00:00",
+            "is_current": True,
+        }
+    )
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        with pytest.raises(sqlite3.IntegrityError):
+            repository.upsert_record(new_generation)
+        repository.supersede_record(legacy.lifecycle_id)
+        repository.upsert_record(new_generation)
+
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        current = repository.get_record(
+            symbol="BTCUSDT",
+            mode="swing",
+            direction="long",
+        )
+        historical = repository.get_record_by_lifecycle_id("v14-lifecycle")
+        generations = repository.list_records_for_symbol(symbol="BTCUSDT")
+
+    assert current is not None
+    assert current.lifecycle_id == "v17-generation"
+    assert historical is not None
+    assert historical.is_current is False
+    assert len(generations) == 2
+
+
+def test_lifecycle_generation_migration_failure_preserves_legacy_rows_for_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.storage.database as database_module
+
+    db_path = tmp_path / "v17-generation-rollback.db"
+    _create_schema_v14_lifecycle_delivery_fixture(db_path)
+    before = _representative_v14_rows(db_path)
+    original = database_module._ensure_lifecycle_generation_indexes
+
+    def fail_generation_index_creation(connection):
+        raise sqlite3.OperationalError("fault-injected v17 generation migration failure")
+
+    monkeypatch.setattr(
+        database_module,
+        "_ensure_lifecycle_generation_indexes",
+        fail_generation_index_creation,
+    )
+    with pytest.raises(StorageError, match="initialize scan history database schema"):
+        with open_initialized_database(db_path):
+            pass
+
+    assert _representative_v14_rows(db_path) == before
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 14
+        assert connection.execute(
+            "SELECT COUNT(*) FROM setup_lifecycle_events"
+        ).fetchone()[0] == 1
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    monkeypatch.setattr(
+        database_module,
+        "_ensure_lifecycle_generation_indexes",
+        original,
+    )
+    with open_initialized_database(db_path):
+        pass
+
+    assert _representative_v14_rows(db_path) == before
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert connection.execute(
+            "SELECT COUNT(*) FROM setup_lifecycle_events"
+        ).fetchone()[0] == 1

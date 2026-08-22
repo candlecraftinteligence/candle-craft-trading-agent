@@ -9,11 +9,11 @@ from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from app.core.minimum_rr import hard_mode_minimum_rr
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
+from app.lifecycle.identity import generation_rotation_reason, new_setup_generation_id
 from app.lifecycle.models import (
     ACTIVE_LIFECYCLE_MONITORING_STATES,
     SetupLifecycleRecord,
@@ -296,12 +296,32 @@ class SetupLifecycleService:
             mode=observation.mode,
             direction=observation.direction,
         )
+        prior_generation = existing
+        rotation_reason = generation_rotation_reason(
+            existing,
+            observed_structural_anchor=observation.structural_anchor,
+            setup_observable=_generation_setup_observable(observation),
+            terminal_observation=_generation_terminal_observation(observation),
+            now=now,
+        )
+        if rotation_reason is not None:
+            existing = None
+        lifecycle_id = (
+            existing.lifecycle_id
+            if existing is not None
+            else new_setup_generation_id(
+                symbol=observation.symbol,
+                mode=observation.mode,
+                direction=observation.direction,
+                structural_anchor=observation.structural_anchor,
+            )
+        )
         health_penalty_cycles = _symbol_health_penalty_cycles(symbol_health_record)
         health_score = getattr(symbol_health_record, "current_health_score", NA) if symbol_health_record is not None else NA
         transition = evaluate_lifecycle_transition(
             existing,
             observation,
-            lifecycle_id=existing.lifecycle_id if existing is not None else uuid4().hex,
+            lifecycle_id=lifecycle_id,
             now=now,
             scan_run_id=scan_run_id,
             required_confirmation_cycles=self.confirmation_cycles,
@@ -317,6 +337,8 @@ class SetupLifecycleService:
             and transition.notes.startswith("invalid_stored_plan_geometry:")
         )
         if final_record is not None and not persistence_blocked:
+            if rotation_reason is not None and prior_generation is not None:
+                repository.supersede_record(prior_generation.lifecycle_id)
             repository.upsert_record(final_record)
         if transition.event is not None and not persistence_blocked:
             repository.insert_event(transition.event)
@@ -564,6 +586,7 @@ def observation_from_symbol_result(
         invalidated=_structural_acceptance_invalidated(pullback_failure_type, acceptance_status, failed_gate),
         expired=_status_key(failed_gate) == "entry_window_expired",
         closed_candle_outcomes_managed=symbol_result.lifecycle_execution_candles is not None,
+        structural_anchor=_structural_anchor_from_symbol_result(symbol_result, diagnostics),
     )
     return replace(
         observation,
@@ -636,6 +659,82 @@ def _setup_tolerance_pct(value: Decimal | str | None) -> Decimal:
     if not decimal.is_finite() or decimal < 0:
         return DEFAULT_SETUP_MERGE_TOLERANCE_PCT
     return decimal
+
+
+def _generation_setup_observable(observation: LifecycleObservation) -> bool:
+    return bool(
+        observation.valid_trade_idea
+        or observation.pullback_and_rr_valid
+        or observation.actionable_a_grade_candidate
+        or observation.a_grade_watch_candidate
+        or observation.sweep_detected
+        or observation.readiness_score >= 50
+        or _display(observation.readiness_label).upper() in {"WATCH", "HOT WATCH", "VALID SETUP"}
+    )
+
+
+def _generation_terminal_observation(observation: LifecycleObservation) -> bool:
+    return bool(
+        observation.tp_hit
+        or observation.sl_hit
+        or observation.invalidated
+        or observation.expired
+    )
+
+
+def _structural_anchor_from_symbol_result(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+) -> str:
+    for key in (
+        "setup_generation_anchor",
+        "setup_anchor",
+        "execution_sweep_timestamp",
+        "sweep_timestamp",
+        "sweep_open_timestamp",
+        "sweep_structure_id",
+        "sweep_id",
+    ):
+        value = _display(diagnostics.get(key))
+        if value != NA:
+            return f"{key}|{value}"
+
+    index = _index_or_none(diagnostics.get("execution_sweep_candle_index"))
+    candles = tuple(symbol_result.lifecycle_execution_candles or ())
+    if index is None or index < 0 or index >= len(candles):
+        return NA
+    timestamp = _candle_timestamp(candles[index])
+    if timestamp == NA:
+        return NA
+    timeframe = _first_non_na(
+        symbol_result.lifecycle_execution_timeframe,
+        diagnostics.get("execution_timeframe"),
+    )
+    return f"execution_sweep|{timeframe}|{timestamp}"
+
+
+def _candle_timestamp(candle: Any) -> str:
+    for key in ("timestamp", "open_timestamp", "opened_at"):
+        value = _field_value(candle, key)
+        text = _display(value)
+        if text != NA:
+            return text
+    return NA
+
+
+def _field_value(value: Any, key: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(key, NA)
+    return getattr(value, key, NA)
+
+
+def _index_or_none(value: Any) -> int | None:
+    if value in (None, "", NA):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _load_health_records(database_path: Path | str, symbols: Sequence[str]) -> dict[str, Any]:
