@@ -8,7 +8,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -139,6 +139,7 @@ from app.storage import (  # noqa: E402
     update_symbol_health_for_result,
 )
 from app.universe.symbol_universe import (  # noqa: E402
+    BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
     MANUAL_UNIVERSE_MODE,
     UNIVERSE_MODES,
     SymbolUniverse,
@@ -217,6 +218,9 @@ class WatchlistResolution:
     active_lifecycle_symbols: tuple[str, ...] = ()
     active_lifecycle_over_cap_count: int = 0
     lifecycle_capacity_displaced_symbols: tuple[str, ...] = ()
+    membership_boundary_ignored_symbols: tuple[str, ...] = ()
+    lifecycle_membership_ignored_symbols: tuple[str, ...] = ()
+
 
 @dataclass(frozen=True)
 class ResumeState:
@@ -1219,17 +1223,35 @@ def _format_universe_header(universe: SymbolUniverse) -> str:
     else:
         top_text = "N/A"
         top_label = "Top 5"
-    return "\n".join(
-        (
-            f"Universe mode: {universe.mode}",
-            f"Universe label: {universe.label}",
-            f"Universe source: {universe.source}",
-            f"Universe size requested: {universe.requested_size}",
-            f"Symbols resolved: {len(universe.resolved_symbols)}",
-            f"Excluded count: {len(universe.excluded_symbols)}",
-            f"{top_label}: {top_text}",
+    lines = [
+        f"Universe mode: {universe.mode}",
+        f"Universe label: {universe.label}",
+        f"Universe source: {universe.source}",
+        f"Universe size requested: {universe.requested_size}",
+        f"Symbols resolved: {len(universe.resolved_symbols)}",
+        f"Excluded count: {len(universe.excluded_symbols)}",
+        f"{top_label}: {top_text}",
+    ]
+    diagnostics = universe.diagnostics
+    if diagnostics:
+        final_ranks = [
+            universe.market_cap_rank_by_symbol[symbol]
+            for symbol in universe.resolved_symbols
+            if symbol in universe.market_cap_rank_by_symbol
+        ]
+        lines.extend(
+            (
+                f"Provider assets: {diagnostics.get('provider_asset_count', 0)}",
+                f"Valid ranks: {diagnostics.get('valid_rank_count', 0)}",
+                f"Ranks within boundary: {diagnostics.get('rank_within_boundary_count', 0)}",
+                f"Binance crypto perpetual matches: {diagnostics.get('binance_perp_match_count', 0)}",
+                f"Ranks greater than N excluded: {diagnostics.get('rank_gt_n_excluded_count', 0)}",
+                f"Ambiguous tickers excluded: {diagnostics.get('ambiguous_symbol_count', 0)}",
+                f"Maximum final global rank: {max(final_ranks) if final_ranks else 'N/A'}",
+                f"Universe cache used: {'yes' if diagnostics.get('cache_used') else 'no'}",
+            )
         )
-    )
+    return "\n".join(lines)
 
 
 async def _resolve_watchlist_for_scan(args: argparse.Namespace) -> WatchlistResolution:
@@ -1240,7 +1262,10 @@ async def _resolve_watchlist_for_scan(args: argparse.Namespace) -> WatchlistReso
 
 async def _resolve_watchlist_for_args(args: argparse.Namespace) -> WatchlistResolution:
     if args.watch and args.watch_symbols_from_latest_run:
-        return _resolve_watchlist_from_latest_run(args)
+        membership_boundary = None
+        if args.universe == BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE:
+            membership_boundary = await _resolve_watchlist_for_scan(args)
+        return _resolve_watchlist_from_latest_run(args, membership_boundary=membership_boundary)
 
     watchlist = await _resolve_watchlist_for_scan(args)
     if args.watch and args.watch_only_near_misses:
@@ -1250,7 +1275,11 @@ async def _resolve_watchlist_for_args(args: argparse.Namespace) -> WatchlistReso
     return watchlist
 
 
-def _resolve_watchlist_from_latest_run(args: argparse.Namespace) -> WatchlistResolution:
+def _resolve_watchlist_from_latest_run(
+    args: argparse.Namespace,
+    *,
+    membership_boundary: WatchlistResolution | None = None,
+) -> WatchlistResolution:
     try:
         symbols = load_symbols_from_run(LATEST_RUN_PATH, near_miss_only=args.watch_only_near_misses)
     except WatchModeError as exc:
@@ -1258,7 +1287,32 @@ def _resolve_watchlist_from_latest_run(args: argparse.Namespace) -> WatchlistRes
     if not symbols:
         label = "near-miss symbols" if args.watch_only_near_misses else "symbols"
         raise SystemExit(f"No {label} found in latest saved run file: {LATEST_RUN_PATH}")
-    return _watch_resolution_from_symbols(args, symbols, source_label=f"latest run {LATEST_RUN_PATH}")
+    if membership_boundary is None:
+        return _watch_resolution_from_symbols(args, symbols, source_label=f"latest run {LATEST_RUN_PATH}")
+
+    allowed = set(membership_boundary.symbols)
+    filtered = tuple(symbol for symbol in dedupe_symbols(symbols) if symbol in allowed)
+    ignored = tuple(symbol for symbol in dedupe_symbols(symbols) if symbol not in allowed)
+    if not filtered:
+        raise SystemExit(
+            "Latest saved-run symbols do not intersect the current strict market-cap universe."
+        )
+    ignored_membership = dedupe_symbols(
+        (*membership_boundary.membership_boundary_ignored_symbols, *ignored)
+    )
+    universe = membership_boundary.universe.with_resolved_symbols(
+        filtered,
+        diagnostic_updates={"membership_boundary_ignored_count": len(ignored_membership)},
+    )
+    return WatchlistResolution(
+        symbols=filtered,
+        source_label=f"latest run {LATEST_RUN_PATH} within strict market-cap membership",
+        universe=universe,
+        explicit_excluded_symbols=membership_boundary.explicit_excluded_symbols,
+        pre_cap_symbols_count=membership_boundary.pre_cap_symbols_count,
+        queue_cap_applied=membership_boundary.queue_cap_applied,
+        membership_boundary_ignored_symbols=ignored_membership,
+    )
 
 
 def _filter_watchlist_to_prior_watch_symbols(
@@ -1285,6 +1339,17 @@ def _filter_watchlist_to_prior_watch_symbols(
             "Use --watch-symbols-from-latest-run or run a scan with --save-run first."
         )
 
+    if watchlist.universe.strict_membership:
+        universe = watchlist.universe.with_resolved_symbols(symbols)
+        return WatchlistResolution(
+            symbols=tuple(symbols),
+            source_label=f"{watchlist.source_label} prior near-miss/watch symbols",
+            universe=universe,
+            explicit_excluded_symbols=watchlist.explicit_excluded_symbols,
+            pre_cap_symbols_count=watchlist.pre_cap_symbols_count,
+            queue_cap_applied=watchlist.queue_cap_applied,
+            membership_boundary_ignored_symbols=watchlist.membership_boundary_ignored_symbols,
+        )
     return _watch_resolution_from_symbols(
         args,
         symbols,
@@ -1310,6 +1375,23 @@ def _extend_watchlist_for_continue_watch(
             raise SystemExit(str(exc)) from exc
 
     continued_symbols = dedupe_symbols((*state_symbols, *latest_symbols))
+    if watchlist.universe.strict_membership:
+        allowed = set(watchlist.symbols)
+        allowed_continued = tuple(symbol for symbol in continued_symbols if symbol in allowed)
+        ignored = tuple(symbol for symbol in continued_symbols if symbol not in allowed)
+        args.continued_watch_symbols = allowed_continued
+        if not ignored:
+            return watchlist
+        ignored_membership = dedupe_symbols((*watchlist.membership_boundary_ignored_symbols, *ignored))
+        return replace(
+            watchlist,
+            membership_boundary_ignored_symbols=ignored_membership,
+            universe=watchlist.universe.with_resolved_symbols(
+                watchlist.symbols,
+                diagnostic_updates={"membership_boundary_ignored_count": len(ignored_membership)},
+            ),
+        )
+
     args.continued_watch_symbols = continued_symbols
     if not continued_symbols:
         return watchlist
@@ -1465,7 +1547,15 @@ async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistReso
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    pre_exclude_symbols = dedupe_symbols((*universe.resolved_symbols, *include_symbols))
+    membership_boundary_ignored_symbols: tuple[str, ...] = ()
+    if universe.strict_membership:
+        allowed = set(universe.resolved_symbols)
+        membership_boundary_ignored_symbols = tuple(
+            symbol for symbol in include_symbols if symbol not in allowed
+        )
+        pre_exclude_symbols = tuple(universe.resolved_symbols)
+    else:
+        pre_exclude_symbols = dedupe_symbols((*universe.resolved_symbols, *include_symbols))
     excluded_cli_symbols = tuple(symbol for symbol in pre_exclude_symbols if symbol in exclude_symbols)
     resolved_symbols = pre_exclude_symbols
     if exclude_symbols:
@@ -1482,7 +1572,16 @@ async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistReso
             "Resolved watchlist is empty after universe/include/exclude/max-symbols processing. Provide at least one symbol."
         )
 
-    universe = universe.with_resolved_symbols(resolved_symbols, extra_excluded_symbols=excluded_cli_symbols)
+    universe = universe.with_resolved_symbols(
+        resolved_symbols,
+        extra_excluded_symbols=excluded_cli_symbols,
+        diagnostic_updates={
+            "requested_max_symbols": args.max_symbols,
+            "membership_boundary_ignored_count": len(membership_boundary_ignored_symbols),
+        }
+        if universe.strict_membership
+        else None,
+    )
     return WatchlistResolution(
         symbols=resolved_symbols,
         source_label=f"universe {args.universe}",
@@ -1490,6 +1589,7 @@ async def _resolve_universe_watchlist(args: argparse.Namespace) -> WatchlistReso
         explicit_excluded_symbols=excluded_cli_symbols,
         pre_cap_symbols_count=len(pre_cap_symbols),
         queue_cap_applied=len(resolved_symbols) < len(pre_cap_symbols),
+        membership_boundary_ignored_symbols=membership_boundary_ignored_symbols,
     )
 
 
@@ -2255,9 +2355,18 @@ def _watchlist_with_lifecycle_priority(
         return watchlist
     original_symbols = watchlist.symbols
     try:
-        active_symbols = active_lifecycle_symbols(original_symbols, database_path=args.database_path)
+        all_active_symbols = active_lifecycle_symbols(original_symbols, database_path=args.database_path)
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc
+
+    lifecycle_membership_ignored_symbols: tuple[str, ...] = ()
+    active_symbols = all_active_symbols
+    if watchlist.universe.strict_membership:
+        allowed = set(watchlist.universe.resolved_symbols)
+        active_symbols = tuple(symbol for symbol in all_active_symbols if symbol in allowed)
+        lifecycle_membership_ignored_symbols = tuple(
+            symbol for symbol in all_active_symbols if symbol not in allowed
+        )
 
     active_set = set(active_symbols)
     discovery_symbols = tuple(symbol for symbol in original_symbols if symbol not in active_set)
@@ -2294,12 +2403,28 @@ def _watchlist_with_lifecycle_priority(
         if prioritized == original_symbols or watchlist.source_label.endswith(" + lifecycle priority")
         else f"{watchlist.source_label} + lifecycle priority"
     )
-    if prioritized == original_symbols and watchlist.active_lifecycle_symbols == active_symbols:
+    ignored_membership = dedupe_symbols(
+        (*watchlist.membership_boundary_ignored_symbols, *lifecycle_membership_ignored_symbols)
+    )
+    ignored_lifecycle = dedupe_symbols(
+        (*watchlist.lifecycle_membership_ignored_symbols, *lifecycle_membership_ignored_symbols)
+    )
+    if (
+        prioritized == original_symbols
+        and watchlist.active_lifecycle_symbols == active_symbols
+        and watchlist.lifecycle_membership_ignored_symbols == ignored_lifecycle
+    ):
         return watchlist
+    universe = watchlist.universe
+    if universe.strict_membership:
+        universe = universe.with_resolved_symbols(
+            universe.resolved_symbols,
+            diagnostic_updates={"membership_boundary_ignored_count": len(ignored_membership)},
+        )
     return WatchlistResolution(
         symbols=prioritized,
         source_label=source_label,
-        universe=watchlist.universe,
+        universe=universe,
         explicit_excluded_symbols=watchlist.explicit_excluded_symbols,
         pre_cap_symbols_count=pre_cap_count,
         queue_cap_applied=cap_applied,
@@ -2309,6 +2434,8 @@ def _watchlist_with_lifecycle_priority(
         active_lifecycle_symbols=active_symbols,
         active_lifecycle_over_cap_count=active_over_cap_count,
         lifecycle_capacity_displaced_symbols=dropped_symbols,
+        membership_boundary_ignored_symbols=ignored_membership,
+        lifecycle_membership_ignored_symbols=ignored_lifecycle,
     )
 
 
@@ -2362,9 +2489,12 @@ def _queued_symbols_for_scan(
     watchlist: WatchlistResolution,
     symbol_priority_plan: SymbolPriorityPlan,
 ) -> tuple[str, ...]:
-    if symbol_priority_plan.enabled:
-        return symbol_priority_plan.symbols_to_scan
-    return watchlist.symbols
+    del args
+    queued = symbol_priority_plan.symbols_to_scan if symbol_priority_plan.enabled else watchlist.symbols
+    if not watchlist.universe.strict_membership:
+        return queued
+    allowed = set(watchlist.universe.resolved_symbols)
+    return tuple(symbol for symbol in queued if symbol in allowed)
 
 
 def _symbol_queue_diagnostics(
@@ -2390,6 +2520,18 @@ def _symbol_queue_diagnostics(
         if symbol_priority_plan.enabled and symbol not in queued_set and symbol not in health_excluded_set
     )
     explicit_excluded = tuple(watchlist.explicit_excluded_symbols)
+    priority_candidates = (
+        symbol_priority_plan.symbols_to_scan if symbol_priority_plan.enabled else watchlist.symbols
+    )
+    allowed_membership = set(watchlist.universe.resolved_symbols)
+    unexpected_priority_symbols = tuple(
+        symbol
+        for symbol in priority_candidates
+        if watchlist.universe.strict_membership and symbol not in allowed_membership
+    )
+    membership_boundary_ignored = dedupe_symbols(
+        (*watchlist.membership_boundary_ignored_symbols, *unexpected_priority_symbols)
+    )
     pre_cap_count = watchlist.pre_cap_symbols_count
     return {
         "universe_requested_count": int(watchlist.universe.requested_size),
@@ -2407,6 +2549,8 @@ def _symbol_queue_diagnostics(
         "active_lifecycle_exceeded_cap": watchlist.active_lifecycle_over_cap_count > 0,
         "adaptive_priority_enabled": bool(symbol_priority_plan.enabled),
         "adaptive_priority_excluded_count": len(adaptive_excluded),
+        "membership_boundary_ignored_count": len(membership_boundary_ignored),
+        "lifecycle_membership_ignored_count": len(watchlist.lifecycle_membership_ignored_symbols),
         "queue_cap_applied": bool(watchlist.queue_cap_applied),
         "queue_cap": args.max_symbols,
         "final_queued_count": len(queued),
@@ -2418,6 +2562,8 @@ def _symbol_queue_diagnostics(
             "active_lifecycle_monitoring": list(active_queued[:20]),
             "active_lifecycle_cooldown_exemption": list(cooldown_exemptions[:20]),
             "adaptive_priority_excluded": list(adaptive_excluded[:20]),
+            "membership_boundary_ignored": list(membership_boundary_ignored[:20]),
+            "lifecycle_outside_membership": list(watchlist.lifecycle_membership_ignored_symbols[:20]),
             "discovery_displaced_by_active_lifecycle": list(watchlist.lifecycle_capacity_displaced_symbols[:20]),
         },
     }
@@ -2454,6 +2600,8 @@ def _format_symbol_queue_diagnostics(diagnostics: Mapping[str, Any]) -> str:
         f"- Active lifecycle cooldown exemptions: {diagnostics.get('active_lifecycle_cooldown_exemption_count', 0)}",
         f"- Active lifecycle over cap count: {diagnostics.get('active_lifecycle_over_cap_count', 0)}",
         f"- Adaptive priority excluded count: {diagnostics.get('adaptive_priority_excluded_count', 0)}",
+        f"- Membership boundary ignored count: {diagnostics.get('membership_boundary_ignored_count', 0)}",
+        f"- Lifecycle outside membership ignored: {diagnostics.get('lifecycle_membership_ignored_count', 0)}",
         f"- Queue cap applied: {cap_text}",
         f"- Final queued count: {diagnostics.get('final_queued_count', 0)}",
     ]
@@ -2463,6 +2611,8 @@ def _format_symbol_queue_diagnostics(diagnostics: Mapping[str, Any]) -> str:
         "active_lifecycle_monitoring",
         "active_lifecycle_cooldown_exemption",
         "adaptive_priority_excluded",
+        "membership_boundary_ignored",
+        "lifecycle_outside_membership",
         "discovery_displaced_by_active_lifecycle",
     ):
         values = example_map.get(reason, ())
