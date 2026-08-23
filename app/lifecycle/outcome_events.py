@@ -25,9 +25,14 @@ def advance_to_managing(
     evaluated_at: str,
     scan_run_id: str | None,
     plan_identity: str,
-) -> tuple[SetupLifecycleRecord, SetupTransitionResult | None]:
+) -> tuple[
+    SetupLifecycleRecord,
+    SetupTransitionResult | None,
+    tuple[SetupTransitionResult, ...],
+]:
     current = record
     last_transition: SetupTransitionResult | None = None
+    transitions: list[SetupTransitionResult] = []
     next_state = {
         SetupLifecycleState.WATCHLISTED: SetupLifecycleState.TRIGGERED,
         SetupLifecycleState.STALKING: SetupLifecycleState.TRIGGERED,
@@ -67,9 +72,10 @@ def advance_to_managing(
             repository.insert_event(transition.event)
         current = transition.record
         last_transition = transition
+        transitions.append(transition)
         if current.current_state == SetupLifecycleState.MANAGING:
             break
-    return current, last_transition
+    return current, last_transition, tuple(transitions)
 
 
 def record_stop(

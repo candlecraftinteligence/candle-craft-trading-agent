@@ -333,6 +333,9 @@ class SetupLifecycleService:
         final_record = transition.record
         outcome_progress: SetupLifecycleOutcomeProgress | None = None
         effective_transition = transition
+        generated_transitions: list[SetupTransitionResult] = []
+        if transition.transitioned:
+            generated_transitions.append(transition)
         persistence_blocked = (
             not transition.allowed
             and transition.notes.startswith("invalid_stored_plan_geometry:")
@@ -358,6 +361,7 @@ class SetupLifecycleService:
             )
             final_record = outcome_evaluation.record
             outcome_progress = outcome_evaluation.progress
+            generated_transitions.extend(outcome_evaluation.transitions)
             if outcome_evaluation.last_transition is not None:
                 effective_transition = outcome_evaluation.last_transition
 
@@ -392,6 +396,7 @@ class SetupLifecycleService:
             update={
                 "lifecycle_state": final_record,
                 "lifecycle_transition": effective_transition,
+                "lifecycle_transitions": tuple(generated_transitions),
                 "lifecycle_outcome_progress": outcome_progress,
                 **audit_updates,
             }

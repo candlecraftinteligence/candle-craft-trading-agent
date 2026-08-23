@@ -329,6 +329,13 @@ def test_entry_and_target_same_candle_does_not_award_ambiguous_target(
         assert result.progress.tp1_at is None
         assert result.progress.stop_at is None
         assert result.record.current_state == SetupLifecycleState.MANAGING
+        assert tuple(item.to_state for item in result.transitions) == (
+            SetupLifecycleState.TRIGGERED,
+            SetupLifecycleState.CONFIRMED,
+            SetupLifecycleState.EXECUTING,
+            SetupLifecycleState.MANAGING,
+        )
+        assert result.last_transition == result.transitions[-1]
 
 
 @pytest.mark.parametrize("direction", ["long", "short"])
@@ -508,7 +515,7 @@ def test_scanner_result_hands_finalized_execution_candles_to_lifecycle(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "outcomes.db"
-    record = _record(state=SetupLifecycleState.MANAGING)
+    record = _record(state=SetupLifecycleState.ACTIONABLE_A_GRADE)
     baseline = _baseline("long")
     symbol_result = ScannerSymbolResult(
         symbol="BTCUSDT",
@@ -555,6 +562,12 @@ def test_scanner_result_hands_finalized_execution_candles_to_lifecycle(
         )
         assert activated.lifecycle_outcome_progress.entry_at == _decision(1)
         assert activated.lifecycle_state.current_state == SetupLifecycleState.MANAGING
+        assert tuple(item.to_state for item in activated.lifecycle_transitions) == (
+            SetupLifecycleState.TRIGGERED,
+            SetupLifecycleState.CONFIRMED,
+            SetupLifecycleState.EXECUTING,
+            SetupLifecycleState.MANAGING,
+        )
 
 
 def test_terminal_progress_is_queryable_once_and_public_tables_remain_silent(

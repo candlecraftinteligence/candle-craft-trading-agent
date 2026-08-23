@@ -70,6 +70,7 @@ class LifecycleOutcomeEvaluation:
     record: SetupLifecycleRecord
     progress: SetupLifecycleOutcomeProgress | None
     last_transition: SetupTransitionResult | None = None
+    transitions: tuple[SetupTransitionResult, ...] = ()
     processed_candles: int = 0
 
 
@@ -254,6 +255,7 @@ def evaluate_closed_candle_outcomes(
 
     current_record = record
     last_transition: SetupTransitionResult | None = None
+    transitions: list[SetupTransitionResult] = []
     processed = 0
     for causal, high, low in pending:
         processed += 1
@@ -272,7 +274,7 @@ def evaluate_closed_candle_outcomes(
                     plan_identity=plan_identity,
                     level=f"{geometry.entry_low}:{geometry.entry_high}",
                 )
-                current_record, entry_transition = _advance_to_managing(
+                current_record, entry_transition, entry_transitions = _advance_to_managing(
                     current_record,
                     repository=repository,
                     causal=causal,
@@ -280,6 +282,7 @@ def evaluate_closed_candle_outcomes(
                     scan_run_id=scan_run_id,
                     plan_identity=plan_identity,
                 )
+                transitions.extend(entry_transitions)
                 last_transition = entry_transition or last_transition
                 if current_record.current_state != SetupLifecycleState.MANAGING:
                     progress = _integrity_failure(
@@ -304,6 +307,7 @@ def evaluate_closed_candle_outcomes(
                         plan_identity=plan_identity,
                         ambiguity_reason="entry_and_stop_same_candle_stop_wins",
                     )
+                    transitions.append(last_transition)
             progress = _with_cursor(
                 progress,
                 causal,
@@ -332,6 +336,7 @@ def evaluate_closed_candle_outcomes(
                 plan_identity=plan_identity,
                 ambiguity_reason=ambiguity_reason,
             )
+            transitions.append(last_transition)
         else:
             for target_number, target in touched_targets:
                 progress = progress.model_copy(
@@ -360,6 +365,7 @@ def evaluate_closed_candle_outcomes(
                     scan_run_id=scan_run_id,
                     plan_identity=plan_identity,
                 )
+                transitions.append(last_transition)
                 progress = progress.model_copy(
                     update={
                         "terminal_outcome": SetupLifecycleState.TP_HIT.value,
@@ -382,6 +388,7 @@ def evaluate_closed_candle_outcomes(
         record=current_record,
         progress=progress,
         last_transition=last_transition,
+        transitions=tuple(transitions),
         processed_candles=processed,
     )
 
