@@ -459,6 +459,11 @@ class ScannerSymbolResult(BaseModel):
     historical_warning: str = NA
     lifecycle_state: SetupLifecycleRecord | None = None
     lifecycle_transition: SetupTransitionResult | None = None
+    lifecycle_transitions: tuple[SetupTransitionResult, ...] = Field(
+        default=(),
+        exclude=True,
+        repr=False,
+    )
     lifecycle_outcome_progress: SetupLifecycleOutcomeProgress | None = None
     lifecycle_execution_candles: tuple[Any, ...] | None = Field(default=None, exclude=True, repr=False)
     lifecycle_execution_timeframe: str = Field(default=NA, exclude=True)

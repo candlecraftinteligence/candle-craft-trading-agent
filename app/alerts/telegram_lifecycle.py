@@ -78,6 +78,15 @@ PUBLIC_INITIAL_ALERT_BY_STATE = {
     SetupLifecycleState.CONFIRMED: TelegramAlertType.SIGNAL_CONFIRMED,
 }
 PUBLIC_INITIAL_LIFECYCLE_STATES = frozenset(PUBLIC_INITIAL_ALERT_BY_STATE)
+PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES = frozenset(
+    {
+        TelegramAlertType.SETUP_TRIGGERED,
+        TelegramAlertType.SIGNAL_CONFIRMED,
+    }
+)
+PUBLIC_LIFECYCLE_OUTBOX_ALERT_BY_EVENT_TYPE = {
+    alert_type.value.lower(): alert_type for alert_type in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES
+}
 PUBLIC_TERMINAL_PREDECESSOR_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
@@ -1736,8 +1745,9 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     public_alert_event_type, normalized_entry_zone_low, normalized_entry_zone_high,
                     normalized_invalidation, dedupe_status, dedupe_reason,
                     blocked_reason, error_message, invalid_target_fields, first_seen_at, last_seen_at,
-                    seen_count, last_scan_run_id, last_error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    seen_count, last_scan_run_id, last_error_message, delivery_state,
+                    telegram_message_id, telegram_chat_id, delivery_part_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _identity(record.signal_id),
@@ -1782,6 +1792,10 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     int(record.seen_count) if record.seen_count >= 1 else 1,
                     record.last_scan_run_id or record.scan_run_id,
                     last_error_message,
+                    _text(record.delivery_state),
+                    record.telegram_message_id,
+                    record.telegram_chat_id,
+                    max(1, int(record.delivery_part_count)),
                 ),
             )
         except sqlite3.IntegrityError:
@@ -2525,6 +2539,144 @@ def reserve_public_watchlist_event(
     )
 
 
+def _reserve_public_lifecycle_event(
+    db: SQLiteTelegramAlertAttemptRepository,
+    *,
+    alert_type: TelegramAlertType,
+    plan: PublicWatchlistPlanIdentity,
+    reservation_record: TelegramAlertAttemptRecord,
+) -> PublicWatchlistReservationResult:
+    """Reserve one exact generation-aware lifecycle event for the durable public outbox."""
+
+    if alert_type not in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES:
+        raise ValueError(f"Unsupported public lifecycle outbox alert: {alert_type.value}")
+    event_type = alert_type.value
+    event_key = _public_watchlist_event_key(plan.plan_id, event_type)
+    if event_key == NA:
+        return PublicWatchlistReservationResult(
+            granted=False,
+            event_key=NA,
+            status="blocked",
+            reason="missing_public_lifecycle_event_key",
+            detail="Public lifecycle event key could not be built.",
+        )
+
+    active_statuses = (
+        PUBLIC_ALERT_EVENT_SENT_STATUS,
+        PUBLIC_ALERT_EVENT_RESERVED_STATUS,
+        PUBLIC_ALERT_EVENT_FAILED_STATUS,
+    )
+    prior_event = _get_public_alert_event(db, event_key=event_key, statuses=active_statuses)
+    if prior_event is not None:
+        state = _text(prior_event.delivery_state).upper()
+        attempt = db.get_public_watchlist_event_attempt(event_key=event_key)
+        if attempt is None:
+            attempt = db.get_attempt(
+                signal_id=reservation_record.signal_id,
+                alert_type=alert_type,
+            )
+        if state in {PENDING, RETRYABLE, IN_FLIGHT} and attempt is not None and attempt.id is not None:
+            return PublicWatchlistReservationResult(
+                granted=True,
+                event_key=event_key,
+                reservation_id=attempt.id,
+                event_id=prior_event.id,
+                status=state.lower(),
+                reason=NA,
+                detail="Committed public lifecycle delivery intent is available for atomic claim.",
+                matched_prior_event_id=prior_event.id,
+            )
+        if state == UNCERTAIN:
+            return PublicWatchlistReservationResult(
+                granted=False,
+                event_key=event_key,
+                event_id=prior_event.id,
+                status="uncertain",
+                reason="public_lifecycle_delivery_uncertain",
+                detail="Prior Telegram acceptance is uncertain; automatic resend is prohibited.",
+            )
+        if state == SENT or prior_event.status == PUBLIC_ALERT_EVENT_SENT_STATUS:
+            return PublicWatchlistReservationResult(
+                granted=False,
+                event_key=event_key,
+                event_id=prior_event.id,
+                status="duplicate",
+                reason=PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON,
+                detail="Prior successful public lifecycle event already exists.",
+                matched_prior_alert_id=attempt.id if attempt is not None else None,
+                matched_prior_event_id=prior_event.id,
+            )
+        return PublicWatchlistReservationResult(
+            granted=False,
+            event_key=event_key,
+            event_id=prior_event.id,
+            status="failed" if state == FAILED_FINAL else "skipped",
+            reason=f"public_lifecycle_outbox_not_claimable:{state.lower()}",
+            detail=f"Public lifecycle event is not claimable from {state}.",
+            matched_prior_event_id=prior_event.id,
+        )
+
+    existing_attempt = db.get_attempt(
+        signal_id=reservation_record.signal_id,
+        alert_type=alert_type,
+    )
+    if existing_attempt is not None:
+        return PublicWatchlistReservationResult(
+            granted=False,
+            event_key=event_key,
+            reservation_id=existing_attempt.id,
+            status="duplicate" if existing_attempt.telegram_status == "sent" else "failed",
+            reason="public_lifecycle_attempt_without_claimable_event",
+            detail="Existing lifecycle attempt has no claimable public outbox intent.",
+            matched_prior_alert_id=existing_attempt.id,
+        )
+
+    event, inserted = _insert_public_alert_event(
+        db,
+        plan=plan,
+        event_key=event_key,
+        event_type=event_type,
+        status=PUBLIC_ALERT_EVENT_RESERVED_STATUS,
+        reserved_at=_text(reservation_record.attempted_at),
+    )
+    if event is None or event.id is None:
+        return PublicWatchlistReservationResult(
+            granted=False,
+            event_key=event_key,
+            status="blocked",
+            reason="public_lifecycle_event_reservation_failed",
+            detail="Public lifecycle event ledger reservation could not be created.",
+        )
+    if not inserted:
+        return PublicWatchlistReservationResult(
+            granted=False,
+            event_key=event_key,
+            event_id=event.id,
+            status="skipped",
+            reason=PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON,
+            detail="Public lifecycle event was concurrently reserved.",
+        )
+    if not db.insert_attempt(reservation_record):
+        return PublicWatchlistReservationResult(
+            granted=False,
+            event_key=event_key,
+            event_id=event.id,
+            status="duplicate",
+            reason=PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON,
+            detail="Public lifecycle attempt reservation could not be acquired.",
+        )
+    reserved = db.get_attempt(signal_id=reservation_record.signal_id, alert_type=alert_type)
+    return PublicWatchlistReservationResult(
+        granted=reserved is not None and reserved.id is not None,
+        event_key=event_key,
+        reservation_id=reserved.id if reserved is not None else None,
+        event_id=event.id,
+        status=PUBLIC_WATCHLIST_RESERVATION_STATUS,
+        reason=NA if reserved is not None and reserved.id is not None else "public_lifecycle_attempt_missing",
+        detail="Public lifecycle event reserved before send.",
+    )
+
+
 def _public_watchlist_reservation_duplicate_detail(
     *,
     fallback_matched_legacy_sent: bool,
@@ -2660,19 +2812,19 @@ def _record_public_watchlist_final_send_guard_event(
     )
 
 
-async def _deliver_committed_public_watchlist_intent(
+async def _deliver_committed_public_alert_intent(
     *,
     repository: SQLiteTelegramAlertAttemptRepository,
     sender: Any,
     reservation: PublicWatchlistReservationResult,
-    symbol_result: ScannerSymbolResult,
+    symbol: str,
     signal_id: str,
-    message: TelegramSignalMessage,
+    alert_type: TelegramAlertType,
+    message_type: TelegramMessageType,
     message_text: str,
     message_hash: str,
-    attempted_at: str,
 ) -> TelegramLifecycleDelivery:
-    """Commit intent, atomically claim it, then durably send one part at a time."""
+    """Commit a public intent, atomically claim it, then durably send its parts."""
 
     assert reservation.event_id is not None
     assert reservation.reservation_id is not None
@@ -2712,12 +2864,15 @@ async def _deliver_committed_public_watchlist_intent(
         raise StorageError("Unable to commit Telegram delivery intent before network activity.") from exc
 
     outbox = SQLitePublicTelegramOutbox(connection)
-    message_type = _telegram_message_type_for_alert(TelegramAlertType.WATCHLIST, message)
-    preflight_guard = PublicWatchlistSendGuard(
-        event_key=reservation.event_key,
-        reservation_id=reservation_id,
-        event_id=event_id,
-        attempt_id="committed-intent-preflight",
+    preflight_guard = (
+        PublicWatchlistSendGuard(
+            event_key=reservation.event_key,
+            reservation_id=reservation_id,
+            event_id=event_id,
+            attempt_id="committed-intent-preflight",
+        )
+        if alert_type == TelegramAlertType.WATCHLIST
+        else None
     )
     if bool(getattr(sender, "dry_run", False)):
         outbox.mark_terminal_without_send(
@@ -2727,9 +2882,9 @@ async def _deliver_committed_public_watchlist_intent(
             reason="telegram_dry_run_enabled",
         )
         return TelegramLifecycleDelivery(
-            symbol=symbol_result.symbol,
+            symbol=symbol,
             signal_id=signal_id,
-            alert_type=TelegramAlertType.WATCHLIST.value,
+            alert_type=alert_type.value,
             status="skipped",
             detail="Telegram dry-run evaluated the committed intent with zero HTTP activity.",
             message_hash=message_hash,
@@ -2748,9 +2903,9 @@ async def _deliver_committed_public_watchlist_intent(
                 reason=_first_non_na(blocked.error_message, blocked.detail),
             )
             return TelegramLifecycleDelivery(
-                symbol=symbol_result.symbol,
+                symbol=symbol,
                 signal_id=signal_id,
-                alert_type=TelegramAlertType.WATCHLIST.value,
+                alert_type=alert_type.value,
                 status="skipped" if terminal_state == POLICY_DISABLED else "failed",
                 detail=blocked.detail,
                 message_hash=message_hash,
@@ -2765,9 +2920,9 @@ async def _deliver_committed_public_watchlist_intent(
     if claim_result.claim is None:
         state = claim_result.state
         return TelegramLifecycleDelivery(
-            symbol=symbol_result.symbol,
+            symbol=symbol,
             signal_id=signal_id,
-            alert_type=TelegramAlertType.WATCHLIST.value,
+            alert_type=alert_type.value,
             status=(
                 "duplicate" if state == SENT
                 else "uncertain" if state == UNCERTAIN
@@ -2786,6 +2941,7 @@ async def _deliver_committed_public_watchlist_intent(
         event_id=claim.event_id,
         attempt_id=claim.attempt_id,
     )
+    delivery_guard = guard if alert_type == TelegramAlertType.WATCHLIST else None
     for part in claim.parts:
         if not outbox.mark_part_in_flight(part_id=part.id, attempt_id=claim.attempt_id):
             outbox.mark_uncertain_after_persistence_failure(
@@ -2794,9 +2950,9 @@ async def _deliver_committed_public_watchlist_intent(
                 detail="Telegram part could not enter IN_FLIGHT before HTTP.",
             )
             return TelegramLifecycleDelivery(
-                symbol=symbol_result.symbol,
+                symbol=symbol,
                 signal_id=signal_id,
-                alert_type=TelegramAlertType.WATCHLIST.value,
+                alert_type=alert_type.value,
                 status="uncertain",
                 detail="Telegram part claim became uncertain before transport.",
                 message_hash=message_hash,
@@ -2811,13 +2967,13 @@ async def _deliver_committed_public_watchlist_intent(
                     part_number=part.part_index,
                     total_parts=part.part_count,
                     message_type=message_type,
-                    public_watchlist_guard=guard,
+                    public_watchlist_guard=delivery_guard,
                 )
             else:
                 send_result = await sender.send_text(
                     part.payload_text,
                     message_type=message_type,
-                    public_watchlist_guard=guard,
+                    public_watchlist_guard=delivery_guard,
                 )
         except Exception as exc:
             send_result = None
@@ -2847,17 +3003,17 @@ async def _deliver_committed_public_watchlist_intent(
             continue
         if state == SENT:
             return TelegramLifecycleDelivery(
-                symbol=symbol_result.symbol, signal_id=signal_id,
-                alert_type=TelegramAlertType.WATCHLIST.value, status="sent",
-                detail="Telegram setup delivery confirmed and persisted.",
+                symbol=symbol, signal_id=signal_id,
+                alert_type=alert_type.value, status="sent",
+                detail="Telegram public alert delivery confirmed and persisted.",
                 message_hash=message_hash,
             )
         return TelegramLifecycleDelivery(
-            symbol=symbol_result.symbol,
+            symbol=symbol,
             signal_id=signal_id,
-            alert_type=TelegramAlertType.WATCHLIST.value,
+            alert_type=alert_type.value,
             status="failed" if state in {RETRYABLE, FAILED_FINAL} else "uncertain",
-            detail=f"Telegram setup delivery ended in {state}.",
+            detail=f"Telegram public alert delivery ended in {state}.",
             message_hash=message_hash,
             error_message=_first_non_na(
                 transport_result.get("error_category"), transport_result.get("error")
@@ -2865,9 +3021,9 @@ async def _deliver_committed_public_watchlist_intent(
         )
 
     return TelegramLifecycleDelivery(
-        symbol=symbol_result.symbol, signal_id=signal_id,
-        alert_type=TelegramAlertType.WATCHLIST.value, status="uncertain",
-        detail="Telegram multipart delivery ended without a durable terminal result.",
+        symbol=symbol, signal_id=signal_id,
+        alert_type=alert_type.value, status="uncertain",
+        detail="Telegram public multipart delivery ended without a durable terminal result.",
         message_hash=message_hash, error_message="multipart_terminal_state_missing",
     )
 
@@ -2890,6 +3046,35 @@ def _telegram_transport_result(send_result: Any) -> dict[str, Any]:
         "error": _first_non_na(
             getattr(send_result, "error_message", NA), getattr(send_result, "detail", NA)
         ),
+    }
+
+
+def _telegram_attempt_transport_fields(send_result: Any) -> dict[str, Any]:
+    results = tuple(
+        item
+        for item in getattr(send_result, "telegram_results", ())
+        if isinstance(item, Mapping)
+    )
+    message_ids = tuple(
+        str(item["message_id"])
+        for item in results
+        if item.get("message_id") is not None
+    )
+    chat_ids = tuple(
+        str(item["chat_id"])
+        for item in results
+        if item.get("chat_id") is not None
+    )
+    declared_parts = tuple(
+        count
+        for item in results
+        if (count := _integer_or_zero(item.get("total_parts"))) > 0
+    )
+    return {
+        "delivery_state": _text(getattr(send_result, "delivery_state", NA)),
+        "telegram_message_id": ",".join(message_ids) if message_ids else None,
+        "telegram_chat_id": ",".join(dict.fromkeys(chat_ids)) if chat_ids else None,
+        "delivery_part_count": max((1, len(results), *declared_parts)),
     }
 
 
@@ -3099,6 +3284,10 @@ class TelegramLifecycleDeliveryService:
                     public_watchlist_require_entry_zone=self.public_watchlist_require_entry_zone,
                     public_watchlist_require_invalidation=self.public_watchlist_require_invalidation,
                 )
+                for delivery in await self.recover_public_lifecycle_alerts(
+                    repository=repository,
+                ):
+                    record_delivery(delivery)
                 public_watchlist_daily_cap_reached: bool | None = None
                 public_watchlist_hourly_cap_reached: bool | None = None
                 public_watchlist_scan_selection = _public_watchlist_scan_selection(
@@ -3122,35 +3311,39 @@ class TelegramLifecycleDeliveryService:
                     if audit is not None:
                         audit_key = f"{audit_key}|{audit.plan_hash}"
                         public_watchlist_audits[audit_key] = audit
-                    alert_type_hint = (
-                        _alert_type_for_transition(symbol_result, symbol_result.lifecycle_transition)
-                        if symbol_result.lifecycle_transition
-                        else None
-                    )
-                    if alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED:
-                        confirmed_candidates_seen += 1
-                        confirmed_message = _telegram_signal_message_for_alert(
-                            symbol_result,
-                            TelegramAlertType.SIGNAL_CONFIRMED,
-                            eligibility_context,
+                    for transition_result in _symbol_results_for_lifecycle_delivery(symbol_result):
+                        alert_type_hint = (
+                            _alert_type_for_transition(
+                                transition_result,
+                                transition_result.lifecycle_transition,
+                            )
+                            if transition_result.lifecycle_transition
+                            else None
                         )
-                        confirmed_prefilter = _confirmed_alert_attempt_prefilter(
-                            symbol_result,
-                            confirmed_message,
-                            eligibility_context,
-                        )
-                        if confirmed_prefilter.passed:
-                            confirmed_prefilter_passed += 1
-                        else:
-                            for reason in confirmed_prefilter.reason_buckets:
-                                confirmed_blocked_before_attempt[reason] = (
-                                    confirmed_blocked_before_attempt.get(reason, 0) + 1
-                                )
+                        if alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED:
+                            confirmed_candidates_seen += 1
+                            confirmed_message = _telegram_signal_message_for_alert(
+                                transition_result,
+                                TelegramAlertType.SIGNAL_CONFIRMED,
+                                eligibility_context,
+                            )
+                            confirmed_prefilter = _confirmed_alert_attempt_prefilter(
+                                transition_result,
+                                confirmed_message,
+                                eligibility_context,
+                            )
+                            if confirmed_prefilter.passed:
+                                confirmed_prefilter_passed += 1
+                            else:
+                                for reason in confirmed_prefilter.reason_buckets:
+                                    confirmed_blocked_before_attempt[reason] = (
+                                        confirmed_blocked_before_attempt.get(reason, 0) + 1
+                                    )
                     public_watchlist_scan_signal_id = _public_watchlist_scan_signal_id(
                         symbol_result,
                         eligibility_context,
                     )
-                    delivery = await self.deliver_for_symbol(
+                    symbol_deliveries = await self.deliver_transitions_for_symbol(
                         symbol_result,
                         repository=repository,
                         scan_run_id=scan_run_id,
@@ -3167,7 +3360,7 @@ class TelegramLifecycleDeliveryService:
                         public_watchlist_daily_cap_reached=public_watchlist_daily_cap_reached,
                         public_watchlist_hourly_cap_reached=public_watchlist_hourly_cap_reached,
                     )
-                    if delivery is None:
+                    if not symbol_deliveries:
                         if audit is not None and audit.eligible:
                             public_watchlist_audits[audit_key] = replace(
                                 audit,
@@ -3176,18 +3369,19 @@ class TelegramLifecycleDeliveryService:
                             )
                         ineligible += 1
                         continue
-                    record_delivery(delivery)
-                    if delivery.alert_type == TelegramAlertType.WATCHLIST.value and audit is not None:
-                        skip_reason = delivery.error_message if delivery.status != "sent" else NA
-                        if skip_reason == PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON and delivery.detail != NA:
-                            skip_reason = f"{skip_reason};{delivery.detail}"
-                        public_watchlist_audits[audit_key] = replace(
-                            audit,
-                            delivery_status=delivery.status,
-                            skip_reason=skip_reason,
-                        )
-                    if delivery.alert_type == TelegramAlertType.WATCHLIST.value and delivery.status == "sent":
-                        public_watchlist_sent_this_scan += 1
+                    for delivery in symbol_deliveries:
+                        record_delivery(delivery)
+                        if delivery.alert_type == TelegramAlertType.WATCHLIST.value and audit is not None:
+                            skip_reason = delivery.error_message if delivery.status != "sent" else NA
+                            if skip_reason == PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON and delivery.detail != NA:
+                                skip_reason = f"{skip_reason};{delivery.detail}"
+                            public_watchlist_audits[audit_key] = replace(
+                                audit,
+                                delivery_status=delivery.status,
+                                skip_reason=skip_reason,
+                            )
+                        if delivery.alert_type == TelegramAlertType.WATCHLIST.value and delivery.status == "sent":
+                            public_watchlist_sent_this_scan += 1
                 for delivery in await self.reconcile_sent_watchlists(
                     repository=repository,
                     lifecycle_repository=lifecycle_repository,
@@ -3232,6 +3426,115 @@ class TelegramLifecycleDeliveryService:
             public_watchlist_audit=public_watchlist_audit,
             confirmed_alert_audit=confirmed_alert_audit,
         )
+
+    async def deliver_transitions_for_symbol(
+        self,
+        symbol_result: ScannerSymbolResult,
+        *,
+        repository: SQLiteTelegramAlertAttemptRepository,
+        scan_run_id: str | None = None,
+        eligibility_context: TelegramEligibilityContext | None = None,
+        allow_public_watchlist: bool = True,
+        public_watchlist_preexisting_cooldown_reason: str | None = None,
+        public_watchlist_daily_cap_reached: bool | None = None,
+        public_watchlist_hourly_cap_reached: bool | None = None,
+    ) -> tuple[TelegramLifecycleDelivery, ...]:
+        deliveries: list[TelegramLifecycleDelivery] = []
+        for transition_result in _symbol_results_for_lifecycle_delivery(symbol_result):
+            delivery = await self.deliver_for_symbol(
+                transition_result,
+                repository=repository,
+                scan_run_id=scan_run_id,
+                eligibility_context=eligibility_context,
+                allow_public_watchlist=allow_public_watchlist,
+                public_watchlist_preexisting_cooldown_reason=public_watchlist_preexisting_cooldown_reason,
+                public_watchlist_daily_cap_reached=public_watchlist_daily_cap_reached,
+                public_watchlist_hourly_cap_reached=public_watchlist_hourly_cap_reached,
+            )
+            if delivery is not None:
+                deliveries.append(delivery)
+        return tuple(deliveries)
+
+    async def recover_public_lifecycle_alerts(
+        self,
+        *,
+        repository: SQLiteTelegramAlertAttemptRepository,
+    ) -> tuple[TelegramLifecycleDelivery, ...]:
+        """Resume only durable, explicitly claimable lifecycle initial-alert intents."""
+
+        event_types = tuple(PUBLIC_LIFECYCLE_OUTBOX_ALERT_BY_EVENT_TYPE)
+        event_placeholders = ",".join("?" for _ in event_types)
+        state_placeholders = ",".join("?" for _ in (PENDING, RETRYABLE, IN_FLIGHT))
+        rows = repository._connection.execute(
+            f"""
+            SELECT * FROM public_alert_events
+            WHERE event_type IN ({event_placeholders})
+              AND delivery_state IN ({state_placeholders})
+            ORDER BY id ASC
+            """,
+            (*event_types, PENDING, RETRYABLE, IN_FLIGHT),
+        ).fetchall()
+        deliveries: list[TelegramLifecycleDelivery] = []
+        for row in rows:
+            event = _public_alert_event_from_row(row)
+            if event is None or event.id is None:
+                continue
+            alert_type = PUBLIC_LIFECYCLE_OUTBOX_ALERT_BY_EVENT_TYPE.get(
+                _status_key(event.event_type)
+            )
+            if alert_type is None:
+                continue
+            attempt = repository.get_public_watchlist_event_attempt(
+                event_key=event.event_key,
+            )
+            if attempt is None or attempt.id is None:
+                logger.error(
+                    "Recoverable public lifecycle event has no attempt reservation: event_key=%s",
+                    event.event_key,
+                )
+                continue
+            reservation = PublicWatchlistReservationResult(
+                granted=True,
+                event_key=event.event_key,
+                reservation_id=attempt.id,
+                event_id=event.id,
+                status=_text(event.delivery_state).lower(),
+                reason=NA,
+                detail="Recoverable public lifecycle outbox intent loaded.",
+            )
+            if _text(event.payload_text) == NA or _text(event.message_hash) == NA:
+                SQLitePublicTelegramOutbox(repository._connection).mark_terminal_without_send(
+                    event_id=event.id,
+                    reservation_id=attempt.id,
+                    state=FAILED_FINAL,
+                    reason="public_lifecycle_outbox_payload_missing",
+                )
+                deliveries.append(
+                    TelegramLifecycleDelivery(
+                        symbol=event.symbol,
+                        signal_id=attempt.signal_id,
+                        alert_type=alert_type.value,
+                        status="failed",
+                        detail="Recoverable lifecycle outbox payload is missing.",
+                        message_hash=_text(event.message_hash),
+                        error_message="public_lifecycle_outbox_payload_missing",
+                    )
+                )
+                continue
+            deliveries.append(
+                await _deliver_committed_public_alert_intent(
+                    repository=repository,
+                    sender=self.sender,
+                    reservation=reservation,
+                    symbol=event.symbol,
+                    signal_id=attempt.signal_id,
+                    alert_type=alert_type,
+                    message_type=_telegram_message_type_for_alert(alert_type),
+                    message_text=event.payload_text,
+                    message_hash=event.message_hash,
+                )
+            )
+        return tuple(deliveries)
 
     async def deliver_for_symbol(
         self,
@@ -3441,9 +3744,32 @@ class TelegramLifecycleDeliveryService:
         attempted_at = now_utc_iso()
         scan_identity = scan_run_id or _transition_scan_run_id(transition)
         reservation: PublicWatchlistReservationResult | None = None
-        if decision.alert_type == TelegramAlertType.WATCHLIST:
+        durable_public_alert = (
+            decision.alert_type == TelegramAlertType.WATCHLIST
+            or decision.alert_type in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES
+        )
+        if durable_public_alert:
             plan = _public_watchlist_canonical_plan(symbol_result, message)
-            event_key = _public_watchlist_event_key(plan.plan_id, PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE)
+            event_type = (
+                PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE
+                if decision.alert_type == TelegramAlertType.WATCHLIST
+                else decision.alert_type.value
+            )
+            if decision.alert_type in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES:
+                plan = replace(plan, plan_id=signal_id)
+            event_key = _public_watchlist_event_key(plan.plan_id, event_type)
+            public_plan_fields = _public_watchlist_record_plan_fields(
+                symbol_result,
+                decision.alert_type,
+                message,
+            )
+            public_plan_fields.update(
+                {
+                    "public_watchlist_plan_id": plan.plan_id,
+                    "public_watchlist_event_key": event_key,
+                    "public_alert_event_type": event_type,
+                }
+            )
             reservation_record = TelegramAlertAttemptRecord(
                 signal_id=signal_id,
                 symbol=symbol_result.symbol,
@@ -3466,7 +3792,7 @@ class TelegramLifecycleDeliveryService:
                 technical_score=_technical_score_text(symbol_result),
                 price_level=_price_level_for_alert(decision.alert_type, message),
                 **_message_level_metadata(message),
-                **_public_watchlist_record_plan_fields(symbol_result, decision.alert_type, message),
+                **public_plan_fields,
                 blocked_reason=NA,
                 invalid_target_fields=NA,
                 error_message=NA,
@@ -3477,21 +3803,32 @@ class TelegramLifecycleDeliveryService:
                 dedupe_status=PUBLIC_WATCHLIST_RESERVATION_STATUS,
                 dedupe_reason=NA,
             )
-            reservation = reserve_public_watchlist_event(
-                repository,
-                symbol=symbol_result.symbol,
-                side=message.direction,
-                canonical_plan_id=plan.plan_id,
-                event_type=PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
-                payload={
-                    "canonical_plan": plan,
-                    "event_key": event_key,
-                    "reservation_record": reservation_record,
-                    "legacy_since": _public_watchlist_cooldown_cutoff(attempted_at, self.public_watchlist_cooldown_hours)
-                    if self.public_watchlist_cooldown_hours > 0
-                    else None,
-                },
-            )
+            if decision.alert_type == TelegramAlertType.WATCHLIST:
+                reservation = reserve_public_watchlist_event(
+                    repository,
+                    symbol=symbol_result.symbol,
+                    side=message.direction,
+                    canonical_plan_id=plan.plan_id,
+                    event_type=event_type,
+                    payload={
+                        "canonical_plan": plan,
+                        "event_key": event_key,
+                        "reservation_record": reservation_record,
+                        "legacy_since": _public_watchlist_cooldown_cutoff(
+                            attempted_at,
+                            self.public_watchlist_cooldown_hours,
+                        )
+                        if self.public_watchlist_cooldown_hours > 0
+                        else None,
+                    },
+                )
+            else:
+                reservation = _reserve_public_lifecycle_event(
+                    repository,
+                    alert_type=decision.alert_type,
+                    plan=plan,
+                    reservation_record=reservation_record,
+                )
             if not reservation.granted:
                 return TelegramLifecycleDelivery(
                     symbol=symbol_result.symbol,
@@ -3503,18 +3840,34 @@ class TelegramLifecycleDeliveryService:
                     error_message=reservation.reason,
                 )
             if reservation.reservation_id is None or reservation.event_id is None:
-                return _persist_public_watchlist_final_send_guard_skip(
-                    repository,
-                    symbol_result,
-                    decision=decision,
-                    reservation=reservation,
-                    scan_run_id=scan_run_id,
-                    eligibility_context=context,
+                if decision.alert_type == TelegramAlertType.WATCHLIST:
+                    return _persist_public_watchlist_final_send_guard_skip(
+                        repository,
+                        symbol_result,
+                        decision=decision,
+                        reservation=reservation,
+                        scan_run_id=scan_run_id,
+                        eligibility_context=context,
+                    )
+                return TelegramLifecycleDelivery(
+                    symbol=symbol_result.symbol,
+                    signal_id=signal_id,
+                    alert_type=decision.alert_type.value,
+                    status="failed",
+                    detail="Public lifecycle outbox reservation metadata is incomplete.",
+                    message_hash=message_hash,
+                    error_message="public_lifecycle_outbox_reservation_incomplete",
                 )
-            return await _deliver_committed_public_watchlist_intent(
-                repository=repository, sender=self.sender, reservation=reservation,
-                symbol_result=symbol_result, signal_id=signal_id, message=message,
-                message_text=message_text, message_hash=message_hash, attempted_at=attempted_at,
+            return await _deliver_committed_public_alert_intent(
+                repository=repository,
+                sender=self.sender,
+                reservation=reservation,
+                symbol=symbol_result.symbol,
+                signal_id=signal_id,
+                alert_type=decision.alert_type,
+                message_type=_telegram_message_type_for_alert(decision.alert_type, message),
+                message_text=message_text,
+                message_hash=message_hash,
             )
         elif repository.has_attempt(signal_id=signal_id, alert_type=decision.alert_type):
             repository.compact_existing_attempt(
@@ -3644,6 +3997,7 @@ class TelegramLifecycleDeliveryService:
                 blocked_reason=NA,
                 invalid_target_fields=NA,
                 error_message=send_result.error_message,
+                **_telegram_attempt_transport_fields(send_result),
             )
             inserted = repository.insert_attempt(record)
             if not inserted:
@@ -3655,7 +4009,6 @@ class TelegramLifecycleDeliveryService:
                     detail="Duplicate Telegram alert prevented.",
                     message_hash=message_hash,
                 )
-
         _log_lifecycle_alert_audit(
             symbol_result=symbol_result,
             message=message,
@@ -6409,6 +6762,34 @@ def is_public_lifecycle_event(state: SetupLifecycleState | str) -> bool:
     }
 
 
+def _symbol_results_for_lifecycle_delivery(
+    symbol_result: ScannerSymbolResult,
+) -> tuple[ScannerSymbolResult, ...]:
+    transitions = tuple(symbol_result.lifecycle_transitions)
+    if not transitions:
+        return (symbol_result,)
+
+    results: list[ScannerSymbolResult] = []
+    for transition in transitions:
+        if transition.record is None:
+            logger.warning(
+                "Lifecycle transition omitted from delivery batch because its record is missing: symbol=%s state=%s",
+                symbol_result.symbol,
+                transition.to_state.value,
+            )
+            continue
+        results.append(
+            symbol_result.model_copy(
+                update={
+                    "lifecycle_state": transition.record,
+                    "lifecycle_transition": transition,
+                    "lifecycle_transitions": (),
+                }
+            )
+        )
+    return tuple(results)
+
+
 def _alert_type_for_transition(
     symbol_result: ScannerSymbolResult,
     transition: SetupTransitionResult,
@@ -7994,14 +8375,22 @@ def _public_watchlist_record_plan_fields(
     alert_type: TelegramAlertType,
     message: TelegramSignalMessage | None,
 ) -> dict[str, str]:
-    if alert_type != TelegramAlertType.WATCHLIST or message is None:
+    if message is None:
         return {}
     plan = _public_watchlist_canonical_plan(symbol_result, message)
-    event_key = _public_watchlist_event_key(plan.plan_id, PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE)
+    if alert_type == TelegramAlertType.WATCHLIST:
+        plan_id = plan.plan_id
+        event_type = PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE
+    elif alert_type in {TelegramAlertType.SETUP_TRIGGERED, TelegramAlertType.SIGNAL_CONFIRMED}:
+        plan_id = _lifecycle_setup_delivery_signal_id(symbol_result)
+        event_type = alert_type.value
+    else:
+        return {}
+    event_key = _public_watchlist_event_key(plan_id, event_type)
     return {
-        "public_watchlist_plan_id": plan.plan_id,
+        "public_watchlist_plan_id": plan_id,
         "public_watchlist_event_key": event_key,
-        "public_alert_event_type": PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
+        "public_alert_event_type": event_type,
         "normalized_entry_zone_low": plan.normalized_entry_low,
         "normalized_entry_zone_high": plan.normalized_entry_high,
         "normalized_invalidation": plan.normalized_invalidation,
@@ -12365,6 +12754,10 @@ def _record_from_row(row: sqlite3.Row) -> TelegramAlertAttemptRecord:
         normalized_invalidation=_row_value(row, "normalized_invalidation"),
         dedupe_status=_row_value(row, "dedupe_status"),
         dedupe_reason=_row_value(row, "dedupe_reason"),
+        delivery_state=_row_value(row, "delivery_state"),
+        telegram_message_id=_row_value(row, "telegram_message_id", None),
+        telegram_chat_id=_row_value(row, "telegram_chat_id", None),
+        delivery_part_count=int(_row_value(row, "delivery_part_count", 1) or 1),
     )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from pathlib import Path
 
@@ -14,8 +15,11 @@ from app.alerts.telegram_lifecycle import (
     telegram_alert_decision_for_symbol,
     _terminal_alert_type_for_lifecycle_state,
 )
+from app.alerts.telegram_routing import TelegramDestination
+from app.alerts.telegram_sender import TelegramSendResult, TelegramSender
 from app.analytics.setup_quality import SetupQualityGrade
 from app.core.config import Settings
+from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleState
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.pipeline.scanner_runner import ScannerPipelineStatus
@@ -23,6 +27,7 @@ from app.pipeline.scanner_runner import ScannerPipelineStatus
 from test_telegram_lifecycle_delivery_phase42 import (
     FakeSender,
     _diagnostics,
+    _empty_run_result,
     _run_result,
     _setup_quality_with_grade,
     _store_lifecycle_record,
@@ -30,6 +35,12 @@ from test_telegram_lifecycle_delivery_phase42 import (
     _trade_idea,
     _with_lifecycle_fields,
     run,
+)
+
+from test_lifecycle_outcomes import (
+    _entry as _outcome_entry,
+    _evaluate as _evaluate_outcomes,
+    _prime as _prime_outcomes,
 )
 
 
@@ -52,6 +63,157 @@ def _service(db_path, sender: FakeSender) -> TelegramLifecycleDeliveryService:
         min_rr=Decimal("3"),
         min_score_for_idea=Decimal("80"),
     )
+
+
+class TimeoutThenSentSender(FakeSender):
+    async def send_part(
+        self,
+        text: str,
+        *,
+        part_number: int,
+        total_parts: int,
+        **kwargs: object,
+    ) -> TelegramSendResult:
+        self.status = "failed" if not self.messages else "sent"
+        result = await super().send_part(
+            text,
+            part_number=part_number,
+            total_parts=total_parts,
+            **kwargs,
+        )
+        if result.status != "failed":
+            return result
+        return TelegramSendResult(
+            status="failed",
+            detail="Telegram request timed out.",
+            telegram_results=result.telegram_results,
+            error_message="network_timeout",
+            delivery_state="RETRYABLE",
+        )
+
+
+class TransportStateSequenceSender(FakeSender):
+    def __init__(self, *states: str) -> None:
+        super().__init__()
+        self.states = list(states)
+
+    async def send_part(
+        self,
+        text: str,
+        *,
+        part_number: int,
+        total_parts: int,
+        **kwargs: object,
+    ) -> TelegramSendResult:
+        if not self.states:
+            raise AssertionError("Unexpected Telegram transport attempt.")
+        state = self.states.pop(0)
+        sent = state == "SENT"
+        self.messages.append(text)
+        self.calls.append(kwargs)
+        error_category = None if sent else f"test_{state.lower()}"
+        transport = {
+            "status": "sent" if sent else "failed",
+            "delivery_state": state,
+            "part_number": part_number,
+            "total_parts": total_parts,
+            "message_id": len(self.messages) if sent else None,
+            "chat_id": "fake-public-chat" if sent else None,
+            "retry_after": 0 if state == "RETRYABLE" else None,
+            "error_category": error_category,
+            "error": error_category,
+        }
+        return TelegramSendResult(
+            status="sent" if sent else "failed",
+            detail="sent" if sent else f"Telegram transport ended in {state}.",
+            telegram_results=(transport,),
+            error_message=NA if sent else str(error_category),
+            delivery_state=state,
+        )
+
+
+def _generated_entry_batch(
+    db_path: Path,
+    *,
+    lifecycle_id: str = "eth-fast-progression",
+):
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        record, candles, _ = _prime_outcomes(
+            repository,
+            lifecycle_id=lifecycle_id,
+            mode="swing",
+        )
+        candles.append(_outcome_entry(1, "long"))
+        outcome = _evaluate_outcomes(repository, record, candles)
+
+    symbol = _symbol(
+        SetupLifecycleState.MANAGING,
+        previous=SetupLifecycleState.EXECUTING,
+        signal_id=lifecycle_id,
+    )
+    return symbol.model_copy(
+        update={
+            "symbol": "ETHUSDT",
+            "lifecycle_state": outcome.record.model_copy(update={"symbol": "ETHUSDT"}),
+            "lifecycle_transition": outcome.last_transition.model_copy(update={"symbol": "ETHUSDT"}),
+            "lifecycle_transitions": tuple(
+                item.model_copy(
+                    update={
+                        "symbol": "ETHUSDT",
+                        "record": item.record.model_copy(update={"symbol": "ETHUSDT"}),
+                    }
+                )
+                for item in outcome.transitions
+            ),
+        }
+    )
+
+
+def _entry_transition_result(symbol, state: SetupLifecycleState):
+    transition = next(item for item in symbol.lifecycle_transitions if item.to_state == state)
+    return symbol.model_copy(
+        update={
+            "lifecycle_state": transition.record,
+            "lifecycle_transition": transition,
+            "lifecycle_transitions": (transition,),
+        }
+    )
+
+
+def _triggered_confirmed_result(symbol):
+    transitions = tuple(
+        item
+        for item in symbol.lifecycle_transitions
+        if item.to_state in {
+            SetupLifecycleState.TRIGGERED,
+            SetupLifecycleState.CONFIRMED,
+        }
+    )
+    return symbol.model_copy(
+        update={
+            "lifecycle_state": transitions[-1].record,
+            "lifecycle_transition": transitions[-1],
+            "lifecycle_transitions": transitions,
+        }
+    )
+
+
+def _make_lifecycle_retry_due(db_path: Path) -> None:
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        repository._connection.execute(
+            """
+            UPDATE public_alert_events
+            SET next_retry_at = '2000-01-01T00:00:00Z'
+            WHERE delivery_state = 'RETRYABLE'
+            """
+        )
+        repository._connection.execute(
+            """
+            UPDATE public_alert_delivery_parts
+            SET next_retry_at = '2000-01-01T00:00:00Z'
+            WHERE delivery_state = 'RETRYABLE'
+            """
+        )
 
 
 @pytest.mark.parametrize(
@@ -435,3 +597,505 @@ def test_same_geometry_triggered_and_confirmed_deliver_once_per_generation(tmp_p
     assert deliveries[0].signal_id == deliveries[1].signal_id
     assert deliveries[2].signal_id == deliveries[3].signal_id
     assert deliveries[0].signal_id != deliveries[2].signal_id
+
+
+def test_same_scan_triggered_and_confirmed_are_delivered_in_order(tmp_path) -> None:
+    db_path = tmp_path / "same-scan.db"
+    symbol = _generated_entry_batch(db_path)
+    sender = FakeSender()
+
+    summary = run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="eth-scan"))
+
+    assert summary.sent >= 2
+    assert "TRIGGERED" in sender.messages[0]
+    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts()
+    public_initial = [
+        attempt.alert_type
+        for attempt in attempts
+        if attempt.alert_type in {
+            TelegramAlertType.SETUP_TRIGGERED.value,
+            TelegramAlertType.SIGNAL_CONFIRMED.value,
+        }
+    ]
+    assert public_initial == [
+        TelegramAlertType.SETUP_TRIGGERED.value,
+        TelegramAlertType.SIGNAL_CONFIRMED.value,
+    ]
+
+
+def test_full_eth_sequence_preserves_both_public_attempts_before_management(tmp_path) -> None:
+    db_path = tmp_path / "eth-full.db"
+    symbol = _generated_entry_batch(db_path)
+    assert tuple(item.to_state for item in symbol.lifecycle_transitions) == (
+        SetupLifecycleState.TRIGGERED,
+        SetupLifecycleState.CONFIRMED,
+        SetupLifecycleState.EXECUTING,
+        SetupLifecycleState.MANAGING,
+    )
+    assert "lifecycle_transitions" not in symbol.model_dump(mode="json")
+    sender = FakeSender()
+
+    run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="2026-08-22T15:05:55Z"))
+
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts()
+        public_events = repository._connection.execute(
+            """
+            SELECT event_type, status, delivery_state, telegram_message_id
+            FROM public_alert_events
+            ORDER BY id
+            """
+        ).fetchall()
+        delivery_parts = repository._connection.execute(
+            """
+            SELECT event_key, delivery_state, telegram_message_id
+            FROM public_alert_delivery_parts
+            ORDER BY id
+            """
+        ).fetchall()
+    attempted_types = [attempt.attempted_alert_type for attempt in attempts]
+    assert attempted_types.count(TelegramAlertType.SETUP_TRIGGERED.value) == 1
+    assert attempted_types.count(TelegramAlertType.SIGNAL_CONFIRMED.value) == 1
+    assert attempted_types.index(TelegramAlertType.SETUP_TRIGGERED.value) < attempted_types.index(
+        TelegramAlertType.SIGNAL_CONFIRMED.value
+    )
+    assert "TRIGGERED" in sender.messages[0]
+    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    limit_attempt = next(
+        attempt for attempt in attempts if attempt.attempted_alert_type == TelegramAlertType.LIMIT_HIT.value
+    )
+    assert attempted_types.index(TelegramAlertType.SIGNAL_CONFIRMED.value) < attempted_types.index(
+        TelegramAlertType.LIMIT_HIT.value
+    )
+    assert limit_attempt.telegram_status == "sent"
+    assert [(row[0], row[1], row[2], row[3]) for row in public_events] == [
+        ("setup_triggered", "SENT", "SENT", "1"),
+        ("signal_confirmed", "SENT", "SENT", "2"),
+    ]
+    assert [(row[1], row[2]) for row in delivery_parts] == [
+        ("SENT", "1"),
+        ("SENT", "2"),
+    ]
+    public_initial_attempts = [
+        attempt for attempt in attempts if attempt.attempted_alert_type in {
+            TelegramAlertType.SETUP_TRIGGERED.value,
+            TelegramAlertType.SIGNAL_CONFIRMED.value,
+        }
+    ]
+    assert [attempt.telegram_message_id for attempt in public_initial_attempts] == ["1", "2"]
+    assert all(attempt.delivery_state == "SENT" for attempt in public_initial_attempts)
+
+
+def test_triggered_timeout_does_not_suppress_confirmed_attempt(tmp_path) -> None:
+    db_path = tmp_path / "failure-isolation.db"
+    symbol = _generated_entry_batch(db_path)
+    sender = TimeoutThenSentSender()
+
+    run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="failure-isolation"))
+
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts()
+        public_events = repository._connection.execute(
+            """
+            SELECT event_type, status, delivery_state
+            FROM public_alert_events
+            ORDER BY id
+            """
+        ).fetchall()
+    triggered = next(item for item in attempts if item.alert_type == TelegramAlertType.SETUP_TRIGGERED.value)
+    confirmed = next(item for item in attempts if item.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value)
+    assert triggered.telegram_status == "retryable"
+    assert triggered.delivery_state == "RETRYABLE"
+    assert confirmed.telegram_status == "sent"
+    assert [(row[0], row[1], row[2]) for row in public_events] == [
+        ("setup_triggered", "RESERVED", "RETRYABLE"),
+        ("signal_confirmed", "SENT", "SENT"),
+    ]
+    assert "CONFIRMED SIGNAL" in sender.messages[1]
+
+
+@pytest.mark.parametrize(
+    ("state", "alert_type"),
+    (
+        (SetupLifecycleState.TRIGGERED, TelegramAlertType.SETUP_TRIGGERED),
+        (SetupLifecycleState.CONFIRMED, TelegramAlertType.SIGNAL_CONFIRMED),
+    ),
+)
+def test_retryable_public_lifecycle_event_recovers_once_and_reuses_identity(
+    tmp_path,
+    state,
+    alert_type,
+) -> None:
+    db_path = tmp_path / f"{alert_type.value.lower()}-retry.db"
+    symbol = _entry_transition_result(_generated_entry_batch(db_path), state)
+    sender = TransportStateSequenceSender("RETRYABLE", "SENT")
+    service = _service(db_path, sender)
+
+    first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="initial"))
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        first_attempt = next(
+            item
+            for item in repository.list_attempts()
+            if item.alert_type == alert_type.value
+        )
+        first_event = repository._connection.execute(
+            """
+            SELECT id, status, delivery_state, attempt_count
+            FROM public_alert_events
+            WHERE event_type = ?
+            """,
+            (alert_type.value.lower(),),
+        ).fetchone()
+    assert first.failed == 1
+    assert first_attempt is not None
+    assert first_attempt.telegram_status == "retryable"
+    assert first_attempt.delivery_state == "RETRYABLE"
+    assert tuple(first_event) == (first_event[0], "RESERVED", "RETRYABLE", 1)
+
+    _make_lifecycle_retry_due(db_path)
+    recovered = run(service.deliver_for_run(_empty_run_result(), scan_run_id="recovery"))
+    repeated = run(service.deliver_for_run(_empty_run_result(), scan_run_id="after-sent"))
+
+    assert recovered.sent == 1
+    assert repeated.sent == 0
+    assert len(sender.messages) == 2
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        final_attempt = next(
+            item
+            for item in repository.list_attempts()
+            if item.alert_type == alert_type.value
+        )
+        final_event = repository._connection.execute(
+            """
+            SELECT id, status, delivery_state, attempt_count
+            FROM public_alert_events
+            WHERE event_type = ?
+            """,
+            (alert_type.value.lower(),),
+        ).fetchone()
+        attempt_rows = repository._connection.execute(
+            """
+            SELECT id, delivery_attempt_count
+            FROM telegram_alert_attempts
+            WHERE attempted_alert_type = ?
+            """,
+            (alert_type.value,),
+        ).fetchall()
+    assert final_attempt is not None
+    assert final_attempt.id == first_attempt.id
+    assert final_attempt.telegram_status == "sent"
+    assert final_attempt.delivery_state == "SENT"
+    assert tuple(final_event) == (first_event[0], "SENT", "SENT", 2)
+    assert [(row[0], row[1]) for row in attempt_rows] == [(first_attempt.id, 2)]
+
+
+def test_retryable_triggered_remains_recoverable_when_confirmed_succeeds(tmp_path) -> None:
+    db_path = tmp_path / "triggered-retry-confirmed-sent.db"
+    symbol = _triggered_confirmed_result(_generated_entry_batch(db_path))
+    sender = TransportStateSequenceSender("RETRYABLE", "SENT", "SENT")
+    service = _service(db_path, sender)
+
+    first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="batch"))
+
+    assert first.failed == 1
+    assert first.sent == 1
+    assert "TRIGGERED" in sender.messages[0]
+    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        initial_states = repository._connection.execute(
+            """
+            SELECT event_type, delivery_state
+            FROM public_alert_events
+            ORDER BY id
+            """
+        ).fetchall()
+    assert [(row[0], row[1]) for row in initial_states] == [
+        ("setup_triggered", "RETRYABLE"),
+        ("signal_confirmed", "SENT"),
+    ]
+
+    _make_lifecycle_retry_due(db_path)
+    recovered = run(service.deliver_for_run(_empty_run_result(), scan_run_id="recovery"))
+    repeated = run(service.deliver_for_run(_empty_run_result(), scan_run_id="deduped"))
+
+    assert recovered.sent == 1
+    assert repeated.sent == 0
+    assert len(sender.messages) == 3
+    assert "TRIGGERED" in sender.messages[2]
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        final_states = repository._connection.execute(
+            """
+            SELECT event_type, delivery_state
+            FROM public_alert_events
+            ORDER BY id
+            """
+        ).fetchall()
+    assert [(row[0], row[1]) for row in final_states] == [
+        ("setup_triggered", "SENT"),
+        ("signal_confirmed", "SENT"),
+    ]
+
+
+def test_failed_final_public_lifecycle_event_is_terminal(tmp_path) -> None:
+    db_path = tmp_path / "failed-final.db"
+    symbol = _entry_transition_result(
+        _generated_entry_batch(db_path),
+        SetupLifecycleState.TRIGGERED,
+    )
+    sender = TransportStateSequenceSender("FAILED_FINAL", "SENT")
+    service = _service(db_path, sender)
+
+    first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="terminal"))
+    recovered = run(service.deliver_for_run(_empty_run_result(), scan_run_id="no-retry"))
+
+    assert first.failed == 1
+    assert recovered.sent == 0
+    assert len(sender.messages) == 1
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        event = repository._connection.execute(
+            "SELECT status, delivery_state, attempt_count FROM public_alert_events"
+        ).fetchone()
+        attempt = repository.list_attempts()[0]
+    assert tuple(event) == ("FAILED", "FAILED_FINAL", 1)
+    assert attempt.telegram_status == "failed_final"
+    assert attempt.delivery_state == "FAILED_FINAL"
+
+
+def test_uncertain_public_lifecycle_event_never_auto_resends(tmp_path) -> None:
+    db_path = tmp_path / "uncertain.db"
+    symbol = _entry_transition_result(
+        _generated_entry_batch(db_path),
+        SetupLifecycleState.TRIGGERED,
+    )
+    sender = TransportStateSequenceSender("UNCERTAIN", "SENT")
+    service = _service(db_path, sender)
+
+    first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="uncertain"))
+    recovered = run(service.deliver_for_run(_empty_run_result(), scan_run_id="no-resend"))
+
+    assert first.skipped == 1
+    assert recovered.sent == 0
+    assert len(sender.messages) == 1
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        event = repository._connection.execute(
+            "SELECT status, delivery_state, attempt_count FROM public_alert_events"
+        ).fetchone()
+        attempt = repository.list_attempts()[0]
+    assert tuple(event) == ("FAILED", "UNCERTAIN", 1)
+    assert attempt.telegram_status == "uncertain"
+    assert attempt.delivery_state == "UNCERTAIN"
+
+
+def test_lifecycle_history_without_claimable_outbox_intent_is_not_replayed(tmp_path) -> None:
+    db_path = tmp_path / "historical-lifecycle.db"
+    _generated_entry_batch(db_path, lifecycle_id="historical-only")
+    sender = TransportStateSequenceSender("SENT")
+
+    summary = run(
+        _service(db_path, sender).deliver_for_run(
+            _empty_run_result(),
+            scan_run_id="restart",
+        )
+    )
+
+    assert summary.sent == 0
+    assert sender.messages == []
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        assert len(repository.list_events(lifecycle_id="historical-only")) >= 4
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        assert repository.list_attempts() == ()
+        assert repository._connection.execute(
+            "SELECT COUNT(*) FROM public_alert_events"
+        ).fetchone()[0] == 0
+
+
+def test_restart_after_full_batch_does_not_resend_successful_events(tmp_path) -> None:
+    db_path = tmp_path / "batch-restart.db"
+    symbol = _generated_entry_batch(db_path)
+    first_sender = FakeSender()
+    second_sender = FakeSender()
+
+    first = run(_service(db_path, first_sender).deliver_for_run(_run_result(symbol), scan_run_id="before"))
+    repeated = run(_service(db_path, second_sender).deliver_for_run(_run_result(symbol), scan_run_id="after"))
+
+    assert first.sent >= 2
+    assert repeated.sent == 0
+    assert second_sender.messages == []
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts()
+    assert sum(item.alert_type == TelegramAlertType.SETUP_TRIGGERED.value for item in attempts) == 1
+    assert sum(item.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value for item in attempts) == 1
+
+
+def test_restart_after_triggered_sends_only_missing_confirmed(tmp_path) -> None:
+    db_path = tmp_path / "partial-restart.db"
+    symbol = _generated_entry_batch(db_path)
+    triggered_transition = next(
+        item for item in symbol.lifecycle_transitions if item.to_state == SetupLifecycleState.TRIGGERED
+    )
+    triggered_only = symbol.model_copy(
+        update={
+            "lifecycle_state": triggered_transition.record,
+            "lifecycle_transition": triggered_transition,
+            "lifecycle_transitions": (triggered_transition,),
+        }
+    )
+    first_sender = FakeSender()
+    second_sender = FakeSender()
+
+    first = run(_service(db_path, first_sender).deliver_for_run(_run_result(triggered_only), scan_run_id="triggered"))
+    resumed = run(_service(db_path, second_sender).deliver_for_run(_run_result(symbol), scan_run_id="resumed"))
+
+    assert first.sent == 1
+    assert resumed.sent >= 1
+    assert all("TRIGGERED" not in message for message in second_sender.messages)
+    assert "CONFIRMED SIGNAL" in second_sender.messages[0]
+
+
+def test_duplicate_public_transition_in_same_batch_sends_once(tmp_path) -> None:
+    db_path = tmp_path / "same-batch-duplicate.db"
+    symbol = _generated_entry_batch(db_path)
+    triggered = next(item for item in symbol.lifecycle_transitions if item.to_state == SetupLifecycleState.TRIGGERED)
+    duplicate_batch = symbol.model_copy(
+        update={
+            "lifecycle_state": triggered.record,
+            "lifecycle_transition": triggered,
+            "lifecycle_transitions": (triggered, triggered),
+        }
+    )
+    sender = FakeSender()
+
+    summary = run(_service(db_path, sender).deliver_for_run(_run_result(duplicate_batch), scan_run_id="duplicate"))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts()
+    assert [item.alert_type for item in attempts] == [TelegramAlertType.SETUP_TRIGGERED.value]
+
+
+def test_per_symbol_batch_path_delivers_triggered_then_confirmed(tmp_path) -> None:
+    db_path = tmp_path / "per-symbol.db"
+    symbol = _generated_entry_batch(db_path)
+    sender = FakeSender()
+    service = _service(db_path, sender)
+
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        deliveries = run(
+            service.deliver_transitions_for_symbol(
+                symbol,
+                repository=repository,
+                scan_run_id="per-symbol",
+                eligibility_context=TelegramEligibilityContext(
+                    min_rr=Decimal("3"),
+                    min_score_for_idea=Decimal("80"),
+                ),
+            )
+        )
+
+    public_types = [
+        item.alert_type
+        for item in deliveries
+        if item.alert_type in {
+            TelegramAlertType.SETUP_TRIGGERED.value,
+            TelegramAlertType.SIGNAL_CONFIRMED.value,
+        }
+    ]
+    assert public_types == [
+        TelegramAlertType.SETUP_TRIGGERED.value,
+        TelegramAlertType.SIGNAL_CONFIRMED.value,
+    ]
+    assert "TRIGGERED" in sender.messages[0]
+    assert "CONFIRMED SIGNAL" in sender.messages[1]
+
+
+def test_executing_or_managing_alone_does_not_synthesize_confirmed(tmp_path) -> None:
+    for state, previous in (
+        (SetupLifecycleState.EXECUTING, SetupLifecycleState.CONFIRMED),
+        (SetupLifecycleState.MANAGING, SetupLifecycleState.EXECUTING),
+    ):
+        db_path = tmp_path / f"{state.value.lower()}.db"
+        sender = FakeSender()
+        symbol = _symbol(state, previous=previous, signal_id=f"only-{state.value}")
+
+        run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id=state.value))
+
+        with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+            attempts = repository.list_attempts()
+        assert not any(item.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value for item in attempts)
+        assert not any("CONFIRMED SIGNAL" in message for message in sender.messages)
+
+
+def test_missing_credentials_block_each_public_transition_safely(tmp_path) -> None:
+    db_path = tmp_path / "missing-credentials.db"
+    symbol = _generated_entry_batch(db_path)
+    sender = TelegramSender(
+        bot_token=None,
+        chat_id=None,
+        signals_enabled=True,
+        dry_run=False,
+        local_manual_mode=True,
+        destination=TelegramDestination.PUBLIC_CHAT,
+    )
+
+    run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="missing-creds"))
+
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts()
+    initial_attempts = [
+        item for item in attempts if item.alert_type in {
+            TelegramAlertType.SETUP_TRIGGERED.value,
+            TelegramAlertType.SIGNAL_CONFIRMED.value,
+        }
+    ]
+    assert len(initial_attempts) == 2
+    assert all(item.telegram_status == "failed_final" for item in initial_attempts)
+    assert all(item.delivery_state == "FAILED_FINAL" for item in initial_attempts)
+    assert all(item.error_message == "missing_telegram_credentials" for item in initial_attempts)
+
+
+def test_scanner_delivery_has_no_polling_listener_dependency(tmp_path) -> None:
+    run_scan_source = Path("scripts/run_scan.py").read_text(encoding="utf-8")
+    lifecycle_source = Path("app/alerts/telegram_lifecycle.py").read_text(encoding="utf-8")
+    assert "run_telegram_bot" not in run_scan_source
+    assert "run_telegram_bot" not in lifecycle_source
+
+    db_path = tmp_path / "listener-independent.db"
+    symbol = _generated_entry_batch(db_path)
+    sender = FakeSender()
+    summary = run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="no-listener"))
+
+    assert summary.sent >= 2
+    assert "TRIGGERED" in sender.messages[0]
+    assert "CONFIRMED SIGNAL" in sender.messages[1]
+
+
+def test_concurrent_polling_listener_does_not_change_scanner_sender_semantics(tmp_path) -> None:
+    db_path = tmp_path / "listener-active.db"
+    symbol = _generated_entry_batch(db_path)
+    sender = FakeSender()
+    listener_running = asyncio.Event()
+    listener_stop = asyncio.Event()
+
+    async def polling_listener_process() -> None:
+        listener_running.set()
+        await listener_stop.wait()
+
+    async def scenario():
+        listener_task = asyncio.create_task(polling_listener_process())
+        await listener_running.wait()
+        try:
+            return await _service(db_path, sender).deliver_for_run(
+                _run_result(symbol),
+                scan_run_id="listener-active",
+            )
+        finally:
+            listener_stop.set()
+            await listener_task
+
+    summary = run(scenario())
+    assert summary.sent >= 2
+    assert "TRIGGERED" in sender.messages[0]
+    assert "CONFIRMED SIGNAL" in sender.messages[1]

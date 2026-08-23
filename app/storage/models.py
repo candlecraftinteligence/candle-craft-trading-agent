@@ -187,6 +187,10 @@ class TelegramAlertAttemptRecord:
     normalized_invalidation: str = "N/A"
     dedupe_status: str = "N/A"
     dedupe_reason: str = "N/A"
+    delivery_state: str = "N/A"
+    telegram_message_id: str | None = None
+    telegram_chat_id: str | None = None
+    delivery_part_count: int = 1
     id: int | None = None
 
 @dataclass(frozen=True)
