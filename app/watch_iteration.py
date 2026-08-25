@@ -110,6 +110,28 @@ def telegram_outbox_status_summary(summary: Any | None) -> dict[str, int]:
         "uncertain": 0,
         "failed_final": 0,
     }
+    confirmed_audit = getattr(summary, "confirmed_alert_audit", None)
+    if confirmed_audit is not None:
+        candidates = int(getattr(confirmed_audit, "confirmed_candidates_seen", 0))
+        passed = int(getattr(confirmed_audit, "confirmed_prefilter_passed", 0))
+        policy_disabled = int(getattr(confirmed_audit, "confirmed_policy_disabled", 0))
+        counts.update(
+            {
+                "confirmed_transitions": candidates,
+                "public_confirmed_candidates": candidates,
+                "public_confirmed_prefilter_passed": passed,
+                "public_confirmed_rejected_pretransport": max(
+                    0,
+                    candidates - passed - policy_disabled,
+                ),
+                "public_confirmed_attempt_records": int(
+                    getattr(confirmed_audit, "signal_confirmed_attempts_created", 0)
+                ),
+                "public_confirmed_sent": int(
+                    getattr(confirmed_audit, "signal_confirmed_sent", 0)
+                ),
+            }
+        )
     for delivery in tuple(getattr(summary, "deliveries", ()) or ()):
         status = str(getattr(delivery, "status", "")).strip().lower()
         detail = str(getattr(delivery, "detail", "")).upper()

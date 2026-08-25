@@ -3549,13 +3549,36 @@ class TelegramLifecycleDeliveryService:
         public_watchlist_hourly_cap_reached: bool | None = None,
     ) -> TelegramLifecycleDelivery | None:
         lifecycle = symbol_result.lifecycle_state
-        if lifecycle is not None and stored_plan_geometry_failure(lifecycle) is not None:
-            return None
         alert_type_hint = (
             _alert_type_for_transition(symbol_result, symbol_result.lifecycle_transition)
             if symbol_result.lifecycle_transition
             else None
         )
+        geometry_failure = stored_plan_geometry_failure(lifecycle) if lifecycle is not None else None
+        if geometry_failure is not None:
+            if alert_type_hint != TelegramAlertType.SIGNAL_CONFIRMED:
+                return None
+            context = _minimum_rr_context_for_symbol(
+                symbol_result, eligibility_context or TelegramEligibilityContext()
+            )
+            message = _telegram_signal_message_for_alert(
+                symbol_result,
+                TelegramAlertType.SIGNAL_CONFIRMED,
+                context,
+            )
+            return _persist_blocked_attempt(
+                repository,
+                symbol_result,
+                decision=TelegramAlertDecision(
+                    False,
+                    f"blocked:invalid_stored_plan_geometry:{geometry_failure}",
+                    alert_type=TelegramAlertType.SIGNAL_CONFIRMED,
+                    message=message,
+                    lifecycle_transition=symbol_result.lifecycle_transition,
+                ),
+                scan_run_id=scan_run_id,
+                eligibility_context=context,
+            )
 
         terminal_bridge = (
             _terminal_identity_bridge(repository, symbol_result, alert_type_hint)
@@ -3592,7 +3615,13 @@ class TelegramLifecycleDeliveryService:
             if decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and decision.message is not None:
                 prefilter = _confirmed_alert_attempt_prefilter(symbol_result, decision.message, context)
                 if not prefilter.passed:
-                    return None
+                    return _persist_blocked_attempt(
+                        repository,
+                        symbol_result,
+                        decision=_confirmed_prefilter_blocked_decision(decision, prefilter),
+                        scan_run_id=scan_run_id,
+                        eligibility_context=context,
+                    )
             if decision.alert_type == TelegramAlertType.WATCHLIST and decision.message is not None:
                 prefilter = _public_watchlist_attempt_prefilter(
                     symbol_result,
@@ -3624,7 +3653,13 @@ class TelegramLifecycleDeliveryService:
         if decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and decision.message is not None:
             prefilter = _confirmed_alert_attempt_prefilter(symbol_result, decision.message, context)
             if not prefilter.passed:
-                return None
+                return _persist_blocked_attempt(
+                    repository,
+                    symbol_result,
+                    decision=_confirmed_prefilter_blocked_decision(decision, prefilter),
+                    scan_run_id=scan_run_id,
+                    eligibility_context=context,
+                )
         if decision.alert_type == TelegramAlertType.WATCHLIST:
             raw_watchlist_signal_id = _signal_id(symbol_result)
             if (
@@ -7662,6 +7697,25 @@ def _confirmed_alert_attempt_prefilter(
         passed=not blocking_reasons,
         blocking_reasons=blocking_reasons,
         reason_buckets=_confirmed_alert_prefilter_reason_buckets(blocking_reasons),
+    )
+
+
+def _confirmed_prefilter_blocked_decision(
+    decision: TelegramAlertDecision,
+    prefilter: ConfirmedAlertPrefilterResult,
+) -> TelegramAlertDecision:
+    """Convert a public-CONFIRMED prefilter rejection into a persistable decision."""
+
+    if decision.alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
+        raise ValueError("confirmed prefilter persistence requires SIGNAL_CONFIRMED")
+    if decision.message is None:
+        raise ValueError("confirmed prefilter persistence requires a rendered message")
+    if not prefilter.blocking_reasons:
+        raise ValueError("confirmed prefilter persistence requires a blocking reason")
+    return replace(
+        decision,
+        eligible=False,
+        reason=f"blocked:{'; '.join(prefilter.blocking_reasons)}",
     )
 
 

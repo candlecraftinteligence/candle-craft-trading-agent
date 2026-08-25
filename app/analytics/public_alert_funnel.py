@@ -22,6 +22,8 @@ SYMBOL_UNIVERSE_GATE = "SYMBOL_UNIVERSE_GATE"
 ENTRY_WINDOW_GATE = "ENTRY_WINDOW_GATE"
 DEDUPLICATION_GATE = "DEDUPLICATION_GATE"
 TERMINAL_UPDATE_GATE = "TERMINAL_UPDATE_GATE"
+RATE_LIMIT_GATE = "RATE_LIMIT_GATE"
+COOLDOWN_GATE = "COOLDOWN_GATE"
 UNKNOWN_GATE = "UNKNOWN_GATE"
 
 BLOCK_STAGES = (
@@ -34,6 +36,8 @@ BLOCK_STAGES = (
     ENTRY_WINDOW_GATE,
     DEDUPLICATION_GATE,
     TERMINAL_UPDATE_GATE,
+    RATE_LIMIT_GATE,
+    COOLDOWN_GATE,
     UNKNOWN_GATE,
 )
 
@@ -81,6 +85,8 @@ PUBLIC_BLOCK_CATEGORIES = (
     "TERMINAL_UPDATE_NO_PRIOR_PUBLIC_ALERT",
     "DERIVATIVES_CONFLICT",
     "TRUST_METER_BELOW_MINIMUM",
+    "PUBLIC_RATE_LIMIT",
+    "PUBLIC_COOLDOWN",
     UNKNOWN_PUBLIC_BLOCK,
 )
 
@@ -223,6 +229,20 @@ def normalize_public_block_reasons(blocked_reason: str) -> list[str]:
         add("DERIVATIVES_CONFLICT")
     if "trust_meter_below_minimum" in key or "trust_meter_below_confirmed_min" in key:
         add("TRUST_METER_BELOW_MINIMUM")
+    if any(
+        token in key
+        for token in (
+            "public_block_scan_cap",
+            "public_block_hourly_cap",
+            "public_block_daily_cap",
+            "public_rate_limit",
+        )
+    ):
+        add("PUBLIC_RATE_LIMIT")
+    if "public_block_same_symbol_same_side_cooldown" in key or (
+        "public_block_same_symbol_opposite_side_cooldown" in key
+    ) or "public_cooldown" in key:
+        add("PUBLIC_COOLDOWN")
 
     return categories or [UNKNOWN_PUBLIC_BLOCK]
 
@@ -237,6 +257,10 @@ def classify_block_stage(blocked_reason: str | Mapping[str, Any], dedupe_reason:
         return TERMINAL_UPDATE_GATE
     if "duplicate_successful_public_watchlist_event" in key or "DUPLICATE_PUBLIC_PLAN" in categories:
         return DEDUPLICATION_GATE
+    if "PUBLIC_RATE_LIMIT" in categories:
+        return RATE_LIMIT_GATE
+    if "PUBLIC_COOLDOWN" in categories:
+        return COOLDOWN_GATE
     if "TARGET_INTEGRITY_BLOCKED" in categories or "INVALID_TP_SEQUENCE" in categories:
         return TARGET_INTEGRITY_GATE
     if (
