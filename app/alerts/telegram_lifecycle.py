@@ -39,6 +39,7 @@ from app.alerts.watchlist_expiry import (
     watchlist_expiry_decision,
 )
 from app.core.config import Settings
+from app.core.confirmed_data_health import confirmed_data_health_for_symbol
 from app.core.trade_plan_integrity import validate_trade_plan
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
@@ -749,6 +750,7 @@ class ConfirmedAlertPrefilterResult:
     passed: bool
     blocking_reasons: tuple[str, ...] = ()
     reason_buckets: tuple[str, ...] = ()
+    diagnostic_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -789,6 +791,7 @@ class ConfirmedAlertAuditSummary:
     signal_confirmed_sent: int = 0
     policy_disabled_by_reason: Mapping[str, int] = field(default_factory=dict)
     blocked_before_attempt_by_reason: Mapping[str, int] = field(default_factory=dict)
+    non_blocking_data_health_by_reason: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -3236,6 +3239,7 @@ class TelegramLifecycleDeliveryService:
         signal_confirmed_sent = 0
         confirmed_policy_disabled_by_reason: dict[str, int] = {}
         confirmed_blocked_before_attempt: dict[str, int] = {}
+        confirmed_non_blocking_data_health: dict[str, int] = {}
 
         def record_delivery(delivery: TelegramLifecycleDelivery) -> None:
             nonlocal duplicate, sent, skipped, failed, blocked, blocked_repeat
@@ -3332,6 +3336,10 @@ class TelegramLifecycleDeliveryService:
                                 confirmed_message,
                                 eligibility_context,
                             )
+                            for reason in confirmed_prefilter.diagnostic_reasons:
+                                confirmed_non_blocking_data_health[reason] = (
+                                    confirmed_non_blocking_data_health.get(reason, 0) + 1
+                                )
                             if confirmed_prefilter.passed:
                                 confirmed_prefilter_passed += 1
                             else:
@@ -3410,6 +3418,9 @@ class TelegramLifecycleDeliveryService:
             signal_confirmed_sent=signal_confirmed_sent,
             policy_disabled_by_reason=dict(sorted(confirmed_policy_disabled_by_reason.items())),
             blocked_before_attempt_by_reason=dict(sorted(confirmed_blocked_before_attempt.items())),
+            non_blocking_data_health_by_reason=dict(
+                sorted(confirmed_non_blocking_data_health.items())
+            ),
         )
         _log_public_watchlist_audit(public_watchlist_audit)
         _log_confirmed_alert_audit(confirmed_alert_audit)
@@ -7690,13 +7701,18 @@ def _confirmed_alert_attempt_prefilter(
             context,
         )
     )
-    reasons.extend(_confirmed_alert_data_health_blockers(symbol_result))
+    data_health = confirmed_data_health_for_symbol(
+        symbol_result,
+        diagnostics=_representative_diagnostics(symbol_result),
+    )
+    reasons.extend(data_health.blocking_reasons)
 
     blocking_reasons = tuple(dict.fromkeys(reason for reason in reasons if _text(reason) != NA))
     return ConfirmedAlertPrefilterResult(
         passed=not blocking_reasons,
         blocking_reasons=blocking_reasons,
         reason_buckets=_confirmed_alert_prefilter_reason_buckets(blocking_reasons),
+        diagnostic_reasons=data_health.diagnostic_reasons,
     )
 
 
@@ -7717,26 +7733,6 @@ def _confirmed_prefilter_blocked_decision(
         eligible=False,
         reason=f"blocked:{'; '.join(prefilter.blocking_reasons)}",
     )
-
-
-def _confirmed_alert_data_health_blockers(symbol_result: ScannerSymbolResult) -> tuple[str, ...]:
-    score_result = symbol_result.score_result
-    direct_values = (
-        symbol_result.missing_data,
-        symbol_result.unverified_data,
-        symbol_result.strategy_missing_data,
-        symbol_result.strategy_unverified_data,
-        symbol_result.derivatives_missing_data,
-        symbol_result.derivatives_unverified_data,
-        getattr(score_result, "missing_data", ()) if score_result is not None else (),
-        getattr(score_result, "unverified_data", ()) if score_result is not None else (),
-    )
-    if any(_sequence_or_single(value) for value in direct_values):
-        return ("data_health_failed",)
-    diagnostics = _representative_diagnostics(symbol_result)
-    if any(_sequence_or_single(diagnostics.get(key)) for key in ("missing_data", "unverified_data")):
-        return ("data_health_failed",)
-    return ()
 
 
 def _confirmed_alert_prefilter_reason_buckets(reasons: Sequence[str]) -> tuple[str, ...]:
@@ -7775,8 +7771,10 @@ def _confirmed_alert_prefilter_reason_buckets(reasons: Sequence[str]) -> tuple[s
             buckets.append("missing_stop")
         elif "planned_rr_below_min" in key or "confirmed_rr_below_min" in key or "confirmed_missing_rr" in key:
             buckets.append("rr_below_min")
-        elif "data_health_failed" in key:
-            buckets.append("data_health_failed")
+        elif key.startswith("required_data_missing"):
+            buckets.append("required_data_missing")
+        elif key.startswith("required_data_unverified"):
+            buckets.append("required_data_unverified")
     return tuple(dict.fromkeys(buckets))
 
 
@@ -8141,7 +8139,8 @@ def _log_confirmed_alert_audit(summary: ConfirmedAlertAuditSummary) -> None:
         "confirmed_alert_audit public_signal_policy=%s confirmed_candidates_seen=%s "
         "confirmed_prefilter_passed=%s confirmed_policy_disabled=%s "
         "signal_confirmed_attempts_created=%s signal_confirmed_sent=%s "
-        "policy_disabled_by_reason=%s blocked_before_attempt_by_reason=%s",
+        "policy_disabled_by_reason=%s blocked_before_attempt_by_reason=%s "
+        "non_blocking_data_health_by_reason=%s",
         summary.public_signal_policy,
         summary.confirmed_candidates_seen,
         summary.confirmed_prefilter_passed,
@@ -8150,6 +8149,7 @@ def _log_confirmed_alert_audit(summary: ConfirmedAlertAuditSummary) -> None:
         summary.signal_confirmed_sent,
         dict(summary.policy_disabled_by_reason),
         dict(summary.blocked_before_attempt_by_reason),
+        dict(summary.non_blocking_data_health_by_reason),
     )
 
 
