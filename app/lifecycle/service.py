@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from app.core.confirmed_data_health import confirmed_data_health_for_symbol
 from app.core.minimum_rr import hard_mode_minimum_rr
 from app.core.trade_plan_integrity import validate_trade_plan
 from app.data.dtos import NA
@@ -521,6 +522,7 @@ def observation_from_symbol_result(
     stop_loss = _stop_value(symbol_result, diagnostics)
     targets = _target_values(symbol_result, diagnostics)
     latest_high, latest_low = _latest_observed_range_values(symbol_result, diagnostics)
+    data_health = confirmed_data_health_for_symbol(symbol_result, diagnostics=diagnostics)
 
     observation = LifecycleObservation(
         symbol=symbol_result.symbol,
@@ -580,7 +582,11 @@ def observation_from_symbol_result(
             diagnostics.get("active_invalidation_reason"),
             diagnostics.get("current_invalidation_reason"),
         ),
-        data_health_failed=_data_health_failed(symbol_result, diagnostics),
+        data_health_failed=data_health.blocked,
+        required_data_missing=data_health.required_missing,
+        required_data_unverified=data_health.required_unverified,
+        optional_data_missing=data_health.optional_missing,
+        optional_data_unverified=data_health.optional_unverified,
         limit_fill_required=requires_limit_fill,
         actionable_a_grade_candidate=actionable_a_grade_candidate,
         a_grade_watch_candidate=a_grade_watch_candidate,
@@ -1148,31 +1154,6 @@ def _opportunity_score(symbol_result: ScannerSymbolResult, diagnostics: Mapping[
         getattr(trade_idea, "confidence_score", NA) if trade_idea is not None else NA,
         diagnostics.get("opportunity_score"),
         diagnostics.get("total_score"),
-    )
-
-
-def _data_health_failed(symbol_result: ScannerSymbolResult, diagnostics: Mapping[str, Any]) -> bool:
-    if any(
-        _sequence_values(value)
-        for value in (
-            symbol_result.missing_data,
-            symbol_result.unverified_data,
-            symbol_result.strategy_missing_data,
-            symbol_result.strategy_unverified_data,
-            symbol_result.derivatives_missing_data,
-            symbol_result.derivatives_unverified_data,
-            diagnostics.get("missing_data"),
-            diagnostics.get("unverified_data"),
-        )
-    ):
-        return True
-    score_result = symbol_result.score_result
-    return bool(
-        score_result is not None
-        and (
-            _sequence_values(getattr(score_result, "missing_data", ()))
-            or _sequence_values(getattr(score_result, "unverified_data", ()))
-        )
     )
 
 

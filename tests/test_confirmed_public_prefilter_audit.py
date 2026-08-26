@@ -11,6 +11,8 @@ from app.alerts.telegram_lifecycle import (
 )
 from app.analytics.setup_quality import SetupQualityGrade
 from app.lifecycle.models import SetupLifecycleState
+from app.lifecycle.service import observation_from_symbol_result
+from app.scoring.opportunity_scoring import score_opportunity
 
 from test_telegram_lifecycle_delivery_phase42 import (
     FakeSender,
@@ -69,6 +71,80 @@ def _confirmed_attempts(db_path: Path):
         )
 
 
+def _healthy_score_result(
+    *,
+    missing_data: tuple[str, ...] = (),
+    unverified_data: tuple[str, ...] = (),
+):
+    return score_opportunity(
+        {
+            "technical_score": Decimal("100"),
+            "derivatives_score": Decimal("100"),
+            "risk_approved": True,
+            "best_rr": Decimal("3"),
+            "liquidity_score": Decimal("100"),
+            "catalyst_score": Decimal("100"),
+            "data_quality_score": Decimal("100"),
+            "invalidation_present": True,
+            "setup_location": "edge",
+            "missing_data": missing_data,
+            "unverified_data": unverified_data,
+        }
+    )
+
+
+PRODUCTION_OPTIONAL_MISSING = (
+    "liquidation_data: N/A",
+    "liquidity_below: N/A",
+    "liquidity_above: N/A",
+    "orderflow_summary: N/A",
+    "cvd: N/A",
+    "btc_context: N/A",
+    "btc_d_context: N/A",
+    "event_risk_context: N/A",
+    "weekend_filter: N/A",
+    "sector_rotation: N/A",
+    "narrative: N/A",
+    "liquidation_heatmap: N/A",
+)
+
+
+def _with_data_health(
+    symbol,
+    *,
+    missing_data: tuple[str, ...] = (),
+    unverified_data: tuple[str, ...] = (),
+    strategy_missing_data: tuple[str, ...] = (),
+    strategy_unverified_data: tuple[str, ...] = (),
+    derivatives_missing_data: tuple[str, ...] = (),
+    derivatives_unverified_data: tuple[str, ...] = (),
+    score_missing_data: tuple[str, ...] = (),
+    score_unverified_data: tuple[str, ...] = (),
+):
+    diagnostics = dict(symbol.strategy_diagnostics["swing"])
+    diagnostics.update(
+        {
+            "missing_data": strategy_missing_data,
+            "unverified_data": strategy_unverified_data,
+        }
+    )
+    return symbol.model_copy(
+        update={
+            "missing_data": missing_data,
+            "unverified_data": unverified_data,
+            "strategy_missing_data": strategy_missing_data,
+            "strategy_unverified_data": strategy_unverified_data,
+            "derivatives_missing_data": derivatives_missing_data,
+            "derivatives_unverified_data": derivatives_unverified_data,
+            "score_result": _healthy_score_result(
+                missing_data=score_missing_data,
+                unverified_data=score_unverified_data,
+            ),
+            "strategy_diagnostics": {"swing": diagnostics},
+        }
+    )
+
+
 def test_eligible_confirmed_candidate_creates_attempt_and_sends(tmp_path: Path) -> None:
     db_path = tmp_path / "eligible-confirmed.db"
     sender = FakeSender()
@@ -90,6 +166,233 @@ def test_eligible_confirmed_candidate_creates_attempt_and_sends(tmp_path: Path) 
     assert len(attempts) == 1
     assert attempts[0].alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value
     assert attempts[0].telegram_status == "sent"
+
+
+def test_optional_enrichment_missing_passes_data_health_and_normal_gates_send(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "optional-enrichment-confirmed.db"
+    sender = FakeSender()
+    optional_missing = (
+        "liquidation_heatmap: N/A",
+        "cvd: N/A",
+        "narrative: N/A",
+        "btc_context: N/A",
+    )
+    symbol = _with_data_health(
+        _confirmed_candidate("eligible"),
+        missing_data=optional_missing,
+        strategy_missing_data=optional_missing,
+        score_missing_data=optional_missing,
+    )
+
+    observation = observation_from_symbol_result(symbol)
+    summary = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(symbol),
+            scan_run_id="optional-enrichment-confirmed",
+        )
+    )
+
+    assert observation.data_health_failed is False
+    assert observation.required_data_missing == ()
+    assert observation.optional_data_missing == (
+        "liquidation_heatmap",
+        "cvd",
+        "narrative",
+        "btc_context",
+    )
+    assert summary.sent == 1
+    assert summary.confirmed_alert_audit.confirmed_prefilter_passed == 1
+    assert summary.confirmed_alert_audit.non_blocking_data_health_by_reason == {
+        "optional_data_missing:liquidation_heatmap,cvd,narrative,btc_context": 1
+    }
+    assert len(sender.messages) == 1
+
+
+def test_production_exact_optional_list_across_all_sources_does_not_hard_block(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "production-optional-confirmed.db"
+    sender = FakeSender()
+    unverified = ("CVD: Unverified", "liquidation_heatmap: Unverified")
+    symbol = _with_data_health(
+        _confirmed_candidate("eligible"),
+        missing_data=PRODUCTION_OPTIONAL_MISSING[:4],
+        unverified_data=unverified,
+        strategy_missing_data=PRODUCTION_OPTIONAL_MISSING[4:10],
+        derivatives_missing_data=PRODUCTION_OPTIONAL_MISSING[10:],
+        derivatives_unverified_data=unverified,
+        score_missing_data=PRODUCTION_OPTIONAL_MISSING,
+        score_unverified_data=unverified,
+    )
+
+    summary = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(symbol),
+            scan_run_id="production-optional-confirmed",
+        )
+    )
+
+    expected_fields = tuple(value.split(":", 1)[0] for value in PRODUCTION_OPTIONAL_MISSING)
+    audit = summary.confirmed_alert_audit
+    assert summary.sent == 1
+    assert audit.confirmed_prefilter_passed == 1
+    assert audit.blocked_before_attempt_by_reason == {}
+    assert audit.non_blocking_data_health_by_reason == {
+        f"optional_data_missing:{','.join(expected_fields)}": 1,
+        "optional_data_unverified:cvd,liquidation_heatmap": 1,
+    }
+    assert len(sender.messages) == 1
+
+
+def test_required_market_data_missing_hard_blocks_confirmed(tmp_path: Path) -> None:
+    db_path = tmp_path / "required-missing-confirmed.db"
+    sender = FakeSender()
+    symbol = _with_data_health(
+        _confirmed_candidate("eligible"),
+        missing_data=("candles_15m: N/A",),
+    )
+
+    observation = observation_from_symbol_result(symbol)
+    summary = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(symbol),
+            scan_run_id="required-missing-confirmed",
+        )
+    )
+
+    assert observation.data_health_failed is True
+    assert observation.required_data_missing == ("candles_15m",)
+    assert summary.sent == 0
+    assert summary.blocked == 1
+    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason == {
+        "required_data_missing": 1
+    }
+    attempts = _confirmed_attempts(db_path)
+    assert len(attempts) == 1
+    assert "required_data_missing:candles_15m" in attempts[0].blocked_reason
+    assert sender.messages == []
+
+
+def test_required_market_data_unverified_hard_blocks_confirmed(tmp_path: Path) -> None:
+    db_path = tmp_path / "required-unverified-confirmed.db"
+    sender = FakeSender()
+    symbol = _with_data_health(
+        _confirmed_candidate("eligible"),
+        unverified_data=("technical: Unverified",),
+    )
+
+    summary = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(symbol),
+            scan_run_id="required-unverified-confirmed",
+        )
+    )
+
+    assert summary.sent == 0
+    assert summary.blocked == 1
+    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason == {
+        "required_data_unverified": 1
+    }
+    attempts = _confirmed_attempts(db_path)
+    assert len(attempts) == 1
+    assert "required_data_unverified:technical" in attempts[0].blocked_reason
+    assert sender.messages == []
+
+
+def test_optional_unverified_is_retained_without_automatic_hard_block(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "optional-unverified-confirmed.db"
+    sender = FakeSender()
+    symbol = _with_data_health(
+        _confirmed_candidate("eligible"),
+        unverified_data=("CVD: Unverified", "liquidation_heatmap: Unverified"),
+    )
+
+    summary = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(symbol),
+            scan_run_id="optional-unverified-confirmed",
+        )
+    )
+
+    assert summary.sent == 1
+    assert summary.confirmed_alert_audit.non_blocking_data_health_by_reason == {
+        "optional_data_unverified:cvd,liquidation_heatmap": 1
+    }
+    assert len(sender.messages) == 1
+
+
+def test_optional_missing_with_low_technical_score_is_not_data_health_blocked(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "optional-low-technical-confirmed.db"
+    sender = FakeSender()
+    symbol = _with_data_health(
+        _confirmed_candidate("technical"),
+        missing_data=("cvd: N/A", "liquidation_heatmap: N/A", "narrative: N/A"),
+    )
+
+    summary = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(symbol),
+            scan_run_id="optional-low-technical-confirmed",
+        )
+    )
+
+    assert summary.sent == 0
+    assert summary.blocked == 1
+    assert summary.confirmed_alert_audit.blocked_before_attempt_by_reason == {
+        "technical_score_below_min": 1
+    }
+    attempts = _confirmed_attempts(db_path)
+    assert len(attempts) == 1
+    assert "technical_score_below_min:49<50" in attempts[0].blocked_reason
+    assert "required_data_" not in attempts[0].blocked_reason
+    assert "data_health_failed" not in attempts[0].blocked_reason
+    assert sender.messages == []
+
+
+def test_required_missing_blocks_otherwise_excellent_confirmed_candidate(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "required-excellent-confirmed.db"
+    sender = FakeSender()
+    excellent = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        signal_id="confirmed-required-excellent",
+        technical_score=Decimal("100"),
+        setup_quality=_setup_quality_with_grade(
+            SetupQualityGrade.A,
+            quality_score=99,
+        ),
+        trade_idea=_trade_idea(
+            opportunity_score=Decimal("99"),
+            opportunity_grade="A+",
+            opportunity_decision="high_quality_candidate",
+        ),
+    )
+    symbol = _with_data_health(
+        excellent,
+        strategy_missing_data=("candles_5m: N/A",),
+    )
+
+    summary = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(symbol),
+            scan_run_id="required-excellent-confirmed",
+        )
+    )
+
+    assert summary.sent == 0
+    assert summary.blocked == 1
+    attempts = _confirmed_attempts(db_path)
+    assert len(attempts) == 1
+    assert "required_data_missing:candles_5m" in attempts[0].blocked_reason
+    assert sender.messages == []
 
 
 @pytest.mark.parametrize(

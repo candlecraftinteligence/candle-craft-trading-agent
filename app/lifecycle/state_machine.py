@@ -249,6 +249,10 @@ class LifecycleObservation:
     active_rejection_reason: str = NA
     active_invalidation_reason: str = NA
     data_health_failed: bool = False
+    required_data_missing: tuple[str, ...] = ()
+    required_data_unverified: tuple[str, ...] = ()
+    optional_data_missing: tuple[str, ...] = ()
+    optional_data_unverified: tuple[str, ...] = ()
     limit_fill_required: bool = False
     actionable_a_grade_candidate: bool = False
     a_grade_watch_candidate: bool = False
@@ -1098,6 +1102,8 @@ def _confirmed_observation_invalidates_active_signal(observation: LifecycleObser
         "core_status_blocked",
         "failed_confirmation_gate",
         "data_health_failed",
+        "required_data_missing",
+        "required_data_unverified",
     }
     return any(blocker.split(":", 1)[0] in active_blockers for blocker in blockers)
 
@@ -1117,7 +1123,13 @@ def _confirmed_observation_blockers(observation: LifecycleObservation) -> tuple[
         blockers.append("active_rejection_reason")
     if _text(observation.active_invalidation_reason) != NA:
         blockers.append("active_invalidation")
-    if observation.data_health_failed:
+    if observation.required_data_missing:
+        blockers.append(f"required_data_missing:{','.join(observation.required_data_missing)}")
+    if observation.required_data_unverified:
+        blockers.append(f"required_data_unverified:{','.join(observation.required_data_unverified)}")
+    if observation.data_health_failed and not (
+        observation.required_data_missing or observation.required_data_unverified
+    ):
         blockers.append("data_health_failed")
 
     if not observation.valid_trade_idea:
