@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     order_execution_enabled: bool = False
     scanner_confirmation_cycles: int = 2
     scanner_setup_merge_tolerance_pct: float = 0.5
+    global_context_enabled: bool = True
+    btc_context_enabled: bool = True
+    btc_d_context_enabled: bool = True
+    btc_d_cache_ttl_sec: int = 300
+    btc_d_request_timeout_sec: float = 5.0
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -95,6 +100,19 @@ class Settings(BaseSettings):
     @classmethod
     def validate_scanner_setup_merge_tolerance_pct(cls, value: float) -> float:
         return max(0.0, float(value))
+
+    @field_validator("btc_d_cache_ttl_sec")
+    @classmethod
+    def validate_btc_d_cache_ttl(cls, value: int) -> int:
+        return max(0, int(value))
+
+    @field_validator("btc_d_request_timeout_sec")
+    @classmethod
+    def validate_btc_d_request_timeout(cls, value: float) -> float:
+        normalized = float(value)
+        if normalized <= 0:
+            raise ValueError("BTC_D_REQUEST_TIMEOUT_SEC must be greater than zero")
+        return normalized
 
     @field_validator(
         "telegram_research_min_quality",

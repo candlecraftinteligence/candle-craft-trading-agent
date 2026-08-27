@@ -58,6 +58,22 @@ from app.analytics.target_intelligence import (
 )
 from app.analytics.volume_profile import VolumeProfileInput, VolumeProfileResult, calculate_volume_profile
 from app.cache.market_data_cache import CachedMarketDataClient, MarketDataCache
+from app.context import (
+    BtcDominanceContextService,
+    CoinPaprikaBtcDominanceProvider,
+    ContextValue,
+    GlobalContextSnapshot,
+    build_global_context_snapshot,
+    build_internal_btc_context,
+    build_weekend_context,
+)
+from app.context.btc import BTC_CONTEXT_TIMEFRAMES
+from app.context.btc_d import (
+    DEFAULT_BTC_D_CACHE_TTL_SECONDS,
+    DEFAULT_BTC_D_FRESH_SECONDS,
+    DEFAULT_BTC_D_MAX_STALE_SECONDS,
+    DEFAULT_BTC_D_REQUEST_TIMEOUT_SECONDS,
+)
 from app.core.process_memory import ProcessMemoryReading, read_process_rss
 from app.data.candle_integrity import (
     CandleIntegrityError,
@@ -216,6 +232,11 @@ class ScannerRunConfig(BaseModel):
     market_regime_enabled: bool = False
     regime_risk_mode: Literal["conservative", "balanced", "aggressive"] = "balanced"
     regime_strictness: Literal["low", "normal", "high"] = "normal"
+    global_context_enabled: bool = False
+    btc_context_enabled: bool = True
+    btc_d_context_enabled: bool = True
+    btc_d_cache_ttl_sec: int = DEFAULT_BTC_D_CACHE_TTL_SECONDS
+    btc_d_request_timeout_sec: float = DEFAULT_BTC_D_REQUEST_TIMEOUT_SECONDS
     decision_timestamp: datetime | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -301,7 +322,20 @@ class ScannerRunConfig(BaseModel):
             raise ValueError("cache_ttl_seconds must be zero or greater")
         return value
 
-    @field_validator("request_timeout_sec", "symbol_timeout_sec", "scan_timeout_sec", mode="before")
+    @field_validator("btc_d_cache_ttl_sec")
+    @classmethod
+    def _btc_d_cache_ttl_in_range(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("btc_d_cache_ttl_sec must be zero or greater")
+        return value
+
+    @field_validator(
+        "request_timeout_sec",
+        "symbol_timeout_sec",
+        "scan_timeout_sec",
+        "btc_d_request_timeout_sec",
+        mode="before",
+    )
     @classmethod
     def _timeout_positive(cls, value: Any) -> Any:
         if value is None:
@@ -554,6 +588,7 @@ class ScannerRunResult(BaseModel):
     performance_memory_summary: dict[str, Any] = Field(default_factory=dict)
     symbol_health: dict[str, Any] = Field(default_factory=dict)
     scanner_process_summary: dict[str, Any] = Field(default_factory=dict)
+    global_context: GlobalContextSnapshot | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -654,6 +689,7 @@ class ScannerRunner:
         alert_agent: AlertAgent | None = None,
         journal_agent: JournalAgent | None = None,
         market_data_cache: MarketDataCache | None = None,
+        btc_d_context_service: BtcDominanceContextService | None = None,
         clock: Callable[[], datetime] | None = None,
         process_memory_sampler: Callable[[], ProcessMemoryReading] | None = None,
         log: logging.Logger | None = None,
@@ -668,6 +704,7 @@ class ScannerRunner:
         self.alert_agent = alert_agent or AlertAgent()
         self.journal_agent = journal_agent or JournalAgent()
         self.market_data_cache = market_data_cache
+        self.btc_d_context_service = btc_d_context_service
         self.clock = clock or (lambda: datetime.now(UTC))
         self.process_memory_sampler = process_memory_sampler or read_process_rss
         self.logger = log or logger
@@ -694,6 +731,7 @@ class ScannerRunner:
             _safe_process_memory_reading(self.process_memory_sampler)
         ]
         client, owns_client = self._exchange_client_for(run_config)
+        global_context: GlobalContextSnapshot | None = None
         results: list[ScannerSymbolResult] = []
         total_symbols = len(run_config.symbols)
         scan_started = time.monotonic()
@@ -708,6 +746,12 @@ class ScannerRunner:
         )
 
         try:
+            if run_config.global_context_enabled:
+                global_context = await self._build_global_context(
+                    client,
+                    run_config,
+                    progress=progress,
+                )
             if run_config.market_regime_enabled:
                 market_regime_context = await self._fetch_market_regime_context(
                     client, run_config, progress=progress
@@ -734,7 +778,13 @@ class ScannerRunner:
 
                 try:
                     symbol_result = await asyncio.wait_for(
-                        self._scan_symbol(symbol_config, run_config, client, progress=progress),
+                        self._scan_symbol(
+                            symbol_config,
+                            run_config,
+                            client,
+                            global_context=global_context,
+                            progress=progress,
+                        ),
                         timeout=symbol_timeout,
                     )
                 except asyncio.TimeoutError:
@@ -845,6 +895,7 @@ class ScannerRunner:
             market_regime=market_regime,
             regime_adjustments=market_regime.adjustment,
             regime_warnings=market_regime.warnings,
+            global_context=global_context,
         )
 
     def _exchange_client_for(self, config: ScannerRunConfig) -> tuple[BaseExchangeClient, bool]:
@@ -869,12 +920,162 @@ class ScannerRunner:
             client = CachedMarketDataClient(client, cache)
         return client, owns_client
 
+    async def _build_global_context(
+        self,
+        client: BaseExchangeClient,
+        config: ScannerRunConfig,
+        *,
+        progress: Callable[[str], Any] | None = None,
+    ) -> GlobalContextSnapshot:
+        if config.decision_timestamp is None:
+            raise RuntimeError("scanner decision_timestamp must be resolved before global context")
+        generated_at = config.decision_timestamp
+        weekend_context = build_weekend_context(generated_at)
+        btc_context = ContextValue.unavailable(
+            source=f"internal_market_data:{config.exchange}",
+            reason="BTC context disabled by configuration",
+        )
+        btc_d_context = ContextValue.unavailable(
+            source="coinpaprika:/v1/global",
+            reason="BTC.D context disabled by configuration",
+        )
+        await _emit_progress(progress, "Preparing global market context...")
+
+        tasks: list[tuple[str, Any]] = []
+        if config.btc_context_enabled:
+            tasks.append(("btc", self._build_internal_btc_context(client, config)))
+        if config.btc_d_context_enabled:
+            tasks.append(("btc_d", self._build_btc_d_context(config)))
+        if tasks:
+            values = await asyncio.gather(
+                *(task for _label, task in tasks),
+                return_exceptions=True,
+            )
+            for (label, _task), value in zip(tasks, values, strict=True):
+                if isinstance(value, BaseException):
+                    context_value = ContextValue.error(
+                        source=(
+                            f"internal_market_data:{config.exchange}"
+                            if label == "btc"
+                            else "coinpaprika:/v1/global"
+                        ),
+                        reason=f"{label} context failed: {_clean_error_message(value)}",
+                    )
+                else:
+                    context_value = value
+                if label == "btc":
+                    btc_context = context_value
+                else:
+                    btc_d_context = context_value
+
+        snapshot = build_global_context_snapshot(
+            generated_at=generated_at,
+            btc_context=btc_context,
+            btc_d_context=btc_d_context,
+            weekend_context=weekend_context,
+        )
+        diagnostics = snapshot.diagnostics
+        self.logger.info(
+            "Global context status=%s btc=%s btc_d=%s weekend=%s btc_d_cache_hit=%s.",
+            diagnostics.global_context_status.value,
+            diagnostics.btc_context_status.value,
+            diagnostics.btc_d_context_status.value,
+            diagnostics.weekend_context_status.value,
+            diagnostics.btc_d_cache_hit,
+        )
+        return snapshot
+
+    async def _build_internal_btc_context(
+        self,
+        client: BaseExchangeClient,
+        config: ScannerRunConfig,
+    ) -> ContextValue:
+        async def fetch_timeframe(
+            timeframe: str,
+        ) -> tuple[str, tuple[Any, ...], str | None]:
+            limit_warnings: list[str] = []
+            fetch_limit = _timeframe_fetch_limit(config, timeframe, limit_warnings)
+            try:
+                candles = await self._request_public_api(
+                    config,
+                    f"BTCUSDT {timeframe} candles for global context",
+                    lambda: client.get_klines("BTCUSDT", timeframe, fetch_limit),
+                    timeout_sec=_optional_request_timeout(config),
+                )
+                closed = self._closed_candles_for_analysis(
+                    candles,
+                    symbol="BTCUSDT",
+                    timeframe=timeframe,
+                    config=config,
+                    minimum_closed_history=0,
+                )
+                if not closed:
+                    return timeframe, (), f"BTC {timeframe} has no closed candles"
+                return timeframe, tuple(closed), None
+            except Exception as exc:
+                self.logger.debug(
+                    "BTC global context candles unavailable timeframe=%s: %s",
+                    timeframe,
+                    exc,
+                )
+                return timeframe, (), f"BTC {timeframe} candles unavailable: {_clean_error_message(exc)}"
+
+        fetched = await asyncio.gather(
+            *(fetch_timeframe(timeframe) for timeframe in BTC_CONTEXT_TIMEFRAMES),
+            self._fetch_optional_market_data(client, "BTCUSDT", config),
+        )
+        optional_data = fetched[-1]
+        timeframe_results = fetched[:-1]
+        candles_by_timeframe = {
+            timeframe: candles
+            for timeframe, candles, _reason in timeframe_results
+            if candles
+        }
+        unavailable_reasons = {
+            timeframe: reason
+            for timeframe, _candles, reason in timeframe_results
+            if reason is not None
+        }
+        return build_internal_btc_context(
+            candles_by_timeframe=candles_by_timeframe,
+            generated_at=config.decision_timestamp,
+            technical_agent=self.technical_agent,
+            exchange=config.exchange,
+            funding=optional_data.funding,
+            open_interest=optional_data.open_interest,
+            open_interest_history=optional_data.open_interest_history,
+            unavailable_reasons=unavailable_reasons,
+        )
+
+    async def _build_btc_d_context(self, config: ScannerRunConfig) -> ContextValue:
+        service = self.btc_d_context_service
+        if service is None:
+            provider = CoinPaprikaBtcDominanceProvider(
+                timeout_seconds=config.btc_d_request_timeout_sec,
+                log=self.logger,
+            )
+            service = BtcDominanceContextService(
+                provider,
+                cache_ttl_seconds=config.btc_d_cache_ttl_sec,
+                fresh_seconds=max(
+                    DEFAULT_BTC_D_FRESH_SECONDS,
+                    config.btc_d_cache_ttl_sec * 2,
+                ),
+                max_stale_seconds=max(
+                    DEFAULT_BTC_D_MAX_STALE_SECONDS,
+                    config.btc_d_cache_ttl_sec * 12,
+                ),
+            )
+            self.btc_d_context_service = service
+        return await service.get_context()
+
     async def _scan_symbol(
         self,
         symbol_config: ScannerSymbolConfig,
         config: ScannerRunConfig,
         client: BaseExchangeClient,
         *,
+        global_context: GlobalContextSnapshot | None = None,
         progress: Callable[[str], Any] | None = None,
     ) -> ScannerSymbolResult:
         symbol = symbol_config.symbol
@@ -922,6 +1123,7 @@ class ScannerRunner:
                 optional_data=optional_data,
                 technical=technical,
                 derivatives_enrichment=derivatives_enrichment,
+                global_context=global_context,
                 progress=progress,
             )
         base_missing.extend(strategy_execution.strategy_missing_data)
@@ -1365,6 +1567,7 @@ class ScannerRunner:
         optional_data: _OptionalMarketData,
         technical: TechnicalStructureResult,
         derivatives_enrichment: DerivativesEnrichmentResult | None = None,
+        global_context: GlobalContextSnapshot | None = None,
         progress: Callable[[str], Any] | None = None,
     ) -> _StrategyExecution:
         if not config.enable_strategy_output or config.strategy_name is None:
@@ -1417,6 +1620,7 @@ class ScannerRunner:
             timeframe_context=timeframe_context,
             volume_profile=execution_volume_profile,
             derivatives_enrichment=derivatives_enrichment,
+            global_context=global_context,
         )
 
         strategy_results: dict[str, LiquidityGrabResult] = {}
@@ -2720,10 +2924,12 @@ def _liquidity_grab_input(
     volume_profile: VolumeProfileResult,
     derivatives_enrichment: DerivativesEnrichmentResult | None = None,
     timeframe_context: Mapping[str, Any] | None = None,
+    global_context: GlobalContextSnapshot | None = None,
 ) -> dict[str, Any]:
     support_levels = _strategy_levels(technical.nearest_support, technical.recent_range_low)
     resistance_levels = _strategy_levels(technical.nearest_resistance, technical.recent_range_high)
     timeframe_context = timeframe_context or {}
+    research_context = global_context.strategy_context() if global_context is not None else {}
     return {
         "symbol": symbol,
         "htf_timeframe": htf_timeframe,
@@ -2752,6 +2958,9 @@ def _liquidity_grab_input(
         "derivatives_enrichment": derivatives_enrichment,
         "cvd": None,
         "liquidation_data": None,
+        "btc_context": research_context.get("btc_context"),
+        "btc_d_context": research_context.get("btc_d_context"),
+        "weekend_filter": research_context.get("weekend_filter"),
         "min_rr": min_rr,
         "aggressive_toggle": aggressive_toggle,
         "htf_2d_context_source": timeframe_context.get("htf_2d_context_source", NA),

@@ -1561,6 +1561,8 @@ def _score_trend_alignment(trend: TrendLabel, direction: Direction) -> int:
 def _score_btc_context(data: LiquidityGrabInput, direction: Direction) -> int:
     if _is_missing(data.btc_context) and _is_missing(data.btc_d_context):
         return 0
+    if _research_only_context(data.btc_context) or _research_only_context(data.btc_d_context):
+        return 0
     if _btc_abnormal(data.btc_context):
         return 0
     if direction == "bullish" and _btc_d_breaking_up(data.btc_d_context) and _is_alt_symbol(data.symbol):
@@ -2627,7 +2629,7 @@ def _unverified_context(data: LiquidityGrabInput) -> tuple[str, ...]:
         "event_risk_context",
     ):
         text = _context_text(getattr(data, field))
-        if text != NA and "unverified" in text.lower():
+        if text != NA and any(label in text.lower() for label in ("unverified", "stale")):
             unverified.append(f"{field}: Unverified")
     return tuple(unverified)
 
@@ -2774,15 +2776,25 @@ def _context_has(value: Any | None, *phrases: str) -> bool:
 
 
 def _btc_abnormal(value: Any | None) -> bool:
+    if _research_only_context(value):
+        return False
     return _context_has(value, "abnormal_volatility", "abnormal volatility", "high volatility", "volatile")
 
 
 def _btc_d_breaking_up(value: Any | None) -> bool:
+    if _research_only_context(value):
+        return False
     return _context_has(value, "breaking_up_intraday", "breaking up intraday", "btc.d up", "dominance up")
 
 
 def _btc_d_breaking_down(value: Any | None) -> bool:
+    if _research_only_context(value):
+        return False
     return _context_has(value, "breaking_down_intraday", "breaking down intraday", "btc.d down", "dominance down")
+
+
+def _research_only_context(value: Any | None) -> bool:
+    return isinstance(value, Mapping) and value.get("usage") == "research_only"
 
 
 def _event_active(value: Any | None) -> bool:

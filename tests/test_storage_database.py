@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,6 +21,11 @@ from app.backtesting import (
     ReplayTradeResult,
 )
 from app.data.dtos import NA
+from app.context import (
+    ContextValue,
+    build_global_context_snapshot,
+    build_weekend_context,
+)
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
@@ -637,6 +643,44 @@ def test_scan_run_insert(tmp_path) -> None:
         row = connection.execute("SELECT run_id, command_preset, total_valid_setups FROM scan_runs").fetchone()
 
     assert row == (run_id, "daily", 1)
+
+
+def test_global_context_persists_once_at_scan_level_not_in_each_symbol_row(tmp_path) -> None:
+    db_path = tmp_path / "candle_craft.db"
+    generated_at = datetime(2026, 8, 27, 12, tzinfo=UTC)
+    snapshot = build_global_context_snapshot(
+        generated_at=generated_at,
+        btc_context=ContextValue.unavailable(
+            source="internal_market_data:binance",
+            reason="fixture",
+        ),
+        btc_d_context=ContextValue.unavailable(
+            source="fake:btc_d",
+            reason="fixture",
+        ),
+        weekend_context=build_weekend_context(generated_at),
+    )
+    result = _scan_result().model_copy(update={"global_context": snapshot})
+
+    run_id = store_scan_result(db_path, result)
+
+    with sqlite3.connect(db_path) as connection:
+        raw_scan = connection.execute(
+            "SELECT raw_payload_json FROM scan_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()[0]
+        raw_symbols = tuple(
+            row[0]
+            for row in connection.execute(
+                "SELECT raw_result_json FROM symbol_results WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
+        )
+
+    payload = json.loads(raw_scan)
+    assert payload["global_context"]["generated_at"] == generated_at.isoformat().replace("+00:00", "Z")
+    assert raw_scan.count('"global_context":') == 1
+    assert all("global_context" not in json.loads(raw_symbol) for raw_symbol in raw_symbols)
 
 
 def test_normal_scan_run_persists_summary_metadata_from_runtime_stats(tmp_path) -> None:
