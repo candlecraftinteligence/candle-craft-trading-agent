@@ -107,7 +107,10 @@ Verified CVD and orderflow inputs carry `usage=research_only`. Existing momentum
 absorption, derivatives-conflict, scoring, gate, grade, risk/reward, lifecycle, and
 Telegram paths explicitly ignore those inputs. They remove only the truthful
 optional `cvd: N/A` and `orderflow_summary: N/A` labels. Non-verified snapshots are
-not injected and preserve exact missing diagnostics.
+not injected. Unavailable, warming, overflow, disconnected, and error states remain
+optional missing diagnostics; stale or gap-compromised observations remain optional
+unverified diagnostics. `microstructure_flow` is explicitly optional at the final
+CONFIRMED data-health boundary, while unknown future fields continue to fail closed.
 
 ## Optional manual smoke procedure
 

@@ -1184,7 +1184,11 @@ class ScannerRunner:
         base_missing.extend(strategy_execution.strategy_missing_data)
         base_unverified.extend(strategy_execution.strategy_unverified_data)
         if microstructure_flow is not None and not microstructure_flow.verified:
-            base_missing.extend(_microstructure_missing_data(microstructure_flow))
+            flow_missing, flow_unverified = _microstructure_data_health_diagnostics(
+                microstructure_flow
+            )
+            base_missing.extend(flow_missing)
+            base_unverified.extend(flow_unverified)
         await _emit_progress(progress, "Scoring...")
 
         if not technical.is_valid:
@@ -2295,7 +2299,7 @@ def _setup_quality_for_result(
             if diagnostics
             else (),
             missing_data=missing_data,
-            unverified_data=unverified_data,
+            unverified_data=_strategy_quality_unverified_data(unverified_data),
             derivatives_missing_data=derivatives_enrichment.missing_data if derivatives_enrichment is not None else (),
             derivatives_unverified_data=derivatives_enrichment.unverified_data
             if derivatives_enrichment is not None
@@ -3722,12 +3726,36 @@ def _derivatives_conflict_reason(direction: Literal["long", "short"], result: De
     )
 
 
-def _microstructure_missing_data(
+_MICROSTRUCTURE_UNVERIFIED_COVERAGE_REASONS = frozenset(
+    {
+        "aggregate_trade_id_gap_in_window",
+        "connection_gap_in_window",
+        "connection_reconnect_in_window",
+        "trade_time_regression_in_window",
+    }
+)
+
+
+def _microstructure_data_health_diagnostics(
     snapshot: MicrostructureFlowSnapshot,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     reason = snapshot.reason or "unknown_reason"
-    return (
-        f"microstructure_flow: N/A (status={snapshot.status.value}, reason={reason})",
+    details = f"status={snapshot.status.value}, reason={reason}"
+    observation_is_unverified = snapshot.status == ContextStatus.STALE or (
+        snapshot.observed_at is not None
+        and reason in _MICROSTRUCTURE_UNVERIFIED_COVERAGE_REASONS
+    )
+    if observation_is_unverified:
+        return (), (f"microstructure_flow: Unverified ({details})",)
+    return (f"microstructure_flow: N/A ({details})",), ()
+
+
+def _strategy_quality_unverified_data(
+    values: Sequence[str],
+) -> tuple[str, ...]:
+    return tuple(
+        value for value in values
+        if not str(value).startswith("microstructure_flow:")
     )
 
 

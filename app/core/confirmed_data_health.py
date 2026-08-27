@@ -28,6 +28,7 @@ _OPTIONAL_FIELDS = frozenset(
         "liquidity_above",
         "liquidity_below",
         "long_short_ratio",
+        "microstructure_flow",
         "narrative",
         "open_interest",
         "open_interest_change_pct",
