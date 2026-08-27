@@ -57,6 +57,11 @@ from app.analytics.portfolio_selection import (  # noqa: E402
 )
 from app.data.dtos import NA  # noqa: E402
 from app.cache.market_data_cache import MarketDataCache  # noqa: E402
+from app.context import BtcDominanceContextService, CoinPaprikaBtcDominanceProvider  # noqa: E402
+from app.context.btc_d import (  # noqa: E402
+    DEFAULT_BTC_D_FRESH_SECONDS,
+    DEFAULT_BTC_D_MAX_STALE_SECONDS,
+)
 from app.command_center import (  # noqa: E402
     build_command_center_payload,
     build_minimum_rr_audit,
@@ -741,6 +746,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         _handle_history_command(args)
         return
 
+    runtime_settings = Settings()
     watchlist = await _resolve_watchlist_for_args(args)
     watchlist = _watchlist_with_lifecycle_priority(args, watchlist)
     diagnostics_level = args.diagnostics_level
@@ -782,6 +788,11 @@ async def main(argv: Sequence[str] | None = None) -> None:
         market_regime_enabled=args.market_regime,
         regime_risk_mode=args.regime_risk_mode,
         regime_strictness=args.regime_strictness,
+        global_context_enabled=runtime_settings.global_context_enabled,
+        btc_context_enabled=runtime_settings.btc_context_enabled,
+        btc_d_context_enabled=runtime_settings.btc_d_context_enabled,
+        btc_d_cache_ttl_sec=runtime_settings.btc_d_cache_ttl_sec,
+        btc_d_request_timeout_sec=runtime_settings.btc_d_request_timeout_sec,
     )
     symbol_priority_plan = _symbol_priority_plan_for_watchlist(args, watchlist)
 
@@ -889,6 +900,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             },
             runtime_stats=scan_result.runtime_stats,
             market_regime=scan_result.market_regime,
+            global_context=scan_result.global_context,
         )
     else:
         result = _combined_run_result(
@@ -1693,6 +1705,7 @@ def _combined_run_result(
     resume_metadata: Mapping[str, Any],
     runtime_stats: ScannerRuntimeStats | None,
     market_regime: Any | None = None,
+    global_context: Any | None = None,
 ) -> ScannerRunResult:
     ordered_results = tuple(
         results_by_symbol[symbol]
@@ -1734,6 +1747,7 @@ def _combined_run_result(
         market_regime=effective_market_regime,
         regime_adjustments=effective_market_regime.adjustment,
         regime_warnings=effective_market_regime.warnings,
+        global_context=global_context,
     )
 
 
@@ -2719,13 +2733,47 @@ def _first_mode(symbol_result: ScannerSymbolResult) -> str:
 
 
 def _scanner_runner(cache: MarketDataCache | None, *, log: Any | None = None) -> Any:
+    return _scanner_runner_with_context(cache, log=log)
+
+
+def _scanner_runner_with_context(
+    cache: MarketDataCache | None,
+    *,
+    log: Any | None = None,
+    btc_d_context_service: BtcDominanceContextService | None = None,
+) -> Any:
     try:
-        return ScannerRunner(market_data_cache=cache, log=log)
+        return ScannerRunner(
+            market_data_cache=cache,
+            btc_d_context_service=btc_d_context_service,
+            log=log,
+        )
     except TypeError:
         try:
             return ScannerRunner(market_data_cache=cache)
         except TypeError:
             return ScannerRunner()
+
+
+def _btc_d_context_service_for_config(
+    config: ScannerRunConfig,
+) -> BtcDominanceContextService | None:
+    if not config.global_context_enabled or not config.btc_d_context_enabled:
+        return None
+    return BtcDominanceContextService(
+        CoinPaprikaBtcDominanceProvider(
+            timeout_seconds=config.btc_d_request_timeout_sec,
+        ),
+        cache_ttl_seconds=config.btc_d_cache_ttl_sec,
+        fresh_seconds=max(
+            DEFAULT_BTC_D_FRESH_SECONDS,
+            config.btc_d_cache_ttl_sec * 2,
+        ),
+        max_stale_seconds=max(
+            DEFAULT_BTC_D_MAX_STALE_SECONDS,
+            config.btc_d_cache_ttl_sec * 12,
+        ),
+    )
 
 
 async def _run_scanner(
@@ -2763,6 +2811,7 @@ async def _run_watch_mode(
     effective_candle_limit: int,
     command_used: str,
 ) -> None:
+    btc_d_context_service = _btc_d_context_service_for_config(config)
     legacy_watch_activation_delivery = _legacy_watch_activation_delivery_enabled(args)
     if legacy_watch_activation_delivery:
         telegram_bot_token, telegram_chat_id, telegram_dry_run = _watch_telegram_credentials(args)
@@ -2829,6 +2878,7 @@ async def _run_watch_mode(
                 config=config,
                 iteration=iteration,
                 console_presenter=console,
+                btc_d_context_service=btc_d_context_service,
             )
             if iteration_error is not None:
                 disposition = classify_watch_exception(iteration_error)
@@ -3172,6 +3222,7 @@ async def _attempt_watch_scan_iteration(
     config: ScannerRunConfig,
     iteration: int,
     console_presenter: ScannerConsolePresenter | None = None,
+    btc_d_context_service: BtcDominanceContextService | None = None,
 ) -> tuple[WatchlistResolution | None, WatchScanExecution | None, Exception | SystemExit | None]:
     try:
         watchlist = await _watchlist_for_watch_iteration(args, startup_watchlist)
@@ -3181,6 +3232,7 @@ async def _attempt_watch_scan_iteration(
             config=config,
             iteration=iteration,
             console_presenter=console_presenter,
+            btc_d_context_service=btc_d_context_service,
         )
     except (Exception, SystemExit) as exc:
         return None, None, exc
@@ -3415,6 +3467,7 @@ async def _run_watch_scan_iteration(
     config: ScannerRunConfig,
     iteration: int,
     console_presenter: ScannerConsolePresenter | None = None,
+    btc_d_context_service: BtcDominanceContextService | None = None,
 ) -> WatchScanExecution:
     phase_statuses = {"universe": "SUCCESS"}
     recoverable_errors: list[str] = []
@@ -3492,9 +3545,10 @@ async def _run_watch_scan_iteration(
             console_presenter.emit(message)
 
     if queued_symbols:
-        runner = _scanner_runner(
+        runner = _scanner_runner_with_context(
             cache,
             log=console_presenter.scanner_logger() if console_presenter is not None else None,
+            btc_d_context_service=btc_d_context_service,
         )
         try:
             scan_result = await _run_scanner(
@@ -3537,6 +3591,7 @@ async def _run_watch_scan_iteration(
             },
             runtime_stats=scan_result.runtime_stats,
             market_regime=scan_result.market_regime,
+            global_context=scan_result.global_context,
         )
     else:
         result = _combined_run_result(

@@ -47,6 +47,11 @@ def test_default_settings_are_safe() -> None:
     assert settings.candle_craft_donate_ton_address is None
     assert settings.candle_craft_donate_btc_address is None
     assert settings.candle_craft_donate_url is None
+    assert settings.global_context_enabled is True
+    assert settings.btc_context_enabled is True
+    assert settings.btc_d_context_enabled is True
+    assert settings.btc_d_cache_ttl_sec == 300
+    assert settings.btc_d_request_timeout_sec == 5.0
     assert settings.local_manual_mode is True
     assert settings.order_execution_enabled is False
 
@@ -130,3 +135,19 @@ def test_env_example_contains_signal_channel_invite_placeholder_only() -> None:
     assert values["TELEGRAM_SIGNAL_CHANNEL_INVITE_LINK"] == (
         "https://t.me/+replace-with-your-private-invite-link"
     )
+
+
+def test_global_context_settings_load_without_secrets(monkeypatch) -> None:
+    monkeypatch.setenv("GLOBAL_CONTEXT_ENABLED", "false")
+    monkeypatch.setenv("BTC_CONTEXT_ENABLED", "false")
+    monkeypatch.setenv("BTC_D_CONTEXT_ENABLED", "false")
+    monkeypatch.setenv("BTC_D_CACHE_TTL_SEC", "90")
+    monkeypatch.setenv("BTC_D_REQUEST_TIMEOUT_SEC", "2.5")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.global_context_enabled is False
+    assert settings.btc_context_enabled is False
+    assert settings.btc_d_context_enabled is False
+    assert settings.btc_d_cache_ttl_sec == 90
+    assert settings.btc_d_request_timeout_sec == 2.5

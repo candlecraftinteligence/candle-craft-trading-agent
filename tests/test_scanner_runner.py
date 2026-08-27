@@ -11,6 +11,12 @@ from app.agents.alert_agent import AlertAgent
 from app.analytics.setup_quality import SetupQualityState
 from app.analytics.target_intelligence import TargetFailureType, TargetIntelligenceResult, TargetQualityGrade
 from app.analytics.volume_profile import VOLUME_PROFILE_SOURCE
+from app.context import (
+    BtcDominanceContextService,
+    BtcDominanceObservation,
+    ContextStatus,
+)
+from app.core.confirmed_data_health import confirmed_data_health_for_symbol
 from app.core.process_memory import ProcessMemoryReading
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, display_fields
@@ -21,6 +27,7 @@ _INTERVAL_MS = {
     "5m": 5 * 60_000,
     "15m": 15 * 60_000,
     "1h": 60 * 60_000,
+    "2h": 2 * 60 * 60_000,
     "4h": 4 * 60 * 60_000,
     "12h": 12 * 60 * 60_000,
     "1d": 24 * 60 * 60_000,
@@ -241,6 +248,25 @@ class FakeExchangeClient:
         delay = self.delayed_methods.get(method_name)
         if delay is not None:
             await asyncio.sleep(delay)
+
+
+class FakeBtcDominanceProvider:
+    source = "fake:btc_d"
+
+    def __init__(self, observed_at: datetime, *, error: Exception | None = None) -> None:
+        self.observed_at = observed_at
+        self.error = error
+        self.calls = 0
+
+    async def get_snapshot(self) -> BtcDominanceObservation:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return BtcDominanceObservation(
+            btc_dominance_pct=Decimal("57.25"),
+            observed_at=self.observed_at,
+            source=self.source,
+        )
 
 
 class SpyAlertAgent(AlertAgent):
@@ -1357,3 +1383,233 @@ def test_high_score_cannot_override_missing_required_technical_evidence() -> Non
     assert symbol_result.technical_score == 100
     assert symbol_result.rejection_stage == "technical_insufficient_data"
     assert symbol_result.trade_idea is None
+
+
+def test_global_context_precedes_symbol_queue_and_removes_only_available_labels() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    provider = FakeBtcDominanceProvider(decision_at)
+    service = BtcDominanceContextService(provider, clock=lambda: decision_at)
+    client = FakeExchangeClient(
+        {
+            "ENAUSDT": _strategy_pullback_candles(),
+            "BTCUSDT": _strategy_pullback_candles(),
+        },
+        failing_timeframes={"2d"},
+    )
+    config = _config(
+        ["ENAUSDT", "BTCUSDT"],
+        global_context_enabled=True,
+        decision_timestamp=decision_at,
+    )
+
+    result = run(
+        ScannerRunner(
+            exchange_client=client,
+            btc_d_context_service=service,
+        ).run(config)
+    )
+
+    assert tuple(item.symbol for item in result.results) == ("ENAUSDT", "BTCUSDT")
+    assert client.requested_klines[:3] == [
+        ("BTCUSDT", "12h"),
+        ("BTCUSDT", "2h"),
+        ("BTCUSDT", "15m"),
+    ]
+    assert provider.calls == 1
+    assert result.global_context is not None
+    assert result.global_context.diagnostics.btc_d_cache_hit is False
+    assert result.global_context.diagnostics.weekend_context_status == ContextStatus.VERIFIED
+    for symbol_result in result.results:
+        assert "btc_context: N/A" not in symbol_result.strategy_missing_data
+        assert "btc_d_context: N/A" not in symbol_result.strategy_missing_data
+        assert "weekend_filter: N/A" not in symbol_result.strategy_missing_data
+        data_health = confirmed_data_health_for_symbol(symbol_result)
+        assert "btc_context" not in data_health.required_missing
+        assert "btc_d_context" not in data_health.required_missing
+        assert "weekend_filter" not in data_health.required_missing
+
+
+def test_btc_d_failure_is_isolated_and_missing_label_remains_visible() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    provider = FakeBtcDominanceProvider(decision_at, error=TimeoutError("mock BTC.D timeout"))
+    service = BtcDominanceContextService(provider, clock=lambda: decision_at)
+    client = FakeExchangeClient(
+        {
+            "ENAUSDT": _strategy_pullback_candles(),
+            "BTCUSDT": _strategy_pullback_candles(),
+        },
+        failing_timeframes={"2d"},
+    )
+
+    result = run(
+        ScannerRunner(
+            exchange_client=client,
+            btc_d_context_service=service,
+        ).run(
+            _config(
+                ["ENAUSDT"],
+                global_context_enabled=True,
+                decision_timestamp=decision_at,
+            )
+        )
+    )
+    symbol_result = result.results[0]
+
+    assert symbol_result.status != ScannerPipelineStatus.SCAN_ERROR
+    assert result.global_context.btc_d_context.status == ContextStatus.UNAVAILABLE
+    assert "mock BTC.D timeout" in result.global_context.btc_d_context.reason
+    assert "btc_d_context: N/A" in symbol_result.strategy_missing_data
+    assert "btc_context: N/A" not in symbol_result.strategy_missing_data
+    assert "weekend_filter: N/A" not in symbol_result.strategy_missing_data
+
+
+def test_global_context_uses_closed_btc_candle_not_open_spike() -> None:
+    candles = _flat_candles() + [
+        {
+            "timestamp": 220,
+            "open": Decimal("100"),
+            "high": Decimal("10000"),
+            "low": Decimal("99"),
+            "close": Decimal("10000"),
+            "volume": Decimal("10000"),
+        }
+    ]
+    decision_at = datetime.fromtimestamp(
+        (220 * _INTERVAL_MS["15m"] + 7 * 60_000) / 1000,
+        tz=timezone.utc,
+    )
+    provider = FakeBtcDominanceProvider(decision_at)
+    service = BtcDominanceContextService(provider, clock=lambda: decision_at)
+    client = FakeExchangeClient(
+        {"ENAUSDT": candles, "BTCUSDT": candles},
+        failing_timeframes={"2d"},
+    )
+
+    result = run(
+        ScannerRunner(
+            exchange_client=client,
+            btc_d_context_service=service,
+        ).run(
+            _config(
+                ["ENAUSDT"],
+                global_context_enabled=True,
+                decision_timestamp=decision_at,
+            )
+        )
+    )
+    execution = result.global_context.btc_context.value.execution_15m
+
+    assert execution.status == ContextStatus.VERIFIED
+    assert execution.value == "neutral"
+    assert execution.observed_at <= decision_at
+    assert execution.observed_at == datetime.fromtimestamp(
+        220 * _INTERVAL_MS["15m"] / 1000,
+        tz=timezone.utc,
+    )
+
+
+def test_repeated_scans_inside_btc_d_ttl_use_one_provider_observation() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    provider = FakeBtcDominanceProvider(decision_at)
+    service = BtcDominanceContextService(provider, clock=lambda: decision_at)
+    client = FakeExchangeClient(
+        {"ENAUSDT": _strategy_pullback_candles(), "BTCUSDT": _strategy_pullback_candles()},
+        failing_timeframes={"2d"},
+    )
+    runner = ScannerRunner(exchange_client=client, btc_d_context_service=service)
+    config = _config(
+        ["ENAUSDT"],
+        global_context_enabled=True,
+        decision_timestamp=decision_at,
+    )
+
+    async def scan_twice():
+        return await runner.run(config), await runner.run(config)
+
+    first, second = run(scan_twice())
+
+    assert provider.calls == 1
+    assert first.global_context.btc_d_context.cache_hit is False
+    assert second.global_context.btc_d_context.cache_hit is True
+
+
+def test_research_only_global_context_does_not_change_strategy_or_delivery_outputs() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    candles = {
+        "ENAUSDT": _strategy_pullback_candles(),
+        "BTCUSDT": _strategy_pullback_candles(),
+    }
+    baseline = run(
+        ScannerRunner(exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})).run(
+            _config(["ENAUSDT"], decision_timestamp=decision_at)
+        )
+    )
+    provider = FakeBtcDominanceProvider(decision_at)
+    enriched = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            btc_d_context_service=BtcDominanceContextService(
+                provider,
+                clock=lambda: decision_at,
+            ),
+        ).run(
+            _config(
+                ["ENAUSDT"],
+                global_context_enabled=True,
+                decision_timestamp=decision_at,
+            )
+        )
+    )
+    before = baseline.results[0]
+    after = enriched.results[0]
+    before_setup = before.strategy_results["swing"].swing
+    after_setup = after.strategy_results["swing"].swing
+
+    assert after.status == before.status
+    assert after.valid_strategy_modes == before.valid_strategy_modes
+    assert after_setup.is_valid == before_setup.is_valid
+    assert after_setup.rr_to_tp2 == before_setup.rr_to_tp2
+    assert after_setup.trust_meter.percentage == before_setup.trust_meter.percentage
+    assert after.score_result.total_score == before.score_result.total_score
+    assert after.score_result.grade == before.score_result.grade
+    assert after.setup_quality.quality_score == before.setup_quality.quality_score
+    assert after.setup_quality.quality_grade == before.setup_quality.quality_grade
+    assert after.lifecycle_state == before.lifecycle_state
+    assert after.lifecycle_transition == before.lifecycle_transition
+    assert enriched.dry_run_alerts_created == baseline.dry_run_alerts_created
+    removed = set(before.strategy_missing_data) - set(after.strategy_missing_data)
+    assert removed == {
+        "btc_context: N/A",
+        "btc_d_context: N/A",
+        "weekend_filter: N/A",
+    }
+
+
+def test_global_context_alone_cannot_create_trade_idea_or_telegram_alert() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    provider = FakeBtcDominanceProvider(decision_at)
+    client = FakeExchangeClient(
+        {"ENAUSDT": _flat_candles(), "BTCUSDT": _flat_candles()},
+        failing_timeframes={"2d"},
+    )
+
+    result = run(
+        ScannerRunner(
+            exchange_client=client,
+            btc_d_context_service=BtcDominanceContextService(
+                provider,
+                clock=lambda: decision_at,
+            ),
+        ).run(
+            _config(
+                ["ENAUSDT"],
+                global_context_enabled=True,
+                decision_timestamp=decision_at,
+            )
+        )
+    )
+
+    assert result.results[0].trade_idea is None
+    assert result.results[0].alert_result is None
+    assert result.trade_ideas_created == 0
+    assert result.dry_run_alerts_created == 0
