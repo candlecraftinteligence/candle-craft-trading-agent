@@ -1073,6 +1073,8 @@ def confirm_momentum(
     cvd: Any | None = None,
     window: int = 20,
 ) -> MomentumConfirmation:
+    if _research_only_context(cvd):
+        cvd = None
     normalized, errors = _normalize_candles(candles, "candles")
     if errors:
         raise ValueError(errors[0])
@@ -2764,6 +2766,8 @@ def _context_text(value: Any | None) -> str:
 
 
 def _context_has(value: Any | None, *phrases: str) -> bool:
+    if _research_only_context(value):
+        return False
     if _is_missing(value):
         return False
     if isinstance(value, Mapping):
@@ -2819,7 +2823,11 @@ def _is_meme_or_illiquid(data: LiquidityGrabInput) -> bool:
 def _funding_oi_against_trade(data: LiquidityGrabInput, direction: Direction) -> bool:
     funding_text = _context_text(data.funding).lower()
     oi_text = _context_text(data.open_interest).lower()
-    orderflow_text = _context_text(data.orderflow_summary).lower()
+    orderflow_text = (
+        ""
+        if _research_only_context(data.orderflow_summary)
+        else _context_text(data.orderflow_summary).lower()
+    )
     rising_oi = "rising" in oi_text or "increasing" in oi_text or _context_has(data.open_interest, "rising", "increasing")
     absorption = "absorption" in orderflow_text
     if not rising_oi or absorption:
