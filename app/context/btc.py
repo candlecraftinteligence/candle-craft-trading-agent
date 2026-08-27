@@ -272,7 +272,20 @@ def _market_data_component(
     value = _first_decimal(raw, value_fields)
     if value is None:
         return ContextValue.unavailable(source=source, reason=f"{label} unavailable")
-    observed_at = _observation_time(raw, timestamp_fields, fallback=generated_at)
+    observed_at = _observation_time(
+        raw,
+        timestamp_fields,
+        reference_time=generated_at,
+    )
+    if observed_at is None:
+        return ContextValue(
+            value=value,
+            source=source,
+            observed_at=None,
+            age_seconds=None,
+            status=ContextStatus.UNAVAILABLE,
+            reason=f"{label} source timestamp unavailable; freshness cannot be verified",
+        )
     age_seconds = _age_seconds(generated_at, observed_at)
     status = _freshness_status(age_seconds, stale_after_seconds=stale_after_seconds)
     return ContextValue(
@@ -326,8 +339,41 @@ def _open_interest_change_component(
             source=source,
             reason="BTC open-interest change could not be normalized",
         )
-    observation_raw = history[-1] if history else open_interest
-    observed_at = _observation_time(observation_raw, ("timestamp", "time"), fallback=generated_at)
+    current_observed_at = _observation_time(
+        open_interest,
+        ("timestamp", "time"),
+        reference_time=generated_at,
+    )
+    previous_observed_at = _observation_time(
+        history[-2],
+        ("timestamp", "time"),
+        reference_time=generated_at,
+    )
+    if current_observed_at is None or previous_observed_at is None:
+        return ContextValue(
+            value=result.open_interest_change_pct,
+            source=source,
+            observed_at=None,
+            age_seconds=None,
+            status=ContextStatus.UNAVAILABLE,
+            reason=(
+                "BTC open-interest change source timestamps unavailable; "
+                "freshness cannot be verified"
+            ),
+        )
+    if previous_observed_at >= current_observed_at:
+        return ContextValue(
+            value=result.open_interest_change_pct,
+            source=source,
+            observed_at=None,
+            age_seconds=None,
+            status=ContextStatus.UNAVAILABLE,
+            reason=(
+                "BTC open-interest change observations are not chronologically ordered; "
+                "freshness cannot be verified"
+            ),
+        )
+    observed_at = current_observed_at
     age_seconds = _age_seconds(generated_at, observed_at)
     status = _freshness_status(
         age_seconds,
@@ -357,12 +403,17 @@ def _stale_reason(label: str, status: ContextStatus) -> str | None:
     return f"{label} observation exceeds its freshness window"
 
 
-def _observation_time(raw: Any, fields: Sequence[str], *, fallback: datetime) -> datetime:
+def _observation_time(
+    raw: Any,
+    fields: Sequence[str],
+    *,
+    reference_time: datetime,
+) -> datetime | None:
     for field in fields:
         parsed = _epoch_datetime(_field(raw, field))
-        if parsed is not None and parsed <= fallback + timedelta(minutes=5):
+        if parsed is not None and parsed <= reference_time + timedelta(minutes=5):
             return parsed
-    return fallback
+    return None
 
 
 def _epoch_datetime(value: Any) -> datetime | None:

@@ -169,6 +169,165 @@ def test_internal_btc_context_preserves_verified_components_when_optional_data_m
     assert "component(s) unavailable" in context.reason
 
 
+def test_funding_timestamp_controls_observation_time_and_freshness() -> None:
+    now = datetime(2026, 8, 27, 12, tzinfo=UTC)
+    fresh_at = now - timedelta(hours=1)
+    stale_at = now - timedelta(hours=25)
+
+    fresh = build_internal_btc_context(
+        candles_by_timeframe={},
+        generated_at=now,
+        technical_agent=TechnicalStructureAgent(),
+        exchange="binance",
+        funding={"funding_rate": "0.0001", "fundingTime": int(fresh_at.timestamp() * 1000)},
+    ).value.funding_rate
+    stale = build_internal_btc_context(
+        candles_by_timeframe={},
+        generated_at=now,
+        technical_agent=TechnicalStructureAgent(),
+        exchange="binance",
+        funding={"funding_rate": "0.0001", "timestamp": int(stale_at.timestamp())},
+    ).value.funding_rate
+
+    assert fresh.observed_at == fresh_at
+    assert fresh.age_seconds == 3600
+    assert fresh.status == ContextStatus.VERIFIED
+    assert stale.observed_at == stale_at
+    assert stale.age_seconds == 25 * 60 * 60
+    assert stale.status == ContextStatus.STALE
+
+
+def test_funding_without_timestamp_never_invents_scan_time_or_verified_freshness() -> None:
+    now = datetime(2026, 8, 27, 12, tzinfo=UTC)
+
+    funding = build_internal_btc_context(
+        candles_by_timeframe={},
+        generated_at=now,
+        technical_agent=TechnicalStructureAgent(),
+        exchange="binance",
+        funding={"funding_rate": "0.0001"},
+    ).value.funding_rate
+
+    assert funding.value == Decimal("0.0001")
+    assert funding.observed_at is None
+    assert funding.age_seconds is None
+    assert funding.status == ContextStatus.UNAVAILABLE
+    assert funding.status != ContextStatus.VERIFIED
+    assert "timestamp unavailable" in funding.reason
+
+
+def test_open_interest_timestamp_controls_normal_freshness() -> None:
+    now = datetime(2026, 8, 27, 12, tzinfo=UTC)
+    observed_at = now - timedelta(minutes=10)
+
+    open_interest = build_internal_btc_context(
+        candles_by_timeframe={},
+        generated_at=now,
+        technical_agent=TechnicalStructureAgent(),
+        exchange="binance",
+        open_interest={
+            "open_interest": "105",
+            "time": int(observed_at.timestamp() * 1000),
+        },
+    ).value.open_interest
+
+    assert open_interest.value == Decimal("105")
+    assert open_interest.observed_at == observed_at
+    assert open_interest.age_seconds == 600
+    assert open_interest.status == ContextStatus.VERIFIED
+
+
+def test_open_interest_without_timestamp_has_unknown_non_verified_freshness() -> None:
+    now = datetime(2026, 8, 27, 12, tzinfo=UTC)
+
+    open_interest = build_internal_btc_context(
+        candles_by_timeframe={},
+        generated_at=now,
+        technical_agent=TechnicalStructureAgent(),
+        exchange="binance",
+        open_interest={"open_interest": "105"},
+    ).value.open_interest
+
+    assert open_interest.value == Decimal("105")
+    assert open_interest.observed_at is None
+    assert open_interest.age_seconds is None
+    assert open_interest.status == ContextStatus.UNAVAILABLE
+    assert open_interest.status != ContextStatus.VERIFIED
+
+
+def test_open_interest_change_uses_actual_timestamped_observations() -> None:
+    now = datetime(2026, 8, 27, 12, tzinfo=UTC)
+    previous_at = now - timedelta(minutes=5)
+
+    change = build_internal_btc_context(
+        candles_by_timeframe={},
+        generated_at=now,
+        technical_agent=TechnicalStructureAgent(),
+        exchange="binance",
+        open_interest={"open_interest": "105", "timestamp": int(now.timestamp() * 1000)},
+        open_interest_history=(
+            {"open_interest": "95", "timestamp": int((previous_at - timedelta(minutes=5)).timestamp() * 1000)},
+            {"open_interest": "100", "timestamp": int(previous_at.timestamp() * 1000)},
+            {"open_interest": "104", "timestamp": int(now.timestamp() * 1000)},
+        ),
+    ).value.open_interest_change_pct
+
+    assert change.value == Decimal("5.00000000")
+    assert change.observed_at == now
+    assert change.age_seconds == 0
+    assert change.status == ContextStatus.VERIFIED
+
+
+def test_open_interest_change_without_history_timestamp_never_claims_freshness() -> None:
+    now = datetime(2026, 8, 27, 12, tzinfo=UTC)
+
+    change = build_internal_btc_context(
+        candles_by_timeframe={},
+        generated_at=now,
+        technical_agent=TechnicalStructureAgent(),
+        exchange="binance",
+        open_interest={"open_interest": "105", "timestamp": int(now.timestamp() * 1000)},
+        open_interest_history=(
+            {"open_interest": "95"},
+            {"open_interest": "100"},
+            {"open_interest": "104"},
+        ),
+    ).value.open_interest_change_pct
+
+    assert change.value == Decimal("5.00000000")
+    assert change.observed_at is None
+    assert change.age_seconds is None
+    assert change.status == ContextStatus.UNAVAILABLE
+    assert change.status != ContextStatus.VERIFIED
+    assert "timestamps unavailable" in change.reason
+
+
+def test_untimestamped_derivatives_do_not_change_verified_candle_components() -> None:
+    now = datetime(2026, 8, 27, 12, tzinfo=UTC)
+
+    context = build_internal_btc_context(
+        candles_by_timeframe={
+            timeframe: _candles(timeframe=timeframe, count=220, decision_at=now)
+            for timeframe in ("12h", "2h", "15m")
+        },
+        generated_at=now,
+        technical_agent=TechnicalStructureAgent(),
+        exchange="binance",
+        funding={"funding_rate": "0.0001"},
+        open_interest={"open_interest": "105"},
+    )
+
+    assert context.status == ContextStatus.VERIFIED
+    assert context.value.bias_12h.value == "bullish"
+    assert context.value.structure_2h.value == "bullish"
+    assert context.value.execution_15m.value == "bullish"
+    assert context.value.atr_15m.value > 0
+    assert context.value.atr_pct_15m.value > 0
+    assert context.value.funding_rate.status == ContextStatus.UNAVAILABLE
+    assert context.value.open_interest.status == ContextStatus.UNAVAILABLE
+    assert "component(s) unavailable" in context.reason
+
+
 def test_coinpaprika_provider_normalizes_valid_public_payload_without_network() -> None:
     observed_at = datetime(2026, 8, 27, 12, tzinfo=UTC)
 
