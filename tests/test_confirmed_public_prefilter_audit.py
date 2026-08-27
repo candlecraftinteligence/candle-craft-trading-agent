@@ -520,3 +520,79 @@ def test_invalid_confirmed_stored_plan_geometry_is_auditable(tmp_path: Path) -> 
     assert attempts[0].blocked_reason.startswith(
         "blocked:invalid_stored_plan_geometry:"
     )
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "channel"),
+    (
+        (
+            "microstructure_flow: N/A "
+            "(status=UNAVAILABLE, reason=insufficient_window_coverage)",
+            "missing",
+        ),
+        (
+            "microstructure_flow: N/A (status=UNAVAILABLE, reason=stream_disconnected)",
+            "missing",
+        ),
+        (
+            "microstructure_flow: N/A "
+            "(status=UNAVAILABLE, reason=subscription_limit_exceeded:max_symbols=100)",
+            "missing",
+        ),
+        (
+            "microstructure_flow: N/A (status=ERROR, reason=service_error:RuntimeError)",
+            "missing",
+        ),
+        (
+            "microstructure_flow: Unverified "
+            "(status=STALE, reason=last_valid_event_stale)",
+            "unverified",
+        ),
+    ),
+)
+def test_research_only_microstructure_matches_disabled_confirmed_delivery_eligibility(
+    tmp_path: Path,
+    diagnostic: str,
+    channel: str,
+) -> None:
+    baseline_sender = FakeSender()
+    baseline_symbol = _confirmed_candidate("eligible")
+    baseline = run(
+        _service(tmp_path / f"baseline-{channel}.db", baseline_sender).deliver_for_run(
+            _run_result(baseline_symbol),
+            scan_run_id=f"baseline-{channel}",
+        )
+    )
+
+    flow_sender = FakeSender()
+    health_values = (
+        {"missing_data": (diagnostic,)}
+        if channel == "missing"
+        else {"unverified_data": (diagnostic,)}
+    )
+    flow_symbol = _with_data_health(
+        _confirmed_candidate("eligible"),
+        **health_values,
+    )
+    observation = observation_from_symbol_result(flow_symbol)
+    flow = run(
+        _service(tmp_path / f"flow-{channel}-{len(diagnostic)}.db", flow_sender).deliver_for_run(
+            _run_result(flow_symbol),
+            scan_run_id=f"flow-{channel}-{len(diagnostic)}",
+        )
+    )
+
+    assert observation.data_health_failed is False
+    assert observation.required_data_missing == ()
+    assert observation.required_data_unverified == ()
+    if channel == "missing":
+        assert observation.optional_data_missing == ("microstructure_flow",)
+        assert observation.optional_data_unverified == ()
+    else:
+        assert observation.optional_data_missing == ()
+        assert observation.optional_data_unverified == ("microstructure_flow",)
+    assert flow.sent == baseline.sent == 1
+    assert flow.blocked == baseline.blocked == 0
+    assert flow.confirmed_alert_audit.confirmed_prefilter_passed == 1
+    assert flow.confirmed_alert_audit.blocked_before_attempt_by_reason == {}
+    assert len(flow_sender.messages) == len(baseline_sender.messages) == 1

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -1613,3 +1613,322 @@ def test_global_context_alone_cannot_create_trade_idea_or_telegram_alert() -> No
     assert result.results[0].alert_result is None
     assert result.trade_ideas_created == 0
     assert result.dry_run_alerts_created == 0
+
+
+def _verified_microstructure_snapshot(decision_at: datetime):
+    from app.microstructure.models import FlowWindowSnapshot, MicrostructureFlowSnapshot
+
+    windows = {}
+    for minutes in (1, 5, 15):
+        windows[f"{minutes}m"] = FlowWindowSnapshot(
+            window_minutes=minutes,
+            window_start=decision_at.replace(tzinfo=timezone.utc)
+            - timedelta(minutes=minutes),
+            window_end=decision_at,
+            coverage_seconds=minutes * 60,
+            coverage_complete=True,
+            aggressive_buy_base=Decimal("10"),
+            aggressive_sell_base=Decimal("4"),
+            aggressive_buy_quote=Decimal("1000"),
+            aggressive_sell_quote=Decimal("400"),
+            delta_base=Decimal("6"),
+            delta_quote=Decimal("600"),
+            total_quote=Decimal("1400"),
+            flow_imbalance_ratio=Decimal("0.42857143"),
+            buyer_aggression_pct=Decimal("71.4286"),
+            rolling_cvd_quote=Decimal("600"),
+            cvd_slope_quote_per_min=Decimal("40"),
+            price_return_pct=Decimal("1"),
+            price_cvd_alignment="ALIGNED_UP",
+            normal_quote_notional=Decimal("1300"),
+            rpi_quote_notional=Decimal("100"),
+            aggregate_event_count=42,
+            underlying_trade_count=84,
+        )
+    return MicrostructureFlowSnapshot(
+        symbol="BTCUSDT",
+        source="binance_usdm:btcusdt@aggTrade",
+        observed_at=decision_at,
+        age_seconds=1,
+        status=ContextStatus.VERIFIED,
+        windows=windows,
+        orderflow_summary=(
+            "15m delta +600.00 USDT; buyer aggression 71.4%; "
+            "CVD slope positive; price/CVD ALIGNED_UP; absorption."
+        ),
+        retained_bucket_count=16,
+        max_retained_bucket_count=16,
+        last_aggregate_trade_id=99,
+        accepted_event_count=42,
+    )
+
+
+class _StaticMicrostructureService:
+    def __init__(self, snapshot=None, *, error: Exception | None = None) -> None:
+        self.value = snapshot
+        self.error = error
+
+    def snapshot(self, symbol: str):
+        if self.error is not None:
+            raise self.error
+        return self.value.model_copy(update={"symbol": symbol})
+
+
+def test_research_only_microstructure_does_not_change_strategy_lifecycle_or_delivery() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    candles = {"BTCUSDT": _strategy_pullback_candles()}
+    baseline = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+        ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
+    )
+    enriched = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            microstructure_flow_service=_StaticMicrostructureService(
+                _verified_microstructure_snapshot(decision_at)
+            ),
+        ).run(
+            _config(
+                ["BTCUSDT"],
+                decision_timestamp=decision_at,
+                microstructure_flow_enabled=True,
+            )
+        )
+    )
+
+    before = baseline.results[0]
+    after = enriched.results[0]
+    before_setup = before.strategy_results["swing"].swing
+    after_setup = after.strategy_results["swing"].swing
+
+    assert after.microstructure_flow.status == ContextStatus.VERIFIED
+    assert after.status == before.status
+    assert after.valid_strategy_modes == before.valid_strategy_modes
+    assert after_setup.is_valid == before_setup.is_valid
+    assert after_setup.first_failed_gate == before_setup.first_failed_gate
+    assert after_setup.trust_meter == before_setup.trust_meter
+    assert after_setup.gate_result == before_setup.gate_result
+    assert after_setup.entry_low == before_setup.entry_low
+    assert after_setup.entry_high == before_setup.entry_high
+    assert after_setup.stop == before_setup.stop
+    assert after_setup.tp1 == before_setup.tp1
+    assert after_setup.tp2 == before_setup.tp2
+    assert after_setup.tp3 == before_setup.tp3
+    assert after_setup.rr_to_tp2 == before_setup.rr_to_tp2
+    assert after_setup.invalidation == before_setup.invalidation
+    assert after.score_result.total_score == before.score_result.total_score
+    assert after.score_result.grade == before.score_result.grade
+    assert after.setup_quality.quality_score == before.setup_quality.quality_score
+    assert after.setup_quality.quality_grade == before.setup_quality.quality_grade
+    assert after.setup_quality.quality_state == before.setup_quality.quality_state
+    assert after.setup_quality.action_label == before.setup_quality.action_label
+    assert after.trade_idea.direction == before.trade_idea.direction
+    assert after.trade_idea.status == before.trade_idea.status
+    assert after.trade_idea.entry_zone == before.trade_idea.entry_zone
+    assert after.trade_idea.stop_loss == before.trade_idea.stop_loss
+    assert after.trade_idea.invalidation == before.trade_idea.invalidation
+    assert after.trade_idea.take_profits == before.trade_idea.take_profits
+    assert after.trade_idea.best_rr == before.trade_idea.best_rr
+    assert after.trade_idea.confidence_score == before.trade_idea.confidence_score
+    assert after.trade_idea.grade == before.trade_idea.grade
+    assert after.trade_idea.quality_gate_result == before.trade_idea.quality_gate_result
+    assert after.lifecycle_state == before.lifecycle_state
+    assert after.lifecycle_transition == before.lifecycle_transition
+    assert enriched.trade_ideas_created == baseline.trade_ideas_created
+    assert enriched.dry_run_alerts_created == baseline.dry_run_alerts_created
+    assert after.alert_result.status == before.alert_result.status
+    assert after.alert_result.channel == before.alert_result.channel
+    assert after.alert_result.dry_run == before.alert_result.dry_run
+    removed = set(before.strategy_missing_data) - set(after.strategy_missing_data)
+    assert removed == {"cvd: N/A", "orderflow_summary: N/A"}
+
+
+def test_disabled_microstructure_does_not_call_or_change_scanner_behavior() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    candles = {"BTCUSDT": _strategy_pullback_candles()}
+    baseline = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+        ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
+    ).results[0]
+    disabled = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            microstructure_flow_service=_StaticMicrostructureService(
+                error=AssertionError("disabled service must not be called")
+            ),
+        ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
+    ).results[0]
+
+    assert disabled.microstructure_flow is None
+    assert disabled.status == baseline.status
+    assert disabled.valid_strategy_modes == baseline.valid_strategy_modes
+    assert disabled.score_result.total_score == baseline.score_result.total_score
+    assert disabled.score_result.grade == baseline.score_result.grade
+    assert disabled.lifecycle_state == baseline.lifecycle_state
+    assert disabled.lifecycle_transition == baseline.lifecycle_transition
+    assert not any(item.startswith("microstructure_flow:") for item in disabled.missing_data)
+    assert not any(item.startswith("microstructure_flow:") for item in disabled.unverified_data)
+
+def test_stale_research_only_microstructure_does_not_change_quality_or_plan() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    candles = {"BTCUSDT": _strategy_pullback_candles()}
+    baseline = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+        ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
+    ).results[0]
+    stale = _verified_microstructure_snapshot(decision_at).model_copy(
+        update={
+            "status": ContextStatus.STALE,
+            "reason": "last_valid_event_stale",
+            "age_seconds": 10,
+        }
+    )
+    enriched = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            microstructure_flow_service=_StaticMicrostructureService(stale),
+        ).run(
+            _config(
+                ["BTCUSDT"],
+                decision_timestamp=decision_at,
+                microstructure_flow_enabled=True,
+            )
+        )
+    ).results[0]
+
+    before_setup = baseline.strategy_results["swing"].swing
+    after_setup = enriched.strategy_results["swing"].swing
+    assert enriched.status == baseline.status
+    assert enriched.valid_strategy_modes == baseline.valid_strategy_modes
+    assert after_setup.trust_meter == before_setup.trust_meter
+    assert after_setup.gate_result == before_setup.gate_result
+    assert after_setup.rr_to_tp2 == before_setup.rr_to_tp2
+    assert (after_setup.entry_low, after_setup.entry_high, after_setup.stop) == (
+        before_setup.entry_low,
+        before_setup.entry_high,
+        before_setup.stop,
+    )
+    assert (after_setup.tp1, after_setup.tp2, after_setup.tp3) == (
+        before_setup.tp1,
+        before_setup.tp2,
+        before_setup.tp3,
+    )
+    assert enriched.score_result.total_score == baseline.score_result.total_score
+    assert enriched.score_result.grade == baseline.score_result.grade
+    assert enriched.setup_quality.quality_score == baseline.setup_quality.quality_score
+    assert enriched.setup_quality.quality_grade == baseline.setup_quality.quality_grade
+    assert enriched.lifecycle_state == baseline.lifecycle_state
+    assert enriched.lifecycle_transition == baseline.lifecycle_transition
+    assert enriched.trade_idea.best_rr == baseline.trade_idea.best_rr
+    assert enriched.trade_idea.take_profits == baseline.trade_idea.take_profits
+    assert enriched.alert_result.status == baseline.alert_result.status
+    assert any(item.startswith("microstructure_flow: Unverified") for item in enriched.unverified_data)
+
+def test_microstructure_service_exception_does_not_crash_scanner() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    result = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(
+                {"BTCUSDT": _strategy_pullback_candles()},
+                failing_timeframes={"2d"},
+            ),
+            microstructure_flow_service=_StaticMicrostructureService(
+                error=RuntimeError("synthetic snapshot failure")
+            ),
+        ).run(
+            _config(
+                ["BTCUSDT"],
+                decision_timestamp=decision_at,
+                microstructure_flow_enabled=True,
+            )
+        )
+    )
+
+    symbol_result = result.results[0]
+    assert symbol_result.status != ScannerPipelineStatus.SCAN_ERROR
+    assert symbol_result.microstructure_flow.status == ContextStatus.ERROR
+    assert symbol_result.microstructure_flow.reason == "service_error:RuntimeError"
+    assert (
+        "microstructure_flow: N/A (status=ERROR, reason=service_error:RuntimeError)"
+        in symbol_result.missing_data
+    )
+    assert "cvd: N/A" in symbol_result.strategy_missing_data
+    assert "orderflow_summary: N/A" in symbol_result.strategy_missing_data
+    data_health = confirmed_data_health_for_symbol(symbol_result)
+    assert data_health.blocked is False
+    assert data_health.required_missing == ()
+    assert "microstructure_flow" in data_health.optional_missing
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "expected_channel"),
+    [
+        (ContextStatus.UNAVAILABLE, "insufficient_window_coverage", "missing"),
+        (ContextStatus.UNAVAILABLE, "stream_disconnected", "missing"),
+        (
+            ContextStatus.UNAVAILABLE,
+            "subscription_limit_exceeded:max_symbols=100",
+            "missing",
+        ),
+        (ContextStatus.STALE, "last_valid_event_stale", "unverified"),
+        (
+            ContextStatus.UNAVAILABLE,
+            "aggregate_trade_id_gap_in_window",
+            "unverified",
+        ),
+    ],
+)
+def test_nonverified_microstructure_preserves_truthful_optional_diagnostics(
+    status: ContextStatus,
+    reason: str,
+    expected_channel: str,
+) -> None:
+    from app.microstructure.models import MicrostructureFlowSnapshot
+
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    unavailable = MicrostructureFlowSnapshot.unavailable(
+        symbol="BTCUSDT",
+        reason=reason,
+        status=status,
+        observed_at=decision_at,
+        age_seconds=10,
+    )
+    result = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(
+                {"BTCUSDT": _strategy_pullback_candles()},
+                failing_timeframes={"2d"},
+            ),
+            microstructure_flow_service=_StaticMicrostructureService(unavailable),
+        ).run(
+            _config(
+                ["BTCUSDT"],
+                decision_timestamp=decision_at,
+                microstructure_flow_enabled=True,
+            )
+        )
+    )
+
+    symbol_result = result.results[0]
+    label = "N/A" if expected_channel == "missing" else "Unverified"
+    diagnostic = f"microstructure_flow: {label} (status={status.value}, reason={reason})"
+    data_health = confirmed_data_health_for_symbol(symbol_result)
+
+    if expected_channel == "missing":
+        assert diagnostic in symbol_result.missing_data
+        assert diagnostic not in symbol_result.unverified_data
+        assert "microstructure_flow" in data_health.optional_missing
+        assert "microstructure_flow" not in data_health.optional_unverified
+    else:
+        assert diagnostic not in symbol_result.missing_data
+        assert diagnostic in symbol_result.unverified_data
+        assert "microstructure_flow" not in data_health.optional_missing
+        assert "microstructure_flow" in data_health.optional_unverified
+    assert data_health.blocked is False
+    assert data_health.required_missing == ()
+    assert data_health.required_unverified == ()
+    assert "cvd: N/A" in symbol_result.strategy_missing_data
+    assert "orderflow_summary: N/A" in symbol_result.strategy_missing_data

@@ -67,6 +67,7 @@ from app.context import (
     build_internal_btc_context,
     build_weekend_context,
 )
+from app.context.models import ContextStatus
 from app.context.btc import BTC_CONTEXT_TIMEFRAMES
 from app.context.btc_d import (
     DEFAULT_BTC_D_CACHE_TTL_SECONDS,
@@ -95,6 +96,8 @@ from app.lifecycle.models import (
     SetupLifecycleRecord,
     SetupTransitionResult,
 )
+from app.microstructure.models import MicrostructureFlowSnapshot
+from app.microstructure.service import MicrostructureFlowService
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
 from app.strategies.liquidity_grab_pullback import (
     DEFAULT_CONFIRMATION_TIMEFRAME,
@@ -237,6 +240,9 @@ class ScannerRunConfig(BaseModel):
     btc_d_context_enabled: bool = True
     btc_d_cache_ttl_sec: int = DEFAULT_BTC_D_CACHE_TTL_SECONDS
     btc_d_request_timeout_sec: float = DEFAULT_BTC_D_REQUEST_TIMEOUT_SECONDS
+    microstructure_flow_enabled: bool = False
+    microstructure_flow_stale_sec: float = 5.0
+    microstructure_flow_max_symbols: int = 100
     decision_timestamp: datetime | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -329,11 +335,19 @@ class ScannerRunConfig(BaseModel):
             raise ValueError("btc_d_cache_ttl_sec must be zero or greater")
         return value
 
+    @field_validator("microstructure_flow_max_symbols")
+    @classmethod
+    def _microstructure_max_symbols_in_range(cls, value: int) -> int:
+        if value < 1 or value > 1024:
+            raise ValueError("microstructure_flow_max_symbols must be between 1 and 1024")
+        return value
+
     @field_validator(
         "request_timeout_sec",
         "symbol_timeout_sec",
         "scan_timeout_sec",
         "btc_d_request_timeout_sec",
+        "microstructure_flow_stale_sec",
         mode="before",
     )
     @classmethod
@@ -455,6 +469,7 @@ class ScannerSymbolResult(BaseModel):
     technical_result: TechnicalStructureResult | None = None
     derivatives_result: DerivativesOrderflowResult | None = None
     derivatives_enrichment: DerivativesEnrichmentResult | None = None
+    microstructure_flow: MicrostructureFlowSnapshot | None = None
     risk_decision: RiskDecision | None = None
     score_result: OpportunityScoreResult | None = None
     trade_idea: TradeIdeaResult | None = None
@@ -652,6 +667,7 @@ class _StrategyExecution(BaseModel):
     selected_setup: LiquidityGrabSetup | None = None
     pullback_intelligence: PullbackIntelligenceResult | None = None
     target_intelligence: TargetIntelligenceResult | None = None
+    microstructure_flow: MicrostructureFlowSnapshot | None = None
     execution_candles: tuple[Any, ...] = Field(default=(), exclude=True, repr=False)
     execution_timeframe: str = NA
     decision_timestamp: datetime | None = None
@@ -690,6 +706,7 @@ class ScannerRunner:
         journal_agent: JournalAgent | None = None,
         market_data_cache: MarketDataCache | None = None,
         btc_d_context_service: BtcDominanceContextService | None = None,
+        microstructure_flow_service: MicrostructureFlowService | None = None,
         clock: Callable[[], datetime] | None = None,
         process_memory_sampler: Callable[[], ProcessMemoryReading] | None = None,
         log: logging.Logger | None = None,
@@ -705,6 +722,7 @@ class ScannerRunner:
         self.journal_agent = journal_agent or JournalAgent()
         self.market_data_cache = market_data_cache
         self.btc_d_context_service = btc_d_context_service
+        self.microstructure_flow_service = microstructure_flow_service
         self.clock = clock or (lambda: datetime.now(UTC))
         self.process_memory_sampler = process_memory_sampler or read_process_rss
         self.logger = log or logger
@@ -1069,6 +1087,38 @@ class ScannerRunner:
             self.btc_d_context_service = service
         return await service.get_context()
 
+    def _microstructure_snapshot(
+        self,
+        symbol: str,
+        config: ScannerRunConfig,
+    ) -> MicrostructureFlowSnapshot | None:
+        if not config.microstructure_flow_enabled:
+            return None
+        if config.exchange != "binance":
+            return MicrostructureFlowSnapshot.unavailable(
+                symbol=symbol,
+                reason="unsupported_exchange",
+            )
+        service = self.microstructure_flow_service
+        if service is None:
+            return MicrostructureFlowSnapshot.unavailable(
+                symbol=symbol,
+                reason="service_not_running",
+            )
+        try:
+            return service.snapshot(symbol)
+        except Exception as exc:
+            self.logger.warning(
+                "Microstructure service failed safely for symbol=%s: %s",
+                symbol,
+                type(exc).__name__,
+            )
+            return MicrostructureFlowSnapshot.unavailable(
+                symbol=symbol,
+                reason=f"service_error:{type(exc).__name__}",
+                status=ContextStatus.ERROR,
+            )
+
     async def _scan_symbol(
         self,
         symbol_config: ScannerSymbolConfig,
@@ -1079,6 +1129,7 @@ class ScannerRunner:
         progress: Callable[[str], Any] | None = None,
     ) -> ScannerSymbolResult:
         symbol = symbol_config.symbol
+        microstructure_flow = self._microstructure_snapshot(symbol, config)
         candles = await self._fetch_primary_candles(client, symbol, config, progress=progress)
         technical_candles = _technical_candles(candles)
         current_price = _current_price_from_candles(candles)
@@ -1124,10 +1175,20 @@ class ScannerRunner:
                 technical=technical,
                 derivatives_enrichment=derivatives_enrichment,
                 global_context=global_context,
+                microstructure_flow=microstructure_flow,
                 progress=progress,
             )
+        strategy_execution = strategy_execution.model_copy(
+            update={"microstructure_flow": microstructure_flow}
+        )
         base_missing.extend(strategy_execution.strategy_missing_data)
         base_unverified.extend(strategy_execution.strategy_unverified_data)
+        if microstructure_flow is not None and not microstructure_flow.verified:
+            flow_missing, flow_unverified = _microstructure_data_health_diagnostics(
+                microstructure_flow
+            )
+            base_missing.extend(flow_missing)
+            base_unverified.extend(flow_unverified)
         await _emit_progress(progress, "Scoring...")
 
         if not technical.is_valid:
@@ -1568,6 +1629,7 @@ class ScannerRunner:
         technical: TechnicalStructureResult,
         derivatives_enrichment: DerivativesEnrichmentResult | None = None,
         global_context: GlobalContextSnapshot | None = None,
+        microstructure_flow: MicrostructureFlowSnapshot | None = None,
         progress: Callable[[str], Any] | None = None,
     ) -> _StrategyExecution:
         if not config.enable_strategy_output or config.strategy_name is None:
@@ -1621,6 +1683,7 @@ class ScannerRunner:
             volume_profile=execution_volume_profile,
             derivatives_enrichment=derivatives_enrichment,
             global_context=global_context,
+            microstructure_flow=microstructure_flow,
         )
 
         strategy_results: dict[str, LiquidityGrabResult] = {}
@@ -2097,6 +2160,7 @@ class ScannerRunner:
             technical_result=technical_result,
             derivatives_result=derivatives_result,
             derivatives_enrichment=derivatives_enrichment,
+            microstructure_flow=strategy_execution.microstructure_flow,
             risk_decision=risk_decision,
             score_result=score_result,
             trade_idea=trade_idea,
@@ -2235,7 +2299,7 @@ def _setup_quality_for_result(
             if diagnostics
             else (),
             missing_data=missing_data,
-            unverified_data=unverified_data,
+            unverified_data=_strategy_quality_unverified_data(unverified_data),
             derivatives_missing_data=derivatives_enrichment.missing_data if derivatives_enrichment is not None else (),
             derivatives_unverified_data=derivatives_enrichment.unverified_data
             if derivatives_enrichment is not None
@@ -2925,11 +2989,16 @@ def _liquidity_grab_input(
     derivatives_enrichment: DerivativesEnrichmentResult | None = None,
     timeframe_context: Mapping[str, Any] | None = None,
     global_context: GlobalContextSnapshot | None = None,
+    microstructure_flow: MicrostructureFlowSnapshot | None = None,
 ) -> dict[str, Any]:
     support_levels = _strategy_levels(technical.nearest_support, technical.recent_range_low)
     resistance_levels = _strategy_levels(technical.nearest_resistance, technical.recent_range_high)
     timeframe_context = timeframe_context or {}
     research_context = global_context.strategy_context() if global_context is not None else {}
+    cvd_context = microstructure_flow.cvd_strategy_context() if microstructure_flow else None
+    orderflow_context = (
+        microstructure_flow.orderflow_strategy_context() if microstructure_flow else None
+    )
     return {
         "symbol": symbol,
         "htf_timeframe": htf_timeframe,
@@ -2956,7 +3025,8 @@ def _liquidity_grab_input(
         "funding": optional_data.funding,
         "open_interest": optional_data.open_interest,
         "derivatives_enrichment": derivatives_enrichment,
-        "cvd": None,
+        "orderflow_summary": orderflow_context,
+        "cvd": cvd_context,
         "liquidation_data": None,
         "btc_context": research_context.get("btc_context"),
         "btc_d_context": research_context.get("btc_d_context"),
@@ -3653,6 +3723,39 @@ def _derivatives_conflict_reason(direction: Literal["long", "short"], result: De
     return (
         f"Severe derivatives conflict against {direction}: funding {result.funding_status}, "
         f"OI {result.oi_direction}, crowding {result.crowding_risk}, squeeze {result.squeeze_risk}."
+    )
+
+
+_MICROSTRUCTURE_UNVERIFIED_COVERAGE_REASONS = frozenset(
+    {
+        "aggregate_trade_id_gap_in_window",
+        "connection_gap_in_window",
+        "connection_reconnect_in_window",
+        "trade_time_regression_in_window",
+    }
+)
+
+
+def _microstructure_data_health_diagnostics(
+    snapshot: MicrostructureFlowSnapshot,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    reason = snapshot.reason or "unknown_reason"
+    details = f"status={snapshot.status.value}, reason={reason}"
+    observation_is_unverified = snapshot.status == ContextStatus.STALE or (
+        snapshot.observed_at is not None
+        and reason in _MICROSTRUCTURE_UNVERIFIED_COVERAGE_REASONS
+    )
+    if observation_is_unverified:
+        return (), (f"microstructure_flow: Unverified ({details})",)
+    return (f"microstructure_flow: N/A ({details})",), ()
+
+
+def _strategy_quality_unverified_data(
+    values: Sequence[str],
+) -> tuple[str, ...]:
+    return tuple(
+        value for value in values
+        if not str(value).startswith("microstructure_flow:")
     )
 
 
