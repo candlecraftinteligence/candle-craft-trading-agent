@@ -2820,13 +2820,27 @@ def _is_alt_symbol(symbol: str) -> bool:
 
 
 def _is_small_or_mid_cap(data: LiquidityGrabInput) -> bool:
-    text = f"{_context_text(data.token_classification)} {_context_text(data.narrative)} {_context_text(data.sector_rotation)}".lower()
+    text = (
+        f"{_context_text(data.token_classification)} "
+        f"{_context_text(data.narrative)} {_strategy_sector_text(data)}"
+    ).lower()
     return "small" in text or "mid" in text or "meme" in text or "illiquid" in text
 
 
 def _is_meme_or_illiquid(data: LiquidityGrabInput) -> bool:
-    text = f"{_context_text(data.token_classification)} {_context_text(data.narrative)} {_context_text(data.sector_rotation)}".lower()
+    text = (
+        f"{_context_text(data.token_classification)} "
+        f"{_context_text(data.narrative)} {_strategy_sector_text(data)}"
+    ).lower()
     return "meme" in text or "illiquid" in text
+
+
+
+def _strategy_sector_text(data: LiquidityGrabInput) -> str:
+    if _research_only_context(data.sector_rotation):
+        return ""
+    return _context_text(data.sector_rotation)
+
 
 
 def _funding_oi_against_trade(data: LiquidityGrabInput, direction: Direction) -> bool:

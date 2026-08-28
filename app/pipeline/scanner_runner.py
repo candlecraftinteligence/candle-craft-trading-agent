@@ -63,11 +63,18 @@ from app.context import (
     CoinPaprikaBtcDominanceProvider,
     ContextValue,
     GlobalContextSnapshot,
+    SectorMemberFeature,
+    SectorRotationContext,
+    SectorRotationEngine,
+    SectorRotationSnapshot,
     build_global_context_snapshot,
     build_internal_btc_context,
+    build_sector_member_feature,
     build_weekend_context,
+    project_sector_context,
 )
 from app.context.models import ContextStatus
+from app.context.sector_scanner_enrichment import apply_sector_context_to_symbol_result
 from app.context.btc import BTC_CONTEXT_TIMEFRAMES
 from app.context.btc_d import (
     DEFAULT_BTC_D_CACHE_TTL_SECONDS,
@@ -80,6 +87,7 @@ from app.data.candle_integrity import (
     CandleIntegrityError,
     closed_candles_as_of,
     normalize_utc_timestamp,
+    timeframe_duration,
 )
 from app.data.dtos import NA, CandleDTO, FundingDTO, MaybeDecimal, MaybeInt, OpenInterestDTO, TickerDTO
 from app.data.exceptions import ExchangeTimeoutError
@@ -493,6 +501,12 @@ class ScannerSymbolResult(BaseModel):
     rejection_reasons: tuple[str, ...] = ()
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
+    sector_rotation: SectorRotationContext | None = None
+    sector_member_feature: SectorMemberFeature | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
     strategy_name: str = NA
     strategy_results: dict[str, LiquidityGrabResult] = Field(default_factory=dict)
     formatted_strategy_output: str = NA
@@ -650,6 +664,7 @@ class ScannerRunResult(BaseModel):
     symbol_health: dict[str, Any] = Field(default_factory=dict)
     scanner_process_summary: dict[str, Any] = Field(default_factory=dict)
     global_context: GlobalContextSnapshot | None = None
+    sector_rotation_snapshot: SectorRotationSnapshot | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -695,6 +710,7 @@ class _OptionalMarketData(BaseModel):
     warnings: tuple[str, ...] = ()
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
+    sector_member_feature: SectorMemberFeature | None = None
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -756,6 +772,7 @@ class ScannerRunner:
         btc_d_context_service: BtcDominanceContextService | None = None,
         microstructure_flow_service: MicrostructureFlowService | None = None,
         order_book_liquidity_service: OrderBookLiquidityService | None = None,
+        sector_rotation_engine: SectorRotationEngine | None = None,
         clock: Callable[[], datetime] | None = None,
         process_memory_sampler: Callable[[], ProcessMemoryReading] | None = None,
         liquidation_flow_service: LiquidationFlowService | None = None,
@@ -774,6 +791,7 @@ class ScannerRunner:
         self.btc_d_context_service = btc_d_context_service
         self.microstructure_flow_service = microstructure_flow_service
         self.order_book_liquidity_service = order_book_liquidity_service
+        self.sector_rotation_engine = sector_rotation_engine or SectorRotationEngine()
         self.clock = clock or (lambda: datetime.now(UTC))
         self.process_memory_sampler = process_memory_sampler or read_process_rss
         self.liquidation_flow_service = liquidation_flow_service
@@ -936,6 +954,39 @@ class ScannerRunner:
             market_regime_context=market_regime_context,
         )
         adjusted_results = _apply_market_regime_to_results(results, market_regime)
+        try:
+            sector_snapshot = self.sector_rotation_engine.build_snapshot(
+                universe_symbols=tuple(item.symbol for item in run_config.symbols),
+                member_features=tuple(
+                    result.sector_member_feature
+                    for result in adjusted_results
+                    if result.sector_member_feature is not None
+                ),
+                generated_at=run_config.decision_timestamp,
+            )
+        except Exception as exc:
+            reason = _clean_error_message(exc)
+            self.logger.error("Sector rotation aggregation failed safely: %s", reason)
+            sector_snapshot = SectorRotationSnapshot.error(
+                universe_symbols=tuple(item.symbol for item in run_config.symbols),
+                generated_at=run_config.decision_timestamp,
+                reason=reason,
+                freshness_seconds=float(
+                    timeframe_duration(run_config.interval).total_seconds() * 2
+                ),
+            )
+        adjusted_results = tuple(
+            apply_sector_context_to_symbol_result(
+                result,
+                project_sector_context(
+                    symbol=result.symbol,
+                    snapshot=sector_snapshot,
+                    member_feature=result.sector_member_feature,
+                    as_of=run_config.decision_timestamp,
+                ),
+            )
+            for result in adjusted_results
+        )
         process_memory_readings.append(
             _safe_process_memory_reading(self.process_memory_sampler)
         )
@@ -966,6 +1017,7 @@ class ScannerRunner:
             regime_adjustments=market_regime.adjustment,
             regime_warnings=market_regime.warnings,
             global_context=global_context,
+            sector_rotation_snapshot=sector_snapshot,
         )
 
     def _exchange_client_for(self, config: ScannerRunConfig) -> tuple[BaseExchangeClient, bool]:
@@ -1268,6 +1320,17 @@ class ScannerRunner:
             current_price = ticker_price
 
         technical = self.technical_agent.analyze(technical_candles, timeframe=config.interval)
+        sector_member_feature = build_sector_member_feature(
+            symbol=symbol,
+            candles=candles,
+            timeframe=config.interval,
+            decision_timestamp=config.decision_timestamp,
+            structure_state=technical.trend_context,
+            technical_valid=technical.is_valid,
+        )
+        optional_data = optional_data.model_copy(
+            update={"sector_member_feature": sector_member_feature}
+        )
         base_missing = list(optional_data.missing_data)
         base_unverified = list(optional_data.unverified_data)
         if technical.analysis_status == TechnicalAnalysisStatus.INSUFFICIENT_DATA:
@@ -2267,6 +2330,7 @@ class ScannerRunner:
             rejection_reasons=_rejection_reasons_for(status, rejection_reason),
             missing_data=cleaned_missing,
             unverified_data=cleaned_unverified,
+            sector_member_feature=optional_data.sector_member_feature,
             lifecycle_execution_candles=tuple(strategy_execution.execution_candles),
             lifecycle_execution_timeframe=strategy_execution.execution_timeframe,
             lifecycle_decision_timestamp=strategy_execution.decision_timestamp,
