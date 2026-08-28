@@ -2373,9 +2373,14 @@ def test_unavailable_order_book_keeps_optional_na_and_scanner_completes() -> Non
     after = enriched.results[0]
     assert after.status == before.status
     assert after.score_result == before.score_result
+    assert after.setup_quality == before.setup_quality
+    assert after.trade_idea == before.trade_idea
     assert after.lifecycle_state == before.lifecycle_state
     assert after.lifecycle_transition == before.lifecycle_transition
     assert "liquidity_below: N/A" in after.strategy_missing_data
+    assert after.alert_result == before.alert_result
+    assert enriched.trade_ideas_created == baseline.trade_ideas_created
+    assert enriched.dry_run_alerts_created == baseline.dry_run_alerts_created
     assert "liquidity_above: N/A" in after.strategy_missing_data
     data_health = confirmed_data_health_for_symbol(after)
     assert "liquidity_below" in data_health.optional_missing

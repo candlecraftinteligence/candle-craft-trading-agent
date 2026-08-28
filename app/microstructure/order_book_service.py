@@ -214,6 +214,8 @@ class OrderBookLiquidityService:
         self._ignored_message_count = 0
         self._snapshot_failure_count = 0
         self._snapshot_request_count = 0
+        self._snapshot_recovery_scheduled_count = 0
+        self._snapshot_recovery_attempt_count = 0
         self._last_error: str | None = None
 
     @property
@@ -337,6 +339,8 @@ class OrderBookLiquidityService:
             "ignored_message_count": self._ignored_message_count,
             "snapshot_request_count": self._snapshot_request_count,
             "snapshot_failure_count": self._snapshot_failure_count,
+            "snapshot_recovery_scheduled_count": self._snapshot_recovery_scheduled_count,
+            "snapshot_recovery_attempt_count": self._snapshot_recovery_attempt_count,
             "snapshot_limit": self.snapshot_limit,
             "snapshot_request_weight": self.snapshot_request_weight,
             "update_speed": self.update_speed,
@@ -465,36 +469,90 @@ class OrderBookLiquidityService:
 
     async def _bootstrap_symbol(self, symbol: str) -> None:
         book = self._books.get(symbol)
-        if book is None:
+        connection = self._connection
+        if book is None or connection is None:
             return
-        last_error: Exception | None = None
-        for attempt in range(1, self.bootstrap_attempts + 1):
-            try:
-                async with self._bootstrap_semaphore:
-                    await self._wait_for_snapshot_slot()
-                    self._snapshot_request_count += 1
-                    payload = await self.snapshot_client.fetch(symbol, self.snapshot_limit)
-                snapshot = parse_binance_depth_snapshot(payload)
-                outcome = book.install_snapshot(snapshot, received_at=self.clock())
-                if outcome != BookIngestOutcome.NEEDS_RESYNC:
+        recovery_cycle = 0
+        while self._bootstrap_context_active(symbol, book=book, connection=connection):
+            last_error: Exception | None = None
+            for attempt in range(1, self.bootstrap_attempts + 1):
+                if not self._bootstrap_context_active(symbol, book=book, connection=connection):
                     return
-                last_error = RuntimeError(book.reason)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                last_error = exc
-            if attempt < self.bootstrap_attempts:
-                retry_after = max(float(getattr(last_error, "retry_after", 0) or 0), 0.0)
-                exponential = self.bootstrap_backoff_seconds * (2 ** (attempt - 1))
-                delay = max(exponential, retry_after) + self.jitter(
-                    self.bootstrap_jitter_seconds
-                )
-                if delay > 0:
-                    await self.sleep(delay)
-        self._snapshot_failure_count += 1
-        book.mark_snapshot_failed()
-        if last_error is not None:
-            self._last_error = f"snapshot_failed:{symbol}:{type(last_error).__name__}"
+                try:
+                    async with self._bootstrap_semaphore:
+                        await self._wait_for_snapshot_slot()
+                        if not self._bootstrap_context_active(
+                            symbol,
+                            book=book,
+                            connection=connection,
+                        ):
+                            return
+                        self._snapshot_request_count += 1
+                        payload = await self.snapshot_client.fetch(symbol, self.snapshot_limit)
+                    if not self._bootstrap_context_active(
+                        symbol,
+                        book=book,
+                        connection=connection,
+                    ):
+                        return
+                    snapshot = parse_binance_depth_snapshot(payload)
+                    outcome = book.install_snapshot(snapshot, received_at=self.clock())
+                    if outcome != BookIngestOutcome.NEEDS_RESYNC:
+                        return
+                    last_error = RuntimeError(book.reason)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                if attempt < self.bootstrap_attempts:
+                    retry_after = max(
+                        float(getattr(last_error, "retry_after", 0) or 0),
+                        0.0,
+                    )
+                    exponential = self.bootstrap_backoff_seconds * (2 ** (attempt - 1))
+                    delay = max(exponential, retry_after) + self.jitter(
+                        self.bootstrap_jitter_seconds
+                    )
+                    if delay > 0:
+                        await self.sleep(delay)
+
+            self._snapshot_failure_count += 1
+            book.mark_snapshot_failed()
+            if last_error is not None:
+                self._last_error = f"snapshot_failed:{symbol}:{type(last_error).__name__}"
+
+            recovery_cycle += 1
+            self._snapshot_recovery_scheduled_count += 1
+            retry_after = max(float(getattr(last_error, "retry_after", 0) or 0), 0.0)
+            recovery_base = max(
+                DEFAULT_RECONNECT_BASE_SECONDS,
+                self.reconnect_base_seconds,
+                self.bootstrap_backoff_seconds,
+            )
+            recovery_ceiling = max(recovery_base, self.reconnect_max_seconds)
+            exponential = recovery_base * (2 ** min(recovery_cycle - 1, 10))
+            delay = max(min(exponential, recovery_ceiling), retry_after) + self.jitter(
+                self.bootstrap_jitter_seconds
+            )
+            await self.sleep(delay)
+            if not self._bootstrap_context_active(symbol, book=book, connection=connection):
+                return
+            self._snapshot_recovery_attempt_count += 1
+            book.mark_bootstrap_started()
+
+    def _bootstrap_context_active(
+        self,
+        symbol: str,
+        *,
+        book: SynchronizedLocalOrderBook,
+        connection: FlowWebSocketConnection,
+    ) -> bool:
+        return (
+            self._connection is connection
+            and not self._stop_event.is_set()
+            and symbol in self._desired_symbols
+            and self._books.get(symbol) is book
+        )
 
     async def _wait_for_snapshot_slot(self) -> None:
         async with self._rate_lock:

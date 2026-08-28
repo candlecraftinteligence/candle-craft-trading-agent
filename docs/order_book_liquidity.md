@@ -47,6 +47,16 @@ immediately revokes synchronization. Trusted levels are cleared, VERIFIED output
 stops, and a new snapshot bootstrap is scheduled. Previous local state is never
 carried across reconnects and CCI never guesses through a gap.
 
+If every bounded attempt in a snapshot bootstrap cycle fails, trusted levels are
+cleared and the book remains ERROR with `reason=snapshot_failed`. The existing
+per-symbol bootstrap task then owns recovery: it waits a positive exponential
+cooldown bounded by the reconnect delay policy, honors a longer Binance
+`Retry-After`, and starts another bounded bootstrap cycle. Every request still
+passes through the shared minimum-interval rate limiter and bootstrap semaphore.
+The one task is cancelled by service stop, symbol unsubscribe, or WebSocket
+disconnect, so it cannot retry against a dead connection. Recovery requires no
+depth message, buffer overflow, symbol churn, or WebSocket reconnect.
+
 ## Default load contract
 
 - Update speed: 500 ms. The scanner consumes research context at a five-minute
@@ -96,10 +106,17 @@ asks above book mid. Both compact mappings carry `usage=research_only`.
 
 ## Freshness and data health
 
-Synchronized fresh output is VERIFIED. Old output is STALE. Warming,
-synchronizing, disconnected, overflowed, or resynchronizing books are unavailable;
-snapshot failures are ERROR. A STALE compact context contains status/provenance but
-does not publish trusted bands or concentrations to strategy input.
+Synchronized fresh output is VERIFIED. Here VERIFIED means that book sequence
+synchronization and freshness are verified; it does not claim that every requested
+liquidity band is fully covered by the finite REST snapshot. A VERIFIED snapshot
+may therefore carry `reason=insufficient_book_coverage`. Each side of each band's
+`coverage_complete` flag remains authoritative, and a false flag means the visible
+notional is partial observed depth and can never be interpreted as complete depth.
+
+Old output is STALE. Warming, synchronizing, disconnected, overflowed, or
+resynchronizing books are unavailable; snapshot failures are ERROR. A STALE compact
+context contains status/provenance but does not publish trusted bands or
+concentrations to strategy input.
 
 Verified mappings truthfully remove the two optional N/A labels. Warming or
 resynchronizing state leaves them optional and missing. Stale context marks them

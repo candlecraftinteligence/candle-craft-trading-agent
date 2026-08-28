@@ -334,11 +334,16 @@ def test_incomplete_far_side_coverage_is_explicit_not_silently_complete() -> Non
     )
     snapshot = _synchronized_book(snapshot_payload=payload).snapshot(as_of=NOW)
     assert snapshot.status == ContextStatus.VERIFIED
+    assert snapshot.verified is True
     assert snapshot.reason == "insufficient_book_coverage"
     assert snapshot.bands["50bps"].bid_coverage_complete is True
     assert snapshot.bands["50bps"].ask_coverage_complete is True
     assert snapshot.bands["100bps"].bid_coverage_complete is False
     assert snapshot.bands["100bps"].ask_coverage_complete is False
+    below = snapshot.liquidity_below_context()
+    above = snapshot.liquidity_above_context()
+    assert below is not None and below["bands"]["100bps"]["coverage_complete"] is False
+    assert above is not None and above["bands"]["100bps"]["coverage_complete"] is False
 
 
 def test_liquidity_below_maps_only_to_bids_and_above_only_to_asks() -> None:
