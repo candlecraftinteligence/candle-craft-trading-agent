@@ -96,6 +96,8 @@ from app.lifecycle.models import (
     SetupLifecycleRecord,
     SetupTransitionResult,
 )
+from app.microstructure.liquidation_models import LiquidationFlowSnapshot
+from app.microstructure.liquidation_service import LiquidationFlowService
 from app.microstructure.models import MicrostructureFlowSnapshot
 from app.microstructure.service import MicrostructureFlowService
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
@@ -243,6 +245,9 @@ class ScannerRunConfig(BaseModel):
     microstructure_flow_enabled: bool = False
     microstructure_flow_stale_sec: float = 5.0
     microstructure_flow_max_symbols: int = 100
+    liquidation_flow_enabled: bool = False
+    liquidation_flow_stale_sec: float = 30.0
+    liquidation_flow_max_symbols: int = 100
     decision_timestamp: datetime | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -342,12 +347,20 @@ class ScannerRunConfig(BaseModel):
             raise ValueError("microstructure_flow_max_symbols must be between 1 and 1024")
         return value
 
+    @field_validator("liquidation_flow_max_symbols")
+    @classmethod
+    def _liquidation_max_symbols_in_range(cls, value: int) -> int:
+        if value < 1 or value > 1024:
+            raise ValueError("liquidation_flow_max_symbols must be between 1 and 1024")
+        return value
+
     @field_validator(
         "request_timeout_sec",
         "symbol_timeout_sec",
         "scan_timeout_sec",
         "btc_d_request_timeout_sec",
         "microstructure_flow_stale_sec",
+        "liquidation_flow_stale_sec",
         mode="before",
     )
     @classmethod
@@ -472,6 +485,7 @@ class ScannerSymbolResult(BaseModel):
     microstructure_flow: MicrostructureFlowSnapshot | None = None
     risk_decision: RiskDecision | None = None
     score_result: OpportunityScoreResult | None = None
+    liquidation_flow: LiquidationFlowSnapshot | None = None
     trade_idea: TradeIdeaResult | None = None
     alert_result: AlertResult | None = None
     journal_entry: JournalEntryResult | None = None
@@ -670,6 +684,7 @@ class _StrategyExecution(BaseModel):
     microstructure_flow: MicrostructureFlowSnapshot | None = None
     execution_candles: tuple[Any, ...] = Field(default=(), exclude=True, repr=False)
     execution_timeframe: str = NA
+    liquidation_flow: LiquidationFlowSnapshot | None = None
     decision_timestamp: datetime | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -709,6 +724,7 @@ class ScannerRunner:
         microstructure_flow_service: MicrostructureFlowService | None = None,
         clock: Callable[[], datetime] | None = None,
         process_memory_sampler: Callable[[], ProcessMemoryReading] | None = None,
+        liquidation_flow_service: LiquidationFlowService | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         self.exchange_client = exchange_client
@@ -725,6 +741,7 @@ class ScannerRunner:
         self.microstructure_flow_service = microstructure_flow_service
         self.clock = clock or (lambda: datetime.now(UTC))
         self.process_memory_sampler = process_memory_sampler or read_process_rss
+        self.liquidation_flow_service = liquidation_flow_service
         self.logger = log or logger
 
     async def run(
@@ -1119,6 +1136,38 @@ class ScannerRunner:
                 status=ContextStatus.ERROR,
             )
 
+    def _liquidation_snapshot(
+        self,
+        symbol: str,
+        config: ScannerRunConfig,
+    ) -> LiquidationFlowSnapshot | None:
+        if not config.liquidation_flow_enabled:
+            return None
+        if config.exchange != "binance":
+            return LiquidationFlowSnapshot.unavailable(
+                symbol=symbol,
+                reason="unsupported_exchange",
+            )
+        service = self.liquidation_flow_service
+        if service is None:
+            return LiquidationFlowSnapshot.unavailable(
+                symbol=symbol,
+                reason="service_not_running",
+            )
+        try:
+            return service.snapshot(symbol)
+        except Exception as exc:
+            self.logger.warning(
+                "Liquidation service failed safely for symbol=%s: %s",
+                symbol,
+                type(exc).__name__,
+            )
+            return LiquidationFlowSnapshot.unavailable(
+                symbol=symbol,
+                reason=f"service_error:{type(exc).__name__}",
+                status=ContextStatus.ERROR,
+            )
+
     async def _scan_symbol(
         self,
         symbol_config: ScannerSymbolConfig,
@@ -1131,11 +1180,21 @@ class ScannerRunner:
         symbol = symbol_config.symbol
         microstructure_flow = self._microstructure_snapshot(symbol, config)
         candles = await self._fetch_primary_candles(client, symbol, config, progress=progress)
+        liquidation_flow = self._liquidation_snapshot(symbol, config)
         technical_candles = _technical_candles(candles)
         current_price = _current_price_from_candles(candles)
         await _emit_progress(progress, "Fetching derivatives...")
         optional_data = await self._fetch_optional_market_data(client, symbol, config)
 
+        optional_data = optional_data.model_copy(
+            update={
+                "liquidation_data": (
+                    liquidation_flow.strategy_context()
+                    if liquidation_flow is not None
+                    else None
+                )
+            }
+        )
         ticker_price = _decimal_field(optional_data.ticker, ("last_price", "mark_price"))
         if ticker_price != NA:
             current_price = ticker_price
@@ -1183,6 +1242,9 @@ class ScannerRunner:
         )
         base_missing.extend(strategy_execution.strategy_missing_data)
         base_unverified.extend(strategy_execution.strategy_unverified_data)
+        strategy_execution = strategy_execution.model_copy(
+            update={"liquidation_flow": liquidation_flow}
+        )
         if microstructure_flow is not None and not microstructure_flow.verified:
             flow_missing, flow_unverified = _microstructure_data_health_diagnostics(
                 microstructure_flow
@@ -2163,6 +2225,7 @@ class ScannerRunner:
             microstructure_flow=strategy_execution.microstructure_flow,
             risk_decision=risk_decision,
             score_result=score_result,
+            liquidation_flow=strategy_execution.liquidation_flow,
             trade_idea=trade_idea,
             alert_result=alert_result,
             journal_entry=journal_entry,
@@ -2301,7 +2364,9 @@ def _setup_quality_for_result(
             missing_data=missing_data,
             unverified_data=_strategy_quality_unverified_data(unverified_data),
             derivatives_missing_data=derivatives_enrichment.missing_data if derivatives_enrichment is not None else (),
-            derivatives_unverified_data=derivatives_enrichment.unverified_data
+            derivatives_unverified_data=_strategy_quality_unverified_data(
+                derivatives_enrichment.unverified_data
+            )
             if derivatives_enrichment is not None
             else (),
             derivatives_warnings=derivatives_enrichment.warnings if derivatives_enrichment is not None else (),
@@ -3027,7 +3092,7 @@ def _liquidity_grab_input(
         "derivatives_enrichment": derivatives_enrichment,
         "orderflow_summary": orderflow_context,
         "cvd": cvd_context,
-        "liquidation_data": None,
+        "liquidation_data": optional_data.liquidation_data,
         "btc_context": research_context.get("btc_context"),
         "btc_d_context": research_context.get("btc_d_context"),
         "weekend_filter": research_context.get("weekend_filter"),
@@ -3753,9 +3818,10 @@ def _microstructure_data_health_diagnostics(
 def _strategy_quality_unverified_data(
     values: Sequence[str],
 ) -> tuple[str, ...]:
+    research_only_prefixes = ("liquidation_data:", "microstructure_flow:")
     return tuple(
         value for value in values
-        if not str(value).startswith("microstructure_flow:")
+        if not str(value).startswith(research_only_prefixes)
     )
 
 

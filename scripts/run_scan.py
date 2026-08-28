@@ -62,6 +62,7 @@ from app.context.btc_d import (  # noqa: E402
     DEFAULT_BTC_D_FRESH_SECONDS,
     DEFAULT_BTC_D_MAX_STALE_SECONDS,
 )
+from app.microstructure.liquidation_service import LiquidationFlowService  # noqa: E402
 from app.microstructure.service import MicrostructureFlowService  # noqa: E402
 from app.command_center import (  # noqa: E402
     build_command_center_payload,
@@ -797,6 +798,9 @@ async def main(argv: Sequence[str] | None = None) -> None:
         microstructure_flow_enabled=runtime_settings.microstructure_flow_enabled,
         microstructure_flow_stale_sec=runtime_settings.microstructure_flow_stale_sec,
         microstructure_flow_max_symbols=runtime_settings.microstructure_flow_max_symbols,
+        liquidation_flow_enabled=runtime_settings.liquidation_flow_enabled,
+        liquidation_flow_stale_sec=runtime_settings.liquidation_flow_stale_sec,
+        liquidation_flow_max_symbols=runtime_settings.liquidation_flow_max_symbols,
     )
     symbol_priority_plan = _symbol_priority_plan_for_watchlist(args, watchlist)
 
@@ -2746,12 +2750,14 @@ def _scanner_runner_with_context(
     log: Any | None = None,
     btc_d_context_service: BtcDominanceContextService | None = None,
     microstructure_flow_service: MicrostructureFlowService | None = None,
+    liquidation_flow_service: LiquidationFlowService | None = None,
 ) -> Any:
     try:
         return ScannerRunner(
             market_data_cache=cache,
             btc_d_context_service=btc_d_context_service,
             microstructure_flow_service=microstructure_flow_service,
+            liquidation_flow_service=liquidation_flow_service,
             log=log,
         )
     except TypeError:
@@ -2793,6 +2799,17 @@ def _microstructure_flow_service_for_config(
     )
 
 
+def _liquidation_flow_service_for_config(
+    config: ScannerRunConfig,
+) -> LiquidationFlowService | None:
+    if not config.liquidation_flow_enabled or config.exchange != "binance":
+        return None
+    return LiquidationFlowService(
+        stale_after_seconds=config.liquidation_flow_stale_sec,
+        max_symbols=config.liquidation_flow_max_symbols,
+    )
+
+
 async def _run_scanner(
     runner: Any,
     config: ScannerRunConfig,
@@ -2830,6 +2847,7 @@ async def _run_watch_mode(
 ) -> None:
     btc_d_context_service = _btc_d_context_service_for_config(config)
     microstructure_flow_service = _microstructure_flow_service_for_config(config)
+    liquidation_flow_service = _liquidation_flow_service_for_config(config)
     legacy_watch_activation_delivery = _legacy_watch_activation_delivery_enabled(args)
     if legacy_watch_activation_delivery:
         telegram_bot_token, telegram_chat_id, telegram_dry_run = _watch_telegram_credentials(args)
@@ -2880,6 +2898,8 @@ async def _run_watch_mode(
     failure_streak = 0
     if microstructure_flow_service is not None:
         await microstructure_flow_service.start(startup_queued_symbols)
+    if liquidation_flow_service is not None:
+        await liquidation_flow_service.start(startup_queued_symbols)
     iteration_in_progress = False
     scheduled_start_monotonic = time.monotonic()
     try:
@@ -2900,6 +2920,7 @@ async def _run_watch_mode(
                 console_presenter=console,
                 btc_d_context_service=btc_d_context_service,
                 microstructure_flow_service=microstructure_flow_service,
+                liquidation_flow_service=liquidation_flow_service,
             )
             if iteration_error is not None:
                 disposition = classify_watch_exception(iteration_error)
@@ -3237,6 +3258,8 @@ async def _run_watch_mode(
     finally:
         if microstructure_flow_service is not None:
             await microstructure_flow_service.stop()
+        if liquidation_flow_service is not None:
+            await liquidation_flow_service.stop()
 
 
 async def _attempt_watch_scan_iteration(
@@ -3248,6 +3271,7 @@ async def _attempt_watch_scan_iteration(
     console_presenter: ScannerConsolePresenter | None = None,
     btc_d_context_service: BtcDominanceContextService | None = None,
     microstructure_flow_service: MicrostructureFlowService | None = None,
+    liquidation_flow_service: LiquidationFlowService | None = None,
 ) -> tuple[WatchlistResolution | None, WatchScanExecution | None, Exception | SystemExit | None]:
     try:
         watchlist = await _watchlist_for_watch_iteration(args, startup_watchlist)
@@ -3259,6 +3283,7 @@ async def _attempt_watch_scan_iteration(
             console_presenter=console_presenter,
             btc_d_context_service=btc_d_context_service,
             microstructure_flow_service=microstructure_flow_service,
+            liquidation_flow_service=liquidation_flow_service,
         )
     except (Exception, SystemExit) as exc:
         return None, None, exc
@@ -3495,6 +3520,7 @@ async def _run_watch_scan_iteration(
     console_presenter: ScannerConsolePresenter | None = None,
     btc_d_context_service: BtcDominanceContextService | None = None,
     microstructure_flow_service: MicrostructureFlowService | None = None,
+    liquidation_flow_service: LiquidationFlowService | None = None,
 ) -> WatchScanExecution:
     phase_statuses = {"universe": "SUCCESS"}
     recoverable_errors: list[str] = []
@@ -3518,6 +3544,14 @@ async def _run_watch_scan_iteration(
             recoverable_errors.append(_watch_phase_error("microstructure_flow", exc))
         else:
             phase_statuses["microstructure_flow"] = "SUCCESS"
+    if liquidation_flow_service is not None:
+        try:
+            await liquidation_flow_service.reconcile_symbols(queued_symbols)
+        except Exception as exc:
+            phase_statuses["liquidation_flow"] = "PARTIAL"
+            recoverable_errors.append(_watch_phase_error("liquidation_flow", exc))
+        else:
+            phase_statuses["liquidation_flow"] = "SUCCESS"
     symbol_queue_diagnostics = _symbol_queue_diagnostics(args, watchlist, symbol_priority_plan, queued_symbols)
     scan_config = (
         ScannerRunConfig.model_validate({**iteration_config.model_dump(), "symbols": list(queued_symbols)})
@@ -3585,6 +3619,7 @@ async def _run_watch_scan_iteration(
             log=console_presenter.scanner_logger() if console_presenter is not None else None,
             btc_d_context_service=btc_d_context_service,
             microstructure_flow_service=microstructure_flow_service,
+            liquidation_flow_service=liquidation_flow_service,
         )
         try:
             scan_result = await _run_scanner(

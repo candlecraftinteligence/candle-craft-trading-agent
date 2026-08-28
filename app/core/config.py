@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     microstructure_flow_enabled: bool = False
     microstructure_flow_stale_sec: float = 5.0
     microstructure_flow_max_symbols: int = 100
+    liquidation_flow_enabled: bool = False
+    liquidation_flow_stale_sec: float = 30.0
+    liquidation_flow_max_symbols: int = 100
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -131,6 +134,22 @@ class Settings(BaseSettings):
         normalized = int(value)
         if normalized < 1 or normalized > 1024:
             raise ValueError("MICROSTRUCTURE_FLOW_MAX_SYMBOLS must be between 1 and 1024")
+        return normalized
+
+    @field_validator("liquidation_flow_stale_sec")
+    @classmethod
+    def validate_liquidation_flow_stale_sec(cls, value: float) -> float:
+        normalized = float(value)
+        if normalized <= 0:
+            raise ValueError("LIQUIDATION_FLOW_STALE_SEC must be greater than zero")
+        return normalized
+
+    @field_validator("liquidation_flow_max_symbols")
+    @classmethod
+    def validate_liquidation_flow_max_symbols(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized < 1 or normalized > 1024:
+            raise ValueError("LIQUIDATION_FLOW_MAX_SYMBOLS must be between 1 and 1024")
         return normalized
 
     @field_validator(

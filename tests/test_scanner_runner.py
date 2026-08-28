@@ -1932,3 +1932,256 @@ def test_nonverified_microstructure_preserves_truthful_optional_diagnostics(
     assert data_health.required_unverified == ()
     assert "cvd: N/A" in symbol_result.strategy_missing_data
     assert "orderflow_summary: N/A" in symbol_result.strategy_missing_data
+
+
+def _liquidation_snapshot(
+    decision_at: datetime,
+    *,
+    status: ContextStatus = ContextStatus.VERIFIED,
+    reason: str | None = None,
+):
+    from app.microstructure.liquidation_models import (
+        LiquidationFlowSnapshot,
+        LiquidationWindowSnapshot,
+    )
+
+    windows = {}
+    for minutes in (1, 5, 15):
+        windows[f"{minutes}m"] = LiquidationWindowSnapshot(
+            window_minutes=minutes,
+            window_start=decision_at - timedelta(minutes=minutes),
+            window_end=decision_at,
+            coverage_seconds=minutes * 60,
+            coverage_complete=True,
+            status=ContextStatus.VERIFIED,
+            long_liquidation_quote=Decimal("750"),
+            short_liquidation_quote=Decimal("1250"),
+            total_liquidation_quote=Decimal("2000"),
+            event_count=4,
+            long_event_count=1,
+            short_event_count=3,
+            largest_long_liquidation=Decimal("750"),
+            largest_short_liquidation=Decimal("600"),
+            liquidation_imbalance=Decimal("0.25"),
+            liquidation_quote_per_minute=Decimal("2000") / Decimal(minutes),
+            liquidation_event_count_per_minute=Decimal("4") / Decimal(minutes),
+            largest_event_share_of_total=Decimal("0.375"),
+        )
+    return LiquidationFlowSnapshot(
+        symbol="BTCUSDT",
+        observed_at=decision_at,
+        age_seconds=1,
+        status=status,
+        reason=reason,
+        windows=windows,
+        liquidation_summary=(
+            "15m observed liquidations: long 750.00 USDT; short 1.25K USDT; "
+            "imbalance +0.2500; 1m rate 2.00K USDT/min; 5m activity INCREASING; absorption."
+        ),
+        retained_bucket_count=15,
+        max_retained_bucket_count=16,
+        dedupe_fingerprint_count=4,
+        max_dedupe_fingerprint_count=128,
+        accepted_event_count=4,
+    )
+
+
+class _StaticLiquidationService:
+    def __init__(self, snapshot=None, *, error: Exception | None = None) -> None:
+        self.value = snapshot
+        self.error = error
+
+    def snapshot(self, symbol: str):
+        if self.error is not None:
+            raise self.error
+        return self.value.model_copy(update={"symbol": symbol})
+
+
+def _strategy_invariant_fields(symbol_result):
+    setup = symbol_result.strategy_results["swing"].swing
+    return {
+        "pipeline_status": symbol_result.status,
+        "valid_modes": symbol_result.valid_strategy_modes,
+        "setup_valid": setup.is_valid,
+        "first_failed_gate": setup.first_failed_gate,
+        "trust_meter": setup.trust_meter,
+        "gate_result": setup.gate_result,
+        "entry_low": setup.entry_low,
+        "entry_high": setup.entry_high,
+        "stop": setup.stop,
+        "tp1": setup.tp1,
+        "tp2": setup.tp2,
+        "tp3": setup.tp3,
+        "rr_to_tp2": setup.rr_to_tp2,
+        "invalidation": setup.invalidation,
+        "opportunity_score": symbol_result.score_result.total_score,
+        "opportunity_grade": symbol_result.score_result.grade,
+        "quality_score": symbol_result.setup_quality.quality_score,
+        "quality_grade": symbol_result.setup_quality.quality_grade,
+        "quality_state": symbol_result.setup_quality.quality_state,
+        "quality_action": symbol_result.setup_quality.action_label,
+        "idea_direction": symbol_result.trade_idea.direction,
+        "idea_status": symbol_result.trade_idea.status,
+        "idea_entry": symbol_result.trade_idea.entry_zone,
+        "idea_stop": symbol_result.trade_idea.stop_loss,
+        "idea_targets": symbol_result.trade_idea.take_profits,
+        "idea_rr": symbol_result.trade_idea.best_rr,
+        "idea_confidence": symbol_result.trade_idea.confidence_score,
+        "idea_grade": symbol_result.trade_idea.grade,
+        "idea_quality_gate": symbol_result.trade_idea.quality_gate_result,
+        "lifecycle_state": symbol_result.lifecycle_state,
+        "lifecycle_transition": symbol_result.lifecycle_transition,
+        "alert_status": symbol_result.alert_result.status,
+        "alert_channel": symbol_result.alert_result.channel,
+        "alert_dry_run": symbol_result.alert_result.dry_run,
+    }
+
+
+def _baseline_and_liquidation_scan(snapshot):
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    candles = {"BTCUSDT": _strategy_pullback_candles()}
+    baseline = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+        ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
+    )
+    enriched = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            liquidation_flow_service=_StaticLiquidationService(snapshot),
+        ).run(
+            _config(
+                ["BTCUSDT"],
+                decision_timestamp=decision_at,
+                liquidation_flow_enabled=True,
+            )
+        )
+    )
+    return baseline, enriched
+
+
+def test_verified_liquidation_is_research_only_and_removes_optional_na() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    baseline, enriched = _baseline_and_liquidation_scan(
+        _liquidation_snapshot(decision_at)
+    )
+    before = baseline.results[0]
+    after = enriched.results[0]
+
+    assert after.liquidation_flow.status == ContextStatus.VERIFIED
+    assert _strategy_invariant_fields(after) == _strategy_invariant_fields(before)
+    assert enriched.trade_ideas_created == baseline.trade_ideas_created
+    assert enriched.dry_run_alerts_created == baseline.dry_run_alerts_created
+    assert set(before.strategy_missing_data) - set(after.strategy_missing_data) == {
+        "liquidation_data: N/A"
+    }
+    assert "liquidation_data: N/A" not in after.derivatives_missing_data
+    before_health = confirmed_data_health_for_symbol(before)
+    after_health = confirmed_data_health_for_symbol(after)
+    assert "liquidation_data" in before_health.optional_missing
+    assert "liquidation_data" not in after_health.optional_missing
+    assert "liquidation_data" not in after_health.optional_unverified
+    assert after_health.blocked is False
+
+
+def test_stale_liquidation_is_optional_unverified_without_quality_or_plan_change() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    stale = _liquidation_snapshot(
+        decision_at,
+        status=ContextStatus.STALE,
+        reason="stale_event_lag",
+    )
+    baseline, enriched = _baseline_and_liquidation_scan(stale)
+    before = baseline.results[0]
+    after = enriched.results[0]
+
+    assert _strategy_invariant_fields(after) == _strategy_invariant_fields(before)
+    assert enriched.trade_ideas_created == baseline.trade_ideas_created
+    assert enriched.dry_run_alerts_created == baseline.dry_run_alerts_created
+    assert "liquidation_data: Unverified" in after.derivatives_unverified_data
+    assert "liquidation_data: Unverified" not in after.strategy_unverified_data
+    data_health = confirmed_data_health_for_symbol(after)
+    assert "liquidation_data" in data_health.optional_unverified
+    assert "liquidation_data" not in data_health.optional_missing
+    assert data_health.blocked is False
+    assert data_health.required_missing == ()
+    assert data_health.required_unverified == ()
+
+
+def test_unavailable_liquidation_remains_optional_missing_and_does_not_block() -> None:
+    from app.microstructure.liquidation_models import LiquidationFlowSnapshot
+
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    unavailable = LiquidationFlowSnapshot.unavailable(
+        symbol="BTCUSDT",
+        reason="insufficient_window_coverage",
+        observed_at=decision_at,
+    )
+    baseline, enriched = _baseline_and_liquidation_scan(unavailable)
+    before = baseline.results[0]
+    after = enriched.results[0]
+
+    assert _strategy_invariant_fields(after) == _strategy_invariant_fields(before)
+    assert after.liquidation_flow.status == ContextStatus.UNAVAILABLE
+    assert "liquidation_data: N/A" in after.strategy_missing_data
+    data_health = confirmed_data_health_for_symbol(after)
+    assert "liquidation_data" in data_health.optional_missing
+    assert data_health.blocked is False
+    assert data_health.required_missing == ()
+
+
+def test_liquidation_service_failure_does_not_crash_or_change_scanner_signal() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    candles = {"BTCUSDT": _strategy_pullback_candles()}
+    baseline = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+        ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
+    )
+    failed = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            liquidation_flow_service=_StaticLiquidationService(
+                error=RuntimeError("synthetic snapshot failure")
+            ),
+        ).run(
+            _config(
+                ["BTCUSDT"],
+                decision_timestamp=decision_at,
+                liquidation_flow_enabled=True,
+            )
+        )
+    )
+    before = baseline.results[0]
+    after = failed.results[0]
+
+    assert after.status != ScannerPipelineStatus.SCAN_ERROR
+    assert after.liquidation_flow.status == ContextStatus.ERROR
+    assert after.liquidation_flow.reason == "service_error:RuntimeError"
+    assert _strategy_invariant_fields(after) == _strategy_invariant_fields(before)
+    assert failed.trade_ideas_created == baseline.trade_ideas_created
+    assert failed.dry_run_alerts_created == baseline.dry_run_alerts_created
+    data_health = confirmed_data_health_for_symbol(after)
+    assert "liquidation_data" in data_health.optional_missing
+    assert data_health.blocked is False
+
+
+def test_disabled_liquidation_never_calls_service_or_changes_behavior() -> None:
+    decision_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    candles = {"BTCUSDT": _strategy_pullback_candles()}
+    baseline = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+        ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
+    ).results[0]
+    disabled = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            liquidation_flow_service=_StaticLiquidationService(
+                error=AssertionError("disabled service must not be called")
+            ),
+        ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
+    ).results[0]
+
+    assert disabled.liquidation_flow is None
+    assert _strategy_invariant_fields(disabled) == _strategy_invariant_fields(baseline)

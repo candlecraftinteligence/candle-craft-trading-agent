@@ -2630,7 +2630,10 @@ def _unverified_context(data: LiquidityGrabInput) -> tuple[str, ...]:
         "btc_d_context",
         "event_risk_context",
     ):
-        text = _context_text(getattr(data, field))
+        value = getattr(data, field)
+        if _research_only_context(value):
+            continue
+        text = _context_text(value)
         if text != NA and any(label in text.lower() for label in ("unverified", "stale")):
             unverified.append(f"{field}: Unverified")
     return tuple(unverified)
