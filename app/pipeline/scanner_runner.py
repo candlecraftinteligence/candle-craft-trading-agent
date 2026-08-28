@@ -98,6 +98,8 @@ from app.lifecycle.models import (
 )
 from app.microstructure.liquidation_models import LiquidationFlowSnapshot
 from app.microstructure.liquidation_service import LiquidationFlowService
+from app.microstructure.order_book_models import OrderBookLiquiditySnapshot
+from app.microstructure.order_book_service import OrderBookLiquidityService
 from app.microstructure.models import MicrostructureFlowSnapshot
 from app.microstructure.service import MicrostructureFlowService
 from app.scoring.opportunity_scoring import OpportunityScoreResult, OpportunityScoringEngine
@@ -248,6 +250,13 @@ class ScannerRunConfig(BaseModel):
     liquidation_flow_enabled: bool = False
     liquidation_flow_stale_sec: float = 30.0
     liquidation_flow_max_symbols: int = 100
+    order_book_liquidity_enabled: bool = False
+    order_book_liquidity_stale_sec: float = 5.0
+    order_book_liquidity_max_symbols: int = 100
+    order_book_liquidity_update_speed: Literal["100ms", "250ms", "500ms"] = "500ms"
+    order_book_liquidity_snapshot_limit: Literal[5, 10, 20, 50, 100, 500, 1000] = 500
+    order_book_liquidity_bootstrap_concurrency: int = 2
+    order_book_liquidity_event_buffer_size: int = 256
     decision_timestamp: datetime | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -354,6 +363,27 @@ class ScannerRunConfig(BaseModel):
             raise ValueError("liquidation_flow_max_symbols must be between 1 and 1024")
         return value
 
+    @field_validator("order_book_liquidity_max_symbols")
+    @classmethod
+    def _order_book_max_symbols_in_range(cls, value: int) -> int:
+        if value < 1 or value > 100:
+            raise ValueError("order_book_liquidity_max_symbols must be between 1 and 100")
+        return value
+
+    @field_validator("order_book_liquidity_bootstrap_concurrency")
+    @classmethod
+    def _order_book_bootstrap_concurrency_in_range(cls, value: int) -> int:
+        if value < 1 or value > 8:
+            raise ValueError("order_book_liquidity_bootstrap_concurrency must be between 1 and 8")
+        return value
+
+    @field_validator("order_book_liquidity_event_buffer_size")
+    @classmethod
+    def _order_book_event_buffer_in_range(cls, value: int) -> int:
+        if value < 1 or value > 4096:
+            raise ValueError("order_book_liquidity_event_buffer_size must be between 1 and 4096")
+        return value
+
     @field_validator(
         "request_timeout_sec",
         "symbol_timeout_sec",
@@ -361,6 +391,7 @@ class ScannerRunConfig(BaseModel):
         "btc_d_request_timeout_sec",
         "microstructure_flow_stale_sec",
         "liquidation_flow_stale_sec",
+        "order_book_liquidity_stale_sec",
         mode="before",
     )
     @classmethod
@@ -483,6 +514,7 @@ class ScannerSymbolResult(BaseModel):
     derivatives_result: DerivativesOrderflowResult | None = None
     derivatives_enrichment: DerivativesEnrichmentResult | None = None
     microstructure_flow: MicrostructureFlowSnapshot | None = None
+    order_book_liquidity: OrderBookLiquiditySnapshot | None = None
     risk_decision: RiskDecision | None = None
     score_result: OpportunityScoreResult | None = None
     liquidation_flow: LiquidationFlowSnapshot | None = None
@@ -682,6 +714,7 @@ class _StrategyExecution(BaseModel):
     pullback_intelligence: PullbackIntelligenceResult | None = None
     target_intelligence: TargetIntelligenceResult | None = None
     microstructure_flow: MicrostructureFlowSnapshot | None = None
+    order_book_liquidity: OrderBookLiquiditySnapshot | None = None
     execution_candles: tuple[Any, ...] = Field(default=(), exclude=True, repr=False)
     execution_timeframe: str = NA
     liquidation_flow: LiquidationFlowSnapshot | None = None
@@ -722,6 +755,7 @@ class ScannerRunner:
         market_data_cache: MarketDataCache | None = None,
         btc_d_context_service: BtcDominanceContextService | None = None,
         microstructure_flow_service: MicrostructureFlowService | None = None,
+        order_book_liquidity_service: OrderBookLiquidityService | None = None,
         clock: Callable[[], datetime] | None = None,
         process_memory_sampler: Callable[[], ProcessMemoryReading] | None = None,
         liquidation_flow_service: LiquidationFlowService | None = None,
@@ -739,6 +773,7 @@ class ScannerRunner:
         self.market_data_cache = market_data_cache
         self.btc_d_context_service = btc_d_context_service
         self.microstructure_flow_service = microstructure_flow_service
+        self.order_book_liquidity_service = order_book_liquidity_service
         self.clock = clock or (lambda: datetime.now(UTC))
         self.process_memory_sampler = process_memory_sampler or read_process_rss
         self.liquidation_flow_service = liquidation_flow_service
@@ -1136,6 +1171,38 @@ class ScannerRunner:
                 status=ContextStatus.ERROR,
             )
 
+    def _order_book_snapshot(
+        self,
+        symbol: str,
+        config: ScannerRunConfig,
+    ) -> OrderBookLiquiditySnapshot | None:
+        if not config.order_book_liquidity_enabled:
+            return None
+        if config.exchange != "binance":
+            return OrderBookLiquiditySnapshot.unavailable(
+                symbol=symbol,
+                reason="unsupported_exchange",
+            )
+        service = self.order_book_liquidity_service
+        if service is None:
+            return OrderBookLiquiditySnapshot.unavailable(
+                symbol=symbol,
+                reason="service_not_running",
+            )
+        try:
+            return service.snapshot(symbol)
+        except Exception as exc:
+            self.logger.warning(
+                "Order-book liquidity service failed safely for symbol=%s: %s",
+                symbol,
+                type(exc).__name__,
+            )
+            return OrderBookLiquiditySnapshot.unavailable(
+                symbol=symbol,
+                reason=f"service_error:{type(exc).__name__}",
+                status=ContextStatus.ERROR,
+            )
+
     def _liquidation_snapshot(
         self,
         symbol: str,
@@ -1179,6 +1246,7 @@ class ScannerRunner:
     ) -> ScannerSymbolResult:
         symbol = symbol_config.symbol
         microstructure_flow = self._microstructure_snapshot(symbol, config)
+        order_book_liquidity = self._order_book_snapshot(symbol, config)
         candles = await self._fetch_primary_candles(client, symbol, config, progress=progress)
         liquidation_flow = self._liquidation_snapshot(symbol, config)
         technical_candles = _technical_candles(candles)
@@ -1235,10 +1303,14 @@ class ScannerRunner:
                 derivatives_enrichment=derivatives_enrichment,
                 global_context=global_context,
                 microstructure_flow=microstructure_flow,
+                order_book_liquidity=order_book_liquidity,
                 progress=progress,
             )
         strategy_execution = strategy_execution.model_copy(
-            update={"microstructure_flow": microstructure_flow}
+            update={
+                "microstructure_flow": microstructure_flow,
+                "order_book_liquidity": order_book_liquidity,
+            }
         )
         base_missing.extend(strategy_execution.strategy_missing_data)
         base_unverified.extend(strategy_execution.strategy_unverified_data)
@@ -1251,6 +1323,12 @@ class ScannerRunner:
             )
             base_missing.extend(flow_missing)
             base_unverified.extend(flow_unverified)
+        if order_book_liquidity is not None and not order_book_liquidity.verified:
+            book_missing, book_unverified = _order_book_data_health_diagnostics(
+                order_book_liquidity
+            )
+            base_missing.extend(book_missing)
+            base_unverified.extend(book_unverified)
         await _emit_progress(progress, "Scoring...")
 
         if not technical.is_valid:
@@ -1692,6 +1770,7 @@ class ScannerRunner:
         derivatives_enrichment: DerivativesEnrichmentResult | None = None,
         global_context: GlobalContextSnapshot | None = None,
         microstructure_flow: MicrostructureFlowSnapshot | None = None,
+        order_book_liquidity: OrderBookLiquiditySnapshot | None = None,
         progress: Callable[[str], Any] | None = None,
     ) -> _StrategyExecution:
         if not config.enable_strategy_output or config.strategy_name is None:
@@ -1746,6 +1825,7 @@ class ScannerRunner:
             derivatives_enrichment=derivatives_enrichment,
             global_context=global_context,
             microstructure_flow=microstructure_flow,
+            order_book_liquidity=order_book_liquidity,
         )
 
         strategy_results: dict[str, LiquidityGrabResult] = {}
@@ -2223,6 +2303,7 @@ class ScannerRunner:
             derivatives_result=derivatives_result,
             derivatives_enrichment=derivatives_enrichment,
             microstructure_flow=strategy_execution.microstructure_flow,
+            order_book_liquidity=strategy_execution.order_book_liquidity,
             risk_decision=risk_decision,
             score_result=score_result,
             liquidation_flow=strategy_execution.liquidation_flow,
@@ -3055,6 +3136,7 @@ def _liquidity_grab_input(
     timeframe_context: Mapping[str, Any] | None = None,
     global_context: GlobalContextSnapshot | None = None,
     microstructure_flow: MicrostructureFlowSnapshot | None = None,
+    order_book_liquidity: OrderBookLiquiditySnapshot | None = None,
 ) -> dict[str, Any]:
     support_levels = _strategy_levels(technical.nearest_support, technical.recent_range_low)
     resistance_levels = _strategy_levels(technical.nearest_resistance, technical.recent_range_high)
@@ -3063,6 +3145,12 @@ def _liquidity_grab_input(
     cvd_context = microstructure_flow.cvd_strategy_context() if microstructure_flow else None
     orderflow_context = (
         microstructure_flow.orderflow_strategy_context() if microstructure_flow else None
+    )
+    liquidity_below = (
+        order_book_liquidity.liquidity_below_context() if order_book_liquidity else None
+    )
+    liquidity_above = (
+        order_book_liquidity.liquidity_above_context() if order_book_liquidity else None
     )
     return {
         "symbol": symbol,
@@ -3092,6 +3180,8 @@ def _liquidity_grab_input(
         "derivatives_enrichment": derivatives_enrichment,
         "orderflow_summary": orderflow_context,
         "cvd": cvd_context,
+        "liquidity_below": liquidity_below,
+        "liquidity_above": liquidity_above,
         "liquidation_data": optional_data.liquidation_data,
         "btc_context": research_context.get("btc_context"),
         "btc_d_context": research_context.get("btc_d_context"),
@@ -3815,10 +3905,28 @@ def _microstructure_data_health_diagnostics(
     return (f"microstructure_flow: N/A ({details})",), ()
 
 
+def _order_book_data_health_diagnostics(
+    snapshot: OrderBookLiquiditySnapshot,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if snapshot.status != ContextStatus.STALE:
+        return (), ()
+    reason = snapshot.reason or "stale_book"
+    details = f"status={snapshot.status.value}, reason={reason}"
+    return (), (
+        f"liquidity_below: Unverified ({details})",
+        f"liquidity_above: Unverified ({details})",
+    )
+
+
 def _strategy_quality_unverified_data(
     values: Sequence[str],
 ) -> tuple[str, ...]:
-    research_only_prefixes = ("liquidation_data:", "microstructure_flow:")
+    research_only_prefixes = (
+        "liquidation_data:",
+        "microstructure_flow:",
+        "liquidity_below:",
+        "liquidity_above:",
+    )
     return tuple(
         value for value in values
         if not str(value).startswith(research_only_prefixes)

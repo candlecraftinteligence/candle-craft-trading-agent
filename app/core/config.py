@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     liquidation_flow_enabled: bool = False
     liquidation_flow_stale_sec: float = 30.0
     liquidation_flow_max_symbols: int = 100
+    order_book_liquidity_enabled: bool = False
+    order_book_liquidity_stale_sec: float = 5.0
+    order_book_liquidity_max_symbols: int = 100
+    order_book_liquidity_update_speed: Literal["100ms", "250ms", "500ms"] = "500ms"
+    order_book_liquidity_snapshot_limit: Literal[5, 10, 20, 50, 100, 500, 1000] = 500
+    order_book_liquidity_bootstrap_concurrency: int = 2
+    order_book_liquidity_event_buffer_size: int = 256
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -150,6 +157,42 @@ class Settings(BaseSettings):
         normalized = int(value)
         if normalized < 1 or normalized > 1024:
             raise ValueError("LIQUIDATION_FLOW_MAX_SYMBOLS must be between 1 and 1024")
+        return normalized
+
+    @field_validator("order_book_liquidity_stale_sec")
+    @classmethod
+    def validate_order_book_liquidity_stale_sec(cls, value: float) -> float:
+        normalized = float(value)
+        if normalized <= 0:
+            raise ValueError("ORDER_BOOK_LIQUIDITY_STALE_SEC must be greater than zero")
+        return normalized
+
+    @field_validator("order_book_liquidity_max_symbols")
+    @classmethod
+    def validate_order_book_liquidity_max_symbols(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized < 1 or normalized > 100:
+            raise ValueError("ORDER_BOOK_LIQUIDITY_MAX_SYMBOLS must be between 1 and 100")
+        return normalized
+
+    @field_validator("order_book_liquidity_bootstrap_concurrency")
+    @classmethod
+    def validate_order_book_liquidity_bootstrap_concurrency(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized < 1 or normalized > 8:
+            raise ValueError(
+                "ORDER_BOOK_LIQUIDITY_BOOTSTRAP_CONCURRENCY must be between 1 and 8"
+            )
+        return normalized
+
+    @field_validator("order_book_liquidity_event_buffer_size")
+    @classmethod
+    def validate_order_book_liquidity_event_buffer_size(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized < 1 or normalized > 4096:
+            raise ValueError(
+                "ORDER_BOOK_LIQUIDITY_EVENT_BUFFER_SIZE must be between 1 and 4096"
+            )
         return normalized
 
     @field_validator(

@@ -1229,6 +1229,8 @@ def _extract_levels(value: Any | None) -> list[Decimal]:
     if _is_missing(value):
         return []
     if isinstance(value, Mapping):
+        if value.get("usage") == "research_only":
+            return []
         levels: list[Decimal] = []
         for key in ("levels", "prices", "support", "resistance", "below", "above"):
             if key in value:

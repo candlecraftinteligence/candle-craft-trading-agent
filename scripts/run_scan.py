@@ -63,6 +63,7 @@ from app.context.btc_d import (  # noqa: E402
     DEFAULT_BTC_D_MAX_STALE_SECONDS,
 )
 from app.microstructure.liquidation_service import LiquidationFlowService  # noqa: E402
+from app.microstructure.order_book_service import OrderBookLiquidityService  # noqa: E402
 from app.microstructure.service import MicrostructureFlowService  # noqa: E402
 from app.command_center import (  # noqa: E402
     build_command_center_payload,
@@ -801,6 +802,13 @@ async def main(argv: Sequence[str] | None = None) -> None:
         liquidation_flow_enabled=runtime_settings.liquidation_flow_enabled,
         liquidation_flow_stale_sec=runtime_settings.liquidation_flow_stale_sec,
         liquidation_flow_max_symbols=runtime_settings.liquidation_flow_max_symbols,
+        order_book_liquidity_enabled=runtime_settings.order_book_liquidity_enabled,
+        order_book_liquidity_stale_sec=runtime_settings.order_book_liquidity_stale_sec,
+        order_book_liquidity_max_symbols=runtime_settings.order_book_liquidity_max_symbols,
+        order_book_liquidity_update_speed=runtime_settings.order_book_liquidity_update_speed,
+        order_book_liquidity_snapshot_limit=runtime_settings.order_book_liquidity_snapshot_limit,
+        order_book_liquidity_bootstrap_concurrency=runtime_settings.order_book_liquidity_bootstrap_concurrency,
+        order_book_liquidity_event_buffer_size=runtime_settings.order_book_liquidity_event_buffer_size,
     )
     symbol_priority_plan = _symbol_priority_plan_for_watchlist(args, watchlist)
 
@@ -2750,6 +2758,7 @@ def _scanner_runner_with_context(
     log: Any | None = None,
     btc_d_context_service: BtcDominanceContextService | None = None,
     microstructure_flow_service: MicrostructureFlowService | None = None,
+    order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
 ) -> Any:
     try:
@@ -2757,6 +2766,7 @@ def _scanner_runner_with_context(
             market_data_cache=cache,
             btc_d_context_service=btc_d_context_service,
             microstructure_flow_service=microstructure_flow_service,
+            order_book_liquidity_service=order_book_liquidity_service,
             liquidation_flow_service=liquidation_flow_service,
             log=log,
         )
@@ -2796,6 +2806,21 @@ def _microstructure_flow_service_for_config(
     return MicrostructureFlowService(
         stale_after_seconds=config.microstructure_flow_stale_sec,
         max_symbols=config.microstructure_flow_max_symbols,
+    )
+
+
+def _order_book_liquidity_service_for_config(
+    config: ScannerRunConfig,
+) -> OrderBookLiquidityService | None:
+    if not config.order_book_liquidity_enabled or config.exchange != "binance":
+        return None
+    return OrderBookLiquidityService(
+        stale_after_seconds=config.order_book_liquidity_stale_sec,
+        max_symbols=config.order_book_liquidity_max_symbols,
+        update_speed=config.order_book_liquidity_update_speed,
+        snapshot_limit=config.order_book_liquidity_snapshot_limit,
+        bootstrap_concurrency=config.order_book_liquidity_bootstrap_concurrency,
+        event_buffer_size=config.order_book_liquidity_event_buffer_size,
     )
 
 
@@ -2847,6 +2872,7 @@ async def _run_watch_mode(
 ) -> None:
     btc_d_context_service = _btc_d_context_service_for_config(config)
     microstructure_flow_service = _microstructure_flow_service_for_config(config)
+    order_book_liquidity_service = _order_book_liquidity_service_for_config(config)
     liquidation_flow_service = _liquidation_flow_service_for_config(config)
     legacy_watch_activation_delivery = _legacy_watch_activation_delivery_enabled(args)
     if legacy_watch_activation_delivery:
@@ -2898,6 +2924,8 @@ async def _run_watch_mode(
     failure_streak = 0
     if microstructure_flow_service is not None:
         await microstructure_flow_service.start(startup_queued_symbols)
+    if order_book_liquidity_service is not None:
+        await order_book_liquidity_service.start(startup_queued_symbols)
     if liquidation_flow_service is not None:
         await liquidation_flow_service.start(startup_queued_symbols)
     iteration_in_progress = False
@@ -2920,6 +2948,7 @@ async def _run_watch_mode(
                 console_presenter=console,
                 btc_d_context_service=btc_d_context_service,
                 microstructure_flow_service=microstructure_flow_service,
+                order_book_liquidity_service=order_book_liquidity_service,
                 liquidation_flow_service=liquidation_flow_service,
             )
             if iteration_error is not None:
@@ -3258,6 +3287,8 @@ async def _run_watch_mode(
     finally:
         if microstructure_flow_service is not None:
             await microstructure_flow_service.stop()
+        if order_book_liquidity_service is not None:
+            await order_book_liquidity_service.stop()
         if liquidation_flow_service is not None:
             await liquidation_flow_service.stop()
 
@@ -3271,6 +3302,7 @@ async def _attempt_watch_scan_iteration(
     console_presenter: ScannerConsolePresenter | None = None,
     btc_d_context_service: BtcDominanceContextService | None = None,
     microstructure_flow_service: MicrostructureFlowService | None = None,
+    order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
 ) -> tuple[WatchlistResolution | None, WatchScanExecution | None, Exception | SystemExit | None]:
     try:
@@ -3283,6 +3315,7 @@ async def _attempt_watch_scan_iteration(
             console_presenter=console_presenter,
             btc_d_context_service=btc_d_context_service,
             microstructure_flow_service=microstructure_flow_service,
+            order_book_liquidity_service=order_book_liquidity_service,
             liquidation_flow_service=liquidation_flow_service,
         )
     except (Exception, SystemExit) as exc:
@@ -3520,6 +3553,7 @@ async def _run_watch_scan_iteration(
     console_presenter: ScannerConsolePresenter | None = None,
     btc_d_context_service: BtcDominanceContextService | None = None,
     microstructure_flow_service: MicrostructureFlowService | None = None,
+    order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
 ) -> WatchScanExecution:
     phase_statuses = {"universe": "SUCCESS"}
@@ -3544,6 +3578,14 @@ async def _run_watch_scan_iteration(
             recoverable_errors.append(_watch_phase_error("microstructure_flow", exc))
         else:
             phase_statuses["microstructure_flow"] = "SUCCESS"
+    if order_book_liquidity_service is not None:
+        try:
+            await order_book_liquidity_service.reconcile_symbols(queued_symbols)
+        except Exception as exc:
+            phase_statuses["order_book_liquidity"] = "PARTIAL"
+            recoverable_errors.append(_watch_phase_error("order_book_liquidity", exc))
+        else:
+            phase_statuses["order_book_liquidity"] = "SUCCESS"
     if liquidation_flow_service is not None:
         try:
             await liquidation_flow_service.reconcile_symbols(queued_symbols)
@@ -3619,6 +3661,7 @@ async def _run_watch_scan_iteration(
             log=console_presenter.scanner_logger() if console_presenter is not None else None,
             btc_d_context_service=btc_d_context_service,
             microstructure_flow_service=microstructure_flow_service,
+            order_book_liquidity_service=order_book_liquidity_service,
             liquidation_flow_service=liquidation_flow_service,
         )
         try:
