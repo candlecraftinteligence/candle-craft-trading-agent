@@ -643,12 +643,22 @@ def _missing_data(
 
 
 def _unverified_data(*, warnings: Sequence[str], liquidation_data: Any | None) -> tuple[str, ...]:
+    if _verified_research_context(liquidation_data):
+        liquidation_data = None
     unverified: list[str] = []
     if warnings:
         unverified.append("derivatives: Unverified")
     if not _is_missing(liquidation_data):
         unverified.append("liquidation_data: Unverified")
     return _unique_strings(unverified)
+
+
+def _verified_research_context(value: Any | None) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and value.get("usage") == "research_only"
+        and value.get("status") == "VERIFIED"
+    )
 
 
 def _score_derivatives_context(
