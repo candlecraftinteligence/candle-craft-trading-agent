@@ -1262,7 +1262,7 @@ def _sweep_confluence(
     atr: Decimal,
     provided_liquidity: Any | None,
 ) -> str:
-    if not _is_missing(provided_liquidity):
+    if not _is_missing(provided_liquidity) and not _research_only_context(provided_liquidity):
         levels = _extract_levels(provided_liquidity)
         if any(abs(candidate - level) <= atr * Decimal("0.20") for candidate in levels):
             return "Verified HTF/user liquidity"
@@ -2691,6 +2691,8 @@ def _extract_levels(value: Any | None) -> list[Decimal]:
     if _is_missing(value):
         return []
     if isinstance(value, Mapping):
+        if _research_only_context(value):
+            return []
         levels: list[Decimal] = []
         for key in ("levels", "prices", "support", "resistance", "below", "above"):
             if key in value:
@@ -2714,6 +2716,10 @@ def _extract_levels(value: Any | None) -> list[Decimal]:
 
 
 def _levels_text(value: Any | None) -> str:
+    if _research_only_context(value):
+        summary = value.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
     levels = _extract_levels(value)
     if levels:
         return ", ".join(_display(_quantize(level)) for level in levels)

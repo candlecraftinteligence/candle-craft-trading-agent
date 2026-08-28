@@ -900,6 +900,8 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_Candle, ...], tup
 
 
 def _extract_levels(values: Any) -> tuple[Decimal, ...]:
+    if isinstance(values, Mapping) and values.get("usage") == "research_only":
+        return ()
     if values is None or values == NA:
         return ()
     if isinstance(values, (str, bytes)):

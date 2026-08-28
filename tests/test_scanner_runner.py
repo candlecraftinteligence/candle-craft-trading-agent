@@ -2185,3 +2185,204 @@ def test_disabled_liquidation_never_calls_service_or_changes_behavior() -> None:
 
     assert disabled.liquidation_flow is None
     assert _strategy_invariant_fields(disabled) == _strategy_invariant_fields(baseline)
+
+
+def _verified_order_book_snapshot(decision_at: datetime):
+    from app.microstructure.order_book_models import (
+        LiquidityBandSnapshot,
+        OrderBookLiquiditySnapshot,
+        VisibleLevelConcentration,
+    )
+
+    bands = {}
+    for band_bps in (10, 25, 50, 100):
+        bands[f"{band_bps}bps"] = LiquidityBandSnapshot(
+            band_bps=band_bps,
+            bid_quote_notional=Decimal("125000"),
+            ask_quote_notional=Decimal("100000"),
+            depth_imbalance=Decimal("0.11111111"),
+            bid_coverage_complete=True,
+            ask_coverage_complete=True,
+        )
+    return OrderBookLiquiditySnapshot(
+        symbol="BTCUSDT",
+        status=ContextStatus.VERIFIED,
+        observed_at=decision_at,
+        age_seconds=1,
+        synchronized=True,
+        last_update_id=123,
+        best_bid=Decimal("99999"),
+        best_ask=Decimal("100001"),
+        mid_price=Decimal("100000"),
+        spread_absolute=Decimal("2"),
+        spread_bps=Decimal("0.2"),
+        bands=bands,
+        furthest_bid_distance_bps=Decimal("120"),
+        furthest_ask_distance_bps=Decimal("120"),
+        largest_bid_level=VisibleLevelConcentration(
+            price=Decimal("99950"),
+            quote_notional=Decimal("50000"),
+            distance_bps=Decimal("5"),
+            share_of_observed_band=Decimal("0.4"),
+            band_bps=100,
+        ),
+        largest_ask_level=VisibleLevelConcentration(
+            price=Decimal("100050"),
+            quote_notional=Decimal("40000"),
+            distance_bps=Decimal("5"),
+            share_of_observed_band=Decimal("0.4"),
+            band_bps=100,
+        ),
+        level_count_bid=500,
+        level_count_ask=500,
+        resync_count=1,
+    )
+
+
+class _StaticOrderBookService:
+    def __init__(self, snapshot=None, *, error: Exception | None = None) -> None:
+        self.value = snapshot
+        self.error = error
+
+    def snapshot(self, symbol: str):
+        if self.error is not None:
+            raise self.error
+        return self.value.model_copy(update={"symbol": symbol})
+
+
+def _baseline_and_order_book_scan(snapshot):
+    decision_at = datetime(2026, 8, 28, 12, tzinfo=timezone.utc)
+    candles = {"BTCUSDT": _strategy_pullback_candles()}
+    baseline = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+        ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
+    )
+    enriched = run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            order_book_liquidity_service=_StaticOrderBookService(snapshot),
+        ).run(
+            _config(
+                ["BTCUSDT"],
+                decision_timestamp=decision_at,
+                order_book_liquidity_enabled=True,
+            )
+        )
+    )
+    return baseline, enriched
+
+
+def test_verified_order_book_is_research_only_and_changes_no_strategy_or_delivery_output() -> None:
+    decision_at = datetime(2026, 8, 28, 12, tzinfo=timezone.utc)
+    baseline, enriched = _baseline_and_order_book_scan(
+        _verified_order_book_snapshot(decision_at)
+    )
+    before = baseline.results[0]
+    after = enriched.results[0]
+    before_setup = before.strategy_results["swing"].swing
+    after_setup = after.strategy_results["swing"].swing
+
+    assert after.order_book_liquidity.status == ContextStatus.VERIFIED
+    assert after.status == before.status
+    assert after.valid_strategy_modes == before.valid_strategy_modes
+    assert after_setup.is_valid == before_setup.is_valid
+    assert after_setup.first_failed_gate == before_setup.first_failed_gate
+    assert after_setup.trust_meter == before_setup.trust_meter
+    assert after_setup.gate_result == before_setup.gate_result
+    assert (after_setup.entry_low, after_setup.entry_high, after_setup.stop) == (
+        before_setup.entry_low,
+        before_setup.entry_high,
+        before_setup.stop,
+    )
+    assert (after_setup.tp1, after_setup.tp2, after_setup.tp3) == (
+        before_setup.tp1,
+        before_setup.tp2,
+        before_setup.tp3,
+    )
+    assert after_setup.rr_to_tp2 == before_setup.rr_to_tp2
+    assert after.score_result.total_score == before.score_result.total_score
+    assert after.score_result.grade == before.score_result.grade
+    assert after.setup_quality.quality_score == before.setup_quality.quality_score
+    assert after.setup_quality.quality_grade == before.setup_quality.quality_grade
+    assert after.setup_quality.quality_state == before.setup_quality.quality_state
+    assert after.setup_quality.action_label == before.setup_quality.action_label
+    assert after.trade_idea.take_profits == before.trade_idea.take_profits
+    assert after.trade_idea.best_rr == before.trade_idea.best_rr
+    assert after.trade_idea.confidence_score == before.trade_idea.confidence_score
+    assert after.trade_idea.grade == before.trade_idea.grade
+    assert after.lifecycle_state == before.lifecycle_state
+    assert after.lifecycle_transition == before.lifecycle_transition
+    assert enriched.trade_ideas_created == baseline.trade_ideas_created
+    assert enriched.dry_run_alerts_created == baseline.dry_run_alerts_created
+    assert after.alert_result.status == before.alert_result.status
+    assert after.alert_result.channel == before.alert_result.channel
+    assert after.alert_result.dry_run == before.alert_result.dry_run
+    removed = set(before.strategy_missing_data) - set(after.strategy_missing_data)
+    assert removed == {"liquidity_below: N/A", "liquidity_above: N/A"}
+    data_health = confirmed_data_health_for_symbol(after)
+    assert "liquidity_below" not in data_health.optional_missing
+    assert "liquidity_above" not in data_health.optional_missing
+    assert data_health.blocked is False
+
+
+def test_stale_order_book_is_optional_unverified_without_quality_or_plan_change() -> None:
+    decision_at = datetime(2026, 8, 28, 12, tzinfo=timezone.utc)
+    stale = _verified_order_book_snapshot(decision_at).model_copy(
+        update={"status": ContextStatus.STALE, "reason": "stale_book", "age_seconds": 10}
+    )
+    baseline, enriched = _baseline_and_order_book_scan(stale)
+    before = baseline.results[0]
+    after = enriched.results[0]
+    before_setup = before.strategy_results["swing"].swing
+    after_setup = after.strategy_results["swing"].swing
+    assert after_setup.trust_meter == before_setup.trust_meter
+    assert after_setup.gate_result == before_setup.gate_result
+    assert after_setup.rr_to_tp2 == before_setup.rr_to_tp2
+    assert (after_setup.tp1, after_setup.tp2, after_setup.tp3) == (
+        before_setup.tp1,
+        before_setup.tp2,
+        before_setup.tp3,
+    )
+    assert after.score_result.total_score == before.score_result.total_score
+    assert after.score_result.grade == before.score_result.grade
+    assert after.setup_quality.quality_score == before.setup_quality.quality_score
+    assert after.setup_quality.quality_grade == before.setup_quality.quality_grade
+    assert after.setup_quality.quality_state == before.setup_quality.quality_state
+    assert after.lifecycle_state == before.lifecycle_state
+    assert after.lifecycle_transition == before.lifecycle_transition
+    assert after.alert_result.status == before.alert_result.status
+    assert any(item.startswith("liquidity_below: Unverified") for item in after.unverified_data)
+    assert any(item.startswith("liquidity_above: Unverified") for item in after.unverified_data)
+    data_health = confirmed_data_health_for_symbol(after)
+    assert "liquidity_below" in data_health.optional_unverified
+    assert "liquidity_above" in data_health.optional_unverified
+    assert data_health.blocked is False
+
+
+def test_unavailable_order_book_keeps_optional_na_and_scanner_completes() -> None:
+    from app.microstructure.order_book_models import OrderBookLiquiditySnapshot
+
+    unavailable = OrderBookLiquiditySnapshot.unavailable(
+        symbol="BTCUSDT",
+        reason="snapshot_failed",
+        status=ContextStatus.ERROR,
+    )
+    baseline, enriched = _baseline_and_order_book_scan(unavailable)
+    before = baseline.results[0]
+    after = enriched.results[0]
+    assert after.status == before.status
+    assert after.score_result == before.score_result
+    assert after.setup_quality == before.setup_quality
+    assert after.trade_idea == before.trade_idea
+    assert after.lifecycle_state == before.lifecycle_state
+    assert after.lifecycle_transition == before.lifecycle_transition
+    assert "liquidity_below: N/A" in after.strategy_missing_data
+    assert after.alert_result == before.alert_result
+    assert enriched.trade_ideas_created == baseline.trade_ideas_created
+    assert enriched.dry_run_alerts_created == baseline.dry_run_alerts_created
+    assert "liquidity_above: N/A" in after.strategy_missing_data
+    data_health = confirmed_data_health_for_symbol(after)
+    assert "liquidity_below" in data_health.optional_missing
+    assert "liquidity_above" in data_health.optional_missing
+    assert data_health.blocked is False
