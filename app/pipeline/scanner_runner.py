@@ -82,6 +82,23 @@ from app.context.btc_d import (
     DEFAULT_BTC_D_MAX_STALE_SECONDS,
     DEFAULT_BTC_D_REQUEST_TIMEOUT_SECONDS,
 )
+from app.context.macro_calendar import (
+    DEFAULT_MACRO_CACHE_TTL_SECONDS,
+    DEFAULT_MACRO_MAX_STALE_SECONDS,
+    MacroCalendarService,
+    default_macro_calendar_service,
+)
+from app.context.macro_events import (
+    MacroEventRiskContext,
+    MacroEventRiskSnapshot,
+    MacroSourceHealth,
+    MacroSourceStatus,
+    MacroVerificationStatus,
+    build_macro_event_snapshot,
+)
+from app.context.macro_scanner_enrichment import (
+    apply_macro_event_context_to_symbol_result,
+)
 from app.core.process_memory import ProcessMemoryReading, read_process_rss
 from app.data.candle_integrity import (
     CandleIntegrityError,
@@ -252,6 +269,10 @@ class ScannerRunConfig(BaseModel):
     btc_d_context_enabled: bool = True
     btc_d_cache_ttl_sec: int = DEFAULT_BTC_D_CACHE_TTL_SECONDS
     btc_d_request_timeout_sec: float = DEFAULT_BTC_D_REQUEST_TIMEOUT_SECONDS
+    macro_event_context_enabled: bool = False
+    macro_event_cache_ttl_sec: int = DEFAULT_MACRO_CACHE_TTL_SECONDS
+    macro_event_max_stale_sec: int = DEFAULT_MACRO_MAX_STALE_SECONDS
+    macro_event_request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC
     microstructure_flow_enabled: bool = False
     microstructure_flow_stale_sec: float = 5.0
     microstructure_flow_max_symbols: int = 100
@@ -357,6 +378,24 @@ class ScannerRunConfig(BaseModel):
             raise ValueError("btc_d_cache_ttl_sec must be zero or greater")
         return value
 
+    @field_validator("macro_event_cache_ttl_sec", "macro_event_max_stale_sec")
+    @classmethod
+    def _macro_cache_values_in_range(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("macro event cache values must be zero or greater")
+        return value
+
+    @field_validator("macro_event_request_timeout_sec", mode="before")
+    @classmethod
+    def _macro_request_timeout_positive(cls, value: Any) -> float:
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("macro event request timeout must be numeric") from exc
+        if normalized <= 0:
+            raise ValueError("macro event request timeout must be greater than zero")
+        return normalized
+
     @field_validator("microstructure_flow_max_symbols")
     @classmethod
     def _microstructure_max_symbols_in_range(cls, value: int) -> int:
@@ -433,6 +472,11 @@ class ScannerRunConfig(BaseModel):
             raise ValueError("min_score_for_idea must be between 0 and 100")
         if self.enable_strategy_output and self.strategy_name is not None and not self.strategy_modes:
             raise ValueError("strategy_modes must include at least one mode when strategy output is enabled")
+        if self.macro_event_max_stale_sec < self.macro_event_cache_ttl_sec:
+            raise ValueError(
+                "macro_event_max_stale_sec must be at least "
+                "macro_event_cache_ttl_sec"
+            )
         return self
 
     @property
@@ -501,6 +545,7 @@ class ScannerSymbolResult(BaseModel):
     rejection_reasons: tuple[str, ...] = ()
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
+    event_risk_context: MacroEventRiskContext | None = None
     sector_rotation: SectorRotationContext | None = None
     sector_member_feature: SectorMemberFeature | None = Field(
         default=None,
@@ -664,6 +709,7 @@ class ScannerRunResult(BaseModel):
     symbol_health: dict[str, Any] = Field(default_factory=dict)
     scanner_process_summary: dict[str, Any] = Field(default_factory=dict)
     global_context: GlobalContextSnapshot | None = None
+    macro_event_snapshot: MacroEventRiskSnapshot | None = None
     sector_rotation_snapshot: SectorRotationSnapshot | None = None
 
     model_config = ConfigDict(frozen=True)
@@ -773,6 +819,7 @@ class ScannerRunner:
         microstructure_flow_service: MicrostructureFlowService | None = None,
         order_book_liquidity_service: OrderBookLiquidityService | None = None,
         sector_rotation_engine: SectorRotationEngine | None = None,
+        macro_calendar_service: MacroCalendarService | None = None,
         clock: Callable[[], datetime] | None = None,
         process_memory_sampler: Callable[[], ProcessMemoryReading] | None = None,
         liquidation_flow_service: LiquidationFlowService | None = None,
@@ -792,6 +839,7 @@ class ScannerRunner:
         self.microstructure_flow_service = microstructure_flow_service
         self.order_book_liquidity_service = order_book_liquidity_service
         self.sector_rotation_engine = sector_rotation_engine or SectorRotationEngine()
+        self.macro_calendar_service = macro_calendar_service
         self.clock = clock or (lambda: datetime.now(UTC))
         self.process_memory_sampler = process_memory_sampler or read_process_rss
         self.liquidation_flow_service = liquidation_flow_service
@@ -820,6 +868,7 @@ class ScannerRunner:
         ]
         client, owns_client = self._exchange_client_for(run_config)
         global_context: GlobalContextSnapshot | None = None
+        macro_event_snapshot: MacroEventRiskSnapshot | None = None
         results: list[ScannerSymbolResult] = []
         total_symbols = len(run_config.symbols)
         scan_started = time.monotonic()
@@ -834,6 +883,11 @@ class ScannerRunner:
         )
 
         try:
+            if run_config.macro_event_context_enabled:
+                macro_event_snapshot = await self._build_macro_event_snapshot(
+                    run_config,
+                    progress=progress,
+                )
             if run_config.global_context_enabled:
                 global_context = await self._build_global_context(
                     client,
@@ -901,6 +955,11 @@ class ScannerRunner:
                         reason,
                         runtime_seconds=elapsed,
                         timeout_status="request_timeout" if isinstance(exc, ExchangeTimeoutError) else "none",
+                    )
+                if macro_event_snapshot is not None:
+                    symbol_result = apply_macro_event_context_to_symbol_result(
+                        symbol_result,
+                        macro_event_snapshot,
                     )
                 symbol_elapsed = time.monotonic() - symbol_started
                 symbol_result = _with_symbol_runtime(
@@ -1017,6 +1076,7 @@ class ScannerRunner:
             regime_adjustments=market_regime.adjustment,
             regime_warnings=market_regime.warnings,
             global_context=global_context,
+            macro_event_snapshot=macro_event_snapshot,
             sector_rotation_snapshot=sector_snapshot,
         )
 
@@ -1041,6 +1101,52 @@ class ScannerRunner:
                 )
             client = CachedMarketDataClient(client, cache)
         return client, owns_client
+
+    async def _build_macro_event_snapshot(
+        self,
+        config: ScannerRunConfig,
+        *,
+        progress: Callable[[str], Any] | None = None,
+    ) -> MacroEventRiskSnapshot:
+        if config.decision_timestamp is None:
+            raise RuntimeError("scanner decision_timestamp must be resolved before macro context")
+        await _emit_progress(progress, "Preparing official macro event context...")
+        try:
+            service = self.macro_calendar_service
+            if service is None:
+                service = default_macro_calendar_service(
+                    timeout_seconds=config.macro_event_request_timeout_sec,
+                    cache_ttl_seconds=config.macro_event_cache_ttl_sec,
+                    max_stale_seconds=config.macro_event_max_stale_sec,
+                    clock=self.clock,
+                    log=self.logger,
+                )
+                self.macro_calendar_service = service
+            snapshot = await service.snapshot(as_of=config.decision_timestamp)
+        except Exception as exc:
+            reason = f"macro calendar service failed safely: {_clean_error_message(exc)}"
+            self.logger.error(reason)
+            snapshot = build_macro_event_snapshot(
+                generated_at=config.decision_timestamp,
+                events=(),
+                sources=(
+                    MacroSourceHealth(
+                        source="macro_calendar_service",
+                        source_url="official_source_aggregation",
+                        status=MacroSourceStatus.UNAVAILABLE,
+                        verification=MacroVerificationStatus.UNVERIFIED,
+                        reason=reason,
+                    ),
+                ),
+            )
+        self.logger.info(
+            "Macro calendar status=%s events=%s provider_requests=%s cache_hit=%s.",
+            snapshot.calendar_status.value,
+            len(snapshot.events),
+            snapshot.provider_requests,
+            snapshot.cache_hit,
+        )
+        return snapshot
 
     async def _build_global_context(
         self,

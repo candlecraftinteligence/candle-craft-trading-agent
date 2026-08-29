@@ -2811,6 +2811,8 @@ def _research_only_context(value: Any | None) -> bool:
 
 
 def _event_active(value: Any | None) -> bool:
+    if _research_only_context(value):
+        return False
     return _context_has(value, "active", "within_30_minutes", "within 30 minutes", "major scheduled news")
 
 
