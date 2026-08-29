@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     btc_d_context_enabled: bool = True
     btc_d_cache_ttl_sec: int = 300
     btc_d_request_timeout_sec: float = 5.0
+    macro_event_context_enabled: bool = True
+    macro_event_cache_ttl_sec: int = 6 * 60 * 60
+    macro_event_max_stale_sec: int = 48 * 60 * 60
+    macro_event_request_timeout_sec: float = 8.0
     microstructure_flow_enabled: bool = False
     microstructure_flow_stale_sec: float = 5.0
     microstructure_flow_max_symbols: int = 100
@@ -125,6 +129,19 @@ class Settings(BaseSettings):
         normalized = float(value)
         if normalized <= 0:
             raise ValueError("BTC_D_REQUEST_TIMEOUT_SEC must be greater than zero")
+        return normalized
+
+    @field_validator("macro_event_cache_ttl_sec", "macro_event_max_stale_sec")
+    @classmethod
+    def validate_macro_event_cache_values(cls, value: int) -> int:
+        return max(0, int(value))
+
+    @field_validator("macro_event_request_timeout_sec")
+    @classmethod
+    def validate_macro_event_request_timeout(cls, value: float) -> float:
+        normalized = float(value)
+        if normalized <= 0:
+            raise ValueError("MACRO_EVENT_REQUEST_TIMEOUT_SEC must be greater than zero")
         return normalized
 
     @field_validator("microstructure_flow_stale_sec")
@@ -224,6 +241,11 @@ class Settings(BaseSettings):
     def enforce_manual_only_phase(self) -> Settings:
         if self.order_execution_enabled:
             raise ValueError("ORDER_EXECUTION_ENABLED must remain false for manual Telegram signal delivery mode.")
+        if self.macro_event_max_stale_sec < self.macro_event_cache_ttl_sec:
+            raise ValueError(
+                "MACRO_EVENT_MAX_STALE_SEC must be at least "
+                "MACRO_EVENT_CACHE_TTL_SEC"
+            )
         return self
 
 

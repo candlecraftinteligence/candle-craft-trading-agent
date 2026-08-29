@@ -62,6 +62,10 @@ from app.context.btc_d import (  # noqa: E402
     DEFAULT_BTC_D_FRESH_SECONDS,
     DEFAULT_BTC_D_MAX_STALE_SECONDS,
 )
+from app.context.macro_calendar import (  # noqa: E402
+    MacroCalendarService,
+    default_macro_calendar_service,
+)
 from app.microstructure.liquidation_service import LiquidationFlowService  # noqa: E402
 from app.microstructure.order_book_service import OrderBookLiquidityService  # noqa: E402
 from app.microstructure.service import MicrostructureFlowService  # noqa: E402
@@ -796,6 +800,10 @@ async def main(argv: Sequence[str] | None = None) -> None:
         btc_d_context_enabled=runtime_settings.btc_d_context_enabled,
         btc_d_cache_ttl_sec=runtime_settings.btc_d_cache_ttl_sec,
         btc_d_request_timeout_sec=runtime_settings.btc_d_request_timeout_sec,
+        macro_event_context_enabled=runtime_settings.macro_event_context_enabled,
+        macro_event_cache_ttl_sec=runtime_settings.macro_event_cache_ttl_sec,
+        macro_event_max_stale_sec=runtime_settings.macro_event_max_stale_sec,
+        macro_event_request_timeout_sec=runtime_settings.macro_event_request_timeout_sec,
         microstructure_flow_enabled=runtime_settings.microstructure_flow_enabled,
         microstructure_flow_stale_sec=runtime_settings.microstructure_flow_stale_sec,
         microstructure_flow_max_symbols=runtime_settings.microstructure_flow_max_symbols,
@@ -2757,6 +2765,7 @@ def _scanner_runner_with_context(
     *,
     log: Any | None = None,
     btc_d_context_service: BtcDominanceContextService | None = None,
+    macro_calendar_service: MacroCalendarService | None = None,
     microstructure_flow_service: MicrostructureFlowService | None = None,
     order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
@@ -2765,6 +2774,7 @@ def _scanner_runner_with_context(
         return ScannerRunner(
             market_data_cache=cache,
             btc_d_context_service=btc_d_context_service,
+            macro_calendar_service=macro_calendar_service,
             microstructure_flow_service=microstructure_flow_service,
             order_book_liquidity_service=order_book_liquidity_service,
             liquidation_flow_service=liquidation_flow_service,
@@ -2795,6 +2805,18 @@ def _btc_d_context_service_for_config(
             DEFAULT_BTC_D_MAX_STALE_SECONDS,
             config.btc_d_cache_ttl_sec * 12,
         ),
+    )
+
+
+def _macro_calendar_service_for_config(
+    config: ScannerRunConfig,
+) -> MacroCalendarService | None:
+    if not config.macro_event_context_enabled:
+        return None
+    return default_macro_calendar_service(
+        timeout_seconds=config.macro_event_request_timeout_sec,
+        cache_ttl_seconds=config.macro_event_cache_ttl_sec,
+        max_stale_seconds=config.macro_event_max_stale_sec,
     )
 
 
@@ -2871,6 +2893,7 @@ async def _run_watch_mode(
     command_used: str,
 ) -> None:
     btc_d_context_service = _btc_d_context_service_for_config(config)
+    macro_calendar_service = _macro_calendar_service_for_config(config)
     microstructure_flow_service = _microstructure_flow_service_for_config(config)
     order_book_liquidity_service = _order_book_liquidity_service_for_config(config)
     liquidation_flow_service = _liquidation_flow_service_for_config(config)
@@ -2947,6 +2970,7 @@ async def _run_watch_mode(
                 iteration=iteration,
                 console_presenter=console,
                 btc_d_context_service=btc_d_context_service,
+                macro_calendar_service=macro_calendar_service,
                 microstructure_flow_service=microstructure_flow_service,
                 order_book_liquidity_service=order_book_liquidity_service,
                 liquidation_flow_service=liquidation_flow_service,
@@ -3301,6 +3325,7 @@ async def _attempt_watch_scan_iteration(
     iteration: int,
     console_presenter: ScannerConsolePresenter | None = None,
     btc_d_context_service: BtcDominanceContextService | None = None,
+    macro_calendar_service: MacroCalendarService | None = None,
     microstructure_flow_service: MicrostructureFlowService | None = None,
     order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
@@ -3314,6 +3339,7 @@ async def _attempt_watch_scan_iteration(
             iteration=iteration,
             console_presenter=console_presenter,
             btc_d_context_service=btc_d_context_service,
+            macro_calendar_service=macro_calendar_service,
             microstructure_flow_service=microstructure_flow_service,
             order_book_liquidity_service=order_book_liquidity_service,
             liquidation_flow_service=liquidation_flow_service,
@@ -3552,6 +3578,7 @@ async def _run_watch_scan_iteration(
     iteration: int,
     console_presenter: ScannerConsolePresenter | None = None,
     btc_d_context_service: BtcDominanceContextService | None = None,
+    macro_calendar_service: MacroCalendarService | None = None,
     microstructure_flow_service: MicrostructureFlowService | None = None,
     order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
@@ -3660,6 +3687,7 @@ async def _run_watch_scan_iteration(
             cache,
             log=console_presenter.scanner_logger() if console_presenter is not None else None,
             btc_d_context_service=btc_d_context_service,
+            macro_calendar_service=macro_calendar_service,
             microstructure_flow_service=microstructure_flow_service,
             order_book_liquidity_service=order_book_liquidity_service,
             liquidation_flow_service=liquidation_flow_service,
