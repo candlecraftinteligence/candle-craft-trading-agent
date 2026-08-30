@@ -359,9 +359,9 @@ def test_triggered_is_public_once_and_semantically_not_confirmed(tmp_path) -> No
     assert first.sent == 1
     assert repeated.sent == 0
     assert len(sender.messages) == 1
-    assert "TRIGGERED" in sender.messages[0]
-    assert "Awaiting Final Confirmation" in sender.messages[0]
-    assert "This is not a confirmed signal" in sender.messages[0]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "CONFIRMATION PENDING" in sender.messages[0]
+    assert "final confirmation gate has not been earned" in sender.messages[0]
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts(signal_id=first.deliveries[0].signal_id)
     sent = [attempt for attempt in attempts if attempt.telegram_status == "sent"]
@@ -389,8 +389,8 @@ def test_confirmed_is_public_once_and_accepts_real_lifecycle_b_plus(tmp_path) ->
     assert first.sent == 1
     assert repeated.sent == 0
     assert len(sender.messages) == 1
-    assert "CONFIRMED SIGNAL" in sender.messages[0]
-    assert "Confirmation criteria satisfied" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[0]
+    assert "🐺 Signal confirmed. Execution stays disciplined." in sender.messages[0]
 
 
 
@@ -417,8 +417,8 @@ def test_triggered_does_not_suppress_later_confirmed(tmp_path) -> None:
     assert second.sent == 1
     assert repeated.sent == 0
     assert len(sender.messages) == 2
-    assert "TRIGGERED" in sender.messages[0]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]
     assert first.deliveries[0].signal_id == second.deliveries[0].signal_id
 
 
@@ -765,8 +765,8 @@ def test_equivalent_trigger_does_not_suppress_confirmed_across_mode_change(tmp_p
     assert second.sent == 1
     assert repeated.sent == 0
     assert len(sender.messages) == 2
-    assert "TRIGGERED" in sender.messages[0]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]
 
 
 def test_retryable_equivalent_mode_projection_retries_prior_committed_intent(tmp_path) -> None:
@@ -1038,10 +1038,10 @@ def test_same_geometry_triggered_and_confirmed_deliver_once_per_generation(tmp_p
         deliveries.append(first.deliveries[0])
 
     assert len(sender.messages) == 4
-    assert "TRIGGERED" in sender.messages[0]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
-    assert "TRIGGERED" in sender.messages[2]
-    assert "CONFIRMED SIGNAL" in sender.messages[3]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert "HUNT ACTIVE" in sender.messages[2]
+    assert "SIGNAL CONFIRMED" in sender.messages[3]
     assert deliveries[0].signal_id == deliveries[1].signal_id
     assert deliveries[2].signal_id == deliveries[3].signal_id
     assert deliveries[0].signal_id != deliveries[2].signal_id
@@ -1055,8 +1055,8 @@ def test_same_scan_triggered_and_confirmed_are_delivered_in_order(tmp_path) -> N
     summary = run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="eth-scan"))
 
     assert summary.sent >= 2
-    assert "TRIGGERED" in sender.messages[0]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts()
     public_initial = [
@@ -1109,8 +1109,8 @@ def test_full_eth_sequence_preserves_both_public_attempts_before_management(tmp_
     assert attempted_types.index(TelegramAlertType.SETUP_TRIGGERED.value) < attempted_types.index(
         TelegramAlertType.SIGNAL_CONFIRMED.value
     )
-    assert "TRIGGERED" in sender.messages[0]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]
     limit_attempt = next(
         attempt for attempt in attempts if attempt.attempted_alert_type == TelegramAlertType.LIMIT_HIT.value
     )
@@ -1161,7 +1161,7 @@ def test_triggered_timeout_does_not_suppress_confirmed_attempt(tmp_path) -> None
         ("setup_triggered", "RESERVED", "RETRYABLE"),
         ("signal_confirmed", "SENT", "SENT"),
     ]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]
 
 
 @pytest.mark.parametrize(
@@ -1249,8 +1249,8 @@ def test_retryable_triggered_remains_recoverable_when_confirmed_succeeds(tmp_pat
 
     assert first.failed == 1
     assert first.sent == 1
-    assert "TRIGGERED" in sender.messages[0]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         initial_states = repository._connection.execute(
             """
@@ -1271,7 +1271,7 @@ def test_retryable_triggered_remains_recoverable_when_confirmed_succeeds(tmp_pat
     assert recovered.sent == 1
     assert repeated.sent == 0
     assert len(sender.messages) == 3
-    assert "TRIGGERED" in sender.messages[2]
+    assert "HUNT ACTIVE" in sender.messages[2]
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         final_states = repository._connection.execute(
             """
@@ -1398,8 +1398,8 @@ def test_restart_after_triggered_sends_only_missing_confirmed(tmp_path) -> None:
 
     assert first.sent == 1
     assert resumed.sent >= 1
-    assert all("TRIGGERED" not in message for message in second_sender.messages)
-    assert "CONFIRMED SIGNAL" in second_sender.messages[0]
+    assert all("HUNT ACTIVE" not in message for message in second_sender.messages)
+    assert "SIGNAL CONFIRMED" in second_sender.messages[0]
 
 
 def test_duplicate_public_transition_in_same_batch_sends_once(tmp_path) -> None:
@@ -1459,8 +1459,8 @@ def test_per_symbol_batch_path_delivers_triggered_then_confirmed(tmp_path) -> No
         TelegramAlertType.SETUP_TRIGGERED.value,
         TelegramAlertType.SIGNAL_CONFIRMED.value,
     ]
-    assert "TRIGGERED" in sender.messages[0]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]
 
 
 def test_executing_or_managing_alone_does_not_synthesize_confirmed(tmp_path) -> None:
@@ -1477,7 +1477,7 @@ def test_executing_or_managing_alone_does_not_synthesize_confirmed(tmp_path) -> 
         with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
             attempts = repository.list_attempts()
         assert not any(item.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value for item in attempts)
-        assert not any("CONFIRMED SIGNAL" in message for message in sender.messages)
+        assert not any("SIGNAL CONFIRMED" in message for message in sender.messages)
 
 
 def test_missing_credentials_block_each_public_transition_safely(tmp_path) -> None:
@@ -1520,8 +1520,8 @@ def test_scanner_delivery_has_no_polling_listener_dependency(tmp_path) -> None:
     summary = run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="no-listener"))
 
     assert summary.sent >= 2
-    assert "TRIGGERED" in sender.messages[0]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]
 
 
 def test_concurrent_polling_listener_does_not_change_scanner_sender_semantics(tmp_path) -> None:
@@ -1549,5 +1549,5 @@ def test_concurrent_polling_listener_does_not_change_scanner_sender_semantics(tm
 
     summary = run(scenario())
     assert summary.sent >= 2
-    assert "TRIGGERED" in sender.messages[0]
-    assert "CONFIRMED SIGNAL" in sender.messages[1]
+    assert "HUNT ACTIVE" in sender.messages[0]
+    assert "SIGNAL CONFIRMED" in sender.messages[1]

@@ -457,7 +457,7 @@ def test_same_scan_triggered_send_is_independent_of_confirmed_prefilter_rejectio
     assert summary.sent == 1
     assert summary.blocked == 1
     assert len(sender.messages) == 1
-    assert "TRIGGERED" in sender.messages[0]
+    assert "HUNT ACTIVE" in sender.messages[0]
     attempts = _confirmed_attempts(db_path)
     assert len(attempts) == 1
     assert attempts[0].telegram_status == "blocked"

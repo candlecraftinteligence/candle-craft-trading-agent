@@ -58,17 +58,17 @@ class SignalEdgeEvidence:
 
 PUBLIC_STATUS_BY_ALERT_TYPE = {
     TelegramAlertType.RESEARCH_WATCH: "RESEARCH WATCH",
-    TelegramAlertType.WATCHLIST: "WATCHLIST",
-    TelegramAlertType.SETUP_TRIGGERED: "TRIGGERED",
-    TelegramAlertType.SIGNAL_CONFIRMED: "CONFIRMED",
-    TelegramAlertType.LIMIT_HIT: "ENTRY ZONE TOUCHED",
-    TelegramAlertType.TP1_HIT: "TP1 HIT",
-    TelegramAlertType.TP2_HIT: "TP2 HIT",
-    TelegramAlertType.TP3_HIT: "TP3 HIT",
-    TelegramAlertType.SL_HIT: "STOP HIT",
-    TelegramAlertType.INVALIDATED: "INVALIDATED",
-    TelegramAlertType.EXPIRED: "INVALIDATED",
-    TelegramAlertType.NO_LONGER_TRACKING: "INVALIDATED",
+    TelegramAlertType.WATCHLIST: "ON THE RADAR",
+    TelegramAlertType.SETUP_TRIGGERED: "HUNT ACTIVE — CONFIRMATION PENDING",
+    TelegramAlertType.SIGNAL_CONFIRMED: "SIGNAL CONFIRMED",
+    TelegramAlertType.LIMIT_HIT: "ZONE ENGAGED",
+    TelegramAlertType.TP1_HIT: "TP1 SECURED",
+    TelegramAlertType.TP2_HIT: "TP2 SECURED",
+    TelegramAlertType.TP3_HIT: "FULL TARGET SEQUENCE COMPLETE",
+    TelegramAlertType.SL_HIT: "SETUP INVALIDATED",
+    TelegramAlertType.INVALIDATED: "SETUP INVALIDATED",
+    TelegramAlertType.EXPIRED: "WATCH EXPIRED",
+    TelegramAlertType.NO_LONGER_TRACKING: "NO LONGER TRACKING",
 }
 
 
@@ -242,28 +242,34 @@ def _format_public_signal_message(
     triggered: bool = False,
 ) -> str:
     edge_lines = _public_edge_lines(message)
+    state_lines = _public_state_summary_lines(confirmed=confirmed, triggered=triggered)
+    intelligence_section = (
+        ("\U0001F9E0 INTELLIGENCE", *edge_lines, "", COMPACT_SEPARATOR, "")
+        if edge_lines
+        else ()
+    )
     return _join(
-        "\U0001F43A Candle Craft Intelligence",
+        f"\U0001F43A {format_symbol(message.symbol)} {MIDDLE_DOT} {format_direction(message.direction)} {MIDDLE_DOT} {_public_setup_style(message)}",
         "",
-        f"{format_symbol(message.symbol)} {MIDDLE_DOT} {format_direction(message.direction)} {MIDDLE_DOT} {_public_setup_style(message)}",
+        _public_status_display(message, confirmed=confirmed, triggered=triggered),
+        "",
         _public_grade_score_rr_line(message),
-        f"Status: {_public_status_display(message, confirmed=confirmed, triggered=triggered)}",
-        *_public_state_summary_lines(confirmed=confirmed, triggered=triggered),
-        "",
-        *_public_liquidity_lines(message),
+        *(("", *state_lines) if state_lines else ()),
         "",
         COMPACT_SEPARATOR,
         "",
-        "\U0001F3AF Trade Map",
+        "\U0001F3AF TRADE MAP",
         *_public_compact_trade_map_lines(message),
         "",
         COMPACT_SEPARATOR,
         "",
-        *(("\U0001F9E0 Edge", *edge_lines, "") if edge_lines else ()),
-        "\u26A0\ufe0f Execution",
+        *intelligence_section,
+        "\u2694\ufe0f EXECUTION",
         *_public_execution_lines(message, confirmed=confirmed, triggered=triggered),
         "",
         _public_compact_invalidation_line(message),
+        "",
+        _public_closing_line(message, confirmed=confirmed, triggered=triggered),
         "",
         "Not financial advice.",
         FOOTER,
@@ -335,7 +341,7 @@ def _public_grade_score_rr_line(message: TelegramSignalMessage) -> str:
     grade = _quality_display(_first_display(context.grade, message.quality))
     score = _display(_first_display(context.quality_score, message.quality_score))
     rr = format_rr(_first_display(context.rr, message.planned_rr))
-    return f"Grade: {grade} | Score: {score} | RR: {rr}"
+    return f"{grade} {MIDDLE_DOT} Score {score} {MIDDLE_DOT} RR {rr}"
 
 
 def _public_status_display(
@@ -345,24 +351,26 @@ def _public_status_display(
     triggered: bool = False,
 ) -> str:
     if _public_is_invalidated(message):
-        return "\U0001F534 Invalidated"
+        return "\U0001F534 SETUP INVALIDATED"
     if confirmed:
-        suffix = f" {MIDDLE_DOT} TP1 Priority" if _has_target_caution(message) else ""
-        return f"\U0001F7E2 CONFIRMED SIGNAL{suffix}"
+        upgrade = f" {MIDDLE_DOT} WATCHLIST UPGRADED" if message.upgraded_from_watchlist else ""
+        caution = f" {MIDDLE_DOT} TP1 PRIORITY" if _has_target_caution(message) else ""
+        return f"\U0001F7E2 SIGNAL CONFIRMED{upgrade}{caution}"
     if triggered:
-        return f"\U0001F7E0 TRIGGERED {EM_DASH} Awaiting Final Confirmation"
+        return f"\U0001F7E0 HUNT ACTIVE {EM_DASH} CONFIRMATION PENDING"
+    lifecycle = _status_key(_first_display(_effective_signal_context(message).lifecycle_state, message.lifecycle_state))
+    if lifecycle == "stalking":
+        return f"\U0001F43A WOLF TRACKING {EM_DASH} CONFIRMATION REQUIRED"
     if _has_target_caution(message):
-        return f"\U0001F7E0 A-Grade Setup {MIDDLE_DOT} TP1 Priority"
+        return f"\U0001F441 ON THE RADAR {MIDDLE_DOT} TP1 PRIORITY"
     if _public_requires_confirmation(message, confirmed=confirmed):
-        return f"\U0001F7E1 Watch {MIDDLE_DOT} Confirmation Needed"
-    return "\U0001F7E2 Entry Zone Active"
+        return f"\U0001F441 ON THE RADAR {EM_DASH} CONFIRMATION REQUIRED"
+    return "\U0001F441 ON THE RADAR"
 
 
 def _public_state_summary_lines(*, confirmed: bool, triggered: bool) -> tuple[str, ...]:
-    if confirmed:
-        return ("Confirmation criteria satisfied.",)
     if triggered:
-        return ("Setup has activated. Final confirmation is still required.",)
+        return ("The setup has activated, but the final confirmation gate has not been earned.",)
     return ()
 
 def _public_is_invalidated(message: TelegramSignalMessage) -> bool:
@@ -423,35 +431,6 @@ def _has_target_caution(message: TelegramSignalMessage) -> bool:
     )
 
 
-def _public_liquidity_lines(message: TelegramSignalMessage) -> tuple[str, str]:
-    side = _public_liquidity_side(message)
-    if side == "downside":
-        return ("\U0001F43A Wolf found downside liquidity.", "Now we track the reaction.")
-    if side == "upside":
-        return ("\U0001F43A Wolf found upside liquidity.", "Now we track the rejection.")
-    return ("\U0001F43A Wolf is tracking liquidity.", "Now we wait for confirmation.")
-
-
-def _public_liquidity_side(message: TelegramSignalMessage) -> str:
-    evidence = _public_edge_evidence_text(message)
-    if not _has_liquidity_sweep_evidence(evidence):
-        return NA
-    if "downside liquidity" in evidence or ("downside" in evidence and "liquidity" in evidence):
-        return "downside"
-    if "upside liquidity" in evidence or ("upside" in evidence and "liquidity" in evidence):
-        return "upside"
-    direction = _direction_key(_first_display(_effective_signal_context(message).direction, message.direction))
-    if direction == "long":
-        return "downside"
-    if direction == "short":
-        return "upside"
-    return NA
-
-
-def _has_liquidity_sweep_evidence(evidence: str) -> bool:
-    return "sweep" in evidence or "swept" in evidence or "reclaim" in evidence or "reject" in evidence
-
-
 def _public_compact_trade_map_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     context = _effective_signal_context(message)
     entry = _entry_range_values(_first_display(context.entry_low, message.entry_low), _first_display(context.entry_high, message.entry_high))
@@ -461,7 +440,8 @@ def _public_compact_trade_map_lines(message: TelegramSignalMessage) -> tuple[str
     tp3 = format_price(_first_display(context.tp3, message.tp3))
     return (
         f"Entry: {entry if entry != NA else NA}",
-        f"Stop: {stop if stop != NA else NA}",
+        f"SL: {stop if stop != NA else NA}",
+        "",
         f"TP1: {tp1 if tp1 != NA else NA}",
         f"TP2: {tp2 if tp2 != NA else NA}",
         f"TP3: {tp3 if tp3 != NA else NA}",
@@ -483,8 +463,6 @@ def _public_edge_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     rr = _public_edge_rr_line(evidence)
     if rr != NA and rr not in lines:
         lines.append(rr)
-    if not lines and evidence is None:
-        lines.extend(_public_fallback_edge_lines(message))
     return tuple(lines[:4])
 
 
@@ -617,23 +595,6 @@ def _public_edge_rr_line(evidence: SignalEdgeEvidence | None) -> str:
     return f"The stored plan provides {rr} to TP2."
 
 
-def _public_fallback_edge_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
-    context = _effective_signal_context(message)
-    lines: list[str] = []
-    for value in _public_text_fragments(context.why_it_matters_points):
-        text = _safe_public_text(value)
-        if text == NA:
-            continue
-        key = text.lower()
-        if "target path" in key or "tp1 reaction" in key or "no chase" in key or "manual execution" in key:
-            continue
-        if text not in lines:
-            lines.append(text)
-        if len(lines) == 2:
-            break
-    return tuple(lines)
-
-
 def _public_execution_lines(
     message: TelegramSignalMessage,
     *,
@@ -642,12 +603,15 @@ def _public_execution_lines(
 ) -> tuple[str, ...]:
     if triggered:
         return (
-            "Await final confirmation. This is not a confirmed signal.",
+            "Wait for final confirmation.",
             "Do not enter blindly or chase price.",
         )
     if _public_requires_confirmation(message, confirmed=confirmed):
-        return ("Wait for confirmation. No entry until structure accepts back through the trigger zone.",)
-    lines = ["No chase. Entry only inside the mapped zone."]
+        return (
+            "Wait for confirmation.",
+            "No entry until structure accepts back through the trigger zone.",
+        )
+    lines = ["No chase outside the mapped zone."]
     if _has_target_caution(message):
         lines.append("TP1 reaction matters because TP2/TP3 path is choppy.")
     return tuple(lines[:2])
@@ -659,37 +623,27 @@ def _public_compact_invalidation_line(message: TelegramSignalMessage) -> str:
     direction = _direction_key(_first_display(context.direction, message.direction))
     if stop != NA:
         side = "below" if direction == "long" else "above" if direction == "short" else "beyond"
-        return f"Invalid if price body-closes and accepts {side} {stop}."
+        return f"Invalid if price accepts {side} {stop}."
     explicit = _public_invalidation_text(message)
     if explicit != NA and "stop level unavailable" not in explicit.lower():
         return explicit
     return "Invalidation: N/A."
 
 
-def _public_edge_evidence_text(message: TelegramSignalMessage) -> str:
-    context = _effective_signal_context(message)
-    fragments = _public_text_fragments(
-        context.why_it_matters_points,
-        message.structure_reason,
-        message.confluence,
-        message.current_context,
-        message.ob_fvg_status,
-    )
-    return " ".join(fragments).lower()
-
-
-def _public_text_fragments(*values: Any) -> tuple[str, ...]:
-    fragments: list[str] = []
-    for value in values:
-        if isinstance(value, Mapping):
-            continue
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            fragments.extend(_public_text_fragments(*value))
-            continue
-        text = _display(value)
-        if text != NA:
-            fragments.append(text)
-    return tuple(fragments)
+def _public_closing_line(
+    message: TelegramSignalMessage,
+    *,
+    confirmed: bool,
+    triggered: bool,
+) -> str:
+    if triggered:
+        return "\U0001F43A Territory reached. Structure decides what happens next."
+    if confirmed:
+        evidence = _public_edge_evidence(message)
+        if evidence is not None and evidence.sweep_present and evidence.structure_present:
+            return "\U0001F43A Liquidity taken. Structure confirmed. Hunt active."
+        return "\U0001F43A Signal confirmed. Execution stays disciplined."
+    return "\U0001F43A On the radar. Patience protects the edge."
 
 def _entry_range_values(entry_low: Any, entry_high: Any) -> str:
     low = format_price(entry_low)
@@ -772,83 +726,11 @@ def _target_caution_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     return ("TP1 reaction matters because TP2/TP3 path is choppy.",)
 
 def format_premium_watchlist_message(message: TelegramSignalMessage) -> str:
-    side = _direction_key(message.direction)
-    hold_level = "support" if side == "long" else "resistance" if side == "short" else "support/resistance"
-    structure = "Bullish" if side == "long" else "Bearish" if side == "short" else "Directional"
-    valid_side = "above" if side == "long" else "below" if side == "short" else "around"
-    limit_zone_hit = _status_key(message.watchlist_status) in {
-        "limit_zone_hit_waiting_confirmation",
-        "limit_zone_hit_waiting_confirm",
-        "limit_zone_hit",
-    }
-    status = "LIMIT ZONE HIT — WAITING CONFIRMATION" if limit_zone_hit else "WATCHLIST"
-    watch_lines = (
-        (
-            f"{BULLET} Price is in or near the Limit Zone.",
-            f"{BULLET} Limit Zone must hold as {hold_level}.",
-            f"{BULLET} Wait for clean confirmation before any trade.",
-        )
-        if limit_zone_hit
-        else (
-            f"{BULLET} Price must trade into the Limit Zone.",
-            f"{BULLET} Limit Zone must hold as {hold_level} after the pullback.",
-            f"{BULLET} {structure} structure must remain valid {valid_side} the invalidation level.",
-        )
-    )
-    closing = "We let the market prove it." if limit_zone_hit else "We let the market come to us."
-    return _join(
-        f"{HEADER_PREFIX} WATCHLIST {EM_DASH} {format_symbol(message.symbol)}",
-        "",
-        "The wolf is stalking this one.",
-        "",
-        f"Bias: {format_direction(message.direction)}",
-        f"Status: {status}",
-        f"Quality: {_quality_display(message.quality)}",
-        f"Potential RR: {_watchlist_rr_with_unit(message.planned_rr)}",
-        "",
-        "\U0001F440 What we want to see",
-        *watch_lines,
-        "",
-        "\U0001F4CD Area of Interest",
-        f"Zone: {format_entry_zone(message)}",
-        f"Invalid below/above: {_watchlist_invalidation_level(message)}",
-        "",
-        "No confirmation = no trade.",
-        closing,
-        "",
-        FOOTER,
-    )
+    return _format_public_signal_message(message, confirmed=False)
 
 
 def format_watchlist_upgraded_message(message: TelegramSignalMessage) -> str:
-    return _join(
-        f"{HEADER_PREFIX} WATCHLIST UPGRADED {EM_DASH} {format_symbol(message.symbol)}",
-        "",
-        "The wolf has confirmation.",
-        "",
-        "Previous state: WATCHLIST",
-        "New state: CONFIRMED SIGNAL",
-        f"Bias: {format_direction(message.direction)}",
-        f"Quality: {_quality_display(message.quality)}",
-        f"RR: {format_rr(message.planned_rr)}",
-        "",
-        "What changed:",
-        safe_reason_text(message.structure_reason, message.confluence),
-        "",
-        "\U0001F3AF Trade Map",
-        f"Entry Zone: {format_entry_zone(message)}",
-        f"Stop: {format_price(message.stop_loss)}",
-        *format_tp_lines(message),
-        "",
-        "\U0001F6AB Invalid if",
-        safe_invalidation_text(message),
-        "",
-        "\u26A0\ufe0f Manual execution only. Manage risk.",
-        "",
-        "Now it becomes execution-ready.",
-        "",
-        FOOTER,
-    )
+    return _format_public_signal_message(message, confirmed=True)
 
 
 def format_premium_lifecycle_update_message(
@@ -860,18 +742,23 @@ def format_premium_lifecycle_update_message(
 
 def format_limit_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} ENTRY ZONE TOUCHED {EM_DASH} {format_symbol(message.symbol)}",
+        f"\U0001F43A {format_symbol(message.symbol)} {MIDDLE_DOT} {format_direction(message.direction)}",
         "",
-        "Entry zone touched.",
+        "\U0001F3AF ZONE ENGAGED",
         "",
-        "Status: AWAITING FOLLOW-THROUGH",
-        f"Direction: {format_direction(message.direction)}",
+        "Price has entered the mapped territory.",
+        "",
+        f"Entry: {format_entry_zone(message)}",
         f"Quality: {_quality_display(message.quality)}",
-        f"Entry Zone: {format_entry_zone(message)}",
-        f"Invalidation: {safe_invalidation_text(message)}",
+        "",
+        "\U0001F7E0 STATUS: REACTION REQUIRED",
+        "",
+        "The setup is alive, but confirmation has not been earned yet.",
         "",
         "Use the existing published plan only.",
-        "No confirmation = no chase.",
+        _public_compact_invalidation_line(message),
+        "",
+        "\U0001F43A The wolf is in position. No confirmation = no chase.",
         "",
         FOOTER,
     )
@@ -879,43 +766,42 @@ def format_limit_hit_update(message: TelegramSignalMessage) -> str:
 
 def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} TAKE PROFIT HIT {EM_DASH} {format_symbol(message.symbol)}",
+        f"\u2705 {format_symbol(message.symbol)} {MIDDLE_DOT} TP1 SECURED",
         "",
-        "First target secured.",
+        "First objective reached.",
         "",
-        f"Direction: {format_direction(message.direction)}",
         f"TP1: {format_price(message.tp1)}",
-        "Status: PARTIAL WIN",
         "",
-        "Nice execution from the zone.",
-        "Risk should now be reduced according to your own plan.",
+        "The setup is progressing according to the stored plan.",
         "",
-        "Next levels:",
+        "Next:",
         f"TP2: {format_price(message.tp2)}",
         f"TP3: {format_price(message.tp3)}",
         "",
-        "The wolf eats step by step.",
+        "\U0001F43A First target secured. The hunt continues.",
         "",
         FOOTER,
     )
 
 
 def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
+    context = _effective_signal_context(message)
+    rr = format_rr(_first_display(context.rr, message.planned_rr))
+    rr_line = () if rr == NA else (f"RR to TP2: {rr}",)
     return _join(
-        f"{HEADER_PREFIX} TAKE PROFIT HIT {EM_DASH} {format_symbol(message.symbol)}",
+        f"\U0001F525 {format_symbol(message.symbol)} {MIDDLE_DOT} TP2 SECURED",
         "",
-        "The move is developing cleanly.",
+        "Second objective reached.",
         "",
-        f"Direction: {format_direction(message.direction)}",
         f"TP2: {format_price(message.tp2)}",
-        "Status: STRONG FOLLOW-THROUGH",
+        *rr_line,
         "",
-        "Market respected the setup and expanded from our zone.",
+        "Strong follow-through from the mapped setup.",
         "",
-        "Remaining target:",
+        "Remaining:",
         f"TP3: {format_price(message.tp3)}",
         "",
-        "Discipline pays better than chasing.",
+        "\U0001F43A Clean structure. Clean continuation.",
         "",
         FOOTER,
     )
@@ -923,53 +809,35 @@ def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
 
 def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} TAKE PROFIT HIT {EM_DASH} {format_symbol(message.symbol)}",
+        f"\u2705 {format_symbol(message.symbol)} {MIDDLE_DOT} FULL TARGET SEQUENCE COMPLETE",
         "",
-        "Full target sequence completed.",
+        f"TP3: {format_price(message.tp3)}",
         "",
-        f"Direction: {format_direction(message.direction)}",
-        f"Final Target: {format_price(message.tp3)}",
-        "Status: TRADE COMPLETE",
+        "The stored target sequence has completed.",
         "",
-        "Clean setup. Clean execution. Clean finish.",
-        "",
-        "The wolf tracked it from liquidity to expansion.",
+        "\U0001F43A Liquidity to expansion. Hunt complete.",
         "",
         FOOTER,
     )
 
 
 def format_trade_complete_update(message: TelegramSignalMessage) -> str:
-    return _join(
-        f"{HEADER_PREFIX} TRADE COMPLETE {EM_DASH} {format_symbol(message.symbol)}",
-        "",
-        "Full target sequence completed.",
-        "",
-        f"Direction: {format_direction(message.direction)}",
-        "Status: TRADE COMPLETE",
-        "",
-        "Clean setup. Clean execution. Clean finish.",
-        "",
-        "The wolf tracked it from liquidity to expansion.",
-        "",
-        FOOTER,
-    )
+    return format_tp3_hit_update(message)
 
 
 def format_sl_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} STOP HIT {EM_DASH} {format_symbol(message.symbol)}",
+        f"\U0001F534 {format_symbol(message.symbol)} {MIDDLE_DOT} SETUP INVALIDATED",
         "",
-        "Setup invalidated.",
-        "",
-        f"Direction: {format_direction(message.direction)}",
         f"Stop: {format_price(message.stop_loss)}",
-        "Status: CLOSED",
         "",
-        "The market failed to hold the structure, so the idea is no longer valid.",
+        "Price failed the structural thesis and the setup is closed.",
         "",
-        "This is part of the process.",
-        "Small controlled losses protect us for the next A-grade opportunity.",
+        "Result: SL",
+        "",
+        "\U0001F9E0 Outcome remains part of lifecycle and expectancy tracking.",
+        "",
+        "No revenge. No reinterpretation. Next setup.",
         "",
         FOOTER,
     )
@@ -982,11 +850,33 @@ def format_invalidated_update(message: TelegramSignalMessage) -> str:
 
 
 def format_expired_update(message: TelegramSignalMessage) -> str:
-    return _format_watchlist_invalidated_update(message)
+    return _join(
+        f"\U0001F441 {format_symbol(message.symbol)} {MIDDLE_DOT} WATCH EXPIRED",
+        "",
+        "The mapped opportunity expired before confirmation.",
+        "",
+        "No entry was confirmed.",
+        "No setup was forced.",
+        "",
+        "\U0001F43A Timing passed. The edge was not chased.",
+        "",
+        FOOTER,
+    )
 
 
 def format_no_longer_tracking_update(message: TelegramSignalMessage) -> str:
-    return _format_watchlist_invalidated_update(message)
+    return _join(
+        f"\U0001F441 {format_symbol(message.symbol)} {MIDDLE_DOT} NO LONGER TRACKING",
+        "",
+        "The setup no longer qualifies for active monitoring.",
+        "",
+        "No entry was confirmed.",
+        "No weak setup was carried forward.",
+        "",
+        "\U0001F43A The radar clears when the edge fades.",
+        "",
+        FOOTER,
+    )
 
 
 def format_public_no_trade_message(message: TelegramSignalMessage, reason: Any = NA) -> str:
@@ -1009,20 +899,15 @@ def format_public_no_trade_message(message: TelegramSignalMessage, reason: Any =
 
 def _format_watchlist_invalidated_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} WATCHLIST INVALIDATED {EM_DASH} {format_symbol(message.symbol)}",
+        f"\U0001F534 {format_symbol(message.symbol)} {MIDDLE_DOT} WATCHLIST INVALIDATED",
         "",
-        "The wolf walks away.",
+        "The watchlist thesis no longer meets the required structure.",
         "",
-        f"Bias was: {format_direction(message.direction)}",
-        "Status: INVALIDATED",
-        "",
-        "Price failed the required structure and no longer fits our setup rules.",
-        "",
-        "No forced trades.",
-        "No revenge entries.",
+        "No entry was confirmed.",
+        "No chase.",
         "No weak confirmations.",
         "",
-        "We wait for the next clean opportunity.",
+        "\U0001F43A The wolf walks away when the edge disappears.",
         "",
         FOOTER,
     )
@@ -1030,18 +915,15 @@ def _format_watchlist_invalidated_update(message: TelegramSignalMessage) -> str:
 
 def _format_signal_invalidated_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"{HEADER_PREFIX} SIGNAL INVALIDATED {EM_DASH} {format_symbol(message.symbol)}",
+        f"\U0001F534 {format_symbol(message.symbol)} {MIDDLE_DOT} SETUP INVALIDATED",
         "",
-        "The setup is cancelled.",
-        "",
-        f"Bias was: {format_direction(message.direction)}",
-        "Status: INVALIDATED",
-        "",
-        "Price failed the required structure before clean execution.",
+        "The required structure no longer supports the original thesis.",
         "",
         "No chase.",
         "No forced entry.",
-        "The setup no longer meets Candle Craft rules.",
+        "No weak confirmation.",
+        "",
+        "\U0001F43A The wolf walks away when the edge disappears.",
         "",
         FOOTER,
     )

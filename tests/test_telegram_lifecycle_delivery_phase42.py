@@ -1926,7 +1926,7 @@ def test_public_signal_context_projects_exact_strategy_evidence_without_research
 
     message = telegram_signal_message_from_symbol(symbol_result)
     text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, message)
-    edge = text.split("🧠 Edge\n", 1)[1].split("\n\n⚠️ Execution", 1)[0]
+    edge = text.split("🧠 INTELLIGENCE\n", 1)[1].split("\n\n━━━━━━━━━━━━━━", 1)[0]
 
     assert "Price swept upside liquidity at 0.2187 with a wick to 0.2191" in edge
     assert "15m bearish BOS closed below 0.2168 at 0.2164." in edge
@@ -2175,9 +2175,9 @@ def _deliver_public_watchlist_snapshot(tmp_path: Path, symbol_result: ScannerSym
 
 
 def _why_section(text: str) -> str:
-    marker = "🧠 Edge"
+    marker = "🧠 INTELLIGENCE"
     assert marker in text
-    return text.split(marker, 1)[1].strip().split("\n\n⚠️ Execution", 1)[0].strip()
+    return text.split(marker, 1)[1].strip().split("\n\n━━━━━━━━━━━━━━", 1)[0].strip()
 
 
 def _reason_watchlist_symbol(
@@ -2357,7 +2357,7 @@ def test_tp_hit_update_does_not_send_public_telegram_message(tmp_path: Path) -> 
 
     assert summary.sent == 0
     assert len(sender.messages) == 1
-    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
+    assert not any("TP1 SECURED" in message for message in sender.messages)
     _assert_suppressed_follow_up(db_path, TelegramAlertType.TP1_HIT)
 
 
@@ -2382,7 +2382,7 @@ def test_sl_hit_update_does_not_send_public_telegram_message(tmp_path: Path) -> 
 
     assert summary.sent == 0
     assert len(sender.messages) == 1
-    assert not any("STOP HIT" in message for message in sender.messages)
+    assert not any("Result: SL" in message for message in sender.messages)
     _assert_suppressed_follow_up(db_path, TelegramAlertType.SL_HIT)
 
 
@@ -4158,7 +4158,7 @@ def test_allousdt_style_contradictory_confirmed_alert_is_blocked() -> None:
 
 
 
-def test_confluence_from_raw_derivatives_context_is_public_text() -> None:
+def test_raw_derivatives_context_is_not_promoted_into_structured_intelligence() -> None:
     symbol_result = _symbol(
         SetupLifecycleState.CONFIRMED,
         previous=SetupLifecycleState.TRIGGERED,
@@ -4180,8 +4180,9 @@ def test_confluence_from_raw_derivatives_context_is_public_text() -> None:
     message = telegram_signal_message_from_symbol(symbol_result)
     text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, message)
 
-    assert "🧠 Edge" in text
-    assert "🧠 Edge" in text
+    assert "🧠 INTELLIGENCE" in text
+    assert "Entry 100 – 102 overlaps the selected order block." in text
+    assert "The stored plan provides 3.00R to TP2." in text
     for forbidden in ("Decimal(", "{", "}", "true", "false", "funding_rate:", "open_interest:"):
         assert forbidden not in text
 
@@ -4636,7 +4637,7 @@ def test_valid_short_tp_triggers_only_when_current_price_is_at_or_below_tp(tmp_p
 
     assert attempt.sent == 0
     assert len(sender.messages) == 1
-    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
+    assert not any("TP1 SECURED" in message for message in sender.messages)
     _assert_suppressed_follow_up(db_path, TelegramAlertType.TP1_HIT)
 
 
@@ -4661,7 +4662,7 @@ def test_valid_long_tp_triggers_only_when_current_price_is_at_or_above_tp(tmp_pa
 
     assert attempt.sent == 0
     assert len(sender.messages) == 1
-    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
+    assert not any("TP1 SECURED" in message for message in sender.messages)
     _assert_suppressed_follow_up(db_path, TelegramAlertType.TP1_HIT)
 
 
@@ -4735,7 +4736,7 @@ def test_short_watchlist_uses_stored_tp1_not_recalculated_current_target(tmp_pat
     )
 
     assert tp_attempt.sent == 0
-    assert not any("TP1 HIT" in message for message in sender.messages)
+    assert not any("TP1 SECURED" in message for message in sender.messages)
     rows = _watchlist_outcome_rows(db_path)
     assert not any(row[0] == TelegramAlertType.TP1_HIT.value and row[1] == "sent" for row in rows)
 
@@ -4799,7 +4800,7 @@ def test_long_watchlist_tracks_tp_sequence_after_limit_hit(tmp_path: Path) -> No
 
     assert (tp1.sent, tp2.sent, tp3.sent, repeat.sent) == (0, 0, 0, 0)
     assert len(sender.messages) == 1
-    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
+    assert not any("TP1 SECURED" in message for message in sender.messages)
     rows = _watchlist_outcome_rows(db_path)
     assert not any(row[1] == "sent" and row[2] in {TelegramAlertType.TP1_HIT.value, TelegramAlertType.TP2_HIT.value, TelegramAlertType.TP3_HIT.value} for row in rows)
     assert any(row[1] == "skipped" and row[3] == "public_watchlist_follow_up_updates_disabled" for row in rows)
@@ -4839,7 +4840,7 @@ def test_long_watchlist_tracks_sl_after_limit_hit_even_when_terminal_updates_dis
     assert sl.sent == 0
     assert repeat.sent == 0
     assert len(sender.messages) == 1
-    assert not any("STOP HIT" in message for message in sender.messages)
+    assert not any("Result: SL" in message for message in sender.messages)
     _assert_suppressed_follow_up(db_path, TelegramAlertType.SL_HIT)
 
 
@@ -4884,8 +4885,8 @@ def test_short_watchlist_tracks_tp_and_sl_rules_after_limit_hit(tmp_path: Path) 
     assert sl.sent == 0
     assert len(sender.messages) == 1
     assert len(sl_sender.messages) == 1
-    assert not any("TAKE PROFIT HIT" in message for message in sender.messages)
-    assert not any("STOP HIT" in message for message in sl_sender.messages)
+    assert not any("TP1 SECURED" in message for message in sender.messages)
+    assert not any("Result: SL" in message for message in sl_sender.messages)
     _assert_suppressed_follow_up(db_path, TelegramAlertType.TP1_HIT)
     _assert_suppressed_follow_up(sl_db_path, TelegramAlertType.SL_HIT)
 
