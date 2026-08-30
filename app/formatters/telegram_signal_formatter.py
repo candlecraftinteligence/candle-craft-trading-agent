@@ -623,7 +623,7 @@ def _public_compact_invalidation_line(message: TelegramSignalMessage) -> str:
     direction = _direction_key(_first_display(context.direction, message.direction))
     if stop != NA:
         side = "below" if direction == "long" else "above" if direction == "short" else "beyond"
-        return f"Invalid if price accepts {side} {stop}."
+        return f"Invalid if price body-closes and accepts {side} {stop}."
     explicit = _public_invalidation_text(message)
     if explicit != NA and "stop level unavailable" not in explicit.lower():
         return explicit
@@ -666,10 +666,10 @@ def _public_invalidation_text(message: TelegramSignalMessage) -> str:
     direction = _direction_key(_first_display(context.direction, message.direction))
     if stop != NA:
         if direction == "long":
-            return f"Invalid if price accepts below {stop}."
+            return f"Invalid if price body-closes and accepts below {stop}."
         if direction == "short":
-            return f"Invalid if price accepts above {stop}."
-        return f"Invalid if price accepts beyond {stop}."
+            return f"Invalid if price body-closes and accepts above {stop}."
+        return f"Invalid if price body-closes and accepts beyond {stop}."
     raw = _safe_public_text(_first_display(message.invalidation_reason, message.watchlist_invalidation_reason))
     if raw != NA:
         return raw
@@ -801,7 +801,7 @@ def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
         "Remaining:",
         f"TP3: {format_price(message.tp3)}",
         "",
-        "\U0001F43A Clean structure. Clean continuation.",
+        "\U0001F43A Second target secured. Momentum remains with the plan.",
         "",
         FOOTER,
     )
@@ -815,7 +815,7 @@ def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
         "",
         "The stored target sequence has completed.",
         "",
-        "\U0001F43A Liquidity to expansion. Hunt complete.",
+        "\U0001F43A Full target sequence secured. Hunt complete.",
         "",
         FOOTER,
     )
@@ -1052,10 +1052,10 @@ def safe_invalidation_text(message: TelegramSignalMessage) -> str:
     if stop == NA:
         return NA
     if direction == "long":
-        return f"Invalid if price accepts below {stop}."
+        return f"Invalid if price body-closes and accepts below {stop}."
     if direction == "short":
-        return f"Invalid if price accepts above {stop}."
-    return f"Invalid if price accepts beyond {stop}."
+        return f"Invalid if price body-closes and accepts above {stop}."
+    return f"Invalid if price body-closes and accepts beyond {stop}."
 
 
 def safe_public_rejection_summary(value: Any) -> str:

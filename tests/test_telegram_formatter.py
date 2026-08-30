@@ -80,7 +80,7 @@ def test_valid_setup_formatting_is_premium_telegram_ready() -> None:
     assert "TP2: 106000" in text
     assert "TP3: 107500" in text
     assert "No chase outside the mapped zone." in text
-    assert "Invalid if price accepts below 102400." in text
+    assert "Invalid if price body-closes and accepts below 102400." in text
     assert "Signal ID" not in text
     assert "strategy_diagnostics" not in text
     assert text.endswith("Candle Craft | Signal. Structure. Execution.")

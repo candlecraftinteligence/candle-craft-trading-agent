@@ -94,7 +94,7 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
     assert "The stored plan provides 2.92R to TP2." in text
     assert "⚔️ EXECUTION" in text
     assert "No chase outside the mapped zone." in text
-    assert "Invalid if price accepts below 95." in text
+    assert "Invalid if price body-closes and accepts below 95." in text
     assert "🐺 Liquidity taken. Structure confirmed. Hunt active." in text
     assert "Not financial advice." in text
     assert "Actionability" + ":" not in text
@@ -127,7 +127,7 @@ def test_public_watchlist_formatter_matches_compact_watch_shape() -> None:
     assert "TP3: 120" in text
     assert "⚔️ EXECUTION" in text
     assert "Wait for confirmation.\nNo entry until structure accepts back through the trigger zone." in text
-    assert "Invalid if price accepts below 95." in text
+    assert "Invalid if price body-closes and accepts below 95." in text
     assert "🐺 On the radar. Patience protects the edge." in text
     assert "Candle Craft | Signal. Structure. Execution." in text
     assert "Actionability" + ":" not in text
@@ -181,7 +181,7 @@ def test_short_liquidity_rejection_signal_tracks_rejection_and_invalidates_above
 
     assert "BTCUSDT · SHORT · SCALP" in text
     assert "Price swept upside liquidity at 105 with a wick to 105.5, then closed back below the level." in text
-    assert "Invalid if price accepts above 105." in text
+    assert "Invalid if price body-closes and accepts above 105." in text
     assert "🐺 Liquidity taken. Structure confirmed. Hunt active." in text
 
 
@@ -214,7 +214,7 @@ def test_public_watchlist_formatter_uses_short_bias_and_stop() -> None:
 
     assert "BTCUSDT · SHORT · SCALP" in text
     assert "SL: 105" in text
-    assert "Invalid if price accepts above 105." in text
+    assert "Invalid if price body-closes and accepts above 105." in text
     assert "Limit Zone must hold as resistance" not in text
     assert "Bearish structure must remain valid" not in text
     assert "Invalid below/above" not in text
@@ -264,7 +264,7 @@ def test_limit_zone_hit_renders_hunting_zone_language() -> None:
     assert "Quality: A" in text
     assert "Entry: 100 – 102" in text
     assert "The setup is alive, but confirmation has not been earned yet." in text
-    assert "Invalid if price accepts below 95." in text
+    assert "Invalid if price body-closes and accepts below 95." in text
     assert "Use the existing published plan only." in text
     assert "🐺 The wolf is in position. No confirmation = no chase." in text
     assert "TP1: 110" not in text
@@ -296,7 +296,7 @@ def test_tp2_renders_strong_follow_through_language() -> None:
     assert "RR to TP2: 2.92R" in text
     assert "Strong follow-through from the mapped setup." in text
     assert "Remaining:\nTP3: 120" in text
-    assert "🐺 Clean structure. Clean continuation." in text
+    assert "🐺 Second target secured. Momentum remains with the plan." in text
 
 
 def test_tp2_omits_rr_when_stored_context_does_not_provide_it() -> None:
@@ -315,7 +315,7 @@ def test_tp3_renders_trade_complete_language() -> None:
     assert text.startswith("✅ BTCUSDT · FULL TARGET SEQUENCE COMPLETE")
     assert "TP3: 120" in text
     assert "The stored target sequence has completed." in text
-    assert "🐺 Liquidity to expansion. Hunt complete." in text
+    assert "🐺 Full target sequence secured. Hunt complete." in text
 
 
 def test_stop_hit_renders_controlled_loss_language() -> None:
@@ -412,7 +412,7 @@ def test_missing_invalidation_uses_directional_stop_fallback() -> None:
         _message(invalidation_reason=NA),
     )
 
-    assert "Invalid if price accepts below 95." in text
+    assert "Invalid if price body-closes and accepts below 95." in text
 
 
 def test_swing_signal_labels_swing_setup() -> None:
@@ -462,8 +462,8 @@ def test_long_and_short_invalidation_are_direction_aware() -> None:
         _message(direction="short", stop_loss=Decimal("105"), invalidation_reason=NA),
     )
 
-    assert "Invalid if price accepts below 95." in long_text
-    assert "Invalid if price accepts above 105." in short_text
+    assert "Invalid if price body-closes and accepts below 95." in long_text
+    assert "Invalid if price body-closes and accepts above 105." in short_text
 
 
 def test_missing_invalidation_level_does_not_invent_number() -> None:
