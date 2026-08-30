@@ -58,8 +58,14 @@ from app.lifecycle.eligibility import (
     is_public_signal_eligible_state,
     research_watch_eligible,
 )
-from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, SetupTransitionReason, SetupTransitionResult
-from app.lifecycle.outcome_policy import stored_plan_geometry_failure
+from app.lifecycle.models import (
+    SetupLifecycleOutcomeProgress,
+    SetupLifecycleRecord,
+    SetupLifecycleState,
+    SetupTransitionReason,
+    SetupTransitionResult,
+)
+from app.lifecycle.outcome_policy import canonical_plan_identity, stored_plan_geometry_failure
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
@@ -84,6 +90,10 @@ PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES = frozenset(
     {
         TelegramAlertType.SETUP_TRIGGERED,
         TelegramAlertType.SIGNAL_CONFIRMED,
+        TelegramAlertType.TP1_HIT,
+        TelegramAlertType.TP2_HIT,
+        TelegramAlertType.TP3_HIT,
+        TelegramAlertType.SL_HIT,
     }
 )
 PUBLIC_LIFECYCLE_OUTBOX_ALERT_BY_EVENT_TYPE = {
@@ -106,6 +116,10 @@ PRIOR_ACTIVE_ALERT_TYPES = {
 }
 PRIOR_PUBLIC_SIGNAL_ALERT_TYPES = {
     TelegramAlertType.SIGNAL_CONFIRMED.value,
+}
+PUBLIC_OUTCOME_TRACKING_ROOT_TYPES = {
+    TelegramAlertType.SIGNAL_CONFIRMED.value,
+    TelegramAlertType.WATCHLIST.value,
 }
 TERMINAL_UPDATE_ALERT_TYPES = {
     TelegramAlertType.INVALIDATED,
@@ -142,6 +156,9 @@ RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON = (
 SENT_WATCHLIST_RECONCILIATION_ATTEMPT = "SENT_WATCHLIST_RECONCILIATION"
 SENT_WATCHLIST_RECONCILIATION_NO_MATCH = "sent_watchlist_reconciliation_no_lifecycle_match"
 SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguous"
+PUBLIC_OUTCOME_TRACKING_ATTEMPT = "PUBLIC_OUTCOME_TRACKING"
+PUBLIC_OUTCOME_TRACKING_NO_MATCH = "public_outcome_tracking_no_lifecycle_match"
+PUBLIC_OUTCOME_TRACKING_AMBIGUOUS = "public_outcome_tracking_identity_ambiguous"
 SOFT_FAILED_CONFIRMATION_ATTEMPT = "SOFT_FAILED_CONFIRMATION"
 SOFT_FAILED_CONFIRMATION_MIN_OBSERVATIONS = 3
 SOFT_FAILED_CONFIRMATION_REMOVAL_REASON = "Watchlist removed because final confirmation conditions did not improve."
@@ -1024,6 +1041,14 @@ class SentWatchlistReconciliationOutcome:
 
 
 @dataclass(frozen=True)
+class CanonicalPublicOutcomeMatch:
+    prior_alert: TelegramAlertAttemptRecord
+    record: SetupLifecycleRecord
+    progress: SetupLifecycleOutcomeProgress
+    current_result: ScannerSymbolResult | None = None
+
+
+@dataclass(frozen=True)
 class WatchlistCandleSnapshot:
     high: Decimal
     low: Decimal
@@ -1298,6 +1323,34 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             (TelegramAlertType.WATCHLIST.value, *sorted(TERMINAL_COMPLETION_ALERT_TYPES)),
         ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
+
+    def list_publicly_tracked_signals(self) -> tuple[TelegramAlertAttemptRecord, ...]:
+        """Return one successful confirmation/legacy root per persisted public signal."""
+
+        placeholders = ",".join("?" for _ in PUBLIC_OUTCOME_TRACKING_ROOT_TYPES)
+        rows = self._connection.execute(
+            f"""
+            SELECT root.* FROM telegram_alert_attempts AS root
+            WHERE root.alert_type IN ({placeholders})
+              AND root.telegram_status = 'sent'
+              AND root.sent_at IS NOT NULL
+              AND root.sent_at NOT IN ('', 'N/A')
+            ORDER BY
+              CASE WHEN root.alert_type = ? THEN 0 ELSE 1 END,
+              root.id ASC
+            """,
+            (
+                *sorted(PUBLIC_OUTCOME_TRACKING_ROOT_TYPES),
+                TelegramAlertType.SIGNAL_CONFIRMED.value,
+            ),
+        ).fetchall()
+        preferred_by_signal: dict[str, TelegramAlertAttemptRecord] = {}
+        for row in rows:
+            record = _record_from_row(row)
+            preferred_by_signal.setdefault(record.signal_id, record)
+        return tuple(
+            sorted(preferred_by_signal.values(), key=lambda record: record.id or 0)
+        )
 
     def has_recent_research_watch_alert(self, *, symbol: str, since: str) -> bool:
         normalized_symbol = _research_cooldown_symbol(symbol)
@@ -2689,15 +2742,52 @@ def _reserve_public_lifecycle_event(
         alert_type=alert_type,
     )
     if existing_attempt is not None:
-        return PublicWatchlistReservationResult(
-            granted=False,
-            event_key=event_key,
-            reservation_id=existing_attempt.id,
-            status="duplicate" if existing_attempt.telegram_status == "sent" else "failed",
-            reason="public_lifecycle_attempt_without_claimable_event",
-            detail="Existing lifecycle attempt has no claimable public outbox intent.",
-            matched_prior_alert_id=existing_attempt.id,
+        existing_state = _text(existing_attempt.delivery_state).upper()
+        if existing_attempt.telegram_status == "sent" or existing_state == SENT:
+            return PublicWatchlistReservationResult(
+                granted=False,
+                event_key=event_key,
+                reservation_id=existing_attempt.id,
+                status="duplicate",
+                reason=PUBLIC_LIFECYCLE_DUPLICATE_EQUIVALENT_SETUP_REASON,
+                detail="Prior successful lifecycle milestone attempt already exists.",
+                matched_prior_alert_id=existing_attempt.id,
+            )
+        if existing_state in {UNCERTAIN, IN_FLIGHT}:
+            return PublicWatchlistReservationResult(
+                granted=False,
+                event_key=event_key,
+                reservation_id=existing_attempt.id,
+                status="uncertain" if existing_state == UNCERTAIN else "skipped",
+                reason=f"public_lifecycle_legacy_attempt_{existing_state.lower()}",
+                detail="Prior milestone acceptance is not safe for automatic resend.",
+                matched_prior_alert_id=existing_attempt.id,
+            )
+        if existing_state in {FAILED_FINAL, POLICY_DISABLED, SKIPPED_DRY_RUN}:
+            return PublicWatchlistReservationResult(
+                granted=False,
+                event_key=event_key,
+                reservation_id=existing_attempt.id,
+                status="failed" if existing_state == FAILED_FINAL else "skipped",
+                reason=f"public_lifecycle_legacy_attempt_{existing_state.lower()}",
+                detail=f"Prior milestone attempt is terminal in {existing_state}.",
+                matched_prior_alert_id=existing_attempt.id,
+            )
+        retryable_legacy_attempt = (
+            existing_state == RETRYABLE
+            or existing_attempt.telegram_status == "retryable"
+            or existing_attempt.telegram_status == "blocked"
         )
+        if not retryable_legacy_attempt:
+            return PublicWatchlistReservationResult(
+                granted=False,
+                event_key=event_key,
+                reservation_id=existing_attempt.id,
+                status="failed",
+                reason="public_lifecycle_attempt_without_claimable_event",
+                detail="Existing lifecycle attempt has no explicitly claimable delivery state.",
+                matched_prior_alert_id=existing_attempt.id,
+            )
 
     event, inserted = _insert_public_alert_event(
         db,
@@ -2723,6 +2813,23 @@ def _reserve_public_lifecycle_event(
             status="skipped",
             reason=PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON,
             detail="Public lifecycle event was concurrently reserved.",
+        )
+    if (
+        existing_attempt is not None
+        and existing_attempt.id is not None
+        and db.replace_attempt_with_reservation(
+            attempt_id=existing_attempt.id,
+            record=reservation_record,
+        )
+    ):
+        return PublicWatchlistReservationResult(
+            granted=True,
+            event_key=event_key,
+            reservation_id=existing_attempt.id,
+            event_id=event.id,
+            status=PUBLIC_WATCHLIST_RESERVATION_STATUS,
+            reason=NA,
+            detail="Retryable legacy milestone attempt adopted into the public outbox.",
         )
     if not db.insert_attempt(reservation_record):
         return PublicWatchlistReservationResult(
@@ -3355,6 +3462,15 @@ class TelegramLifecycleDeliveryService:
                 )
                 for delivery in await self.recover_public_lifecycle_alerts(
                     repository=repository,
+                ):
+                    record_delivery(delivery)
+                for delivery in await self.reconcile_publicly_tracked_outcomes(
+                    repository=repository,
+                    lifecycle_repository=lifecycle_repository,
+                    publicly_tracked_signals=repository.list_publicly_tracked_signals(),
+                    current_results=result.results,
+                    scan_run_id=scan_run_id,
+                    eligibility_context=eligibility_context,
                 ):
                     record_delivery(delivery)
                 public_watchlist_daily_cap_reached: bool | None = None
@@ -4297,6 +4413,216 @@ class TelegramLifecycleDeliveryService:
             if send_result.status == "sent":
                 sent_this_scan += 1
         return tuple(deliveries)
+
+    async def reconcile_publicly_tracked_outcomes(
+        self,
+        *,
+        repository: SQLiteTelegramAlertAttemptRepository,
+        lifecycle_repository: SQLiteSetupLifecycleRepository,
+        publicly_tracked_signals: Sequence[TelegramAlertAttemptRecord],
+        current_results: Sequence[ScannerSymbolResult],
+        scan_run_id: str | None,
+        eligibility_context: TelegramEligibilityContext,
+    ) -> tuple[TelegramLifecycleDelivery, ...]:
+        """Project trustworthy persisted lifecycle milestones to the public outbox."""
+
+        matches_by_plan: dict[str, list[CanonicalPublicOutcomeMatch]] = {}
+        audit_deliveries: list[TelegramLifecycleDelivery] = []
+        for prior_alert in publicly_tracked_signals:
+            match, blocked_reason = _match_public_tracking_outcome(
+                prior_alert,
+                alert_repository=repository,
+                lifecycle_repository=lifecycle_repository,
+                current_results=current_results,
+            )
+            if match is None:
+                if blocked_reason is not None:
+                    audit_deliveries.append(
+                        _persist_public_outcome_tracking_audit(
+                            repository,
+                            prior_alert,
+                            reason=blocked_reason,
+                            scan_run_id=scan_run_id,
+                        )
+                    )
+                continue
+            plan_key = _canonical_public_outcome_plan_key(match)
+            matches_by_plan.setdefault(plan_key, []).append(match)
+
+        deliveries = list(audit_deliveries)
+        ordered_matches = tuple(
+            _preferred_canonical_public_outcome_match(matches)
+            for _, matches in sorted(matches_by_plan.items())
+        )
+        for match in ordered_matches:
+            blockers = _canonical_public_outcome_blockers(match)
+            if blockers:
+                deliveries.append(
+                    _persist_public_outcome_tracking_audit(
+                        repository,
+                        match.prior_alert,
+                        reason=";".join(blockers),
+                        scan_run_id=scan_run_id,
+                    )
+                )
+                continue
+
+            for reason in _canonical_public_outcome_causal_audit_reasons(match.progress):
+                deliveries.append(
+                    _persist_public_outcome_tracking_audit(
+                        repository,
+                        match.prior_alert,
+                        reason=reason,
+                        scan_run_id=scan_run_id,
+                    )
+                )
+
+            for alert_type, reached_at in _canonical_public_outcome_sequence(match.progress):
+                delivery = await self._send_canonical_public_outcome(
+                    repository,
+                    match=match,
+                    alert_type=alert_type,
+                    reached_at=reached_at,
+                    scan_run_id=scan_run_id,
+                    eligibility_context=eligibility_context,
+                )
+                deliveries.append(delivery)
+                if delivery.status not in {"sent", "duplicate"}:
+                    break
+        return tuple(deliveries)
+
+    async def _send_canonical_public_outcome(
+        self,
+        repository: SQLiteTelegramAlertAttemptRepository,
+        *,
+        match: CanonicalPublicOutcomeMatch,
+        alert_type: TelegramAlertType,
+        reached_at: str,
+        scan_run_id: str | None,
+        eligibility_context: TelegramEligibilityContext,
+    ) -> TelegramLifecycleDelivery:
+        prior_alert = match.prior_alert
+        record = match.record
+        symbol_result = _reconciliation_symbol_result(
+            record,
+            prior_alert,
+            current_result=match.current_result,
+        )
+        message = replace(
+            _telegram_signal_message_for_alert(
+                symbol_result,
+                alert_type,
+                eligibility_context,
+            ),
+            signal_id=prior_alert.signal_id,
+            symbol=record.symbol,
+            direction=record.direction,
+            entry_low=record.entry_low,
+            entry_high=record.entry_high,
+            stop_loss=record.stop_loss,
+            tp1=record.tp1,
+            tp2=record.tp2,
+            tp3=record.tp3,
+            planned_rr=record.rr,
+            was_watchlist=prior_alert.alert_type == TelegramAlertType.WATCHLIST.value,
+        )
+        plan = _public_economic_setup_plan(symbol_result, message)
+        if (
+            prior_alert.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value
+            and _text(prior_alert.public_watchlist_plan_id) != NA
+        ):
+            plan = replace(
+                plan,
+                plan_id=prior_alert.public_watchlist_plan_id,
+                plan_hash=prior_alert.public_watchlist_plan_id.rsplit("|", 1)[-1],
+            )
+        event_type = alert_type.value
+        event_key = _public_watchlist_event_key(plan.plan_id, event_type)
+        message_text = format_telegram_signal_message(alert_type, message)
+        message_hash = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
+        attempted_at = now_utc_iso()
+        public_plan_fields = _public_watchlist_record_plan_fields(
+            symbol_result,
+            alert_type,
+            message,
+        )
+        public_plan_fields.update(
+            {
+                "public_watchlist_plan_id": plan.plan_id,
+                "public_watchlist_event_key": event_key,
+                "public_alert_event_type": event_type,
+            }
+        )
+        reservation_record = TelegramAlertAttemptRecord(
+            signal_id=prior_alert.signal_id,
+            symbol=record.symbol,
+            direction=record.direction,
+            previous_state=record.previous_state.value if record.previous_state is not None else NA,
+            new_state=record.current_state.value,
+            alert_type=alert_type.value,
+            lifecycle_state=record.current_state.value,
+            sent_at=None,
+            attempted_at=attempted_at,
+            telegram_status=PUBLIC_WATCHLIST_RESERVATION_STATUS,
+            message_hash=message_hash,
+            scan_run_id=scan_run_id,
+            attempted_alert_type=alert_type.value,
+            setup_quality_score=_text(record.quality_score),
+            rr_planned=_text(record.rr),
+            min_rr=_text(eligibility_context.min_rr),
+            opportunity_score=_text(record.opportunity_score),
+            min_score_for_idea=_text(eligibility_context.min_score_for_idea),
+            technical_score=_text(record.technical_score),
+            price_level=_price_level_for_alert(alert_type, message),
+            **_message_level_metadata(message),
+            **public_plan_fields,
+            blocked_reason=NA,
+            invalid_target_fields=NA,
+            error_message=NA,
+            first_seen_at=reached_at,
+            last_seen_at=attempted_at,
+            last_scan_run_id=scan_run_id,
+            last_error_message=NA,
+            dedupe_status=PUBLIC_WATCHLIST_RESERVATION_STATUS,
+            dedupe_reason=NA,
+        )
+        reservation = _reserve_public_lifecycle_event(
+            repository,
+            alert_type=alert_type,
+            plan=plan,
+            reservation_record=reservation_record,
+        )
+        if not reservation.granted:
+            return TelegramLifecycleDelivery(
+                symbol=record.symbol,
+                signal_id=prior_alert.signal_id,
+                alert_type=alert_type.value,
+                status=reservation.status,
+                detail=reservation.detail,
+                message_hash=message_hash,
+                error_message=reservation.reason,
+            )
+        if reservation.reservation_id is None or reservation.event_id is None:
+            return TelegramLifecycleDelivery(
+                symbol=record.symbol,
+                signal_id=prior_alert.signal_id,
+                alert_type=alert_type.value,
+                status="failed",
+                detail="Canonical outcome outbox reservation metadata is incomplete.",
+                message_hash=message_hash,
+                error_message="canonical_outcome_outbox_reservation_incomplete",
+            )
+        return await _deliver_committed_public_alert_intent(
+            repository=repository,
+            sender=self.sender,
+            reservation=reservation,
+            symbol=record.symbol,
+            signal_id=prior_alert.signal_id,
+            alert_type=alert_type,
+            message_type=_telegram_message_type_for_alert(alert_type, message),
+            message_text=message_text,
+            message_hash=message_hash,
+        )
 
     async def reconcile_sent_watchlists(
         self,
@@ -8613,7 +8939,7 @@ def _public_watchlist_record_plan_fields(
     if alert_type == TelegramAlertType.WATCHLIST:
         plan_id = plan.plan_id
         event_type = PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE
-    elif alert_type in {TelegramAlertType.SETUP_TRIGGERED, TelegramAlertType.SIGNAL_CONFIRMED}:
+    elif alert_type in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES:
         plan = _public_economic_setup_plan(symbol_result, message)
         plan_id = plan.plan_id
         event_type = alert_type.value
@@ -10369,6 +10695,71 @@ def _persist_blocked_attempt(
     )
 
 
+def _persist_public_outcome_tracking_audit(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    prior_alert: TelegramAlertAttemptRecord,
+    *,
+    reason: str,
+    scan_run_id: str | None,
+) -> TelegramLifecycleDelivery:
+    seen_at = now_utc_iso()
+    digest = hashlib.sha256(_text(reason).encode("utf-8")).hexdigest()[:12]
+    audit_alert_type = f"{PUBLIC_OUTCOME_TRACKING_ATTEMPT}_{digest}"
+    record = TelegramAlertAttemptRecord(
+        signal_id=prior_alert.signal_id,
+        symbol=prior_alert.symbol,
+        direction=prior_alert.direction,
+        previous_state=prior_alert.previous_state,
+        new_state=prior_alert.new_state,
+        alert_type=audit_alert_type,
+        lifecycle_state=prior_alert.lifecycle_state,
+        sent_at=None,
+        attempted_at=seen_at,
+        telegram_status="blocked",
+        message_hash=hashlib.sha256(
+            f"{prior_alert.signal_id}|{audit_alert_type}|{reason}".encode("utf-8")
+        ).hexdigest(),
+        scan_run_id=scan_run_id,
+        attempted_alert_type=PUBLIC_OUTCOME_TRACKING_ATTEMPT,
+        setup_quality_score=prior_alert.setup_quality_score,
+        rr_planned=prior_alert.rr_planned,
+        min_rr=prior_alert.min_rr,
+        opportunity_score=prior_alert.opportunity_score,
+        min_score_for_idea=prior_alert.min_score_for_idea,
+        technical_score=prior_alert.technical_score,
+        price_level=prior_alert.price_level,
+        entry_low=prior_alert.entry_low,
+        entry_high=prior_alert.entry_high,
+        stop_loss=prior_alert.stop_loss,
+        tp1=prior_alert.tp1,
+        tp2=prior_alert.tp2,
+        tp3=prior_alert.tp3,
+        public_watchlist_plan_id=prior_alert.public_watchlist_plan_id,
+        public_watchlist_event_key=prior_alert.public_watchlist_event_key,
+        public_alert_event_type=prior_alert.public_alert_event_type,
+        normalized_entry_zone_low=prior_alert.normalized_entry_zone_low,
+        normalized_entry_zone_high=prior_alert.normalized_entry_zone_high,
+        normalized_invalidation=prior_alert.normalized_invalidation,
+        blocked_reason=reason,
+        error_message=reason,
+        first_seen_at=seen_at,
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id,
+        last_error_message=reason,
+    )
+    inserted = repository.insert_attempt(record)
+    compacted = False if inserted else repository.compact_repeated_attempt(record)
+    return TelegramLifecycleDelivery(
+        symbol=prior_alert.symbol,
+        signal_id=prior_alert.signal_id,
+        alert_type=PUBLIC_OUTCOME_TRACKING_ATTEMPT,
+        status="blocked" if inserted else "blocked_repeat" if compacted else "duplicate",
+        detail="Canonical public outcome tracking withheld an untrustworthy candidate.",
+        message_hash=record.message_hash,
+        error_message=reason,
+    )
+
+
 def _persist_equivalent_public_setup_skip(
     repository: SQLiteTelegramAlertAttemptRepository,
     symbol_result: ScannerSymbolResult,
@@ -11855,6 +12246,305 @@ def _match_sent_watchlist_lifecycle(
     if len(fallback_records) > 1:
         return SentWatchlistLifecycleMatch(blocked_reason=SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS)
     return SentWatchlistLifecycleMatch(blocked_reason=SENT_WATCHLIST_RECONCILIATION_NO_MATCH)
+
+
+def _match_public_tracking_outcome(
+    prior_alert: TelegramAlertAttemptRecord,
+    *,
+    alert_repository: SQLiteTelegramAlertAttemptRepository,
+    lifecycle_repository: SQLiteSetupLifecycleRepository,
+    current_results: Sequence[ScannerSymbolResult],
+) -> tuple[CanonicalPublicOutcomeMatch | None, str | None]:
+    records: dict[str, SetupLifecycleRecord] = {}
+    exact = lifecycle_repository.get_record_by_lifecycle_id(prior_alert.signal_id)
+    if exact is not None:
+        records[exact.lifecycle_id] = exact
+    for record in _current_lifecycle_records_for_signal_id(prior_alert.signal_id, current_results):
+        records.setdefault(record.lifecycle_id, record)
+    for record in lifecycle_repository.list_records_for_symbol(
+        symbol=prior_alert.symbol,
+        direction=prior_alert.direction,
+    ):
+        records.setdefault(record.lifecycle_id, record)
+
+    candidates: list[tuple[CanonicalPublicOutcomeMatch, bool, bool]] = []
+    progress_seen = False
+    for record in records.values():
+        progress = lifecycle_repository.get_outcome_progress(
+            lifecycle_id=record.lifecycle_id,
+            plan_identity=canonical_plan_identity(record),
+        )
+        if progress is None:
+            continue
+        progress_seen = True
+        current_result = _current_result_for_lifecycle_record(
+            record,
+            prior_alert,
+            current_results,
+        )
+        identity_exact = (
+            record.lifecycle_id == prior_alert.signal_id
+            and _public_tracking_root_has_same_symbol_direction(prior_alert, record)
+        )
+        plan_matches = _public_tracking_root_matches_record(
+            prior_alert,
+            record,
+            alert_repository=alert_repository,
+            current_result=current_result,
+        )
+        if not identity_exact and not plan_matches:
+            continue
+        candidates.append(
+            (
+                CanonicalPublicOutcomeMatch(
+                    prior_alert=prior_alert,
+                    record=record,
+                    progress=progress,
+                    current_result=current_result,
+                ),
+                identity_exact,
+                plan_matches,
+            )
+        )
+
+    if not candidates:
+        return (
+            None,
+            PUBLIC_OUTCOME_TRACKING_NO_MATCH if progress_seen else None,
+        )
+    candidates.sort(
+        key=lambda item: (
+            item[1],
+            item[2],
+            _canonical_outcome_milestone_count(item[0].progress),
+            bool(item[0].record.is_current),
+            item[0].progress.last_evaluated_at,
+            item[0].record.lifecycle_id,
+        ),
+        reverse=True,
+    )
+    best = candidates[0]
+    if len(candidates) > 1:
+        best_rank = (
+            best[1],
+            best[2],
+            _canonical_outcome_milestone_count(best[0].progress),
+            bool(best[0].record.is_current),
+            best[0].progress.last_evaluated_at,
+        )
+        second = candidates[1]
+        second_rank = (
+            second[1],
+            second[2],
+            _canonical_outcome_milestone_count(second[0].progress),
+            bool(second[0].record.is_current),
+            second[0].progress.last_evaluated_at,
+        )
+        if best_rank == second_rank and _canonical_public_outcome_plan_key(best[0]) != _canonical_public_outcome_plan_key(second[0]):
+            return None, PUBLIC_OUTCOME_TRACKING_AMBIGUOUS
+    return best[0], None
+
+
+def _public_tracking_root_matches_record(
+    prior_alert: TelegramAlertAttemptRecord,
+    record: SetupLifecycleRecord,
+    *,
+    alert_repository: SQLiteTelegramAlertAttemptRepository,
+    current_result: ScannerSymbolResult | None,
+) -> bool:
+    if not _public_tracking_root_has_same_symbol_direction(prior_alert, record):
+        return False
+    symbol_result = _reconciliation_symbol_result(
+        record,
+        prior_alert,
+        current_result=current_result,
+    )
+    prior_event = _get_public_alert_event(
+        alert_repository,
+        event_key=prior_alert.public_watchlist_event_key,
+    )
+    if (
+        prior_event is not None
+        and _text(prior_event.setup_family) != NA
+        and _text(symbol_result.strategy_name) == NA
+    ):
+        symbol_result = symbol_result.model_copy(
+            update={"strategy_name": prior_event.setup_family}
+        )
+    message = telegram_signal_message_from_symbol(symbol_result)
+    prior_plan_id = _text(prior_alert.public_watchlist_plan_id)
+    if prior_alert.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value:
+        plan = _public_economic_setup_plan(symbol_result, message)
+        if prior_plan_id != NA and plan.plan_id == prior_plan_id:
+            return True
+        return prior_event is not None and _public_alert_event_matches_plan(prior_event, plan)[0]
+    plan = _public_watchlist_canonical_plan(symbol_result, message)
+    if prior_plan_id != NA and plan.plan_id == prior_plan_id:
+        return True
+    matched, _ = _public_watchlist_legacy_record_matches_plan(prior_alert, plan)
+    return matched
+
+
+def _public_tracking_root_has_same_symbol_direction(
+    prior_alert: TelegramAlertAttemptRecord,
+    record: SetupLifecycleRecord,
+) -> bool:
+    if _symbol(prior_alert.symbol) != _symbol(record.symbol):
+        return False
+    prior_direction = _status_key(prior_alert.direction)
+    return prior_direction not in {"long", "short"} or _status_key(record.direction) == prior_direction
+
+
+def _canonical_public_outcome_plan_key(match: CanonicalPublicOutcomeMatch) -> str:
+    symbol_result = _reconciliation_symbol_result(
+        match.record,
+        match.prior_alert,
+        current_result=match.current_result,
+    )
+    plan = _public_economic_setup_plan(
+        symbol_result,
+        telegram_signal_message_from_symbol(symbol_result),
+    )
+    if (
+        match.prior_alert.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value
+        and _text(match.prior_alert.public_watchlist_plan_id) != NA
+    ):
+        return match.prior_alert.public_watchlist_plan_id
+    return _first_non_na(plan.plan_id, match.prior_alert.signal_id)
+
+
+def _preferred_canonical_public_outcome_match(
+    matches: Sequence[CanonicalPublicOutcomeMatch],
+) -> CanonicalPublicOutcomeMatch:
+    return sorted(
+        matches,
+        key=lambda match: (
+            _canonical_outcome_milestone_count(match.progress),
+            bool(match.record.is_current),
+            match.prior_alert.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value,
+            match.progress.last_evaluated_at,
+            match.record.lifecycle_id,
+        ),
+        reverse=True,
+    )[0]
+
+
+def _canonical_outcome_milestone_count(progress: SetupLifecycleOutcomeProgress) -> int:
+    return sum(
+        value is not None
+        for value in (progress.tp1_at, progress.tp2_at, progress.tp3_at, progress.stop_at)
+    )
+
+
+def _canonical_public_outcome_blockers(
+    match: CanonicalPublicOutcomeMatch,
+) -> tuple[str, ...]:
+    progress = match.progress
+    blockers: list[str] = []
+    geometry_failure = stored_plan_geometry_failure(match.record)
+    if geometry_failure is not None:
+        blockers.append(f"canonical_outcome_invalid_stored_geometry:{geometry_failure}")
+    expected_plan_identity = canonical_plan_identity(match.record)
+    if progress.plan_identity != expected_plan_identity:
+        blockers.append("canonical_outcome_plan_identity_mismatch")
+    if _status_key(progress.integrity_status) != "verified":
+        blockers.append(
+            "canonical_outcome_integrity_"
+            f"{_status_key(progress.integrity_status) or 'unverified'}:"
+            f"{_text(progress.diagnostic)}"
+        )
+    milestone_times = tuple(
+        value
+        for value in (
+            progress.entry_at,
+            progress.tp1_at,
+            progress.tp2_at,
+            progress.tp3_at,
+            progress.stop_at,
+            progress.invalidated_at,
+        )
+        if value is not None
+    )
+    if any(_strict_outcome_timestamp(value) is None for value in milestone_times):
+        blockers.append("canonical_outcome_malformed_causal_timestamp")
+    if any(
+        value is not None
+        for value in (progress.tp1_at, progress.tp2_at, progress.tp3_at, progress.stop_at)
+    ) and progress.entry_at is None:
+        blockers.append("canonical_outcome_missing_entry_activation")
+    return tuple(dict.fromkeys(blockers))
+
+
+def _canonical_public_outcome_sequence(
+    progress: SetupLifecycleOutcomeProgress,
+) -> tuple[tuple[TelegramAlertType, str], ...]:
+    cutoff_values = tuple(
+        value
+        for value in (progress.invalidated_at, progress.stop_at)
+        if value is not None
+    )
+    cutoff = min(
+        (_strict_outcome_timestamp(value) for value in cutoff_values),
+        default=None,
+    )
+    milestones: list[tuple[TelegramAlertType, str]] = []
+    for alert_type, reached_at in (
+        (TelegramAlertType.TP1_HIT, progress.tp1_at),
+        (TelegramAlertType.TP2_HIT, progress.tp2_at),
+        (TelegramAlertType.TP3_HIT, progress.tp3_at),
+    ):
+        if reached_at is None:
+            continue
+        reached = _strict_outcome_timestamp(reached_at)
+        if reached is None or (cutoff is not None and reached > cutoff):
+            continue
+        milestones.append((alert_type, reached_at))
+    if (
+        progress.stop_at is not None
+        and _status_key(progress.terminal_outcome) == "sl_hit"
+    ):
+        milestones.append((TelegramAlertType.SL_HIT, progress.stop_at))
+    return tuple(milestones)
+
+
+def _canonical_public_outcome_causal_audit_reasons(
+    progress: SetupLifecycleOutcomeProgress,
+) -> tuple[str, ...]:
+    cutoff_values = tuple(
+        value
+        for value in (progress.invalidated_at, progress.stop_at)
+        if value is not None
+    )
+    if not cutoff_values:
+        return ()
+    cutoff = min(_strict_outcome_timestamp(value) for value in cutoff_values)
+    reasons: list[str] = []
+    for alert_type, reached_at in (
+        (TelegramAlertType.TP1_HIT, progress.tp1_at),
+        (TelegramAlertType.TP2_HIT, progress.tp2_at),
+        (TelegramAlertType.TP3_HIT, progress.tp3_at),
+    ):
+        if reached_at is None:
+            continue
+        reached = _strict_outcome_timestamp(reached_at)
+        if reached is not None and cutoff is not None and reached > cutoff:
+            reasons.append(
+                f"canonical_outcome_{alert_type.value.lower()}_after_terminal_cutoff"
+            )
+    return tuple(reasons)
+
+
+def _strict_outcome_timestamp(value: Any) -> datetime | None:
+    text = _text(value)
+    if text == NA:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _sent_watchlist_snapshot_by_symbol(
