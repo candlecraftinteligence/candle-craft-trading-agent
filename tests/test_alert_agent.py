@@ -52,12 +52,12 @@ def _idea(**overrides: object) -> TradeIdeaResult:
 def test_formats_valid_trade_idea() -> None:
     message = AlertAgent().format(_idea())
 
-    assert message.startswith("🐺 Candle Craft Intelligence")
+    assert message.startswith("🐺 BTCUSDT · LONG · SETUP")
     assert "BTCUSDT · LONG · SETUP" in message
-    assert "Grade: A | Score: N/A | RR: 3.50R" in message
-    assert "Status: 🟢 CONFIRMED SIGNAL" in message
+    assert "A · Score N/A · RR 3.50R" in message
+    assert "🟢 SIGNAL CONFIRMED" in message
     assert "Entry: 100 – 102" in message
-    assert "Stop: 95" in message
+    assert "SL: 95" in message
     assert "TP1: 112" in message
     assert "TP2: 120" in message
     assert "TP3: N/A" in message
@@ -95,7 +95,7 @@ def test_dry_run_returns_formatted_message() -> None:
 
     assert result.status == "dry_run"
     assert result.dry_run is True
-    assert result.formatted_message.startswith("🐺 Candle Craft Intelligence")
+    assert result.formatted_message.startswith("🐺 BTCUSDT · LONG · SETUP")
     assert result.message_parts == (result.formatted_message,)
 
 
@@ -140,7 +140,7 @@ def test_mocked_telegram_success() -> None:
             payload = json.loads(request.content.decode())
             assert request.url.path == "/bottoken/sendMessage"
             assert payload["chat_id"] == "chat"
-            assert payload["text"].startswith("🐺 Candle Craft Intelligence")
+            assert payload["text"].startswith("🐺 BTCUSDT · LONG · SETUP")
             assert CANDLE_CRAFT_SIGNATURE in payload["text"]
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
 

@@ -72,15 +72,14 @@ def _rejected_symbol_result(**overrides: object) -> ScannerSymbolResult:
 def test_valid_setup_formatting_is_premium_telegram_ready() -> None:
     text = format_telegram_strategy_output(_valid_symbol_result())
 
-    assert text.startswith("🐺 Candle Craft Intelligence")
-    assert "BTCUSDT · LONG · SCALP" in text
-    assert "Grade: A | Score: N/A | RR: 3.25R" in text
-    assert "Status: 🟢 CONFIRMED SIGNAL" in text
+    assert text.startswith("🐺 BTCUSDT · LONG · SCALP")
+    assert "A · Score N/A · RR 3.25R" in text
+    assert "🟢 SIGNAL CONFIRMED" in text
     assert "Entry: 103100 – 103300" in text
     assert "TP1: 104800" in text
     assert "TP2: 106000" in text
     assert "TP3: 107500" in text
-    assert "No chase. Entry only inside the mapped zone." in text
+    assert "No chase outside the mapped zone." in text
     assert "Invalid if price body-closes and accepts below 102400." in text
     assert "Signal ID" not in text
     assert "strategy_diagnostics" not in text
@@ -126,7 +125,7 @@ def test_na_values_are_preserved_in_valid_setup_formatting() -> None:
             }
         )
     )
-    assert "🎯 Trade Map" in missing_tp3
+    assert "🎯 TRADE MAP" in missing_tp3
     assert "TP3: N/A" in missing_tp3
 
 

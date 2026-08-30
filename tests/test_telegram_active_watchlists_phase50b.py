@@ -991,7 +991,7 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
     detail = service.public_response_for("/signal CRCLUSDT")
 
     assert detail.text.startswith("🐺🟠 CRCLUSDT — SIGNAL DETAIL")
-    assert "Status: ENTRY ZONE TOUCHED" in detail.text
+    assert "Status: ZONE ENGAGED" in detail.text
     assert "Quality: A" in detail.text
     assert "RR: 3.12R" in detail.text
     assert "Lifecycle: CONFIRMED → LIMIT ZONE HIT" in detail.text
@@ -1088,7 +1088,7 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
 
     assert detail.text.startswith("🐺🟠 BTCUSDT — SIGNAL DETAIL")
     assert "Bias: LONG" in detail.text
-    assert "Status: CONFIRMED" in detail.text
+    assert "Status: SIGNAL CONFIRMED" in detail.text
     assert "Quality: A" in detail.text
     assert "RR: 3.12R" in detail.text
     assert "Lifecycle: WATCHLISTED → CONFIRMED → EXECUTING" in detail.text
@@ -1429,7 +1429,7 @@ def test_quality_reject_cannot_coexist_with_active_lifecycle_display(tmp_path: P
     assert all(not value.startswith("public:signal:") for value in _callback_data_values(active.reply_markup))
     assert "No active signal available for this symbol. Setup expired or invalidated." in detail.text
     assert "Quality: Reject" not in detail.text
-    assert "Status: ENTRY ZONE TOUCHED" not in detail.text
+    assert "Status: ZONE ENGAGED" not in detail.text
     assert "Lifecycle: CONFIRMED" not in detail.text
 
 
@@ -1552,7 +1552,7 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
     assert "Active signals: 1" in response.text
     assert _button_labels(response.reply_markup) == ["ENAUSDT"]
     detail = _service(tmp_path, db_path).public_response_for("/signal ENAUSDT")
-    assert "Status: TP1 HIT" in detail.text
+    assert "Status: TP1 SECURED" in detail.text
     assert f"Updated: {tp1_seen}" in detail.text
     tp3_detail = _service(tmp_path, db_path).public_response_for("/signal TP3USDT")
     assert "No active signal available for this symbol. Setup expired or invalidated." in tp3_detail.text
