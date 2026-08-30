@@ -34,6 +34,28 @@ class TelegramAlertType(str, Enum):
     NO_LONGER_TRACKING = "NO_LONGER_TRACKING"
 
 
+@dataclass(frozen=True)
+class SignalEdgeEvidence:
+    """Validated strategy facts that may be projected into the public Edge block."""
+
+    sweep_present: bool = False
+    sweep_direction: Any = NA
+    swept_level: Any = NA
+    sweep_wick: Any = NA
+    structure_present: bool = False
+    structure_kind: Any = NA
+    structure_direction: Any = NA
+    structure_timeframe: Any = NA
+    structure_level: Any = NA
+    structure_close: Any = NA
+    selected_zone_type: Any = NA
+    fib_aligned: bool = False
+    pullback_depth_ratio: Any = NA
+    entry_low: Any = NA
+    entry_high: Any = NA
+    rr_to_tp2: Any = NA
+
+
 PUBLIC_STATUS_BY_ALERT_TYPE = {
     TelegramAlertType.RESEARCH_WATCH: "RESEARCH WATCH",
     TelegramAlertType.WATCHLIST: "WATCHLIST",
@@ -79,6 +101,7 @@ class SignalMessageContext:
     final_failed_gate: Any = NA
     final_block_reason: Any = NA
     invalidation_logic: Any = NA
+    edge_evidence: SignalEdgeEvidence | None = None
     why_it_matters_points: tuple[Any, ...] = ()
     what_we_want_next_points: tuple[Any, ...] = ()
     caution_points: tuple[Any, ...] = ()
@@ -133,6 +156,7 @@ class TelegramSignalMessage:
     final_failed_gate: Any = NA
     final_block_reason: Any = NA
     invalidation_logic: Any = NA
+    edge_evidence: SignalEdgeEvidence | None = None
     why_it_matters_points: tuple[Any, ...] = ()
     what_we_want_next_points: tuple[Any, ...] = ()
     caution_points: tuple[Any, ...] = ()
@@ -217,6 +241,7 @@ def _format_public_signal_message(
     confirmed: bool,
     triggered: bool = False,
 ) -> str:
+    edge_lines = _public_edge_lines(message)
     return _join(
         "\U0001F43A Candle Craft Intelligence",
         "",
@@ -234,9 +259,7 @@ def _format_public_signal_message(
         "",
         COMPACT_SEPARATOR,
         "",
-        "\U0001F9E0 Edge",
-        *_public_edge_lines(message),
-        "",
+        *(("\U0001F9E0 Edge", *edge_lines, "") if edge_lines else ()),
         "\u26A0\ufe0f Execution",
         *_public_execution_lines(message, confirmed=confirmed, triggered=triggered),
         "",
@@ -276,6 +299,7 @@ def _effective_signal_context(message: TelegramSignalMessage) -> SignalMessageCo
         final_failed_gate=message.final_failed_gate,
         final_block_reason=message.final_block_reason,
         invalidation_logic=_first_display(message.invalidation_logic, message.invalidation_reason, message.watchlist_invalidation_reason),
+        edge_evidence=message.edge_evidence,
         why_it_matters_points=message.why_it_matters_points,
         what_we_want_next_points=message.what_we_want_next_points,
         caution_points=message.caution_points,
@@ -445,94 +469,158 @@ def _public_compact_trade_map_lines(message: TelegramSignalMessage) -> tuple[str
 
 
 def _public_edge_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    evidence = _public_edge_evidence(message)
     lines: list[str] = []
-    liquidity = _public_edge_liquidity_line(message)
+    liquidity = _public_edge_liquidity_line(message, evidence=evidence)
     if liquidity != NA:
         lines.append(liquidity)
-    confluence = _public_edge_confluence_line(message)
-    if confluence != NA and confluence not in lines:
-        lines.append(confluence)
-    if not lines:
+    structure = _public_edge_structure_line(evidence)
+    if structure != NA and structure not in lines:
+        lines.append(structure)
+    entry = _public_edge_entry_line(evidence)
+    if entry != NA and entry not in lines:
+        lines.append(entry)
+    rr = _public_edge_rr_line(evidence)
+    if rr != NA and rr not in lines:
+        lines.append(rr)
+    if not lines and evidence is None:
         lines.extend(_public_fallback_edge_lines(message))
-    return tuple(lines[:2]) if lines else (NA,)
+    return tuple(lines[:4])
 
 
-def _public_edge_liquidity_line(message: TelegramSignalMessage) -> str:
-    side = _public_liquidity_side(message)
-    evidence = _public_edge_evidence_text(message)
-    if side == "downside":
-        if "reclaim" in evidence:
-            return "Downside liquidity was swept and reclaimed."
-        return "Downside liquidity was swept."
-    if side == "upside":
-        if "reject" in evidence:
-            return "Upside liquidity was swept and rejected."
-        return "Upside liquidity was swept."
-    return NA
-
-
-def _public_edge_confluence_line(message: TelegramSignalMessage) -> str:
+def _public_edge_evidence(message: TelegramSignalMessage) -> SignalEdgeEvidence | None:
     context = _effective_signal_context(message)
-    evidence = _public_edge_evidence_text(message)
-    direction = _direction_key(_first_display(_effective_signal_context(message).direction, message.direction))
-    direction_word = "bullish" if direction == "long" else "bearish" if direction == "short" else "directional"
-    structure = _has_structure_shift_evidence(evidence)
-    zone = _public_reaction_zone_label(evidence)
-    structure_text = f"{_confirmation_timeframe(message, context)} structure shifted {direction_word}" if structure else NA
-    if structure_text != NA and zone != NA:
-        return f"{structure_text}, with pullback aligned {zone}."
-    if structure_text != NA:
-        return f"{structure_text}."
-    if zone != NA:
-        return f"Pullback aligned {zone}."
+    return context.edge_evidence or message.edge_evidence
+
+
+def _public_edge_liquidity_line(
+    message: TelegramSignalMessage,
+    *,
+    evidence: SignalEdgeEvidence | None = None,
+) -> str:
+    if evidence is not None:
+        if not evidence.sweep_present:
+            return NA
+        side = _edge_sweep_side(evidence.sweep_direction, message.direction)
+        if side == NA:
+            return NA
+        level = format_price(evidence.swept_level)
+        wick = format_price(evidence.sweep_wick)
+        close_side = "above" if side == "downside" else "below"
+        if level != NA and wick != NA and wick != level:
+            return (
+                f"Price swept {side} liquidity at {level} with a wick to {wick}, "
+                f"then closed back {close_side} the level."
+            )
+        if level != NA:
+            return f"Price swept {side} liquidity at {level} and closed back {close_side} the level."
+        return f"Price swept {side} liquidity and closed back inside the prior structure."
+
     return NA
 
 
-def _confirmation_timeframe(message: TelegramSignalMessage, context: SignalMessageContext) -> str:
-    timeframe = _display(_first_display(context.confirmation_timeframe, message.confirmation_timeframe))
-    return timeframe if timeframe != NA else "15m"
+def _edge_sweep_side(sweep_direction: Any, message_direction: Any) -> str:
+    key = _status_key(sweep_direction)
+    if key in {"bullish", "long", "downside"}:
+        return "downside"
+    if key in {"bearish", "short", "upside"}:
+        return "upside"
+    direction = _direction_key(message_direction)
+    return "downside" if direction == "long" else "upside" if direction == "short" else NA
 
 
-def _has_structure_shift_evidence(evidence: str) -> bool:
-    return (
-        "structure shifted" in evidence
-        or "structure shift" in evidence
-        or "structure is confirmed" in evidence
-        or "bos/choch confirmed" in evidence
-        or "bos/choch confirms" in evidence
-        or "clean ltf bos/choch" in evidence
-        or ("bos" in evidence and "confirmed" in evidence)
-        or ("choch" in evidence and "confirmed" in evidence)
+def _public_edge_structure_line(evidence: SignalEdgeEvidence | None) -> str:
+    if evidence is None or not evidence.structure_present:
+        return NA
+    kind = _edge_structure_kind(evidence.structure_kind)
+    if kind == NA:
+        return NA
+    direction = _status_key(evidence.structure_direction)
+    direction_word = (
+        "bullish"
+        if direction in {"bullish", "long"}
+        else "bearish"
+        if direction in {"bearish", "short"}
+        else NA
     )
+    timeframe = _display(evidence.structure_timeframe)
+    prefix = " ".join(part for part in (timeframe, direction_word, kind) if part != NA)
+    if not prefix:
+        return NA
+    level = format_price(evidence.structure_level)
+    close = format_price(evidence.structure_close)
+    if level != NA and close != NA and direction_word != NA:
+        relation = "above" if direction_word == "bullish" else "below"
+        return f"{prefix} closed {relation} {level} at {close}."
+    if level != NA and direction_word != NA:
+        relation = "above" if direction_word == "bullish" else "below"
+        return f"{prefix} confirmed through {level} with a body close {relation} structure."
+    return f"{prefix} confirmed the structure shift."
 
 
-def _public_reaction_zone_label(evidence: str) -> str:
-    normalized = evidence.replace("-", "_").replace("/", "_").replace(" ", "_")
-    padded = f" {evidence} "
-    has_ob = "ob_fvg" in normalized or "order_block" in normalized or "order block" in evidence or " ob " in padded
-    has_fvg = "ob_fvg" in normalized or "fvg" in normalized or "imbalance" in evidence
-    has_fib = "fib" in evidence
-    if has_ob and has_fvg and has_fib:
-        return "inside OB/FVG + fib reaction zone"
-    if has_ob and has_fvg:
-        return "inside OB/FVG reaction zone"
-    if has_ob and has_fib:
-        return "inside OB + fib reaction zone"
-    if has_fvg and has_fib:
-        return "inside FVG + fib reaction zone"
-    if has_ob:
-        return "inside OB reaction zone"
-    if has_fvg:
-        return "inside FVG reaction zone"
-    if has_fib:
-        return "with fib reaction zone"
+def _edge_structure_kind(value: Any) -> str:
+    key = _status_key(value)
+    if key == "bos":
+        return "BOS"
+    if key in {"choch", "ch_och"}:
+        return "CHoCH"
+    if key == "mss":
+        return "MSS"
     return NA
+
+
+def _public_edge_entry_line(evidence: SignalEdgeEvidence | None) -> str:
+    if evidence is None:
+        return NA
+    zone = _edge_zone_label(evidence.selected_zone_type)
+    fib = bool(evidence.fib_aligned)
+    if zone == NA and not fib:
+        return NA
+    entry = _entry_range_values(evidence.entry_low, evidence.entry_high)
+    subject = f"Entry {entry}" if entry != NA else "The mapped entry"
+    if zone != NA and fib:
+        line = f"{subject} overlaps the selected {zone} and the validated fib pullback zone"
+    elif zone != NA:
+        line = f"{subject} overlaps the selected {zone}"
+    else:
+        line = f"{subject} is aligned with the validated fib pullback zone"
+    depth = _edge_pullback_depth(evidence.pullback_depth_ratio)
+    if depth != NA:
+        line += f" at a {depth} retracement"
+    return f"{line}."
+
+
+def _edge_zone_label(value: Any) -> str:
+    key = _status_key(value)
+    if key in {"ob_fvg_overlap", "ob_fvg", "ob_fvg_valid", "order_block_fvg_overlap"}:
+        return "OB/FVG overlap"
+    if key in {"ob", "ob_valid", "order_block", "order_block_valid"}:
+        return "order block"
+    if key in {"fvg", "fvg_valid", "fair_value_gap", "fair_value_gap_valid", "imbalance"}:
+        return "FVG"
+    return NA
+
+
+def _edge_pullback_depth(value: Any) -> str:
+    decimal = _decimal_value(value)
+    if decimal is None or decimal < 0 or decimal > 1:
+        return NA
+    return f"{decimal.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):f}"
+
+
+def _public_edge_rr_line(evidence: SignalEdgeEvidence | None) -> str:
+    if evidence is None:
+        return NA
+    rr = format_rr(evidence.rr_to_tp2)
+    if rr == NA:
+        return NA
+    return f"The stored plan provides {rr} to TP2."
 
 
 def _public_fallback_edge_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
     context = _effective_signal_context(message)
     lines: list[str] = []
-    for value in _public_text_fragments(context.why_it_matters_points, message.structure_reason, message.confluence, message.current_context):
+    for value in _public_text_fragments(context.why_it_matters_points):
         text = _safe_public_text(value)
         if text == NA:
             continue
@@ -543,7 +631,7 @@ def _public_fallback_edge_lines(message: TelegramSignalMessage) -> tuple[str, ..
             lines.append(text)
         if len(lines) == 2:
             break
-    return tuple(lines) if lines else (NA,)
+    return tuple(lines)
 
 
 def _public_execution_lines(
@@ -1417,6 +1505,7 @@ __all__ = [
     "FOOTER",
     "HEADER_PREFIX",
     "PUBLIC_STATUS_BY_ALERT_TYPE",
+    "SignalEdgeEvidence",
     "TelegramAlertType",
     "SignalMessageContext",
     "TelegramSignalMessage",

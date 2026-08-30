@@ -6,6 +6,7 @@ from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
     FOOTER,
     HEADER_PREFIX,
+    SignalEdgeEvidence,
     TelegramAlertType,
     SignalMessageContext,
     TelegramSignalMessage,
@@ -14,6 +15,29 @@ from app.formatters.telegram_signal_formatter import (
     format_telegram_rr,
     format_telegram_signal_message,
 )
+
+
+def _edge(**overrides: object) -> SignalEdgeEvidence:
+    data = {
+        "sweep_present": True,
+        "sweep_direction": "bullish",
+        "swept_level": Decimal("99"),
+        "sweep_wick": Decimal("98.5"),
+        "structure_present": True,
+        "structure_kind": "CHoCH",
+        "structure_direction": "bullish",
+        "structure_timeframe": "15m",
+        "structure_level": Decimal("103"),
+        "structure_close": Decimal("104"),
+        "selected_zone_type": "OB_FVG_OVERLAP",
+        "fib_aligned": True,
+        "pullback_depth_ratio": Decimal("0.58"),
+        "entry_low": Decimal("100"),
+        "entry_high": Decimal("102"),
+        "rr_to_tp2": Decimal("2.91918017"),
+    }
+    data.update(overrides)
+    return SignalEdgeEvidence(**data)
 
 
 def _message(**overrides: object) -> TelegramSignalMessage:
@@ -36,6 +60,7 @@ def _message(**overrides: object) -> TelegramSignalMessage:
         "needs_next": ("Price must trade into the Limit Zone.",),
         "invalidation_reason": "Invalid if price accepts below 95.",
         "confluence": "LTF BOS/CHoCH confirmed.",
+        "edge_evidence": _edge(),
     }
     data.update(overrides)
     return TelegramSignalMessage(**data)
@@ -73,8 +98,10 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
     assert "TP2: 115" in text
     assert "TP3: 120" in text
     assert "🧠 Edge" in text
-    assert "Downside liquidity was swept and reclaimed." in text
-    assert "15m structure shifted bullish." in text
+    assert "Price swept downside liquidity at 99 with a wick to 98.5, then closed back above the level." in text
+    assert "15m bullish CHoCH closed above 103 at 104." in text
+    assert "Entry 100 – 102 overlaps the selected OB/FVG overlap and the validated fib pullback zone" in text
+    assert "The stored plan provides 2.92R to TP2." in text
     assert "⚠️ Execution" in text
     assert "No chase. Entry only inside the mapped zone." in text
     assert "Invalid if price body-closes and accepts below 95." in text
@@ -89,11 +116,11 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
 def test_signal_formatter_uses_explicit_m5_confirmation_override() -> None:
     text = format_telegram_signal_message(
         TelegramAlertType.SIGNAL_CONFIRMED,
-        _message(confirmation_timeframe="5m"),
+        _message(confirmation_timeframe="5m", edge_evidence=_edge(structure_timeframe="5m")),
     )
 
-    assert "5m structure shifted bullish." in text
-    assert "15m structure shifted bullish." not in text
+    assert "5m bullish CHoCH" in text
+    assert "15m bullish CHoCH" not in text
 
 def test_public_watchlist_formatter_matches_compact_watch_shape() -> None:
     text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, _message())
@@ -153,20 +180,30 @@ def test_short_liquidity_rejection_signal_tracks_rejection_and_invalidates_above
             structure_reason="Upside liquidity was swept and rejected.",
             confluence="LTF BOS/CHoCH confirmed.",
             invalidation_reason="Invalid if price accepts above 105.",
+            edge_evidence=_edge(
+                sweep_direction="bearish",
+                swept_level=Decimal("105"),
+                sweep_wick=Decimal("105.5"),
+                structure_direction="bearish",
+            ),
         ),
     )
 
     assert "BTCUSDT · SHORT · SCALP" in text
     assert "🐺 Wolf found upside liquidity." in text
     assert "Now we track the rejection." in text
-    assert "Upside liquidity was swept and rejected." in text
+    assert "Price swept upside liquidity at 105 with a wick to 105.5, then closed back below the level." in text
     assert "Invalid if price body-closes and accepts above 105." in text
 
 
 def test_public_signal_missing_liquidity_uses_safe_wolf_fallback() -> None:
     text = format_telegram_signal_message(
         TelegramAlertType.SIGNAL_CONFIRMED,
-        _message(structure_reason="Pullback zone is mapped.", confluence="LTF BOS/CHoCH confirmed."),
+        _message(
+            structure_reason="Pullback zone is mapped.",
+            confluence="LTF BOS/CHoCH confirmed.",
+            edge_evidence=SignalEdgeEvidence(),
+        ),
     )
 
     assert "Wolf found downside liquidity" not in text
@@ -331,15 +368,14 @@ def test_missing_tp3_renders_labeled_na_target() -> None:
     assert "Missing: TP3" not in text
 
 
-def test_missing_reason_renders_na_edge_without_inventing_confirmation() -> None:
+def test_missing_evidence_omits_edge_without_inventing_confirmation() -> None:
     text = format_telegram_signal_message(
         TelegramAlertType.SIGNAL_CONFIRMED,
-        _message(structure_reason=NA, confluence=NA),
+        _message(structure_reason=NA, confluence=NA, edge_evidence=SignalEdgeEvidence()),
     )
 
-    edge = text.split("🧠 Edge\n", 1)[1].split("\n\n⚠️ Execution", 1)[0]
-    assert edge == "N/A"
-    assert "confirmation" not in edge.lower()
+    assert "🧠 Edge" not in text
+    assert "liquidity was swept" not in text
 
 
 def test_missing_invalidation_uses_directional_body_close_stop_fallback() -> None:
@@ -412,7 +448,7 @@ def test_missing_invalidation_level_does_not_invent_number() -> None:
     assert "95" not in text
 
 
-def test_structured_why_points_replace_generic_fallback_text() -> None:
+def test_structured_edge_evidence_replaces_generic_fallback_text() -> None:
     text = format_telegram_signal_message(
         TelegramAlertType.WATCHLIST,
         _message(
@@ -433,10 +469,130 @@ def test_structured_why_points_replace_generic_fallback_text() -> None:
         ),
     )
 
-    assert "Downside liquidity was swept." in text
-    assert "15m structure shifted bullish, with pullback aligned inside OB/FVG + fib reaction zone." in text
+    assert "Price swept downside liquidity at 99" in text
+    assert "15m bullish CHoCH closed above 103 at 104." in text
+    assert "selected OB/FVG overlap" in text
     assert "Setup quality does not provide enough deterministic edge" not in text
     assert "clean RR path" not in text
+
+
+def _edge_section(text: str) -> str:
+    if "🧠 Edge\n" not in text:
+        return ""
+    return text.split("🧠 Edge\n", 1)[1].split("\n\n⚠️ Execution", 1)[0]
+
+
+def test_long_and_short_edges_use_actual_sweep_side_and_level() -> None:
+    long_edge = _edge_section(
+        format_telegram_signal_message(TelegramAlertType.SETUP_TRIGGERED, _message())
+    )
+    short_edge = _edge_section(
+        format_telegram_signal_message(
+            TelegramAlertType.SETUP_TRIGGERED,
+            _message(
+                direction="short",
+                edge_evidence=_edge(
+                    sweep_direction="bearish",
+                    swept_level=Decimal("105.25"),
+                    sweep_wick=Decimal("105.40"),
+                    structure_direction="bearish",
+                ),
+            ),
+        )
+    )
+
+    assert "downside liquidity at 99" in long_edge
+    assert "upside liquidity at 105.25" in short_edge
+    assert long_edge != short_edge
+
+
+def test_bos_and_choch_edges_preserve_exact_structure_kind() -> None:
+    bos = _edge_section(
+        format_telegram_signal_message(
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            _message(edge_evidence=_edge(structure_kind="BOS")),
+        )
+    )
+    choch = _edge_section(
+        format_telegram_signal_message(
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            _message(edge_evidence=_edge(structure_kind="CHoCH")),
+        )
+    )
+
+    assert "bullish BOS" in bos and "CHoCH" not in bos
+    assert "bullish CHoCH" in choch and " BOS" not in choch
+
+
+def test_entry_edge_claims_only_the_selected_zone_evidence() -> None:
+    ob = _edge_section(
+        format_telegram_signal_message(
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            _message(edge_evidence=_edge(selected_zone_type="OB", fib_aligned=False)),
+        )
+    )
+    fvg = _edge_section(
+        format_telegram_signal_message(
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            _message(edge_evidence=_edge(selected_zone_type="FVG", fib_aligned=False)),
+        )
+    )
+    overlap = _edge_section(
+        format_telegram_signal_message(
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            _message(edge_evidence=_edge(selected_zone_type="OB_FVG_OVERLAP", fib_aligned=False)),
+        )
+    )
+
+    assert "selected order block" in ob and "FVG" not in ob
+    assert "selected FVG" in fvg and "order block" not in fvg
+    assert "selected OB/FVG overlap" in overlap
+
+
+def test_fib_and_rr_are_emitted_only_when_present() -> None:
+    without = _edge_section(
+        format_telegram_signal_message(
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            _message(edge_evidence=_edge(fib_aligned=False, pullback_depth_ratio=NA, rr_to_tp2=NA)),
+        )
+    )
+    with_rr = _edge_section(
+        format_telegram_signal_message(
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            _message(edge_evidence=_edge(rr_to_tp2=Decimal("3.06"))),
+        )
+    )
+
+    assert "fib" not in without.lower()
+    assert "retracement" not in without.lower()
+    assert "R to TP2" not in without
+    assert "3.06R to TP2" in with_rr
+
+
+def test_edge_is_deterministic_public_safe_and_ignores_research_context() -> None:
+    message = _message(
+        current_context=(
+            "CVD confirms; orderflow supports; order-book depth is strong; "
+            "liquidations reinforce the trade."
+        ),
+    )
+    first = _edge_section(format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, message))
+    second = _edge_section(format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, message))
+
+    assert first == second
+    assert "N/A" not in first
+    assert not any(
+        term in first.lower()
+        for term in (
+            "selected_zone_type",
+            "pullback_depth_ratio",
+            "rr_to_tp2",
+            "cvd",
+            "orderflow",
+            "order-book",
+            "liquidation",
+        )
+    )
 def test_rejected_no_setup_output_is_not_converted_to_valid_signal() -> None:
     text = format_public_no_trade_message(_message(), "Opportunity score is below 80.")
 

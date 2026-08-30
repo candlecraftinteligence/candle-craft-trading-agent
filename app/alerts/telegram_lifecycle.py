@@ -43,6 +43,7 @@ from app.core.confirmed_data_health import confirmed_data_health_for_symbol
 from app.core.trade_plan_integrity import validate_trade_plan
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
+    SignalEdgeEvidence,
     SignalMessageContext,
     TelegramAlertType,
     TelegramSignalMessage,
@@ -312,11 +313,13 @@ PUBLIC_WATCHLIST_COOLDOWN_HOURS = PUBLIC_SIGNAL_SAME_SIDE_COOLDOWN_HOURS
 PUBLIC_WATCHLIST_PRICE_TOLERANCE_TICKS = Decimal("10")
 PUBLIC_WATCHLIST_ZONE_TOLERANCE_MULTIPLIER = Decimal("2")
 PUBLIC_WATCHLIST_PLAN_ID_VERSION = "public-watchlist-plan-v2"
+PUBLIC_ECONOMIC_SETUP_ID_VERSION = "public-economic-setup-v1"
 PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE = "initial_watchlist"
 PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON = "duplicate_successful_public_watchlist_event"
 PUBLIC_WATCHLIST_RESERVATION_IN_FLIGHT_REASON = "public_watchlist_event_reservation_in_flight"
 PUBLIC_WATCHLIST_MISSING_REQUIRED_RESERVATION_REASON = "public_watchlist_missing_required_reservation"
 PUBLIC_WATCHLIST_DUPLICATE_EQUIVALENT_PLAN_REASON = "public_watchlist_duplicate_equivalent_plan"
+PUBLIC_LIFECYCLE_DUPLICATE_EQUIVALENT_SETUP_REASON = "duplicate_equivalent_public_setup"
 PUBLIC_WATCHLIST_RESERVATION_STATUS = "reserved"
 PUBLIC_ALERT_EVENT_RESERVED_STATUS = "RESERVED"
 PUBLIC_ALERT_EVENT_SENT_STATUS = "SENT"
@@ -707,6 +710,7 @@ class PublicWatchlistPlanIdentity:
     side: str = NA
     setup_family: str = NA
     source_modes: tuple[str, ...] = ()
+    structural_anchor: str = NA
     structural_identity: tuple[tuple[str, str], ...] = ()
     raw_entry_low: str = NA
     raw_entry_high: str = NA
@@ -2004,7 +2008,51 @@ def _public_alert_event_matches_plan(
     )
     if _text(event.setup_family) != NA and plan.setup_family != NA and _text(event.setup_family) != plan.setup_family:
         return False, False
+    event_anchor = _text(event.structural_anchor)
+    plan_anchor = _text(plan.structural_anchor)
+    if event_anchor != plan_anchor and (event_anchor != NA or plan_anchor != NA):
+        return False, False
     return _public_watchlist_legacy_record_matches_plan(record, plan)
+
+
+def _public_alert_event_with_resolved_structural_anchor(
+    db: SQLiteTelegramAlertAttemptRepository,
+    event: PublicAlertEventRecord,
+) -> PublicAlertEventRecord:
+    """Resolve anchors for pre-v18 events from their persisted lifecycle attempt."""
+
+    if _text(event.structural_anchor) != NA or event.id is None:
+        return event
+    row = db._connection.execute(
+        """
+        SELECT lifecycle.structural_anchor
+        FROM telegram_alert_attempts AS attempt
+        JOIN setup_lifecycle_records AS lifecycle
+          ON attempt.signal_id = lifecycle.lifecycle_id
+          OR substr(attempt.signal_id, 1, length(lifecycle.lifecycle_id) + 7)
+             = lifecycle.lifecycle_id || '-SETUP-'
+        WHERE attempt.public_watchlist_event_key = ?
+          AND lifecycle.structural_anchor IS NOT NULL
+          AND lifecycle.structural_anchor NOT IN ('', 'N/A')
+        ORDER BY length(lifecycle.lifecycle_id) DESC
+        LIMIT 1
+        """,
+        (event.event_key,),
+    ).fetchone()
+    if row is None:
+        return event
+    anchor = _text(row["structural_anchor"])
+    if anchor == NA:
+        return event
+    db._connection.execute(
+        """
+        UPDATE public_alert_events
+        SET structural_anchor = ?, updated_at = ?
+        WHERE id = ? AND structural_anchor IN ('', 'N/A')
+        """,
+        (anchor, now_utc_iso(), event.id),
+    )
+    return replace(event, structural_anchor=anchor)
 
 
 def _find_matching_public_alert_event(
@@ -2042,6 +2090,7 @@ def _find_matching_public_alert_event(
         event = _public_alert_event_from_row(row)
         if event is None:
             continue
+        event = _public_alert_event_with_resolved_structural_anchor(db, event)
         matched, jitter = _public_alert_event_matches_plan(event, plan)
         if matched:
             return event, jitter
@@ -2071,11 +2120,12 @@ def _insert_public_alert_event(
             """
             INSERT INTO public_alert_events (
                 canonical_plan_id, event_type, event_key, symbol, side, setup_family,
+                structural_anchor,
                 normalized_zone_low, normalized_zone_high, normalized_invalidation,
                 raw_entry_low, raw_entry_high, raw_stop_loss, status, reserved_at, sent_at,
                 source_modes, matched_prior_alert_id, matched_prior_event_id, failure_reason,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
 ,
             (
@@ -2085,6 +2135,7 @@ def _insert_public_alert_event(
                 _symbol(plan.symbol),
                 _status_key(plan.side),
                 _text(plan.setup_family),
+                _text(plan.structural_anchor),
                 _text(plan.normalized_entry_low),
                 _text(plan.normalized_entry_high),
                 _text(plan.normalized_invalidation),
@@ -2549,7 +2600,7 @@ def _reserve_public_lifecycle_event(
     plan: PublicWatchlistPlanIdentity,
     reservation_record: TelegramAlertAttemptRecord,
 ) -> PublicWatchlistReservationResult:
-    """Reserve one exact generation-aware lifecycle event for the durable public outbox."""
+    """Reserve one alert type for an equivalent public economic setup."""
 
     if alert_type not in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES:
         raise ValueError(f"Unsupported public lifecycle outbox alert: {alert_type.value}")
@@ -2570,9 +2621,18 @@ def _reserve_public_lifecycle_event(
         PUBLIC_ALERT_EVENT_FAILED_STATUS,
     )
     prior_event = _get_public_alert_event(db, event_key=event_key, statuses=active_statuses)
+    equivalent_match = False
+    if prior_event is None:
+        prior_event, equivalent_match = _find_matching_public_alert_event(
+            db,
+            symbol=plan.symbol,
+            direction=plan.side,
+            plan=plan,
+            event_type=event_type,
+        )
     if prior_event is not None:
         state = _text(prior_event.delivery_state).upper()
-        attempt = db.get_public_watchlist_event_attempt(event_key=event_key)
+        attempt = db.get_public_watchlist_event_attempt(event_key=prior_event.event_key)
         if attempt is None:
             attempt = db.get_attempt(
                 signal_id=reservation_record.signal_id,
@@ -2581,7 +2641,7 @@ def _reserve_public_lifecycle_event(
         if state in {PENDING, RETRYABLE, IN_FLIGHT} and attempt is not None and attempt.id is not None:
             return PublicWatchlistReservationResult(
                 granted=True,
-                event_key=event_key,
+                event_key=prior_event.event_key,
                 reservation_id=attempt.id,
                 event_id=prior_event.id,
                 status=state.lower(),
@@ -2592,7 +2652,7 @@ def _reserve_public_lifecycle_event(
         if state == UNCERTAIN:
             return PublicWatchlistReservationResult(
                 granted=False,
-                event_key=event_key,
+                event_key=prior_event.event_key,
                 event_id=prior_event.id,
                 status="uncertain",
                 reason="public_lifecycle_delivery_uncertain",
@@ -2601,17 +2661,22 @@ def _reserve_public_lifecycle_event(
         if state == SENT or prior_event.status == PUBLIC_ALERT_EVENT_SENT_STATUS:
             return PublicWatchlistReservationResult(
                 granted=False,
-                event_key=event_key,
+                event_key=prior_event.event_key,
                 event_id=prior_event.id,
                 status="duplicate",
-                reason=PUBLIC_WATCHLIST_DUPLICATE_SUCCESS_REASON,
-                detail="Prior successful public lifecycle event already exists.",
+                reason=PUBLIC_LIFECYCLE_DUPLICATE_EQUIVALENT_SETUP_REASON,
+                detail=(
+                    "Prior successful equivalent public economic setup already exists."
+                    if equivalent_match
+                    else "Prior successful public economic setup event already exists."
+                ),
                 matched_prior_alert_id=attempt.id if attempt is not None else None,
                 matched_prior_event_id=prior_event.id,
+                jitter_matched_same_plan=equivalent_match,
             )
         return PublicWatchlistReservationResult(
             granted=False,
-            event_key=event_key,
+            event_key=prior_event.event_key,
             event_id=prior_event.id,
             status="failed" if state == FAILED_FINAL else "skipped",
             reason=f"public_lifecycle_outbox_not_claimable:{state.lower()}",
@@ -3593,7 +3658,7 @@ class TelegramLifecycleDeliveryService:
 
         terminal_bridge = (
             _terminal_identity_bridge(repository, symbol_result, alert_type_hint)
-            if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES
+            if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES or alert_type_hint in TP_SL_ALERT_TYPES
             else _triggered_identity_bridge(repository, symbol_result)
             if alert_type_hint == TelegramAlertType.SIGNAL_CONFIRMED
             else TerminalIdentityBridge()
@@ -3606,7 +3671,7 @@ class TelegramLifecycleDeliveryService:
         )
         previously_active_sent = (
             prior_active_alert is not None
-            if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES
+            if alert_type_hint in TERMINAL_UPDATE_ALERT_TYPES or alert_type_hint in TP_SL_ALERT_TYPES
             else prior_public_signal_alert is not None
             if alert_type_hint == TelegramAlertType.LIMIT_HIT
             else repository.get_prior_public_alert(signal_ids=_signal_id_candidates(symbol_result)) is not None
@@ -3749,7 +3814,10 @@ class TelegramLifecycleDeliveryService:
             signal_id = prior_limit_alert.signal_id
             message = _message_with_prior_public_plan(message, prior_limit_alert)
         elif decision.alert_type in TP_SL_ALERT_TYPES:
-            prior_tp_sl_alert = repository.get_prior_public_alert(signal_ids=_signal_id_candidates(symbol_result))
+            prior_tp_sl_alert = (
+                repository.get_prior_public_alert(signal_ids=_signal_id_candidates(symbol_result))
+                or prior_active_alert
+            )
             if prior_tp_sl_alert is not None:
                 signal_id = prior_tp_sl_alert.signal_id
                 message = _message_with_prior_public_plan(message, prior_tp_sl_alert)
@@ -3795,14 +3863,16 @@ class TelegramLifecycleDeliveryService:
             or decision.alert_type in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES
         )
         if durable_public_alert:
-            plan = _public_watchlist_canonical_plan(symbol_result, message)
+            plan = (
+                _public_economic_setup_plan(symbol_result, message)
+                if decision.alert_type in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES
+                else _public_watchlist_canonical_plan(symbol_result, message)
+            )
             event_type = (
                 PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE
                 if decision.alert_type == TelegramAlertType.WATCHLIST
                 else decision.alert_type.value
             )
-            if decision.alert_type in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES:
-                plan = replace(plan, plan_id=signal_id)
             event_key = _public_watchlist_event_key(plan.plan_id, event_type)
             public_plan_fields = _public_watchlist_record_plan_fields(
                 symbol_result,
@@ -3876,6 +3946,18 @@ class TelegramLifecycleDeliveryService:
                     reservation_record=reservation_record,
                 )
             if not reservation.granted:
+                if (
+                    decision.alert_type in PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES
+                    and reservation.reason == PUBLIC_LIFECYCLE_DUPLICATE_EQUIVALENT_SETUP_REASON
+                ):
+                    return _persist_equivalent_public_setup_skip(
+                        repository,
+                        symbol_result,
+                        decision=decision,
+                        reservation=reservation,
+                        scan_run_id=scan_run_id,
+                        eligibility_context=context,
+                    )
                 return TelegramLifecycleDelivery(
                     symbol=symbol_result.symbol,
                     signal_id=signal_id,
@@ -5314,6 +5396,7 @@ def _signal_message_context_from_symbol(
         diagnostics.get("block_reason"),
         message.final_block_reason,
     )
+    edge_evidence = _signal_edge_evidence(symbol_result, diagnostics, message)
     context = SignalMessageContext(
         symbol=symbol_result.symbol,
         direction=message.direction,
@@ -5364,6 +5447,7 @@ def _signal_message_context_from_symbol(
         final_failed_gate=final_failed_gate,
         final_block_reason=final_block_reason,
         invalidation_logic=_signal_context_invalidation_logic(message, diagnostics),
+        edge_evidence=edge_evidence,
         why_it_matters_points=(),
         what_we_want_next_points=(),
         caution_points=(),
@@ -5373,6 +5457,100 @@ def _signal_message_context_from_symbol(
         why_it_matters_points=_signal_context_why_points(symbol_result, diagnostics, context),
         what_we_want_next_points=_signal_context_next_points(context, diagnostics),
         caution_points=_signal_context_caution_points(context),
+    )
+
+
+def _signal_edge_evidence(
+    symbol_result: ScannerSymbolResult,
+    diagnostics: Mapping[str, Any],
+    message: TelegramSignalMessage,
+) -> SignalEdgeEvidence:
+    """Project only validated strategy fields into deterministic public Edge facts."""
+
+    setup = _selected_setup(symbol_result, diagnostics)
+    sweep = _field(setup, "sweep")
+    structure = _field(setup, "structure_shift")
+    pullback = _field(setup, "pullback_zone")
+    fib = _field(setup, "fib_alignment")
+    structure_kind = _first_non_na(
+        _field(structure, "kind"),
+        "CHoCH" if symbol_result.choch_detected and not symbol_result.bos_detected else NA,
+        "BOS" if symbol_result.bos_detected and not symbol_result.choch_detected else NA,
+    )
+    return SignalEdgeEvidence(
+        sweep_present=_context_positive(_field(sweep, "is_present")) or _context_any_positive(
+            diagnostics,
+            "liquidity_sweep_detected",
+            "sweep_detected",
+            "execution_sweep_detected",
+            "execution_sweep_status",
+        ),
+        sweep_direction=_first_non_na(
+            _field(sweep, "direction"),
+            diagnostics.get("sweep_direction"),
+            message.direction,
+        ),
+        swept_level=_first_non_na(
+            _field(sweep, "swing_level"),
+            diagnostics.get("swept_level"),
+            diagnostics.get("initial_sweep_level"),
+            diagnostics.get("swing_level"),
+        ),
+        sweep_wick=_first_non_na(
+            _field(sweep, "wick_price"),
+            diagnostics.get("sweep_wick_price"),
+        ),
+        structure_present=_context_positive(_field(structure, "is_present")) or _context_any_positive(
+            diagnostics,
+            "bos_detected",
+            "choch_detected",
+            "mss_detected",
+            "structure_shift_detected",
+            "confirmation_structure_shift_status",
+        ),
+        structure_kind=structure_kind,
+        structure_direction=_first_non_na(
+            _field(structure, "direction"),
+            diagnostics.get("structure_shift_direction"),
+            message.direction,
+        ),
+        structure_timeframe=_first_non_na(
+            _field(setup, "confirmation_timeframe"),
+            _field(setup, "ltf_confirmation_timeframe"),
+            diagnostics.get("confirmation_timeframe"),
+            message.confirmation_timeframe,
+        ),
+        structure_level=_first_non_na(
+            _field(structure, "level"),
+            diagnostics.get("bos_origin_price"),
+        ),
+        structure_close=_first_non_na(
+            _field(structure, "close"),
+            diagnostics.get("structure_shift_close"),
+        ),
+        selected_zone_type=_first_non_na(
+            _field(pullback, "selected_zone_type"),
+            _field(setup, "selected_zone_type"),
+            diagnostics.get("selected_zone_type"),
+        ),
+        fib_aligned=_context_positive(_field(fib, "is_aligned")) or _status_key(
+            diagnostics.get("fib_alignment_status")
+        ) in {"aligned", "valid", "passed"},
+        pullback_depth_ratio=_first_non_na(
+            _field(pullback, "pullback_depth_ratio"),
+            _field(setup, "pullback_depth_ratio"),
+            diagnostics.get("pullback_depth_ratio"),
+        ),
+        entry_low=message.entry_low,
+        entry_high=message.entry_high,
+        rr_to_tp2=_first_non_na(
+            _field(setup, "rr_to_tp2"),
+            diagnostics.get("rr_to_tp2"),
+            getattr(symbol_result.lifecycle_state, "rr", NA)
+            if symbol_result.lifecycle_state is not None
+            else NA,
+            message.planned_rr,
+        ),
     )
 
 
@@ -8436,7 +8614,8 @@ def _public_watchlist_record_plan_fields(
         plan_id = plan.plan_id
         event_type = PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE
     elif alert_type in {TelegramAlertType.SETUP_TRIGGERED, TelegramAlertType.SIGNAL_CONFIRMED}:
-        plan_id = _lifecycle_setup_delivery_signal_id(symbol_result)
+        plan = _public_economic_setup_plan(symbol_result, message)
+        plan_id = plan.plan_id
         event_type = alert_type.value
     else:
         return {}
@@ -8449,6 +8628,52 @@ def _public_watchlist_record_plan_fields(
         "normalized_entry_zone_high": plan.normalized_entry_high,
         "normalized_invalidation": plan.normalized_invalidation,
     }
+
+
+def _public_economic_setup_plan(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+) -> PublicWatchlistPlanIdentity:
+    """Return mode-neutral identity for one public economic trade setup."""
+
+    plan = _public_watchlist_canonical_plan(symbol_result, message)
+    if plan.plan_id == NA:
+        return plan
+    anchor = _public_economic_structural_anchor(symbol_result, message)
+    identity_parts = (
+        PUBLIC_ECONOMIC_SETUP_ID_VERSION,
+        plan.symbol,
+        plan.side,
+        plan.setup_family,
+        anchor,
+        plan.normalized_entry_low,
+        plan.normalized_entry_high,
+        plan.normalized_invalidation,
+    )
+    plan_hash = hashlib.sha256(
+        "|".join(_text(part) for part in identity_parts).encode("utf-8")
+    ).hexdigest()[:20]
+    return replace(
+        plan,
+        plan_id=f"{plan.symbol}|{plan.side}|{plan_hash}",
+        plan_hash=plan_hash,
+        structural_anchor=anchor,
+        material_change_reason="same_public_economic_setup",
+    )
+
+
+def _public_economic_structural_anchor(
+    symbol_result: ScannerSymbolResult,
+    message: TelegramSignalMessage,
+) -> str:
+    lifecycle = symbol_result.lifecycle_state
+    anchor = _text(getattr(lifecycle, "structural_anchor", NA))
+    if anchor != NA:
+        return anchor
+    structural_identity = _public_watchlist_structural_identity(symbol_result, message)
+    if not structural_identity:
+        return NA
+    return "|".join(f"{key}={value}" for key, value in structural_identity)
 
 
 def _public_watchlist_canonical_plan(
@@ -10141,6 +10366,53 @@ def _persist_blocked_attempt(
         detail=_blocked_delivery_detail(decision.alert_type),
         message_hash=message_hash,
         error_message=decision.reason,
+    )
+
+
+def _persist_equivalent_public_setup_skip(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    symbol_result: ScannerSymbolResult,
+    *,
+    decision: TelegramAlertDecision,
+    reservation: PublicWatchlistReservationResult,
+    scan_run_id: str | None,
+    eligibility_context: TelegramEligibilityContext,
+) -> TelegramLifecycleDelivery:
+    """Persist an auditable no-send row for an equivalent SENT public setup."""
+
+    reason = PUBLIC_LIFECYCLE_DUPLICATE_EQUIVALENT_SETUP_REASON
+    blocked_decision = replace(decision, eligible=False, reason=reason)
+    delivery = _persist_blocked_attempt(
+        repository,
+        symbol_result,
+        decision=blocked_decision,
+        scan_run_id=scan_run_id,
+        eligibility_context=eligibility_context,
+    )
+    signal_id = _signal_id_for_alert(
+        symbol_result,
+        decision.alert_type,
+        decision.message,
+    )
+    blocked_alert_type = _blocked_alert_type(decision.alert_type, reason)
+    detail_parts = [reason]
+    if reservation.matched_prior_alert_id is not None:
+        detail_parts.append(f"matched_prior_sent_row_id={reservation.matched_prior_alert_id}")
+    if reservation.matched_prior_event_id is not None:
+        detail_parts.append(f"matched_prior_event_id={reservation.matched_prior_event_id}")
+    repository._connection.execute(
+        """
+        UPDATE telegram_alert_attempts
+        SET dedupe_status = 'skipped', dedupe_reason = ?
+        WHERE signal_id = ? AND alert_type = ?
+        """,
+        (";".join(detail_parts), signal_id, blocked_alert_type),
+    )
+    return replace(
+        delivery,
+        status="duplicate",
+        detail="Equivalent public economic setup already sent for this alert type.",
+        error_message=reason,
     )
 
 
@@ -12194,7 +12466,11 @@ def _terminal_identity_bridge(
     *,
     watchlist_only: bool = False,
 ) -> TerminalIdentityBridge:
-    if alert_type not in TERMINAL_UPDATE_ALERT_TYPES and not watchlist_only:
+    if (
+        alert_type not in TERMINAL_UPDATE_ALERT_TYPES
+        and alert_type not in TP_SL_ALERT_TYPES
+        and not watchlist_only
+    ):
         return TerminalIdentityBridge(blocked_reason="terminal_update_not_terminal_state")
 
     message = telegram_signal_message_from_symbol(symbol_result)

@@ -201,6 +201,7 @@ class PublicAlertEventRecord:
     symbol: str
     side: str
     setup_family: str = "N/A"
+    structural_anchor: str = "N/A"
     normalized_zone_low: str = "N/A"
     normalized_zone_high: str = "N/A"
     normalized_invalidation: str = "N/A"
