@@ -220,7 +220,7 @@ def test_missing_data_preserved_as_na() -> None:
         )
     )
 
-    assert "Technical context: N/A." in message
+    assert "Technical context: N/A." not in message
     assert "Missing data:" not in message
 
 

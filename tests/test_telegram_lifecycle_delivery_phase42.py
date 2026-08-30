@@ -1886,14 +1886,53 @@ def test_public_signal_context_extracts_specific_diagnostics_for_message() -> No
     assert message.signal_context is not None
     assert message.signal_context.primary_mode == "swing"
     assert "CTXUSDT · LONG · SWING" in text
-    assert "Downside liquidity was swept" in text
-    assert "Downside liquidity was swept and reclaimed." in text
-    assert "15m structure shifted bullish" in text
-    assert "FVG + fib reaction zone" in text
-    assert "fib reaction zone" in text
+    assert "Price swept downside liquidity and closed back inside the prior structure." in text
+    assert "BOS" not in text and "CHoCH" not in text
+    assert "confirmed the structure shift" not in text
+    assert "Entry 100 – 102 overlaps the selected FVG and the validated fib pullback zone." in text
+    assert "The stored plan provides 3.25R to TP2." in text
     assert "clean RR path" not in text
     assert "Invalid if price" in text and "below 95" in text
     assert "Setup quality does not provide enough deterministic edge" not in text
+
+
+def test_public_signal_context_projects_exact_strategy_evidence_without_research_context() -> None:
+    symbol_result = _public_v1_symbol(
+        symbol="EDGEUSDT",
+        signal_id="edge-watch",
+        rr=Decimal("3.06"),
+        diagnostics={
+            "mode": "swing",
+            "execution_sweep_status": "passed",
+            "sweep_direction": "bearish",
+            "swept_level": Decimal("0.2187"),
+            "sweep_wick_price": Decimal("0.2191"),
+            "confirmation_structure_shift_status": "passed",
+            "structure_shift_direction": "bearish",
+            "confirmation_timeframe": "15m",
+            "bos_origin_price": Decimal("0.2168"),
+            "structure_shift_close": Decimal("0.2164"),
+            "selected_zone_type": "FVG",
+            "fib_alignment_status": "aligned",
+            "pullback_depth_ratio": Decimal("0.58"),
+            "rr_to_tp2": Decimal("3.06"),
+            "cvd": "research_only_bullish",
+            "orderflow": "research_only_supportive",
+            "order_book_depth": "research_only_deep",
+            "liquidations": "research_only_cluster",
+        },
+        direction="short",
+    ).model_copy(update={"bos_detected": True})
+
+    message = telegram_signal_message_from_symbol(symbol_result)
+    text = format_telegram_signal_message(TelegramAlertType.WATCHLIST, message)
+    edge = text.split("🧠 Edge\n", 1)[1].split("\n\n⚠️ Execution", 1)[0]
+
+    assert "Price swept upside liquidity at 0.2187 with a wick to 0.2191" in edge
+    assert "15m bearish BOS closed below 0.2168 at 0.2164." in edge
+    assert "selected FVG and the validated fib pullback zone at a 0.58 retracement" in edge
+    assert "3.06R to TP2" in edge
+    assert not any(term in edge.lower() for term in ("cvd", "orderflow", "depth", "liquidation"))
 
 def _near_miss_watchlist_symbol(
     *,

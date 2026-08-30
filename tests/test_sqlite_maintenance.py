@@ -787,7 +787,7 @@ def test_source_equals_generated_destination_is_rejected(tmp_path: Path) -> None
     archive = tmp_path / "archives"
     archive.mkdir()
     created = datetime(2026, 7, 18, 12, tzinfo=UTC)
-    source = archive / "cci-20260718T120000Z-schema-v17-abcdef123456.sqlite"
+    source = archive / f"cci-20260718T120000Z-schema-v{SCHEMA_VERSION}-abcdef123456.sqlite"
     with open_initialized_database(source):
         pass
     before = sha256_file(source)

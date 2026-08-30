@@ -13,6 +13,9 @@ from app.alerts.telegram_lifecycle import (
     TelegramLifecycleDeliveryService,
     is_public_lifecycle_event,
     telegram_alert_decision_for_symbol,
+    telegram_signal_message_from_symbol,
+    _lifecycle_setup_delivery_signal_id,
+    _public_economic_setup_plan,
     _terminal_alert_type_for_lifecycle_state,
 )
 from app.alerts.telegram_routing import TelegramDestination
@@ -62,6 +65,87 @@ def _service(db_path, sender: FakeSender) -> TelegramLifecycleDeliveryService:
         sender=sender,
         min_rr=Decimal("3"),
         min_score_for_idea=Decimal("80"),
+    )
+
+
+def _public_setup_symbol(
+    *,
+    signal_id: str,
+    state: SetupLifecycleState = SetupLifecycleState.TRIGGERED,
+    previous: SetupLifecycleState = SetupLifecycleState.STALKING,
+    mode: str = "swing",
+    source_modes: tuple[str, ...] = ("swing",),
+    direction: str = "long",
+    structural_anchor: str = "execution_sweep|15m|1789987200000",
+    entry_low: Decimal = Decimal("100"),
+    entry_high: Decimal = Decimal("102"),
+    stop_loss: Decimal = Decimal("95"),
+    tick_size: Decimal = Decimal("0.01"),
+):
+    short = direction == "short"
+    risk = stop_loss - entry_high if short else entry_low - stop_loss
+    tp1 = entry_low - risk if short else entry_high + risk
+    tp2 = entry_low - (risk * Decimal("2")) if short else entry_high + (risk * Decimal("2"))
+    tp3 = entry_low - (risk * Decimal("3")) if short else entry_high + (risk * Decimal("3"))
+    invalidation = (
+        f"Invalid if price accepts above {stop_loss}."
+        if short
+        else f"Invalid if price accepts below {stop_loss}."
+    )
+    diagnostics = _diagnostics(
+        mode=mode,
+        bias=direction,
+        entry_low=entry_low,
+        entry_high=entry_high,
+        stop=stop_loss,
+        tp1=tp1,
+        tp2=tp2,
+        tp3=tp3,
+        invalidation=invalidation,
+        tick_size=tick_size,
+        setup_type=f"liquidity_grab_pullback_{mode}",
+    )
+    symbol = _symbol(
+        state,
+        previous=previous,
+        signal_id=signal_id,
+        diagnostics=diagnostics,
+        setup_quality=_setup_quality_with_grade(SetupQualityGrade.B_PLUS, quality_score=78)
+        if state == SetupLifecycleState.CONFIRMED
+        else None,
+    )
+    record = symbol.lifecycle_state.model_copy(
+        update={
+            "lifecycle_id": signal_id,
+            "mode": mode,
+            "direction": direction,
+            "structural_anchor": structural_anchor,
+            "entry_low": str(entry_low),
+            "entry_high": str(entry_high),
+            "stop_loss": str(stop_loss),
+            "tp1": str(tp1),
+            "tp2": str(tp2),
+            "tp3": str(tp3),
+            "invalidation_reason": invalidation,
+            "invalidation_logic": invalidation,
+            "setup_identity": (
+                f"BTCUSDT|{mode}|{direction}|{entry_low}|{entry_high}|{stop_loss}|{invalidation}"
+            ),
+        }
+    )
+    transition = symbol.lifecycle_transition.model_copy(
+        update={"lifecycle_id": signal_id, "record": record}
+    )
+    return symbol.model_copy(
+        update={
+            "valid_strategy_modes": source_modes,
+            "strategy_diagnostics": {
+                source_mode: {**diagnostics, "mode": source_mode}
+                for source_mode in source_modes
+            },
+            "lifecycle_state": record,
+            "lifecycle_transition": transition,
+        }
     )
 
 
@@ -280,7 +364,12 @@ def test_triggered_is_public_once_and_semantically_not_confirmed(tmp_path) -> No
     assert "This is not a confirmed signal" in sender.messages[0]
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts(signal_id=first.deliveries[0].signal_id)
-    assert [attempt.alert_type for attempt in attempts] == [TelegramAlertType.SETUP_TRIGGERED.value]
+    sent = [attempt for attempt in attempts if attempt.telegram_status == "sent"]
+    blocked = [attempt for attempt in attempts if attempt.telegram_status == "blocked"]
+    assert [attempt.alert_type for attempt in sent] == [TelegramAlertType.SETUP_TRIGGERED.value]
+    assert len(blocked) == 1
+    assert blocked[0].blocked_reason == "duplicate_equivalent_public_setup"
+    assert "matched_prior_event_id=" in blocked[0].dedupe_reason
 
 
 def test_confirmed_is_public_once_and_accepts_real_lifecycle_b_plus(tmp_path) -> None:
@@ -352,7 +441,359 @@ def test_restart_does_not_resend_same_setup(tmp_path) -> None:
     assert second_sender.messages == []
 
 
-def test_new_setup_identity_is_not_suppressed_by_old_same_tuple(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "first_mode,first_sources,second_mode,second_sources",
+    (
+        ("scalp", ("scalp", "swing"), "swing", ("swing",)),
+        ("swing", ("swing",), "scalp", ("scalp", "swing")),
+    ),
+)
+def test_mode_projection_change_does_not_resend_equivalent_trigger(
+    tmp_path,
+    first_mode,
+    first_sources,
+    second_mode,
+    second_sources,
+) -> None:
+    db_path = tmp_path / f"mode-{first_mode}-{second_mode}.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    first_setup = _public_setup_symbol(
+        signal_id=f"{first_mode}-generation",
+        mode=first_mode,
+        source_modes=first_sources,
+    )
+    second_setup = _public_setup_symbol(
+        signal_id=f"{second_mode}-generation",
+        mode=second_mode,
+        source_modes=second_sources,
+    )
+
+    first = run(service.deliver_for_run(_run_result(first_setup), scan_run_id="first-mode"))
+    repeated = run(service.deliver_for_run(_run_result(second_setup), scan_run_id="second-mode"))
+
+    assert first.sent == 1
+    assert repeated.sent == 0
+    assert repeated.deliveries[0].status == "duplicate"
+    assert repeated.deliveries[0].error_message == "duplicate_equivalent_public_setup"
+    assert len(sender.messages) == 1
+
+
+def test_mode_specific_lifecycle_ids_collapse_to_one_public_economic_identity() -> None:
+    confluence = _public_setup_symbol(
+        signal_id="identity-confluence-generation",
+        mode="scalp",
+        source_modes=("scalp", "swing"),
+    )
+    swing_only = _public_setup_symbol(
+        signal_id="identity-swing-generation",
+        mode="swing",
+        source_modes=("swing",),
+    )
+
+    old_confluence_id = _lifecycle_setup_delivery_signal_id(confluence)
+    old_swing_id = _lifecycle_setup_delivery_signal_id(swing_only)
+    confluence_plan = _public_economic_setup_plan(
+        confluence,
+        telegram_signal_message_from_symbol(confluence),
+    )
+    swing_plan = _public_economic_setup_plan(
+        swing_only,
+        telegram_signal_message_from_symbol(swing_only),
+    )
+
+    assert old_confluence_id != old_swing_id
+    assert confluence_plan.plan_id == swing_plan.plan_id
+    assert confluence_plan.structural_anchor == swing_plan.structural_anchor
+    assert confluence_plan.source_modes != swing_plan.source_modes
+
+
+def test_tp_update_still_bridges_after_equivalent_mode_trigger_is_suppressed(tmp_path) -> None:
+    db_path = tmp_path / "mode-trigger-tp.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    confluence = _public_setup_symbol(
+        signal_id="tp-confluence-generation",
+        mode="scalp",
+        source_modes=("scalp", "swing"),
+    )
+    swing_only = _public_setup_symbol(
+        signal_id="tp-swing-generation",
+        mode="swing",
+        source_modes=("swing",),
+    )
+    tp1 = _public_setup_symbol(
+        signal_id="tp-swing-generation",
+        state=SetupLifecycleState.TP_HIT,
+        previous=SetupLifecycleState.MANAGING,
+        mode="swing",
+        source_modes=("swing",),
+    )
+    tp1 = tp1.model_copy(
+        update={
+            "current_price": Decimal("107"),
+            "strategy_diagnostics": {
+                mode: {**diagnostics, "outcome_status": "tp1_hit"}
+                for mode, diagnostics in tp1.strategy_diagnostics.items()
+            },
+        }
+    )
+
+    initial = run(service.deliver_for_run(_run_result(confluence), scan_run_id="initial"))
+    duplicate = run(service.deliver_for_run(_run_result(swing_only), scan_run_id="mode-change"))
+    update = run(service.deliver_for_run(_run_result(tp1), scan_run_id="tp1"))
+
+    assert initial.sent == 1
+    assert duplicate.sent == 0
+    assert update.sent == 1
+    assert update.deliveries[0].alert_type == TelegramAlertType.TP1_HIT.value
+    assert len(sender.messages) == 2
+
+
+def test_equivalent_mode_projection_remains_deduped_after_repository_reload(tmp_path) -> None:
+    db_path = tmp_path / "equivalent-reload.db"
+    first_sender = FakeSender()
+    second_sender = FakeSender()
+    confluence = _public_setup_symbol(
+        signal_id="confluence-generation",
+        mode="scalp",
+        source_modes=("scalp", "swing"),
+    )
+    swing_only = _public_setup_symbol(
+        signal_id="swing-generation",
+        mode="swing",
+        source_modes=("swing",),
+    )
+
+    first = run(_service(db_path, first_sender).deliver_for_run(_run_result(confluence), scan_run_id="before"))
+    repeated = run(_service(db_path, second_sender).deliver_for_run(_run_result(swing_only), scan_run_id="after"))
+
+    assert first.sent == 1
+    assert repeated.sent == 0
+    assert len(first_sender.messages) == 1
+    assert second_sender.messages == []
+
+
+def test_pre_v18_event_recovers_persisted_lifecycle_anchor_before_dedupe(tmp_path) -> None:
+    db_path = tmp_path / "legacy-anchor-reload.db"
+    first_sender = FakeSender()
+    second_sender = FakeSender()
+    confluence = _public_setup_symbol(
+        signal_id="legacy-confluence-generation",
+        mode="scalp",
+        source_modes=("scalp", "swing"),
+    )
+    swing_only = _public_setup_symbol(
+        signal_id="current-swing-generation",
+        mode="swing",
+        source_modes=("swing",),
+    )
+    _store_lifecycle_record(db_path, confluence.lifecycle_state)
+
+    first = run(_service(db_path, first_sender).deliver_for_run(_run_result(confluence), scan_run_id="legacy-first"))
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        legacy_plan_id = repository._connection.execute(
+            "SELECT signal_id FROM telegram_alert_attempts WHERE telegram_status = 'sent'"
+        ).fetchone()[0]
+        legacy_event_key = f"{legacy_plan_id}|setup_triggered"
+        repository._connection.execute(
+            """
+            UPDATE public_alert_events
+            SET canonical_plan_id = ?, event_key = ?, structural_anchor = 'N/A'
+            """,
+            (legacy_plan_id, legacy_event_key),
+        )
+        repository._connection.execute(
+            """
+            UPDATE telegram_alert_attempts
+            SET public_watchlist_plan_id = ?, public_watchlist_event_key = ?
+            WHERE telegram_status = 'sent'
+            """,
+            (legacy_plan_id, legacy_event_key),
+        )
+
+    repeated = run(_service(db_path, second_sender).deliver_for_run(_run_result(swing_only), scan_run_id="legacy-reload"))
+
+    assert first.sent == 1
+    assert repeated.sent == 0
+    assert second_sender.messages == []
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        anchor = repository._connection.execute(
+            "SELECT structural_anchor FROM public_alert_events WHERE status = 'SENT'"
+        ).fetchone()[0]
+    assert anchor == "execution_sweep|15m|1789987200000"
+
+
+def test_tiny_tick_size_stop_movement_is_same_public_setup(tmp_path) -> None:
+    db_path = tmp_path / "tick-equivalent.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    common = {
+        "mode": "swing",
+        "source_modes": ("swing",),
+        "structural_anchor": "execution_sweep|15m|jup-sweep",
+        "entry_low": Decimal("0.21690"),
+        "entry_high": Decimal("0.21731"),
+        "tick_size": Decimal("0.00001"),
+    }
+    first_setup = _public_setup_symbol(
+        signal_id="jup-generation-a",
+        stop_loss=Decimal("0.21941"),
+        direction="short",
+        **common,
+    )
+    second_setup = _public_setup_symbol(
+        signal_id="jup-generation-b",
+        stop_loss=Decimal("0.21942"),
+        direction="short",
+        **common,
+    )
+
+    first = run(service.deliver_for_run(_run_result(first_setup), scan_run_id="jup-a"))
+    repeated = run(service.deliver_for_run(_run_result(second_setup), scan_run_id="jup-b"))
+
+    assert first.sent == 1
+    assert repeated.sent == 0
+    assert repeated.deliveries[0].error_message == "duplicate_equivalent_public_setup"
+    assert len(sender.messages) == 1
+
+
+def test_equivalent_stop_jitter_across_normalization_bucket_is_deduped(tmp_path) -> None:
+    db_path = tmp_path / "tick-bucket-equivalent.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    common = {
+        "mode": "swing",
+        "source_modes": ("swing",),
+        "direction": "short",
+        "structural_anchor": "execution_sweep|15m|jup-bucket-sweep",
+        "entry_low": Decimal("0.21690"),
+        "entry_high": Decimal("0.21731"),
+        "tick_size": Decimal("0.00001"),
+    }
+    first_setup = _public_setup_symbol(signal_id="jup-bucket-a", stop_loss=Decimal("0.21934"), **common)
+    second_setup = _public_setup_symbol(signal_id="jup-bucket-b", stop_loss=Decimal("0.21936"), **common)
+    first_plan = _public_economic_setup_plan(first_setup, telegram_signal_message_from_symbol(first_setup))
+    second_plan = _public_economic_setup_plan(second_setup, telegram_signal_message_from_symbol(second_setup))
+
+    first = run(service.deliver_for_run(_run_result(first_setup), scan_run_id="bucket-a"))
+    repeated = run(service.deliver_for_run(_run_result(second_setup), scan_run_id="bucket-b"))
+
+    assert first_plan.plan_id != second_plan.plan_id
+    assert first.sent == 1
+    assert repeated.sent == 0
+    assert repeated.deliveries[0].error_message == "duplicate_equivalent_public_setup"
+    assert len(sender.messages) == 1
+
+
+def test_material_entry_change_with_same_anchor_remains_publishable(tmp_path) -> None:
+    db_path = tmp_path / "material-entry.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    first_setup = _public_setup_symbol(signal_id="entry-a")
+    second_setup = _public_setup_symbol(
+        signal_id="entry-b",
+        entry_low=Decimal("110"),
+        entry_high=Decimal("112"),
+        stop_loss=Decimal("105"),
+    )
+
+    first = run(service.deliver_for_run(_run_result(first_setup), scan_run_id="entry-a"))
+    second = run(service.deliver_for_run(_run_result(second_setup), scan_run_id="entry-b"))
+
+    assert first.sent == 1
+    assert second.sent == 1
+    assert len(sender.messages) == 2
+
+
+def test_new_structural_anchor_remains_publishable_with_same_geometry(tmp_path) -> None:
+    db_path = tmp_path / "new-anchor.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    first_setup = _public_setup_symbol(signal_id="anchor-a", structural_anchor="execution_sweep|15m|a")
+    second_setup = _public_setup_symbol(signal_id="anchor-b", structural_anchor="execution_sweep|15m|b")
+
+    first = run(service.deliver_for_run(_run_result(first_setup), scan_run_id="anchor-a"))
+    second = run(service.deliver_for_run(_run_result(second_setup), scan_run_id="anchor-b"))
+
+    assert first.sent == 1
+    assert second.sent == 1
+    assert len(sender.messages) == 2
+
+
+def test_opposite_direction_remains_publishable(tmp_path) -> None:
+    db_path = tmp_path / "opposite-direction.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    long_setup = _public_setup_symbol(signal_id="long-generation")
+    short_setup = _public_setup_symbol(
+        signal_id="short-generation",
+        direction="short",
+        stop_loss=Decimal("105"),
+    )
+
+    first = run(service.deliver_for_run(_run_result(long_setup), scan_run_id="long"))
+    second = run(service.deliver_for_run(_run_result(short_setup), scan_run_id="short"))
+
+    assert first.sent == 1
+    assert second.sent == 1
+    assert len(sender.messages) == 2
+
+
+def test_equivalent_trigger_does_not_suppress_confirmed_across_mode_change(tmp_path) -> None:
+    db_path = tmp_path / "mode-progress.db"
+    sender = FakeSender()
+    service = _service(db_path, sender)
+    triggered = _public_setup_symbol(
+        signal_id="scalp-triggered-generation",
+        mode="scalp",
+        source_modes=("scalp", "swing"),
+    )
+    confirmed = _public_setup_symbol(
+        signal_id="swing-confirmed-generation",
+        state=SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        mode="swing",
+        source_modes=("swing",),
+    )
+
+    first = run(service.deliver_for_run(_run_result(triggered), scan_run_id="triggered"))
+    second = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="confirmed"))
+    repeated = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="confirmed-repeat"))
+
+    assert first.sent == 1
+    assert second.sent == 1
+    assert repeated.sent == 0
+    assert len(sender.messages) == 2
+    assert "TRIGGERED" in sender.messages[0]
+    assert "CONFIRMED SIGNAL" in sender.messages[1]
+
+
+def test_retryable_equivalent_mode_projection_retries_prior_committed_intent(tmp_path) -> None:
+    db_path = tmp_path / "equivalent-retry.db"
+    sender = TransportStateSequenceSender("RETRYABLE", "SENT")
+    confluence = _public_setup_symbol(
+        signal_id="retry-confluence",
+        mode="scalp",
+        source_modes=("scalp", "swing"),
+    )
+    swing_only = _public_setup_symbol(
+        signal_id="retry-swing",
+        mode="swing",
+        source_modes=("swing",),
+    )
+
+    first = run(_service(db_path, sender).deliver_for_run(_run_result(confluence), scan_run_id="retry-first"))
+    _make_lifecycle_retry_due(db_path)
+    retried = run(_service(db_path, sender).deliver_for_run(_run_result(swing_only), scan_run_id="retry-second"))
+
+    assert first.sent == 0
+    assert retried.sent == 1
+    assert len(sender.messages) == 2
+    assert sender.states == []
+
+
+def test_materially_new_entry_geometry_is_not_suppressed_by_old_same_tuple(tmp_path) -> None:
     db_path = tmp_path / "new-setup.db"
     sender = FakeSender()
     service = _service(db_path, sender)
@@ -361,9 +802,12 @@ def test_new_setup_identity_is_not_suppressed_by_old_same_tuple(tmp_path) -> Non
         previous=SetupLifecycleState.STALKING,
         signal_id="broad-lifecycle-id",
     )
-    second_setup = _with_lifecycle_fields(
-        first_setup,
-        setup_identity="BTCUSDT|swing|long|new-plan-geometry",
+    second_setup = _public_setup_symbol(
+        signal_id="new-plan-lifecycle-id",
+        structural_anchor="N/A",
+        entry_low=Decimal("110"),
+        entry_high=Decimal("112"),
+        stop_loss=Decimal("105"),
     )
 
     first = run(service.deliver_for_run(_run_result(first_setup), scan_run_id="old-setup"))
@@ -543,7 +987,11 @@ def test_same_geometry_triggered_and_confirmed_deliver_once_per_generation(tmp_p
                 quality_score=78,
             ),
         )
-        return _with_lifecycle_fields(symbol, setup_identity=geometry)
+        return _with_lifecycle_fields(
+            symbol,
+            setup_identity=geometry,
+            structural_anchor=f"execution_sweep|15m|{generation_id}",
+        )
 
     generation_a_triggered = generation_symbol(
         SetupLifecycleState.TRIGGERED,
@@ -973,7 +1421,11 @@ def test_duplicate_public_transition_in_same_batch_sends_once(tmp_path) -> None:
     assert len(sender.messages) == 1
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts()
-    assert [item.alert_type for item in attempts] == [TelegramAlertType.SETUP_TRIGGERED.value]
+    sent = [item for item in attempts if item.telegram_status == "sent"]
+    blocked = [item for item in attempts if item.telegram_status == "blocked"]
+    assert [item.alert_type for item in sent] == [TelegramAlertType.SETUP_TRIGGERED.value]
+    assert len(blocked) == 1
+    assert blocked[0].blocked_reason == "duplicate_equivalent_public_setup"
 
 
 def test_per_symbol_batch_path_delivers_triggered_then_confirmed(tmp_path) -> None:

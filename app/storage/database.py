@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -718,6 +718,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL,
                 setup_family TEXT NOT NULL DEFAULT 'N/A',
+                structural_anchor TEXT NOT NULL DEFAULT 'N/A',
                 normalized_zone_low TEXT NOT NULL DEFAULT 'N/A',
                 normalized_zone_high TEXT NOT NULL DEFAULT 'N/A',
                 normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
@@ -973,6 +974,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "telegram_message_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "delivery_part_count", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(connection, "public_alert_events", "delivery_state", "TEXT NOT NULL DEFAULT 'PENDING'")
+        _ensure_column(connection, "public_alert_events", "structural_anchor", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "public_alert_events", "payload_text", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "public_alert_events", "message_hash", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "public_alert_events", "destination_chat_id", "TEXT NOT NULL DEFAULT 'N/A'")

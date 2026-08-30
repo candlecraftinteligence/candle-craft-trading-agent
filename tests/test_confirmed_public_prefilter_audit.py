@@ -488,12 +488,15 @@ def test_blocked_confirmed_audit_does_not_consume_real_dedupe_identity(tmp_path:
     assert repeated.sent == 0
     assert len(sender.messages) == 1
     attempts = _confirmed_attempts(db_path)
-    assert len(attempts) == 2
+    assert len(attempts) == 3
     assert {attempt.telegram_status for attempt in attempts} == {"blocked", "sent"}
     assert sum(
         attempt.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value
         for attempt in attempts
     ) == 1
+    blocked_reasons = {attempt.blocked_reason for attempt in attempts if attempt.telegram_status == "blocked"}
+    assert any("technical_score_below_min" in reason for reason in blocked_reasons)
+    assert "duplicate_equivalent_public_setup" in blocked_reasons
 
 
 def test_invalid_confirmed_stored_plan_geometry_is_auditable(tmp_path: Path) -> None:

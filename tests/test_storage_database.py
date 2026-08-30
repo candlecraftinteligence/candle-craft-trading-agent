@@ -1407,13 +1407,14 @@ def test_schema_v14_to_v17_preserves_lifecycle_and_telegram_data(
 
     assert _representative_v14_rows(db_path) == before
     version, tables, attempt_columns, public_columns = _schema_contract(db_path)
-    assert version == 17 == SCHEMA_VERSION
+    assert version == 18 == SCHEMA_VERSION
     assert "setup_lifecycle_outcome_progress" in tables
     assert "public_alert_delivery_parts" in tables
     assert "delivery_state" in attempt_columns
     assert "telegram_message_id" in attempt_columns
     assert "delivery_state" in public_columns
     assert "payload_text" in public_columns
+    assert "structural_anchor" in public_columns
 
     with sqlite3.connect(db_path) as connection:
         progress_count = connection.execute(
@@ -1666,7 +1667,7 @@ def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:
         "v15-plan", "SENT", "2026-07-01T10:00:01Z", "SENT"
     )
     assert "public_alert_delivery_parts" in tables
-    assert version == 17 == SCHEMA_VERSION
+    assert version == 18 == SCHEMA_VERSION
 
 
 def test_schema_v16_migration_is_idempotent_for_v15_delivery_data(tmp_path) -> None:
@@ -1760,7 +1761,7 @@ def test_schema_v14_lifecycle_row_migrates_to_current_legacy_generation(
               AND name = 'ux_lifecycle_records_current_symbol_mode_direction'
             """
         ).fetchone()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
     assert {"structural_anchor", "is_current"} <= columns
     assert index_sql is not None
@@ -1839,7 +1840,7 @@ def test_lifecycle_generation_migration_failure_preserves_legacy_rows_for_retry(
 
     assert _representative_v14_rows(db_path) == before
     with sqlite3.connect(db_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert connection.execute(
             "SELECT COUNT(*) FROM setup_lifecycle_events"
         ).fetchone()[0] == 1
