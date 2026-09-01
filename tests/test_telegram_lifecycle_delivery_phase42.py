@@ -4158,7 +4158,7 @@ def test_allousdt_style_contradictory_confirmed_alert_is_blocked() -> None:
 
 
 
-def test_raw_derivatives_context_is_not_promoted_into_structured_intelligence() -> None:
+def test_raw_derivatives_context_is_not_promoted_into_compact_edge() -> None:
     symbol_result = _symbol(
         SetupLifecycleState.CONFIRMED,
         previous=SetupLifecycleState.TRIGGERED,
@@ -4180,9 +4180,10 @@ def test_raw_derivatives_context_is_not_promoted_into_structured_intelligence() 
     message = telegram_signal_message_from_symbol(symbol_result)
     text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, message)
 
-    assert "🧠 INTELLIGENCE" in text
-    assert "Entry 100 – 102 overlaps the selected order block." in text
-    assert "The stored plan provides 3.00R to TP2." in text
+    assert "🧠 EDGE" in text
+    assert "OB ✓" in text
+    assert "Entry 100 – 102 overlaps the selected order block." not in text
+    assert "The stored plan provides 3.00R to TP2." not in text
     for forbidden in ("Decimal(", "{", "}", "true", "false", "funding_rate:", "open_interest:"):
         assert forbidden not in text
 

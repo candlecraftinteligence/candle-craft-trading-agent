@@ -9,7 +9,7 @@ import httpx
 
 from app.agents.alert_agent import AlertAgent, AlertChannel, AlertStatus
 from app.agents.trade_idea import TradeIdeaResult, create_trade_idea
-from app.alerts.templates import CANDLE_CRAFT_SIGNATURE, split_message
+from app.alerts.templates import split_message
 
 
 def run(coro: Any) -> Any:
@@ -54,14 +54,14 @@ def test_formats_valid_trade_idea() -> None:
 
     assert message.startswith("🐺 BTCUSDT · LONG · SETUP")
     assert "BTCUSDT · LONG · SETUP" in message
-    assert "A · Score N/A · RR 3.50R" in message
+    assert "A · Score N/A · 3.50R" in message
     assert "🟢 SIGNAL CONFIRMED" in message
-    assert "Entry: 100 – 102" in message
-    assert "SL: 95" in message
-    assert "TP1: 112" in message
-    assert "TP2: 120" in message
-    assert "TP3: N/A" in message
-    assert "Not financial advice." in message
+    assert "🎯 ENTRY 100 – 102" in message
+    assert "🛡 SL 95" in message
+    assert "TP1 112" in message
+    assert "TP2 120" in message
+    assert "TP3 N/A" in message
+    assert "Not financial advice." not in message
     assert "Actionability" + ":" not in message
     assert "Trade Map (incomplete stored context)" not in message
     assert "Manual execution only. Manage risk." not in message
@@ -141,7 +141,7 @@ def test_mocked_telegram_success() -> None:
             assert request.url.path == "/bottoken/sendMessage"
             assert payload["chat_id"] == "chat"
             assert payload["text"].startswith("🐺 BTCUSDT · LONG · SETUP")
-            assert CANDLE_CRAFT_SIGNATURE in payload["text"]
+            assert "CCI · Signal. Structure. Execution." in payload["text"]
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://telegram.test")
@@ -231,25 +231,30 @@ def test_unverified_data_preserved_as_unverified() -> None:
     assert "Unverified" not in message
 
 
-def test_risk_warning_included() -> None:
+def test_compact_signal_omits_disclaimer_but_preserves_internal_risk_warning() -> None:
+    idea = _idea()
+    message = AlertAgent().format(idea)
+
+    assert "Not financial advice." not in message
+    assert idea.risk_warning
+
+
+def test_cci_signature_included() -> None:
     message = AlertAgent().format(_idea())
 
-    assert "Not financial advice." in message
+    assert message.endswith("CCI · Signal. Structure. Execution.")
 
 
-def test_candle_craft_signature_included() -> None:
-    message = AlertAgent().format(_idea())
+def test_verbose_confirmed_facts_do_not_expand_compact_signal() -> None:
+    compact_message = AlertAgent().format(
+        _idea(confirmed_facts=tuple(f"Fact {index}" for index in range(80)))
+    )
+    parts = split_message(compact_message, max_length=300)
 
-    assert message.endswith(CANDLE_CRAFT_SIGNATURE)
-
-
-def test_long_message_split_behavior() -> None:
-    long_message = AlertAgent().format(_idea(confirmed_facts=tuple(f"Fact {index}" for index in range(80))))
-    parts = split_message(long_message, max_length=300)
-
-    assert len(parts) > 1
+    assert len(parts) == 1
     assert all(len(part) <= 300 for part in parts)
-    assert parts[-1].endswith(CANDLE_CRAFT_SIGNATURE)
+    assert "Fact 0" not in compact_message
+    assert parts[-1].endswith("CCI · Signal. Structure. Execution.")
 
 
 def test_deduplication_key_is_marked_in_output() -> None:

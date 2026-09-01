@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
+    CCI_FOOTER,
     FOOTER,
     HEADER_PREFIX,
     SignalEdgeEvidence,
@@ -66,12 +67,25 @@ def _message(**overrides: object) -> TelegramSignalMessage:
     return TelegramSignalMessage(**data)
 
 
-def test_all_public_signal_messages_end_with_candle_craft_footer() -> None:
+def test_public_signal_messages_use_their_canonical_footer_contract() -> None:
     for alert_type in TelegramAlertType:
         text = format_telegram_signal_message(alert_type, _message())
 
-        assert text.startswith((HEADER_PREFIX, "🐺", "👁", "✅", "🔥", "🔴"))
-        assert text.endswith(FOOTER)
+        assert text.startswith((HEADER_PREFIX, "🐺", "👁", "✅", "🔥", "🔴", "🎯", "🏆"))
+        if alert_type in {
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            TelegramAlertType.LIMIT_HIT,
+            TelegramAlertType.SL_HIT,
+        }:
+            assert text.endswith(CCI_FOOTER)
+        elif alert_type in {
+            TelegramAlertType.TP1_HIT,
+            TelegramAlertType.TP2_HIT,
+            TelegramAlertType.TP3_HIT,
+        }:
+            assert not text.endswith((FOOTER, CCI_FOOTER))
+        else:
+            assert text.endswith(FOOTER)
 
 
 def test_valid_scalp_signal_renders_premium_compact_card() -> None:
@@ -79,24 +93,20 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
 
     assert text.startswith("🐺 BTCUSDT · LONG · SCALP")
     assert "🟢 SIGNAL CONFIRMED" in text
-    assert "A · Score N/A · RR 2.92R" in text
+    assert "🟡 TP1 PRIORITY" not in text
+    assert "A · Score N/A · 2.92R" in text
     assert "Confirmation criteria satisfied." not in text
-    assert "🎯 TRADE MAP" in text
-    assert "Entry: 100 – 102" in text
-    assert "SL: 95" in text
-    assert "TP1: 110" in text
-    assert "TP2: 115" in text
-    assert "TP3: 120" in text
-    assert "🧠 INTELLIGENCE" in text
-    assert "Price swept downside liquidity at 99 with a wick to 98.5, then closed back above the level." in text
-    assert "15m bullish CHoCH closed above 103 at 104." in text
-    assert "Entry 100 – 102 overlaps the selected OB/FVG overlap and the validated fib pullback zone" in text
-    assert "The stored plan provides 2.92R to TP2." in text
+    assert "🎯 ENTRY 100 – 102" in text
+    assert "🛡 SL 95" in text
+    assert "TP1 110" in text
+    assert "TP2 115" in text
+    assert "TP3 120" in text
+    assert "🧠 EDGE" in text
+    assert "Sweep ✓ · CHoCH ✓ · OB ✓ · FVG ✓ · Fib ✓" in text
     assert "⚔️ EXECUTION" in text
-    assert "No chase outside the mapped zone." in text
-    assert "Invalid if price body-closes and accepts below 95." in text
-    assert "🐺 Liquidity taken. Structure confirmed. Hunt active." in text
-    assert "Not financial advice." in text
+    assert "Wait for the mapped zone. No chase." in text
+    assert "🐺 Hunt live." in text
+    assert "Not financial advice." not in text
     assert "Actionability" + ":" not in text
     assert "Why this setup " + "matters" not in text
     assert "Execution " + "notes" not in text
@@ -110,7 +120,8 @@ def test_signal_formatter_uses_explicit_m5_confirmation_override() -> None:
         _message(confirmation_timeframe="5m", edge_evidence=_edge(structure_timeframe="5m")),
     )
 
-    assert "5m bullish CHoCH" in text
+    assert "CHoCH ✓" in text
+    assert "5m bullish CHoCH" not in text
     assert "15m bullish CHoCH" not in text
 
 def test_public_watchlist_formatter_matches_compact_watch_shape() -> None:
@@ -139,26 +150,52 @@ def test_public_watchlist_formatter_matches_compact_watch_shape() -> None:
     assert "CONFIRMED" not in text
 
 
-def test_public_watchlist_target_caution_renders_single_tp1_priority_warning() -> None:
+def test_confirmed_target_caution_does_not_expand_the_compact_card() -> None:
+    message = _message(
+        actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
+        target_failure_severity="target_caution_actionable",
+        target_warning_reason="TP2 remains inside recent chop/range.",
+    )
     text = format_telegram_signal_message(
         TelegramAlertType.SIGNAL_CONFIRMED,
-        _message(
-            actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
-            target_failure_severity="target_caution_actionable",
-            target_warning_reason="TP2 remains inside recent chop/range.",
-        ),
+        message,
     )
 
-    assert "🟢 SIGNAL CONFIRMED · TP1 PRIORITY" in text
-    assert "No chase outside the mapped zone." in text
-    assert "TP1 reaction matters because TP2/TP3 path is choppy." in text
-    assert text.count("TP1 reaction matters because TP2/TP3 path is choppy.") == 1
+    assert "🟢 SIGNAL CONFIRMED" in text
+    assert "\n\n🟡 TP1 PRIORITY\n\nA · Score N/A · 2.92R" in text
+    assert "Wait for the mapped zone. No chase." in text
+    assert "TP1 reaction matters because TP2/TP3 path is choppy." not in text
     assert "Actionability" + ":" not in text
     assert "TARGET " + "CAUTION" not in text
     assert "Target path is choppy/tighter" not in text
     assert "Reduce aggression until price clears chop" not in text
     assert "target clean" not in text.lower()
     assert "clean target" not in text.lower()
+    assert "TP2 remains inside recent chop/range." not in text
+    assert format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, message) == text
+
+
+def test_premium_target_caution_is_not_inferred_from_warning_fields() -> None:
+    cases = (
+        {"target_warning_reason": "TP2 remains inside chop."},
+        {"target_warning_reason": "TP2 remains inside the recent range."},
+        {"target_integrity_status": "warning"},
+        {
+            "target_integrity_status": "soft_warning",
+            "target_failure_severity": "soft_target_warning",
+            "target_warning_reason": "Range and chop remain nearby.",
+        },
+    )
+
+    for overrides in cases:
+        text = format_telegram_signal_message(
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            _message(actionability_state="A_GRADE_ACTIONABLE", **overrides),
+        )
+
+        assert "🟡 TP1 PRIORITY" not in text
+        assert "Range and chop remain nearby." not in text
+        assert "TP2 remains inside" not in text
 
 
 def test_short_liquidity_rejection_signal_tracks_rejection_and_invalidates_above_stop() -> None:
@@ -180,9 +217,10 @@ def test_short_liquidity_rejection_signal_tracks_rejection_and_invalidates_above
     )
 
     assert "BTCUSDT · SHORT · SCALP" in text
-    assert "Price swept upside liquidity at 105 with a wick to 105.5, then closed back below the level." in text
-    assert "Invalid if price body-closes and accepts above 105." in text
-    assert "🐺 Liquidity taken. Structure confirmed. Hunt active." in text
+    assert "Sweep ✓ · CHoCH ✓" in text
+    assert "🛡 SL 105" in text
+    assert "wick to 105.5" not in text
+    assert "🐺 Hunt live." in text
 
 
 def test_public_signal_missing_liquidity_uses_safe_wolf_fallback() -> None:
@@ -197,8 +235,8 @@ def test_public_signal_missing_liquidity_uses_safe_wolf_fallback() -> None:
 
     assert "Wolf found downside liquidity" not in text
     assert "Wolf found upside liquidity" not in text
-    assert "🧠 INTELLIGENCE" not in text
-    assert "🐺 Signal confirmed. Execution stays disciplined." in text
+    assert "🧠 EDGE" not in text
+    assert "🐺 Hunt live." in text
 
 
 def test_public_watchlist_formatter_uses_short_bias_and_stop() -> None:
@@ -250,24 +288,20 @@ def test_watchlist_upgraded_requires_upgrade_flag() -> None:
 
     assert "WATCHLIST UPGRADED" not in plain
     assert upgraded.startswith("🐺 BTCUSDT · LONG · SCALP")
-    assert "🟢 SIGNAL CONFIRMED · WATCHLIST UPGRADED" in upgraded
-    assert "🎯 TRADE MAP" in upgraded
+    assert "WATCHLIST UPGRADED" not in upgraded
+    assert upgraded == plain
 
 
 def test_limit_zone_hit_renders_hunting_zone_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.LIMIT_HIT, _message())
 
-    assert text.startswith("🐺 BTCUSDT · LONG")
-    assert "🎯 ZONE ENGAGED" in text
-    assert "Price has entered the mapped territory." in text
-    assert "🟠 STATUS: REACTION REQUIRED" in text
-    assert "Quality: A" in text
-    assert "Entry: 100 – 102" in text
-    assert "The setup is alive, but confirmation has not been earned yet." in text
-    assert "Invalid if price body-closes and accepts below 95." in text
-    assert "Use the existing published plan only." in text
-    assert "🐺 The wolf is in position. No confirmation = no chase." in text
-    assert "TP1: 110" not in text
+    assert text.startswith("🎯 BTCUSDT · ZONE ENGAGED")
+    assert "Price has reached the mapped territory." in text
+    assert "⚔️ REACTION REQUIRED" in text
+    assert "Entry 100 – 102" in text
+    assert "Watch the response. No chase outside the zone." in text
+    assert "🐺 Territory reached." in text
+    assert "TP1 110" not in text
     assert "TAKE PROFIT HIT" not in text
     lowered = text.lower()
     assert "scalp signal" not in lowered
@@ -281,10 +315,9 @@ def test_tp1_renders_partial_win_language() -> None:
 
     assert text.startswith("✅ BTCUSDT · TP1 SECURED")
     assert "First objective reached." in text
-    assert "TP1: 110" in text
-    assert "The setup is progressing according to the stored plan." in text
-    assert "Next:\nTP2: 115\nTP3: 120" in text
-    assert "🐺 First target secured. The hunt continues." in text
+    assert "\n\n110\n\n" in text
+    assert "Next → TP2 115" in text
+    assert "🐺 Hunt continues." in text
 
 
 def test_tp2_renders_strong_follow_through_language() -> None:
@@ -292,11 +325,9 @@ def test_tp2_renders_strong_follow_through_language() -> None:
 
     assert text.startswith("🔥 BTCUSDT · TP2 SECURED")
     assert "Second objective reached." in text
-    assert "TP2: 115" in text
-    assert "RR to TP2: 2.92R" in text
-    assert "Strong follow-through from the mapped setup." in text
-    assert "Remaining:\nTP3: 120" in text
-    assert "🐺 Second target secured. Momentum remains with the plan." in text
+    assert "\n\n115\n\n" in text
+    assert "Final → TP3 120" in text
+    assert "🐺 One target remains." in text
 
 
 def test_tp2_omits_rr_when_stored_context_does_not_provide_it() -> None:
@@ -312,21 +343,21 @@ def test_tp2_omits_rr_when_stored_context_does_not_provide_it() -> None:
 def test_tp3_renders_trade_complete_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.TP3_HIT, _message())
 
-    assert text.startswith("✅ BTCUSDT · FULL TARGET SEQUENCE COMPLETE")
-    assert "TP3: 120" in text
-    assert "The stored target sequence has completed." in text
-    assert "🐺 Full target sequence secured. Hunt complete." in text
+    assert text.startswith("🏆 BTCUSDT · FULL TARGET")
+    assert "TP3 120" in text
+    assert "Full target sequence completed." in text
+    assert "🐺 Hunt complete." in text
 
 
 def test_stop_hit_renders_controlled_loss_language() -> None:
     text = format_telegram_signal_message(TelegramAlertType.SL_HIT, _message())
 
     assert text.startswith("🔴 BTCUSDT · SETUP INVALIDATED")
-    assert "Stop: 95" in text
-    assert "Price failed the structural thesis and the setup is closed." in text
+    assert "SL 95" in text
+    assert "Structural thesis failed." in text
     assert "Result: SL" in text
-    assert "🧠 Outcome remains part of lifecycle and expectancy tracking." in text
-    assert "No revenge. No reinterpretation. Next setup." in text
+    assert "🧠 Outcome logged for expectancy tracking." in text
+    assert "No reinterpretation. Next setup." in text
 
 
 def test_watchlist_invalidated_renders_wolf_walks_away_language() -> None:
@@ -381,10 +412,10 @@ def test_no_trade_output_does_not_expose_internal_debug_codes() -> None:
 def test_missing_tp3_renders_labeled_na_target() -> None:
     text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, _message(tp3=NA))
 
-    assert "🎯 TRADE MAP" in text
-    assert "TP1: 110" in text
-    assert "TP2: 115" in text
-    assert "TP3: N/A" in text
+    assert "🎯 ENTRY 100 – 102" in text
+    assert "TP1 110" in text
+    assert "TP2 115" in text
+    assert "TP3 N/A" in text
     assert "Trade Map (incomplete stored context)" not in text
     assert "Missing: TP3" not in text
 
@@ -400,15 +431,15 @@ def test_missing_evidence_omits_intelligence_without_inventing_technical_claims(
         ),
     )
 
-    assert "🧠 INTELLIGENCE" not in text
+    assert "🧠 EDGE" not in text
     for unsupported in ("liquidity swept", "CHoCH", "order block", "OB/FVG", "Fib alignment"):
         assert unsupported not in text
-    assert "🐺 Signal confirmed. Execution stays disciplined." in text
+    assert "🐺 Hunt live." in text
 
 
 def test_missing_invalidation_uses_directional_stop_fallback() -> None:
     text = format_telegram_signal_message(
-        TelegramAlertType.SIGNAL_CONFIRMED,
+        TelegramAlertType.WATCHLIST,
         _message(invalidation_reason=NA),
     )
 
@@ -505,6 +536,8 @@ def test_structured_edge_evidence_replaces_generic_fallback_text() -> None:
 
 
 def _edge_section(text: str) -> str:
+    if "🧠 EDGE\n" in text:
+        return text.split("🧠 EDGE\n", 1)[1].split("\n\n⚔️ EXECUTION", 1)[0]
     if "🧠 INTELLIGENCE\n" not in text:
         return ""
     return text.split("🧠 INTELLIGENCE\n", 1)[1].split("\n\n━━━━━━━━━━━━━━", 1)[0]
@@ -548,8 +581,8 @@ def test_bos_and_choch_edges_preserve_exact_structure_kind() -> None:
         )
     )
 
-    assert "bullish BOS" in bos and "CHoCH" not in bos
-    assert "bullish CHoCH" in choch and " BOS" not in choch
+    assert "BOS ✓" in bos and "CHoCH ✓" not in bos
+    assert "CHoCH ✓" in choch and "BOS ✓" not in choch
 
 
 def test_entry_edge_claims_only_the_selected_zone_evidence() -> None:
@@ -572,9 +605,9 @@ def test_entry_edge_claims_only_the_selected_zone_evidence() -> None:
         )
     )
 
-    assert "selected order block" in ob and "FVG" not in ob
-    assert "selected FVG" in fvg and "order block" not in fvg
-    assert "selected OB/FVG overlap" in overlap
+    assert "OB ✓" in ob and "FVG ✓" not in ob
+    assert "FVG ✓" in fvg and "OB ✓" not in fvg
+    assert "OB ✓" in overlap and "FVG ✓" in overlap
 
 
 def test_fib_and_rr_are_emitted_only_when_present() -> None:
@@ -594,7 +627,7 @@ def test_fib_and_rr_are_emitted_only_when_present() -> None:
     assert "fib" not in without.lower()
     assert "retracement" not in without.lower()
     assert "R to TP2" not in without
-    assert "3.06R to TP2" in with_rr
+    assert "3.06R to TP2" not in with_rr
 
 
 def test_edge_is_deterministic_public_safe_and_ignores_research_context() -> None:
@@ -646,12 +679,12 @@ def test_all_required_stored_levels_survive_confirmed_formatting() -> None:
     )
 
     for expected in (
-        "Entry: 0.2169 – 0.21731",
-        "SL: 0.2194",
-        "TP1: 0.214",
-        "TP2: 0.21089",
-        "TP3: 0.2089",
-        "RR 3.07R",
+        "🎯 ENTRY 0.2169 – 0.21731",
+        "🛡 SL 0.2194",
+        "TP1 0.214",
+        "TP2 0.21089",
+        "TP3 0.2089",
+        "· 3.07R",
     ):
         assert expected in text
 
