@@ -438,7 +438,7 @@ def test_ineligible_confirmed_candidate_persists_exact_prefilter_reason(
     assert attempt.scan_run_id == f"ineligible-confirmed-{case}"
 
 
-def test_same_scan_triggered_send_is_independent_of_confirmed_prefilter_rejection(
+def test_same_scan_triggered_stays_internal_when_confirmed_prefilter_rejects(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "same-scan-confirmed-blocked.db"
@@ -454,10 +454,10 @@ def test_same_scan_triggered_send_is_independent_of_confirmed_prefilter_rejectio
         )
     )
 
-    assert summary.sent == 1
+    assert summary.sent == 0
     assert summary.blocked == 1
-    assert len(sender.messages) == 1
-    assert "HUNT ACTIVE" in sender.messages[0]
+    assert summary.skipped == 1
+    assert sender.messages == []
     attempts = _confirmed_attempts(db_path)
     assert len(attempts) == 1
     assert attempts[0].telegram_status == "blocked"
@@ -466,10 +466,11 @@ def test_same_scan_triggered_send_is_independent_of_confirmed_prefilter_rejectio
         triggered = tuple(
             attempt
             for attempt in repository.list_attempts()
-            if attempt.alert_type == TelegramAlertType.SETUP_TRIGGERED.value
+            if attempt.attempted_alert_type == TelegramAlertType.SETUP_TRIGGERED.value
         )
     assert len(triggered) == 1
-    assert triggered[0].telegram_status == "sent"
+    assert triggered[0].telegram_status == "skipped"
+    assert triggered[0].dedupe_reason == "public_triggered_coalesced_into_confirmation"
 
 
 def test_blocked_confirmed_audit_does_not_consume_real_dedupe_identity(tmp_path: Path) -> None:

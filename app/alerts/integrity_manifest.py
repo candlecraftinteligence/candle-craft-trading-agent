@@ -691,6 +691,8 @@ def _message_has_risk_warning(message: str) -> bool:
         return True
     for line in message.splitlines():
         text = line.strip().lower()
+        if "no chase" in text:
+            return True
         if "manual execution" in text and "manage risk" in text:
             return True
         if "not financial advice" in text:
@@ -702,7 +704,10 @@ def _message_has_invalidation(message: str) -> bool:
         return True
     lines = message.splitlines()
     for index, line in enumerate(lines):
-        if "invalid if" in line.strip().lower():
+        text = line.strip()
+        if text.startswith("🛡 SL ") and _present(text.removeprefix("🛡 SL ").strip()):
+            return True
+        if "invalid if" in text.lower():
             return _next_non_blank_line_present(lines, index + 1)
     return False
 

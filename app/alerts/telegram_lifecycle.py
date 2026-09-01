@@ -19,6 +19,7 @@ from app.analytics.public_signal_quality import (
     public_quality_decision,
 )
 from app.alerts.telegram_outbox import (
+    DEFAULT_MAX_ATTEMPTS,
     FAILED_FINAL,
     IN_FLIGHT,
     PENDING,
@@ -159,6 +160,16 @@ SENT_WATCHLIST_RECONCILIATION_AMBIGUOUS = "sent_watchlist_reconciliation_ambiguo
 PUBLIC_OUTCOME_TRACKING_ATTEMPT = "PUBLIC_OUTCOME_TRACKING"
 PUBLIC_OUTCOME_TRACKING_NO_MATCH = "public_outcome_tracking_no_lifecycle_match"
 PUBLIC_OUTCOME_TRACKING_AMBIGUOUS = "public_outcome_tracking_identity_ambiguous"
+PUBLIC_OUTCOME_TRACKING_GENERATION_MISMATCH = (
+    "public_outcome_tracking_lifecycle_generation_mismatch"
+)
+PUBLIC_TRIGGERED_INTERNAL_ONLY_REASON = "public_triggered_internal_only"
+PUBLIC_TRIGGERED_COALESCED_REASON = "public_triggered_coalesced_into_confirmation"
+PUBLIC_LIMIT_HIT_COALESCED_REASON = "public_limit_hit_coalesced_into_confirmation"
+PUBLIC_TP1_COALESCED_INTO_TP2_REASON = "public_tp1_coalesced_into_tp2"
+PUBLIC_TP1_COALESCED_INTO_TP3_REASON = "public_tp1_coalesced_into_tp3"
+PUBLIC_TP2_COALESCED_INTO_TP3_REASON = "public_tp2_coalesced_into_tp3"
+PUBLIC_TARGET_IN_FLIGHT_REASON = "public_target_milestone_in_flight"
 SOFT_FAILED_CONFIRMATION_ATTEMPT = "SOFT_FAILED_CONFIRMATION"
 SOFT_FAILED_CONFIRMATION_MIN_OBSERVATIONS = 3
 SOFT_FAILED_CONFIRMATION_REMOVAL_REASON = "Watchlist removed because final confirmation conditions did not improve."
@@ -1046,6 +1057,14 @@ class CanonicalPublicOutcomeMatch:
     record: SetupLifecycleRecord
     progress: SetupLifecycleOutcomeProgress
     current_result: ScannerSymbolResult | None = None
+
+
+@dataclass(frozen=True)
+class CanonicalPublicOutcomeDelivery:
+    alert_type: TelegramAlertType
+    reached_at: str
+    coalesced_milestones: tuple[str, ...] = ()
+    suppression_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2727,6 +2746,34 @@ def _reserve_public_lifecycle_event(
                 matched_prior_event_id=prior_event.id,
                 jitter_matched_same_plan=equivalent_match,
             )
+        if (
+            state == FAILED_FINAL
+            and alert_type
+            in {
+                TelegramAlertType.TP1_HIT,
+                TelegramAlertType.TP2_HIT,
+                TelegramAlertType.TP3_HIT,
+            }
+            and attempt is not None
+            and attempt.id is not None
+            and prior_event.id is not None
+            and _rearm_failed_final_public_target(
+                db,
+                event_id=prior_event.id,
+                attempt_id=attempt.id,
+                reservation_record=reservation_record,
+            )
+        ):
+            return PublicWatchlistReservationResult(
+                granted=True,
+                event_key=prior_event.event_key,
+                reservation_id=attempt.id,
+                event_id=prior_event.id,
+                status=RETRYABLE.lower(),
+                reason=NA,
+                detail="Failed-final public target milestone re-armed from persisted outcome progress.",
+                matched_prior_event_id=prior_event.id,
+            )
         return PublicWatchlistReservationResult(
             granted=False,
             event_key=prior_event.event_key,
@@ -2850,6 +2897,84 @@ def _reserve_public_lifecycle_event(
         reason=NA if reserved is not None and reserved.id is not None else "public_lifecycle_attempt_missing",
         detail="Public lifecycle event reserved before send.",
     )
+
+
+def _rearm_failed_final_public_target(
+    db: SQLiteTelegramAlertAttemptRepository,
+    *,
+    event_id: int,
+    attempt_id: int,
+    reservation_record: TelegramAlertAttemptRecord,
+) -> bool:
+    timestamp = _text(reservation_record.attempted_at)
+    if timestamp == NA:
+        timestamp = now_utc_iso()
+    db._connection.execute("SAVEPOINT rearm_failed_final_public_target")
+    try:
+        event_cursor = db._connection.execute(
+            """
+            UPDATE public_alert_events
+            SET status = ?, delivery_state = ?, next_retry_at = NULL,
+                max_attempts = max_attempts + ?, completed_at = NULL,
+                updated_at = ?
+            WHERE id = ? AND delivery_state = ? AND sent_at IS NULL
+            """,
+            (
+                PUBLIC_ALERT_EVENT_RESERVED_STATUS,
+                RETRYABLE,
+                DEFAULT_MAX_ATTEMPTS,
+                timestamp,
+                int(event_id),
+                FAILED_FINAL,
+            ),
+        )
+        if event_cursor.rowcount != 1:
+            db._connection.execute(
+                "ROLLBACK TO SAVEPOINT rearm_failed_final_public_target"
+            )
+            db._connection.execute(
+                "RELEASE SAVEPOINT rearm_failed_final_public_target"
+            )
+            return False
+        db._connection.execute(
+            """
+            UPDATE public_alert_delivery_parts
+            SET delivery_state = ?, next_retry_at = NULL, updated_at = ?
+            WHERE public_alert_event_id = ? AND delivery_state = ? AND sent_at IS NULL
+            """,
+            (RETRYABLE, timestamp, int(event_id), FAILED_FINAL),
+        )
+        if not db.replace_attempt_with_reservation(
+            attempt_id=attempt_id,
+            record=reservation_record,
+        ):
+            db._connection.execute(
+                "ROLLBACK TO SAVEPOINT rearm_failed_final_public_target"
+            )
+            db._connection.execute(
+                "RELEASE SAVEPOINT rearm_failed_final_public_target"
+            )
+            return False
+        db._connection.execute(
+            """
+            UPDATE telegram_alert_attempts
+            SET telegram_status = 'retryable', delivery_state = ?,
+                dedupe_status = 'retryable',
+                dedupe_reason = 'public_milestone_failed_final_rearmed'
+            WHERE id = ?
+            """,
+            (RETRYABLE, int(attempt_id)),
+        )
+    except sqlite3.Error:
+        db._connection.execute(
+            "ROLLBACK TO SAVEPOINT rearm_failed_final_public_target"
+        )
+        db._connection.execute(
+            "RELEASE SAVEPOINT rearm_failed_final_public_target"
+        )
+        raise
+    db._connection.execute("RELEASE SAVEPOINT rearm_failed_final_public_target")
+    return True
 
 
 def _public_watchlist_reservation_duplicate_detail(
@@ -3460,10 +3585,6 @@ class TelegramLifecycleDeliveryService:
                     public_watchlist_require_entry_zone=self.public_watchlist_require_entry_zone,
                     public_watchlist_require_invalidation=self.public_watchlist_require_invalidation,
                 )
-                for delivery in await self.recover_public_lifecycle_alerts(
-                    repository=repository,
-                ):
-                    record_delivery(delivery)
                 for delivery in await self.reconcile_publicly_tracked_outcomes(
                     repository=repository,
                     lifecycle_repository=lifecycle_repository,
@@ -3471,6 +3592,10 @@ class TelegramLifecycleDeliveryService:
                     current_results=result.results,
                     scan_run_id=scan_run_id,
                     eligibility_context=eligibility_context,
+                ):
+                    record_delivery(delivery)
+                for delivery in await self.recover_public_lifecycle_alerts(
+                    repository=repository,
                 ):
                     record_delivery(delivery)
                 public_watchlist_daily_cap_reached: bool | None = None
@@ -3632,12 +3757,66 @@ class TelegramLifecycleDeliveryService:
         public_watchlist_hourly_cap_reached: bool | None = None,
     ) -> tuple[TelegramLifecycleDelivery, ...]:
         deliveries: list[TelegramLifecycleDelivery] = []
-        for transition_result in _symbol_results_for_lifecycle_delivery(symbol_result):
+        transition_results = _symbol_results_for_lifecycle_delivery(symbol_result)
+        typed_results = tuple(
+            (
+                transition_result,
+                _alert_type_for_transition(
+                    transition_result,
+                    transition_result.lifecycle_transition,
+                )
+                if transition_result.lifecycle_transition is not None
+                else None,
+            )
+            for transition_result in transition_results
+        )
+        confirmed_result = next(
+            (
+                transition_result
+                for transition_result, alert_type in typed_results
+                if alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+            ),
+            None,
+        )
+        coalesced_zone_active = any(
+            alert_type == TelegramAlertType.LIMIT_HIT
+            for _, alert_type in typed_results
+        ) and confirmed_result is not None
+
+        for transition_result, alert_type in typed_results:
+            suppression_reason: str | None = None
+            if alert_type == TelegramAlertType.SETUP_TRIGGERED:
+                suppression_reason = (
+                    PUBLIC_TRIGGERED_COALESCED_REASON
+                    if confirmed_result is not None
+                    else PUBLIC_TRIGGERED_INTERNAL_ONLY_REASON
+                )
+            elif alert_type == TelegramAlertType.LIMIT_HIT and coalesced_zone_active:
+                suppression_reason = PUBLIC_LIMIT_HIT_COALESCED_REASON
+            elif alert_type == TelegramAlertType.SIGNAL_CONFIRMED and transition_result is not confirmed_result:
+                suppression_reason = "public_confirmation_duplicate_in_batch"
+
+            if suppression_reason is not None and alert_type is not None:
+                deliveries.append(
+                    _persist_public_lifecycle_suppression_audit(
+                        repository,
+                        transition_result,
+                        alert_type=alert_type,
+                        reason=suppression_reason,
+                        scan_run_id=scan_run_id,
+                        eligibility_context=eligibility_context or TelegramEligibilityContext(),
+                    )
+                )
+                continue
             delivery = await self.deliver_for_symbol(
                 transition_result,
                 repository=repository,
                 scan_run_id=scan_run_id,
                 eligibility_context=eligibility_context,
+                zone_active=(
+                    coalesced_zone_active
+                    and transition_result is confirmed_result
+                ),
                 allow_public_watchlist=allow_public_watchlist,
                 public_watchlist_preexisting_cooldown_reason=public_watchlist_preexisting_cooldown_reason,
                 public_watchlist_daily_cap_reached=public_watchlist_daily_cap_reached,
@@ -3683,6 +3862,25 @@ class TelegramLifecycleDeliveryService:
                 logger.error(
                     "Recoverable public lifecycle event has no attempt reservation: event_key=%s",
                     event.event_key,
+                )
+                continue
+            if alert_type == TelegramAlertType.SETUP_TRIGGERED:
+                SQLitePublicTelegramOutbox(repository._connection).mark_terminal_without_send(
+                    event_id=event.id,
+                    reservation_id=attempt.id,
+                    state=FAILED_FINAL,
+                    reason=PUBLIC_TRIGGERED_INTERNAL_ONLY_REASON,
+                )
+                deliveries.append(
+                    TelegramLifecycleDelivery(
+                        symbol=event.symbol,
+                        signal_id=attempt.signal_id,
+                        alert_type=alert_type.value,
+                        status="skipped",
+                        detail="Recovered TRIGGERED intent retained internally without public delivery.",
+                        message_hash=_text(event.message_hash),
+                        error_message=PUBLIC_TRIGGERED_INTERNAL_ONLY_REASON,
+                    )
                 )
                 continue
             reservation = PublicWatchlistReservationResult(
@@ -3735,6 +3933,7 @@ class TelegramLifecycleDeliveryService:
         repository: SQLiteTelegramAlertAttemptRepository,
         scan_run_id: str | None = None,
         eligibility_context: TelegramEligibilityContext | None = None,
+        zone_active: bool = False,
         allow_public_watchlist: bool = True,
         public_watchlist_preexisting_cooldown_reason: str | None = None,
         public_watchlist_daily_cap_reached: bool | None = None,
@@ -3746,6 +3945,15 @@ class TelegramLifecycleDeliveryService:
             if symbol_result.lifecycle_transition
             else None
         )
+        if alert_type_hint == TelegramAlertType.SETUP_TRIGGERED:
+            return _persist_public_lifecycle_suppression_audit(
+                repository,
+                symbol_result,
+                alert_type=TelegramAlertType.SETUP_TRIGGERED,
+                reason=PUBLIC_TRIGGERED_INTERNAL_ONLY_REASON,
+                scan_run_id=scan_run_id,
+                eligibility_context=eligibility_context or TelegramEligibilityContext(),
+            )
         geometry_failure = stored_plan_geometry_failure(lifecycle) if lifecycle is not None else None
         if geometry_failure is not None:
             if alert_type_hint != TelegramAlertType.SIGNAL_CONFIRMED:
@@ -3937,6 +4145,9 @@ class TelegramLifecycleDeliveryService:
             if prior_tp_sl_alert is not None:
                 signal_id = prior_tp_sl_alert.signal_id
                 message = _message_with_prior_public_plan(message, prior_tp_sl_alert)
+
+        if decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and zone_active:
+            message = replace(message, zone_active=True)
 
         message = replace(message, signal_id=signal_id)
 
@@ -4477,12 +4688,40 @@ class TelegramLifecycleDeliveryService:
                     )
                 )
 
-            for alert_type, reached_at in _canonical_public_outcome_sequence(match.progress):
+            outcome_deliveries, selection_audits = _canonical_public_outcome_deliveries(
+                repository,
+                match,
+            )
+            for reason in selection_audits:
+                deliveries.append(
+                    _persist_public_outcome_tracking_audit(
+                        repository,
+                        match.prior_alert,
+                        reason=reason,
+                        scan_run_id=scan_run_id,
+                    )
+                )
+            for outcome_delivery in outcome_deliveries:
+                for reason in outcome_delivery.suppression_reasons:
+                    _supersede_public_target_intent(
+                        repository,
+                        match,
+                        reason=reason,
+                    )
+                    deliveries.append(
+                        _persist_public_outcome_tracking_audit(
+                            repository,
+                            match.prior_alert,
+                            reason=reason,
+                            scan_run_id=scan_run_id,
+                        )
+                    )
                 delivery = await self._send_canonical_public_outcome(
                     repository,
                     match=match,
-                    alert_type=alert_type,
-                    reached_at=reached_at,
+                    alert_type=outcome_delivery.alert_type,
+                    reached_at=outcome_delivery.reached_at,
+                    coalesced_milestones=outcome_delivery.coalesced_milestones,
                     scan_run_id=scan_run_id,
                     eligibility_context=eligibility_context,
                 )
@@ -4498,6 +4737,7 @@ class TelegramLifecycleDeliveryService:
         match: CanonicalPublicOutcomeMatch,
         alert_type: TelegramAlertType,
         reached_at: str,
+        coalesced_milestones: tuple[str, ...],
         scan_run_id: str | None,
         eligibility_context: TelegramEligibilityContext,
     ) -> TelegramLifecycleDelivery:
@@ -4525,6 +4765,7 @@ class TelegramLifecycleDeliveryService:
             tp3=record.tp3,
             planned_rr=record.rr,
             was_watchlist=prior_alert.alert_type == TelegramAlertType.WATCHLIST.value,
+            coalesced_milestones=coalesced_milestones,
         )
         plan = _public_economic_setup_plan(symbol_result, message)
         if (
@@ -10616,6 +10857,70 @@ def _invalid_target_fields_from_reason(reason: str) -> str:
     return fields if fields else NA
 
 
+def _persist_public_lifecycle_suppression_audit(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    symbol_result: ScannerSymbolResult,
+    *,
+    alert_type: TelegramAlertType,
+    reason: str,
+    scan_run_id: str | None,
+    eligibility_context: TelegramEligibilityContext,
+) -> TelegramLifecycleDelivery:
+    context = _minimum_rr_context_for_symbol(symbol_result, eligibility_context)
+    message = _telegram_signal_message_for_alert(symbol_result, alert_type, context)
+    signal_id = _signal_id_for_alert(symbol_result, alert_type, message)
+    transition = symbol_result.lifecycle_transition
+    previous_state = transition.from_state.value if transition and transition.from_state else NA
+    new_state = transition.to_state.value if transition else _lifecycle_state_text(symbol_result)
+    seen_at = now_utc_iso()
+    message_hash = hashlib.sha256(
+        f"{signal_id}|{alert_type.value}|{reason}".encode("utf-8")
+    ).hexdigest()
+    record = TelegramAlertAttemptRecord(
+        signal_id=signal_id,
+        symbol=symbol_result.symbol,
+        direction=message.direction,
+        previous_state=previous_state,
+        new_state=new_state,
+        alert_type=_blocked_alert_type(alert_type, reason),
+        lifecycle_state=_lifecycle_state_text(symbol_result),
+        sent_at=None,
+        attempted_at=seen_at,
+        telegram_status="skipped",
+        message_hash=message_hash,
+        scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        attempted_alert_type=alert_type.value,
+        setup_quality_score=_quality_score(symbol_result),
+        rr_planned=_text(message.planned_rr),
+        min_rr=_text(_min_rr_for_alert(alert_type, context)),
+        opportunity_score=_opportunity_score_text(symbol_result),
+        min_score_for_idea=_text(context.min_score_for_idea),
+        technical_score=_technical_score_text(symbol_result),
+        price_level=_price_level_for_alert(alert_type, message),
+        **_message_level_metadata(message),
+        **_public_watchlist_record_plan_fields(symbol_result, alert_type, message),
+        blocked_reason=reason,
+        error_message=reason,
+        first_seen_at=seen_at,
+        last_seen_at=seen_at,
+        last_scan_run_id=scan_run_id or _transition_scan_run_id(transition),
+        last_error_message=reason,
+        dedupe_status="coalesced",
+        dedupe_reason=reason,
+    )
+    inserted = repository.insert_attempt(record)
+    compacted = False if inserted else repository.compact_repeated_attempt(record)
+    return TelegramLifecycleDelivery(
+        symbol=symbol_result.symbol,
+        signal_id=signal_id,
+        alert_type=alert_type.value,
+        status="skipped" if inserted else "blocked_repeat" if compacted else "duplicate",
+        detail="Public lifecycle transition retained internally and suppressed from standalone delivery.",
+        message_hash=message_hash,
+        error_message=reason,
+    )
+
+
 def _persist_blocked_attempt(
     repository: SQLiteTelegramAlertAttemptRepository,
     symbol_result: ScannerSymbolResult,
@@ -12256,7 +12561,9 @@ def _match_public_tracking_outcome(
     current_results: Sequence[ScannerSymbolResult],
 ) -> tuple[CanonicalPublicOutcomeMatch | None, str | None]:
     records: dict[str, SetupLifecycleRecord] = {}
-    exact = lifecycle_repository.get_record_by_lifecycle_id(prior_alert.signal_id)
+    anchored_lifecycle_id = _setup_delivery_lifecycle_id(prior_alert.signal_id)
+    exact_lookup_id = anchored_lifecycle_id or prior_alert.signal_id
+    exact = lifecycle_repository.get_record_by_lifecycle_id(exact_lookup_id)
     if exact is not None:
         records[exact.lifecycle_id] = exact
     for record in _current_lifecycle_records_for_signal_id(prior_alert.signal_id, current_results):
@@ -12283,7 +12590,7 @@ def _match_public_tracking_outcome(
             current_results,
         )
         identity_exact = (
-            record.lifecycle_id == prior_alert.signal_id
+            record.lifecycle_id == exact_lookup_id
             and _public_tracking_root_has_same_symbol_direction(prior_alert, record)
         )
         plan_matches = _public_tracking_root_matches_record(
@@ -12292,7 +12599,9 @@ def _match_public_tracking_outcome(
             alert_repository=alert_repository,
             current_result=current_result,
         )
-        if not identity_exact and not plan_matches:
+        # A matching lifecycle id is necessary but not sufficient: public
+        # outcome projection must also retain the original economic geometry.
+        if not plan_matches:
             continue
         candidates.append(
             (
@@ -12308,10 +12617,32 @@ def _match_public_tracking_outcome(
         )
 
     if not candidates:
+        if anchored_lifecycle_id is not None and progress_seen:
+            return None, PUBLIC_OUTCOME_TRACKING_GENERATION_MISMATCH
         return (
             None,
             PUBLIC_OUTCOME_TRACKING_NO_MATCH if progress_seen else None,
         )
+    exact_candidates = [item for item in candidates if item[1]]
+    if exact_candidates:
+        candidates = exact_candidates
+    elif anchored_lifecycle_id is not None:
+        projection_modes = _public_tracking_root_source_modes(
+            prior_alert,
+            alert_repository=alert_repository,
+        )
+        candidates = [
+            item
+            for item in candidates
+            if len(projection_modes) > 1
+            and _status_key(item[0].record.mode) in projection_modes
+        ]
+        if not candidates:
+            return None, PUBLIC_OUTCOME_TRACKING_GENERATION_MISMATCH
+        if len(candidates) > 1:
+            return None, PUBLIC_OUTCOME_TRACKING_AMBIGUOUS
+    elif len(candidates) > 1:
+        return None, PUBLIC_OUTCOME_TRACKING_AMBIGUOUS
     candidates.sort(
         key=lambda item: (
             item[1],
@@ -12340,9 +12671,37 @@ def _match_public_tracking_outcome(
             bool(second[0].record.is_current),
             second[0].progress.last_evaluated_at,
         )
-        if best_rank == second_rank and _canonical_public_outcome_plan_key(best[0]) != _canonical_public_outcome_plan_key(second[0]):
+        if best_rank == second_rank and best[0].record.lifecycle_id != second[0].record.lifecycle_id:
             return None, PUBLIC_OUTCOME_TRACKING_AMBIGUOUS
     return best[0], None
+
+
+def _setup_delivery_lifecycle_id(signal_id: Any) -> str | None:
+    normalized = _identity(signal_id)
+    prefix, marker, digest = normalized.rpartition("-SETUP-")
+    if marker == str() or prefix == str() or len(digest) != 16:
+        return None
+    if any(character not in "0123456789abcdef" for character in digest.lower()):
+        return None
+    return prefix
+
+
+def _public_tracking_root_source_modes(
+    prior_alert: TelegramAlertAttemptRecord,
+    *,
+    alert_repository: SQLiteTelegramAlertAttemptRepository,
+) -> frozenset[str]:
+    event = _get_public_alert_event(
+        alert_repository,
+        event_key=prior_alert.public_watchlist_event_key,
+    )
+    if event is None or _text(event.source_modes) == NA:
+        return frozenset()
+    return frozenset(
+        mode
+        for mode in (_status_key(value) for value in event.source_modes.split(","))
+        if mode != str()
+    )
 
 
 def _public_tracking_root_matches_record(
@@ -12505,6 +12864,212 @@ def _canonical_public_outcome_sequence(
     ):
         milestones.append((TelegramAlertType.SL_HIT, progress.stop_at))
     return tuple(milestones)
+
+
+def _canonical_public_outcome_deliveries(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    match: CanonicalPublicOutcomeMatch,
+) -> tuple[tuple[CanonicalPublicOutcomeDelivery, ...], tuple[str, ...]]:
+    """Select at most one target update, plus an independent SL update."""
+
+    reached = dict(_canonical_public_outcome_sequence(match.progress))
+    successful = _successful_canonical_public_outcome_types(repository, match)
+    deliveries: list[CanonicalPublicOutcomeDelivery] = []
+    audits: list[str] = []
+
+    def satisfied(alert_type: TelegramAlertType) -> bool:
+        if alert_type == TelegramAlertType.TP1_HIT:
+            return bool(
+                successful
+                & {
+                    TelegramAlertType.TP1_HIT,
+                    TelegramAlertType.TP2_HIT,
+                    TelegramAlertType.TP3_HIT,
+                }
+            )
+        if alert_type == TelegramAlertType.TP2_HIT:
+            return bool(
+                successful
+                & {TelegramAlertType.TP2_HIT, TelegramAlertType.TP3_HIT}
+            )
+        return alert_type in successful
+
+    if TelegramAlertType.TP3_HIT in reached and not satisfied(TelegramAlertType.TP3_HIT):
+        lower_missing = not (
+            satisfied(TelegramAlertType.TP1_HIT)
+            and satisfied(TelegramAlertType.TP2_HIT)
+        )
+        suppression_reasons: list[str] = []
+        if not satisfied(TelegramAlertType.TP1_HIT):
+            suppression_reasons.append(PUBLIC_TP1_COALESCED_INTO_TP3_REASON)
+        if not satisfied(TelegramAlertType.TP2_HIT):
+            suppression_reasons.append(PUBLIC_TP2_COALESCED_INTO_TP3_REASON)
+        deliveries.append(
+            CanonicalPublicOutcomeDelivery(
+                alert_type=TelegramAlertType.TP3_HIT,
+                reached_at=reached[TelegramAlertType.TP3_HIT],
+                coalesced_milestones=("tp1", "tp2", "tp3") if lower_missing else (),
+                suppression_reasons=tuple(suppression_reasons),
+            )
+        )
+    elif TelegramAlertType.TP2_HIT in reached and not satisfied(TelegramAlertType.TP2_HIT):
+        tp1_missing = not satisfied(TelegramAlertType.TP1_HIT)
+        deliveries.append(
+            CanonicalPublicOutcomeDelivery(
+                alert_type=TelegramAlertType.TP2_HIT,
+                reached_at=reached[TelegramAlertType.TP2_HIT],
+                coalesced_milestones=("tp1", "tp2") if tp1_missing else (),
+                suppression_reasons=(PUBLIC_TP1_COALESCED_INTO_TP2_REASON,) if tp1_missing else (),
+            )
+        )
+    elif TelegramAlertType.TP1_HIT in reached and not satisfied(TelegramAlertType.TP1_HIT):
+        deliveries.append(
+            CanonicalPublicOutcomeDelivery(
+                alert_type=TelegramAlertType.TP1_HIT,
+                reached_at=reached[TelegramAlertType.TP1_HIT],
+            )
+        )
+
+    if TelegramAlertType.SL_HIT in reached and not satisfied(TelegramAlertType.SL_HIT):
+        deliveries.append(
+            CanonicalPublicOutcomeDelivery(
+                alert_type=TelegramAlertType.SL_HIT,
+                reached_at=reached[TelegramAlertType.SL_HIT],
+            )
+        )
+    return tuple(deliveries), tuple(audits)
+
+
+def _successful_canonical_public_outcome_types(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    match: CanonicalPublicOutcomeMatch,
+) -> frozenset[TelegramAlertType]:
+    plan_id = _canonical_public_outcome_plan_key(match)
+    successful: set[TelegramAlertType] = set()
+    rows = repository._connection.execute(
+        """
+        SELECT event_type FROM public_alert_events
+        WHERE canonical_plan_id = ?
+          AND status = ?
+          AND delivery_state = ?
+          AND sent_at IS NOT NULL
+        """,
+        (plan_id, PUBLIC_ALERT_EVENT_SENT_STATUS, SENT),
+    ).fetchall()
+    for row in rows:
+        try:
+            successful.add(TelegramAlertType(_text(row["event_type"]).upper()))
+        except ValueError:
+            continue
+
+    for alert_type in TP_SL_ALERT_TYPES:
+        attempt = repository.get_attempt(
+            signal_id=match.prior_alert.signal_id,
+            alert_type=alert_type,
+        )
+        if (
+            attempt is not None
+            and _status_key(attempt.telegram_status) == "sent"
+            and _text(attempt.sent_at) != NA
+            and _text(attempt.delivery_state).upper() in {SENT, NA}
+        ):
+            successful.add(alert_type)
+    return frozenset(successful)
+
+
+def _supersede_public_target_intent(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    match: CanonicalPublicOutcomeMatch,
+    *,
+    reason: str,
+) -> None:
+    alert_type = {
+        PUBLIC_TP1_COALESCED_INTO_TP2_REASON: TelegramAlertType.TP1_HIT,
+        PUBLIC_TP1_COALESCED_INTO_TP3_REASON: TelegramAlertType.TP1_HIT,
+        PUBLIC_TP2_COALESCED_INTO_TP3_REASON: TelegramAlertType.TP2_HIT,
+    }.get(reason)
+    if alert_type is None:
+        return
+    event_key = _public_watchlist_event_key(
+        _canonical_public_outcome_plan_key(match),
+        alert_type.value,
+    )
+    row = repository._connection.execute(
+        "SELECT id, delivery_state FROM public_alert_events WHERE event_key = ?",
+        (event_key,),
+    ).fetchone()
+    if row is not None and _text(row["delivery_state"]).upper() in {
+        PENDING,
+        RETRYABLE,
+        FAILED_FINAL,
+        SKIPPED_DRY_RUN,
+        POLICY_DISABLED,
+    }:
+        event_id = int(row["id"])
+        timestamp = now_utc_iso()
+        repository._connection.execute(
+            """
+            UPDATE public_alert_events
+            SET status = ?, delivery_state = ?, failure_reason = ?,
+                last_error_category = ?, last_error_detail = ?,
+                completed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                PUBLIC_ALERT_EVENT_FAILED_STATUS,
+                FAILED_FINAL,
+                reason,
+                reason,
+                reason,
+                timestamp,
+                timestamp,
+                event_id,
+            ),
+        )
+        repository._connection.execute(
+            """
+            UPDATE public_alert_delivery_parts
+            SET delivery_state = ?, last_error_category = ?,
+                last_error_detail = ?, updated_at = ?
+            WHERE public_alert_event_id = ?
+              AND delivery_state IN (?, ?, ?, ?, ?)
+            """,
+            (
+                FAILED_FINAL,
+                reason,
+                reason,
+                timestamp,
+                event_id,
+                PENDING,
+                RETRYABLE,
+                FAILED_FINAL,
+                SKIPPED_DRY_RUN,
+                POLICY_DISABLED,
+            ),
+        )
+    repository._connection.execute(
+        """
+        UPDATE telegram_alert_attempts
+        SET telegram_status = 'skipped', delivery_state = ?,
+            blocked_reason = ?, error_message = ?,
+            dedupe_status = 'coalesced', dedupe_reason = ?,
+            last_error_message = ?
+        WHERE signal_id = ? AND alert_type = ?
+          AND telegram_status != 'sent'
+          AND delivery_state NOT IN (?, ?)
+        """,
+        (
+            FAILED_FINAL,
+            reason,
+            reason,
+            reason,
+            reason,
+            match.prior_alert.signal_id,
+            alert_type.value,
+            IN_FLIGHT,
+            UNCERTAIN,
+        ),
+    )
 
 
 def _canonical_public_outcome_causal_audit_reasons(

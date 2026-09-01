@@ -71,8 +71,8 @@ def _service(db_path, sender: FakeSender) -> TelegramLifecycleDeliveryService:
 def _public_setup_symbol(
     *,
     signal_id: str,
-    state: SetupLifecycleState = SetupLifecycleState.TRIGGERED,
-    previous: SetupLifecycleState = SetupLifecycleState.STALKING,
+    state: SetupLifecycleState = SetupLifecycleState.CONFIRMED,
+    previous: SetupLifecycleState = SetupLifecycleState.TRIGGERED,
     mode: str = "swing",
     source_modes: tuple[str, ...] = ("swing",),
     direction: str = "long",
@@ -343,7 +343,7 @@ def test_rejected_and_cooldown_are_not_public(tmp_path, state) -> None:
     assert is_public_lifecycle_event(state) is False
 
 
-def test_triggered_is_public_once_and_semantically_not_confirmed(tmp_path) -> None:
+def test_triggered_is_internal_only_and_audited_once_per_observation(tmp_path) -> None:
     db_path = tmp_path / "triggered.db"
     sender = FakeSender()
     service = _service(db_path, sender)
@@ -356,20 +356,14 @@ def test_triggered_is_public_once_and_semantically_not_confirmed(tmp_path) -> No
     first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="triggered-1"))
     repeated = run(service.deliver_for_run(_run_result(symbol), scan_run_id="triggered-2"))
 
-    assert first.sent == 1
+    assert first.sent == 0
     assert repeated.sent == 0
-    assert len(sender.messages) == 1
-    assert "HUNT ACTIVE" in sender.messages[0]
-    assert "CONFIRMATION PENDING" in sender.messages[0]
-    assert "final confirmation gate has not been earned" in sender.messages[0]
+    assert sender.messages == []
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts(signal_id=first.deliveries[0].signal_id)
-    sent = [attempt for attempt in attempts if attempt.telegram_status == "sent"]
-    blocked = [attempt for attempt in attempts if attempt.telegram_status == "blocked"]
-    assert [attempt.alert_type for attempt in sent] == [TelegramAlertType.SETUP_TRIGGERED.value]
-    assert len(blocked) == 1
-    assert blocked[0].blocked_reason == "duplicate_equivalent_public_setup"
-    assert "matched_prior_event_id=" in blocked[0].dedupe_reason
+    assert len(attempts) == 1
+    assert all(attempt.telegram_status == "skipped" for attempt in attempts)
+    assert all(attempt.dedupe_reason == "public_triggered_internal_only" for attempt in attempts)
 
 
 def test_confirmed_is_public_once_and_accepts_real_lifecycle_b_plus(tmp_path) -> None:
@@ -390,7 +384,7 @@ def test_confirmed_is_public_once_and_accepts_real_lifecycle_b_plus(tmp_path) ->
     assert repeated.sent == 0
     assert len(sender.messages) == 1
     assert "SIGNAL CONFIRMED" in sender.messages[0]
-    assert "🐺 Signal confirmed. Execution stays disciplined." in sender.messages[0]
+    assert "🐺 Hunt live." in sender.messages[0]
 
 
 
@@ -413,12 +407,11 @@ def test_triggered_does_not_suppress_later_confirmed(tmp_path) -> None:
     second = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="progression-confirmed"))
     repeated = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="progression-confirmed-repeat"))
 
-    assert first.sent == 1
+    assert first.sent == 0
     assert second.sent == 1
     assert repeated.sent == 0
-    assert len(sender.messages) == 2
-    assert "HUNT ACTIVE" in sender.messages[0]
-    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED" in sender.messages[0]
     assert first.deliveries[0].signal_id == second.deliveries[0].signal_id
 
 
@@ -746,6 +739,8 @@ def test_equivalent_trigger_does_not_suppress_confirmed_across_mode_change(tmp_p
     service = _service(db_path, sender)
     triggered = _public_setup_symbol(
         signal_id="scalp-triggered-generation",
+        state=SetupLifecycleState.TRIGGERED,
+        previous=SetupLifecycleState.STALKING,
         mode="scalp",
         source_modes=("scalp", "swing"),
     )
@@ -761,12 +756,11 @@ def test_equivalent_trigger_does_not_suppress_confirmed_across_mode_change(tmp_p
     second = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="confirmed"))
     repeated = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="confirmed-repeat"))
 
-    assert first.sent == 1
+    assert first.sent == 0
     assert second.sent == 1
     assert repeated.sent == 0
-    assert len(sender.messages) == 2
-    assert "HUNT ACTIVE" in sender.messages[0]
-    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED" in sender.messages[0]
 
 
 def test_retryable_equivalent_mode_projection_retries_prior_committed_intent(tmp_path) -> None:
@@ -813,9 +807,9 @@ def test_materially_new_entry_geometry_is_not_suppressed_by_old_same_tuple(tmp_p
     first = run(service.deliver_for_run(_run_result(first_setup), scan_run_id="old-setup"))
     second = run(service.deliver_for_run(_run_result(second_setup), scan_run_id="new-setup"))
 
-    assert first.sent == 1
+    assert first.sent == 0
     assert second.sent == 1
-    assert len(sender.messages) == 2
+    assert len(sender.messages) == 1
     assert first.deliveries[0].signal_id != second.deliveries[0].signal_id
 
 
@@ -826,13 +820,13 @@ def test_materially_new_entry_geometry_is_not_suppressed_by_old_same_tuple(tmp_p
         (SetupLifecycleState.SL_HIT, _diagnostics(), Decimal("95"), TelegramAlertType.SL_HIT),
     ),
 )
-def test_triggered_setup_keeps_tp_and_sl_updates_functional(tmp_path, state, diagnostics, current_price, expected) -> None:
+def test_confirmed_setup_keeps_tp_and_sl_updates_functional(tmp_path, state, diagnostics, current_price, expected) -> None:
     db_path = tmp_path / f"{expected.value}.db"
     sender = FakeSender()
     service = _service(db_path, sender)
-    triggered = _symbol(
-        SetupLifecycleState.TRIGGERED,
-        previous=SetupLifecycleState.STALKING,
+    confirmed = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
         signal_id=f"follow-up-{expected.value}",
     )
     outcome = _symbol(
@@ -842,7 +836,7 @@ def test_triggered_setup_keeps_tp_and_sl_updates_functional(tmp_path, state, dia
         signal_id=f"follow-up-{expected.value}",
     ).model_copy(update={"current_price": current_price})
 
-    initial = run(service.deliver_for_run(_run_result(triggered), scan_run_id="follow-up-initial"))
+    initial = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="follow-up-initial"))
     update = run(service.deliver_for_run(_run_result(outcome), scan_run_id="follow-up-update"))
 
     assert initial.sent == 1
@@ -916,13 +910,13 @@ def test_invalidated_update_requires_and_uses_prior_public_setup(tmp_path) -> No
     db_path = tmp_path / "with-prior.db"
     sender = FakeSender()
     service = _service(db_path, sender)
-    triggered = _symbol(
-        SetupLifecycleState.TRIGGERED,
-        previous=SetupLifecycleState.STALKING,
+    confirmed = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
         signal_id=signal_id,
     )
 
-    initial = run(service.deliver_for_run(_run_result(triggered), scan_run_id="prior"))
+    initial = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="prior"))
     update = run(service.deliver_for_run(_run_result(invalidated), scan_run_id="invalidated"))
 
     assert initial.sent == 1
@@ -930,14 +924,14 @@ def test_invalidated_update_requires_and_uses_prior_public_setup(tmp_path) -> No
     assert update.deliveries[0].alert_type == TelegramAlertType.INVALIDATED.value
 
 
-def test_cooldown_stays_internal_even_after_public_trigger(tmp_path) -> None:
+def test_cooldown_stays_internal_even_after_public_confirmation(tmp_path) -> None:
     db_path = tmp_path / "cooldown-after-trigger.db"
     sender = FakeSender()
     service = _service(db_path, sender)
     signal_id = "cooldown-after-trigger"
-    triggered = _symbol(
-        SetupLifecycleState.TRIGGERED,
-        previous=SetupLifecycleState.STALKING,
+    confirmed = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
         signal_id=signal_id,
     )
     cooldown = _symbol(
@@ -946,7 +940,7 @@ def test_cooldown_stays_internal_even_after_public_trigger(tmp_path) -> None:
         signal_id=signal_id,
     )
 
-    initial = run(service.deliver_for_run(_run_result(triggered), scan_run_id="trigger"))
+    initial = run(service.deliver_for_run(_run_result(confirmed), scan_run_id="confirmed"))
     internal = run(service.deliver_for_run(_run_result(cooldown), scan_run_id="cooldown"))
 
     assert initial.sent == 1
@@ -1033,36 +1027,36 @@ def test_same_geometry_triggered_and_confirmed_deliver_once_per_generation(tmp_p
                 scan_run_id=f"{scan_run_id}-repeat",
             )
         )
-        assert first.sent == 1
+        assert first.sent == (
+            1 if symbol.lifecycle_state.current_state == SetupLifecycleState.CONFIRMED else 0
+        )
         assert repeated.sent == 0
         deliveries.append(first.deliveries[0])
 
-    assert len(sender.messages) == 4
-    assert "HUNT ACTIVE" in sender.messages[0]
+    assert len(sender.messages) == 2
+    assert "SIGNAL CONFIRMED" in sender.messages[0]
     assert "SIGNAL CONFIRMED" in sender.messages[1]
-    assert "HUNT ACTIVE" in sender.messages[2]
-    assert "SIGNAL CONFIRMED" in sender.messages[3]
     assert deliveries[0].signal_id == deliveries[1].signal_id
     assert deliveries[2].signal_id == deliveries[3].signal_id
     assert deliveries[0].signal_id != deliveries[2].signal_id
 
 
-def test_same_scan_triggered_and_confirmed_are_delivered_in_order(tmp_path) -> None:
+def test_same_scan_triggered_and_confirmed_are_coalesced(tmp_path) -> None:
     db_path = tmp_path / "same-scan.db"
     symbol = _generated_entry_batch(db_path)
     sender = FakeSender()
 
     summary = run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="eth-scan"))
 
-    assert summary.sent >= 2
-    assert "HUNT ACTIVE" in sender.messages[0]
-    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED · 🎯 ZONE ACTIVE" in sender.messages[0]
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts()
     public_initial = [
-        attempt.alert_type
+        attempt.attempted_alert_type
         for attempt in attempts
-        if attempt.alert_type in {
+        if attempt.attempted_alert_type in {
             TelegramAlertType.SETUP_TRIGGERED.value,
             TelegramAlertType.SIGNAL_CONFIRMED.value,
         }
@@ -1073,7 +1067,7 @@ def test_same_scan_triggered_and_confirmed_are_delivered_in_order(tmp_path) -> N
     ]
 
 
-def test_full_eth_sequence_preserves_both_public_attempts_before_management(tmp_path) -> None:
+def test_full_eth_sequence_preserves_suppression_audits_before_management(tmp_path) -> None:
     db_path = tmp_path / "eth-full.db"
     symbol = _generated_entry_batch(db_path)
     assert tuple(item.to_state for item in symbol.lifecycle_transitions) == (
@@ -1109,22 +1103,21 @@ def test_full_eth_sequence_preserves_both_public_attempts_before_management(tmp_
     assert attempted_types.index(TelegramAlertType.SETUP_TRIGGERED.value) < attempted_types.index(
         TelegramAlertType.SIGNAL_CONFIRMED.value
     )
-    assert "HUNT ACTIVE" in sender.messages[0]
-    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED · 🎯 ZONE ACTIVE" in sender.messages[0]
     limit_attempt = next(
         attempt for attempt in attempts if attempt.attempted_alert_type == TelegramAlertType.LIMIT_HIT.value
     )
     assert attempted_types.index(TelegramAlertType.SIGNAL_CONFIRMED.value) < attempted_types.index(
         TelegramAlertType.LIMIT_HIT.value
     )
-    assert limit_attempt.telegram_status == "sent"
+    assert limit_attempt.telegram_status == "skipped"
+    assert limit_attempt.dedupe_reason == "public_limit_hit_coalesced_into_confirmation"
     assert [(row[0], row[1], row[2], row[3]) for row in public_events] == [
-        ("setup_triggered", "SENT", "SENT", "1"),
-        ("signal_confirmed", "SENT", "SENT", "2"),
+        ("signal_confirmed", "SENT", "SENT", "1"),
     ]
     assert [(row[1], row[2]) for row in delivery_parts] == [
         ("SENT", "1"),
-        ("SENT", "2"),
     ]
     public_initial_attempts = [
         attempt for attempt in attempts if attempt.attempted_alert_type in {
@@ -1132,14 +1125,14 @@ def test_full_eth_sequence_preserves_both_public_attempts_before_management(tmp_
             TelegramAlertType.SIGNAL_CONFIRMED.value,
         }
     ]
-    assert [attempt.telegram_message_id for attempt in public_initial_attempts] == ["1", "2"]
-    assert all(attempt.delivery_state == "SENT" for attempt in public_initial_attempts)
+    assert [attempt.telegram_message_id for attempt in public_initial_attempts] == [None, "1"]
+    assert [attempt.telegram_status for attempt in public_initial_attempts] == ["skipped", "sent"]
 
 
-def test_triggered_timeout_does_not_suppress_confirmed_attempt(tmp_path) -> None:
+def test_internal_triggered_does_not_consume_confirmed_transport_attempt(tmp_path) -> None:
     db_path = tmp_path / "failure-isolation.db"
     symbol = _generated_entry_batch(db_path)
-    sender = TimeoutThenSentSender()
+    sender = FakeSender()
 
     run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="failure-isolation"))
 
@@ -1152,22 +1145,25 @@ def test_triggered_timeout_does_not_suppress_confirmed_attempt(tmp_path) -> None
             ORDER BY id
             """
         ).fetchall()
-    triggered = next(item for item in attempts if item.alert_type == TelegramAlertType.SETUP_TRIGGERED.value)
+    triggered = next(
+        item
+        for item in attempts
+        if item.attempted_alert_type == TelegramAlertType.SETUP_TRIGGERED.value
+    )
     confirmed = next(item for item in attempts if item.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value)
-    assert triggered.telegram_status == "retryable"
-    assert triggered.delivery_state == "RETRYABLE"
+    assert triggered.telegram_status == "skipped"
+    assert triggered.dedupe_reason == "public_triggered_coalesced_into_confirmation"
     assert confirmed.telegram_status == "sent"
     assert [(row[0], row[1], row[2]) for row in public_events] == [
-        ("setup_triggered", "RESERVED", "RETRYABLE"),
         ("signal_confirmed", "SENT", "SENT"),
     ]
-    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED" in sender.messages[0]
 
 
 @pytest.mark.parametrize(
     ("state", "alert_type"),
     (
-        (SetupLifecycleState.TRIGGERED, TelegramAlertType.SETUP_TRIGGERED),
         (SetupLifecycleState.CONFIRMED, TelegramAlertType.SIGNAL_CONFIRMED),
     ),
 )
@@ -1239,18 +1235,17 @@ def test_retryable_public_lifecycle_event_recovers_once_and_reuses_identity(
     assert [(row[0], row[1]) for row in attempt_rows] == [(first_attempt.id, 2)]
 
 
-def test_retryable_triggered_remains_recoverable_when_confirmed_succeeds(tmp_path) -> None:
+def test_coalesced_triggered_never_becomes_a_recovery_send(tmp_path) -> None:
     db_path = tmp_path / "triggered-retry-confirmed-sent.db"
     symbol = _triggered_confirmed_result(_generated_entry_batch(db_path))
-    sender = TransportStateSequenceSender("RETRYABLE", "SENT", "SENT")
+    sender = FakeSender()
     service = _service(db_path, sender)
 
     first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="batch"))
 
-    assert first.failed == 1
     assert first.sent == 1
-    assert "HUNT ACTIVE" in sender.messages[0]
-    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED" in sender.messages[0]
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         initial_states = repository._connection.execute(
             """
@@ -1259,19 +1254,14 @@ def test_retryable_triggered_remains_recoverable_when_confirmed_succeeds(tmp_pat
             ORDER BY id
             """
         ).fetchall()
-    assert [(row[0], row[1]) for row in initial_states] == [
-        ("setup_triggered", "RETRYABLE"),
-        ("signal_confirmed", "SENT"),
-    ]
+    assert [(row[0], row[1]) for row in initial_states] == [("signal_confirmed", "SENT")]
 
-    _make_lifecycle_retry_due(db_path)
     recovered = run(service.deliver_for_run(_empty_run_result(), scan_run_id="recovery"))
     repeated = run(service.deliver_for_run(_empty_run_result(), scan_run_id="deduped"))
 
-    assert recovered.sent == 1
+    assert recovered.sent == 0
     assert repeated.sent == 0
-    assert len(sender.messages) == 3
-    assert "HUNT ACTIVE" in sender.messages[2]
+    assert len(sender.messages) == 1
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         final_states = repository._connection.execute(
             """
@@ -1280,17 +1270,14 @@ def test_retryable_triggered_remains_recoverable_when_confirmed_succeeds(tmp_pat
             ORDER BY id
             """
         ).fetchall()
-    assert [(row[0], row[1]) for row in final_states] == [
-        ("setup_triggered", "SENT"),
-        ("signal_confirmed", "SENT"),
-    ]
+    assert [(row[0], row[1]) for row in final_states] == [("signal_confirmed", "SENT")]
 
 
 def test_failed_final_public_lifecycle_event_is_terminal(tmp_path) -> None:
     db_path = tmp_path / "failed-final.db"
     symbol = _entry_transition_result(
         _generated_entry_batch(db_path),
-        SetupLifecycleState.TRIGGERED,
+        SetupLifecycleState.CONFIRMED,
     )
     sender = TransportStateSequenceSender("FAILED_FINAL", "SENT")
     service = _service(db_path, sender)
@@ -1315,7 +1302,7 @@ def test_uncertain_public_lifecycle_event_never_auto_resends(tmp_path) -> None:
     db_path = tmp_path / "uncertain.db"
     symbol = _entry_transition_result(
         _generated_entry_batch(db_path),
-        SetupLifecycleState.TRIGGERED,
+        SetupLifecycleState.CONFIRMED,
     )
     sender = TransportStateSequenceSender("UNCERTAIN", "SENT")
     service = _service(db_path, sender)
@@ -1368,12 +1355,12 @@ def test_restart_after_full_batch_does_not_resend_successful_events(tmp_path) ->
     first = run(_service(db_path, first_sender).deliver_for_run(_run_result(symbol), scan_run_id="before"))
     repeated = run(_service(db_path, second_sender).deliver_for_run(_run_result(symbol), scan_run_id="after"))
 
-    assert first.sent >= 2
+    assert first.sent == 1
     assert repeated.sent == 0
     assert second_sender.messages == []
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts()
-    assert sum(item.alert_type == TelegramAlertType.SETUP_TRIGGERED.value for item in attempts) == 1
+    assert sum(item.attempted_alert_type == TelegramAlertType.SETUP_TRIGGERED.value for item in attempts) == 1
     assert sum(item.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value for item in attempts) == 1
 
 
@@ -1396,8 +1383,8 @@ def test_restart_after_triggered_sends_only_missing_confirmed(tmp_path) -> None:
     first = run(_service(db_path, first_sender).deliver_for_run(_run_result(triggered_only), scan_run_id="triggered"))
     resumed = run(_service(db_path, second_sender).deliver_for_run(_run_result(symbol), scan_run_id="resumed"))
 
-    assert first.sent == 1
-    assert resumed.sent >= 1
+    assert first.sent == 0
+    assert resumed.sent == 1
     assert all("HUNT ACTIVE" not in message for message in second_sender.messages)
     assert "SIGNAL CONFIRMED" in second_sender.messages[0]
 
@@ -1417,15 +1404,13 @@ def test_duplicate_public_transition_in_same_batch_sends_once(tmp_path) -> None:
 
     summary = run(_service(db_path, sender).deliver_for_run(_run_result(duplicate_batch), scan_run_id="duplicate"))
 
-    assert summary.sent == 1
-    assert len(sender.messages) == 1
+    assert summary.sent == 0
+    assert sender.messages == []
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts()
-    sent = [item for item in attempts if item.telegram_status == "sent"]
-    blocked = [item for item in attempts if item.telegram_status == "blocked"]
-    assert [item.alert_type for item in sent] == [TelegramAlertType.SETUP_TRIGGERED.value]
-    assert len(blocked) == 1
-    assert blocked[0].blocked_reason == "duplicate_equivalent_public_setup"
+    assert len(attempts) == 1
+    assert all(item.telegram_status == "skipped" for item in attempts)
+    assert all(item.dedupe_reason == "public_triggered_internal_only" for item in attempts)
 
 
 def test_per_symbol_batch_path_delivers_triggered_then_confirmed(tmp_path) -> None:
@@ -1459,8 +1444,8 @@ def test_per_symbol_batch_path_delivers_triggered_then_confirmed(tmp_path) -> No
         TelegramAlertType.SETUP_TRIGGERED.value,
         TelegramAlertType.SIGNAL_CONFIRMED.value,
     ]
-    assert "HUNT ACTIVE" in sender.messages[0]
-    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED · 🎯 ZONE ACTIVE" in sender.messages[0]
 
 
 def test_executing_or_managing_alone_does_not_synthesize_confirmed(tmp_path) -> None:
@@ -1497,15 +1482,18 @@ def test_missing_credentials_block_each_public_transition_safely(tmp_path) -> No
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         attempts = repository.list_attempts()
     initial_attempts = [
-        item for item in attempts if item.alert_type in {
+        item for item in attempts if item.attempted_alert_type in {
             TelegramAlertType.SETUP_TRIGGERED.value,
             TelegramAlertType.SIGNAL_CONFIRMED.value,
         }
     ]
     assert len(initial_attempts) == 2
-    assert all(item.telegram_status == "failed_final" for item in initial_attempts)
-    assert all(item.delivery_state == "FAILED_FINAL" for item in initial_attempts)
-    assert all(item.error_message == "missing_telegram_credentials" for item in initial_attempts)
+    triggered, confirmed = initial_attempts
+    assert triggered.telegram_status == "skipped"
+    assert triggered.dedupe_reason == "public_triggered_coalesced_into_confirmation"
+    assert confirmed.telegram_status == "failed_final"
+    assert confirmed.delivery_state == "FAILED_FINAL"
+    assert confirmed.error_message == "missing_telegram_credentials"
 
 
 def test_scanner_delivery_has_no_polling_listener_dependency(tmp_path) -> None:
@@ -1519,9 +1507,9 @@ def test_scanner_delivery_has_no_polling_listener_dependency(tmp_path) -> None:
     sender = FakeSender()
     summary = run(_service(db_path, sender).deliver_for_run(_run_result(symbol), scan_run_id="no-listener"))
 
-    assert summary.sent >= 2
-    assert "HUNT ACTIVE" in sender.messages[0]
-    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED · 🎯 ZONE ACTIVE" in sender.messages[0]
 
 
 def test_concurrent_polling_listener_does_not_change_scanner_sender_semantics(tmp_path) -> None:
@@ -1548,6 +1536,6 @@ def test_concurrent_polling_listener_does_not_change_scanner_sender_semantics(tm
             await listener_task
 
     summary = run(scenario())
-    assert summary.sent >= 2
-    assert "HUNT ACTIVE" in sender.messages[0]
-    assert "SIGNAL CONFIRMED" in sender.messages[1]
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED · 🎯 ZONE ACTIVE" in sender.messages[0]

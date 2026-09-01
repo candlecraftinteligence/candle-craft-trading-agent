@@ -15,7 +15,9 @@ BULLET = "\u2022"
 RANGE_DASH = "\u2013"
 EM_DASH = "\u2014"
 MIDDLE_DOT = "\u00B7"
+CCI_FOOTER = f"CCI {MIDDLE_DOT} Signal. Structure. Execution."
 COMPACT_SEPARATOR = "\u2501" * 14
+PREMIUM_SIGNAL_SEPARATOR = "\u2501" * 13
 DEFAULT_MIN_RR_DISPLAY = Decimal("3")
 
 
@@ -164,6 +166,8 @@ class TelegramSignalMessage:
     watchlist_outcome: bool = False
     upgraded_from_watchlist: bool = False
     was_watchlist: bool = False
+    zone_active: bool = False
+    coalesced_milestones: tuple[Any, ...] = ()
 
 def format_telegram_signal_message(
     alert_type: TelegramAlertType | str,
@@ -221,10 +225,46 @@ def format_research_watch_message(message: TelegramSignalMessage) -> str:
 
 
 def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
-    if message.upgraded_from_watchlist:
-        return format_watchlist_upgraded_message(message)
-
-    return _format_public_signal_message(message, confirmed=True)
+    edge_strip = _public_edge_strip(message)
+    edge_section = (
+        ("", "\U0001F9E0 EDGE", "", edge_strip)
+        if edge_strip != NA
+        else ()
+    )
+    return _join(
+        f"\U0001F43A {format_symbol(message.symbol)} {MIDDLE_DOT} {format_direction(message.direction)} {MIDDLE_DOT} {_public_setup_style(message)}",
+        "",
+        (
+            f"\U0001F7E2 SIGNAL CONFIRMED {MIDDLE_DOT} \U0001F3AF ZONE ACTIVE"
+            if message.zone_active
+            else "\U0001F7E2 SIGNAL CONFIRMED"
+        ),
+        "",
+        _premium_grade_score_rr_line(message),
+        "",
+        PREMIUM_SIGNAL_SEPARATOR,
+        "",
+        *_premium_trade_map_lines(message),
+        "",
+        PREMIUM_SIGNAL_SEPARATOR,
+        *edge_section,
+        "",
+        "\u2694\ufe0f EXECUTION",
+        "",
+        (
+            "Zone active. Watch the reaction. No chase."
+            if message.zone_active
+            else "Wait for the mapped zone. No chase."
+        ),
+        "",
+        (
+            "\U0001F43A The hunt is live."
+            if message.zone_active
+            else "\U0001F43A Hunt live."
+        ),
+        "",
+        CCI_FOOTER,
+    )
 
 
 def format_simple_public_signal_message(message: TelegramSignalMessage) -> str:
@@ -342,6 +382,61 @@ def _public_grade_score_rr_line(message: TelegramSignalMessage) -> str:
     score = _display(_first_display(context.quality_score, message.quality_score))
     rr = format_rr(_first_display(context.rr, message.planned_rr))
     return f"{grade} {MIDDLE_DOT} Score {score} {MIDDLE_DOT} RR {rr}"
+
+
+def _premium_grade_score_rr_line(message: TelegramSignalMessage) -> str:
+    context = _effective_signal_context(message)
+    grade = _quality_display(_first_display(context.grade, message.quality))
+    score = _display(_first_display(context.quality_score, message.quality_score))
+    rr = format_rr(_first_display(context.rr, message.planned_rr))
+    return f"{grade} {MIDDLE_DOT} Score {score} {MIDDLE_DOT} {rr}"
+
+
+def _premium_trade_map_lines(message: TelegramSignalMessage) -> tuple[str, ...]:
+    context = _effective_signal_context(message)
+    entry = _entry_range_values(
+        _first_display(context.entry_low, message.entry_low),
+        _first_display(context.entry_high, message.entry_high),
+    )
+    return (
+        f"\U0001F3AF ENTRY {entry}",
+        "",
+        f"\U0001F6E1 SL {format_price(_first_display(context.stop_loss, message.stop_loss))}",
+        "",
+        f"TP1 {format_price(_first_display(context.tp1, message.tp1))}",
+        "",
+        f"TP2 {format_price(_first_display(context.tp2, message.tp2))}",
+        "",
+        f"TP3 {format_price(_first_display(context.tp3, message.tp3))}",
+    )
+
+
+def _public_edge_strip(message: TelegramSignalMessage) -> str:
+    """Render badges only from validated structured edge evidence."""
+
+    evidence = _public_edge_evidence(message)
+    if evidence is None:
+        return NA
+    tokens: list[str] = []
+    if evidence.sweep_present:
+        tokens.append("Sweep \u2713")
+    if evidence.structure_present:
+        structure = _edge_structure_kind(evidence.structure_kind)
+        if structure in {"BOS", "CHoCH"}:
+            tokens.append(f"{structure} \u2713")
+
+    zone = _edge_zone_label(evidence.selected_zone_type)
+    fib = bool(evidence.fib_aligned)
+    if zone == "order block" and fib:
+        tokens.append("OB/Fib \u2713")
+    else:
+        if zone in {"order block", "OB/FVG overlap"}:
+            tokens.append("OB \u2713")
+        if zone in {"FVG", "OB/FVG overlap"}:
+            tokens.append("FVG \u2713")
+        if fib:
+            tokens.append("Fib \u2713")
+    return f" {MIDDLE_DOT} ".join(dict.fromkeys(tokens)) if tokens else NA
 
 
 def _public_status_display(
@@ -742,25 +837,19 @@ def format_premium_lifecycle_update_message(
 
 def format_limit_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
-        f"\U0001F43A {format_symbol(message.symbol)} {MIDDLE_DOT} {format_direction(message.direction)}",
+        f"\U0001F3AF {format_symbol(message.symbol)} {MIDDLE_DOT} ZONE ENGAGED",
         "",
-        "\U0001F3AF ZONE ENGAGED",
+        f"Entry {format_entry_zone(message)}",
         "",
-        "Price has entered the mapped territory.",
+        "Price has reached the mapped territory.",
         "",
-        f"Entry: {format_entry_zone(message)}",
-        f"Quality: {_quality_display(message.quality)}",
+        "\u2694\ufe0f REACTION REQUIRED",
         "",
-        "\U0001F7E0 STATUS: REACTION REQUIRED",
+        "Watch the response. No chase outside the zone.",
         "",
-        "The setup is alive, but confirmation has not been earned yet.",
+        "\U0001F43A Territory reached.",
         "",
-        "Use the existing published plan only.",
-        _public_compact_invalidation_line(message),
-        "",
-        "\U0001F43A The wolf is in position. No confirmation = no chase.",
-        "",
-        FOOTER,
+        CCI_FOOTER,
     )
 
 
@@ -768,56 +857,45 @@ def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
         f"\u2705 {format_symbol(message.symbol)} {MIDDLE_DOT} TP1 SECURED",
         "",
+        format_price(message.tp1),
+        "",
         "First objective reached.",
         "",
-        f"TP1: {format_price(message.tp1)}",
+        f"Next \u2192 TP2 {format_price(message.tp2)}",
         "",
-        "The setup is progressing according to the stored plan.",
-        "",
-        "Next:",
-        f"TP2: {format_price(message.tp2)}",
-        f"TP3: {format_price(message.tp3)}",
-        "",
-        "\U0001F43A First target secured. The hunt continues.",
-        "",
-        FOOTER,
+        "\U0001F43A Hunt continues.",
     )
 
 
 def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
-    context = _effective_signal_context(message)
-    rr = format_rr(_first_display(context.rr, message.planned_rr))
-    rr_line = () if rr == NA else (f"RR to TP2: {rr}",)
+    consolidated = _coalesced_target_count(message) >= 2
     return _join(
         f"\U0001F525 {format_symbol(message.symbol)} {MIDDLE_DOT} TP2 SECURED",
         "",
+        "TP1 \u2713 \u00b7 TP2 \u2713" if consolidated else format_price(message.tp2),
+        "",
         "Second objective reached.",
         "",
-        f"TP2: {format_price(message.tp2)}",
-        *rr_line,
+        f"Final \u2192 TP3 {format_price(message.tp3)}",
         "",
-        "Strong follow-through from the mapped setup.",
-        "",
-        "Remaining:",
-        f"TP3: {format_price(message.tp3)}",
-        "",
-        "\U0001F43A Second target secured. Momentum remains with the plan.",
-        "",
-        FOOTER,
+        "\U0001F43A One target remains.",
     )
 
 
 def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
+    consolidated = _coalesced_target_count(message) >= 3
     return _join(
-        f"\u2705 {format_symbol(message.symbol)} {MIDDLE_DOT} FULL TARGET SEQUENCE COMPLETE",
+        f"\U0001F3C6 {format_symbol(message.symbol)} {MIDDLE_DOT} FULL TARGET",
         "",
-        f"TP3: {format_price(message.tp3)}",
+        (
+            "TP1 \u2713 \u00b7 TP2 \u2713 \u00b7 TP3 \u2713"
+            if consolidated
+            else f"TP3 {format_price(message.tp3)}"
+        ),
         "",
-        "The stored target sequence has completed.",
+        "Full target sequence completed.",
         "",
-        "\U0001F43A Full target sequence secured. Hunt complete.",
-        "",
-        FOOTER,
+        "\U0001F43A Hunt complete.",
     )
 
 
@@ -829,17 +907,27 @@ def format_sl_hit_update(message: TelegramSignalMessage) -> str:
     return _join(
         f"\U0001F534 {format_symbol(message.symbol)} {MIDDLE_DOT} SETUP INVALIDATED",
         "",
-        f"Stop: {format_price(message.stop_loss)}",
+        f"SL {format_price(message.stop_loss)}",
         "",
-        "Price failed the structural thesis and the setup is closed.",
+        "Structural thesis failed.",
         "",
         "Result: SL",
         "",
-        "\U0001F9E0 Outcome remains part of lifecycle and expectancy tracking.",
+        "\U0001F9E0 Outcome logged for expectancy tracking.",
         "",
-        "No revenge. No reinterpretation. Next setup.",
+        "No reinterpretation. Next setup.",
         "",
-        FOOTER,
+        CCI_FOOTER,
+    )
+
+
+def _coalesced_target_count(message: TelegramSignalMessage) -> int:
+    return len(
+        {
+            _status_key(value)
+            for value in message.coalesced_milestones
+            if _status_key(value) in {"tp1", "tp2", "tp3", "tp1_hit", "tp2_hit", "tp3_hit"}
+        }
     )
 
 

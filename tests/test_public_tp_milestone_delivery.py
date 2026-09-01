@@ -202,13 +202,17 @@ def _insert_legacy_watchlist_root(db_path: Path, symbol) -> None:
 def test_production_like_confirmed_without_watchlist_delivers_tp1_once(tmp_path) -> None:
     db_path = tmp_path / "production-like.db"
     sender = FakeSender()
-    triggered = _public_setup_symbol(signal_id="production-like")
+    triggered = _public_setup_symbol(
+        signal_id="production-like",
+        state=SetupLifecycleState.TRIGGERED,
+        previous=SetupLifecycleState.STALKING,
+    )
     confirmed = _public_setup_symbol(
         signal_id="production-like",
         state=SetupLifecycleState.CONFIRMED,
         previous=SetupLifecycleState.TRIGGERED,
     )
-    assert run(_service(db_path, sender).deliver_for_run(_run_result(triggered))).sent == 1
+    assert run(_service(db_path, sender).deliver_for_run(_run_result(triggered))).sent == 0
     assert run(_service(db_path, sender).deliver_for_run(_run_result(confirmed))).sent == 1
     _insert_sent_limit_hit(db_path)
     _persist_progress(db_path, confirmed, tp_count=1)
@@ -246,7 +250,7 @@ def test_confirmed_without_touched_target_creates_no_tp(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("tp_count", (2, 3))
-def test_multiple_canonical_targets_are_delivered_in_order_once(tmp_path, tp_count) -> None:
+def test_multiple_canonical_targets_are_consolidated_to_highest_once(tmp_path, tp_count) -> None:
     db_path = tmp_path / f"multi-{tp_count}.db"
     sender = FakeSender()
     confirmed = _send_confirmed_root(db_path, sender)
@@ -256,20 +260,16 @@ def test_multiple_canonical_targets_are_delivered_in_order_once(tmp_path, tp_cou
     repeated = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
 
     expected = [
-        TelegramAlertType.TP1_HIT.value,
-        TelegramAlertType.TP2_HIT.value,
-        TelegramAlertType.TP3_HIT.value,
-    ][:tp_count]
-    assert first.sent == tp_count
+        TelegramAlertType.TP2_HIT.value
+        if tp_count == 2
+        else TelegramAlertType.TP3_HIT.value
+    ]
+    assert first.sent == 1
     assert repeated.sent == 0
     assert [item.alert_type for item in _sent_outcomes(db_path)] == expected
-    assert sum("TP1 SECURED" in message for message in sender.messages) == 1
-    assert sum(
-        "TP1 SECURED" in message and "TP1: 107" in message
-        for message in sender.messages
-    ) == 1
-    assert sum("TP2 SECURED" in message for message in sender.messages) == (tp_count >= 2)
-    assert sum("FULL TARGET SEQUENCE COMPLETE" in message for message in sender.messages) == (tp_count >= 3)
+    assert sum("TP1 SECURED" in message for message in sender.messages) == 0
+    assert sum("TP2 SECURED" in message for message in sender.messages) == (tp_count == 2)
+    assert sum("FULL TARGET" in message for message in sender.messages) == (tp_count == 3)
 
 
 def test_restart_after_sent_and_before_send_are_both_safe(tmp_path) -> None:
@@ -576,10 +576,8 @@ def test_tp3_terminal_projection_uses_same_public_event_once(tmp_path) -> None:
 
     summary = run(_service(db_path, sender).deliver_for_run(_run_result(terminal)))
 
-    assert summary.sent == 3
+    assert summary.sent == 1
     assert [item.alert_type for item in _sent_outcomes(db_path)] == [
-        TelegramAlertType.TP1_HIT.value,
-        TelegramAlertType.TP2_HIT.value,
         TelegramAlertType.TP3_HIT.value,
     ]
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
