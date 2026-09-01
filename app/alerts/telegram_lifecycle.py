@@ -19,7 +19,6 @@ from app.analytics.public_signal_quality import (
     public_quality_decision,
 )
 from app.alerts.telegram_outbox import (
-    DEFAULT_MAX_ATTEMPTS,
     FAILED_FINAL,
     IN_FLIGHT,
     PENDING,
@@ -169,7 +168,6 @@ PUBLIC_LIMIT_HIT_COALESCED_REASON = "public_limit_hit_coalesced_into_confirmatio
 PUBLIC_TP1_COALESCED_INTO_TP2_REASON = "public_tp1_coalesced_into_tp2"
 PUBLIC_TP1_COALESCED_INTO_TP3_REASON = "public_tp1_coalesced_into_tp3"
 PUBLIC_TP2_COALESCED_INTO_TP3_REASON = "public_tp2_coalesced_into_tp3"
-PUBLIC_TARGET_IN_FLIGHT_REASON = "public_target_milestone_in_flight"
 SOFT_FAILED_CONFIRMATION_ATTEMPT = "SOFT_FAILED_CONFIRMATION"
 SOFT_FAILED_CONFIRMATION_MIN_OBSERVATIONS = 3
 SOFT_FAILED_CONFIRMATION_REMOVAL_REASON = "Watchlist removed because final confirmation conditions did not improve."
@@ -2746,34 +2744,6 @@ def _reserve_public_lifecycle_event(
                 matched_prior_event_id=prior_event.id,
                 jitter_matched_same_plan=equivalent_match,
             )
-        if (
-            state == FAILED_FINAL
-            and alert_type
-            in {
-                TelegramAlertType.TP1_HIT,
-                TelegramAlertType.TP2_HIT,
-                TelegramAlertType.TP3_HIT,
-            }
-            and attempt is not None
-            and attempt.id is not None
-            and prior_event.id is not None
-            and _rearm_failed_final_public_target(
-                db,
-                event_id=prior_event.id,
-                attempt_id=attempt.id,
-                reservation_record=reservation_record,
-            )
-        ):
-            return PublicWatchlistReservationResult(
-                granted=True,
-                event_key=prior_event.event_key,
-                reservation_id=attempt.id,
-                event_id=prior_event.id,
-                status=RETRYABLE.lower(),
-                reason=NA,
-                detail="Failed-final public target milestone re-armed from persisted outcome progress.",
-                matched_prior_event_id=prior_event.id,
-            )
         return PublicWatchlistReservationResult(
             granted=False,
             event_key=prior_event.event_key,
@@ -2897,84 +2867,6 @@ def _reserve_public_lifecycle_event(
         reason=NA if reserved is not None and reserved.id is not None else "public_lifecycle_attempt_missing",
         detail="Public lifecycle event reserved before send.",
     )
-
-
-def _rearm_failed_final_public_target(
-    db: SQLiteTelegramAlertAttemptRepository,
-    *,
-    event_id: int,
-    attempt_id: int,
-    reservation_record: TelegramAlertAttemptRecord,
-) -> bool:
-    timestamp = _text(reservation_record.attempted_at)
-    if timestamp == NA:
-        timestamp = now_utc_iso()
-    db._connection.execute("SAVEPOINT rearm_failed_final_public_target")
-    try:
-        event_cursor = db._connection.execute(
-            """
-            UPDATE public_alert_events
-            SET status = ?, delivery_state = ?, next_retry_at = NULL,
-                max_attempts = max_attempts + ?, completed_at = NULL,
-                updated_at = ?
-            WHERE id = ? AND delivery_state = ? AND sent_at IS NULL
-            """,
-            (
-                PUBLIC_ALERT_EVENT_RESERVED_STATUS,
-                RETRYABLE,
-                DEFAULT_MAX_ATTEMPTS,
-                timestamp,
-                int(event_id),
-                FAILED_FINAL,
-            ),
-        )
-        if event_cursor.rowcount != 1:
-            db._connection.execute(
-                "ROLLBACK TO SAVEPOINT rearm_failed_final_public_target"
-            )
-            db._connection.execute(
-                "RELEASE SAVEPOINT rearm_failed_final_public_target"
-            )
-            return False
-        db._connection.execute(
-            """
-            UPDATE public_alert_delivery_parts
-            SET delivery_state = ?, next_retry_at = NULL, updated_at = ?
-            WHERE public_alert_event_id = ? AND delivery_state = ? AND sent_at IS NULL
-            """,
-            (RETRYABLE, timestamp, int(event_id), FAILED_FINAL),
-        )
-        if not db.replace_attempt_with_reservation(
-            attempt_id=attempt_id,
-            record=reservation_record,
-        ):
-            db._connection.execute(
-                "ROLLBACK TO SAVEPOINT rearm_failed_final_public_target"
-            )
-            db._connection.execute(
-                "RELEASE SAVEPOINT rearm_failed_final_public_target"
-            )
-            return False
-        db._connection.execute(
-            """
-            UPDATE telegram_alert_attempts
-            SET telegram_status = 'retryable', delivery_state = ?,
-                dedupe_status = 'retryable',
-                dedupe_reason = 'public_milestone_failed_final_rearmed'
-            WHERE id = ?
-            """,
-            (RETRYABLE, int(attempt_id)),
-        )
-    except sqlite3.Error:
-        db._connection.execute(
-            "ROLLBACK TO SAVEPOINT rearm_failed_final_public_target"
-        )
-        db._connection.execute(
-            "RELEASE SAVEPOINT rearm_failed_final_public_target"
-        )
-        raise
-    db._connection.execute("RELEASE SAVEPOINT rearm_failed_final_public_target")
-    return True
 
 
 def _public_watchlist_reservation_duplicate_detail(

@@ -231,6 +231,11 @@ def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
         if edge_strip != NA
         else ()
     )
+    target_caution_section = (
+        ("", "\U0001F7E1 TP1 PRIORITY")
+        if _premium_has_canonical_target_caution(message)
+        else ()
+    )
     return _join(
         f"\U0001F43A {format_symbol(message.symbol)} {MIDDLE_DOT} {format_direction(message.direction)} {MIDDLE_DOT} {_public_setup_style(message)}",
         "",
@@ -239,6 +244,7 @@ def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
             if message.zone_active
             else "\U0001F7E2 SIGNAL CONFIRMED"
         ),
+        *target_caution_section,
         "",
         _premium_grade_score_rr_line(message),
         "",
@@ -390,6 +396,16 @@ def _premium_grade_score_rr_line(message: TelegramSignalMessage) -> str:
     score = _display(_first_display(context.quality_score, message.quality_score))
     rr = format_rr(_first_display(context.rr, message.planned_rr))
     return f"{grade} {MIDDLE_DOT} Score {score} {MIDDLE_DOT} {rr}"
+
+
+def _premium_has_canonical_target_caution(message: TelegramSignalMessage) -> bool:
+    """Use only the engine's structured actionability decision."""
+
+    context = _effective_signal_context(message)
+    actionability = _status_key(
+        _first_display(context.actionability_state, message.actionability_state)
+    )
+    return actionability == "a_grade_actionable_target_caution"
 
 
 def _premium_trade_map_lines(message: TelegramSignalMessage) -> tuple[str, ...]:

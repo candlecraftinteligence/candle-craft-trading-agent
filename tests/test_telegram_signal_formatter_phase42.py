@@ -93,6 +93,7 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
 
     assert text.startswith("🐺 BTCUSDT · LONG · SCALP")
     assert "🟢 SIGNAL CONFIRMED" in text
+    assert "🟡 TP1 PRIORITY" not in text
     assert "A · Score N/A · 2.92R" in text
     assert "Confirmation criteria satisfied." not in text
     assert "🎯 ENTRY 100 – 102" in text
@@ -150,16 +151,18 @@ def test_public_watchlist_formatter_matches_compact_watch_shape() -> None:
 
 
 def test_confirmed_target_caution_does_not_expand_the_compact_card() -> None:
+    message = _message(
+        actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
+        target_failure_severity="target_caution_actionable",
+        target_warning_reason="TP2 remains inside recent chop/range.",
+    )
     text = format_telegram_signal_message(
         TelegramAlertType.SIGNAL_CONFIRMED,
-        _message(
-            actionability_state="A_GRADE_ACTIONABLE_TARGET_CAUTION",
-            target_failure_severity="target_caution_actionable",
-            target_warning_reason="TP2 remains inside recent chop/range.",
-        ),
+        message,
     )
 
     assert "🟢 SIGNAL CONFIRMED" in text
+    assert "\n\n🟡 TP1 PRIORITY\n\nA · Score N/A · 2.92R" in text
     assert "Wait for the mapped zone. No chase." in text
     assert "TP1 reaction matters because TP2/TP3 path is choppy." not in text
     assert "Actionability" + ":" not in text
@@ -168,6 +171,31 @@ def test_confirmed_target_caution_does_not_expand_the_compact_card() -> None:
     assert "Reduce aggression until price clears chop" not in text
     assert "target clean" not in text.lower()
     assert "clean target" not in text.lower()
+    assert "TP2 remains inside recent chop/range." not in text
+    assert format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, message) == text
+
+
+def test_premium_target_caution_is_not_inferred_from_warning_fields() -> None:
+    cases = (
+        {"target_warning_reason": "TP2 remains inside chop."},
+        {"target_warning_reason": "TP2 remains inside the recent range."},
+        {"target_integrity_status": "warning"},
+        {
+            "target_integrity_status": "soft_warning",
+            "target_failure_severity": "soft_target_warning",
+            "target_warning_reason": "Range and chop remain nearby.",
+        },
+    )
+
+    for overrides in cases:
+        text = format_telegram_signal_message(
+            TelegramAlertType.SIGNAL_CONFIRMED,
+            _message(actionability_state="A_GRADE_ACTIONABLE", **overrides),
+        )
+
+        assert "🟡 TP1 PRIORITY" not in text
+        assert "Range and chop remain nearby." not in text
+        assert "TP2 remains inside" not in text
 
 
 def test_short_liquidity_rejection_signal_tracks_rejection_and_invalidates_above_stop() -> None:

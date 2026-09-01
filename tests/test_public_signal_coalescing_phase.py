@@ -4,6 +4,8 @@ from dataclasses import replace
 from decimal import Decimal
 
 from app.alerts.telegram_lifecycle import SQLiteTelegramAlertAttemptRepository
+from app.alerts.telegram_routing import TelegramDestination
+from app.alerts.telegram_sender import TelegramSender
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import (
     SignalEdgeEvidence,
@@ -338,20 +340,114 @@ def test_restart_and_retryable_tp1_reconcile_exactly_once(tmp_path) -> None:
     ]
 
 
-def test_failed_final_tp1_remains_reconcilable(tmp_path) -> None:
+def test_failed_final_tp1_remains_terminal_bounded_and_auditable(tmp_path) -> None:
     db_path = tmp_path / "failed-final-tp1.db"
     confirmed = _send_confirmed_root(db_path, FakeSender())
-    _persist_progress(db_path, confirmed, tp_count=1)
+    record, expected_progress = _persist_progress(db_path, confirmed, tp_count=1)
     sender = TransportStateSequenceSender("FAILED_FINAL", "SENT")
 
     failed = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
-    recovered = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        before = repository._connection.execute(
+            """
+            SELECT delivery_state, max_attempts, attempt_count, sent_at
+            FROM public_alert_events
+            WHERE event_type = 'tp1_hit'
+            """
+        ).fetchone()
+    restarted_sender = FakeSender()
+    repeated = tuple(
+        run(_service(db_path, restarted_sender).deliver_for_run(_empty_run_result()))
+        for _ in range(3)
+    )
 
     assert failed.failed >= 1
-    assert recovered.sent == 1
-    assert [item.alert_type for item in _sent_outcomes(db_path)] == [
-        TelegramAlertType.TP1_HIT.value
-    ]
+    assert all(summary.sent == 0 for summary in repeated)
+    assert restarted_sender.messages == []
+    assert sender.states == ["SENT"]
+    assert _sent_outcomes(db_path) == ()
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        after = repository._connection.execute(
+            """
+            SELECT delivery_state, max_attempts, attempt_count, sent_at
+            FROM public_alert_events
+            WHERE event_type = 'tp1_hit'
+            """
+        ).fetchone()
+        attempt = next(
+            item
+            for item in repository.list_attempts()
+            if item.alert_type == TelegramAlertType.TP1_HIT.value
+        )
+    assert tuple(before) == tuple(after)
+    assert after["delivery_state"] == "FAILED_FINAL"
+    assert after["sent_at"] is None
+    assert attempt.telegram_status == "failed_final"
+    assert attempt.delivery_state == "FAILED_FINAL"
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        progress = repository.get_outcome_progress(
+            lifecycle_id=record.lifecycle_id,
+            plan_identity=expected_progress.plan_identity,
+        )
+    assert progress is not None
+    assert progress.tp1_at == expected_progress.tp1_at
+
+
+def test_missing_credentials_failed_final_target_stays_terminal_after_restart(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "failed-final-missing-credentials.db"
+    confirmed = _send_confirmed_root(db_path, FakeSender())
+    _persist_progress(db_path, confirmed, tp_count=1)
+    missing_credentials_sender = TelegramSender(
+        bot_token=None,
+        chat_id=None,
+        signals_enabled=True,
+        dry_run=False,
+        local_manual_mode=True,
+        destination=TelegramDestination.PUBLIC_CHAT,
+    )
+
+    failed = run(
+        _service(db_path, missing_credentials_sender).deliver_for_run(
+            _empty_run_result()
+        )
+    )
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        before = repository._connection.execute(
+            """
+            SELECT delivery_state, max_attempts, attempt_count, sent_at
+            FROM public_alert_events
+            WHERE event_type = 'tp1_hit'
+            """
+        ).fetchone()
+    restarted_sender = FakeSender()
+    restarted = tuple(
+        run(_service(db_path, restarted_sender).deliver_for_run(_empty_run_result()))
+        for _ in range(2)
+    )
+
+    assert failed.failed >= 1
+    assert all(summary.sent == 0 for summary in restarted)
+    assert restarted_sender.messages == []
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        after = repository._connection.execute(
+            """
+            SELECT delivery_state, max_attempts, attempt_count, sent_at
+            FROM public_alert_events
+            WHERE event_type = 'tp1_hit'
+            """
+        ).fetchone()
+        attempt = next(
+            item
+            for item in repository.list_attempts()
+            if item.alert_type == TelegramAlertType.TP1_HIT.value
+        )
+    assert tuple(before) == tuple(after)
+    assert after["delivery_state"] == "FAILED_FINAL"
+    assert after["sent_at"] is None
+    assert attempt.error_message == "missing_telegram_credentials"
+    assert _sent_outcomes(db_path) == ()
 
 
 def test_different_generation_and_opposite_direction_cannot_inherit_tp(tmp_path) -> None:

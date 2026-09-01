@@ -287,20 +287,33 @@ def test_restart_after_sent_and_before_send_are_both_safe(tmp_path) -> None:
     assert len(delivery_sender.messages) == 1
 
 
-def test_retryable_tp_attempt_retries_and_sends(tmp_path) -> None:
-    db_path = tmp_path / "retryable.db"
+@pytest.mark.parametrize(
+    ("tp_count", "expected_alert_type"),
+    (
+        (1, TelegramAlertType.TP1_HIT),
+        (2, TelegramAlertType.TP2_HIT),
+    ),
+)
+def test_retryable_tp_attempt_retries_and_sends_exactly_once(
+    tmp_path,
+    tp_count,
+    expected_alert_type,
+) -> None:
+    db_path = tmp_path / f"retryable-{tp_count}.db"
     sender = TransportStateSequenceSender("SENT", "RETRYABLE", "SENT")
     confirmed = _send_confirmed_root(db_path, sender)
-    _persist_progress(db_path, confirmed, tp_count=1)
+    _persist_progress(db_path, confirmed, tp_count=tp_count)
 
     failed = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
     _make_lifecycle_retry_due(db_path)
     retried = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
+    repeated = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
 
     assert failed.failed == 1
     assert retried.sent == 1
+    assert repeated.sent == 0
     assert [item.alert_type for item in _sent_outcomes(db_path)] == [
-        TelegramAlertType.TP1_HIT.value
+        expected_alert_type.value
     ]
 
 
