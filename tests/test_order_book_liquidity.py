@@ -536,6 +536,10 @@ def test_service_configuration_exposes_current_weight_and_hard_bounds() -> None:
     assert service.snapshot_request_weight == 10
     assert service.event_buffer_size == 256
     assert service.bootstrap_concurrency == 2
+    assert service.transport.max_message_bytes == 1024 * 1024
+    assert service.transport.max_queue == 4
+    assert service.health()["websocket_max_message_bytes"] == 1024 * 1024
+    assert service.health()["websocket_queue_bound"] == 4
     with pytest.raises(ValueError, match="max_symbols"):
         OrderBookLiquidityService(snapshot_client=_StaticSnapshotClient(), max_symbols=101)
     with pytest.raises(ValueError, match="update_speed"):

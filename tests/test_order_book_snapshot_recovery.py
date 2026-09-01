@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -14,26 +15,37 @@ NOW = datetime(2026, 8, 28, 12, tzinfo=UTC)
 NOW_MS = int(NOW.timestamp() * 1000)
 
 
-def _snapshot_payload(*, update_id: int = 100) -> dict[str, Any]:
+def _snapshot_payload(
+    *,
+    update_id: int = 100,
+    best_bid: str = "99.99",
+) -> dict[str, Any]:
     return {
         "lastUpdateId": update_id,
         "E": NOW_MS - 10,
         "T": NOW_MS - 11,
-        "bids": [["99.99", "1"], ["99.00", "2"]],
+        "bids": [[best_bid, "1"], ["99.00", "2"]],
         "asks": [["100.01", "1"], ["101.00", "2"]],
     }
 
 
-def _bridge_payload(*, symbol: str = "BTCUSDT") -> dict[str, Any]:
+def _bridge_payload(
+    *,
+    symbol: str = "BTCUSDT",
+    first_update_id: int = 100,
+    final_update_id: int = 101,
+    previous_final_update_id: int = 99,
+    bid_price: str = "99.99",
+) -> dict[str, Any]:
     return {
         "e": "depthUpdate",
         "E": NOW_MS,
         "T": NOW_MS - 1,
         "s": symbol,
-        "U": 100,
-        "u": 101,
-        "pu": 99,
-        "b": [["99.99", "1.5"]],
+        "U": first_update_id,
+        "u": final_update_id,
+        "pu": previous_final_update_id,
+        "b": [[bid_price, "1.5"]],
         "a": [["100.01", "1.5"]],
         "ps": symbol,
         "st": 1,
@@ -99,6 +111,9 @@ class _IdleConnection:
     def disconnect(self) -> None:
         self._incoming.put_nowait(RuntimeError("test disconnect"))
 
+    def push(self, payload: Mapping[str, Any]) -> None:
+        self._incoming.put_nowait(json.dumps(payload))
+
 
 class _StaticTransport:
     def __init__(self, connection: _IdleConnection) -> None:
@@ -109,6 +124,19 @@ class _StaticTransport:
     async def connect(self) -> _IdleConnection:
         self.connect_count += 1
         return self.connection
+
+
+class _SequenceTransport:
+    def __init__(self, connections: list[_IdleConnection]) -> None:
+        self.connections = list(connections)
+        self.max_queue = 4
+        self.max_message_bytes = 1024 * 1024
+        self.connect_count = 0
+
+    async def connect(self) -> _IdleConnection:
+        connection = self.connections[self.connect_count]
+        self.connect_count += 1
+        return connection
 
 
 class _RecordingSleep:
@@ -395,6 +423,79 @@ async def _assert_ws_disconnect_cancels_recovery_without_stale_snapshot_request(
     assert len(client.calls) == 1
     assert transport.connect_count == 1
     assert service.snapshot("BTCUSDT").reason == "stream_disconnected"
+    await service.stop()
+
+
+def test_ws_disconnect_clears_verified_book_and_reconnect_requires_fresh_bridge() -> None:
+    asyncio.run(_assert_ws_disconnect_clears_verified_book_and_reconnect_requires_fresh_bridge())
+
+
+async def _assert_ws_disconnect_clears_verified_book_and_reconnect_requires_fresh_bridge() -> None:
+    first_connection = _IdleConnection()
+    second_connection = _IdleConnection()
+    transport = _SequenceTransport([first_connection, second_connection])
+    reconnect_sleep = _GateSleep()
+    client = _SequenceSnapshotClient(
+        [
+            _snapshot_payload(update_id=100, best_bid="99.99"),
+            _snapshot_payload(update_id=200, best_bid="99.98"),
+        ]
+    )
+    service = OrderBookLiquidityService(
+        transport=transport,
+        snapshot_client=client,
+        bootstrap_attempts=1,
+        bootstrap_min_interval_seconds=0,
+        bootstrap_backoff_seconds=0,
+        bootstrap_jitter_seconds=0,
+        reconnect_base_seconds=1,
+        reconnect_max_seconds=1,
+        clock=lambda: NOW,
+        sleep=reconnect_sleep,
+        jitter=lambda _maximum: 0.0,
+    )
+
+    await service.start([])
+    await _wait_for(lambda: len(client.calls) == 1)
+    first_connection.push(_bridge_payload())
+    await _wait_for(lambda: service.snapshot("BTCUSDT").status == ContextStatus.VERIFIED)
+    first_verified = service.snapshot("BTCUSDT")
+    assert first_verified.last_update_id == 101
+    assert str(first_verified.best_bid) == "99.99"
+
+    first_connection.disconnect()
+    await _wait_for(lambda: reconnect_sleep.started.is_set())
+    disconnected = service.snapshot("BTCUSDT")
+    assert disconnected.status == ContextStatus.UNAVAILABLE
+    assert disconnected.reason == "stream_disconnected"
+    assert disconnected.synchronized is False
+    assert disconnected.last_update_id is None
+    assert disconnected.best_bid is None
+    assert disconnected.best_ask is None
+
+    reconnect_sleep.release()
+    await _wait_for(lambda: transport.connect_count == 2)
+    await _wait_for(lambda: len(client.calls) == 2)
+    awaiting_bridge = service.snapshot("BTCUSDT")
+    assert awaiting_bridge.status == ContextStatus.UNAVAILABLE
+    assert awaiting_bridge.synchronized is False
+    assert awaiting_bridge.last_update_id is None
+    assert awaiting_bridge.best_bid is None
+
+    second_connection.push(
+        _bridge_payload(
+            first_update_id=200,
+            final_update_id=201,
+            previous_final_update_id=199,
+            bid_price="99.98",
+        )
+    )
+    await _wait_for(lambda: service.snapshot("BTCUSDT").status == ContextStatus.VERIFIED)
+    resynchronized = service.snapshot("BTCUSDT")
+    assert resynchronized.last_update_id == 201
+    assert str(resynchronized.best_bid) == "99.98"
+    assert transport.connect_count == 2
+    assert client.calls == [("BTCUSDT", 500), ("BTCUSDT", 500)]
     await service.stop()
 
 

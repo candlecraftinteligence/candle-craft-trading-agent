@@ -19,6 +19,11 @@ from app.microstructure.order_book import (  # noqa: E402
     parse_binance_depth_event,
     parse_binance_depth_snapshot,
 )
+from app.microstructure.order_book_service import (  # noqa: E402
+    DEFAULT_ORDER_BOOK_EVENT_BUFFER_SIZE,
+    ORDER_BOOK_WEBSOCKET_MAX_MESSAGE_BYTES,
+    ORDER_BOOK_WEBSOCKET_MAX_QUEUE,
+)
 
 
 def run_synthetic_order_book_benchmark(
@@ -79,6 +84,9 @@ def run_synthetic_order_book_benchmark(
 
     ordered_latency = sorted(snapshot_latencies_ms)
     p95_index = min(len(ordered_latency) - 1, max(0, int(len(ordered_latency) * 0.95) - 1))
+    raw_transport_queue_bytes = (
+        ORDER_BOOK_WEBSOCKET_MAX_MESSAGE_BYTES * ORDER_BOOK_WEBSOCKET_MAX_QUEUE
+    )
     return {
         "maintained_symbols": symbol_count,
         "levels_per_side": levels_per_side,
@@ -92,8 +100,13 @@ def run_synthetic_order_book_benchmark(
         "snapshot_latency_median_ms": round(statistics.median(snapshot_latencies_ms), 4),
         "snapshot_latency_p95_ms": round(ordered_latency[p95_index], 4),
         "representative_serialized_snapshot_bytes": representative_bytes,
-        "transport_queue_bound_messages": 32,
-        "per_symbol_snapshot_event_buffer_bound": 256,
+        "websocket_max_message_bytes": ORDER_BOOK_WEBSOCKET_MAX_MESSAGE_BYTES,
+        "transport_queue_bound_frames": ORDER_BOOK_WEBSOCKET_MAX_QUEUE,
+        "theoretical_raw_transport_queue_bytes": raw_transport_queue_bytes,
+        "approximate_books_plus_raw_transport_bytes": (
+            maintained_memory + raw_transport_queue_bytes
+        ),
+        "per_symbol_snapshot_event_buffer_bound": DEFAULT_ORDER_BOOK_EVENT_BUFFER_SIZE,
         "external_network_calls": 0,
     }
 
