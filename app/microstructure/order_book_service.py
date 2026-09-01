@@ -51,6 +51,8 @@ DEFAULT_ORDER_BOOK_BOOTSTRAP_BACKOFF_SECONDS = 1.0
 DEFAULT_ORDER_BOOK_BOOTSTRAP_JITTER_SECONDS = 0.1
 DEFAULT_RECONNECT_BASE_SECONDS = 1.0
 DEFAULT_RECONNECT_MAX_SECONDS = 30.0
+ORDER_BOOK_WEBSOCKET_MAX_MESSAGE_BYTES = 1024 * 1024
+ORDER_BOOK_WEBSOCKET_MAX_QUEUE = 4
 VALID_UPDATE_SPEEDS = frozenset({"100ms", "250ms", "500ms"})
 VALID_SNAPSHOT_LIMITS = frozenset({5, 10, 20, 50, 100, 500, 1000})
 SNAPSHOT_REQUEST_WEIGHTS = {5: 2, 10: 2, 20: 2, 50: 2, 100: 5, 500: 10, 1000: 20}
@@ -170,6 +172,8 @@ class OrderBookLiquidityService:
 
         self.transport = transport or BinanceWebSocketTransport(
             url=BINANCE_USDM_PUBLIC_STREAM_URL,
+            max_message_bytes=ORDER_BOOK_WEBSOCKET_MAX_MESSAGE_BYTES,
+            max_queue=ORDER_BOOK_WEBSOCKET_MAX_QUEUE,
             ping_interval_seconds=20.0,
             ping_timeout_seconds=20.0,
         )
@@ -345,6 +349,11 @@ class OrderBookLiquidityService:
             "snapshot_request_weight": self.snapshot_request_weight,
             "update_speed": self.update_speed,
             "event_buffer_size": self.event_buffer_size,
+            "websocket_max_message_bytes": getattr(
+                self.transport,
+                "max_message_bytes",
+                None,
+            ),
             "websocket_queue_bound": getattr(self.transport, "max_queue", None),
             "last_error": self._last_error,
         }
@@ -372,10 +381,13 @@ class OrderBookLiquidityService:
                 failure_count = 0
                 self._last_error = None
                 self.logger.info(
-                    "Order-book WebSocket connected symbols=%s reconnect=%s speed=%s.",
+                    "Order-book WebSocket connected symbols=%s reconnect=%s speed=%s "
+                    "max_message_bytes=%s max_queue=%s.",
                     len(self._desired_symbols),
                     reconnect,
                     self.update_speed,
+                    getattr(self.transport, "max_message_bytes", None),
+                    getattr(self.transport, "max_queue", None),
                 )
                 while not self._stop_event.is_set():
                     payload = await connection.recv()

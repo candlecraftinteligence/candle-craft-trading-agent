@@ -6,7 +6,7 @@ risk/reward, grades, lifecycle, or Telegram eligibility.
 
 ## Official contract audited
 
-Contract audit date: 2026-08-28.
+Contract audit date: 2026-09-01.
 
 - Public diff depth: `{symbol}@depth@{updateSpeed}` on
   `wss://fstream.binance.com/public/stream`.
@@ -19,6 +19,10 @@ Contract audit date: 2026-08-28.
 - Current request weights by limit are 2, 2, 2, 2, 5, 10, and 20.
 - Standard public depth excludes Retail Price Improvement (RPI) orders. This
   phase does not call or combine the separate RPI depth contract.
+- Binance documents connection, stream-count, rate, cadence, and synchronization
+  constraints but does not publish a maximum USDⓈ-M diff-depth message size.
+  CCI therefore enforces its own finite transport limit rather than assuming an
+  exchange maximum or accepting unlimited messages.
 
 Official references:
 
@@ -72,7 +76,15 @@ depth message, buffer overflow, symbol churn, or WebSocket reconnect.
 - Bootstrap attempts: 3 with exponential backoff, bounded jitter, and `Retry-After`
   support. Failures are isolated per symbol.
 - Per-symbol pre-snapshot buffer: 256 events. Overflow fails synchronization closed.
-- WebSocket transport queue: 32 messages; maximum message size: 64 KiB.
+- Order-book WebSocket maximum message size: 1 MiB. This is an order-book-only
+  override; the shared, aggregate-trade, and liquidation transports retain their
+  64 KiB default.
+- Order-book WebSocket queue high-water mark: 4 frames. With `websockets` 15/16
+  asyncio semantics, the queue applies backpressure and remains finite. Neither
+  `max_size` nor `max_queue` is unlimited.
+- Theoretical raw WebSocket frame-buffer allowance: 1 MiB × 4 = 4 MiB. Python
+  text/object decoding, compression state, TLS/OS buffers, and transient parsing
+  add overhead, so this product is a payload allowance rather than an RSS ceiling.
 
 The feature and all load knobs are disabled or bounded in `.env.example`.
 
@@ -133,9 +145,12 @@ The deterministic, network-free benchmark on CPython 3.11.9 with 100 symbols and
 
 - initialized book memory: 247,479 bytes per symbol;
 - 100-symbol book memory: 24,747,999 bytes;
+- theoretical raw WebSocket frame queue: 4,194,304 bytes;
+- approximate books plus raw frame queue: 28,942,303 bytes;
 - representative serialized compact snapshot: 1,641 bytes;
-- synthetic snapshot computation: 1.9085 ms median, 3.3875 ms p95;
-- synthetic sequential update processing: 5,010.85 events/second.
+- synthetic snapshot computation: 0.9786 ms median, 2.9548 ms p95;
+- synthetic sequential update processing: 13,432.28 events/second;
+- external network calls: 0.
 
 Timing is reported, not asserted in CI. Run the same benchmark with:
 
