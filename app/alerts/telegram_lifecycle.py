@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import sqlite3
 from collections.abc import Mapping, Sequence
@@ -13,6 +14,10 @@ from typing import Any
 
 from app.analytics.public_signal_quality import (
     MIN_PUBLIC_SIGNAL_GRADE,
+    MIN_PUBLIC_SETUP_QUALITY_SCORE,
+    canonical_public_setup_quality_decision,
+    canonical_public_setup_quality_grade,
+    canonical_public_setup_quality_score,
     grade_from_score,
     grade_rank,
     normalize_grade,
@@ -82,8 +87,6 @@ PUBLIC_SIGNAL_POLICY_SETUP_ONLY = "setup_only"
 CONFIRMED_PUBLIC_DELIVERY_POLICY_DISABLED_REASON = (
     "confirmed_public_delivery_disabled_by_setup_only_policy"
 )
-CONFIRMED_LIFECYCLE_MIN_GRADE = "B+"
-
 PUBLIC_INITIAL_ALERT_BY_STATE = {
     SetupLifecycleState.TRIGGERED: TelegramAlertType.SETUP_TRIGGERED,
     SetupLifecycleState.CONFIRMED: TelegramAlertType.SIGNAL_CONFIRMED,
@@ -252,7 +255,7 @@ TERMINAL_IDENTITY_BLOCK_REASONS = {
 }
 DEFAULT_CONFIRMED_MIN_RR = Decimal("3")
 PUBLIC_SIGNAL_MIN_GRADE = MIN_PUBLIC_SIGNAL_GRADE
-PUBLIC_SIGNAL_MIN_SCORE = Decimal("88")
+PUBLIC_SIGNAL_MIN_SCORE = MIN_PUBLIC_SETUP_QUALITY_SCORE
 PUBLIC_SIGNAL_MIN_RR = Decimal("3")
 PUBLIC_SIGNAL_TARGET_CAUTION_MIN_SCORE = Decimal("88")
 PUBLIC_SIGNAL_TARGET_CAUTION_MIN_RR = Decimal("2.8")
@@ -1682,10 +1685,15 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 scan_run_id = ?,
                 attempted_alert_type = ?,
                 setup_quality_score = ?,
+                canonical_setup_quality_score = ?,
+                effective_min_setup_quality_score = ?,
+                quality_grade = ?,
+                min_quality_grade = ?,
                 rr_planned = ?,
                 min_rr = ?,
                 opportunity_score = ?,
                 min_score_for_idea = ?,
+                min_opportunity_score = ?,
                 technical_score = ?,
                 price_level = ?,
                 entry_low = ?,
@@ -1731,10 +1739,15 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 record.scan_run_id,
                 _text(record.attempted_alert_type),
                 _text(record.setup_quality_score),
+                _text(record.canonical_setup_quality_score),
+                _text(record.effective_min_setup_quality_score),
+                _text(record.quality_grade),
+                _text(record.min_quality_grade),
                 _text(record.rr_planned),
                 _text(record.min_rr),
                 _text(record.opportunity_score),
                 _text(record.min_score_for_idea),
+                _text(record.min_opportunity_score),
                 _text(record.technical_score),
                 _text(record.price_level),
                 _text(record.entry_low),
@@ -1839,7 +1852,10 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     signal_id, symbol, direction, previous_state, new_state,
                     alert_type, lifecycle_state, sent_at, attempted_at, telegram_status,
                     message_hash, scan_run_id, attempted_alert_type, setup_quality_score,
+                    canonical_setup_quality_score, effective_min_setup_quality_score,
+                    quality_grade, min_quality_grade,
                     rr_planned, min_rr, opportunity_score, min_score_for_idea,
+                    min_opportunity_score,
                     technical_score, price_level, entry_low, entry_high, stop_loss,
                     tp1, tp2, tp3, public_watchlist_plan_id, public_watchlist_event_key,
                     public_alert_event_type, normalized_entry_zone_low, normalized_entry_zone_high,
@@ -1847,7 +1863,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     blocked_reason, error_message, invalid_target_fields, first_seen_at, last_seen_at,
                     seen_count, last_scan_run_id, last_error_message, delivery_state,
                     telegram_message_id, telegram_chat_id, delivery_part_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _identity(record.signal_id),
@@ -1864,10 +1880,15 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     record.scan_run_id,
                     _text(record.attempted_alert_type),
                     _text(record.setup_quality_score),
+                    _text(record.canonical_setup_quality_score),
+                    _text(record.effective_min_setup_quality_score),
+                    _text(record.quality_grade),
+                    _text(record.min_quality_grade),
                     _text(record.rr_planned),
                     _text(record.min_rr),
                     _text(record.opportunity_score),
                     _text(record.min_score_for_idea),
+                    _text(record.min_opportunity_score),
                     _text(record.technical_score),
                     _text(record.price_level),
                     _text(record.entry_low),
@@ -1975,10 +1996,15 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             scan_run_id=existing.scan_run_id,
             attempted_alert_type=existing.attempted_alert_type,
             setup_quality_score=existing.setup_quality_score,
+            canonical_setup_quality_score=existing.canonical_setup_quality_score,
+            effective_min_setup_quality_score=existing.effective_min_setup_quality_score,
+            quality_grade=existing.quality_grade,
+            min_quality_grade=existing.min_quality_grade,
             rr_planned=existing.rr_planned,
             min_rr=existing.min_rr,
             opportunity_score=existing.opportunity_score,
             min_score_for_idea=existing.min_score_for_idea,
+            min_opportunity_score=existing.min_opportunity_score,
             technical_score=existing.technical_score,
             price_level=existing.price_level,
             entry_low=existing.entry_low,
@@ -3575,6 +3601,7 @@ class TelegramLifecycleDeliveryService:
                     symbol_deliveries = await self.deliver_transitions_for_symbol(
                         symbol_result,
                         repository=repository,
+                        lifecycle_repository=lifecycle_repository,
                         scan_run_id=scan_run_id,
                         eligibility_context=eligibility_context,
                         allow_public_watchlist=(
@@ -3664,6 +3691,7 @@ class TelegramLifecycleDeliveryService:
         symbol_result: ScannerSymbolResult,
         *,
         repository: SQLiteTelegramAlertAttemptRepository,
+        lifecycle_repository: SQLiteSetupLifecycleRepository | None = None,
         scan_run_id: str | None = None,
         eligibility_context: TelegramEligibilityContext | None = None,
         allow_public_watchlist: bool = True,
@@ -3693,10 +3721,37 @@ class TelegramLifecycleDeliveryService:
             ),
             None,
         )
-        coalesced_zone_active = any(
-            alert_type == TelegramAlertType.LIMIT_HIT
-            for _, alert_type in typed_results
-        ) and confirmed_result is not None
+        limit_result = next(
+            (
+                transition_result
+                for transition_result, alert_type in typed_results
+                if alert_type == TelegramAlertType.LIMIT_HIT
+            ),
+            None,
+        )
+        coalesced_entry_progress = (
+            _canonical_entry_progress_for_coalescing(
+                limit_result,
+                lifecycle_repository=lifecycle_repository,
+            )
+            if limit_result is not None
+            else None
+        )
+        coalesced_zone_active = (
+            confirmed_result is not None
+            and limit_result is not None
+            and coalesced_entry_progress is not None
+            and not _canonical_entry_evidence_blockers(
+                coalesced_entry_progress,
+                record=limit_result.lifecycle_state,
+            )
+            and any(
+                alert_type == TelegramAlertType.LIMIT_HIT
+                for alert_type, _ in _canonical_public_outcome_sequence(
+                    coalesced_entry_progress
+                )
+            )
+        )
 
         for transition_result, alert_type in typed_results:
             suppression_reason: str | None = None
@@ -3798,6 +3853,28 @@ class TelegramLifecycleDeliveryService:
                     )
                 )
                 continue
+            if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
+                truth_blockers = _persisted_confirmed_truth_blockers(attempt)
+                if truth_blockers:
+                    reason = ";".join(truth_blockers)
+                    SQLitePublicTelegramOutbox(repository._connection).mark_terminal_without_send(
+                        event_id=event.id,
+                        reservation_id=attempt.id,
+                        state=FAILED_FINAL,
+                        reason=reason,
+                    )
+                    deliveries.append(
+                        TelegramLifecycleDelivery(
+                            symbol=event.symbol,
+                            signal_id=attempt.signal_id,
+                            alert_type=alert_type.value,
+                            status="blocked",
+                            detail="Recovered confirmed intent failed the persisted public truth contract.",
+                            message_hash=_text(event.message_hash),
+                            error_message=reason,
+                        )
+                    )
+                    continue
             reservation = PublicWatchlistReservationResult(
                 granted=True,
                 event_key=event.event_key,
@@ -4147,6 +4224,7 @@ class TelegramLifecycleDeliveryService:
                 min_rr=_text(_min_rr_for_alert(decision.alert_type, context)),
                 opportunity_score=_opportunity_score_text(symbol_result),
                 min_score_for_idea=_text(context.min_score_for_idea),
+                **_public_quality_audit_fields(symbol_result, decision.alert_type, context),
                 technical_score=_technical_score_text(symbol_result),
                 price_level=_price_level_for_alert(decision.alert_type, message),
                 **_message_level_metadata(message),
@@ -4360,6 +4438,7 @@ class TelegramLifecycleDeliveryService:
                 min_rr=_text(_min_rr_for_alert(decision.alert_type, context)),
                 opportunity_score=_opportunity_score_text(symbol_result),
                 min_score_for_idea=_text(context.min_score_for_idea),
+                **_public_quality_audit_fields(symbol_result, decision.alert_type, context),
                 technical_score=_technical_score_text(symbol_result),
                 price_level=_price_level_for_alert(decision.alert_type, message),
                 **_message_level_metadata(message),
@@ -5107,6 +5186,11 @@ class TelegramLifecycleDeliveryService:
             min_rr=_text(eligibility_context.min_rr),
             opportunity_score=_opportunity_score_text(outcome.symbol_result),
             min_score_for_idea=_text(eligibility_context.min_score_for_idea),
+            **_public_quality_audit_fields(
+                outcome.symbol_result,
+                outcome.alert_type,
+                eligibility_context,
+            ),
             technical_score=_technical_score_text(outcome.symbol_result),
             price_level=_price_level_for_alert(outcome.alert_type, outcome.message),
             **_message_level_metadata(outcome.message),
@@ -6637,6 +6721,18 @@ def _telegram_signal_message_for_alert(
     context: TelegramEligibilityContext,
 ) -> TelegramSignalMessage:
     message = replace(telegram_signal_message_from_symbol(symbol_result), min_rr=context.min_rr)
+    if alert_type == TelegramAlertType.SIGNAL_CONFIRMED:
+        score = canonical_public_setup_quality_score(symbol_result)
+        grade = canonical_public_setup_quality_grade(symbol_result)
+        signal_context = message.signal_context
+        if signal_context is not None:
+            signal_context = replace(signal_context, grade=grade, quality_score=score if score is not None else NA)
+        message = replace(
+            message,
+            quality=grade,
+            quality_score=score if score is not None else NA,
+            signal_context=signal_context,
+        )
     if alert_type == TelegramAlertType.WATCHLIST:
         diagnostics = _representative_diagnostics(symbol_result)
         candidate = _public_watchlist_candidate_from_symbol(symbol_result)
@@ -8083,6 +8179,21 @@ def _public_signal_gate_result(
             reasons.append(f"limit_hit_internal_touch_state:{state_key}")
         if prior_public_alert is not None and prior_public_alert.signal_id not in _signal_id_candidates(symbol_result):
             reasons.append("limit_hit_signal_id_mismatch")
+        entry_progress = symbol_result.lifecycle_outcome_progress
+        entry_evidence_blockers = _canonical_entry_evidence_blockers(
+            entry_progress,
+            record=symbol_result.lifecycle_state,
+        )
+        reasons.extend(entry_evidence_blockers)
+        if (
+            not entry_evidence_blockers
+            and entry_progress is not None
+            and not any(
+                candidate == TelegramAlertType.LIMIT_HIT
+                for candidate, _ in _canonical_public_outcome_sequence(entry_progress)
+            )
+        ):
+            reasons.append("limit_hit_suppressed_by_same_candle_terminal_precedence")
 
     missing = _missing_required_fields(alert_type, message)
     if missing:
@@ -9562,15 +9673,7 @@ def _public_watchlist_missing_identity_fields(
 
 
 def _public_setup_quality_score_decimal(symbol_result: ScannerSymbolResult) -> Decimal | None:
-    diagnostics = _representative_diagnostics(symbol_result)
-    lifecycle = symbol_result.lifecycle_state
-    setup_quality = symbol_result.setup_quality
-    return _first_decimal(
-        getattr(setup_quality, "quality_score", NA),
-        diagnostics.get("setup_quality_score"),
-        diagnostics.get("quality_score"),
-        getattr(lifecycle, "quality_score", NA) if lifecycle is not None else NA,
-    )
+    return canonical_public_setup_quality_score(symbol_result)
 
 def _public_watchlist_v1_blockers(
     symbol_result: ScannerSymbolResult,
@@ -10234,10 +10337,7 @@ def _defensive_delivery_blockers(
 
     blockers: list[str] = []
     rejection_context = _confirmed_rejection_context(symbol_result, message)
-    quality_blockers = _public_quality_gate_blockers(
-        symbol_result,
-        min_grade=CONFIRMED_LIFECYCLE_MIN_GRADE,
-    )
+    quality_blockers = _public_quality_gate_blockers(symbol_result)
     blockers.extend(quality_blockers)
     if quality_blockers:
         blockers.append("confirmed_grade_below_min")
@@ -10271,13 +10371,16 @@ def _defensive_delivery_blockers(
         blockers.append(f"confirmed_rr_below_min:{_text(planned_rr)}<{_text(context.min_rr)}")
 
     opportunity_score = _opportunity_score_decimal(symbol_result)
-    if context.min_score_for_idea is not None:
-        if opportunity_score is None:
-            blockers.append("opportunity_score_missing")
-        elif opportunity_score < context.min_score_for_idea:
-            blockers.append(
-                f"opportunity_score_below_min:{_text(opportunity_score)}<{_text(context.min_score_for_idea)}"
-            )
+    min_opportunity_score = max(
+        context.min_score_for_idea or PUBLIC_SIGNAL_MIN_SCORE,
+        PUBLIC_SIGNAL_MIN_SCORE,
+    )
+    if opportunity_score is None:
+        blockers.append("opportunity_score_missing")
+    elif opportunity_score < min_opportunity_score:
+        blockers.append(
+            f"opportunity_score_below_min:{_text(opportunity_score)}<{_text(min_opportunity_score)}"
+        )
 
     technical_score = _technical_score_decimal(symbol_result)
     if technical_score is not None and technical_score < context.min_technical_score:
@@ -10666,35 +10769,12 @@ def _setup_quality_state_key(symbol_result: ScannerSymbolResult) -> str:
 
 
 def _public_quality_gate_blockers(symbol_result: ScannerSymbolResult, *, min_grade: str = MIN_PUBLIC_SIGNAL_GRADE) -> tuple[str, ...]:
-    diagnostics = _representative_diagnostics(symbol_result)
-    trade_idea = symbol_result.trade_idea
-    setup_quality = symbol_result.setup_quality
-    decision = public_quality_decision(
-        grade_candidates=(
-            getattr(getattr(setup_quality, "quality_grade", None), "value", NA),
-            getattr(trade_idea, "grade", NA) if trade_idea is not None else NA,
-            diagnostics.get("quality_grade"),
-            diagnostics.get("opportunity_grade"),
-            diagnostics.get("grade"),
-            diagnostics.get("trust_grade"),
-        ),
-        score_candidates=(
-            getattr(setup_quality, "quality_score", NA),
-            getattr(trade_idea, "confidence_score", NA) if trade_idea is not None else NA,
-            diagnostics.get("setup_quality_score"),
-            diagnostics.get("quality_score"),
-            diagnostics.get("opportunity_score"),
-            diagnostics.get("confidence_score"),
-            diagnostics.get("trust_percentage"),
-            diagnostics.get("readiness_score"),
-        ),
+    decision = canonical_public_setup_quality_decision(
+        symbol_result,
+        min_score=PUBLIC_SIGNAL_MIN_SCORE,
         min_grade=min_grade,
     )
-    if decision.passed:
-        return ()
-    grade = decision.grade if _text(decision.grade) != NA else NA
-    source = decision.source if _text(decision.source) != NA else NA
-    return (f"{decision.reason}:grade={grade}:min={min_grade}:source={source}",)
+    return decision.blockers
 
 
 def _public_watchlist_quality_gate_blockers(
@@ -10821,6 +10901,7 @@ def _persist_public_lifecycle_suppression_audit(
         min_rr=_text(_min_rr_for_alert(alert_type, context)),
         opportunity_score=_opportunity_score_text(symbol_result),
         min_score_for_idea=_text(context.min_score_for_idea),
+        **_public_quality_audit_fields(symbol_result, alert_type, context),
         technical_score=_technical_score_text(symbol_result),
         price_level=_price_level_for_alert(alert_type, message),
         **_message_level_metadata(message),
@@ -10885,6 +10966,11 @@ def _persist_blocked_attempt(
         min_rr=_text(_min_rr_for_alert(decision.alert_type, eligibility_context)),
         opportunity_score=_opportunity_score_text(symbol_result),
         min_score_for_idea=_text(eligibility_context.min_score_for_idea),
+        **_public_quality_audit_fields(
+            symbol_result,
+            decision.alert_type,
+            eligibility_context,
+        ),
         technical_score=_technical_score_text(symbol_result),
         price_level=_price_level_for_alert(decision.alert_type, decision.message),
         **_message_level_metadata(decision.message),
@@ -10953,10 +11039,15 @@ def _persist_public_outcome_tracking_audit(
         scan_run_id=scan_run_id,
         attempted_alert_type=PUBLIC_OUTCOME_TRACKING_ATTEMPT,
         setup_quality_score=prior_alert.setup_quality_score,
+        canonical_setup_quality_score=prior_alert.canonical_setup_quality_score,
+        effective_min_setup_quality_score=prior_alert.effective_min_setup_quality_score,
+        quality_grade=prior_alert.quality_grade,
+        min_quality_grade=prior_alert.min_quality_grade,
         rr_planned=prior_alert.rr_planned,
         min_rr=prior_alert.min_rr,
         opportunity_score=prior_alert.opportunity_score,
         min_score_for_idea=prior_alert.min_score_for_idea,
+        min_opportunity_score=prior_alert.min_opportunity_score,
         technical_score=prior_alert.technical_score,
         price_level=prior_alert.price_level,
         entry_low=prior_alert.entry_low,
@@ -11075,6 +11166,11 @@ def _persist_skipped_public_watchlist_attempt(
         min_rr=_text(_min_rr_for_alert(decision.alert_type, eligibility_context)),
         opportunity_score=_opportunity_score_text(symbol_result),
         min_score_for_idea=_text(eligibility_context.min_score_for_idea),
+        **_public_quality_audit_fields(
+            symbol_result,
+            decision.alert_type,
+            eligibility_context,
+        ),
         technical_score=_technical_score_text(symbol_result),
         price_level=_price_level_for_alert(decision.alert_type, decision.message),
         **_message_level_metadata(decision.message),
@@ -11353,10 +11449,15 @@ def _persist_watchlist_expiry_audit(
         scan_run_id=scan_run_id,
         attempted_alert_type=WATCHLIST_EXPIRY_ATTEMPT,
         setup_quality_score=prior_alert.setup_quality_score,
+        canonical_setup_quality_score=prior_alert.canonical_setup_quality_score,
+        effective_min_setup_quality_score=prior_alert.effective_min_setup_quality_score,
+        quality_grade=prior_alert.quality_grade,
+        min_quality_grade=prior_alert.min_quality_grade,
         rr_planned=prior_alert.rr_planned,
         min_rr=prior_alert.min_rr,
         opportunity_score=prior_alert.opportunity_score,
         min_score_for_idea=prior_alert.min_score_for_idea,
+        min_opportunity_score=prior_alert.min_opportunity_score,
         technical_score=prior_alert.technical_score,
         price_level=prior_alert.price_level,
         entry_low=prior_alert.entry_low,
@@ -11482,58 +11583,26 @@ def _watchlist_outcome_for_current_result(
             message=message,
         )
 
-    if not repository.has_attempt(signal_id=prior_alert.signal_id, alert_type=TelegramAlertType.LIMIT_HIT):
-        if not _candle_touches_zone(candle, limit_zone):
-            _persist_watchlist_outcome_audit(
-                repository,
-                prior_alert,
-                reason="outcome_tracking_not_limit_hit_yet",
-                scan_run_id=scan_run_id,
-                symbol_result=current_result,
-                message=message,
-                price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
-            )
-            return None
-        if prior_signal_alert is None:
-            _persist_watchlist_outcome_audit(
-                repository,
-                prior_alert,
-                reason="outcome_tracking_limit_hit_requires_prior_public_signal",
-                scan_run_id=scan_run_id,
-                symbol_result=current_result,
-                message=message,
-                price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
-            )
-            return None
-        public_gate = _public_signal_gate_result(
-            current_result,
-            TelegramAlertType.LIMIT_HIT,
-            message,
-            prior_public_alert=prior_signal_alert,
+    prior_limit = repository.get_attempt(
+        signal_id=prior_alert.signal_id,
+        alert_type=TelegramAlertType.LIMIT_HIT,
+    )
+    prior_limit_sent = (
+        prior_limit is not None
+        and _status_key(prior_limit.telegram_status) == "sent"
+        and _text(prior_limit.sent_at) != NA
+    )
+    if not prior_limit_sent:
+        _persist_watchlist_outcome_audit(
+            repository,
+            prior_alert,
+            reason="outcome_tracking_requires_canonical_entry_evidence",
+            scan_run_id=scan_run_id,
+            symbol_result=current_result,
+            message=message,
+            price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
         )
-        if not public_gate.allowed:
-            _persist_watchlist_outcome_audit(
-                repository,
-                prior_alert,
-                reason="outcome_tracking_public_gate_blocked:" + ",".join(public_gate.reason_codes),
-                scan_run_id=scan_run_id,
-                symbol_result=current_result,
-                message=message,
-                price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
-            )
-            return None
-        tracked_targets = () if target_tracking_unresolved else targets
-        if _same_candle_touches_post_limit_outcome(candle, side=side, stop_loss=stop_loss, targets=tracked_targets):
-            _persist_watchlist_outcome_audit(
-                repository,
-                prior_alert,
-                reason="outcome_tracking_same_candle_ambiguous",
-                scan_run_id=scan_run_id,
-                symbol_result=current_result,
-                message=message,
-                price_level=_price_level_for_alert(TelegramAlertType.LIMIT_HIT, message),
-            )
-        return TelegramAlertType.LIMIT_HIT, message
+        return None
 
     if repository.has_attempt(signal_id=prior_alert.signal_id, alert_type=TelegramAlertType.SL_HIT) or repository.has_attempt(
         signal_id=prior_alert.signal_id,
@@ -12916,7 +12985,7 @@ def _canonical_public_outcome_sequence(
         if reached_at is None:
             continue
         reached = _strict_outcome_timestamp(reached_at)
-        if reached is None or (cutoff is not None and reached > cutoff):
+        if reached is None or (cutoff is not None and reached >= cutoff):
             continue
         milestones.append((alert_type, reached_at))
     if (
@@ -12955,7 +13024,23 @@ def _canonical_public_outcome_deliveries(
             )
         return alert_type in successful
 
-    if TelegramAlertType.LIMIT_HIT in reached and not satisfied(TelegramAlertType.LIMIT_HIT):
+    entry_evidence_blockers = _canonical_entry_evidence_blockers(
+        match.progress,
+        record=match.record,
+    )
+    entry_publicly_established = (
+        not entry_evidence_blockers
+        or satisfied(TelegramAlertType.LIMIT_HIT)
+    )
+    if not entry_publicly_established:
+        audits.extend(entry_evidence_blockers)
+        return (), tuple(dict.fromkeys(audits))
+
+    if (
+        TelegramAlertType.LIMIT_HIT in reached
+        and not satisfied(TelegramAlertType.LIMIT_HIT)
+        and not entry_evidence_blockers
+    ):
         deliveries.append(
             CanonicalPublicOutcomeDelivery(
                 alert_type=TelegramAlertType.LIMIT_HIT,
@@ -13009,6 +13094,149 @@ def _canonical_public_outcome_deliveries(
     return tuple(deliveries), tuple(audits)
 
 
+def _canonical_entry_progress_for_coalescing(
+    symbol_result: ScannerSymbolResult,
+    *,
+    lifecycle_repository: SQLiteSetupLifecycleRepository | None,
+) -> SetupLifecycleOutcomeProgress | None:
+    record = symbol_result.lifecycle_state
+    direct = symbol_result.lifecycle_outcome_progress
+    if record is None:
+        return None
+    compatible_identities = set(compatible_plan_identities(record))
+    if (
+        direct is not None
+        and direct.plan_identity in compatible_identities
+        and not _canonical_entry_evidence_blockers(direct, record=record)
+    ):
+        return direct
+    if lifecycle_repository is None:
+        return None
+    candidates = tuple(
+        progress
+        for progress in lifecycle_repository.list_outcome_progress(
+            lifecycle_id=record.lifecycle_id
+        )
+        if progress.plan_identity in compatible_identities
+        and not _canonical_entry_evidence_blockers(progress, record=record)
+    )
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _canonical_entry_evidence_blockers(
+    progress: SetupLifecycleOutcomeProgress | None,
+    *,
+    record: SetupLifecycleRecord | None = None,
+) -> tuple[str, ...]:
+    if progress is None or progress.entry_at is None:
+        return ("limit_hit_requires_canonical_entry_evidence",)
+    try:
+        raw_metadata = json.loads(progress.metadata_json)
+    except (TypeError, json.JSONDecodeError):
+        raw_metadata = {}
+    metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+    blockers: list[str] = []
+    if record is not None:
+        if progress.lifecycle_id != record.lifecycle_id:
+            blockers.append("canonical_entry_lifecycle_id_mismatch")
+        if _symbol(progress.symbol) != _symbol(record.symbol):
+            blockers.append("canonical_entry_symbol_mismatch")
+        if _status_key(progress.direction) != _status_key(record.direction):
+            blockers.append("canonical_entry_direction_mismatch")
+        if progress.plan_identity not in set(compatible_plan_identities(record)):
+            blockers.append("canonical_entry_plan_identity_mismatch")
+        expected_evidence = {
+            "lifecycle_id": record.lifecycle_id,
+            "symbol": _symbol(record.symbol),
+            "direction": _status_key(record.direction),
+        }
+        observed_evidence = {
+            "lifecycle_id": _text(metadata.get("lifecycle_id")),
+            "symbol": _symbol(metadata.get("symbol")),
+            "direction": _status_key(metadata.get("direction")),
+        }
+        for key, expected in expected_evidence.items():
+            if observed_evidence[key] != expected:
+                blockers.append(f"canonical_entry_evidence_{key}_mismatch")
+    if _text(metadata.get("entry_evidence_type")) != (
+        "fully_post_boundary_closed_execution_candle_range"
+    ):
+        blockers.append("canonical_entry_evidence_type_unverified")
+    if _status_key(metadata.get("entry_evidence_eligibility_decision")) != (
+        "fully_post_boundary"
+    ):
+        blockers.append("canonical_entry_evidence_eligibility_unverified")
+
+    boundary = _strict_outcome_timestamp(
+        metadata.get("tracking_boundary_timestamp")
+    )
+    candle_open = _strict_outcome_timestamp(metadata.get("causal_candle_open"))
+    candle_close = _strict_outcome_timestamp(metadata.get("causal_candle_close"))
+    persisted_entry_at = _strict_outcome_timestamp(progress.entry_at)
+    evidence_entry_at = _strict_outcome_timestamp(metadata.get("entry_at"))
+    evaluated_at = _strict_outcome_timestamp(metadata.get("evaluated_at"))
+    if boundary is None:
+        blockers.append("canonical_entry_tracking_boundary_missing")
+    if _text(metadata.get("tracking_boundary_source")) == NA:
+        blockers.append("canonical_entry_tracking_boundary_source_missing")
+    if candle_open is None or candle_close is None:
+        blockers.append("canonical_entry_causal_candle_timestamp_missing")
+    elif candle_close <= candle_open:
+        blockers.append("canonical_entry_causal_candle_interval_invalid")
+    if (
+        boundary is not None
+        and candle_open is not None
+        and candle_open < boundary
+    ):
+        blockers.append("canonical_entry_candle_not_fully_post_boundary")
+    if evidence_entry_at is None or persisted_entry_at is None:
+        blockers.append("canonical_entry_evidence_timestamp_missing")
+    elif evidence_entry_at != persisted_entry_at:
+        blockers.append("canonical_entry_evidence_timestamp_mismatch")
+    if (
+        candle_close is not None
+        and evidence_entry_at is not None
+        and candle_close != evidence_entry_at
+    ):
+        blockers.append("canonical_entry_evidence_not_closed_candle_milestone")
+    if evaluated_at is None:
+        blockers.append("canonical_entry_evaluated_at_missing")
+    elif evidence_entry_at is not None and evaluated_at < evidence_entry_at:
+        blockers.append("canonical_entry_evaluated_before_milestone")
+
+    candle_high = _decimal_or_none(metadata.get("candle_high"))
+    candle_low = _decimal_or_none(metadata.get("candle_low"))
+    entry_low = _decimal_or_none(metadata.get("entry_low"))
+    entry_high = _decimal_or_none(metadata.get("entry_high"))
+    numeric_evidence = {
+        "candle_high": candle_high,
+        "candle_low": candle_low,
+        "entry_low": entry_low,
+        "entry_high": entry_high,
+    }
+    for key, value in numeric_evidence.items():
+        if value is None:
+            blockers.append(f"canonical_entry_evidence_missing_or_invalid:{key}")
+    if candle_high is not None and candle_low is not None and candle_high < candle_low:
+        blockers.append("canonical_entry_candle_range_invalid")
+    if entry_high is not None and entry_low is not None and entry_high < entry_low:
+        blockers.append("canonical_entry_zone_invalid")
+    if record is not None:
+        expected_entry_low = _decimal_or_none(record.entry_low)
+        expected_entry_high = _decimal_or_none(record.entry_high)
+        if entry_low != expected_entry_low or entry_high != expected_entry_high:
+            blockers.append("canonical_entry_evidence_zone_mismatch")
+    if (
+        candle_high is not None
+        and candle_low is not None
+        and entry_low is not None
+        and entry_high is not None
+        and not (candle_high >= entry_low and candle_low <= entry_high)
+    ):
+        blockers.append("canonical_entry_candle_does_not_overlap_zone")
+    return tuple(dict.fromkeys(blockers))
+
+
 def _successful_canonical_public_outcome_types(
     repository: SQLiteTelegramAlertAttemptRepository,
     match: CanonicalPublicOutcomeMatch,
@@ -13043,6 +13271,31 @@ def _successful_canonical_public_outcome_types(
             and _text(attempt.delivery_state).upper() in {SENT, NA}
         ):
             successful.add(alert_type)
+    confirmed_attempt = repository.get_attempt(
+        signal_id=match.prior_alert.signal_id,
+        alert_type=TelegramAlertType.SIGNAL_CONFIRMED,
+    )
+    if (
+        confirmed_attempt is not None
+        and _status_key(confirmed_attempt.telegram_status) == "sent"
+        and _text(confirmed_attempt.sent_at) != NA
+    ):
+        coalesced_limit = repository._connection.execute(
+            """
+            SELECT 1 FROM telegram_alert_attempts
+            WHERE public_watchlist_plan_id = ?
+              AND attempted_alert_type = ?
+              AND dedupe_reason = ?
+            LIMIT 1
+            """,
+            (
+                plan_id,
+                TelegramAlertType.LIMIT_HIT.value,
+                PUBLIC_LIMIT_HIT_COALESCED_REASON,
+            ),
+        ).fetchone()
+        if coalesced_limit is not None:
+            successful.add(TelegramAlertType.LIMIT_HIT)
     return frozenset(successful)
 
 
@@ -13537,9 +13790,10 @@ def _confirmed_reconciliation_outcome(
     *,
     eligibility_context: TelegramEligibilityContext,
 ) -> SentWatchlistReconciliationOutcome:
-    confirmed_message = replace(
-        telegram_signal_message_from_symbol(symbol_result),
-        min_rr=eligibility_context.min_rr,
+    confirmed_message = _telegram_signal_message_for_alert(
+        symbol_result,
+        TelegramAlertType.SIGNAL_CONFIRMED,
+        eligibility_context,
     )
     blockers = _defensive_delivery_blockers(
         symbol_result,
@@ -14024,24 +14278,102 @@ def _transition_scan_run_id(transition: SetupTransitionResult | None) -> str | N
 
 
 def _quality_score(symbol_result: ScannerSymbolResult) -> str:
-    return _text(getattr(symbol_result.setup_quality, "quality_score", NA))
+    return _text(canonical_public_setup_quality_score(symbol_result))
 
 
 def _opportunity_score_decimal(symbol_result: ScannerSymbolResult) -> Decimal | None:
-    trade_idea = symbol_result.trade_idea
-    diagnostics = _representative_diagnostics(symbol_result)
     score_result = symbol_result.score_result
-    return _first_decimal(
-        getattr(score_result, "total_score", NA) if score_result is not None else NA,
-        getattr(trade_idea, "confidence_score", NA) if trade_idea is not None else NA,
-        diagnostics.get("opportunity_score"),
-        diagnostics.get("total_score"),
-    )
+    if score_result is None:
+        return None
+    return _decimal_or_none(getattr(score_result, "total_score", NA))
 
 
 def _opportunity_score_text(symbol_result: ScannerSymbolResult) -> str:
     score = _opportunity_score_decimal(symbol_result)
     return _text(score)
+
+
+def _public_quality_audit_fields(
+    symbol_result: ScannerSymbolResult,
+    alert_type: TelegramAlertType,
+    context: TelegramEligibilityContext,
+) -> dict[str, str]:
+    if alert_type != TelegramAlertType.SIGNAL_CONFIRMED:
+        return {}
+    score = canonical_public_setup_quality_score(symbol_result)
+    return {
+        "canonical_setup_quality_score": _text(score),
+        "effective_min_setup_quality_score": _text(PUBLIC_SIGNAL_MIN_SCORE),
+        "quality_grade": canonical_public_setup_quality_grade(symbol_result),
+        "min_quality_grade": PUBLIC_SIGNAL_MIN_GRADE,
+        "min_opportunity_score": _text(
+            max(
+                context.min_score_for_idea or PUBLIC_SIGNAL_MIN_SCORE,
+                PUBLIC_SIGNAL_MIN_SCORE,
+            )
+        ),
+    }
+
+
+def _persisted_confirmed_truth_blockers(
+    attempt: TelegramAlertAttemptRecord,
+) -> tuple[str, ...]:
+    blockers: list[str] = []
+    score = _decimal_or_none(attempt.canonical_setup_quality_score)
+    persisted_setup_min = _decimal_or_none(attempt.effective_min_setup_quality_score)
+    if score is None:
+        blockers.append("persisted_public_setup_quality_score_missing")
+    if persisted_setup_min is None:
+        blockers.append("persisted_public_setup_quality_min_missing")
+    effective_setup_min = max(
+        persisted_setup_min or PUBLIC_SIGNAL_MIN_SCORE,
+        PUBLIC_SIGNAL_MIN_SCORE,
+    )
+    if score is not None and score < effective_setup_min:
+        blockers.append(
+            f"public_setup_quality_score_below_min:{_text(score)}<{_text(effective_setup_min)}"
+        )
+
+    grade = normalize_grade(attempt.quality_grade)
+    persisted_min_grade = normalize_grade(attempt.min_quality_grade)
+    public_min_rank = grade_rank(PUBLIC_SIGNAL_MIN_GRADE)
+    grade_rank_value = grade_rank(grade)
+    persisted_min_rank = grade_rank(persisted_min_grade)
+    if grade_rank_value is None:
+        blockers.append("persisted_public_setup_quality_grade_missing")
+    if persisted_min_rank is None:
+        blockers.append("persisted_public_setup_quality_min_grade_missing")
+    effective_min_rank = max(persisted_min_rank or 0, public_min_rank or 0)
+    if grade_rank_value is not None and grade_rank_value < effective_min_rank:
+        blockers.append(
+            f"public_setup_quality_grade_below_min:{grade}<{PUBLIC_SIGNAL_MIN_GRADE}"
+        )
+
+    opportunity = _decimal_or_none(attempt.opportunity_score)
+    persisted_opportunity_min = _decimal_or_none(attempt.min_opportunity_score)
+    if opportunity is None:
+        blockers.append("persisted_opportunity_score_missing")
+    if persisted_opportunity_min is None:
+        blockers.append("persisted_min_opportunity_score_missing")
+    effective_opportunity_min = max(
+        persisted_opportunity_min or PUBLIC_SIGNAL_MIN_SCORE,
+        PUBLIC_SIGNAL_MIN_SCORE,
+    )
+    if opportunity is not None and opportunity < effective_opportunity_min:
+        blockers.append(
+            f"opportunity_score_below_min:{_text(opportunity)}<{_text(effective_opportunity_min)}"
+        )
+
+    rr = _decimal_or_none(attempt.rr_planned)
+    persisted_rr_min = _decimal_or_none(attempt.min_rr)
+    if rr is None:
+        blockers.append("persisted_planned_rr_missing")
+    if persisted_rr_min is None:
+        blockers.append("persisted_min_rr_missing")
+    effective_rr_min = max(persisted_rr_min or PUBLIC_SIGNAL_MIN_RR, PUBLIC_SIGNAL_MIN_RR)
+    if rr is not None and rr < effective_rr_min:
+        blockers.append(f"planned_rr_below_min:{_text(rr)}<{_text(effective_rr_min)}")
+    return tuple(dict.fromkeys(blockers))
 
 
 def _technical_score_decimal(symbol_result: ScannerSymbolResult) -> Decimal | None:
@@ -14380,10 +14712,15 @@ def _record_from_row(row: sqlite3.Row) -> TelegramAlertAttemptRecord:
         scan_run_id=row["scan_run_id"],
         attempted_alert_type=row["attempted_alert_type"],
         setup_quality_score=row["setup_quality_score"],
+        canonical_setup_quality_score=_row_value(row, "canonical_setup_quality_score"),
+        effective_min_setup_quality_score=_row_value(row, "effective_min_setup_quality_score"),
+        quality_grade=_row_value(row, "quality_grade"),
+        min_quality_grade=_row_value(row, "min_quality_grade"),
         rr_planned=row["rr_planned"],
         min_rr=row["min_rr"],
         opportunity_score=row["opportunity_score"],
         min_score_for_idea=row["min_score_for_idea"],
+        min_opportunity_score=_row_value(row, "min_opportunity_score"),
         technical_score=row["technical_score"],
         price_level=row["price_level"],
         entry_low=row["entry_low"],

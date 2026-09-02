@@ -675,10 +675,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 scan_run_id TEXT,
                 attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
                 setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                canonical_setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                effective_min_setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                quality_grade TEXT NOT NULL DEFAULT 'N/A',
+                min_quality_grade TEXT NOT NULL DEFAULT 'N/A',
                 rr_planned TEXT NOT NULL DEFAULT 'N/A',
                 min_rr TEXT NOT NULL DEFAULT 'N/A',
                 opportunity_score TEXT NOT NULL DEFAULT 'N/A',
                 min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+                min_opportunity_score TEXT NOT NULL DEFAULT 'N/A',
                 technical_score TEXT NOT NULL DEFAULT 'N/A',
                 price_level TEXT NOT NULL DEFAULT 'N/A',
                 entry_low TEXT NOT NULL DEFAULT 'N/A',
@@ -939,10 +944,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "attempted_at", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "attempted_alert_type", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "setup_quality_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "canonical_setup_quality_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "effective_min_setup_quality_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "quality_grade", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "min_quality_grade", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "rr_planned", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "min_rr", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "opportunity_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "min_score_for_idea", "TEXT NOT NULL DEFAULT 'N/A'")
+        _ensure_column(connection, "telegram_alert_attempts", "min_opportunity_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "technical_score", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "price_level", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "entry_low", "TEXT NOT NULL DEFAULT 'N/A'")
@@ -1381,10 +1391,15 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
             scan_run_id TEXT,
             attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
             setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+            canonical_setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+            effective_min_setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+            quality_grade TEXT NOT NULL DEFAULT 'N/A',
+            min_quality_grade TEXT NOT NULL DEFAULT 'N/A',
             rr_planned TEXT NOT NULL DEFAULT 'N/A',
             min_rr TEXT NOT NULL DEFAULT 'N/A',
             opportunity_score TEXT NOT NULL DEFAULT 'N/A',
             min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+            min_opportunity_score TEXT NOT NULL DEFAULT 'N/A',
             technical_score TEXT NOT NULL DEFAULT 'N/A',
             price_level TEXT NOT NULL DEFAULT 'N/A',
             entry_low TEXT NOT NULL DEFAULT 'N/A',
@@ -1429,10 +1444,15 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
         "scan_run_id",
         "attempted_alert_type",
         "setup_quality_score",
+        "canonical_setup_quality_score",
+        "effective_min_setup_quality_score",
+        "quality_grade",
+        "min_quality_grade",
         "rr_planned",
         "min_rr",
         "opportunity_score",
         "min_score_for_idea",
+        "min_opportunity_score",
         "technical_score",
         "price_level",
         "entry_low",

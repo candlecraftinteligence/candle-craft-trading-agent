@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 
 from app.alerts.telegram_lifecycle import (
     SQLiteTelegramAlertAttemptRepository,
+    _canonical_public_outcome_sequence,
     public_outcome_tracking_diagnostics,
 )
 from app.data.dtos import NA
@@ -111,7 +113,31 @@ def _persist_progress(
         terminal_outcome=terminal,
         integrity_status=integrity_status,
         diagnostic=diagnostic,
-        metadata_json='{"source":"canonical_lifecycle_closed_execution_candles"}',
+        metadata_json=json.dumps(
+            {
+                "source": "canonical_lifecycle_closed_execution_candles",
+                "entry_causality_contract": "fully_post_boundary_closed_candle_v1",
+                "lifecycle_id": record.lifecycle_id,
+                "symbol": record.symbol,
+                "direction": record.direction,
+                "tracking_boundary_timestamp": "2026-08-30T10:00:00+00:00",
+                "tracking_boundary_source": "lifecycle_confirmed_at",
+                "causal_candle_open": "2026-08-30T10:00:00+00:00",
+                "causal_candle_close": ENTRY_AT,
+                "candle_high": "103",
+                "candle_low": "99",
+                "entry_low": record.entry_low,
+                "entry_high": record.entry_high,
+                "entry_evidence_type": (
+                    "fully_post_boundary_closed_execution_candle_range"
+                ),
+                "entry_evidence_eligibility_decision": "fully_post_boundary",
+                "entry_at": ENTRY_AT,
+                "evaluated_at": ENTRY_AT,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
         first_evaluated_at=ENTRY_AT,
         last_evaluated_at=STOP_AT,
     )
@@ -143,6 +169,56 @@ def _sent_outcomes(db_path: Path):
                 TelegramAlertType.SL_HIT.value,
             }
         )
+
+
+def test_same_candle_entry_and_stop_exposes_only_stop_publicly() -> None:
+    progress = SetupLifecycleOutcomeProgress(
+        lifecycle_id="same-candle-stop",
+        plan_identity="same-candle-plan",
+        symbol="BTCUSDT",
+        mode="swing",
+        direction="long",
+        execution_timeframe="15m",
+        entry_at=ENTRY_AT,
+        stop_at=ENTRY_AT,
+        outcome_at=ENTRY_AT,
+        terminal_outcome=SetupLifecycleState.SL_HIT.value,
+        first_evaluated_at=ENTRY_AT,
+        last_evaluated_at=ENTRY_AT,
+    )
+
+    assert _canonical_public_outcome_sequence(progress) == (
+        (TelegramAlertType.SL_HIT, ENTRY_AT),
+    )
+
+
+def test_historical_public_81_signal_keeps_receiving_canonical_tp_updates(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "historical-low-quality.db"
+    sender = FakeSender()
+    confirmed = _send_confirmed_root(db_path, sender)
+    _persist_progress(db_path, confirmed, tp_count=1)
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        repository._connection.execute(
+            """
+            UPDATE telegram_alert_attempts
+            SET setup_quality_score = '81',
+                canonical_setup_quality_score = '81',
+                quality_grade = 'A-'
+            """
+        )
+
+    update = run(
+        _service(db_path, sender).deliver_for_run(
+            _empty_run_result(),
+            scan_run_id="historical-low-quality-tp1",
+        )
+    )
+
+    assert update.sent == 1
+    assert update.deliveries[0].alert_type == TelegramAlertType.TP1_HIT.value
+    assert len(sender.messages) == 2
 
 
 def _insert_sent_limit_hit(

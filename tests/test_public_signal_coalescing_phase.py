@@ -165,15 +165,73 @@ def test_triggered_confirmed_and_limit_batch_sends_one_combined_card_and_keeps_h
     )
 
 
+def test_same_batch_limit_transition_without_evidence_does_not_claim_zone_active(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "unsafe-combined.db"
+    batch = _generated_entry_batch(db_path, lifecycle_id="unsafe-combined")
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository._connection.execute(
+            "DELETE FROM setup_lifecycle_outcome_progress WHERE lifecycle_id = ?",
+            ("unsafe-combined",),
+        )
+    batch = batch.model_copy(update={"lifecycle_outcome_progress": None})
+    sender = FakeSender()
+
+    summary = run(_service(db_path, sender).deliver_for_run(_run_result(batch)))
+
+    assert summary.sent == 1
+    assert len(sender.messages) == 1
+    assert "SIGNAL CONFIRMED" in sender.messages[0]
+    assert "ZONE ACTIVE" not in sender.messages[0]
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        limit_attempt = next(
+            item
+            for item in repository.list_attempts()
+            if item.attempted_alert_type == TelegramAlertType.LIMIT_HIT.value
+        )
+    assert limit_attempt.telegram_status == "blocked"
+    assert "limit_hit_requires_canonical_entry_evidence" in limit_attempt.blocked_reason
+
+
 def test_limit_hit_in_later_iteration_sends_one_short_follow_up(tmp_path) -> None:
     db_path = tmp_path / "later-limit.db"
     sender = FakeSender()
-    confirmed = _public_setup_symbol(signal_id="later-limit")
+    batch = _generated_entry_batch(db_path, lifecycle_id="later-limit")
+    confirmed_transition = next(
+        item
+        for item in batch.lifecycle_transitions
+        if item.to_state == SetupLifecycleState.CONFIRMED
+    )
+    confirmed = batch.model_copy(
+        update={
+            "lifecycle_state": confirmed_transition.record,
+            "lifecycle_transition": confirmed_transition,
+            "lifecycle_transitions": tuple(
+                item
+                for item in batch.lifecycle_transitions
+                if item.to_state
+                in {
+                    SetupLifecycleState.TRIGGERED,
+                    SetupLifecycleState.CONFIRMED,
+                }
+            ),
+        }
+    )
     initial = run(_service(db_path, sender).deliver_for_run(_run_result(confirmed)))
-    managing = _public_setup_symbol(
-        signal_id="later-limit",
-        state=SetupLifecycleState.MANAGING,
-        previous=SetupLifecycleState.EXECUTING,
+    managing = batch.model_copy(
+        update={
+            "lifecycle_transition": batch.lifecycle_transitions[-1],
+            "lifecycle_transitions": tuple(
+                item
+                for item in batch.lifecycle_transitions
+                if item.to_state
+                in {
+                    SetupLifecycleState.EXECUTING,
+                    SetupLifecycleState.MANAGING,
+                }
+            ),
+        }
     )
 
     follow_up = run(_service(db_path, sender).deliver_for_run(_run_result(managing)))

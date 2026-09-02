@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from typing import Any
 
 from app.data.candle_integrity import CausalCandle
 from app.data.dtos import NA
@@ -167,6 +169,7 @@ def insert_milestone_event(
     scan_run_id: str | None,
     plan_identity: str,
     level: str,
+    evidence: Mapping[str, Any] | None = None,
 ) -> None:
     repository.insert_event(
         SetupLifecycleEvent(
@@ -186,6 +189,7 @@ def insert_milestone_event(
                 plan_identity=plan_identity,
                 policy_reason=NA,
                 level=level,
+                evidence=evidence,
             ),
         )
     )
@@ -206,6 +210,7 @@ def _event_notes(
     plan_identity: str,
     policy_reason: str,
     level: str,
+    evidence: Mapping[str, Any] | None = None,
 ) -> str:
     payload = {
         "candle_close_at": causal.close_timestamp.isoformat(),
@@ -216,6 +221,8 @@ def _event_notes(
         "policy_reason": policy_reason,
         "source": "canonical_lifecycle_closed_execution_candles",
     }
+    if evidence:
+        payload.update({str(key): value for key, value in evidence.items()})
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

@@ -64,7 +64,7 @@ def _service(db_path, sender: FakeSender) -> TelegramLifecycleDeliveryService:
         settings=_settings(),
         sender=sender,
         min_rr=Decimal("3"),
-        min_score_for_idea=Decimal("80"),
+        min_score_for_idea=Decimal("88"),
     )
 
 
@@ -110,7 +110,7 @@ def _public_setup_symbol(
         previous=previous,
         signal_id=signal_id,
         diagnostics=diagnostics,
-        setup_quality=_setup_quality_with_grade(SetupQualityGrade.B_PLUS, quality_score=78)
+        setup_quality=_setup_quality_with_grade(SetupQualityGrade.A, quality_score=89)
         if state == SetupLifecycleState.CONFIRMED
         else None,
     )
@@ -237,18 +237,10 @@ def _generated_entry_batch(
     )
     return symbol.model_copy(
         update={
-            "symbol": "ETHUSDT",
-            "lifecycle_state": outcome.record.model_copy(update={"symbol": "ETHUSDT"}),
-            "lifecycle_transition": outcome.last_transition.model_copy(update={"symbol": "ETHUSDT"}),
-            "lifecycle_transitions": tuple(
-                item.model_copy(
-                    update={
-                        "symbol": "ETHUSDT",
-                        "record": item.record.model_copy(update={"symbol": "ETHUSDT"}),
-                    }
-                )
-                for item in outcome.transitions
-            ),
+            "lifecycle_state": outcome.record,
+            "lifecycle_transition": outcome.last_transition,
+            "lifecycle_transitions": outcome.transitions,
+            "lifecycle_outcome_progress": outcome.progress,
         }
     )
 
@@ -366,7 +358,7 @@ def test_triggered_is_internal_only_and_audited_once_per_observation(tmp_path) -
     assert all(attempt.dedupe_reason == "public_triggered_internal_only" for attempt in attempts)
 
 
-def test_confirmed_is_public_once_and_accepts_real_lifecycle_b_plus(tmp_path) -> None:
+def test_confirmed_below_canonical_quality_floor_is_never_public(tmp_path) -> None:
     db_path = tmp_path / "confirmed.db"
     sender = FakeSender()
     service = _service(db_path, sender)
@@ -374,17 +366,24 @@ def test_confirmed_is_public_once_and_accepts_real_lifecycle_b_plus(tmp_path) ->
         SetupLifecycleState.CONFIRMED,
         previous=SetupLifecycleState.TRIGGERED,
         signal_id="confirmed-once",
-        setup_quality=_setup_quality_with_grade(SetupQualityGrade.B_PLUS, quality_score=78),
+        setup_quality=_setup_quality_with_grade(SetupQualityGrade.A_MINUS, quality_score=81),
     )
 
     first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-1"))
     repeated = run(service.deliver_for_run(_run_result(symbol), scan_run_id="confirmed-2"))
 
-    assert first.sent == 1
+    assert first.sent == 0
     assert repeated.sent == 0
-    assert len(sender.messages) == 1
-    assert "SIGNAL CONFIRMED" in sender.messages[0]
-    assert "🐺 Hunt live." in sender.messages[0]
+    assert sender.messages == []
+    assert first.blocked == 1
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempt = repository.list_attempts()[0]
+    assert "public_setup_quality_score_below_min:81<88" in attempt.blocked_reason
+    assert attempt.canonical_setup_quality_score == "81"
+    assert attempt.effective_min_setup_quality_score == "88"
+    assert attempt.quality_grade == "A-"
+    assert attempt.min_quality_grade == "A"
+    assert attempt.min_opportunity_score == "88"
 
 
 
@@ -977,8 +976,8 @@ def test_same_geometry_triggered_and_confirmed_deliver_once_per_generation(tmp_p
             previous=previous,
             signal_id=generation_id,
             setup_quality=_setup_quality_with_grade(
-                SetupQualityGrade.B_PLUS,
-                quality_score=78,
+                SetupQualityGrade.A,
+                quality_score=89,
             ),
         )
         return _with_lifecycle_fields(
@@ -1259,9 +1258,12 @@ def test_coalesced_triggered_never_becomes_a_recovery_send(tmp_path) -> None:
     recovered = run(service.deliver_for_run(_empty_run_result(), scan_run_id="recovery"))
     repeated = run(service.deliver_for_run(_empty_run_result(), scan_run_id="deduped"))
 
-    assert recovered.sent == 0
+    assert recovered.sent == 1
+    assert recovered.deliveries[0].alert_type == TelegramAlertType.LIMIT_HIT.value
     assert repeated.sent == 0
-    assert len(sender.messages) == 1
+    assert len(sender.messages) == 2
+    assert "ZONE ENGAGED" in sender.messages[-1]
+    assert all("SETUP TRIGGERED" not in message for message in sender.messages)
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
         final_states = repository._connection.execute(
             """
@@ -1270,7 +1272,10 @@ def test_coalesced_triggered_never_becomes_a_recovery_send(tmp_path) -> None:
             ORDER BY id
             """
         ).fetchall()
-    assert [(row[0], row[1]) for row in final_states] == [("signal_confirmed", "SENT")]
+    assert [(row[0], row[1]) for row in final_states] == [
+        ("signal_confirmed", "SENT"),
+        ("limit_hit", "SENT"),
+    ]
 
 
 def test_failed_final_public_lifecycle_event_is_terminal(tmp_path) -> None:

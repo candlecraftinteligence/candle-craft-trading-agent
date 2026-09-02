@@ -50,6 +50,7 @@ from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState, Setu
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.service import apply_lifecycle_to_run_result
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunResult, ScannerSymbolResult
+from app.scoring.opportunity_scoring import score_opportunity
 from app.storage.models import TelegramAlertAttemptRecord
 from app.telegram_admin.active_watchlists import load_active_public_signals
 
@@ -317,6 +318,7 @@ def _symbol(
     rejection_reason: str | None = None,
     rejection_reasons: tuple[str, ...] = (),
     technical_score: object = Decimal("70"),
+    opportunity_score: Decimal = Decimal("95"),
     setup_quality: SetupQualityResult | None = None,
 ) -> ScannerSymbolResult:
     transition = _transition(state, previous=previous, transitioned=transitioned, signal_id=signal_id)
@@ -332,6 +334,19 @@ def _symbol(
         rejection_reason=rejection_reason,
         rejection_reasons=rejection_reasons,
         technical_score=technical_score,
+        score_result=score_opportunity(
+            {
+                "technical_score": Decimal("100"),
+                "derivatives_score": Decimal("100"),
+                "risk_approved": True,
+                "best_rr": Decimal("5"),
+                "liquidity_score": Decimal("100"),
+                "catalyst_score": Decimal("100"),
+                "data_quality_score": Decimal("100"),
+                "invalidation_present": True,
+                "setup_location": "edge",
+            }
+        ).model_copy(update={"total_score": opportunity_score}),
         valid_strategy_modes=("swing",) if state != SetupLifecycleState.REJECTED else (),
         rejected_strategy_modes=("swing",) if state == SetupLifecycleState.REJECTED else (),
         strategy_diagnostics={"swing": diagnostics or _diagnostics()},
@@ -666,6 +681,7 @@ def _public_v1_symbol(
         signal_id=signal_id,
         setup_quality=_setup_quality_with_grade(grade, quality_score=quality_score),
         technical_score=technical_score,
+        opportunity_score=opportunity_score,
         trade_idea=None,
     ).model_copy(update={"symbol": symbol})
     assert result.lifecycle_state is not None
@@ -1709,7 +1725,7 @@ def test_grade_b_is_blocked_from_public_confirmed_signal() -> None:
 
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
-    assert "below_min_public_grade" in decision.reason
+    assert "public_setup_quality_grade_below_min:B<A" in decision.reason
 
 
 
@@ -1727,6 +1743,74 @@ def test_public_confirmed_signal_allows_a_family_grades() -> None:
 
         assert decision.eligible is True
         assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
+
+
+@pytest.mark.parametrize(
+    ("quality_score", "grade", "opportunity_score", "expected"),
+    (
+        (87, SetupQualityGrade.A, Decimal("95"), False),
+        (88, SetupQualityGrade.A, Decimal("88"), True),
+        (90, SetupQualityGrade.A_PLUS, Decimal("95"), True),
+        (95, SetupQualityGrade.A_PLUS, Decimal("87"), False),
+    ),
+)
+def test_confirmed_public_quality_and_opportunity_are_conjunctive(
+    quality_score: int,
+    grade: SetupQualityGrade,
+    opportunity_score: Decimal,
+    expected: bool,
+) -> None:
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        setup_quality=_setup_quality_with_grade(grade, quality_score=quality_score),
+        opportunity_score=opportunity_score,
+        diagnostics=_diagnostics(rr_to_tp2=Decimal("4")),
+        trade_idea=_trade_idea(best_rr=Decimal("4")),
+    )
+
+    decision = telegram_alert_decision_for_symbol(
+        symbol,
+        eligibility_context=TelegramEligibilityContext(
+            min_rr=Decimal("3"),
+            min_score_for_idea=Decimal("88"),
+        ),
+    )
+
+    assert decision.eligible is expected
+    if expected:
+        assert decision.message is not None
+        assert decision.message.quality_score == quality_score
+        assert decision.message.quality == grade.value
+
+
+def test_confirmed_missing_evaluated_setup_quality_fails_closed() -> None:
+    missing = _setup_quality_with_grade(
+        SetupQualityGrade.A_PLUS,
+        quality_score=99,
+    ).model_copy(update={"is_evaluated": False})
+    symbol = _symbol(
+        SetupLifecycleState.CONFIRMED,
+        previous=SetupLifecycleState.TRIGGERED,
+        setup_quality=missing,
+        opportunity_score=Decimal("99"),
+        diagnostics=_diagnostics(
+            setup_quality_score=Decimal("99"),
+            quality_score=Decimal("99"),
+            quality_grade="A+",
+            trust_grade="A+",
+        ),
+        trade_idea=_trade_idea(
+            opportunity_grade="A+",
+            opportunity_score=Decimal("99"),
+        ),
+    )
+
+    decision = telegram_alert_decision_for_symbol(symbol)
+
+    assert decision.eligible is False
+    assert "public_setup_quality_score_missing" in decision.reason
+    assert "public_setup_quality_grade_missing" in decision.reason
 
 
 
@@ -2240,6 +2324,7 @@ def _assert_suppressed_follow_up(db_path: Path, attempted_alert_type: TelegramAl
         and row[3] in {
             "public_watchlist_follow_up_updates_disabled",
             "outcome_tracking_limit_hit_requires_prior_public_signal",
+            "outcome_tracking_requires_canonical_entry_evidence",
         }
         for row in rows
     )
@@ -3323,7 +3408,7 @@ def test_confirmed_signal_quality_gates_unchanged() -> None:
 
     assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED
-    assert "below_min_public_grade" in decision.reason
+    assert "public_setup_quality_grade_below_min:B<A" in decision.reason
 
 
 
@@ -3963,12 +4048,13 @@ def test_confirmed_alert_is_blocked_when_opportunity_score_below_minimum() -> No
             SetupLifecycleState.CONFIRMED,
             previous=SetupLifecycleState.TRIGGERED,
             trade_idea=_trade_idea(opportunity_score=Decimal("79")),
+            opportunity_score=Decimal("79"),
         ),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
 
     assert decision.eligible is False
-    assert "opportunity_score_below_min" in decision.reason
+    assert "opportunity_score_below_min:79<88" in decision.reason
 
 
 def test_confirmed_alert_is_blocked_when_technical_score_below_threshold() -> None:
@@ -4145,13 +4231,14 @@ def test_allousdt_style_contradictory_confirmed_alert_is_blocked() -> None:
                 invalidation=rejection_text,
             ),
             technical_score=Decimal("49"),
+            opportunity_score=Decimal("79"),
         ),
         eligibility_context=TelegramEligibilityContext(min_rr=Decimal("3"), min_score_for_idea=Decimal("80")),
     )
 
     assert decision.eligible is False
     assert "planned_rr_below_min:2.79181174<3" in decision.reason
-    assert "opportunity_score_below_min:79<80" in decision.reason
+    assert "opportunity_score_below_min:79<88" in decision.reason
     assert "technical_score_below_min:49<50" in decision.reason
     assert "invalidation_contains_rejection_reason" in decision.reason
 
@@ -4212,10 +4299,10 @@ def test_sent_watchlist_limit_zone_touch_requires_prior_public_signal(tmp_path: 
     assert second.sent == 0
     assert sender.messages == []
     rows = _watchlist_outcome_rows(db_path)
-    assert any(row[3] == "outcome_tracking_limit_hit_requires_prior_public_signal" for row in rows)
+    assert any(row[3] == "outcome_tracking_requires_canonical_entry_evidence" for row in rows)
 
 
-def test_limit_hit_decision_is_allowed_only_after_prior_public_signal() -> None:
+def test_limit_hit_decision_requires_prior_signal_and_canonical_entry_evidence() -> None:
     signal_id = "watch-limit-hit-confirmed"
     prior = TelegramAlertAttemptRecord(
         signal_id=signal_id,
@@ -4249,12 +4336,9 @@ def test_limit_hit_decision_is_allowed_only_after_prior_public_signal() -> None:
         prior_public_alert=prior,
     )
 
-    assert decision.eligible is True
+    assert decision.eligible is False
     assert decision.alert_type == TelegramAlertType.LIMIT_HIT
-    assert decision.message is not None
-    assert decision.message.entry_low == "100"
-    assert decision.message.entry_high == "102"
-    assert decision.message.planned_rr == "3"
+    assert "limit_hit_requires_canonical_entry_evidence" in decision.reason
 
 
 
@@ -4279,7 +4363,7 @@ def test_watchlist_does_not_send_tp_or_sl_before_limit_hit(tmp_path: Path) -> No
     assert sender.messages == []
     rows = _watchlist_outcome_rows(db_path)
     assert not any(row[0] in {TelegramAlertType.TP1_HIT.value, TelegramAlertType.SL_HIT.value} for row in rows)
-    assert any(row[3] == "outcome_tracking_not_limit_hit_yet" for row in rows)
+    assert any(row[3] == "outcome_tracking_requires_canonical_entry_evidence" for row in rows)
 
 
 def test_watchlist_same_candle_entry_and_target_sends_only_limit_and_audits_ambiguity(tmp_path: Path) -> None:
@@ -4300,7 +4384,7 @@ def test_watchlist_same_candle_entry_and_target_sends_only_limit_and_audits_ambi
     assert sender.messages == []
     rows = _watchlist_outcome_rows(db_path)
     assert not any(row[0] == TelegramAlertType.TP1_HIT.value for row in rows)
-    assert any(row[3] == "outcome_tracking_limit_hit_requires_prior_public_signal" for row in rows)
+    assert any(row[3] == "outcome_tracking_requires_canonical_entry_evidence" for row in rows)
 
 
 def test_watchlist_target_touch_rules_are_direction_aware() -> None:
@@ -4531,7 +4615,7 @@ def test_watchlist_current_price_at_tp_cannot_send_tp_before_entry_zone_touched(
     assert sender.messages == []
     rows = _watchlist_outcome_rows(db_path)
     assert not any(row[2] == TelegramAlertType.TP1_HIT.value and row[1] == "sent" for row in rows)
-    assert any(row[3] == "outcome_tracking_not_limit_hit_yet" for row in rows)
+    assert any(row[3] == "outcome_tracking_requires_canonical_entry_evidence" for row in rows)
 
 
 def test_tp_sl_symbol_mismatch_blocks_watchlist_alert(tmp_path: Path) -> None:

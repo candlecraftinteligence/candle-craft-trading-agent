@@ -58,6 +58,7 @@ def _record(
         first_seen_at=BASE.isoformat(),
         last_seen_at=BASE.isoformat(),
         last_transition_at=BASE.isoformat(),
+        confirmed_at=BASE.isoformat(),
         invalidation_reason="Closed structure beyond the stored stop invalidates the plan.",
         invalidation_logic="Closed structure beyond the stored stop invalidates the plan.",
         setup_identity=f"{lifecycle_id}-setup",
@@ -205,6 +206,7 @@ def test_tracking_boundary_excludes_pre_setup_candle(
         update={
             "last_seen_at": boundary.isoformat(),
             "last_transition_at": boundary.isoformat(),
+            "confirmed_at": boundary.isoformat(),
         }
     )
     candles = [
@@ -213,27 +215,100 @@ def test_tracking_boundary_excludes_pre_setup_candle(
     ]
     with SQLiteSetupLifecycleRepository(tmp_path / "outcomes.db") as repository:
         repository.upsert_record(record)
-        repository.insert_event(
-            SetupLifecycleEvent(
-                lifecycle_id=record.lifecycle_id,
-                timestamp=boundary.isoformat(),
-                symbol=record.symbol,
-                from_state=SetupLifecycleState.DISCOVERED,
-                to_state=SetupLifecycleState.WATCHLISTED,
-                reason=SetupTransitionReason.READINESS_IMPROVED,
-            )
-        )
-
         result = _evaluate(repository, record, candles)
 
-        expected_start = BASE + timedelta(minutes=5)
-        assert result.processed_candles == 1
+        expected_start = boundary
+        assert result.processed_candles == 0
         assert result.progress.tracking_start_at == expected_start.isoformat()
-        assert result.progress.evaluation_cursor_open_at == expected_start.isoformat()
+        assert result.progress.evaluation_cursor_open_at is None
         assert result.progress.entry_at is None
         assert (
             json.loads(result.progress.metadata_json)["tracking_boundary_source"]
-            == "lifecycle_outcome_trackable_event:WATCHLISTED"
+            == "lifecycle_confirmed_at"
+        )
+
+        candles.append(_candle(2, high="99", low="95"))
+        next_result = _evaluate(repository, record, candles)
+        assert next_result.processed_candles == 1
+        assert next_result.progress.evaluation_cursor_open_at == expected_start.isoformat()
+
+
+def test_partial_confirmation_candle_cannot_prove_entry_and_restart_is_stable(
+    tmp_path: Path,
+) -> None:
+    boundary = BASE + timedelta(seconds=1)
+    record = _record().model_copy(
+        update={
+            "confirmed_at": boundary.isoformat(),
+            "last_seen_at": boundary.isoformat(),
+            "last_transition_at": boundary.isoformat(),
+        }
+    )
+    ambiguous_candles = [_entry(0, "long")]
+    with SQLiteSetupLifecycleRepository(tmp_path / "outcomes.db") as repository:
+        repository.upsert_record(record)
+
+        first = _evaluate(repository, record, ambiguous_candles)
+        restarted = _evaluate(repository, record, ambiguous_candles)
+
+        assert first.processed_candles == 0
+        assert first.progress.entry_at is None
+        assert first.progress.evaluation_cursor_open_at is None
+        assert first.progress.tracking_start_at == (
+            BASE + timedelta(minutes=5)
+        ).isoformat()
+        assert first.progress.integrity_status == "Verified"
+        assert first.progress.diagnostic == "partial_boundary_candle_not_entry_eligible"
+        metadata = json.loads(first.progress.metadata_json)
+        assert (
+            metadata["boundary_candle_eligibility_decision"]
+            == "partially_overlapping_boundary"
+        )
+        assert restarted.progress.entry_at is None
+        assert restarted.processed_candles == 0
+
+        full_post_boundary = [*ambiguous_candles, _entry(1, "long")]
+        entered = _evaluate(repository, record, full_post_boundary)
+
+        assert entered.processed_candles == 1
+        assert entered.progress.entry_at == _decision(1)
+        evidence = json.loads(entered.progress.metadata_json)
+        assert evidence["entry_evidence_type"] == (
+            "fully_post_boundary_closed_execution_candle_range"
+        )
+        assert evidence["entry_evidence_eligibility_decision"] == "fully_post_boundary"
+        assert evidence["tracking_boundary_timestamp"] == boundary.isoformat()
+        assert evidence["causal_candle_open"] == (
+            BASE + timedelta(minutes=5)
+        ).isoformat()
+        assert evidence["causal_candle_close"] == _decision(1)
+        events = repository.list_events(lifecycle_id=record.lifecycle_id)
+        entry_event = next(
+            event
+            for event in events
+            if event.reason == SetupTransitionReason.ENTRY_ACTIVATED
+        )
+        event_evidence = json.loads(entry_event.notes)
+        assert event_evidence["entry_evidence_type"] == evidence["entry_evidence_type"]
+        assert event_evidence["candle_high"] == "103"
+        assert event_evidence["candle_low"] == "99"
+
+
+def test_confirmation_boundary_exactly_at_candle_open_allows_that_candle(
+    tmp_path: Path,
+) -> None:
+    record = _record().model_copy(update={"confirmed_at": BASE.isoformat()})
+    with SQLiteSetupLifecycleRepository(tmp_path / "outcomes.db") as repository:
+        repository.upsert_record(record)
+
+        result = _evaluate(repository, record, [_entry(0, "long")])
+
+        assert result.processed_candles == 1
+        assert result.progress.entry_at == _decision(0)
+        metadata = json.loads(result.progress.metadata_json)
+        assert (
+            metadata["boundary_candle_eligibility_decision"]
+            == "boundary_exactly_at_candle_open"
         )
 
 
@@ -535,6 +610,25 @@ def test_missing_or_gapped_history_creates_precise_diagnostic(tmp_path: Path) ->
         )
         assert "continuity_gap" in gapped.progress.diagnostic
         assert gapped.progress.entry_at is None
+
+
+def test_history_starting_after_boundary_does_not_weaken_data_health_gate(
+    tmp_path: Path,
+) -> None:
+    record = _record()
+    with SQLiteSetupLifecycleRepository(tmp_path / "outcomes.db") as repository:
+        repository.upsert_record(record)
+
+        result = _evaluate(
+            repository,
+            record,
+            [_entry(1, "long")],
+            decision_index=1,
+        )
+
+        assert result.progress.entry_at is None
+        assert result.progress.integrity_status == "Unverified"
+        assert "missing_execution_candle_history" in result.progress.diagnostic
 
 
 def test_restart_catches_up_all_downtime_candles_in_order(tmp_path: Path) -> None:
