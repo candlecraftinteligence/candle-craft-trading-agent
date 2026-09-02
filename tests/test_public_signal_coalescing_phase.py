@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 from decimal import Decimal
 
-from app.alerts.telegram_lifecycle import SQLiteTelegramAlertAttemptRepository
+from app.alerts.telegram_lifecycle import (
+    SQLiteTelegramAlertAttemptRepository,
+    public_outcome_tracking_diagnostics,
+)
 from app.alerts.telegram_routing import TelegramDestination
 from app.alerts.telegram_sender import TelegramSender
 from app.data.dtos import NA
@@ -497,6 +500,18 @@ def test_same_geometry_new_generation_cannot_inherit_tp(tmp_path) -> None:
     assert audits[-1].blocked_reason == (
         "public_outcome_tracking_lifecycle_generation_mismatch"
     )
+    with (
+        SQLiteTelegramAlertAttemptRepository(db_path) as alert_repository,
+        SQLiteSetupLifecycleRepository(db_path) as lifecycle_repository,
+    ):
+        diagnostics = public_outcome_tracking_diagnostics(
+            alert_repository=alert_repository,
+            lifecycle_repository=lifecycle_repository,
+        )
+    assert diagnostics[0].match_status == "NO_MATCH"
+    assert diagnostics[0].match_reason == (
+        "public_outcome_tracking_lifecycle_generation_mismatch"
+    )
 
 
 def test_legacy_multi_generation_identity_is_ambiguous_and_blocks(tmp_path) -> None:
@@ -546,6 +561,46 @@ def test_legacy_multi_generation_identity_is_ambiguous_and_blocks(tmp_path) -> N
         ]
     assert audits
     assert audits[-1].blocked_reason == "public_outcome_tracking_identity_ambiguous"
+    with (
+        SQLiteTelegramAlertAttemptRepository(db_path) as alert_repository,
+        SQLiteSetupLifecycleRepository(db_path) as lifecycle_repository,
+    ):
+        diagnostics = public_outcome_tracking_diagnostics(
+            alert_repository=alert_repository,
+            lifecycle_repository=lifecycle_repository,
+        )
+    assert diagnostics[0].match_status == "AMBIGUOUS"
+    assert diagnostics[0].match_reason == "public_outcome_tracking_identity_ambiguous"
+
+
+def test_public_outcome_no_match_is_persisted_and_queryable(tmp_path) -> None:
+    db_path = tmp_path / "identity-no-match.db"
+    sender = FakeSender()
+    _send_confirmed_root(db_path, sender)
+
+    summary = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
+
+    assert summary.sent == 0
+    with (
+        SQLiteTelegramAlertAttemptRepository(db_path) as alert_repository,
+        SQLiteSetupLifecycleRepository(db_path) as lifecycle_repository,
+    ):
+        diagnostics = public_outcome_tracking_diagnostics(
+            alert_repository=alert_repository,
+            lifecycle_repository=lifecycle_repository,
+        )
+        audits = tuple(
+            item
+            for item in alert_repository.list_attempts()
+            if item.attempted_alert_type == "PUBLIC_OUTCOME_TRACKING"
+        )
+    assert len(diagnostics) == 1
+    assert diagnostics[0].match_status == "NO_MATCH"
+    assert diagnostics[0].match_reason.startswith(
+        "public_outcome_tracking_no_lifecycle_match:"
+    )
+    assert audits
+    assert audits[-1].blocked_reason == diagnostics[0].match_reason
 
 
 def test_all_persisted_target_timestamps_remain_independent(tmp_path) -> None:

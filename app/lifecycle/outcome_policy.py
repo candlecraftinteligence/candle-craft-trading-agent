@@ -25,17 +25,33 @@ class StoredPlanGeometry:
 
 
 def canonical_plan_identity(record: Any) -> str:
+    return _plan_identity(record, normalize_numeric_representation=True)
+
+
+def compatible_plan_identities(record: Any) -> tuple[str, ...]:
+    """Return the stable identity plus the pre-v19 raw-text identity."""
+
+    canonical = canonical_plan_identity(record)
+    legacy = _plan_identity(record, normalize_numeric_representation=False)
+    return tuple(dict.fromkeys((canonical, legacy)))
+
+
+def _plan_identity(
+    record: Any,
+    *,
+    normalize_numeric_representation: bool,
+) -> str:
     values = (
         _field(record, "lifecycle_id"),
         _field(record, "symbol"),
         _field(record, "mode"),
         _field(record, "direction"),
-        _field(record, "entry_low"),
-        _field(record, "entry_high"),
-        _field(record, "stop_loss"),
-        _field(record, "tp1"),
-        _field(record, "tp2"),
-        _field(record, "tp3"),
+        *(
+            _identity_price(_field(record, name))
+            if normalize_numeric_representation
+            else _text(_field(record, name))
+            for name in ("entry_low", "entry_high", "stop_loss", "tp1", "tp2", "tp3")
+        ),
         _stored_invalidation(record),
     )
     digest = hashlib.sha256("\x1f".join(_text(value) for value in values).encode("utf-8")).hexdigest()
@@ -165,6 +181,20 @@ def _required_decimal(value: Any, name: str) -> Decimal:
     return number
 
 
+def _identity_price(value: Any) -> str:
+    text = _text(value)
+    if text == NA:
+        return NA
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return text
+    if not number.is_finite():
+        return text
+    normalized = format(number.normalize(), "f")
+    return "0" if normalized in {"-0", "-0.0"} else normalized
+
+
 def _text(value: Any) -> str:
     if value is None or value == "":
         return NA
@@ -177,6 +207,7 @@ __all__ = [
     "StoredPlanGeometry",
     "candle_range",
     "canonical_plan_identity",
+    "compatible_plan_identities",
     "entry_touched",
     "has_valid_stored_plan_geometry",
     "newly_touched_targets",

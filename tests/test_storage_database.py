@@ -26,6 +26,11 @@ from app.context import (
     build_global_context_snapshot,
     build_weekend_context,
 )
+from app.lifecycle.models import (
+    SetupLifecycleOutcomeProgress,
+    SetupLifecycleRecord,
+    SetupLifecycleState,
+)
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
@@ -320,6 +325,7 @@ def test_scanner_process_improvement_schema_columns_exist(tmp_path) -> None:
         "lifecycle_id",
         "plan_identity",
         "execution_timeframe",
+        "tracking_start_at",
         "evaluation_cursor_open_at",
         "entry_at",
         "tp1_at",
@@ -333,6 +339,83 @@ def test_scanner_process_improvement_schema_columns_exist(tmp_path) -> None:
         "diagnostic",
         "metadata_json",
     } <= progress_columns
+    assert {"raw_candles_json", "execution_candles_json"}.isdisjoint(
+        progress_columns
+    )
+
+
+def test_schema_v19_backfills_existing_cursor_without_rewind_or_milestone_loss(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "v18-outcome-progress.db"
+    timestamp = "2026-09-02T10:30:00+00:00"
+    record = SetupLifecycleRecord(
+        lifecycle_id="v18-progress",
+        symbol="BTCUSDT",
+        mode="swing",
+        direction="long",
+        current_state=SetupLifecycleState.MANAGING,
+        first_seen_at="2026-09-02T10:00:00+00:00",
+        last_seen_at=timestamp,
+        last_transition_at="2026-09-02T10:15:00+00:00",
+        entry_low="100",
+        entry_high="102",
+        stop_loss="95",
+        tp1="107",
+        tp2="112",
+        tp3="117",
+        invalidation_reason="Invalid below 95.",
+        invalidation_logic="Invalid below 95.",
+    )
+    progress = SetupLifecycleOutcomeProgress(
+        lifecycle_id=record.lifecycle_id,
+        plan_identity="plan-v18-existing-cursor",
+        symbol=record.symbol,
+        mode=record.mode,
+        direction=record.direction,
+        execution_timeframe="15m",
+        evaluation_cursor_open_at="2026-09-02T10:15:00+00:00",
+        evaluation_cursor_close_at=timestamp,
+        entry_at="2026-09-02T10:15:00+00:00",
+        tp1_at=timestamp,
+        integrity_status="Verified",
+        first_evaluated_at="2026-09-02T10:15:00+00:00",
+        last_evaluated_at=timestamp,
+    )
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(record)
+        repository.upsert_outcome_progress(progress)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE setup_lifecycle_outcome_progress SET tracking_start_at = NULL"
+        )
+        connection.execute("PRAGMA user_version = 18")
+        connection.commit()
+
+    with open_initialized_database(db_path):
+        pass
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT tracking_start_at, evaluation_cursor_open_at, entry_at, tp1_at
+            FROM setup_lifecycle_outcome_progress
+            WHERE lifecycle_id = ? AND plan_identity = ?
+            """,
+            (record.lifecycle_id, progress.plan_identity),
+        ).fetchone()
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+    assert row == (
+        progress.evaluation_cursor_open_at,
+        progress.evaluation_cursor_open_at,
+        progress.entry_at,
+        progress.tp1_at,
+    )
+    assert version == SCHEMA_VERSION == 19
 
 
 def test_scan_run_migration_adds_watch_columns_without_destroying_rows(tmp_path) -> None:
@@ -1407,7 +1490,7 @@ def test_schema_v14_to_v17_preserves_lifecycle_and_telegram_data(
 
     assert _representative_v14_rows(db_path) == before
     version, tables, attempt_columns, public_columns = _schema_contract(db_path)
-    assert version == 18 == SCHEMA_VERSION
+    assert version == 19 == SCHEMA_VERSION
     assert "setup_lifecycle_outcome_progress" in tables
     assert "public_alert_delivery_parts" in tables
     assert "delivery_state" in attempt_columns
@@ -1667,7 +1750,7 @@ def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:
         "v15-plan", "SENT", "2026-07-01T10:00:01Z", "SENT"
     )
     assert "public_alert_delivery_parts" in tables
-    assert version == 18 == SCHEMA_VERSION
+    assert version == 19 == SCHEMA_VERSION
 
 
 def test_schema_v16_migration_is_idempotent_for_v15_delivery_data(tmp_path) -> None:

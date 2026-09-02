@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from app.alerts.telegram_lifecycle import SQLiteTelegramAlertAttemptRepository
+from app.alerts.telegram_lifecycle import (
+    SQLiteTelegramAlertAttemptRepository,
+    public_outcome_tracking_diagnostics,
+)
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import TelegramAlertType
 from app.lifecycle.models import SetupLifecycleOutcomeProgress, SetupLifecycleState
@@ -58,6 +61,7 @@ def _persist_progress(
     diagnostic: str = NA,
     invalidated_at: str | None = None,
     tp1_at: str | None = None,
+    limit_hit_already_sent: bool = True,
 ):
     if stop:
         state = SetupLifecycleState.SL_HIT
@@ -94,6 +98,7 @@ def _persist_progress(
         mode=record.mode,
         direction=record.direction,
         execution_timeframe="5m",
+        tracking_start_at="2026-08-30T10:00:00+00:00",
         evaluation_cursor_open_at="2026-08-30T10:20:00+00:00",
         evaluation_cursor_close_at="2026-08-30T10:25:00+00:00",
         entry_at=ENTRY_AT,
@@ -120,6 +125,8 @@ def _persist_progress(
             repository.supersede_record(existing.lifecycle_id)
         repository.upsert_record(record)
         repository.upsert_outcome_progress(progress)
+    if limit_hit_already_sent:
+        _insert_sent_limit_hit(db_path, lifecycle_id=record.lifecycle_id)
     return record, progress
 
 
@@ -138,13 +145,28 @@ def _sent_outcomes(db_path: Path):
         )
 
 
-def _insert_sent_limit_hit(db_path: Path) -> None:
+def _insert_sent_limit_hit(
+    db_path: Path,
+    *,
+    lifecycle_id: str | None = None,
+) -> bool:
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
-        confirmed = next(
-            item
-            for item in repository.list_attempts()
-            if item.alert_type == TelegramAlertType.SIGNAL_CONFIRMED.value
-        )
+        roots = list(repository.list_publicly_tracked_signals())
+        if lifecycle_id is not None:
+            roots = [
+                item
+                for item in roots
+                if item.signal_id == lifecycle_id
+                or item.signal_id.rpartition("-SETUP-")[0] == lifecycle_id
+            ]
+        if not roots:
+            return False
+        confirmed = roots[0]
+        if repository.has_attempt(
+            signal_id=confirmed.signal_id,
+            alert_type=TelegramAlertType.LIMIT_HIT,
+        ):
+            return True
         now = "2026-08-30T10:06:00+00:00"
         assert repository.insert_attempt(
             replace(
@@ -167,6 +189,7 @@ def _insert_sent_limit_hit(db_path: Path) -> None:
                 public_alert_event_type=NA,
             )
         )
+        return True
 
 
 def _insert_legacy_watchlist_root(db_path: Path, symbol) -> None:
@@ -247,6 +270,48 @@ def test_confirmed_without_touched_target_creates_no_tp(tmp_path) -> None:
 
     assert summary.sent == 0
     assert _sent_outcomes(db_path) == ()
+
+
+def test_canonical_entry_progress_delivers_limit_once_without_current_price_gate(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "canonical-limit.db"
+    sender = FakeSender()
+    confirmed = _send_confirmed_root(db_path, sender)
+    record, progress = _persist_progress(
+        db_path,
+        confirmed,
+        tp_count=0,
+        limit_hit_already_sent=False,
+    )
+    away_from_zone = confirmed.model_copy(
+        update={
+            "current_price": "150",
+            "lifecycle_state": record,
+            "lifecycle_transition": None,
+            "lifecycle_transitions": (),
+            "lifecycle_outcome_progress": progress,
+        }
+    )
+
+    first = run(_service(db_path, sender).deliver_for_run(_run_result(away_from_zone)))
+    restarted = run(
+        _service(db_path, FakeSender()).deliver_for_run(_empty_run_result())
+    )
+
+    assert first.sent == 1
+    assert restarted.sent == 0
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        attempts = repository.list_attempts()
+        assert sum(
+            item.alert_type == TelegramAlertType.LIMIT_HIT.value
+            and item.telegram_status == "sent"
+            for item in attempts
+        ) == 1
+        assert sum(
+            item.alert_type == TelegramAlertType.WATCHLIST.value
+            for item in attempts
+        ) == 0
 
 
 @pytest.mark.parametrize("tp_count", (2, 3))
@@ -498,6 +563,9 @@ def test_pr96_equivalent_mode_projection_has_one_tp1(tmp_path) -> None:
         source_modes=("swing",),
     )
     _send_confirmed_root(db_path, sender, symbol=confirmed)
+    # Retain a real exact-generation progress row so the stale SCALP lifecycle
+    # cannot shadow the later equivalent SWING projection.
+    _persist_progress(db_path, confirmed, tp_count=0)
     record, _ = _persist_progress(db_path, swing, tp_count=1)
     current = swing.model_copy(
         update={"lifecycle_state": record, "lifecycle_transition": None}
@@ -509,6 +577,29 @@ def test_pr96_equivalent_mode_projection_has_one_tp1(tmp_path) -> None:
     assert first.sent == 1
     assert repeated.sent == 0
     assert len(_sent_outcomes(db_path)) == 1
+    with (
+        SQLiteTelegramAlertAttemptRepository(db_path) as alert_repository,
+        SQLiteSetupLifecycleRepository(db_path) as lifecycle_repository,
+    ):
+        diagnostics = public_outcome_tracking_diagnostics(
+            alert_repository=alert_repository,
+            lifecycle_repository=lifecycle_repository,
+            current_results=(current,),
+        )
+        audits = tuple(
+            item
+            for item in alert_repository.list_attempts()
+            if item.attempted_alert_type == "PUBLIC_OUTCOME_TRACKING"
+        )
+    assert len(diagnostics) == 1
+    assert diagnostics[0].match_status == "MATCHED"
+    assert diagnostics[0].matched_lifecycle_id == record.lifecycle_id
+    assert diagnostics[0].public_economic_setup_id != NA
+    assert diagnostics[0].tracking_start_at == ENTRY_AT.replace("10:05", "10:00")
+    assert not any(
+        "public_outcome_tracking_no_lifecycle_match" in item.blocked_reason
+        for item in audits
+    )
 
 
 @pytest.mark.parametrize(

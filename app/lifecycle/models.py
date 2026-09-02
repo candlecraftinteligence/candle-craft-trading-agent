@@ -254,6 +254,7 @@ class SetupLifecycleOutcomeProgress(BaseModel):
     mode: str = NA
     direction: str = NA
     execution_timeframe: str = NA
+    tracking_start_at: str | None = None
     evaluation_cursor_open_at: str | None = None
     evaluation_cursor_close_at: str | None = None
     entry_at: str | None = None

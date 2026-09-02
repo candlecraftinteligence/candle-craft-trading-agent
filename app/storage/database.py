@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -603,6 +603,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 mode TEXT NOT NULL DEFAULT 'N/A',
                 direction TEXT NOT NULL DEFAULT 'N/A',
                 execution_timeframe TEXT NOT NULL DEFAULT 'N/A',
+                tracking_start_at TEXT,
                 evaluation_cursor_open_at TEXT,
                 evaluation_cursor_close_at TEXT,
                 entry_at TEXT,
@@ -932,6 +933,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             "INTEGER NOT NULL DEFAULT 0",
         )
         _ensure_column(connection, "setup_lifecycle_records", "setup_identity", "TEXT NOT NULL DEFAULT 'N/A'")
+        _migrate_outcome_tracking_start_v19(connection)
         _ensure_column(connection, "setup_lifecycle_events", "scan_run_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "scan_run_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "attempted_at", "TEXT NOT NULL DEFAULT 'N/A'")
@@ -1055,6 +1057,30 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
     }
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_outcome_tracking_start_v19(connection: sqlite3.Connection) -> None:
+    """Add the causal boundary without rewinding already-consumed history.
+
+    Existing cursors remain authoritative. Backfilling their open timestamp as
+    the tracking start makes the migration observable while deliberately not
+    attempting to recover a candle that an older runtime consumed as baseline.
+    """
+
+    _ensure_column(
+        connection,
+        "setup_lifecycle_outcome_progress",
+        "tracking_start_at",
+        "TEXT",
+    )
+    connection.execute(
+        """
+        UPDATE setup_lifecycle_outcome_progress
+        SET tracking_start_at = evaluation_cursor_open_at
+        WHERE tracking_start_at IS NULL
+          AND evaluation_cursor_open_at IS NOT NULL
+        """
+    )
 
 
 def _migrate_lifecycle_generation_identity_v17(connection: sqlite3.Connection) -> None:

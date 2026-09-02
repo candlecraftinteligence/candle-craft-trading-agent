@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from app.data.candle_integrity import (
@@ -31,6 +32,7 @@ from app.lifecycle.outcome_policy import (
     _text,
     candle_range as _candle_range,
     canonical_plan_identity,
+    compatible_plan_identities,
     entry_touched as _entry_touched,
     newly_touched_targets as _newly_touched_targets,
     stop_touched as _stop_touched,
@@ -85,11 +87,22 @@ def evaluate_closed_candle_outcomes(
     repository: SQLiteSetupLifecycleRepository,
     scan_run_id: str | None = None,
 ) -> LifecycleOutcomeEvaluation:
-    plan_identity = canonical_plan_identity(record)
-    progress = repository.get_outcome_progress(
-        lifecycle_id=record.lifecycle_id,
-        plan_identity=plan_identity,
+    plan_identities = compatible_plan_identities(record)
+    progress = next(
+        (
+            candidate
+            for identity in plan_identities
+            if (
+                candidate := repository.get_outcome_progress(
+                    lifecycle_id=record.lifecycle_id,
+                    plan_identity=identity,
+                )
+            )
+            is not None
+        ),
+        None,
     )
+    plan_identity = progress.plan_identity if progress is not None else plan_identities[0]
 
     # Malformed legacy plans are preserved as evidence, but never create or
     # advance outcome progress. Explicit hygiene owns any quarantine transition.
@@ -181,53 +194,126 @@ def evaluate_closed_candle_outcomes(
         repository.upsert_outcome_progress(progress)
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
-    if progress.evaluation_cursor_open_at is None:
-        baseline = window.timeline[-1]
-        progress = _with_cursor(
-            progress,
-            baseline,
-            evaluated_at=evaluated_at,
-            diagnostic="cursor_initialized_without_retroactive_evaluation",
-            processed_candles=0,
-        )
-        repository.upsert_outcome_progress(progress)
-        return LifecycleOutcomeEvaluation(record=record, progress=progress)
+    fresh_cursor = progress.evaluation_cursor_open_at is None
+    if progress.tracking_start_at is None:
+        if fresh_cursor:
+            try:
+                tracking_start, boundary_timestamp, boundary_source = _tracking_start_boundary(
+                    record,
+                    progress=progress,
+                    timeline=window.timeline,
+                    evaluated_at=evaluated_at,
+                    repository=repository,
+                    compatible_identities=plan_identities,
+                )
+            except ValueError as exc:
+                progress = _integrity_failure(
+                    progress,
+                    status=INTEGRITY_UNVERIFIED,
+                    diagnostic=str(exc),
+                    evaluated_at=evaluated_at,
+                )
+                repository.upsert_outcome_progress(progress)
+                return LifecycleOutcomeEvaluation(record=record, progress=progress)
+            progress = _with_tracking_start(
+                progress,
+                tracking_start=tracking_start,
+                boundary_timestamp=boundary_timestamp,
+                boundary_source=boundary_source,
+            )
+        else:
+            try:
+                existing_cursor = normalize_utc_timestamp(
+                    progress.evaluation_cursor_open_at,
+                    field_name="evaluation_cursor_open_at",
+                )
+            except ValueError as exc:
+                progress = _integrity_failure(
+                    progress,
+                    status=INTEGRITY_FAILED,
+                    diagnostic=f"invalid_persisted_evaluation_cursor:{exc}",
+                    evaluated_at=evaluated_at,
+                )
+                repository.upsert_outcome_progress(progress)
+                return LifecycleOutcomeEvaluation(record=record, progress=progress)
+            progress = _with_tracking_start(
+                progress,
+                tracking_start=existing_cursor,
+                boundary_timestamp=progress.evaluation_cursor_open_at,
+                boundary_source="existing_cursor_v19_backfill",
+            )
 
     try:
-        cursor_open = normalize_utc_timestamp(
-            progress.evaluation_cursor_open_at,
-            field_name="evaluation_cursor_open_at",
+        tracking_start = normalize_utc_timestamp(
+            progress.tracking_start_at,
+            field_name="tracking_start_at",
         )
     except ValueError as exc:
         progress = _integrity_failure(
             progress,
             status=INTEGRITY_FAILED,
-            diagnostic=f"invalid_persisted_evaluation_cursor:{exc}",
+            diagnostic=f"invalid_persisted_tracking_start:{exc}",
             evaluated_at=evaluated_at,
         )
         repository.upsert_outcome_progress(progress)
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
     latest_open = window.timeline[-1].open_timestamp
-    if latest_open < cursor_open:
-        progress = _integrity_failure(
-            progress,
-            status=INTEGRITY_UNVERIFIED,
-            diagnostic=(
-                "stale_execution_candle_history:"
-                f"latest={latest_open.isoformat()} cursor={cursor_open.isoformat()}"
-            ),
-            evaluated_at=evaluated_at,
+    if fresh_cursor:
+        expected_open = tracking_start
+        pending = tuple(
+            (causal, high, low)
+            for causal, (high, low) in zip(window.timeline, candle_ranges, strict=True)
+            if causal.open_timestamp >= tracking_start
         )
-        repository.upsert_outcome_progress(progress)
-        return LifecycleOutcomeEvaluation(record=record, progress=progress)
+    else:
+        try:
+            cursor_open = normalize_utc_timestamp(
+                progress.evaluation_cursor_open_at,
+                field_name="evaluation_cursor_open_at",
+            )
+        except ValueError as exc:
+            progress = _integrity_failure(
+                progress,
+                status=INTEGRITY_FAILED,
+                diagnostic=f"invalid_persisted_evaluation_cursor:{exc}",
+                evaluated_at=evaluated_at,
+            )
+            repository.upsert_outcome_progress(progress)
+            return LifecycleOutcomeEvaluation(record=record, progress=progress)
+        if latest_open < cursor_open:
+            progress = _integrity_failure(
+                progress,
+                status=INTEGRITY_UNVERIFIED,
+                diagnostic=(
+                    "stale_execution_candle_history:"
+                    f"latest={latest_open.isoformat()} cursor={cursor_open.isoformat()}"
+                ),
+                evaluated_at=evaluated_at,
+            )
+            repository.upsert_outcome_progress(progress)
+            return LifecycleOutcomeEvaluation(record=record, progress=progress)
+        expected_open = cursor_open + timeframe_duration(normalized_timeframe)
+        pending = tuple(
+            (causal, high, low)
+            for causal, (high, low) in zip(window.timeline, candle_ranges, strict=True)
+            if causal.open_timestamp > cursor_open
+        )
 
-    pending = tuple(
-        (causal, high, low)
-        for causal, (high, low) in zip(window.timeline, candle_ranges, strict=True)
-        if causal.open_timestamp > cursor_open
-    )
     if not pending:
+        if fresh_cursor:
+            progress = _integrity_failure(
+                progress,
+                status=INTEGRITY_UNVERIFIED,
+                diagnostic=(
+                    "missing_execution_candle_history:"
+                    f"tracking_start_at={tracking_start.isoformat()} "
+                    f"latest_open={latest_open.isoformat()}"
+                ),
+                evaluated_at=evaluated_at,
+            )
+            repository.upsert_outcome_progress(progress)
+            return LifecycleOutcomeEvaluation(record=record, progress=progress)
         progress = progress.model_copy(
             update={
                 "integrity_status": INTEGRITY_VERIFIED,
@@ -238,7 +324,6 @@ def evaluate_closed_candle_outcomes(
         repository.upsert_outcome_progress(progress)
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
-    expected_open = cursor_open + timeframe_duration(normalized_timeframe)
     if pending[0][0].open_timestamp != expected_open:
         progress = _integrity_failure(
             progress,
@@ -308,6 +393,9 @@ def evaluate_closed_candle_outcomes(
                         ambiguity_reason="entry_and_stop_same_candle_stop_wins",
                     )
                     transitions.append(last_transition)
+            # Established policy: the entry candle can prove the fill (and a
+            # conservative same-candle stop), but targets begin with the next
+            # closed execution candle.
             progress = _with_cursor(
                 progress,
                 causal,
@@ -449,6 +537,104 @@ def _terminal_progress_for_record(
         updates["integrity_status"] = INTEGRITY_UNVERIFIED
         updates["diagnostic"] = "terminal_state_preceded_canonical_outcome_cursor"
     return progress.model_copy(update=updates)
+
+
+def _tracking_start_boundary(
+    record: SetupLifecycleRecord,
+    *,
+    progress: SetupLifecycleOutcomeProgress,
+    timeline: Sequence[CausalCandle],
+    evaluated_at: str,
+    repository: SQLiteSetupLifecycleRepository,
+    compatible_identities: Sequence[str],
+) -> tuple[datetime, str, str]:
+    compatible_identity_set = set(compatible_identities)
+    historical_plans = tuple(
+        item
+        for item in repository.list_outcome_progress(lifecycle_id=record.lifecycle_id)
+        if item.plan_identity not in compatible_identity_set
+    )
+    if historical_plans:
+        boundary_value = progress.first_evaluated_at or evaluated_at
+        boundary_source = "material_plan_first_evaluated_at"
+    else:
+        first_trackable_event = next(
+            (
+                event
+                for event in repository.list_events(lifecycle_id=record.lifecycle_id)
+                if event.to_state in OUTCOME_ELIGIBLE_STATES
+            ),
+            None,
+        )
+        if first_trackable_event is not None:
+            boundary_value = first_trackable_event.timestamp
+            boundary_source = (
+                "lifecycle_outcome_trackable_event:"
+                f"{first_trackable_event.to_state.value}"
+            )
+        else:
+            boundary_value = record.first_seen_at
+            boundary_source = "lifecycle_first_seen_at"
+
+    try:
+        boundary_timestamp = normalize_utc_timestamp(
+            boundary_value,
+            field_name="outcome_tracking_boundary",
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid_outcome_tracking_start_boundary:{exc}") from exc
+
+    # Lifecycle timestamps are scan decisions. The most recent candle already
+    # closed at that decision may be the structure/confirmation candle that
+    # created the stored plan, so it is eligible; no earlier candle is.
+    closed_at_boundary = tuple(
+        causal
+        for causal in timeline
+        if causal.close_timestamp <= boundary_timestamp
+    )
+    if closed_at_boundary:
+        tracking_start = closed_at_boundary[-1].open_timestamp
+    else:
+        containing_boundary = tuple(
+            causal
+            for causal in timeline
+            if causal.open_timestamp <= boundary_timestamp < causal.close_timestamp
+        )
+        tracking_start = (
+            containing_boundary[-1].open_timestamp
+            if containing_boundary
+            else None
+        )
+    if tracking_start is None:
+        raise ValueError(
+            "missing_execution_candle_history:"
+            f"tracking_boundary_at={boundary_timestamp.isoformat()} "
+            f"earliest_open={timeline[0].open_timestamp.isoformat()}"
+        )
+    return tracking_start, boundary_timestamp.isoformat(), boundary_source
+
+
+def _with_tracking_start(
+    progress: SetupLifecycleOutcomeProgress,
+    *,
+    tracking_start: datetime,
+    boundary_timestamp: str,
+    boundary_source: str,
+) -> SetupLifecycleOutcomeProgress:
+    metadata = _metadata(progress)
+    metadata.update(
+        {
+            "tracking_boundary_source": boundary_source,
+            "tracking_boundary_timestamp": boundary_timestamp,
+            "tracking_start_at": tracking_start.isoformat(),
+        }
+    )
+    return progress.model_copy(
+        update={
+            "tracking_start_at": tracking_start.isoformat(),
+            "metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        }
+    )
 
 
 
