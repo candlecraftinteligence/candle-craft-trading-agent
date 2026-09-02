@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from app.lifecycle.models import (
+    SetupLifecycleEvent,
     SetupLifecycleRecord,
     SetupLifecycleState,
     SetupTransitionReason,
@@ -148,6 +149,92 @@ def _prime(
     assert result.progress.evaluation_cursor_open_at == BASE.isoformat()
     assert result.progress.entry_at is None
     return result.record, candles, result.progress
+
+
+def test_fresh_progress_evaluates_first_eligible_entry_candle_exactly_once(
+    tmp_path: Path,
+) -> None:
+    with SQLiteSetupLifecycleRepository(tmp_path / "outcomes.db") as repository:
+        record = _record()
+        repository.upsert_record(record)
+
+        result = _evaluate(repository, record, [_entry(0, "long")])
+
+        assert result.processed_candles == 1
+        assert result.progress is not None
+        assert result.progress.tracking_start_at == BASE.isoformat()
+        assert result.progress.evaluation_cursor_open_at == BASE.isoformat()
+        assert result.progress.entry_at == _decision(0)
+        assert result.progress.integrity_status == "Verified"
+        assert result.progress.diagnostic == "N/A"
+        assert result.record.current_state == SetupLifecycleState.MANAGING
+        events = repository.list_events(lifecycle_id=record.lifecycle_id)
+        assert sum(
+            event.reason == SetupTransitionReason.ENTRY_ACTIVATED
+            for event in events
+        ) == 1
+
+
+def test_fresh_no_touch_advances_cursor_and_next_candle_can_activate_entry(
+    tmp_path: Path,
+) -> None:
+    with SQLiteSetupLifecycleRepository(tmp_path / "outcomes.db") as repository:
+        record = _record()
+        repository.upsert_record(record)
+        candles = [_baseline("long")]
+
+        first = _evaluate(repository, record, candles)
+        assert first.processed_candles == 1
+        assert first.progress.entry_at is None
+        assert first.progress.evaluation_cursor_open_at == BASE.isoformat()
+
+        candles.append(_entry(1, "long"))
+        second = _evaluate(repository, first.record, candles)
+        assert second.processed_candles == 1
+        assert second.progress.entry_at == _decision(1)
+        assert second.progress.evaluation_cursor_open_at == (
+            BASE + timedelta(minutes=5)
+        ).isoformat()
+
+
+def test_tracking_boundary_excludes_pre_setup_candle(
+    tmp_path: Path,
+) -> None:
+    boundary = BASE + timedelta(minutes=10)
+    record = _record().model_copy(
+        update={
+            "last_seen_at": boundary.isoformat(),
+            "last_transition_at": boundary.isoformat(),
+        }
+    )
+    candles = [
+        _entry(0, "long"),
+        _candle(1, high="99", low="95"),
+    ]
+    with SQLiteSetupLifecycleRepository(tmp_path / "outcomes.db") as repository:
+        repository.upsert_record(record)
+        repository.insert_event(
+            SetupLifecycleEvent(
+                lifecycle_id=record.lifecycle_id,
+                timestamp=boundary.isoformat(),
+                symbol=record.symbol,
+                from_state=SetupLifecycleState.DISCOVERED,
+                to_state=SetupLifecycleState.WATCHLISTED,
+                reason=SetupTransitionReason.READINESS_IMPROVED,
+            )
+        )
+
+        result = _evaluate(repository, record, candles)
+
+        expected_start = BASE + timedelta(minutes=5)
+        assert result.processed_candles == 1
+        assert result.progress.tracking_start_at == expected_start.isoformat()
+        assert result.progress.evaluation_cursor_open_at == expected_start.isoformat()
+        assert result.progress.entry_at is None
+        assert (
+            json.loads(result.progress.metadata_json)["tracking_boundary_source"]
+            == "lifecycle_outcome_trackable_event:WATCHLISTED"
+        )
 
 
 @pytest.mark.parametrize("direction", ["long", "short"])
@@ -470,6 +557,69 @@ def test_restart_catches_up_all_downtime_candles_in_order(tmp_path: Path) -> Non
         assert result.progress.tp1_at == _decision(2)
         assert result.progress.tp2_at == _decision(3)
         assert result.progress.evaluation_cursor_open_at != baseline.evaluation_cursor_open_at
+
+
+def test_persisted_cursor_never_rewinds_when_history_is_stale(tmp_path: Path) -> None:
+    with SQLiteSetupLifecycleRepository(tmp_path / "outcomes.db") as repository:
+        record, candles, _ = _prime(repository)
+        candles.append(_entry(1, "long"))
+        entered = _evaluate(repository, record, candles)
+        cursor = entered.progress.evaluation_cursor_open_at
+        entry_at = entered.progress.entry_at
+
+        stale = _evaluate(
+            repository,
+            entered.record,
+            [_baseline("long")],
+            decision_index=0,
+        )
+
+        assert stale.processed_candles == 0
+        assert stale.progress.evaluation_cursor_open_at == cursor
+        assert stale.progress.entry_at == entry_at
+        assert stale.progress.integrity_status == "Unverified"
+        assert "stale_execution_candle_history" in stale.progress.diagnostic
+
+
+def test_numeric_presentation_jitter_keeps_one_canonical_progress_row(
+    tmp_path: Path,
+) -> None:
+    with SQLiteSetupLifecycleRepository(tmp_path / "outcomes.db") as repository:
+        record = _record().model_copy(
+            update={
+                "entry_low": "100.0",
+                "entry_high": "102.00",
+                "stop_loss": "90.000",
+                "tp1": "110.0",
+                "tp2": "120.00",
+                "tp3": "130.000",
+            }
+        )
+        repository.upsert_record(record)
+        first = _evaluate(repository, record, [_baseline("long")])
+        first_identity = first.progress.plan_identity
+
+        equivalent = first.record.model_copy(
+            update={
+                "entry_low": "100.0000",
+                "entry_high": "102.0",
+                "stop_loss": "90.0",
+                "tp1": "110.000",
+                "tp2": "120.0",
+                "tp3": "130.00",
+            }
+        )
+        repository.upsert_record(equivalent)
+        second = _evaluate(
+            repository,
+            equivalent,
+            [_baseline("long"), _candle(1, high="99", low="95")],
+        )
+
+        assert canonical_plan_identity(equivalent) == first_identity
+        assert second.progress.plan_identity == first_identity
+        assert second.processed_candles == 1
+        assert len(repository.list_outcome_progress(lifecycle_id=record.lifecycle_id)) == 1
 
 
 def test_new_plan_and_multiple_plans_never_exchange_progress(tmp_path: Path) -> None:

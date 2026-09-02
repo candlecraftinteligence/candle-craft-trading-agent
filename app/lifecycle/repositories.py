@@ -285,15 +285,16 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
             """
             INSERT INTO setup_lifecycle_outcome_progress (
                 lifecycle_id, plan_identity, symbol, mode, direction, execution_timeframe,
-                evaluation_cursor_open_at, evaluation_cursor_close_at, entry_at, tp1_at,
+                tracking_start_at, evaluation_cursor_open_at, evaluation_cursor_close_at, entry_at, tp1_at,
                 tp2_at, tp3_at, stop_at, invalidated_at, outcome_at, terminal_outcome,
                 integrity_status, diagnostic, metadata_json, first_evaluated_at, last_evaluated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lifecycle_id, plan_identity) DO UPDATE SET
                 symbol = excluded.symbol,
                 mode = excluded.mode,
                 direction = excluded.direction,
                 execution_timeframe = excluded.execution_timeframe,
+                tracking_start_at = excluded.tracking_start_at,
                 evaluation_cursor_open_at = excluded.evaluation_cursor_open_at,
                 evaluation_cursor_close_at = excluded.evaluation_cursor_close_at,
                 entry_at = excluded.entry_at,
@@ -382,6 +383,7 @@ def _outcome_progress_params(progress: SetupLifecycleOutcomeProgress) -> tuple[A
         progress.mode,
         progress.direction,
         progress.execution_timeframe,
+        progress.tracking_start_at,
         progress.evaluation_cursor_open_at,
         progress.evaluation_cursor_close_at,
         progress.entry_at,
@@ -408,6 +410,7 @@ def _outcome_progress_from_row(row: sqlite3.Row) -> SetupLifecycleOutcomeProgres
         mode=row["mode"],
         direction=row["direction"],
         execution_timeframe=row["execution_timeframe"],
+        tracking_start_at=row["tracking_start_at"],
         evaluation_cursor_open_at=row["evaluation_cursor_open_at"],
         evaluation_cursor_close_at=row["evaluation_cursor_close_at"],
         entry_at=row["entry_at"],

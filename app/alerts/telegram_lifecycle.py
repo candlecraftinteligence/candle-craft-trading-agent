@@ -65,7 +65,10 @@ from app.lifecycle.models import (
     SetupTransitionReason,
     SetupTransitionResult,
 )
-from app.lifecycle.outcome_policy import canonical_plan_identity, stored_plan_geometry_failure
+from app.lifecycle.outcome_policy import (
+    compatible_plan_identities,
+    stored_plan_geometry_failure,
+)
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
@@ -90,6 +93,7 @@ PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES = frozenset(
     {
         TelegramAlertType.SETUP_TRIGGERED,
         TelegramAlertType.SIGNAL_CONFIRMED,
+        TelegramAlertType.LIMIT_HIT,
         TelegramAlertType.TP1_HIT,
         TelegramAlertType.TP2_HIT,
         TelegramAlertType.TP3_HIT,
@@ -1055,6 +1059,25 @@ class CanonicalPublicOutcomeMatch:
     record: SetupLifecycleRecord
     progress: SetupLifecycleOutcomeProgress
     current_result: ScannerSymbolResult | None = None
+
+
+@dataclass(frozen=True)
+class PublicOutcomeTrackingDiagnostic:
+    public_signal_id: str
+    public_economic_setup_id: str = NA
+    match_status: str = "NO_MATCH"
+    match_reason: str = NA
+    matched_lifecycle_id: str = NA
+    structural_anchor: str = NA
+    plan_identity: str = NA
+    tracking_start_at: str = NA
+    cursor_open_at: str = NA
+    entry_at: str = NA
+    tp1_at: str = NA
+    tp2_at: str = NA
+    tp3_at: str = NA
+    integrity_status: str = NA
+    diagnostic: str = NA
 
 
 @dataclass(frozen=True)
@@ -4540,14 +4563,25 @@ class TelegramLifecycleDeliveryService:
             )
             if match is None:
                 if blocked_reason is not None:
-                    audit_deliveries.append(
-                        _persist_public_outcome_tracking_audit(
-                            repository,
-                            prior_alert,
-                            reason=blocked_reason,
-                            scan_run_id=scan_run_id,
-                        )
+                    missing_tracking_state = blocked_reason.endswith(
+                        (":no_lifecycle_candidates", ":no_canonical_outcome_progress")
                     )
+                    if (
+                        missing_tracking_state
+                        and prior_alert.alert_type != TelegramAlertType.SIGNAL_CONFIRMED.value
+                    ):
+                        # Legacy WATCHLIST roots retain their established
+                        # reconciliation audit path. Avoid a second canonical
+                        # tracking row when no canonical progress exists yet.
+                        continue
+                    audit_delivery = _persist_public_outcome_tracking_audit(
+                        repository,
+                        prior_alert,
+                        reason=blocked_reason,
+                        scan_run_id=scan_run_id,
+                    )
+                    if not missing_tracking_state:
+                        audit_deliveries.append(audit_delivery)
                 continue
             plan_key = _canonical_public_outcome_plan_key(match)
             matches_by_plan.setdefault(plan_key, []).append(match)
@@ -12466,12 +12500,22 @@ def _match_public_tracking_outcome(
     ):
         records.setdefault(record.lifecycle_id, record)
 
-    candidates: list[tuple[CanonicalPublicOutcomeMatch, bool, bool]] = []
+    anchored_record = (
+        records.get(anchored_lifecycle_id)
+        if anchored_lifecycle_id is not None
+        else None
+    )
+    projection_modes = _public_tracking_root_source_modes(
+        prior_alert,
+        alert_repository=alert_repository,
+    )
+    candidates: list[tuple[CanonicalPublicOutcomeMatch, bool, bool, bool]] = []
     progress_seen = False
+    public_plan_match_seen = False
     for record in records.values():
-        progress = lifecycle_repository.get_outcome_progress(
-            lifecycle_id=record.lifecycle_id,
-            plan_identity=canonical_plan_identity(record),
+        progress = _compatible_outcome_progress_for_record(
+            lifecycle_repository,
+            record,
         )
         if progress is None:
             continue
@@ -12495,6 +12539,32 @@ def _match_public_tracking_outcome(
         # outcome projection must also retain the original economic geometry.
         if not plan_matches:
             continue
+        public_plan_match_seen = True
+        observed_current = any(
+            result.lifecycle_state is not None
+            and result.lifecycle_state.lifecycle_id == record.lifecycle_id
+            for result in current_results
+        )
+        mode_projection = False
+        if anchored_lifecycle_id is not None and not identity_exact:
+            record_mode = _status_key(record.mode)
+            anchored_mode = (
+                _status_key(anchored_record.mode)
+                if anchored_record is not None
+                else ""
+            )
+            mode_projection = (
+                len(projection_modes) > 1
+                and record_mode in projection_modes
+                and (not anchored_mode or record_mode != anchored_mode)
+                and _public_tracking_anchor_matches_record(
+                    prior_alert,
+                    record,
+                    alert_repository=alert_repository,
+                )
+            )
+            if not mode_projection:
+                continue
         candidates.append(
             (
                 CanonicalPublicOutcomeMatch(
@@ -12504,44 +12574,43 @@ def _match_public_tracking_outcome(
                     current_result=current_result,
                 ),
                 identity_exact,
-                plan_matches,
+                observed_current,
+                mode_projection,
             )
         )
 
     if not candidates:
-        if anchored_lifecycle_id is not None and progress_seen:
+        if not records:
+            return None, f"{PUBLIC_OUTCOME_TRACKING_NO_MATCH}:no_lifecycle_candidates"
+        if not progress_seen:
+            return None, f"{PUBLIC_OUTCOME_TRACKING_NO_MATCH}:no_canonical_outcome_progress"
+        if not public_plan_match_seen:
+            return None, f"{PUBLIC_OUTCOME_TRACKING_NO_MATCH}:public_economic_identity_mismatch"
+        if anchored_lifecycle_id is not None:
             return None, PUBLIC_OUTCOME_TRACKING_GENERATION_MISMATCH
-        return (
-            None,
-            PUBLIC_OUTCOME_TRACKING_NO_MATCH if progress_seen else None,
-        )
-    exact_candidates = [item for item in candidates if item[1]]
-    if exact_candidates:
-        candidates = exact_candidates
-    elif anchored_lifecycle_id is not None:
-        projection_modes = _public_tracking_root_source_modes(
-            prior_alert,
-            alert_repository=alert_repository,
-        )
-        candidates = [
-            item
-            for item in candidates
-            if len(projection_modes) > 1
-            and _status_key(item[0].record.mode) in projection_modes
-        ]
-        if not candidates:
-            return None, PUBLIC_OUTCOME_TRACKING_GENERATION_MISMATCH
-        if len(candidates) > 1:
+        detail = "no_resolvable_lifecycle_generation"
+        return None, f"{PUBLIC_OUTCOME_TRACKING_NO_MATCH}:{detail}"
+
+    if anchored_lifecycle_id is None:
+        exact_candidates = [item for item in candidates if item[1]]
+        if len(exact_candidates) == 1:
+            return exact_candidates[0][0], None
+        if len(exact_candidates) > 1 or len(candidates) > 1:
             return None, PUBLIC_OUTCOME_TRACKING_AMBIGUOUS
-    elif len(candidates) > 1:
+        return candidates[0][0], None
+
+    observed_candidates = [item for item in candidates if item[2]]
+    if len(observed_candidates) == 1:
+        return observed_candidates[0][0], None
+    if len(observed_candidates) > 1:
         return None, PUBLIC_OUTCOME_TRACKING_AMBIGUOUS
+
     candidates.sort(
         key=lambda item: (
-            item[1],
-            item[2],
+            _strict_outcome_timestamp(item[0].progress.last_evaluated_at)
+            or datetime.min.replace(tzinfo=timezone.utc),
             _canonical_outcome_milestone_count(item[0].progress),
             bool(item[0].record.is_current),
-            item[0].progress.last_evaluated_at,
             item[0].record.lifecycle_id,
         ),
         reverse=True,
@@ -12549,23 +12618,117 @@ def _match_public_tracking_outcome(
     best = candidates[0]
     if len(candidates) > 1:
         best_rank = (
-            best[1],
-            best[2],
+            _strict_outcome_timestamp(best[0].progress.last_evaluated_at),
             _canonical_outcome_milestone_count(best[0].progress),
             bool(best[0].record.is_current),
-            best[0].progress.last_evaluated_at,
         )
         second = candidates[1]
         second_rank = (
-            second[1],
-            second[2],
+            _strict_outcome_timestamp(second[0].progress.last_evaluated_at),
             _canonical_outcome_milestone_count(second[0].progress),
             bool(second[0].record.is_current),
-            second[0].progress.last_evaluated_at,
         )
         if best_rank == second_rank and best[0].record.lifecycle_id != second[0].record.lifecycle_id:
             return None, PUBLIC_OUTCOME_TRACKING_AMBIGUOUS
     return best[0], None
+
+
+def _compatible_outcome_progress_for_record(
+    repository: SQLiteSetupLifecycleRepository,
+    record: SetupLifecycleRecord,
+) -> SetupLifecycleOutcomeProgress | None:
+    return next(
+        (
+            progress
+            for identity in compatible_plan_identities(record)
+            if (
+                progress := repository.get_outcome_progress(
+                    lifecycle_id=record.lifecycle_id,
+                    plan_identity=identity,
+                )
+            )
+            is not None
+        ),
+        None,
+    )
+
+
+def public_outcome_tracking_diagnostics(
+    *,
+    alert_repository: SQLiteTelegramAlertAttemptRepository,
+    lifecycle_repository: SQLiteSetupLifecycleRepository,
+    current_results: Sequence[ScannerSymbolResult] = (),
+) -> tuple[PublicOutcomeTrackingDiagnostic, ...]:
+    """Return compact, read-only linkage diagnostics for public signal roots."""
+
+    diagnostics: list[PublicOutcomeTrackingDiagnostic] = []
+    for prior_alert in alert_repository.list_publicly_tracked_signals():
+        match, reason = _match_public_tracking_outcome(
+            prior_alert,
+            alert_repository=alert_repository,
+            lifecycle_repository=lifecycle_repository,
+            current_results=current_results,
+        )
+        if match is None:
+            diagnostics.append(
+                PublicOutcomeTrackingDiagnostic(
+                    public_signal_id=prior_alert.signal_id,
+                    public_economic_setup_id=_text(
+                        prior_alert.public_watchlist_plan_id
+                    ),
+                    match_status=(
+                        "AMBIGUOUS"
+                        if reason == PUBLIC_OUTCOME_TRACKING_AMBIGUOUS
+                        else "NO_MATCH"
+                    ),
+                    match_reason=_text(reason),
+                    diagnostic=_text(reason),
+                )
+            )
+            continue
+        progress = match.progress
+        diagnostics.append(
+            PublicOutcomeTrackingDiagnostic(
+                public_signal_id=prior_alert.signal_id,
+                public_economic_setup_id=_text(
+                    prior_alert.public_watchlist_plan_id
+                ),
+                match_status="MATCHED",
+                matched_lifecycle_id=match.record.lifecycle_id,
+                structural_anchor=_text(match.record.structural_anchor),
+                plan_identity=progress.plan_identity,
+                tracking_start_at=_text(progress.tracking_start_at),
+                cursor_open_at=_text(progress.evaluation_cursor_open_at),
+                entry_at=_text(progress.entry_at),
+                tp1_at=_text(progress.tp1_at),
+                tp2_at=_text(progress.tp2_at),
+                tp3_at=_text(progress.tp3_at),
+                integrity_status=_text(progress.integrity_status),
+                diagnostic=_text(progress.diagnostic),
+            )
+        )
+    return tuple(diagnostics)
+
+
+def _public_tracking_anchor_matches_record(
+    prior_alert: TelegramAlertAttemptRecord,
+    record: SetupLifecycleRecord,
+    *,
+    alert_repository: SQLiteTelegramAlertAttemptRepository,
+) -> bool:
+    event = _get_public_alert_event(
+        alert_repository,
+        event_key=prior_alert.public_watchlist_event_key,
+    )
+    if event is None:
+        return False
+    event = _public_alert_event_with_resolved_structural_anchor(
+        alert_repository,
+        event,
+    )
+    event_anchor = _text(event.structural_anchor)
+    record_anchor = _text(record.structural_anchor)
+    return event_anchor != NA and event_anchor == record_anchor
 
 
 def _setup_delivery_lifecycle_id(signal_id: Any) -> str | None:
@@ -12683,7 +12846,13 @@ def _preferred_canonical_public_outcome_match(
 def _canonical_outcome_milestone_count(progress: SetupLifecycleOutcomeProgress) -> int:
     return sum(
         value is not None
-        for value in (progress.tp1_at, progress.tp2_at, progress.tp3_at, progress.stop_at)
+        for value in (
+            progress.entry_at,
+            progress.tp1_at,
+            progress.tp2_at,
+            progress.tp3_at,
+            progress.stop_at,
+        )
     )
 
 
@@ -12695,8 +12864,7 @@ def _canonical_public_outcome_blockers(
     geometry_failure = stored_plan_geometry_failure(match.record)
     if geometry_failure is not None:
         blockers.append(f"canonical_outcome_invalid_stored_geometry:{geometry_failure}")
-    expected_plan_identity = canonical_plan_identity(match.record)
-    if progress.plan_identity != expected_plan_identity:
+    if progress.plan_identity not in compatible_plan_identities(match.record):
         blockers.append("canonical_outcome_plan_identity_mismatch")
     if _status_key(progress.integrity_status) != "verified":
         blockers.append(
@@ -12740,6 +12908,7 @@ def _canonical_public_outcome_sequence(
     )
     milestones: list[tuple[TelegramAlertType, str]] = []
     for alert_type, reached_at in (
+        (TelegramAlertType.LIMIT_HIT, progress.entry_at),
         (TelegramAlertType.TP1_HIT, progress.tp1_at),
         (TelegramAlertType.TP2_HIT, progress.tp2_at),
         (TelegramAlertType.TP3_HIT, progress.tp3_at),
@@ -12785,6 +12954,14 @@ def _canonical_public_outcome_deliveries(
                 & {TelegramAlertType.TP2_HIT, TelegramAlertType.TP3_HIT}
             )
         return alert_type in successful
+
+    if TelegramAlertType.LIMIT_HIT in reached and not satisfied(TelegramAlertType.LIMIT_HIT):
+        deliveries.append(
+            CanonicalPublicOutcomeDelivery(
+                alert_type=TelegramAlertType.LIMIT_HIT,
+                reached_at=reached[TelegramAlertType.LIMIT_HIT],
+            )
+        )
 
     if TelegramAlertType.TP3_HIT in reached and not satisfied(TelegramAlertType.TP3_HIT):
         lower_missing = not (
@@ -12854,7 +13031,7 @@ def _successful_canonical_public_outcome_types(
         except ValueError:
             continue
 
-    for alert_type in TP_SL_ALERT_TYPES:
+    for alert_type in {TelegramAlertType.LIMIT_HIT, *TP_SL_ALERT_TYPES}:
         attempt = repository.get_attempt(
             signal_id=match.prior_alert.signal_id,
             alert_type=alert_type,
@@ -14313,6 +14490,7 @@ __all__ = [
     "CONFIRMED_SIGNAL_RR_PENDING",
     "REGIME_MARKET_CONDITION_PENDING",
     "TIMING_CONFIRMATION_PENDING",
+    "PublicOutcomeTrackingDiagnostic",
     "ResearchWatchCandidate",
     "SQLiteTelegramAlertAttemptRepository",
     "TelegramAlertDecision",
@@ -14326,6 +14504,7 @@ __all__ = [
     "is_public_lifecycle_event",
     "reserve_public_watchlist_event",
     "normalize_failed_gate_code",
+    "public_outcome_tracking_diagnostics",
     "telegram_alert_decision_for_symbol",
     "telegram_signal_message_from_symbol",
 ]
