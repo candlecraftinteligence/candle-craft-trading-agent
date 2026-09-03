@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -675,10 +675,15 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 scan_run_id TEXT,
                 attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
                 setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                canonical_setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                effective_min_setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+                quality_grade TEXT NOT NULL DEFAULT 'N/A',
+                min_quality_grade TEXT NOT NULL DEFAULT 'N/A',
                 rr_planned TEXT NOT NULL DEFAULT 'N/A',
                 min_rr TEXT NOT NULL DEFAULT 'N/A',
                 opportunity_score TEXT NOT NULL DEFAULT 'N/A',
                 min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+                min_opportunity_score TEXT NOT NULL DEFAULT 'N/A',
                 technical_score TEXT NOT NULL DEFAULT 'N/A',
                 price_level TEXT NOT NULL DEFAULT 'N/A',
                 entry_low TEXT NOT NULL DEFAULT 'N/A',
@@ -939,6 +944,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "attempted_at", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "attempted_alert_type", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "setup_quality_score", "TEXT NOT NULL DEFAULT 'N/A'")
+        if existing_version < 20:
+            _migrate_public_signal_truth_audit_v20(connection)
         _ensure_column(connection, "telegram_alert_attempts", "rr_planned", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "min_rr", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "opportunity_score", "TEXT NOT NULL DEFAULT 'N/A'")
@@ -1057,6 +1064,24 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
     }
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_public_signal_truth_audit_v20(connection: sqlite3.Connection) -> None:
+    """Add the persisted public-quality audit contract without rewriting rows."""
+
+    for column in (
+        "canonical_setup_quality_score",
+        "effective_min_setup_quality_score",
+        "quality_grade",
+        "min_quality_grade",
+        "min_opportunity_score",
+    ):
+        _ensure_column(
+            connection,
+            "telegram_alert_attempts",
+            column,
+            "TEXT NOT NULL DEFAULT 'N/A'",
+        )
 
 
 def _migrate_outcome_tracking_start_v19(connection: sqlite3.Connection) -> None:
@@ -1381,10 +1406,15 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
             scan_run_id TEXT,
             attempted_alert_type TEXT NOT NULL DEFAULT 'N/A',
             setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+            canonical_setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+            effective_min_setup_quality_score TEXT NOT NULL DEFAULT 'N/A',
+            quality_grade TEXT NOT NULL DEFAULT 'N/A',
+            min_quality_grade TEXT NOT NULL DEFAULT 'N/A',
             rr_planned TEXT NOT NULL DEFAULT 'N/A',
             min_rr TEXT NOT NULL DEFAULT 'N/A',
             opportunity_score TEXT NOT NULL DEFAULT 'N/A',
             min_score_for_idea TEXT NOT NULL DEFAULT 'N/A',
+            min_opportunity_score TEXT NOT NULL DEFAULT 'N/A',
             technical_score TEXT NOT NULL DEFAULT 'N/A',
             price_level TEXT NOT NULL DEFAULT 'N/A',
             entry_low TEXT NOT NULL DEFAULT 'N/A',
@@ -1429,10 +1459,15 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
         "scan_run_id",
         "attempted_alert_type",
         "setup_quality_score",
+        "canonical_setup_quality_score",
+        "effective_min_setup_quality_score",
+        "quality_grade",
+        "min_quality_grade",
         "rr_planned",
         "min_rr",
         "opportunity_score",
         "min_score_for_idea",
+        "min_opportunity_score",
         "technical_score",
         "price_level",
         "entry_low",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.data.candle_integrity import (
@@ -64,6 +64,8 @@ TERMINAL_OUTCOME_STATES = frozenset(
 INTEGRITY_VERIFIED = "Verified"
 INTEGRITY_UNVERIFIED = "Unverified"
 INTEGRITY_FAILED = "Failed"
+ENTRY_CAUSALITY_CONTRACT = "fully_post_boundary_closed_candle_v1"
+ENTRY_EVIDENCE_TYPE = "fully_post_boundary_closed_execution_candle_range"
 
 
 
@@ -194,17 +196,108 @@ def evaluate_closed_candle_outcomes(
         repository.upsert_outcome_progress(progress)
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
+    if (
+        progress.entry_at is None
+        and _metadata(progress).get("entry_causality_contract") != ENTRY_CAUSALITY_CONTRACT
+    ):
+        try:
+            (
+                boundary_timestamp,
+                boundary_source,
+            ) = _entry_tracking_boundary(
+                record,
+                progress=progress,
+                evaluated_at=evaluated_at,
+                repository=repository,
+                compatible_identities=plan_identities,
+            )
+            duration = timeframe_duration(normalized_timeframe)
+            if progress.evaluation_cursor_open_at is None:
+                earliest_open = window.timeline[0].open_timestamp
+                if boundary_timestamp < earliest_open:
+                    raise ValueError(
+                        "missing_execution_candle_history:"
+                        f"tracking_boundary_at={boundary_timestamp.isoformat()} "
+                        f"earliest_open={earliest_open.isoformat()}"
+                    )
+                first_fully_post_boundary = _first_fully_post_boundary_open(
+                    boundary_timestamp,
+                    timeline=window.timeline,
+                    duration=duration,
+                )
+                tracking_start = first_fully_post_boundary
+            else:
+                cursor_open = normalize_utc_timestamp(
+                    progress.evaluation_cursor_open_at,
+                    field_name="evaluation_cursor_open_at",
+                )
+                first_fully_post_boundary = _first_aligned_open_at_or_after(
+                    boundary_timestamp,
+                    anchor=cursor_open,
+                    duration=duration,
+                )
+                tracking_start = max(
+                    cursor_open + duration,
+                    first_fully_post_boundary,
+                )
+            if first_fully_post_boundary == boundary_timestamp:
+                boundary_eligibility = "boundary_exactly_at_candle_open"
+                boundary_diagnostic = NA
+            else:
+                boundary_eligibility = "partially_overlapping_boundary"
+                boundary_diagnostic = "partial_boundary_candle_not_entry_eligible"
+        except ValueError as exc:
+            progress = _integrity_failure(
+                progress,
+                status=INTEGRITY_UNVERIFIED,
+                diagnostic=str(exc),
+                evaluated_at=evaluated_at,
+            )
+            repository.upsert_outcome_progress(progress)
+            return LifecycleOutcomeEvaluation(record=record, progress=progress)
+        progress = _with_tracking_start(
+            progress,
+            tracking_start=tracking_start,
+            boundary_timestamp=boundary_timestamp.isoformat(),
+            boundary_source=boundary_source,
+            boundary_eligibility=boundary_eligibility,
+            boundary_diagnostic=boundary_diagnostic,
+        )
+        metadata = _metadata(progress)
+        metadata.update(
+            {
+                "entry_causality_migration": "legacy_unfilled_cursor_adopted_prospectively",
+                "entry_causality_prospective_start_at": tracking_start.isoformat(),
+            }
+        )
+        if progress.evaluation_cursor_open_at is not None:
+            metadata["legacy_evaluation_cursor_open_at_preserved"] = (
+                progress.evaluation_cursor_open_at
+            )
+        progress = progress.model_copy(
+            update={
+                "metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+            }
+        )
+
     fresh_cursor = progress.evaluation_cursor_open_at is None
     if progress.tracking_start_at is None:
         if fresh_cursor:
             try:
-                tracking_start, boundary_timestamp, boundary_source = _tracking_start_boundary(
+                (
+                    tracking_start,
+                    boundary_timestamp,
+                    boundary_source,
+                    boundary_eligibility,
+                    boundary_diagnostic,
+                ) = _tracking_start_boundary(
                     record,
                     progress=progress,
                     timeline=window.timeline,
                     evaluated_at=evaluated_at,
                     repository=repository,
                     compatible_identities=plan_identities,
+                    execution_timeframe=normalized_timeframe,
                 )
             except ValueError as exc:
                 progress = _integrity_failure(
@@ -220,6 +313,8 @@ def evaluate_closed_candle_outcomes(
                 tracking_start=tracking_start,
                 boundary_timestamp=boundary_timestamp,
                 boundary_source=boundary_source,
+                boundary_eligibility=boundary_eligibility,
+                boundary_diagnostic=boundary_diagnostic,
             )
         else:
             try:
@@ -241,6 +336,8 @@ def evaluate_closed_candle_outcomes(
                 tracking_start=existing_cursor,
                 boundary_timestamp=progress.evaluation_cursor_open_at,
                 boundary_source="existing_cursor_v19_backfill",
+                boundary_eligibility="legacy_entry_already_persisted",
+                boundary_diagnostic=NA,
             )
 
     try:
@@ -293,15 +390,35 @@ def evaluate_closed_candle_outcomes(
             )
             repository.upsert_outcome_progress(progress)
             return LifecycleOutcomeEvaluation(record=record, progress=progress)
-        expected_open = cursor_open + timeframe_duration(normalized_timeframe)
+        expected_open = max(
+            cursor_open + timeframe_duration(normalized_timeframe),
+            tracking_start,
+        )
         pending = tuple(
             (causal, high, low)
             for causal, (high, low) in zip(window.timeline, candle_ranges, strict=True)
-            if causal.open_timestamp > cursor_open
+            if causal.open_timestamp >= expected_open
         )
 
     if not pending:
         if fresh_cursor:
+            if latest_open < tracking_start:
+                metadata = _metadata(progress)
+                waiting_diagnostic = str(
+                    metadata.get(
+                        "boundary_diagnostic",
+                        "awaiting_first_fully_post_boundary_candle",
+                    )
+                )
+                progress = progress.model_copy(
+                    update={
+                        "integrity_status": INTEGRITY_VERIFIED,
+                        "diagnostic": waiting_diagnostic,
+                        "last_evaluated_at": evaluated_at,
+                    }
+                )
+                repository.upsert_outcome_progress(progress)
+                return LifecycleOutcomeEvaluation(record=record, progress=progress)
             progress = _integrity_failure(
                 progress,
                 status=INTEGRITY_UNVERIFIED,
@@ -347,7 +464,22 @@ def evaluate_closed_candle_outcomes(
         candle_close = causal.close_timestamp.isoformat()
         if progress.entry_at is None:
             if _entry_touched(high, low, geometry):
-                progress = progress.model_copy(update={"entry_at": candle_close})
+                evidence = _entry_evidence(
+                    current_record,
+                    progress=progress,
+                    causal=causal,
+                    candle_high=high,
+                    candle_low=low,
+                    entry_low=geometry.entry_low,
+                    entry_high=geometry.entry_high,
+                    entry_at=candle_close,
+                    evaluated_at=evaluated_at,
+                )
+                progress = _with_entry_evidence(
+                    progress,
+                    entry_at=candle_close,
+                    evidence=evidence,
+                )
                 _insert_milestone_event(
                     repository,
                     current_record,
@@ -358,6 +490,7 @@ def evaluate_closed_candle_outcomes(
                     scan_run_id=scan_run_id,
                     plan_identity=plan_identity,
                     level=f"{geometry.entry_low}:{geometry.entry_high}",
+                    evidence=evidence,
                 )
                 current_record, entry_transition, entry_transitions = _advance_to_managing(
                     current_record,
@@ -500,6 +633,7 @@ def _new_progress(
         metadata_json=json.dumps(
             {
                 "ambiguity_policy": "conservative_stop_wins",
+                "entry_causality_contract": ENTRY_CAUSALITY_CONTRACT,
                 "plan_identity": plan_identity,
                 "processed_candle_count": 0,
                 "source": "canonical_lifecycle_closed_execution_candles",
@@ -539,6 +673,64 @@ def _terminal_progress_for_record(
     return progress.model_copy(update=updates)
 
 
+def _entry_tracking_boundary(
+    record: SetupLifecycleRecord,
+    *,
+    progress: SetupLifecycleOutcomeProgress,
+    evaluated_at: str,
+    repository: SQLiteSetupLifecycleRepository,
+    compatible_identities: Sequence[str],
+) -> tuple[datetime, str]:
+    confirmation_value = record.confirmed_at
+    confirmation_source = "lifecycle_confirmed_at"
+    if not confirmation_value or _text(confirmation_value) == NA:
+        confirmed_event = next(
+            (
+                event
+                for event in repository.list_events(lifecycle_id=record.lifecycle_id)
+                if event.to_state == SetupLifecycleState.CONFIRMED
+            ),
+            None,
+        )
+        if confirmed_event is None:
+            raise ValueError("missing_entry_tracking_confirmation_boundary")
+        confirmation_value = confirmed_event.timestamp
+        confirmation_source = "lifecycle_confirmed_event"
+    try:
+        confirmation_timestamp = normalize_utc_timestamp(
+            confirmation_value,
+            field_name="entry_tracking_confirmation_boundary",
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid_entry_tracking_confirmation_boundary:{exc}") from exc
+
+    compatible_identity_set = set(compatible_identities)
+    historical_plans = tuple(
+        item
+        for item in repository.list_outcome_progress(lifecycle_id=record.lifecycle_id)
+        if item.plan_identity not in compatible_identity_set
+    )
+    if historical_plans:
+        material_plan_value = progress.first_evaluated_at or evaluated_at
+        try:
+            material_plan_timestamp = normalize_utc_timestamp(
+                material_plan_value,
+                field_name="material_plan_first_evaluated_at",
+            )
+        except ValueError as exc:
+            raise ValueError(f"invalid_material_plan_tracking_boundary:{exc}") from exc
+        if material_plan_timestamp > confirmation_timestamp:
+            boundary_timestamp = material_plan_timestamp
+            boundary_source = "material_plan_first_evaluated_at_after_confirmation"
+        else:
+            boundary_timestamp = confirmation_timestamp
+            boundary_source = confirmation_source
+    else:
+        boundary_timestamp = confirmation_timestamp
+        boundary_source = confirmation_source
+    return boundary_timestamp, boundary_source
+
+
 def _tracking_start_boundary(
     record: SetupLifecycleRecord,
     *,
@@ -547,71 +739,75 @@ def _tracking_start_boundary(
     evaluated_at: str,
     repository: SQLiteSetupLifecycleRepository,
     compatible_identities: Sequence[str],
-) -> tuple[datetime, str, str]:
-    compatible_identity_set = set(compatible_identities)
-    historical_plans = tuple(
-        item
-        for item in repository.list_outcome_progress(lifecycle_id=record.lifecycle_id)
-        if item.plan_identity not in compatible_identity_set
+    execution_timeframe: str,
+) -> tuple[datetime, str, str, str, str]:
+    boundary_timestamp, boundary_source = _entry_tracking_boundary(
+        record,
+        progress=progress,
+        evaluated_at=evaluated_at,
+        repository=repository,
+        compatible_identities=compatible_identities,
     )
-    if historical_plans:
-        boundary_value = progress.first_evaluated_at or evaluated_at
-        boundary_source = "material_plan_first_evaluated_at"
-    else:
-        first_trackable_event = next(
-            (
-                event
-                for event in repository.list_events(lifecycle_id=record.lifecycle_id)
-                if event.to_state in OUTCOME_ELIGIBLE_STATES
-            ),
-            None,
-        )
-        if first_trackable_event is not None:
-            boundary_value = first_trackable_event.timestamp
-            boundary_source = (
-                "lifecycle_outcome_trackable_event:"
-                f"{first_trackable_event.to_state.value}"
-            )
-        else:
-            boundary_value = record.first_seen_at
-            boundary_source = "lifecycle_first_seen_at"
 
-    try:
-        boundary_timestamp = normalize_utc_timestamp(
-            boundary_value,
-            field_name="outcome_tracking_boundary",
-        )
-    except ValueError as exc:
-        raise ValueError(f"invalid_outcome_tracking_start_boundary:{exc}") from exc
-
-    # Lifecycle timestamps are scan decisions. The most recent candle already
-    # closed at that decision may be the structure/confirmation candle that
-    # created the stored plan, so it is eligible; no earlier candle is.
-    closed_at_boundary = tuple(
-        causal
-        for causal in timeline
-        if causal.close_timestamp <= boundary_timestamp
-    )
-    if closed_at_boundary:
-        tracking_start = closed_at_boundary[-1].open_timestamp
-    else:
-        containing_boundary = tuple(
-            causal
-            for causal in timeline
-            if causal.open_timestamp <= boundary_timestamp < causal.close_timestamp
-        )
-        tracking_start = (
-            containing_boundary[-1].open_timestamp
-            if containing_boundary
-            else None
-        )
-    if tracking_start is None:
+    earliest_open = timeline[0].open_timestamp
+    if boundary_timestamp < earliest_open:
         raise ValueError(
             "missing_execution_candle_history:"
             f"tracking_boundary_at={boundary_timestamp.isoformat()} "
-            f"earliest_open={timeline[0].open_timestamp.isoformat()}"
+            f"earliest_open={earliest_open.isoformat()}"
         )
-    return tracking_start, boundary_timestamp.isoformat(), boundary_source
+    duration = timeframe_duration(execution_timeframe)
+    tracking_start = _first_fully_post_boundary_open(
+        boundary_timestamp,
+        timeline=timeline,
+        duration=duration,
+    )
+    if boundary_timestamp >= timeline[0].open_timestamp and tracking_start > boundary_timestamp:
+        boundary_eligibility = "partially_overlapping_boundary"
+        boundary_diagnostic = "partial_boundary_candle_not_entry_eligible"
+    elif tracking_start == boundary_timestamp:
+        boundary_eligibility = "boundary_exactly_at_candle_open"
+        boundary_diagnostic = NA
+    else:
+        boundary_eligibility = "fully_post_boundary_history_start"
+        boundary_diagnostic = NA
+    return (
+        tracking_start,
+        boundary_timestamp.isoformat(),
+        boundary_source,
+        boundary_eligibility,
+        boundary_diagnostic,
+    )
+
+
+def _first_fully_post_boundary_open(
+    boundary_timestamp: datetime,
+    *,
+    timeline: Sequence[CausalCandle],
+    duration: timedelta,
+) -> datetime:
+    earliest_open = timeline[0].open_timestamp
+    if boundary_timestamp <= earliest_open:
+        return earliest_open
+    elapsed = boundary_timestamp - earliest_open
+    periods = elapsed // duration
+    candidate = earliest_open + (duration * periods)
+    if candidate < boundary_timestamp:
+        candidate += duration
+    return candidate
+
+
+def _first_aligned_open_at_or_after(
+    boundary_timestamp: datetime,
+    *,
+    anchor: datetime,
+    duration: timedelta,
+) -> datetime:
+    periods = (boundary_timestamp - anchor) // duration
+    candidate = anchor + (duration * periods)
+    if candidate < boundary_timestamp:
+        candidate += duration
+    return candidate
 
 
 def _with_tracking_start(
@@ -620,12 +816,17 @@ def _with_tracking_start(
     tracking_start: datetime,
     boundary_timestamp: str,
     boundary_source: str,
+    boundary_eligibility: str,
+    boundary_diagnostic: str,
 ) -> SetupLifecycleOutcomeProgress:
     metadata = _metadata(progress)
     metadata.update(
         {
             "tracking_boundary_source": boundary_source,
             "tracking_boundary_timestamp": boundary_timestamp,
+            "boundary_candle_eligibility_decision": boundary_eligibility,
+            "boundary_diagnostic": boundary_diagnostic,
+            "entry_causality_contract": ENTRY_CAUSALITY_CONTRACT,
             "tracking_start_at": tracking_start.isoformat(),
         }
     )
@@ -659,6 +860,56 @@ def _with_cursor(
             "diagnostic": diagnostic,
             "metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
             "last_evaluated_at": evaluated_at,
+        }
+    )
+
+
+def _entry_evidence(
+    record: SetupLifecycleRecord,
+    *,
+    progress: SetupLifecycleOutcomeProgress,
+    causal: CausalCandle,
+    candle_high: Any,
+    candle_low: Any,
+    entry_low: Any,
+    entry_high: Any,
+    entry_at: str,
+    evaluated_at: str,
+) -> dict[str, str]:
+    metadata = _metadata(progress)
+    return {
+        "lifecycle_id": record.lifecycle_id,
+        "symbol": record.symbol,
+        "direction": record.direction,
+        "entry_low": _text(entry_low),
+        "entry_high": _text(entry_high),
+        "tracking_boundary_timestamp": _text(
+            metadata.get("tracking_boundary_timestamp")
+        ),
+        "tracking_boundary_source": _text(metadata.get("tracking_boundary_source")),
+        "causal_candle_open": causal.open_timestamp.isoformat(),
+        "causal_candle_close": causal.close_timestamp.isoformat(),
+        "candle_high": _text(candle_high),
+        "candle_low": _text(candle_low),
+        "entry_evidence_type": ENTRY_EVIDENCE_TYPE,
+        "entry_evidence_eligibility_decision": "fully_post_boundary",
+        "entry_at": entry_at,
+        "evaluated_at": evaluated_at,
+    }
+
+
+def _with_entry_evidence(
+    progress: SetupLifecycleOutcomeProgress,
+    *,
+    entry_at: str,
+    evidence: Mapping[str, Any],
+) -> SetupLifecycleOutcomeProgress:
+    metadata = _metadata(progress)
+    metadata.update({str(key): value for key, value in evidence.items()})
+    return progress.model_copy(
+        update={
+            "entry_at": entry_at,
+            "metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
         }
     )
 

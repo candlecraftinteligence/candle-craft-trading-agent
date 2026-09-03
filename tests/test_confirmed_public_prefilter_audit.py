@@ -34,8 +34,8 @@ from test_triggered_confirmed_telegram_delivery import (
 def _confirmed_candidate(case: str):
     kwargs: dict[str, object] = {
         "setup_quality": _setup_quality_with_grade(
-            SetupQualityGrade.B_PLUS,
-            quality_score=78,
+            SetupQualityGrade.A,
+            quality_score=89,
         )
     }
     if case == "rr":
@@ -51,7 +51,10 @@ def _confirmed_candidate(case: str):
     elif case == "technical":
         kwargs["technical_score"] = Decimal("49")
     elif case == "opportunity":
-        kwargs["trade_idea"] = _trade_idea(opportunity_score=Decimal("79"))
+        kwargs.update(
+            opportunity_score=Decimal("79"),
+            trade_idea=_trade_idea(opportunity_score=Decimal("79")),
+        )
     elif case != "eligible":
         raise AssertionError(f"Unknown fixture case: {case}")
     return _symbol(
@@ -401,7 +404,7 @@ def test_required_missing_blocks_otherwise_excellent_confirmed_candidate(
         ("rr", "planned_rr_below_min:2.9<3", "rr_below_min"),
         ("grade", "confirmed_grade_below_min", "confirmed_grade_below_min"),
         ("technical", "technical_score_below_min:49<50", "technical_score_below_min"),
-        ("opportunity", "opportunity_score_below_min:79<80", "opportunity_score_below_min"),
+        ("opportunity", "opportunity_score_below_min:79<88", "opportunity_score_below_min"),
     ),
 )
 def test_ineligible_confirmed_candidate_persists_exact_prefilter_reason(

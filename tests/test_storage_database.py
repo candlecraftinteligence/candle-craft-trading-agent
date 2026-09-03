@@ -44,7 +44,9 @@ from app.storage.database import (
     SCHEMA_VERSION,
     DatabaseMissingError,
     StorageError,
+    identify_schema_version,
     open_initialized_database,
+    open_read_only_database,
 )
 from app.storage.maintenance import create_verified_backup, verify_backup
 from app.storage.models import WatchIterationMetadata
@@ -415,7 +417,176 @@ def test_schema_v19_backfills_existing_cursor_without_rewind_or_milestone_loss(
         progress.entry_at,
         progress.tp1_at,
     )
-    assert version == SCHEMA_VERSION == 19
+    assert version == SCHEMA_VERSION == 20
+
+
+def _create_schema_v19_public_truth_fixture(db_path: Path) -> None:
+    connection = open_initialized_database(db_path)
+    try:
+        connection.executescript(
+            """
+            INSERT INTO setup_lifecycle_records (
+                lifecycle_id, symbol, mode, direction, current_state,
+                first_seen_at, last_seen_at, last_transition_at,
+                quality_score, opportunity_score, quality_grade_current,
+                entry_low, entry_high, stop_loss, tp1, tp2, tp3, rr,
+                confirmed_at
+            ) VALUES (
+                'v19-life', 'BTCUSDT', 'swing', 'long', 'CONFIRMED',
+                '2026-09-02T14:00:00+00:00',
+                '2026-09-02T14:07:00+00:00',
+                '2026-09-02T14:07:00+00:00',
+                89, '95', 'A', '100', '102', '95', '108', '112', '116', '4',
+                '2026-09-02T14:07:00+00:00'
+            );
+            INSERT INTO setup_lifecycle_events (
+                lifecycle_id, timestamp, symbol, to_state, reason, notes
+            ) VALUES (
+                'v19-life', '2026-09-02T14:07:00+00:00', 'BTCUSDT',
+                'CONFIRMED', 'CONFIRMATION_CYCLES_MET', 'v19-event-note'
+            );
+            INSERT INTO setup_lifecycle_outcome_progress (
+                lifecycle_id, plan_identity, symbol, mode, direction,
+                execution_timeframe, tracking_start_at,
+                evaluation_cursor_open_at, evaluation_cursor_close_at,
+                integrity_status, metadata_json, first_evaluated_at,
+                last_evaluated_at
+            ) VALUES (
+                'v19-life', 'v19-plan', 'BTCUSDT', 'swing', 'long', '15m',
+                '2026-09-02T14:15:00+00:00',
+                '2026-09-02T15:15:00+00:00',
+                '2026-09-02T15:30:00+00:00',
+                'Verified', '{"source":"v19"}',
+                '2026-09-02T14:15:00+00:00',
+                '2026-09-02T15:30:00+00:00'
+            );
+            INSERT INTO telegram_alert_attempts (
+                signal_id, symbol, direction, new_state, alert_type,
+                lifecycle_state, telegram_status, message_hash,
+                setup_quality_score, opportunity_score, rr_planned,
+                delivery_state
+            ) VALUES (
+                'v19-signal', 'BTCUSDT', 'long', 'CONFIRMED',
+                'SIGNAL_CONFIRMED', 'CONFIRMED', 'sent', 'v19-message-hash',
+                '89', '95', '4', 'SENT'
+            );
+            INSERT INTO public_alert_events (
+                canonical_plan_id, event_type, event_key, symbol, side, status,
+                payload_text
+            ) VALUES (
+                'v19-plan', 'signal_confirmed', 'v19-plan|signal_confirmed',
+                'BTCUSDT', 'long', 'SENT', 'v19-public-payload'
+            );
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with sqlite3.connect(db_path) as connection:
+        for column in (
+            "canonical_setup_quality_score",
+            "effective_min_setup_quality_score",
+            "quality_grade",
+            "min_quality_grade",
+            "min_opportunity_score",
+        ):
+            connection.execute(
+                f"ALTER TABLE telegram_alert_attempts DROP COLUMN {column}"
+            )
+        connection.execute("PRAGMA user_version = 19")
+        connection.commit()
+
+
+def _v19_public_truth_rows(db_path: Path) -> dict[str, list[tuple[object, ...]]]:
+    tables = (
+        "setup_lifecycle_records",
+        "setup_lifecycle_events",
+        "setup_lifecycle_outcome_progress",
+        "telegram_alert_attempts",
+        "public_alert_events",
+    )
+    v20_columns = {
+        "canonical_setup_quality_score",
+        "effective_min_setup_quality_score",
+        "quality_grade",
+        "min_quality_grade",
+        "min_opportunity_score",
+    }
+    with sqlite3.connect(db_path) as connection:
+        rows: dict[str, list[tuple[object, ...]]] = {}
+        for table in tables:
+            columns = [
+                str(row[1])
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+                if table != "telegram_alert_attempts" or str(row[1]) not in v20_columns
+            ]
+            column_list = ", ".join(f'"{column}"' for column in columns)
+            rows[table] = connection.execute(
+                f'SELECT {column_list} FROM "{table}" ORDER BY id'
+                if "id" in columns
+                else f'SELECT {column_list} FROM "{table}" ORDER BY 1'
+            ).fetchall()
+        return rows
+
+
+def test_schema_v19_to_v20_adds_public_truth_audit_columns_idempotently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.storage.database as database_module
+
+    db_path = tmp_path / "v19-public-truth.db"
+    _create_schema_v19_public_truth_fixture(db_path)
+    before = _v19_public_truth_rows(db_path)
+
+    with open_initialized_database(db_path):
+        pass
+
+    expected_columns = {
+        "canonical_setup_quality_score",
+        "effective_min_setup_quality_score",
+        "quality_grade",
+        "min_quality_grade",
+        "min_opportunity_score",
+    }
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(telegram_alert_attempts)"
+            ).fetchall()
+        }
+        audit_defaults = connection.execute(
+            """
+            SELECT canonical_setup_quality_score,
+                   effective_min_setup_quality_score,
+                   quality_grade, min_quality_grade, min_opportunity_score
+            FROM telegram_alert_attempts WHERE signal_id = 'v19-signal'
+            """
+        ).fetchone()
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert identify_schema_version(connection) == 20 == SCHEMA_VERSION
+
+    assert expected_columns <= columns
+    assert audit_defaults == ("N/A", "N/A", "N/A", "N/A", "N/A")
+    assert _v19_public_truth_rows(db_path) == before
+
+    with open_read_only_database(db_path) as connection:
+        assert identify_schema_version(connection) == 20
+
+    def unexpected_repeat_migration(connection: sqlite3.Connection) -> None:
+        del connection
+        raise AssertionError("v20 reopen attempted the v19-to-v20 migration")
+
+    monkeypatch.setattr(
+        database_module,
+        "_migrate_public_signal_truth_audit_v20",
+        unexpected_repeat_migration,
+    )
+    with open_initialized_database(db_path):
+        pass
+    assert _v19_public_truth_rows(db_path) == before
 
 
 def test_scan_run_migration_adds_watch_columns_without_destroying_rows(tmp_path) -> None:
@@ -1490,7 +1661,7 @@ def test_schema_v14_to_v17_preserves_lifecycle_and_telegram_data(
 
     assert _representative_v14_rows(db_path) == before
     version, tables, attempt_columns, public_columns = _schema_contract(db_path)
-    assert version == 19 == SCHEMA_VERSION
+    assert version == 20 == SCHEMA_VERSION
     assert "setup_lifecycle_outcome_progress" in tables
     assert "public_alert_delivery_parts" in tables
     assert "delivery_state" in attempt_columns
@@ -1750,7 +1921,7 @@ def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:
         "v15-plan", "SENT", "2026-07-01T10:00:01Z", "SENT"
     )
     assert "public_alert_delivery_parts" in tables
-    assert version == 19 == SCHEMA_VERSION
+    assert version == 20 == SCHEMA_VERSION
 
 
 def test_schema_v16_migration_is_idempotent_for_v15_delivery_data(tmp_path) -> None:

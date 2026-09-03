@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from app.alerts.telegram_lifecycle import SQLiteTelegramAlertAttemptRepository
+from app.analytics.setup_quality import SetupQualityGrade
 from app.formatters.telegram_signal_formatter import TelegramAlertType
 from app.lifecycle.models import SetupLifecycleState, SetupTransitionReason
 from app.lifecycle.outcomes import evaluate_closed_candle_outcomes
@@ -16,6 +17,8 @@ from test_triggered_confirmed_telegram_delivery import (
     _public_setup_symbol,
     _run_result,
     _service,
+    _setup_quality_with_grade,
+    _trade_idea,
     run,
 )
 
@@ -46,6 +49,15 @@ def _confirmed_symbol(signal_id: str):
         state=SetupLifecycleState.CONFIRMED,
         previous=SetupLifecycleState.TRIGGERED,
     )
+    strategy_diagnostics = {
+        mode: {
+            **diagnostics,
+            "rr_to_tp2": Decimal("4"),
+            "planned_rr": Decimal("4"),
+            "opportunity_score": Decimal("95"),
+        }
+        for mode, diagnostics in symbol.strategy_diagnostics.items()
+    }
     first_close = _decision(0).isoformat()
     record = symbol.lifecycle_state.model_copy(
         update={
@@ -53,6 +65,7 @@ def _confirmed_symbol(signal_id: str):
             "last_seen_at": first_close,
             "last_transition_at": first_close,
             "confirmed_at": first_close,
+            "rr": "4",
         }
     )
     transition = symbol.lifecycle_transition.model_copy(update={"record": record})
@@ -66,6 +79,11 @@ def _confirmed_symbol(signal_id: str):
         )
     return symbol.model_copy(
         update={
+            "strategy_diagnostics": strategy_diagnostics,
+            "trade_idea": _trade_idea(
+                best_rr=Decimal("4"),
+                opportunity_score=Decimal("95"),
+            ),
             "lifecycle_state": record,
             "lifecycle_transition": transition,
         }
@@ -109,12 +127,35 @@ def _sent_market_outcomes(db_path: Path) -> tuple[str, ...]:
         )
 
 
-def test_confirmed_first_candle_entry_then_tp1_tp2_tp3_end_to_end(
+def test_confirmation_candle_is_ambiguous_then_full_candle_entry_and_tp_chain(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "incident.db"
     sender = FakeSender()
     confirmed = _confirmed_symbol("incident-generation")
+    weak = confirmed.model_copy(
+        update={
+            "setup_quality": _setup_quality_with_grade(
+                SetupQualityGrade.A_MINUS,
+                quality_score=81,
+            )
+        }
+    )
+    blocked = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(weak),
+            scan_run_id="incident-quality-blocked",
+        )
+    )
+    assert blocked.sent == 0
+    assert sender.messages == []
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        blocked_attempt = repository.list_attempts()[-1]
+        assert (
+            "public_setup_quality_score_below_min:81<88"
+            in blocked_attempt.blocked_reason
+        )
+
     root = run(
         _service(db_path, sender).deliver_for_run(
             _run_result(confirmed),
@@ -126,7 +167,7 @@ def test_confirmed_first_candle_entry_then_tp1_tp2_tp3_end_to_end(
         repository.upsert_record(confirmed.lifecycle_state)
 
     candles = [_candle(0, high="103", low="99")]
-    entered = _evaluate(
+    ambiguous = _evaluate(
         db_path,
         confirmed.lifecycle_state.lifecycle_id,
         candles,
@@ -134,24 +175,56 @@ def test_confirmed_first_candle_entry_then_tp1_tp2_tp3_end_to_end(
     away_from_zone = confirmed.model_copy(
         update={
             "current_price": Decimal("150"),
-            "lifecycle_state": entered.record,
+            "lifecycle_state": ambiguous.record,
             "lifecycle_transition": None,
             "lifecycle_transitions": (),
+            "lifecycle_outcome_progress": ambiguous.progress,
+        }
+    )
+    no_limit = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(away_from_zone),
+            scan_run_id="incident-ambiguous-confirmation-candle",
+        )
+    )
+    assert ambiguous.progress.entry_at is None
+    assert ambiguous.progress.tracking_start_at == (
+        BASE + timedelta(minutes=15)
+    ).isoformat()
+    assert no_limit.sent == 0
+    assert _sent_market_outcomes(db_path) == ()
+
+    restarted = _evaluate(
+        db_path,
+        confirmed.lifecycle_state.lifecycle_id,
+        candles,
+    )
+    assert restarted.progress.entry_at is None
+
+    candles.append(_candle(1, high="103", low="99"))
+    entered = _evaluate(
+        db_path,
+        confirmed.lifecycle_state.lifecycle_id,
+        candles,
+    )
+    away_from_zone = away_from_zone.model_copy(
+        update={
+            "lifecycle_state": entered.record,
             "lifecycle_outcome_progress": entered.progress,
         }
     )
     limit = run(
         _service(db_path, sender).deliver_for_run(
             _run_result(away_from_zone),
-            scan_run_id="incident-entry",
+            scan_run_id="incident-full-post-boundary-entry",
         )
     )
-    assert entered.progress.entry_at == _decision(0).isoformat()
+    assert entered.progress.entry_at == _decision(1).isoformat()
     assert entered.record.current_state == SetupLifecycleState.MANAGING
     assert limit.sent == 1
     assert _sent_market_outcomes(db_path) == (TelegramAlertType.LIMIT_HIT.value,)
 
-    candles.append(_candle(1, high="108", low="103"))
+    candles.append(_candle(2, high="108", low="103"))
     tp1_progress = _evaluate(db_path, entered.record.lifecycle_id, candles)
     tp1 = run(
         _service(db_path, sender).deliver_for_run(
@@ -159,10 +232,10 @@ def test_confirmed_first_candle_entry_then_tp1_tp2_tp3_end_to_end(
             scan_run_id="incident-tp1",
         )
     )
-    assert tp1_progress.progress.tp1_at == _decision(1).isoformat()
+    assert tp1_progress.progress.tp1_at == _decision(2).isoformat()
     assert tp1.sent == 1
 
-    candles.append(_candle(2, high="113", low="108"))
+    candles.append(_candle(3, high="113", low="108"))
     tp2_progress = _evaluate(db_path, entered.record.lifecycle_id, candles)
     tp2 = run(
         _service(db_path, sender).deliver_for_run(
@@ -170,10 +243,10 @@ def test_confirmed_first_candle_entry_then_tp1_tp2_tp3_end_to_end(
             scan_run_id="incident-tp2",
         )
     )
-    assert tp2_progress.progress.tp2_at == _decision(2).isoformat()
+    assert tp2_progress.progress.tp2_at == _decision(3).isoformat()
     assert tp2.sent == 1
 
-    candles.append(_candle(3, high="118", low="113"))
+    candles.append(_candle(4, high="118", low="113"))
     tp3_progress = _evaluate(db_path, entered.record.lifecycle_id, candles)
     tp3 = run(
         _service(db_path, sender).deliver_for_run(
@@ -181,7 +254,7 @@ def test_confirmed_first_candle_entry_then_tp1_tp2_tp3_end_to_end(
             scan_run_id="incident-tp3",
         )
     )
-    assert tp3_progress.progress.tp3_at == _decision(3).isoformat()
+    assert tp3_progress.progress.tp3_at == _decision(4).isoformat()
     assert tp3_progress.progress.terminal_outcome == SetupLifecycleState.TP_HIT.value
     assert tp3_progress.record.current_state == SetupLifecycleState.TP_HIT
     assert tp3.sent == 1
@@ -275,6 +348,62 @@ def test_confirmed_without_entry_touch_has_no_limit_or_tp_milestone(
     assert progress.progress.tp2_at is None
     assert progress.progress.tp3_at is None
     assert _sent_market_outcomes(db_path) == ()
+
+
+def test_entry_and_stop_same_full_candle_never_sends_zone_engaged(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "same-candle-stop.db"
+    sender = FakeSender()
+    confirmed = _confirmed_symbol("same-candle-stop")
+    assert run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(confirmed),
+            scan_run_id="same-candle-stop-confirmed",
+        )
+    ).sent == 1
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(confirmed.lifecycle_state)
+
+    outcome = _evaluate(
+        db_path,
+        confirmed.lifecycle_state.lifecycle_id,
+        [
+            _candle(0, high="99", low="96"),
+            _candle(1, high="103", low="94"),
+        ],
+    )
+    stopped = confirmed.model_copy(
+        update={
+            "lifecycle_state": outcome.record,
+            "lifecycle_transition": outcome.last_transition,
+            "lifecycle_transitions": outcome.transitions,
+            "lifecycle_outcome_progress": outcome.progress,
+        }
+    )
+
+    delivered = run(
+        _service(db_path, sender).deliver_for_run(
+            _run_result(stopped),
+            scan_run_id="same-candle-stop-outcome",
+        )
+    )
+
+    assert outcome.progress.entry_at == outcome.progress.stop_at
+    assert delivered.sent == 1
+    assert all("ZONE ENGAGED" not in message for message in sender.messages)
+    assert _sent_market_outcomes(db_path) == (TelegramAlertType.SL_HIT.value,)
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        limit_attempt = next(
+            item
+            for item in repository.list_attempts()
+            if item.attempted_alert_type == TelegramAlertType.LIMIT_HIT.value
+        )
+    assert limit_attempt.telegram_status == "blocked"
+    assert (
+        "limit_hit_suppressed_by_same_candle_terminal_precedence"
+        in limit_attempt.blocked_reason
+    )
 
 
 def test_confirmed_invalidation_before_entry_sends_only_invalidated(
