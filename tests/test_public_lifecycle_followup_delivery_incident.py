@@ -12,12 +12,12 @@ persisted state is the only source of truth.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 from app.alerts.telegram_lifecycle import SQLiteTelegramAlertAttemptRepository
+from app.alerts.watchlist_expiry import WATCHLIST_NON_EXPIRING_STATE_KEYS
 from app.lifecycle.models import SetupLifecycleState
 from app.lifecycle.outcomes import evaluate_closed_candle_outcomes
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
@@ -26,10 +26,17 @@ from app.lifecycle.service import (
     observation_from_symbol_result,
 )
 from app.lifecycle.state_machine import (
+    CONFIDENCE_DECAY_TERMINAL_EXEMPT_STATES,
+    DECAYABLE_STATES,
     evaluate_lifecycle_transition,
     observed_state,
 )
+from app.strategies.liquidity_grab_pullback import (
+    LiquidityGrabMode,
+    analyze_liquidity_grab_pullback,
+)
 
+from test_liquidity_grab_pullback import _full_bullish_setup_candles
 from test_triggered_confirmed_telegram_delivery import (
     FakeSender,
     _public_setup_symbol,
@@ -292,41 +299,174 @@ def test_confidence_decay_downgrades_confirmed_setup_without_expiring_it(
     assert current.lifecycle_state.decay_count == 6
 
 
-def test_true_entry_window_expiry_still_expires_a_confirmed_setup(
-    tmp_path: Path,
-) -> None:
-    """The canonical entry-window expiry contract is untouched by the fix."""
+def _stale_bos_candles() -> list[dict[str, object]]:
+    """A confirmed setup whose price ran away without ever tagging the zone."""
 
-    del tmp_path
-    lifecycle_id = "expiry-generation"
+    candles = _full_bullish_setup_candles()
+    for index in range(36, 60):
+        candles.append(
+            {
+                "timestamp": index,
+                "open": Decimal("107"),
+                "high": Decimal("110"),
+                "low": Decimal("106"),
+                "close": Decimal("108"),
+                "volume": Decimal("100"),
+            }
+        )
+    return candles
+
+
+def _strategy_violation_codes(mode: LiquidityGrabMode) -> tuple[str, ...]:
+    candles = _stale_bos_candles()
+    result = analyze_liquidity_grab_pullback(
+        {
+            "symbol": "BTCUSDT",
+            "mode": mode,
+            "candles_15m": candles,
+            "candles_5m": candles,
+        }
+    )
+    setup = getattr(result, mode.value)
+    return tuple(violation.code for violation in setup.gate_result.violations)
+
+
+def test_scalp_entry_window_expiry_is_generated_by_the_production_strategy() -> None:
+    """SCALP has a real bars-since-BOS entry window; SWING does not."""
+
+    assert "entry_window_expired" in _strategy_violation_codes(LiquidityGrabMode.scalp)
+    assert "entry_window_expired" not in _strategy_violation_codes(
+        LiquidityGrabMode.swing
+    )
+
+
+def test_production_entry_window_expiry_derives_observation_expired() -> None:
+    """The scanner diagnostic drives observation.expired without manual toggling."""
+
+    lifecycle_id = "scalp-expiry-generation"
+    confirmed = _confirmed_symbol(lifecycle_id)
+    lapsed = confirmed.model_copy(
+        update={
+            "strategy_diagnostics": {
+                mode: {**diagnostics, "first_failed_gate": "entry_window_expired"}
+                for mode, diagnostics in confirmed.strategy_diagnostics.items()
+            }
+        }
+    )
+
+    observation = observation_from_symbol_result(lapsed, min_score_for_idea=Decimal("80"))
+    assert observation.failed_gate == "entry_window_expired"
+    assert observation.expired is True
+    assert observed_state(observation) == SetupLifecycleState.EXPIRED
+
+
+def test_production_entry_window_expiry_expires_an_unfilled_a_grade_setup() -> None:
+    """An -> EXPIRED path driven by a derived observation rather than a flag.
+
+    ``A_GRADE_WATCH`` and ``ACTIONABLE_A_GRADE`` are the pre-fill states whose
+    ``_next_state`` branches consult ``observation.expired`` without an
+    invalidation precedence check, so they are where the canonical expiry
+    contract is directly observable end to end.
+    """
+
+    lifecycle_id = "scalp-expiry-a-grade"
+    confirmed = _confirmed_symbol(lifecycle_id)
+    lapsed = confirmed.model_copy(
+        update={
+            "strategy_diagnostics": {
+                mode: {**diagnostics, "first_failed_gate": "entry_window_expired"}
+                for mode, diagnostics in confirmed.strategy_diagnostics.items()
+            }
+        }
+    )
+    observation = observation_from_symbol_result(lapsed, min_score_for_idea=Decimal("80"))
+    assert observation.expired is True
+    assert observation.invalidated is False
+
+    for state in (
+        SetupLifecycleState.A_GRADE_WATCH,
+        SetupLifecycleState.ACTIONABLE_A_GRADE,
+    ):
+        record = confirmed.lifecycle_state.model_copy(
+            update={"current_state": state, "previous_state": SetupLifecycleState.TRIGGERED}
+        )
+        transition = evaluate_lifecycle_transition(
+            record,
+            observation,
+            lifecycle_id=lifecycle_id,
+            now=_decision(1).isoformat(),
+        )
+        assert transition.record is not None
+        assert transition.record.current_state == SetupLifecycleState.EXPIRED, (
+            f"{state} did not honour the canonical entry-window expiry"
+        )
+
+
+def test_production_entry_window_expiry_terminates_a_confirmed_setup() -> None:
+    """A lapsed entry window still retires a confirmed setup.
+
+    For CONFIRMED the state machine checks invalidation before expiry, and the
+    same ``failed_gate`` that raises ``observation.expired`` also raises the
+    ``failed_confirmation_gate`` blocker, so the canonical terminal state here
+    is INVALIDATED rather than EXPIRED. Either way the setup is retired and
+    canonical outcome tracking stops.
+    """
+
+    lifecycle_id = "scalp-expiry-confirmed"
     confirmed = _confirmed_symbol(lifecycle_id)
     record = confirmed.lifecycle_state
     assert record is not None
 
-    observation = observation_from_symbol_result(
-        confirmed,
-        min_score_for_idea=Decimal("80"),
-    )
-    # Sanity: without the canonical expiry signal the committed setup is held.
     held = evaluate_lifecycle_transition(
         record,
-        observation,
+        observation_from_symbol_result(confirmed, min_score_for_idea=Decimal("80")),
         lifecycle_id=lifecycle_id,
         now=_decision(1).isoformat(),
     )
     assert held.record is not None
     assert held.record.current_state == SetupLifecycleState.CONFIRMED
 
-    # The real entry window lapsing still retires the setup.
-    lapsed = evaluate_lifecycle_transition(
+    lapsed = confirmed.model_copy(
+        update={
+            "strategy_diagnostics": {
+                mode: {**diagnostics, "first_failed_gate": "entry_window_expired"}
+                for mode, diagnostics in confirmed.strategy_diagnostics.items()
+            }
+        }
+    )
+    observation = observation_from_symbol_result(lapsed, min_score_for_idea=Decimal("80"))
+    assert observation.expired is True
+
+    retired = evaluate_lifecycle_transition(
         record,
-        replace(observation, expired=True),
+        observation,
         lifecycle_id=lifecycle_id,
         now=_decision(2).isoformat(),
     )
-    assert lapsed.record is not None
-    assert lapsed.record.current_state == SetupLifecycleState.EXPIRED
-    assert observed_state(replace(observation, expired=True)) == SetupLifecycleState.EXPIRED
+    assert retired.record is not None
+    assert retired.record.current_state == SetupLifecycleState.INVALIDATED
+    assert retired.record.failed_gate == "entry_window_expired"
+
+
+def test_swing_confirmed_setup_has_no_entry_window_time_ceiling() -> None:
+    """Documents the audited architectural gap for SWING.
+
+    SWING never raises ``entry_window_expired``, so an unfilled confirmed SWING
+    setup is retired only by structural invalidation, a closed-candle outcome,
+    or generation rotation. There is deliberately no invented time ceiling here.
+    """
+
+    assert "entry_window_expired" not in _strategy_violation_codes(
+        LiquidityGrabMode.swing
+    )
+
+    confirmed = _confirmed_symbol("swing-no-ceiling")
+    observation = observation_from_symbol_result(confirmed, min_score_for_idea=Decimal("80"))
+    assert observation.expired is False
+
+    # Confirmed setups are excluded from the 48h public watchlist expiry sweep,
+    # so that sweep cannot retire them either.
+    assert "confirmed" in WATCHLIST_NON_EXPIRING_STATE_KEYS
 
 
 def test_structural_invalidation_still_terminates_a_confirmed_setup(
@@ -376,15 +516,34 @@ def test_uncommitted_candidate_states_still_expire_through_confidence_decay(
     with SQLiteSetupLifecycleRepository(db_path) as repository:
         repository.upsert_record(watchlisted)
 
-    # A watchlisted candidate is not publicly committed, so confidence decay
-    # must still be able to retire it.
-    from app.lifecycle.state_machine import (
-        CONFIDENCE_DECAY_TERMINAL_EXEMPT_STATES,
-        DECAYABLE_STATES,
-    )
-
     assert SetupLifecycleState.WATCHLISTED in DECAYABLE_STATES
     assert SetupLifecycleState.WATCHLISTED not in CONFIDENCE_DECAY_TERMINAL_EXEMPT_STATES
     assert CONFIDENCE_DECAY_TERMINAL_EXEMPT_STATES == frozenset(
         {SetupLifecycleState.CONFIRMED}
     )
+
+    # A watchlisted candidate is not committed to anything, so repeated idle
+    # scans must still garbage collect it through confidence decay.
+    record = watchlisted
+    states: list[SetupLifecycleState] = []
+    for index in range(1, 9):
+        transition = evaluate_lifecycle_transition(
+            record,
+            observation_from_symbol_result(
+                confirmed.model_copy(update={"lifecycle_state": record}),
+                min_score_for_idea=Decimal("80"),
+            ),
+            lifecycle_id=lifecycle_id,
+            now=_decision(index).isoformat(),
+        )
+        assert transition.record is not None
+        record = transition.record
+        states.append(record.current_state)
+        if record.current_state == SetupLifecycleState.EXPIRED:
+            break
+
+    assert record.current_state == SetupLifecycleState.EXPIRED, (
+        f"confidence decay no longer retires uncommitted candidates: {states}"
+    )
+    assert record.failed_gate == "confidence_decay"
+    assert record.decay_count >= 3

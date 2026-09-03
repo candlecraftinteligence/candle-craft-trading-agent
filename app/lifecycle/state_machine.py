@@ -87,11 +87,12 @@ DECAYABLE_STATES = {
     SetupLifecycleState.A_GRADE_WATCH,
 }
 DECAY_GRADE_PATH = ("a+", "a", "a-", "b+")
-# A CONFIRMED setup is already publicly committed and is waiting for a limit
-# fill, so "no price reaction" is its expected state rather than evidence of
+# A confirmed limit-entry setup is waiting for price to trade back into its
+# zone, so "no price reaction" is its expected state rather than evidence of
 # expiry. Confidence decay still downgrades it, but only the canonical terminal
-# contracts (entry_window_expired, invalidation, or a closed-candle outcome)
-# may end it.
+# contracts (entry-window expiry, invalidation, or a closed-candle outcome) may
+# end it. This is an internal lifecycle rule and carries no assumption about
+# whether any alert for the setup was delivered.
 CONFIDENCE_DECAY_TERMINAL_EXEMPT_STATES = frozenset({SetupLifecycleState.CONFIRMED})
 ENTRY_TOUCH_MONITOR_STATES = {
     SetupLifecycleState.WATCHLISTED,
