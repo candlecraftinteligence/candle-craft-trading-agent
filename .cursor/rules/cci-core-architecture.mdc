@@ -1,0 +1,129 @@
+---
+alwaysApply: true
+---
+
+Candle Craft Intelligence (CCI) is a professional-grade crypto perpetual futures market-structure intelligence and research system.
+
+CORE PRINCIPLES
+- Quality > quantity.
+- Do not increase signal count by weakening gates.
+- Do not invent confirmations or missing data.
+- Do not bypass RR requirements.
+- Do not convert weak WATCH candidates into valid setups artificially.
+- Preserve deterministic, replayable, measurable behavior.
+- Optimize for long-term expectancy, not activity.
+
+CCI CORE LOGIC
+The system uses:
+- multi-timeframe market structure
+- liquidity sweeps/grabs
+- BOS / CHoCH
+- OB / FVG validation
+- pullback intelligence
+- regime context
+- lifecycle progression
+- symbol health
+- adaptive prioritization
+- research persistence
+- replay validation
+- performance memory
+
+LIFECYCLE
+REJECTED
+→ WATCH
+→ STALKING
+→ TRIGGERED
+→ CONFIRMED
+→ EXECUTING
+→ TP_HIT / SL_HIT / INVALIDATED / COOLDOWN
+
+Do not change lifecycle semantics casually.
+
+SAFETY BOUNDARIES
+Never:
+- add order execution
+- enable autonomous trading
+- add withdrawals or transfers
+- expose or commit secrets
+- commit .env
+- access, overwrite, or copy the live runtime database
+- enable live Telegram delivery on the Dev PC
+- weaken setup-quality gates
+- bypass structural confirmation
+- bypass minimum RR requirements
+- merge branches automatically
+
+DEV PC
+Project root:
+C:\CandleCraftDev
+
+Dev PC defaults:
+- LOCAL_MANUAL_MODE=true
+- ORDER_EXECUTION_ENABLED=false
+- TELEGRAM_DRY_RUN=true
+- TELEGRAM_SIGNALS_ENABLED=false
+
+The Dev PC must not run the full-time Telegram bot listener.
+The Dev PC must not run the full-time scanner watch loop.
+Use separate test databases only.
+
+The Runtime PC owns:
+scan_runs\main_live_runtime.sqlite
+
+Do not use, copy, overwrite, or mutate that live database unless explicitly requested.
+
+DEVELOPMENT WORKFLOW
+For every implementation phase:
+1. inspect the existing architecture
+2. identify the smallest focused change
+3. present an implementation plan
+4. state safety constraints
+5. implement on a feature branch
+6. add or update tests
+7. run python -m pytest
+8. verify no setup-quality gate was weakened
+9. inspect git diff
+10. commit
+11. push branch
+12. open PR
+13. do not merge automatically
+
+RESEARCH PRINCIPLES
+New market-data providers, models, metrics, or contextual features must initially be observational/shadow-only unless explicitly approved otherwise.
+
+External context must not become setup-generation authority without empirical validation.
+
+When adding external intelligence:
+- preserve source timestamps
+- preserve received timestamps
+- track freshness
+- distinguish unavailable from zero
+- never invent missing values
+- persist enough raw and normalized evidence for replay
+- external-provider failure must not stop the core scanner
+
+CMC INTEGRATION
+CoinMarketCap is currently approved only as an external context and research layer.
+
+CMC may initially:
+- enrich existing candidates
+- provide derivatives context
+- provide global market context
+- provide macro context
+- provide news/narrative context
+- persist research variables
+- operate in shadow mode
+
+CMC must initially NOT:
+- create setups
+- approve rejected setups
+- alter BOS / CHoCH
+- alter liquidity sweep detection
+- modify entry geometry
+- change RR
+- change invalidation
+- promote lifecycle states
+- weaken public-signal quality gates
+
+Always inspect existing code before changing architecture.
+Prefer focused, measurable, testable changes over broad rewrites.
