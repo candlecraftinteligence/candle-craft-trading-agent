@@ -200,18 +200,82 @@ def evaluate_closed_candle_outcomes(
         progress.entry_at is None
         and _metadata(progress).get("entry_causality_contract") != ENTRY_CAUSALITY_CONTRACT
     ):
+        try:
+            (
+                boundary_timestamp,
+                boundary_source,
+            ) = _entry_tracking_boundary(
+                record,
+                progress=progress,
+                evaluated_at=evaluated_at,
+                repository=repository,
+                compatible_identities=plan_identities,
+            )
+            duration = timeframe_duration(normalized_timeframe)
+            if progress.evaluation_cursor_open_at is None:
+                earliest_open = window.timeline[0].open_timestamp
+                if boundary_timestamp < earliest_open:
+                    raise ValueError(
+                        "missing_execution_candle_history:"
+                        f"tracking_boundary_at={boundary_timestamp.isoformat()} "
+                        f"earliest_open={earliest_open.isoformat()}"
+                    )
+                first_fully_post_boundary = _first_fully_post_boundary_open(
+                    boundary_timestamp,
+                    timeline=window.timeline,
+                    duration=duration,
+                )
+                tracking_start = first_fully_post_boundary
+            else:
+                cursor_open = normalize_utc_timestamp(
+                    progress.evaluation_cursor_open_at,
+                    field_name="evaluation_cursor_open_at",
+                )
+                first_fully_post_boundary = _first_aligned_open_at_or_after(
+                    boundary_timestamp,
+                    anchor=cursor_open,
+                    duration=duration,
+                )
+                tracking_start = max(
+                    cursor_open + duration,
+                    first_fully_post_boundary,
+                )
+            if first_fully_post_boundary == boundary_timestamp:
+                boundary_eligibility = "boundary_exactly_at_candle_open"
+                boundary_diagnostic = NA
+            else:
+                boundary_eligibility = "partially_overlapping_boundary"
+                boundary_diagnostic = "partial_boundary_candle_not_entry_eligible"
+        except ValueError as exc:
+            progress = _integrity_failure(
+                progress,
+                status=INTEGRITY_UNVERIFIED,
+                diagnostic=str(exc),
+                evaluated_at=evaluated_at,
+            )
+            repository.upsert_outcome_progress(progress)
+            return LifecycleOutcomeEvaluation(record=record, progress=progress)
+        progress = _with_tracking_start(
+            progress,
+            tracking_start=tracking_start,
+            boundary_timestamp=boundary_timestamp.isoformat(),
+            boundary_source=boundary_source,
+            boundary_eligibility=boundary_eligibility,
+            boundary_diagnostic=boundary_diagnostic,
+        )
         metadata = _metadata(progress)
         metadata.update(
             {
-                "entry_causality_contract": ENTRY_CAUSALITY_CONTRACT,
-                "entry_causality_migration": "legacy_unfilled_cursor_rebased",
+                "entry_causality_migration": "legacy_unfilled_cursor_adopted_prospectively",
+                "entry_causality_prospective_start_at": tracking_start.isoformat(),
             }
         )
+        if progress.evaluation_cursor_open_at is not None:
+            metadata["legacy_evaluation_cursor_open_at_preserved"] = (
+                progress.evaluation_cursor_open_at
+            )
         progress = progress.model_copy(
             update={
-                "tracking_start_at": None,
-                "evaluation_cursor_open_at": None,
-                "evaluation_cursor_close_at": None,
                 "metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
             }
         )
@@ -326,11 +390,14 @@ def evaluate_closed_candle_outcomes(
             )
             repository.upsert_outcome_progress(progress)
             return LifecycleOutcomeEvaluation(record=record, progress=progress)
-        expected_open = cursor_open + timeframe_duration(normalized_timeframe)
+        expected_open = max(
+            cursor_open + timeframe_duration(normalized_timeframe),
+            tracking_start,
+        )
         pending = tuple(
             (causal, high, low)
             for causal, (high, low) in zip(window.timeline, candle_ranges, strict=True)
-            if causal.open_timestamp > cursor_open
+            if causal.open_timestamp >= expected_open
         )
 
     if not pending:
@@ -606,16 +673,14 @@ def _terminal_progress_for_record(
     return progress.model_copy(update=updates)
 
 
-def _tracking_start_boundary(
+def _entry_tracking_boundary(
     record: SetupLifecycleRecord,
     *,
     progress: SetupLifecycleOutcomeProgress,
-    timeline: Sequence[CausalCandle],
     evaluated_at: str,
     repository: SQLiteSetupLifecycleRepository,
     compatible_identities: Sequence[str],
-    execution_timeframe: str,
-) -> tuple[datetime, str, str, str, str]:
+) -> tuple[datetime, str]:
     confirmation_value = record.confirmed_at
     confirmation_source = "lifecycle_confirmed_at"
     if not confirmation_value or _text(confirmation_value) == NA:
@@ -663,6 +728,26 @@ def _tracking_start_boundary(
     else:
         boundary_timestamp = confirmation_timestamp
         boundary_source = confirmation_source
+    return boundary_timestamp, boundary_source
+
+
+def _tracking_start_boundary(
+    record: SetupLifecycleRecord,
+    *,
+    progress: SetupLifecycleOutcomeProgress,
+    timeline: Sequence[CausalCandle],
+    evaluated_at: str,
+    repository: SQLiteSetupLifecycleRepository,
+    compatible_identities: Sequence[str],
+    execution_timeframe: str,
+) -> tuple[datetime, str, str, str, str]:
+    boundary_timestamp, boundary_source = _entry_tracking_boundary(
+        record,
+        progress=progress,
+        evaluated_at=evaluated_at,
+        repository=repository,
+        compatible_identities=compatible_identities,
+    )
 
     earliest_open = timeline[0].open_timestamp
     if boundary_timestamp < earliest_open:
@@ -707,6 +792,19 @@ def _first_fully_post_boundary_open(
     elapsed = boundary_timestamp - earliest_open
     periods = elapsed // duration
     candidate = earliest_open + (duration * periods)
+    if candidate < boundary_timestamp:
+        candidate += duration
+    return candidate
+
+
+def _first_aligned_open_at_or_after(
+    boundary_timestamp: datetime,
+    *,
+    anchor: datetime,
+    duration: timedelta,
+) -> datetime:
+    periods = (boundary_timestamp - anchor) // duration
+    candidate = anchor + (duration * periods)
     if candidate < boundary_timestamp:
         candidate += duration
     return candidate

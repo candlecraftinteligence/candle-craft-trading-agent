@@ -10,6 +10,7 @@ import pytest
 
 from app.lifecycle.models import (
     SetupLifecycleEvent,
+    SetupLifecycleOutcomeProgress,
     SetupLifecycleRecord,
     SetupLifecycleState,
     SetupTransitionReason,
@@ -292,6 +293,142 @@ def test_partial_confirmation_candle_cannot_prove_entry_and_restart_is_stable(
         assert event_evidence["entry_evidence_type"] == evidence["entry_evidence_type"]
         assert event_evidence["candle_high"] == "103"
         assert event_evidence["candle_low"] == "99"
+
+
+def test_legacy_unfilled_cursor_is_preserved_and_only_next_unseen_touch_can_enter(
+    tmp_path: Path,
+) -> None:
+    boundary = BASE + timedelta(minutes=7)
+    record = _record(lifecycle_id="legacy-prospective").model_copy(
+        update={
+            "confirmed_at": boundary.isoformat(),
+            "last_seen_at": boundary.isoformat(),
+            "last_transition_at": boundary.isoformat(),
+        }
+    )
+    consumed_cursor = BASE + timedelta(minutes=15)
+    progress = SetupLifecycleOutcomeProgress(
+        lifecycle_id=record.lifecycle_id,
+        plan_identity=canonical_plan_identity(record),
+        symbol=record.symbol,
+        mode=record.mode,
+        direction=record.direction,
+        execution_timeframe=TIMEFRAME,
+        tracking_start_at=consumed_cursor.isoformat(),
+        evaluation_cursor_open_at=consumed_cursor.isoformat(),
+        evaluation_cursor_close_at=(consumed_cursor + timedelta(minutes=5)).isoformat(),
+        integrity_status="Verified",
+        metadata_json=json.dumps({"source": "legacy-v19-runtime"}),
+        first_evaluated_at=BASE.isoformat(),
+        last_evaluated_at=(consumed_cursor + timedelta(minutes=5)).isoformat(),
+    )
+    consumed = [
+        _candle(0, high="99", low="95"),
+        _entry(1, "long"),
+        _candle(2, high="99", low="95"),
+        _candle(3, high="99", low="95"),
+    ]
+    db_path = tmp_path / "legacy-prospective.db"
+    with SQLiteSetupLifecycleRepository(db_path) as repository:
+        repository.upsert_record(record)
+        repository.upsert_outcome_progress(progress)
+
+        deployed = _evaluate(repository, record, consumed)
+        restarted = _evaluate(repository, record, consumed)
+
+        assert deployed.processed_candles == 0
+        assert deployed.progress is not None
+        assert deployed.progress.entry_at is None
+        assert deployed.progress.evaluation_cursor_open_at == consumed_cursor.isoformat()
+        assert deployed.progress.evaluation_cursor_close_at == (
+            consumed_cursor + timedelta(minutes=5)
+        ).isoformat()
+        assert deployed.progress.tracking_start_at == (
+            consumed_cursor + timedelta(minutes=5)
+        ).isoformat()
+        metadata = json.loads(deployed.progress.metadata_json)
+        assert metadata["entry_causality_migration"] == (
+            "legacy_unfilled_cursor_adopted_prospectively"
+        )
+        assert metadata["legacy_evaluation_cursor_open_at_preserved"] == (
+            consumed_cursor.isoformat()
+        )
+        assert restarted.processed_candles == 0
+        assert restarted.progress.entry_at is None
+        assert restarted.progress.evaluation_cursor_open_at == consumed_cursor.isoformat()
+        assert not any(
+            event.reason == SetupTransitionReason.ENTRY_ACTIVATED
+            for event in repository.list_events(lifecycle_id=record.lifecycle_id)
+        )
+
+        next_unseen_touch = [*consumed, _entry(4, "long")]
+        entered = _evaluate(repository, record, next_unseen_touch)
+
+        assert entered.processed_candles == 1
+        assert entered.progress.entry_at == _decision(4)
+        assert entered.progress.evaluation_cursor_open_at == (
+            BASE + timedelta(minutes=20)
+        ).isoformat()
+        assert sum(
+            event.reason == SetupTransitionReason.ENTRY_ACTIVATED
+            for event in repository.list_events(lifecycle_id=record.lifecycle_id)
+        ) == 1
+
+
+def test_legacy_cursor_candle_straddling_confirmation_is_not_reinterpreted(
+    tmp_path: Path,
+) -> None:
+    cursor_open = BASE + timedelta(minutes=15)
+    boundary = cursor_open + timedelta(seconds=1)
+    record = _record(lifecycle_id="legacy-partial-cursor").model_copy(
+        update={
+            "confirmed_at": boundary.isoformat(),
+            "last_seen_at": boundary.isoformat(),
+            "last_transition_at": boundary.isoformat(),
+        }
+    )
+    progress = SetupLifecycleOutcomeProgress(
+        lifecycle_id=record.lifecycle_id,
+        plan_identity=canonical_plan_identity(record),
+        symbol=record.symbol,
+        mode=record.mode,
+        direction=record.direction,
+        execution_timeframe=TIMEFRAME,
+        tracking_start_at=cursor_open.isoformat(),
+        evaluation_cursor_open_at=cursor_open.isoformat(),
+        evaluation_cursor_close_at=(cursor_open + timedelta(minutes=5)).isoformat(),
+        integrity_status="Verified",
+        metadata_json="{}",
+        first_evaluated_at=BASE.isoformat(),
+        last_evaluated_at=(cursor_open + timedelta(minutes=5)).isoformat(),
+    )
+    consumed = [
+        _candle(0, high="99", low="95"),
+        _candle(1, high="99", low="95"),
+        _candle(2, high="99", low="95"),
+        _entry(3, "long"),
+    ]
+    with SQLiteSetupLifecycleRepository(tmp_path / "legacy-partial.db") as repository:
+        repository.upsert_record(record)
+        repository.upsert_outcome_progress(progress)
+
+        deployed = _evaluate(repository, record, consumed)
+
+        assert deployed.processed_candles == 0
+        assert deployed.progress.entry_at is None
+        assert deployed.progress.evaluation_cursor_open_at == cursor_open.isoformat()
+        assert deployed.progress.tracking_start_at == (
+            cursor_open + timedelta(minutes=5)
+        ).isoformat()
+
+        next_full_miss = [*consumed, _candle(4, high="99", low="95")]
+        waited = _evaluate(repository, record, next_full_miss)
+
+        assert waited.processed_candles == 1
+        assert waited.progress.entry_at is None
+        assert waited.progress.evaluation_cursor_open_at == (
+            BASE + timedelta(minutes=20)
+        ).isoformat()
 
 
 def test_confirmation_boundary_exactly_at_candle_open_allows_that_candle(
