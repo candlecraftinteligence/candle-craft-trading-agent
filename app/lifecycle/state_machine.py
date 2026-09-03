@@ -87,6 +87,12 @@ DECAYABLE_STATES = {
     SetupLifecycleState.A_GRADE_WATCH,
 }
 DECAY_GRADE_PATH = ("a+", "a", "a-", "b+")
+# A CONFIRMED setup is already publicly committed and is waiting for a limit
+# fill, so "no price reaction" is its expected state rather than evidence of
+# expiry. Confidence decay still downgrades it, but only the canonical terminal
+# contracts (entry_window_expired, invalidation, or a closed-candle outcome)
+# may end it.
+CONFIDENCE_DECAY_TERMINAL_EXEMPT_STATES = frozenset({SetupLifecycleState.CONFIRMED})
 ENTRY_TOUCH_MONITOR_STATES = {
     SetupLifecycleState.WATCHLISTED,
     SetupLifecycleState.STALKING,
@@ -1378,6 +1384,8 @@ def _apply_decay_if_needed(
         "decay_reason": reason,
     }
     if next_grade == "EXPIRED":
+        if next_state in CONFIDENCE_DECAY_TERMINAL_EXEMPT_STATES:
+            return next_state, updated.model_copy(update=update), reason
         update["quality_grade_current"] = "Expired"
         update["failed_gate"] = "confidence_decay"
         update["invalidation_reason"] = reason
