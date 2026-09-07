@@ -262,8 +262,8 @@ def _entities() -> dict[str, Any]:
                 "Stable lineage of a market structure idea across scans, independent of "
                 "target revisions and public message ids."
             ),
-            current_authoritative_id="setup_identity (derived, not unique)",
-            proposed_future_id="setup_id (P1 design only; not implemented)",
+            current_authoritative_id="setup_identity (derived, not unique; still authoritative for current consumers)",
+            proposed_future_id="setup_id (P1 parallel foundation; consumers still use setup_identity)",
             unit="geometry identity string; many lifecycle rows may share one",
             owner="app.lifecycle.identity.setup_geometry_identity",
             creation_point="lifecycle create/update in SetupLifecycleService / state_machine._setup_identity",
@@ -295,7 +295,7 @@ def _entities() -> dict[str, Any]:
             current_authoritative_id=(
                 "plan_identity on setup_lifecycle_outcome_progress; public canonical_plan_id is a different namespace"
             ),
-            proposed_future_id="plan_version_id (P1 design only; not implemented)",
+            proposed_future_id="migrate outcome consumers from plan_identity to plan_version_id",
             unit="hashed plan including lifecycle_id (so generation is mixed into economics)",
             owner="app.lifecycle.outcome_policy.canonical_plan_identity",
             creation_point="outcome progress upsert during lifecycle apply",
@@ -310,23 +310,29 @@ def _entities() -> dict[str, Any]:
         ),
         "PLAN VERSION": _entity(
             current_meaning=(
-                "NOT FOUND as a first-class entity. Target revisions are the same setup_identity "
-                "and a different plan_identity if TPs change while unlocked."
+                "P1 parallel foundation: setup_lifecycle_records.plan_version_id is a SHA-256 "
+                "of immutable plan economics (schema, setup_id, entry/stop/TPs, invalidation) "
+                "without lifecycle_id. It is not yet used by outcome, public, or Telegram "
+                "consumers. Current consumer joins still use plan_identity, which includes "
+                "lifecycle_id. TRIGGERED remains outside PLAN_LOCK_STATES, so plan_version_id "
+                "is not latched in that state. No exit/fill-policy version exists to include."
             ),
             intended_research_meaning="Immutable snapshot of economics; supersession creates a new version",
-            current_authoritative_id="NOT FOUND",
-            proposed_future_id="plan_version_id",
-            unit="none currently",
-            owner="none",
-            creation_point="NOT FOUND",
-            mutability="NOT FOUND",
-            timestamp_semantics="NOT FOUND",
-            relationships="Not separable from lifecycle_id today because plan_identity includes lifecycle_id",
-            cardinality="NOT FOUND",
+            current_authoritative_id=(
+                "setup_lifecycle_records.plan_version_id (P1 parallel; not used by outcome/public consumers)"
+            ),
+            proposed_future_id="plan_version_id as outcome/trade authority after consumer migration",
+            unit="hashed plan economics independent of lifecycle_id; NULL when unavailable/legacy",
+            owner="app.lifecycle.economic_identity.mint_plan_version_id",
+            creation_point="evaluate_lifecycle_transition latch after record construction",
+            mutability="latched once in PLAN_LOCK_STATES; later geometry change is invariant_violation, not overwrite",
+            timestamp_semantics="No dedicated plan-version timestamp; uses lifecycle first_seen_at / last_transition_at",
+            relationships="Many lifecycle_ids may share one setup_id; plan_version_id is per latched economics; no UNIQUE constraint",
+            cardinality="0..1 latched plan_version_id per lifecycle row; historical rows remain NULL",
             research_statistics_safe=UNSAFE,
-            producers=(),
+            producers=("app.lifecycle.economic_identity.latch_economic_identities",),
             consumers=(),
-            enforcement="convention only; no plan_version_id column",
+            enforcement="additive nullable columns; no uniqueness; tests/test_economic_identity.py",
         ),
         "LIFECYCLE": _entity(
             current_meaning=(

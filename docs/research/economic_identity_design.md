@@ -1,13 +1,38 @@
 # CCI P1 Economic Identity — Forensic Answers and Design
 
-**Status:** design and test plan only. This phase does **not** implement, enable,
-migrate, or replace economic identity. Dormant hygiene (`app/lifecycle/hygiene.py`,
-`scripts/repair_lifecycle_hygiene.py`) remains offline repair, not a scan-path identity service.
+**Status:** P1 implemented as a **parallel, prospective** identity foundation.
+Current consumers still use `setup_identity`, `lifecycle_id`, `plan_identity`,
+and public `event_key`. Dormant hygiene (`app/lifecycle/hygiene.py`,
+`scripts/repair_lifecycle_hygiene.py`) remains offline repair, not a scan-path
+identity service.
+
+P1 does **not** backfill historical rows. Legacy NULL identity columns are
+ambiguous by design.
 
 `feature/lifecycle-plan-identity-hygiene-v1` is an ancestor of current `main`; hygiene
 helpers are already on this checkout and are not activated by this document.
 
-## P1 forensic answers
+## P1 implementation (schema v21)
+
+Module: `app.lifecycle.economic_identity`.
+
+| ID | Meaning | Canonical fields | When minted |
+| --- | --- | --- | --- |
+| `setup_id` | Structural setup lineage | `cci-setup-id-v1`, scan-run `exchange` as instrument venue, normalized symbol, direction, mode, structural_anchor | Once venue + mode + direction + symbol + non-`N/A` structural_anchor exist. Then latched. |
+| `plan_version_id` | Immutable plan economics/geometry | `cci-plan-version-v1`, `setup_id`, entry_low/high, stop, TP1/2/3, stored invalidation | Only while `current_state ∈ PLAN_LOCK_STATES` and geometry is complete/valid. Not latched in `TRIGGERED`. |
+
+Encoding: ordered `\x1f`-joined fields, UTF-8, SHA-256, prefixes `setup-` and `plan-version-`. Prices use `Decimal.normalize()`; Python `float` and non-finite values are rejected. Tick quantization is **not** applied on the lifecycle path because verified per-instrument tick metadata is not carried on `LifecycleObservation`. Optional `tick_size` on the primitive rejects off-tick values instead of rounding.
+
+Not included: lifecycle_id, RR, quality, readiness, state, failed gates, Telegram ids, research provenance, exit/fill-policy version (none exists in-repo).
+
+Venue is the scan-run `ScannerRunConfig.exchange` value (`binance` / `bybit`), not a hardcoded USDT-perp contract id. Contract/market type and exchange tick size are **not** available at lifecycle mint time; they are not invented. If venue is missing, `setup_id` stays unavailable.
+
+Persistence: nullable `setup_lifecycle_records.setup_id`, `plan_version_id`, `economic_identity_reason`. No uniqueness. No historical rewrite.
+
+Current `PLAN_LOCK_STATES` is unchanged. `TRIGGERED` can still mutate stored geometry; P1 documents that mutability by refusing to latch `plan_version_id` there. A geometry change after latch is `plan_version_invariant_violation`, not a silent overwrite and not a lifecycle repair.
+
+## P0 forensic answers
+
 
 Each answer is `YES` / `NO` / `CONDITIONAL` / `NOT ESTABLISHED` from repository
 inspection. A code path that permits a collision is not a measurement of historical frequency.
@@ -211,35 +236,33 @@ include `lifecycle_id`.
 
 ## Compatibility
 
-- Keep writing current `setup_identity`, `lifecycle_id`, `plan_identity`, public
-  `event_key` unchanged in the first identity implementation.
-- Add parallel columns or JSON fields only in a **migrated** later phase (not authorized now).
+- Current `setup_identity`, `lifecycle_id`, `plan_identity`, and public `event_key`
+  remain the authoritative consumer identities.
+- P1 added parallel nullable columns `setup_id`, `plan_version_id`, and
+  `economic_identity_reason` on `setup_lifecycle_records` (schema v21).
 - Public-event idempotency stays on `event_key` / plan reservation.
 - Historical SENT messages remain referenced by stored `canonical_plan_id` +
-  `message_hash`; do not rebuild from the latest symbol snapshot.
-- Ambiguous legacy rows: quarantine classification, not synthetic confident ids.
-  Quarantine is a design recommendation, not permission to rewrite history.
-- Rollback: new ids must be ignorable by old readers.
+  `message_hash`; P1 does not rebuild them.
+- Ambiguous legacy rows keep NULL new identities rather than synthetic ids.
+- Rollback: new columns are nullable; old readers that SELECT named legacy
+  columns continue to work. A v20 runtime refuses a v21 `user_version` via the
+  existing unsupported-schema guard.
 
-## Affected modules (future implementation phase)
+## P1 modules
 
-`app/lifecycle/identity.py`, `outcome_policy.py`, `state_machine.py`, `service.py`,
-`repositories.py`, `outcomes.py`, `app/alerts/telegram_lifecycle.py`,
-`app/alerts/public_identity.py`, `app/storage/database.py` (schema — requires
-migration review), `app/storage/repositories.py`, tests under `tests/test_lifecycle.py`,
-public delivery tests. **Do not start that work here.**
+`app/lifecycle/economic_identity.py` (new primitives), `state_machine.py` (latch
+after existing transitions), `service.py` (thread scan-run exchange as venue),
+`models.py` / `repositories.py` / `app/storage/database.py` (additive persistence).
+`app/lifecycle/identity.py`, `outcome_policy.py`, `outcomes.py`,
+`app/alerts/telegram_lifecycle.py`, and `app/alerts/public_identity.py` are
+unchanged.
 
-## Future test plan (next identity phase)
+## Later phases (not this PR)
 
-1. Same entry/stop, different TPs → different `plan_version_id`, same `setup_id` if anchor matches.
-2. Same economics, different days, no fill → same content fingerprint, not the same trade occurrence.
-3. Scalp vs swing same symbol/direction → different `setup_id` (mode in lineage).
-4. Tick vs raw string (`100` vs `100.0`) → one plan_version after canonicalization; document tick policy.
-5. Off-tick / non-finite → reject or quarantine, never silent merge.
-6. Missing required economics → ambiguous legacy, not a synthetic id.
-7. `lifecycle_id` rotation on new anchor → new generation; lineage assertions.
-8. Public `event_key` unchanged by adding parallel ids.
-9. Outcome fan-out still detected until outcome-ownership phase.
-10. No strategy gate, RR, Telegram transport, or lifecycle transition changes in that PR either unless separately authorized.
+1. Consumer migration of outcome joins from `plan_identity` to `plan_version_id`.
+2. Explicit supersession lineage if economics change after lock.
+3. Occurrence / simulated-trade identity after fill/exit policy exists.
+4. Tick-normalized identity if verified instrument tick metadata is carried to mint time.
+5. Outcome fan-out ownership.
 
-**Stop at INSPECT → MAP → DESIGN → TEST PLAN.**
+Do not begin those phases here.

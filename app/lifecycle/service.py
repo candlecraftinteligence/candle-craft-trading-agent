@@ -181,6 +181,10 @@ class SetupLifecycleService:
                 observation = observation_from_symbol_result(
                     symbol_result, min_score_for_idea=result.config.min_score_for_idea
                 )
+                observation = replace(
+                    observation,
+                    instrument_venue=_display(result.config.exchange),
+                )
             except (InvalidOperation, TypeError, ValueError) as exc:
                 _record_lifecycle_symbol_error(process_summary, symbol_result.symbol, exc)
                 prepared.append((symbol_result, None))

@@ -312,6 +312,9 @@ def test_scanner_process_improvement_schema_columns_exist(tmp_path) -> None:
         "symbol_health_score_at_detection",
         "symbol_health_penalty_cycles",
         "setup_identity",
+        "setup_id",
+        "plan_version_id",
+        "economic_identity_reason",
     } <= lifecycle_columns
     assert {
         "invalidation_count",
@@ -417,7 +420,7 @@ def test_schema_v19_backfills_existing_cursor_without_rewind_or_milestone_loss(
         progress.entry_at,
         progress.tp1_at,
     )
-    assert version == SCHEMA_VERSION == 20
+    assert version == SCHEMA_VERSION == 21
 
 
 def _create_schema_v19_public_truth_fixture(db_path: Path) -> None:
@@ -566,14 +569,14 @@ def test_schema_v19_to_v20_adds_public_truth_audit_columns_idempotently(
             """
         ).fetchone()
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert identify_schema_version(connection) == 20 == SCHEMA_VERSION
+        assert identify_schema_version(connection) == 21 == SCHEMA_VERSION
 
     assert expected_columns <= columns
     assert audit_defaults == ("N/A", "N/A", "N/A", "N/A", "N/A")
     assert _v19_public_truth_rows(db_path) == before
 
     with open_read_only_database(db_path) as connection:
-        assert identify_schema_version(connection) == 20
+        assert identify_schema_version(connection) == 21
 
     def unexpected_repeat_migration(connection: sqlite3.Connection) -> None:
         del connection
@@ -1661,7 +1664,7 @@ def test_schema_v14_to_v17_preserves_lifecycle_and_telegram_data(
 
     assert _representative_v14_rows(db_path) == before
     version, tables, attempt_columns, public_columns = _schema_contract(db_path)
-    assert version == 20 == SCHEMA_VERSION
+    assert version == 21 == SCHEMA_VERSION
     assert "setup_lifecycle_outcome_progress" in tables
     assert "public_alert_delivery_parts" in tables
     assert "delivery_state" in attempt_columns
@@ -1921,7 +1924,7 @@ def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:
         "v15-plan", "SENT", "2026-07-01T10:00:01Z", "SENT"
     )
     assert "public_alert_delivery_parts" in tables
-    assert version == 20 == SCHEMA_VERSION
+    assert version == 21 == SCHEMA_VERSION
 
 
 def test_schema_v16_migration_is_idempotent_for_v15_delivery_data(tmp_path) -> None:
@@ -2098,3 +2101,144 @@ def test_lifecycle_generation_migration_failure_preserves_legacy_rows_for_retry(
         assert connection.execute(
             "SELECT COUNT(*) FROM setup_lifecycle_events"
         ).fetchone()[0] == 1
+
+
+def _create_schema_v20_lifecycle_identity_fixture(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE setup_lifecycle_records (
+                lifecycle_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                current_state TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                last_transition_at TEXT NOT NULL,
+                entry_low TEXT NOT NULL DEFAULT 'N/A',
+                entry_high TEXT NOT NULL DEFAULT 'N/A',
+                stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                tp1 TEXT NOT NULL DEFAULT 'N/A',
+                tp2 TEXT NOT NULL DEFAULT 'N/A',
+                tp3 TEXT NOT NULL DEFAULT 'N/A',
+                setup_identity TEXT NOT NULL DEFAULT 'N/A',
+                structural_anchor TEXT NOT NULL DEFAULT 'N/A',
+                is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0, 1))
+            );
+            INSERT INTO setup_lifecycle_records (
+                lifecycle_id, symbol, mode, direction, current_state,
+                first_seen_at, last_seen_at, last_transition_at,
+                entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                setup_identity, structural_anchor, is_current
+            ) VALUES (
+                'v20-lifecycle', 'BTCUSDT', 'swing', 'long', 'CONFIRMED',
+                '2026-09-01T09:00:00+00:00',
+                '2026-09-01T10:00:00+00:00',
+                '2026-09-01T10:00:00+00:00',
+                '100.00', '102.00', '95.00', '110', '117', '124',
+                'BTCUSDT|swing|long|100.00|102.00|95.00|legacy',
+                'setup_generation_anchor|sweep-legacy',
+                1
+            );
+            PRAGMA user_version = 20;
+            """
+        )
+        connection.commit()
+
+
+def test_schema_v20_to_v21_adds_economic_identity_columns_without_backfill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.storage.database as database_module
+
+    db_path = tmp_path / "v20-economic-identity.db"
+    _create_schema_v20_lifecycle_identity_fixture(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        before = connection.execute(
+            """
+            SELECT lifecycle_id, symbol, entry_low, entry_high, stop_loss,
+                   tp1, tp2, tp3, setup_identity, structural_anchor
+            FROM setup_lifecycle_records
+            WHERE lifecycle_id = 'v20-lifecycle'
+            """
+        ).fetchone()
+        assert identify_schema_version(connection) == 20
+
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
+        }
+        after = connection.execute(
+            """
+            SELECT lifecycle_id, symbol, entry_low, entry_high, stop_loss,
+                   tp1, tp2, tp3, setup_identity, structural_anchor,
+                   setup_id, plan_version_id, economic_identity_reason
+            FROM setup_lifecycle_records
+            WHERE lifecycle_id = 'v20-lifecycle'
+            """
+        ).fetchone()
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert identify_schema_version(connection) == 21 == SCHEMA_VERSION
+
+    assert {"setup_id", "plan_version_id", "economic_identity_reason"} <= columns
+    assert after is not None
+    assert tuple(after[:10]) == tuple(before)
+    assert after[10] is None
+    assert after[11] is None
+    assert after[12] is None
+    assert "setup_lifecycle_records" in tables
+
+    with open_read_only_database(db_path) as connection:
+        assert identify_schema_version(connection) == SCHEMA_VERSION
+        row = connection.execute(
+            """
+            SELECT setup_id, plan_version_id, economic_identity_reason, tp2
+            FROM setup_lifecycle_records WHERE lifecycle_id = 'v20-lifecycle'
+            """
+        ).fetchone()
+        assert tuple(row) == (None, None, None, "117")
+
+    def unexpected_repeat_migration(connection: sqlite3.Connection) -> None:
+        del connection
+        raise AssertionError("v21 reopen attempted the v20-to-v21 migration")
+
+    monkeypatch.setattr(
+        database_module,
+        "_migrate_economic_identity_v21",
+        unexpected_repeat_migration,
+    )
+    with open_initialized_database(db_path):
+        pass
+
+
+def test_fresh_database_contains_economic_identity_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "fresh-economic-identity.db"
+    with open_initialized_database(db_path):
+        pass
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
+        }
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 21
+        assert {"setup_id", "plan_version_id", "economic_identity_reason"} <= columns
+        nullability = {
+            str(row[1]): int(row[3])
+            for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
+            if str(row[1]) in {"setup_id", "plan_version_id", "economic_identity_reason"}
+        }
+        assert nullability == {"setup_id": 0, "plan_version_id": 0, "economic_identity_reason": 0}
+

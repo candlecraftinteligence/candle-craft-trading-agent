@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -570,7 +570,10 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 symbol_health_penalty_cycles INTEGER NOT NULL DEFAULT 0,
                 setup_identity TEXT NOT NULL DEFAULT 'N/A',
                 structural_anchor TEXT NOT NULL DEFAULT 'N/A',
-                is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0, 1))
+                is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0, 1)),
+                setup_id TEXT,
+                plan_version_id TEXT,
+                economic_identity_reason TEXT
             );
 
             CREATE TABLE IF NOT EXISTS setup_lifecycle_events (
@@ -1039,6 +1042,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         )
         _ensure_column(connection, "symbol_health", "duplicate_noisy_setup_count", "INTEGER NOT NULL DEFAULT 0")
         _migrate_lifecycle_generation_identity_v17(connection)
+        if existing_version < 21:
+            _migrate_economic_identity_v21(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
@@ -1064,6 +1069,13 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, defi
     }
     if column not in columns:
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_economic_identity_v21(connection: sqlite3.Connection) -> None:
+    """Add prospective economic identity columns without rewriting historical rows."""
+
+    for column in ("setup_id", "plan_version_id", "economic_identity_reason"):
+        _ensure_column(connection, "setup_lifecycle_records", column, "TEXT")
 
 
 def _migrate_public_signal_truth_audit_v20(connection: sqlite3.Connection) -> None:
