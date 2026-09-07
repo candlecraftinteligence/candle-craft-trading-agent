@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from statistics import median
 from typing import Any
+from app.analytics.evidence_contract import UNAVAILABLE
 from app.data.dtos import NA
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_read_only_database
 
@@ -399,6 +400,14 @@ def _summary_report(data: ResearchData, filters: ResearchFilters) -> dict[str, A
     rejected_rows = tuple(row for row in data.symbols if row["display_bucket"] in {"near_miss", "no_setup", "data_issue"})
     replay_stats = _replay_stats(data.replays)
     watch_rows = _watch_iteration_rows(data.runs)
+    if watch_rows:
+        valid_activations_from_watch: int | None = sum(
+            _int_value(row.get("valid_activations")) for row in watch_rows
+        )
+        valid_activations_from_watch_status = "available"
+    else:
+        valid_activations_from_watch = None
+        valid_activations_from_watch_status = UNAVAILABLE
     warnings = []
     if replay_stats["total_replay_samples"] and replay_stats["total_replay_samples"] < MIN_RELIABLE_SAMPLE_SIZE:
         warnings.append(SAMPLE_SIZE_WARNING)
@@ -419,7 +428,12 @@ def _summary_report(data: ResearchData, filters: ResearchFilters) -> dict[str, A
             "average_symbols_per_watch_iteration": _number(
                 _mean(_numeric_values(row.get("symbols_requested") or row.get("symbols_scanned") for row in watch_rows))
             ),
-            "valid_activations_from_watch": sum(_int_value(row.get("valid_activations")) for row in watch_rows),
+            "valid_activations_from_watch": valid_activations_from_watch,
+            "valid_activations_from_watch_status": valid_activations_from_watch_status,
+            "valid_activations_from_watch_unit": (
+                "watch-loop WatchActivation alerts on is_watch_iteration rows; not fills"
+            ),
+            "valid_activations_from_watch_economic": False,
             "average_readiness_score": _number(_mean(readiness_scores)),
             "average_quality_score": _number(_mean(quality_scores)),
             "most_common_regime": _most_common_text(row.get("regime_state") for row in data.symbols),
@@ -458,6 +472,9 @@ def _watch_iterations_report(data: ResearchData, filters: ResearchFilters) -> di
             for row in rows[: filters.normalized_limit]
         ],
         "total_watch_iterations": len(rows),
+        "valid_activations_unit": (
+            "watch-loop WatchActivation alerts for that iteration; not fills"
+        ),
         "warnings": [],
     }
 

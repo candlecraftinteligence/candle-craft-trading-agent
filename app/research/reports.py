@@ -107,7 +107,7 @@ def _format_summary(report: Mapping[str, Any]) -> str:
         ("Total watch iterations", summary.get("total_watch_iterations")),
         ("Last watch iteration", summary.get("last_watch_iteration")),
         ("Average symbols/watch iteration", summary.get("average_symbols_per_watch_iteration")),
-        ("Valid activations from watch", summary.get("valid_activations_from_watch")),
+        ("Watch-loop alert activations (not fills)", summary.get("valid_activations_from_watch")),
         ("Average readiness score", summary.get("average_readiness_score")),
         ("Average quality score", summary.get("average_quality_score")),
         ("Most common regime", summary.get("most_common_regime")),

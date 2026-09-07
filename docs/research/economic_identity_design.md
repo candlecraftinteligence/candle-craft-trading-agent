@@ -148,7 +148,7 @@ confidently. Dual canonical/legacy `plan_identity` already exists via
 | Public mode-neutral ids | `telegram_lifecycle.py` | Scalp/swing collapse | public watchlist tests | mismatch rate vs modes | Keep public idempotency separate from setup_id |
 | UUID when no anchor | `new_setup_generation_id` | Non-replay-deterministic | lifecycle tests | how often anchor is N/A | Require anchor or quarantine |
 | Dual outcome tables | `outcomes.py` / service analytics | Join fan-out; not one trade | storage uniqueness tests | live fan-out rate | Authoritative outcome phase |
-| `valid_activations` ≠ lifecycle fills | `watch_mode.py` vs `outcome_events.py` | False zero-activation world | watch vs lifecycle tests separate | live co-occurrence | Activation accounting phase |
+| `valid_activations` ≠ lifecycle fills | `watch_mode.py` vs `outcome_events.py` | False zero-activation world if mixed as economics | P2A watch-scoped projection + event-record counts | occurrence identity still unavailable | Outcome/fill-occurrence phase |
 | Hygiene offline only | `hygiene.py` | Invalid geometry can linger | `test_lifecycle_geometry_hygiene.py` | whether repair is used in runtime | Do not enable as silent rewrite |
 
 ## Critique of the six-id model

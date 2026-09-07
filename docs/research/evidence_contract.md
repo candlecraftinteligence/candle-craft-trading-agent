@@ -1,7 +1,7 @@
 # CCI Evidence Contract
 
 Canonical structured definition: `app/analytics/evidence_contract.py`  
-Contract version: `cci-evidence-contract-v1`
+Contract version: `cci-evidence-contract-v2`
 
 This document explains current repository behavior. It does not change scanner,
 lifecycle, delivery, outcome, or identity generation. Audit-reported live-database
@@ -46,7 +46,11 @@ Summary of current vs intended:
 - **Lifecycle** is `lifecycle_id` / `setup_generation_id`. Geometry freezes only in `PLAN_LOCK_STATES` (`TRIGGERED` is excluded). Current-row filters are not as-of reconstruction.
 - **Readiness** and **quality** are overwritten snapshot scores/labels. They are not economic identity.
 - **Confirmation** is `confirmation_count` / `confirmed_at` / state `CONFIRMED`. It is not entry.
-- **Activation** is split: `scan_runs.valid_activations` counts watch-loop `WatchActivation` alerts and is `0` on non-watch runs; lifecycle `ENTRY_FILL_SIMULATED` is a different unit. **CURRENTLY UNSAFE / AMBIGUOUS**. Not repaired in this phase.
+- **Activation** is split and no longer treated as one economic funnel:
+  - Legacy `scan_runs.valid_activations` counts watch-loop `WatchActivation` alerts and is `DEFAULT 0` on non-watch runs. The physical field and operational consumers are unchanged. **Deprecated as an economic research metric.** Mixed-window sums that include non-watch zeros are **CURRENTLY UNSAFE / AMBIGUOUS**.
+  - Watch-scoped research projection: `activation_accounting.watch_alert_activations` (unavailable when no watch rows or the watch flag/column is missing; a complete 0 requires watch iterations in the window).
+  - Closed-candle entry-activation evidence: `setup_lifecycle_events.reason = ENTRY_ACTIVATED`, counted only as **event records** (`entry_activated_event_records`). Not a unique fill occurrence.
+  - `ENTRY_FILL_SIMULATED` is a different event-record unit; the reason text cannot distinguish simulated vs verified fills. Manual fill and fill-occurrence counts are **unavailable**.
 - **Simulated fill** exists as a transition reason and replay `filled` flags. **Manual fill** is **NOT FOUND**.
 - **Public signal** is a delivery event. Message hash is SHA-256 of formatted text, not JSON.
 - **Outcome** has two tables and can fan out on `lifecycle_id`. TP progress is not a completed trade. **CURRENTLY UNSAFE / AMBIGUOUS**.
@@ -68,7 +72,7 @@ observations. None of them count unique economic plans.
 | `near_misses` | observation `near_miss` | Safe as observation count |
 | `rejected` | observation `no_setup` (name is ambiguous vs `rejected_no_edge`) | **CURRENTLY UNSAFE / AMBIGUOUS** |
 | `data_issues` | watch metadata or display `data_issue`; may disagree with `data_issues_json` | **CURRENTLY UNSAFE / AMBIGUOUS** |
-| `valid_activations` | watch alert count; else default 0 | **CURRENTLY UNSAFE / AMBIGUOUS** |
+| `valid_activations` | watch alert count; else default 0 | **CURRENTLY UNSAFE / AMBIGUOUS**; deprecated as economic metric. Use `activation_accounting`. |
 | `still_watching` | watch eligible symbols not activated | Safe as watch snapshot |
 | `actionable_setups` | **alias of** `actionable_a_grade_setups` | **CURRENTLY UNSAFE / AMBIGUOUS** |
 | `confirmed_setups` | observations with lifecycle state `CONFIRMED` | **CURRENTLY UNSAFE / AMBIGUOUS** |

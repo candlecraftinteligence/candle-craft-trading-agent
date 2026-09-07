@@ -273,6 +273,13 @@ def test_window_is_half_open_and_counts_stay_distinct(tmp_path: Path) -> None:
     assert payload["count_distinctions"]["candidate_count"]["value"] == 1
     assert payload["count_distinctions"]["outcome_progress_row_count"]["value"] == 3
     assert payload["count_distinctions"]["unique_trade_count"]["status"] == UNAVAILABLE
+    assert payload["scan_run_counters"]["valid_activations"]["status"] == UNSAFE
+    assert payload["scan_run_counters"]["valid_activations"]["economic_research_metric"] is False
+    assert payload["activation_accounting"]["watch_alert_activations"]["status"] == UNAVAILABLE
+    assert payload["activation_accounting"]["watch_alert_activations"]["value"] is None
+    assert payload["activation_accounting"]["entry_activated_event_records"]["status"] == UNAVAILABLE
+    assert payload["activation_accounting"]["fill_occurrence_count"]["status"] == UNAVAILABLE
+    assert payload["activation_accounting"]["manual_fill_count"]["status"] == UNAVAILABLE
     assert payload["count_distinctions"]["unique_trade_count"]["value"] is None
     assert payload["count_distinctions"]["unique_economic_plan_count"]["status"] == UNSAFE
     assert payload["identity_diagnostics"]["setup_identity"]["generic_or_na_rows"] == 1
@@ -325,7 +332,7 @@ def test_cli_requires_explicit_path_and_emits_deterministic_json(tmp_path: Path,
     assert first == 0
     assert second == 0
     assert out_first == out_second
-    assert '"audit_version":"cci-evidence-baseline-audit-v1"' in out_first.replace(" ", "")
+    assert '"audit_version":"cci-evidence-baseline-audit-v2"' in out_first.replace(" ", "")
     refused = audit_evidence_baseline.main(
         [
             "--database-path",
