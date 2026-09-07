@@ -21,7 +21,7 @@ Module: `app.lifecycle.economic_identity`.
 | `setup_id` | Structural setup lineage | `cci-setup-id-v1`, scan-run `exchange` as instrument venue, normalized symbol, direction, mode, structural_anchor | Once venue + mode + direction + symbol + non-`N/A` structural_anchor exist. Then latched. |
 | `plan_version_id` | Immutable plan economics/geometry | `cci-plan-version-v1`, `setup_id`, entry_low/high, stop, TP1/2/3, stored invalidation | Only while `current_state ∈ PLAN_LOCK_STATES` and geometry is complete/valid. Not latched in `TRIGGERED`. |
 
-Encoding: ordered `\x1f`-joined fields, UTF-8, SHA-256, prefixes `setup-` and `plan-version-`. Prices use `Decimal.normalize()`; Python `float` and non-finite values are rejected. Tick quantization is **not** applied on the lifecycle path because verified per-instrument tick metadata is not carried on `LifecycleObservation`. Optional `tick_size` on the primitive rejects off-tick values instead of rounding.
+Encoding: ordered `\x1f`-joined fields, UTF-8, SHA-256, prefixes `setup-` and `plan-version-`. Prices use `Decimal.normalize()`; Python `float` and non-finite values are rejected. Text fields containing the `\x1f` delimiter are rejected before hashing so joined payloads cannot collide. Tick quantization is **not** applied on the lifecycle path because verified per-instrument tick metadata is not carried on `LifecycleObservation`. Optional `tick_size` on the primitive rejects off-tick values instead of rounding.
 
 Not included: lifecycle_id, RR, quality, readiness, state, failed gates, Telegram ids, research provenance, exit/fill-policy version (none exists in-repo).
 
@@ -29,7 +29,7 @@ Venue is the scan-run `ScannerRunConfig.exchange` value (`binance` / `bybit`), n
 
 Persistence: nullable `setup_lifecycle_records.setup_id`, `plan_version_id`, `economic_identity_reason`. No uniqueness. No historical rewrite.
 
-Current `PLAN_LOCK_STATES` is unchanged. `TRIGGERED` can still mutate stored geometry; P1 documents that mutability by refusing to latch `plan_version_id` there. A geometry change after latch is `plan_version_invariant_violation`, not a silent overwrite and not a lifecycle repair.
+Current `PLAN_LOCK_STATES` is unchanged. `TRIGGERED` can still mutate stored geometry; P1 documents that mutability by refusing to latch `plan_version_id` there. A geometry change after latch, or latched economics that can no longer reproduce the same identity, is `plan_version_invariant_violation` (latched id preserved), not a silent overwrite and not a lifecycle repair.
 
 ## P0 forensic answers
 

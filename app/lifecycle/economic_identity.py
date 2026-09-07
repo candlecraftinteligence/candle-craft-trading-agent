@@ -10,8 +10,10 @@ economics only, not a trade occurrence.
 
 Tick metadata is not available on the lifecycle write path. Identities therefore
 use Decimal canonicalization without tick quantization. Callers that *do* have a
-verified tick may pass ``tick_size`` to reject off-tick prices; values are never
-silently rounded onto a tick.
+verified tick may pass ``tick_size`` to reject off-tick values; they are never
+silently rounded onto a tick. Canonical text fields containing the U+001F
+(``\\x1f``) field delimiter are rejected before hashing so joined payloads
+cannot collide.
 """
 
 from __future__ import annotations
@@ -64,6 +66,10 @@ REASON_MISSING_INVALIDATION = "missing_invalidation"
 REASON_PLAN_GEOMETRY_UNLOCKED = "plan_geometry_unlocked"
 REASON_INVALID_STORED_PLAN_GEOMETRY = "invalid_stored_plan_geometry"
 REASON_PLAN_VERSION_INVARIANT_VIOLATION = "plan_version_invariant_violation"
+
+
+def _canonical_separator_reason(name: str) -> str:
+    return f"canonical_separator_in_{name}"
 
 
 class IdentityFieldKind(str, Enum):
@@ -197,7 +203,9 @@ def latch_economic_identities(
     current ``PLAN_LOCK_STATES`` contract. TRIGGERED remains unlocked; complete
     economics in that state stay unlatched rather than claiming immutability.
     A later geometry change after latch is an invariant violation, not a silent
-    overwrite and not a lifecycle-state repair.
+    overwrite and not a lifecycle-state repair. The same diagnostic applies when
+    latched economics become missing, malformed, non-finite, or otherwise unable
+    to reproduce the latched identity.
     """
 
     prior = previous if previous is not None else record
@@ -222,9 +230,8 @@ def latch_economic_identities(
     if not setup_result.available and setup_result.reason:
         reasons.append(setup_result.reason)
 
-    plan_result: IdentityMintResult
     if setup_id is None:
-        plan_result = IdentityMintResult.unavailable(REASON_MISSING_SETUP_ID)
+        candidate = IdentityMintResult.unavailable(REASON_MISSING_SETUP_ID)
     else:
         candidate = mint_plan_version_id(
             setup_id=setup_id,
@@ -237,25 +244,16 @@ def latch_economic_identities(
             invalidation=_stored_invalidation(record),
             tick_size=tick_size,
         )
-        if latched_plan is not None:
-            if (
-                candidate.available
-                and candidate.identity is not None
-                and candidate.identity != latched_plan
-            ):
-                plan_result = IdentityMintResult(
-                    identity=latched_plan,
-                    available=True,
-                    reason=REASON_PLAN_VERSION_INVARIANT_VIOLATION,
-                )
-            else:
-                plan_result = IdentityMintResult(identity=latched_plan, available=True, reason=None)
-        elif not plan_locked:
-            plan_result = IdentityMintResult.unavailable(REASON_PLAN_GEOMETRY_UNLOCKED)
-        elif not _record_has_valid_plan_geometry(record):
-            plan_result = IdentityMintResult.unavailable(REASON_INVALID_STORED_PLAN_GEOMETRY)
-        else:
-            plan_result = candidate
+    if latched_plan is not None:
+        plan_result = _preserved_latched_plan_result(latched_plan, candidate)
+    elif not plan_locked:
+        plan_result = IdentityMintResult.unavailable(REASON_PLAN_GEOMETRY_UNLOCKED)
+    elif setup_id is None:
+        plan_result = candidate
+    elif not _record_has_valid_plan_geometry(record):
+        plan_result = IdentityMintResult.unavailable(REASON_INVALID_STORED_PLAN_GEOMETRY)
+    else:
+        plan_result = candidate
 
     plan_version_id = plan_result.identity if plan_result.available else None
     if plan_result.reason:
@@ -274,6 +272,27 @@ def latch_economic_identities(
             "plan_version_id": plan_version_id,
             "economic_identity_reason": reason,
         }
+    )
+
+
+def _preserved_latched_plan_result(
+    latched_plan: str,
+    candidate: IdentityMintResult,
+) -> IdentityMintResult:
+    """Keep a latched plan_version_id and diagnose any failure to reproduce it."""
+
+    if (
+        candidate.available
+        and candidate.identity is not None
+        and candidate.identity == latched_plan
+    ):
+        return IdentityMintResult(identity=latched_plan, available=True, reason=None)
+    return IdentityMintResult(
+        identity=latched_plan,
+        available=True,
+        reason=_join_reasons(
+            [REASON_PLAN_VERSION_INVARIANT_VIOLATION, candidate.reason or ""]
+        ),
     )
 
 
@@ -315,6 +334,9 @@ def _required_symbol(name: str, value: Any) -> CanonicalField:
     text = _identity_text(value, case="upper")
     if text is None:
         return CanonicalField(name=name, kind=IdentityFieldKind.REQUIRED_MISSING, reason=REASON_MISSING_SYMBOL)
+    separator_rejection = _separator_rejection(name, text)
+    if separator_rejection is not None:
+        return separator_rejection
     return CanonicalField(name=name, kind=IdentityFieldKind.VALUE, canonical=text)
 
 
@@ -326,6 +348,9 @@ def _required_direction(name: str, value: Any) -> CanonicalField:
             kind=IdentityFieldKind.REQUIRED_MISSING,
             reason=REASON_MISSING_DIRECTION,
         )
+    separator_rejection = _separator_rejection(name, text)
+    if separator_rejection is not None:
+        return separator_rejection
     if text not in {"long", "short"}:
         return CanonicalField(
             name=name,
@@ -346,6 +371,9 @@ def _required_identity_text(name: str, value: Any, *, case: str | None) -> Canon
             "invalidation": REASON_MISSING_INVALIDATION,
         }.get(name, f"missing_{name}")
         return CanonicalField(name=name, kind=IdentityFieldKind.REQUIRED_MISSING, reason=reason)
+    separator_rejection = _separator_rejection(name, text)
+    if separator_rejection is not None:
+        return separator_rejection
     return CanonicalField(name=name, kind=IdentityFieldKind.VALUE, canonical=text)
 
 
@@ -354,6 +382,11 @@ def _required_price(name: str, value: Any, *, tick_size: Decimal | None) -> Cano
         return CanonicalField(name=name, kind=IdentityFieldKind.REQUIRED_MISSING, reason=f"missing_{name}")
     if isinstance(value, bool) or isinstance(value, float):
         return CanonicalField(name=name, kind=IdentityFieldKind.REJECTED, reason=f"rejected_{name}")
+    if not isinstance(value, Decimal):
+        raw = str(value)
+        separator_rejection = _separator_rejection(name, raw)
+        if separator_rejection is not None:
+            return separator_rejection
     try:
         number = value if isinstance(value, Decimal) else Decimal(str(value).strip())
     except (InvalidOperation, ValueError, ArithmeticError):
@@ -385,6 +418,16 @@ def _optional_tick_size(value: Any) -> Decimal | None:
 def _price_on_tick(price: Decimal, tick_size: Decimal) -> bool:
     quotient = price / tick_size
     return quotient == quotient.to_integral_value()
+
+
+def _separator_rejection(name: str, text: str) -> CanonicalField | None:
+    if CANONICAL_SEPARATOR not in text:
+        return None
+    return CanonicalField(
+        name=name,
+        kind=IdentityFieldKind.REJECTED,
+        reason=_canonical_separator_reason(name),
+    )
 
 
 def _identity_text(value: Any, *, case: str | None) -> str | None:

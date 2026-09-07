@@ -7,6 +7,7 @@ from math import inf, nan
 from app.alerts.public_identity import canonical_public_event_key
 from app.data.dtos import NA
 from app.lifecycle.economic_identity import (
+    CANONICAL_SEPARATOR,
     PLAN_VERSION_ID_PREFIX,
     PLAN_VERSION_ID_SCHEMA_VERSION,
     REASON_MISSING_INSTRUMENT_VENUE,
@@ -429,7 +430,71 @@ def test_latched_plan_version_is_not_silently_overwritten() -> None:
     assert result.setup_id == locked.setup_id
     assert result.plan_version_id == locked.plan_version_id
     assert result.plan_version_id != mint_plan_version_id(**_plan_kwargs(tp2="999")).identity
-    assert REASON_PLAN_VERSION_INVARIANT_VIOLATION in (result.economic_identity_reason or "")
+    assert result.economic_identity_reason == REASON_PLAN_VERSION_INVARIANT_VIOLATION
+
+
+def test_latched_plan_missing_tp_preserves_id_and_reports_invariant() -> None:
+    locked = latch_economic_identities(_record(), instrument_venue="binance", plan_locked=True)
+    result = latch_economic_identities(
+        locked.model_copy(update={"tp2": NA}),
+        instrument_venue="binance",
+        plan_locked=True,
+        previous=locked,
+    )
+    assert result.plan_version_id == locked.plan_version_id
+    assert result.current_state == locked.current_state
+    assert result.tp2 == NA
+    reason = result.economic_identity_reason or ""
+    assert REASON_PLAN_VERSION_INVARIANT_VIOLATION in reason
+    assert "missing_tp2" in reason
+
+
+def test_latched_plan_malformed_price_preserves_id_and_reports_invariant() -> None:
+    locked = latch_economic_identities(_record(), instrument_venue="binance", plan_locked=True)
+    result = latch_economic_identities(
+        locked.model_copy(update={"stop_loss": "not-a-price"}),
+        instrument_venue="binance",
+        plan_locked=True,
+        previous=locked,
+    )
+    assert result.plan_version_id == locked.plan_version_id
+    assert result.stop_loss == "not-a-price"
+    reason = result.economic_identity_reason or ""
+    assert REASON_PLAN_VERSION_INVARIANT_VIOLATION in reason
+    assert "malformed_stop_loss" in reason
+
+
+def test_latched_plan_missing_invalidation_preserves_id_and_reports_invariant() -> None:
+    locked = latch_economic_identities(_record(), instrument_venue="binance", plan_locked=True)
+    result = latch_economic_identities(
+        locked.model_copy(update={"invalidation_logic": NA, "invalidation_reason": NA}),
+        instrument_venue="binance",
+        plan_locked=True,
+        previous=locked,
+    )
+    assert result.plan_version_id == locked.plan_version_id
+    assert result.invalidation_logic == NA
+    assert result.invalidation_reason == NA
+    reason = result.economic_identity_reason or ""
+    assert REASON_PLAN_VERSION_INVARIANT_VIOLATION in reason
+    assert "missing_invalidation" in reason
+
+
+def test_latched_plan_unchanged_valid_geometry_has_no_invariant() -> None:
+    locked = latch_economic_identities(_record(), instrument_venue="binance", plan_locked=True)
+    result = latch_economic_identities(
+        locked,
+        instrument_venue="binance",
+        plan_locked=True,
+        previous=locked,
+    )
+    assert result is locked or (
+        result.plan_version_id == locked.plan_version_id
+        and result.setup_id == locked.setup_id
+        and result.economic_identity_reason is None
+    )
+    assert result.economic_identity_reason is None
+    assert result.plan_version_id == mint_plan_version_id(**_plan_kwargs()).identity
 
 
 def test_unlocked_complete_geometry_waits_for_lock_before_plan_version() -> None:
@@ -563,3 +628,54 @@ def test_identity_schema_constants_are_explicit() -> None:
     assert PLAN_VERSION_ID_SCHEMA_VERSION == "cci-plan-version-v1"
     assert SETUP_ID_PREFIX == "setup-"
     assert PLAN_VERSION_ID_PREFIX == "plan-version-"
+    assert CANONICAL_SEPARATOR == "\x1f"
+
+
+def test_structural_anchor_containing_canonical_separator_is_rejected() -> None:
+    poisoned = mint_setup_id(
+        **_setup_kwargs(structural_anchor=f"setup_generation_anchor{CANONICAL_SEPARATOR}sweep-a")
+    )
+    assert poisoned.available is False
+    assert poisoned.identity is None
+    assert poisoned.reason == "canonical_separator_in_structural_anchor"
+
+
+def test_invalidation_containing_canonical_separator_is_rejected() -> None:
+    poisoned = mint_plan_version_id(
+        **_plan_kwargs(invalidation=f"Invalid below 95.{CANONICAL_SEPARATOR}extra")
+    )
+    assert poisoned.available is False
+    assert poisoned.identity is None
+    assert poisoned.reason == "canonical_separator_in_invalidation"
+
+
+def test_canonical_separator_cannot_create_field_boundary_collision() -> None:
+    honest = mint_setup_id(**_setup_kwargs(mode="swing", structural_anchor="x"))
+    mode_absorbs_anchor = mint_setup_id(
+        **_setup_kwargs(mode=f"swing{CANONICAL_SEPARATOR}x", structural_anchor="y")
+    )
+    anchor_absorbs_mode = mint_setup_id(
+        **_setup_kwargs(mode="swing", structural_anchor=f"x{CANONICAL_SEPARATOR}y")
+    )
+    assert honest.available is True
+    assert honest.identity is not None
+    assert mode_absorbs_anchor.available is False
+    assert mode_absorbs_anchor.identity is None
+    assert mode_absorbs_anchor.reason == "canonical_separator_in_mode"
+    assert anchor_absorbs_mode.available is False
+    assert anchor_absorbs_mode.identity is None
+    assert anchor_absorbs_mode.reason == "canonical_separator_in_structural_anchor"
+    assert mode_absorbs_anchor.identity != honest.identity
+    assert anchor_absorbs_mode.identity != honest.identity
+
+
+def test_invalidation_separator_cannot_collide_with_split_fields() -> None:
+    honest = mint_plan_version_id(**_plan_kwargs(invalidation="Invalid below 95."))
+    poisoned = mint_plan_version_id(
+        **_plan_kwargs(invalidation=f"Invalid below 95.{CANONICAL_SEPARATOR}tp-extra")
+    )
+    assert honest.available is True
+    assert poisoned.available is False
+    assert poisoned.identity is None
+    assert poisoned.reason == "canonical_separator_in_invalidation"
+    assert poisoned.identity != honest.identity
