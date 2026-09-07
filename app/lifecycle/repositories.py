@@ -145,8 +145,9 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 stop_loss, tp1, tp2, tp3, rr, invalidation_logic, confirmation_count,
                 required_confirmation_cycles, quality_grade_first_seen, quality_grade_current,
                 quality_grade_confirmed, confirmed_at, decay_count, decay_reason,
-                symbol_health_score_at_detection, symbol_health_penalty_cycles, setup_identity,
-                structural_anchor, is_current
+                symbol_health_score_at_detection, symbol_health_penalty_cycles,                 setup_identity,
+                structural_anchor, is_current, setup_id, plan_version_id,
+                economic_identity_reason
             ) VALUES ({placeholders})
             ON CONFLICT(lifecycle_id) DO UPDATE SET
                 symbol = excluded.symbol,
@@ -197,7 +198,10 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 symbol_health_penalty_cycles = excluded.symbol_health_penalty_cycles,
                 setup_identity = excluded.setup_identity,
                 structural_anchor = excluded.structural_anchor,
-                is_current = excluded.is_current
+                is_current = excluded.is_current,
+                setup_id = excluded.setup_id,
+                plan_version_id = excluded.plan_version_id,
+                economic_identity_reason = excluded.economic_identity_reason
             """,
             params,
         )
@@ -482,6 +486,9 @@ def _record_params(record: SetupLifecycleRecord) -> tuple[Any, ...]:
         record.setup_identity,
         record.structural_anchor,
         int(record.is_current),
+        record.setup_id,
+        record.plan_version_id,
+        record.economic_identity_reason,
     )
 
 
@@ -554,6 +561,9 @@ def _record_from_row(row: sqlite3.Row) -> SetupLifecycleRecord:
         setup_identity=row["setup_identity"],
         structural_anchor=row["structural_anchor"],
         is_current=bool(row["is_current"]),
+        setup_id=_optional_identity_value(row, "setup_id"),
+        plan_version_id=_optional_identity_value(row, "plan_version_id"),
+        economic_identity_reason=_optional_identity_value(row, "economic_identity_reason"),
     )
 
 
@@ -628,6 +638,19 @@ def _state_or_none(value: Any) -> SetupLifecycleState | None:
     if value in (None, "", NA):
         return None
     return SetupLifecycleState(str(value))
+
+
+def _optional_identity_value(row: sqlite3.Row, name: str) -> str | None:
+    try:
+        value = row[name]
+    except (IndexError, KeyError):
+        return None
+    if value in (None, "", NA):
+        return None
+    text = str(value).strip()
+    if not text or text.upper() == NA:
+        return None
+    return text
 
 
 def _reason_from_value(value: Any) -> SetupTransitionReason:

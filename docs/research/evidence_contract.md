@@ -42,7 +42,7 @@ Summary of current vs intended:
 - **Candidate** is an optional geometry snapshot for that observation. It is not an activated plan.
 - **Setup** is closest to `setup_identity` (`symbol|mode|direction|entry_low|entry_high|stop_loss|invalidation_reason`). Targets are omitted. **CURRENTLY UNSAFE / AMBIGUOUS**.
 - **Economic plan** is closest to stored lifecycle geometry plus `canonical_plan_identity`. That hash includes `lifecycle_id`, so generation identity is mixed into economics. Public `canonical_plan_id` is a different, mode-neutral namespace. **CURRENTLY UNSAFE / AMBIGUOUS**.
-- **Plan version** is **NOT FOUND**. Target revisions can keep `setup_identity` and change `plan_identity` if geometry is unlocked.
+- **Plan version** is P1 parallel `setup_lifecycle_records.plan_version_id` (SHA-256 of plan economics without `lifecycle_id`). Current outcome/public consumers still use `plan_identity`. Historical rows remain NULL. **CURRENTLY UNSAFE / AMBIGUOUS** for research counting until consumer migration.
 - **Lifecycle** is `lifecycle_id` / `setup_generation_id`. Geometry freezes only in `PLAN_LOCK_STATES` (`TRIGGERED` is excluded). Current-row filters are not as-of reconstruction.
 - **Readiness** and **quality** are overwritten snapshot scores/labels. They are not economic identity.
 - **Confirmation** is `confirmation_count` / `confirmed_at` / state `CONFIRMED`. It is not entry.

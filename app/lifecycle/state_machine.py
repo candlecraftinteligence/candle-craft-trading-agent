@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.data.dtos import NA
+from app.lifecycle.economic_identity import latch_economic_identities
 from app.lifecycle.identity import setup_geometry_identity
 from app.lifecycle.models import (
     ACTIVE_LIFECYCLE_MONITORING_STATES,
@@ -273,6 +274,7 @@ class LifecycleObservation:
     expired: bool = False
     closed_candle_outcomes_managed: bool = False
     structural_anchor: str = NA
+    instrument_venue: str = NA
 
     @property
     def pullback_and_rr_valid(self) -> bool:
@@ -387,6 +389,24 @@ def transition_record(
     )
 
 
+def _with_economic_identities(
+    result: SetupTransitionResult,
+    observation: LifecycleObservation,
+    previous: SetupLifecycleRecord | None,
+) -> SetupTransitionResult:
+    if result.record is None:
+        return result
+    updated = latch_economic_identities(
+        result.record,
+        instrument_venue=observation.instrument_venue,
+        plan_locked=result.record.current_state in PLAN_LOCK_STATES,
+        previous=previous,
+    )
+    if updated is result.record:
+        return result
+    return result.model_copy(update={"record": updated})
+
+
 def evaluate_lifecycle_transition(
     record: SetupLifecycleRecord | None,
     observation: LifecycleObservation,
@@ -491,16 +511,20 @@ def evaluate_lifecycle_transition(
             failed_gate=new_record.failed_gate,
             notes=_transition_notes(_reason_for_state(initial_state, observation, initialized=True), observation),
         )
-        return SetupTransitionResult(
-            lifecycle_id=lifecycle_id,
-            symbol=observation.symbol,
-            from_state=None,
-            to_state=initial_state,
-            reason=event.reason,
-            transitioned=True,
-            notes=event.notes,
-            event=event,
-            record=new_record,
+        return _with_economic_identities(
+            SetupTransitionResult(
+                lifecycle_id=lifecycle_id,
+                symbol=observation.symbol,
+                from_state=None,
+                to_state=initial_state,
+                reason=event.reason,
+                transitioned=True,
+                notes=event.notes,
+                event=event,
+                record=new_record,
+            ),
+            observation,
+            previous=None,
         )
 
     existing_geometry_failure = stored_plan_geometry_failure(record)
@@ -509,32 +533,40 @@ def evaluate_lifecycle_transition(
         and existing_geometry_failure is not None
     ):
         diagnostic = f"{INVALID_STORED_PLAN_GEOMETRY}:{existing_geometry_failure}"
-        return SetupTransitionResult(
-            lifecycle_id=record.lifecycle_id,
-            symbol=record.symbol,
-            from_state=record.current_state,
-            to_state=record.current_state,
-            reason=SetupTransitionReason.INVALID_TRANSITION,
-            transitioned=False,
-            allowed=False,
-            notes=diagnostic,
-            record=record,
+        return _with_economic_identities(
+            SetupTransitionResult(
+                lifecycle_id=record.lifecycle_id,
+                symbol=record.symbol,
+                from_state=record.current_state,
+                to_state=record.current_state,
+                reason=SetupTransitionReason.INVALID_TRANSITION,
+                transitioned=False,
+                allowed=False,
+                notes=diagnostic,
+                record=record,
+            ),
+            observation,
+            previous=record,
         )
 
     if (
         observation.closed_candle_outcomes_managed
         and record.current_state in {SetupLifecycleState.TP_HIT, SetupLifecycleState.SL_HIT}
     ):
-        return transition_record(
-            record,
-            record.current_state,
-            reason=SetupTransitionReason.NO_CHANGE,
-            now=timestamp,
-            scan_run_id=scan_run_id,
-            readiness_score=record.readiness_score,
-            quality_score=record.quality_score,
-            failed_gate=record.failed_gate,
-            notes="Canonical terminal lifecycle state is immutable.",
+        return _with_economic_identities(
+            transition_record(
+                record,
+                record.current_state,
+                reason=SetupTransitionReason.NO_CHANGE,
+                now=timestamp,
+                scan_run_id=scan_run_id,
+                readiness_score=record.readiness_score,
+                quality_score=record.quality_score,
+                failed_gate=record.failed_gate,
+                notes="Canonical terminal lifecycle state is immutable.",
+            ),
+            observation,
+            previous=record,
         )
 
     if not observation.closed_candle_outcomes_managed and _stored_monitoring_entry_zone_touched(record, observation):
@@ -579,28 +611,32 @@ def evaluate_lifecycle_transition(
         and next_state == SetupLifecycleState.CONFIRMED
     ):
         reason = SetupTransitionReason.MULTI_SCAN_CONFIRMED
-    return transition_record(
-        updated_record,
-        next_state,
-        reason=reason,
-        now=timestamp,
-        scan_run_id=scan_run_id,
-        readiness_score=observation.readiness_score,
-        quality_score=observation.quality_score,
-        failed_gate=(
-            geometry_diagnostic
-            if geometry_diagnostic != NA
-            else updated_record.failed_gate
-            if decay_reason != NA
-            else observation.failed_gate
+    return _with_economic_identities(
+        transition_record(
+            updated_record,
+            next_state,
+            reason=reason,
+            now=timestamp,
+            scan_run_id=scan_run_id,
+            readiness_score=observation.readiness_score,
+            quality_score=observation.quality_score,
+            failed_gate=(
+                geometry_diagnostic
+                if geometry_diagnostic != NA
+                else updated_record.failed_gate
+                if decay_reason != NA
+                else observation.failed_gate
+            ),
+            notes=(
+                geometry_diagnostic
+                if geometry_diagnostic != NA
+                else _transition_notes(reason, observation)
+                if next_state != updated_record.current_state
+                else SetupTransitionReason.NO_CHANGE.value
+            ),
         ),
-        notes=(
-            geometry_diagnostic
-            if geometry_diagnostic != NA
-            else _transition_notes(reason, observation)
-            if next_state != updated_record.current_state
-            else SetupTransitionReason.NO_CHANGE.value
-        ),
+        observation,
+        previous=record,
     )
 
 
