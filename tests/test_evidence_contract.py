@@ -56,4 +56,11 @@ def test_fixture_examples_keep_counting_units_separate() -> None:
     assert evidence_contract_payload()["entities"]["MANUAL FILL"]["research_statistics_safe"] == UNAVAILABLE
     assert evidence_contract_payload()["metrics"]["actionable_setups"]["trust_status"] == UNSAFE
     assert evidence_contract_payload()["metrics"]["valid_activations"]["trust_status"] == UNSAFE
+    assert "deprecated as an economic research metric" in evidence_contract_payload()["metrics"]["valid_activations"]["limitations"].lower()
+    accounting = evidence_contract_payload()["activation_accounting"]
+    assert accounting["feeds_operational_decisions"] is False
+    assert accounting["schema_version_unchanged"] is True
+    assert accounting["unsupported_occurrence_metrics"]["fill_occurrence_count"] == UNAVAILABLE
+    assert accounting["unsupported_occurrence_metrics"]["manual_fill_count"] == UNAVAILABLE
+    assert "ENTRY_ACTIVATED" in examples["trigger_touch_activation_fill"]["example"]
     assert "identical to actionable_a_grade_setups" in evidence_contract_payload()["metrics"]["actionable_setups"]["inclusion_rules"]

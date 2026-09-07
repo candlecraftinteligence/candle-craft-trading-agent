@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
 
+from app.analytics.activation_accounting import project_activation_accounting
 from app.analytics.evidence_contract import CONTRACT_VERSION, UNAVAILABLE, UNSAFE
 from app.analytics.evidence_time import (
     EvidenceTimestampError,
@@ -32,7 +33,7 @@ from app.storage.database import (
     read_only_connection_safety_proof,
 )
 
-AUDIT_VERSION: Final[str] = "cci-evidence-baseline-audit-v1"
+AUDIT_VERSION: Final[str] = "cci-evidence-baseline-audit-v2"
 LIVE_RUNTIME_BASENAME: Final[str] = "main_live_runtime.sqlite"
 KNOWN_LIVE_PATHS: Final[tuple[Path, ...]] = (
     Path(r"S:\CandleCraftRuntime\scan_runs\main_live_runtime.sqlite"),
@@ -212,7 +213,7 @@ def _audit_connection(
         sqlite_naive=False,
         start=start,
         cutoff=cutoff,
-        extra_columns=("lifecycle_id",),
+        extra_columns=("lifecycle_id", "event_id", "reason", "scan_run_id", "from_state", "to_state"),
     )
     lifecycle_records = _timestamped_rows(
         connection,
@@ -307,6 +308,13 @@ def _audit_connection(
             "telegram_alert_attempts": telegram_attempts["coverage"],
         },
         "scan_run_counters": _counter_sums(scan_rows, tables.get("scan_runs", set())),
+        "activation_accounting": project_activation_accounting(
+            scan_rows=scan_rows,
+            scan_columns=set(tables.get("scan_runs", set())),
+            event_rows=lifecycle_events.get("rows", ()),
+            event_columns=set(tables.get("setup_lifecycle_events", set())),
+            events_table_available=lifecycle_events["coverage"].get("status") == "available",
+        ),
         "observation_counts": {
             "symbol_results_in_window_runs": observations["count"],
             "setup_candidates_in_window_runs": candidates["count"],
@@ -413,6 +421,9 @@ def _scan_run_window(
     columns = ["run_id", "timestamp"]
     for name in SCAN_RUN_COUNTERS:
         if name in tables["scan_runs"]:
+            columns.append(name)
+    for name in ("is_watch_iteration", "watch_iteration_number"):
+        if name in tables["scan_runs"] and name not in columns:
             columns.append(name)
     selected = ", ".join(_quote_ident(name) for name in columns)
     fetched = connection.execute(f"SELECT {selected} FROM scan_runs").fetchall()
@@ -573,6 +584,22 @@ def _counter_sums(rows: Sequence[Mapping[str, Any]], columns: set[str]) -> dict[
         total = 0
         for row in rows:
             total += int(row.get(name) or 0)
+        if name == "valid_activations":
+            payload[name] = {
+                "status": UNSAFE,
+                "value": total,
+                "unit": "legacy_scan_run_counter_sum_including_non_watch_default_zeros",
+                "scope": "sum of stored per-run counters whose persist timestamp is in window",
+                "unique_economic_plans_counted": False,
+                "research_funnel_suitable": False,
+                "economic_research_metric": False,
+                "zero_semantics": (
+                    "Stored 0 on non-watch runs is the insert default, not proof of no "
+                    "watch alerts and not proof of no lifecycle fills. See "
+                    "activation_accounting.watch_alert_activations."
+                ),
+            }
+            continue
         payload[name] = {
             "status": "available",
             "value": total,

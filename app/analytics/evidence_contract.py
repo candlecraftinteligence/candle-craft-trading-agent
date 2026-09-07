@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any, Final
 
-CONTRACT_VERSION: Final[str] = "cci-evidence-contract-v1"
+CONTRACT_VERSION: Final[str] = "cci-evidence-contract-v2"
 UNSAFE: Final[str] = "CURRENTLY UNSAFE / AMBIGUOUS"
 UNAVAILABLE: Final[str] = "unavailable"
 
@@ -188,6 +188,7 @@ def build_evidence_contract() -> dict[str, Any]:
         "metrics": _metrics(),
         "timestamps": _timestamps(),
         "counting_unit_examples": _counting_unit_examples(),
+        "activation_accounting": _activation_accounting_contract(),
     }
 
 
@@ -427,32 +428,58 @@ def _entities() -> dict[str, Any]:
         ),
         "ACTIVATION": _entity(
             current_meaning=(
-                "Two different concepts. (1) scan_runs.valid_activations is "
-                "len(watch_mode WatchActivation) for watch iterations else 0; a WatchActivation "
-                "is a watch-loop alert trigger (trade_idea + valid quality + display_status "
-                "valid_setup), not a lifecycle EXECUTING transition. (2) Lifecycle may emit "
-                "ENTRY_FILL_SIMULATED and move toward EXECUTING/MANAGING independently. "
-                "Audit-reported activation events with valid_activations=0 are consistent with "
-                "this split if those events are lifecycle fills rather than watch alerts."
+                "P2A splits the previously mixed label. (1) Legacy scan_runs.valid_activations "
+                "is len(watch_mode WatchActivation) for watch iterations else DEFAULT 0; a "
+                "WatchActivation is a watch-loop alert trigger (trade_idea + valid quality + "
+                "display_status valid_setup), not a lifecycle EXECUTING transition. This field "
+                "is preserved operationally and is deprecated as an economic research metric. "
+                "(2) Authoritative closed-candle entry-activation evidence is "
+                "setup_lifecycle_events.reason = ENTRY_ACTIVATED, counted only as event records. "
+                "(3) ENTRY_FILL_SIMULATED is a different event-record unit whose reason text "
+                "cannot distinguish simulated vs verified fills. Fill-occurrence identity is "
+                "unavailable. Audit-reported activation narratives with valid_activations=0 "
+                "are consistent with this split when those narratives are lifecycle events "
+                "rather than watch alerts."
             ),
             intended_research_meaning="First permitted entry occurrence of a frozen plan version",
-            current_authoritative_id="NOT FOUND as a unified id; valid_activations is a watch-alert counter",
-            proposed_future_id="simulated_trade_id / fill occurrence id (P1+)",
-            unit="watch alert (counter) vs lifecycle fill event (different unit)",
-            owner="app.watch_mode.build_watch_iteration_summary vs app.lifecycle.outcome_events",
-            creation_point="watch loop activations list; or lifecycle outcome advance_to_managing",
-            mutability="counter is insert-once per scan_runs row; lifecycle state continues to mutate",
-            timestamp_semantics="watch iteration completed_at vs lifecycle event timestamp",
-            relationships="Do not infer activation from reconciled symbols_completed",
-            cardinality="valid_activations defaults 0 on non-watch runs even if lifecycle fills exist",
+            current_authoritative_id=(
+                "Watch alerts: scan_runs.valid_activations on is_watch_iteration=1. "
+                "Entry activation evidence: setup_lifecycle_events.event_id where reason is "
+                "ENTRY_ACTIVATED. No unified activation/fill occurrence id."
+            ),
+            proposed_future_id="simulated_trade_id / fill occurrence id (later; not P2A)",
+            unit="watch alert (legacy counter) vs lifecycle event records (different units)",
+            owner="app.watch_mode.build_watch_iteration_summary vs app.lifecycle.outcomes",
+            creation_point="watch loop activations list; or evaluate_closed_candle_outcomes entry_activated",
+            mutability="scan_runs counter is insert-once per run; lifecycle events append; state continues to mutate",
+            timestamp_semantics=(
+                "Watch: scan persist / watch completed_at. ENTRY_ACTIVATED event.timestamp is "
+                "evaluation/processing time, not candle-close occurrence time."
+            ),
+            relationships=(
+                "Do not infer activation from current_state EXECUTING, confirmed_setups, "
+                "Telegram delivery, or reconciled symbols_completed. See activation_accounting."
+            ),
+            cardinality=(
+                "valid_activations defaults 0 on non-watch runs even if lifecycle fills exist; "
+                "that default is not a complete economic zero"
+            ),
             research_statistics_safe=UNSAFE,
             producers=(
                 "app.watch_mode.build_watch_iteration_summary",
                 "app.storage.repositories._scan_run_record",
-                "app.lifecycle.outcome_events",
+                "app.lifecycle.outcomes.evaluate_closed_candle_outcomes",
+                "app.analytics.activation_accounting.project_activation_accounting",
             ),
-            consumers=("scan_runs.valid_activations", "research.queries valid_activations_from_watch"),
-            enforcement="tests for watch counter; lifecycle fill tests are separate. Not repaired in this phase.",
+            consumers=(
+                "scan_runs.valid_activations (operational, unchanged)",
+                "research.queries valid_activations_from_watch (watch-scoped research)",
+                "evidence baseline audit activation_accounting (P2A projection)",
+            ),
+            enforcement=(
+                "Watch counter tests remain; P2A adds isolated research projections and "
+                "unavailable occurrence metrics. Lifecycle/fill producers are unchanged."
+            ),
         ),
         "SIMULATED FILL": _entity(
             current_meaning=(
@@ -729,19 +756,24 @@ def _metrics() -> dict[str, Any]:
             producer="app.watch_mode.build_watch_iteration_summary",
             update_path="len(activations); stored only when watch_iteration metadata is passed; else 0",
             persistence=persist,
-            inclusion_rules="WatchActivation list: prior state allows activation, current_result_is_valid_activation (trade_idea, quality, display_status==valid_setup, optional portfolio). NOT lifecycle ENTRY_FILL_SIMULATED.",
+            inclusion_rules="WatchActivation list: prior state allows activation, current_result_is_valid_activation (trade_idea, quality, display_status==valid_setup, optional portfolio). NOT lifecycle ENTRY_ACTIVATED or ENTRY_FILL_SIMULATED.",
             counting_unit="watch-loop alert trigger per iteration",
             scope="watch iteration / run",
             repeated_observations_counted="per watch iteration that stored the summary",
             unique_economic_plans_counted="no",
             snapshot_time="watch iteration persist",
-            relative_to_lifecycle="not the lifecycle fill counter",
+            relative_to_lifecycle="not the lifecycle fill or entry-activation counter",
             consumers=consumers + ("app.research.reports valid_activations_from_watch",),
             default_null_zero="NOT NULL DEFAULT 0 — zero on non-watch runs is default, not proof of no fills",
             categories_overlap="orthogonal to confirmed_setups and actionable_a_grade_setups",
             research_funnel_suitable="no — cannot be used as entry funnel",
             trust_status=UNSAFE,
-            limitations="Activation accounting is deferred. Zero is not 'no activations happened' for lifecycle fills.",
+            limitations=(
+                "P2A: deprecated as an economic research metric. Physical field and operational "
+                "consumers are unchanged. Mixed-window sums that include non-watch default zeros "
+                "are unsafe. Use activation_accounting.watch_alert_activations for the watch-scoped "
+                "counter and entry_activated_event_records for closed-candle activation evidence."
+            ),
         ),
         "still_watching": _metric(
             producer="app.watch_mode.build_watch_iteration_summary",
@@ -1057,6 +1089,158 @@ def _counting_unit_examples() -> dict[str, Any]:
         "boundary_window": {
             "unit": "half-open [start, cutoff)",
             "example": "A scan_runs.timestamp equal to cutoff is excluded",
+        },
+        "trigger_touch_activation_fill": {
+            "unit": "distinct evidence kinds; do not sum",
+            "example": (
+                "TRIGGERED lifecycle event is a trigger observation. "
+                "ENTRY_ZONE_TOUCHED is a zone-touch event record. "
+                "ENTRY_ACTIVATED is closed-candle activation evidence (event record). "
+                "ENTRY_FILL_SIMULATED is a later state-progression event whose text cannot "
+                "prove a verified manual fill. Watch valid_activations=1 is a watch alert, "
+                "not any of the above. None of these is a unique trade."
+            ),
+        },
+    }
+
+
+def _activation_accounting_contract() -> dict[str, Any]:
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "accounting_version": "cci-activation-accounting-v1",
+        "schema_version_unchanged": True,
+        "feeds_operational_decisions": False,
+        "prospective_applicability": (
+            "Projections apply to committed rows in an explicit [start, cutoff) window. "
+            "Historical scan_runs.valid_activations values are not rewritten. "
+            "Missing P1 identities stay missing. No backfill."
+        ),
+        "legacy_valid_activations": {
+            "name": "valid_activations",
+            "meaning": "Watch-loop WatchActivation alert count stored on scan_runs",
+            "producer": "app.watch_mode.build_watch_iteration_summary then _scan_run_record",
+            "authoritative_predicate": (
+                "watch_iteration is not None: len(WatchActivation); else INTEGER DEFAULT 0"
+            ),
+            "source_identity": "scan_runs.run_id",
+            "event_time": "scan persist / watch completed_at, not candle close",
+            "counting_unit": "watch-loop alert per stored watch iteration",
+            "uniqueness_rule": "per scan_runs row; repeated watch iterations recount",
+            "aggregation_grain": "watch-scoped rows only for research; mixed sums are unsafe",
+            "run_iteration_attribution": "the stored scan_runs row",
+            "evidence_window_watermark": "scan_runs.timestamp in [start, cutoff)",
+            "completion_criteria": "insert-once scan persist succeeded",
+            "null_zero_semantics": (
+                "Non-watch 0 is default, not observed inactivity. Missing column is unavailable."
+            ),
+            "retry_replay_behavior": "insert-once; re-reading the row does not increment",
+            "persistence": "scan_runs.valid_activations INTEGER NOT NULL DEFAULT 0",
+            "consumers": (
+                "watch console, research watch summaries, post-restart funnel raw extract"
+            ),
+            "contract_version": CONTRACT_VERSION,
+            "prospective_applicability_boundary": "unchanged operational writes from P2A onward",
+            "legacy_interpretation": (
+                "Deprecated as economic activation/fill count. Keep the physical field."
+            ),
+        },
+        "watch_alert_activations": {
+            "name": "watch_alert_activations",
+            "meaning": "Watch-scoped sum of stored valid_activations",
+            "producer": "app.analytics.activation_accounting.project_activation_accounting",
+            "authoritative_predicate": "is_watch_iteration=1",
+            "source_identity": "scan_runs.run_id",
+            "event_time": "scan persist time",
+            "counting_unit": "watch-loop WatchActivation alert",
+            "uniqueness_rule": "per watch-iteration row",
+            "aggregation_grain": "persist-window sum of watch rows",
+            "run_iteration_attribution": "the watch-iteration scan_runs row",
+            "evidence_window_watermark": "scan_runs.timestamp in [start, cutoff) and is_watch_iteration=1",
+            "completion_criteria": (
+                "is_watch_iteration column present and at least one watch row in window"
+            ),
+            "null_zero_semantics": (
+                "No watch rows or missing columns => unavailable, not zero. "
+                "Watch rows all storing 0 => complete supported zero of watch alerts."
+            ),
+            "retry_replay_behavior": "deterministic projection; does not rewrite source rows",
+            "persistence": "derived; no new column",
+            "consumers": "evidence baseline audit activation_accounting only",
+            "contract_version": CONTRACT_VERSION,
+            "prospective_applicability_boundary": "P2A+ research projection",
+            "legacy_interpretation": "replaces mixed valid_activations sums for research",
+        },
+        "entry_activated_event_records": {
+            "name": "entry_activated_event_records",
+            "meaning": "Closed-candle entry activation evidence records",
+            "producer": "app.lifecycle.outcomes.evaluate_closed_candle_outcomes",
+            "authoritative_predicate": "reason == ENTRY_ACTIVATED enum value",
+            "source_identity": "setup_lifecycle_events.event_id",
+            "event_time": "event.timestamp = evaluated_at (processing time)",
+            "counting_unit": "event record",
+            "uniqueness_rule": "event_id; not fill-occurrence identity",
+            "aggregation_grain": "processing-time window",
+            "run_iteration_attribution": (
+                "event.scan_run_id when present; otherwise lifecycle-event measurement only"
+            ),
+            "evidence_window_watermark": "setup_lifecycle_events.timestamp in [start, cutoff)",
+            "completion_criteria": "events table and reason column present",
+            "null_zero_semantics": "missing table/column => unavailable; complete window with no matches => 0",
+            "retry_replay_behavior": "append-only events; projection re-reads the same rows",
+            "persistence": "existing setup_lifecycle_events",
+            "consumers": "evidence baseline audit activation_accounting only",
+            "contract_version": CONTRACT_VERSION,
+            "prospective_applicability_boundary": "P2A+ research projection",
+            "legacy_interpretation": "not represented by scan_runs.valid_activations",
+        },
+        "entry_zone_touched_event_records": {
+            "name": "entry_zone_touched_event_records",
+            "meaning": "Lifecycle zone-touch event records",
+            "producer": "app.lifecycle.state_machine / outcome_events.advance_to_managing",
+            "authoritative_predicate": "reason == ENTRY_ZONE_TOUCHED enum value",
+            "source_identity": "setup_lifecycle_events.event_id",
+            "event_time": "event.timestamp processing time",
+            "counting_unit": "event record",
+            "uniqueness_rule": "event_id; a touch is not an activation or fill",
+            "aggregation_grain": "processing-time window",
+            "run_iteration_attribution": "event.scan_run_id when present",
+            "evidence_window_watermark": "setup_lifecycle_events.timestamp in [start, cutoff)",
+            "completion_criteria": "events table and reason column present",
+            "null_zero_semantics": "missing table/column => unavailable; no matches => complete 0",
+            "retry_replay_behavior": "append-only events; projection re-reads",
+            "persistence": "existing setup_lifecycle_events",
+            "consumers": "evidence baseline audit activation_accounting only",
+            "contract_version": CONTRACT_VERSION,
+            "prospective_applicability_boundary": "P2A+ research projection",
+            "legacy_interpretation": "not a valid_activations increment",
+        },
+        "entry_fill_simulated_event_records": {
+            "name": "entry_fill_simulated_event_records",
+            "meaning": "ENTRY_FILL_SIMULATED event records; simulated vs confirmed indistinguishable",
+            "producer": "app.lifecycle.outcome_events.advance_to_managing / state_machine MANAGING reason",
+            "authoritative_predicate": "reason == ENTRY_FILL_SIMULATED enum value",
+            "source_identity": "setup_lifecycle_events.event_id",
+            "event_time": "event.timestamp processing time",
+            "counting_unit": "event record",
+            "uniqueness_rule": "event_id; not a verified manual fill and not a unique trade",
+            "aggregation_grain": "processing-time window",
+            "run_iteration_attribution": "event.scan_run_id when present",
+            "evidence_window_watermark": "setup_lifecycle_events.timestamp in [start, cutoff)",
+            "completion_criteria": "events table and reason column present",
+            "null_zero_semantics": "missing table/column => unavailable; no matches => complete 0",
+            "retry_replay_behavior": "append-only events; projection re-reads",
+            "persistence": "existing setup_lifecycle_events",
+            "consumers": "evidence baseline audit activation_accounting only",
+            "contract_version": CONTRACT_VERSION,
+            "prospective_applicability_boundary": "P2A+ research projection",
+            "legacy_interpretation": (
+                "Preserve the structured ambiguity. Do not mint two fill classes from the reason text."
+            ),
+        },
+        "unsupported_occurrence_metrics": {
+            "fill_occurrence_count": UNAVAILABLE,
+            "manual_fill_count": UNAVAILABLE,
+            "unique_activation_occurrence_count": UNAVAILABLE,
         },
     }
 

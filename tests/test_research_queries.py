@@ -420,6 +420,9 @@ def test_summary_query(tmp_path) -> None:
     assert report["summary"]["total_rejected"] == 1
     assert report["summary"]["total_replay_outcomes"] == 2
     assert report["summary"]["most_common_regime"] == "trend_expansion"
+    assert report["summary"]["valid_activations_from_watch"] is None
+    assert report["summary"]["valid_activations_from_watch_status"] == "unavailable"
+    assert report["summary"]["valid_activations_from_watch_economic"] is False
 
 
 def test_summary_counts_watch_iterations(tmp_path) -> None:
@@ -436,6 +439,7 @@ def test_summary_counts_watch_iterations(tmp_path) -> None:
     assert report["summary"]["last_watch_iteration"] == 3
     assert report["summary"]["average_symbols_per_watch_iteration"] == 2
     assert report["summary"]["valid_activations_from_watch"] == 1
+    assert report["summary"]["valid_activations_from_watch_status"] == "available"
 
 
 def test_watch_iterations_query(tmp_path) -> None:
