@@ -126,14 +126,13 @@ def open_evidence_audit_database(path: Path) -> sqlite3.Connection:
 
 def reject_protected_database_path(path: Path | str) -> None:
     candidate = Path(path)
-    if candidate.name.casefold() == LIVE_RUNTIME_BASENAME:
+    if _has_protected_basename(path) or _has_protected_basename(candidate):
         raise EvidenceAuditError("Protected runtime database basename is not allowed.")
     raw_key = _path_key(candidate)
     for known in KNOWN_LIVE_PATHS:
         if raw_key == _path_key(known):
             raise EvidenceAuditError("Protected live runtime database path is not allowed.")
-    parts = {part.casefold() for part in candidate.parts}
-    if PROTECTED_PATH_PART in parts:
+    if _has_protected_runtime_root(path) or _has_protected_runtime_root(candidate):
         raise EvidenceAuditError("Protected live runtime database path is not allowed.")
     try:
         resolved = candidate.resolve()
@@ -147,10 +146,24 @@ def reject_protected_database_path(path: Path | str) -> None:
             known_resolved = _path_key(known)
         if resolved_key == known_resolved:
             raise EvidenceAuditError("Protected live runtime database path is not allowed.")
-    if resolved.name.casefold() == LIVE_RUNTIME_BASENAME:
+    if _has_protected_basename(resolved):
         raise EvidenceAuditError("Protected runtime database basename is not allowed.")
-    if PROTECTED_PATH_PART in {part.casefold() for part in resolved.parts}:
+    if _has_protected_runtime_root(resolved):
         raise EvidenceAuditError("Protected live runtime database path is not allowed.")
+
+
+def separator_agnostic_path_parts(path: Path | str) -> tuple[str, ...]:
+    """Split a path on ``/`` and ``\\`` so Windows forms are visible on POSIX."""
+
+    return tuple(part for part in str(path).replace("\\", "/").split("/") if part and part not in {".", ""})
+
+
+def _has_protected_basename(path: Path | str) -> bool:
+    return any(part.casefold() == LIVE_RUNTIME_BASENAME for part in separator_agnostic_path_parts(path))
+
+
+def _has_protected_runtime_root(path: Path | str) -> bool:
+    return any(part.casefold() == PROTECTED_PATH_PART for part in separator_agnostic_path_parts(path))
 
 
 def _path_key(path: Path) -> str:
@@ -758,4 +771,5 @@ __all__ = [
     "dumps_evidence_payload",
     "open_evidence_audit_database",
     "reject_protected_database_path",
+    "separator_agnostic_path_parts",
 ]

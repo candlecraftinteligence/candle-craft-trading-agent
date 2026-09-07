@@ -14,6 +14,7 @@ from app.analytics.evidence_baseline_audit import (
     dumps_evidence_payload,
     open_evidence_audit_database,
     reject_protected_database_path,
+    separator_agnostic_path_parts,
 )
 from app.analytics.evidence_contract import UNAVAILABLE, UNSAFE
 from app.analytics.evidence_time import EvidenceTimestampError, parse_aware_utc_timestamp, utc_iso
@@ -192,9 +193,11 @@ def test_missing_path_fails_and_does_not_create(tmp_path: Path) -> None:
         Path(r"S:\CandleCraftRuntime\scan_runs\MAIN_LIVE_RUNTIME.SQLITE"),
         Path("scan_runs") / "main_live_runtime.sqlite",
         Path(r"C:\research\main_live_runtime.sqlite"),
+        r"C:\research\main_live_runtime.sqlite",
+        "C:/research/MAIN_LIVE_RUNTIME.SQLITE",
     ),
 )
-def test_protected_paths_are_rejected_before_connect(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_protected_paths_are_rejected_before_connect(path: Path | str, monkeypatch: pytest.MonkeyPatch) -> None:
     def must_not_connect(*args: object, **kwargs: object) -> object:
         del args, kwargs
         raise AssertionError("protected path must not open sqlite")
@@ -204,7 +207,21 @@ def test_protected_paths_are_rejected_before_connect(path: Path, monkeypatch: py
         reject_protected_database_path(path)
     with pytest.raises(EvidenceAuditError, match="Protected"):
         build_evidence_baseline(path, start=START, cutoff=CUTOFF)
-    assert path.name.casefold() == LIVE_RUNTIME_BASENAME or "candlecraftruntime" in str(path).casefold()
+    parts = {part.casefold() for part in separator_agnostic_path_parts(path)}
+    assert LIVE_RUNTIME_BASENAME in parts or "candlecraftruntime" in parts
+
+
+def test_windows_backslash_live_basename_is_rejected_when_posix_pathlib_hides_it() -> None:
+    raw = r"C:\research\main_live_runtime.sqlite"
+    as_path = Path(raw)
+    parts = separator_agnostic_path_parts(as_path)
+    assert parts[-1].casefold() == LIVE_RUNTIME_BASENAME
+    if as_path.name.casefold() != LIVE_RUNTIME_BASENAME:
+        assert "\\" in str(as_path)
+    with pytest.raises(EvidenceAuditError, match="Protected"):
+        reject_protected_database_path(raw)
+    with pytest.raises(EvidenceAuditError, match="Protected"):
+        reject_protected_database_path(as_path)
 
 
 def test_audit_connection_is_query_only_and_omits_immutable(
