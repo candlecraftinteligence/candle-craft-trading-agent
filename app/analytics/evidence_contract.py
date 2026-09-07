@@ -1298,11 +1298,39 @@ def _outcome_ownership_contract() -> dict[str, Any]:
         ),
         "plan_level_outcome": (
             "A diagnostic interpretation of one coherent evaluation context for a verified "
-            "plan_version_id. Not a persisted canonical owner and not a trade."
+            "plan_version_id. Requires verified ownership binding, a durable evaluation "
+            "window (progress.tracking_start_at), and justified reduction. A retained "
+            "progress terminal_outcome without tracking_start_at stays raw/source evidence "
+            "and is classified ambiguous_evaluation_context. Not a persisted canonical "
+            "owner and not a trade."
         ),
         "fill_trade_occurrence_outcome": (
             "Unavailable. ENTRY_ACTIVATED, ENTRY_FILL_SIMULATED, watch alerts, public delivery, "
             "and generic activation labels are not fill-occurrence identity."
+        ),
+        "event_record_identity": (
+            "Diagnostic P2A event-record counts use (source_namespace, event_id) when "
+            "event_id is present. Same event_id in distinct namespaces counts as two "
+            "supplied event records. Duplicate copies in one namespace do not inflate "
+            "the count. This is not a fill occurrence or unique trade."
+        ),
+        "evaluation_context_anchor": (
+            "tracking_start_at is the durable evaluation-window field on progress. "
+            "first_evaluated_at is the evaluation-pass clock. The terminal-before-cursor "
+            "producer copies an already-terminal lifecycle state onto progress without "
+            "setting tracking_start_at; that terminal is retained and does not by itself "
+            "authorize a plan-level interpretation. Missing anchors are not invented."
+        ),
+        "missing_entry_evidence": (
+            "Missing entry_at does not prove that entry never occurred unless coverage is "
+            "complete and no entry evidence is present. Incomplete coverage remains "
+            "uncertain. SL_HIT is never classified as before-entry."
+        ),
+        "analytics_plan_authority": (
+            "setup_outcome_analytics is UNIQUE(lifecycle_id, final_outcome) and is "
+            "lifecycle-level unless a proven plan_identity binding is present (direct "
+            "field or nested outcome_progress.plan_identity). Unbound analytics is "
+            "retained and does not decide a plan-specific economic conflict."
         ),
         "append_only_versus_canonical_projection": (
             "Events are append-only. Progress is a mutable current projection per "

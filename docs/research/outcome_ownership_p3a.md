@@ -24,7 +24,7 @@ No live or existing scan database was read.
 - **Authoritative stored outcome projection:** `setup_lifecycle_outcome_progress` keyed by `UNIQUE(lifecycle_id, plan_identity)`.
 - **`plan_identity`** hashes `lifecycle_id` plus geometry (`app.lifecycle.outcome_policy.canonical_plan_identity`). Compatibility aliases (`compatible_plan_identities`) are lookup variants, not proof of equal immutable economics.
 - **P1 `plan_version_id`** is latched on `setup_lifecycle_records` only. `evaluate_closed_candle_outcomes` does not receive or persist it.
-- **Analytics** `setup_outcome_analytics` is keyed by `UNIQUE(lifecycle_id, final_outcome)`. Lifecycle `TP_HIT` maps to analytics `TP3_HIT`. `COOLDOWN` may be stored as a `final_outcome` without replacing economic terminal evidence on progress.
+- **Analytics** `setup_outcome_analytics` is keyed by `UNIQUE(lifecycle_id, final_outcome)` and has no `plan_identity` column. Nested `raw_payload_json.outcome_progress.plan_identity` may exist when the producer passed a progress snapshot. That nested identity is the only proven plan binding. Unbound analytics remains lifecycle-level evidence and must not decide a plan-specific economic conflict. P3A does not change analytics persistence.
 - **Events** are append-only; no event idempotency key. Repeated scans can append additional `ENTRY_FILL_SIMULATED` event records while a single progress row remains.
 - **Public delivery** uses `event_key` / `(signal_id, alert_type)` and is not an outcome owner.
 - **Replay** `replay_results` uses a separate fingerprint and is not joined to lifecycle outcomes.
@@ -43,7 +43,15 @@ Otherwise the helper reports missing/legacy identity, conflicting identity/econo
 
 Progress stores `tracking_start_at`, cursors, and `execution_timeframe`. As-of cutoff and replay/run identity are **not** columns on progress. One `plan_version_id` across lifecycle generations is one inventory item, not automatically one outcome. Replay and live namespaces must not be merged. Missing anchors are not invented.
 
+**Producer invariant — terminal-before-cursor path.** `evaluate_closed_candle_outcomes` copies an already-terminal lifecycle `current_state` onto progress via `_terminal_progress_for_record`. That path sets `terminal_outcome` (and `invalidated_at` when INVALIDATED) and may mark `integrity_status=Unverified` with `diagnostic=terminal_state_preceded_canonical_outcome_cursor`. It does **not** set `tracking_start_at`. `first_evaluated_at` is the evaluation-pass clock, not a proven tracking window. A retained terminal is raw/source evidence; it does not by itself prove a coherent evaluation context or authorize a plan-level interpretation.
+
+**Producer invariant — closed-candle path.** When the evaluator tracks a live window, `_with_tracking_start` durably binds `tracking_start_at`. That field is the P3A evaluation-window anchor.
+
 **Canonical one-outcome-per-plan-version is unproven** as a persisted research unit.
+
+## Event-record identity
+
+Diagnostic P2A event-record counts use `(source_namespace, event_id)` when `event_id` is present. The same `event_id` in `live-monitoring` and `replay-run-a` is two supplied event records. Duplicate copies in one namespace do not inflate the count. These counts are not fill occurrences or unique trades. P3A does not mint occurrence ids.
 
 ## Authority and idempotency
 
@@ -60,8 +68,10 @@ Progress stores `tracking_start_at`, cursors, and `execution_timeframe`. As-of c
 | TP3 + `terminal_outcome=TP_HIT` | Take-profit terminal under current exit policy |
 | Generic `TP_HIT` without `tp3_at` | Not promoted to TP3 |
 | TP1/TP2 then `SL_HIT` | Keep milestones and the stop; no invented P&L |
-| Invalidation with no `entry_at` | Pre-entry invalidation, not a stop |
-| Expiry with no `entry_at` | Pre-entry expiry, not a loss |
+| Invalidation with no `entry_at`, complete coverage, no entry evidence | Pre-entry invalidation, not a stop |
+| Expiry with no `entry_at`, complete coverage, no entry evidence | Pre-entry expiry, not a loss |
+| INVALIDATED / EXPIRED with no `entry_at` and incomplete coverage | Entry relationship uncertain; raw terminal preserved |
+| SL_HIT with no `entry_at` | Never "before entry"; entry relationship uncertain |
 | Missing `entry_at` without completeness | Uncertainty, not a negative finding |
 
 ## Synthetic producer observations (not live history)

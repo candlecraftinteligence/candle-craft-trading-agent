@@ -121,7 +121,13 @@ def project_outcome_ownership(
         ("lifecycle_id", "final_outcome"),
     )
 
-    evaluations = _build_evaluations(records, progress, events, analytics)
+    evaluations = _build_evaluations(
+        records,
+        progress,
+        events,
+        analytics,
+        coverage_complete=bool(meta["coverage_complete"]),
+    )
     inventory = _plan_identity_inventory(records, evaluations)
     interpretations = _plan_interpretations(evaluations)
     integrity = _integrity_rollup(records, evaluations)
@@ -277,6 +283,8 @@ def _build_evaluations(
     progress: Sequence[Mapping[str, Any]],
     events: Sequence[Mapping[str, Any]],
     analytics: Sequence[Mapping[str, Any]],
+    *,
+    coverage_complete: bool,
 ) -> list[dict[str, Any]]:
     record_index = _index_records(records)
     grouped_progress = _group_items(progress, PROGRESS_PHYSICAL_FIELDS)
@@ -299,7 +307,17 @@ def _build_evaluations(
             if item["source_namespace"] == namespace
             and _text(item["payload"].get("lifecycle_id")) == lifecycle_id
         ]
-        economic = _economic_view(merged, related_analytics, record_match)
+        bound_analytics, unbound_analytics = _split_analytics_by_plan(
+            related_analytics, plan_identity
+        )
+        entry_evidence_present = any(_event_is_entry_evidence(item) for item in related_events)
+        economic = _economic_view(
+            merged,
+            bound_analytics,
+            record_match,
+            coverage_complete=coverage_complete,
+            entry_evidence_present=entry_evidence_present,
+        )
         integrity = attribution["status"]
         if merge_conflicts or economic["conflict"]:
             integrity = STATUS_CONFLICTING_ECONOMIC
@@ -315,6 +333,10 @@ def _build_evaluations(
                 "progress_evidence": [_source_ref(item) for item in snapshots],
                 "event_evidence": [_source_ref(item) for item in related_events],
                 "analytics_evidence": [_source_ref(item) for item in related_analytics],
+                "analytics_plan_bound_evidence": [_source_ref(item) for item in bound_analytics],
+                "analytics_lifecycle_unbound_evidence": [
+                    _source_ref(item) for item in unbound_analytics
+                ],
                 "raw_labels": {
                     "progress_terminal_outcome": _optional_text(merged.get("terminal_outcome")),
                     "lifecycle_current_state": _optional_text(
@@ -322,6 +344,12 @@ def _build_evaluations(
                     ),
                     "analytics_final_outcomes": [
                         _text(item["payload"].get("final_outcome")) for item in related_analytics
+                    ],
+                    "analytics_plan_bound_final_outcomes": [
+                        _text(item["payload"].get("final_outcome")) for item in bound_analytics
+                    ],
+                    "analytics_lifecycle_unbound_final_outcomes": [
+                        _text(item["payload"].get("final_outcome")) for item in unbound_analytics
                     ],
                     "economic_identity_reason": _optional_text(
                         record_match["payload"].get("economic_identity_reason") if record_match else None
@@ -530,6 +558,9 @@ def _economic_view(
     progress: Mapping[str, Any],
     analytics: Sequence[Mapping[str, Any]],
     record_match: Mapping[str, Any] | None,
+    *,
+    coverage_complete: bool,
+    entry_evidence_present: bool,
 ) -> dict[str, Any]:
     entry_at = _optional_text(progress.get("entry_at"))
     tp1_at = _optional_text(progress.get("tp1_at"))
@@ -563,16 +594,34 @@ def _economic_view(
     if terminal == SetupLifecycleState.TP_HIT.value and "SL_HIT" in analytic_economic:
         conflict = True
         conflict_reason = "analytics_stop_conflicts_with_progress_tp"
+    entry_relationship = _entry_relationship(
+        terminal=terminal,
+        entry_at=entry_at,
+        coverage_complete=coverage_complete,
+        entry_evidence_present=entry_evidence_present,
+    )
     if generic_tp:
         semantic_terminal = "generic_tp_hit_not_promoted"
     elif terminal == SetupLifecycleState.TP_HIT.value and tp3_at is not None:
         semantic_terminal = "tp3_terminal"
     elif terminal == SetupLifecycleState.SL_HIT.value:
-        semantic_terminal = "stop_after_entry" if entry_at else "stop_without_proven_entry"
+        semantic_terminal = (
+            "stop_after_entry" if entry_relationship == "after_entry" else "stop_entry_relationship_uncertain"
+        )
     elif terminal == SetupLifecycleState.INVALIDATED.value:
-        semantic_terminal = "invalidation_before_entry" if entry_at is None else "invalidation_after_entry"
+        if entry_relationship == "after_entry":
+            semantic_terminal = "invalidation_after_entry"
+        elif entry_relationship == "before_entry":
+            semantic_terminal = "invalidation_before_entry"
+        else:
+            semantic_terminal = "invalidation_entry_relationship_uncertain"
     elif terminal == SetupLifecycleState.EXPIRED.value:
-        semantic_terminal = "expiry_before_entry" if entry_at is None else "expiry_after_entry"
+        if entry_relationship == "after_entry":
+            semantic_terminal = "expiry_after_entry"
+        elif entry_relationship == "before_entry":
+            semantic_terminal = "expiry_before_entry"
+        else:
+            semantic_terminal = "expiry_entry_relationship_uncertain"
     elif terminal:
         semantic_terminal = "other_progress_terminal"
     elif entry_at:
@@ -599,6 +648,7 @@ def _economic_view(
         "invalidated_at": invalidated_at,
         "progress_terminal_outcome": terminal,
         "semantic_terminal": semantic_terminal,
+        "entry_relationship": entry_relationship,
         "generic_tp_hit_not_promoted": generic_tp,
         "lifecycle_successor_state": lifecycle_state if lifecycle_state in LIFECYCLE_SUCCESSORS else None,
         "successor_note": successor_note,
@@ -677,6 +727,10 @@ def _record_only_evaluations(
                 "progress_evidence": [],
                 "event_evidence": [_source_ref(row) for row in related_events],
                 "analytics_evidence": [_source_ref(row) for row in related_analytics],
+                "analytics_plan_bound_evidence": [],
+                "analytics_lifecycle_unbound_evidence": [
+                    _source_ref(row) for row in related_analytics
+                ],
                 "raw_labels": {
                     "lifecycle_current_state": _optional_text(item["payload"].get("current_state")),
                     "economic_identity_reason": reason,
@@ -807,27 +861,40 @@ def _plan_interpretations(evaluations: Sequence[Mapping[str, Any]]) -> list[dict
                         }
                     ],
                     "economic_status": None,
+                    "retained_raw_terminal_outcome": member["economic"].get("progress_terminal_outcome"),
                     "source_refs": list(member["progress_evidence"]),
                 }
             )
             continue
-        if not member["evaluation_context"].get("complete") and not member["economic"].get(
-            "progress_terminal_outcome"
-        ):
+        if not member["evaluation_context"].get("complete"):
+            terminal = member["economic"].get("progress_terminal_outcome")
             interpretations.append(
                 {
                     "interpretable": False,
                     "plan_version_id": plan_id,
                     "source_namespace": namespace,
                     "integrity_status": STATUS_AMBIGUOUS_CONTEXT,
-                    "reason": "evaluation start/horizon is not durably bound; missing anchors are not invented",
+                    "reason": (
+                        "verified plan binding is present and terminal progress evidence is retained, "
+                        "but tracking_start_at is missing; a lifecycle terminal does not by itself "
+                        "prove a coherent evaluation window. Missing anchors are not invented."
+                        if terminal
+                        else "evaluation start/horizon is not durably bound; missing anchors are not invented"
+                    ),
                     "member_evaluations": [
                         {
                             "lifecycle_id": member["lifecycle_id"],
                             "plan_identity": member["plan_identity"],
+                            "tracking_start_at": member["evaluation_context"].get("tracking_start_at"),
                         }
                     ],
                     "economic_status": None,
+                    "retained_raw_terminal_outcome": terminal,
+                    "retained_raw_labels": member.get("raw_labels"),
+                    "evaluation_context": {
+                        "tracking_start_at": member["evaluation_context"].get("tracking_start_at"),
+                        "complete": False,
+                    },
                     "source_refs": list(member["progress_evidence"]),
                 }
             )
@@ -856,15 +923,8 @@ def _plan_interpretations(evaluations: Sequence[Mapping[str, Any]]) -> list[dict
                 "not_a_unique_trade": True,
                 "source_refs": list(member["progress_evidence"]),
                 "retained_event_refs": list(member["event_evidence"]),
-                "reason": (
-                    "single verified evaluation context with monotonic progress evidence"
-                    if member["evaluation_context"].get("complete")
-                    else (
-                        "verified binding with producer terminal evidence; tracking_start_at "
-                        "was not supplied and is not invented"
-                    )
-                ),
-                "evaluation_context_complete": bool(member["evaluation_context"].get("complete")),
+                "reason": "single verified evaluation context with monotonic progress evidence",
+                "evaluation_context_complete": True,
                 "contexts_observed": len(contexts),
             }
         )
@@ -995,17 +1055,15 @@ def _unavailable_metrics() -> dict[str, Any]:
 def _p2a_event_units(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     def _count(reason: str) -> int:
         matched = [item for item in events if _event_reason(item) == reason]
-        identities = [
-            item["payload"].get("event_id")
-            for item in matched
-            if item["payload"].get("event_id") not in (None, "")
-        ]
-        if identities and len(identities) == len(matched):
-            return len(set(map(str, identities)))
-        return len(matched)
+        return _event_record_count(matched)
 
     return {
         "unit": "setup_lifecycle_events row",
+        "event_record_identity": (
+            "(source_namespace, event_id) when event_id is present; otherwise the retained event row"
+        ),
+        "not_a_fill_occurrence": True,
+        "not_a_unique_trade": True,
         "entry_activated_event_records": {
             "value": _count(_ENTRY_ACTIVATED),
             "not": "unique fill occurrence",
@@ -1081,6 +1139,82 @@ def _raw_versus_diagnostic(
             "source_trail": "setup_lifecycle_records.current_state vs setup_lifecycle_outcome_progress.terminal_outcome",
         },
     ]
+
+
+def _event_record_count(events: Sequence[Mapping[str, Any]]) -> int:
+    identities: set[tuple[str, ...]] = set()
+    for item in events:
+        event_id = item["payload"].get("event_id")
+        if event_id not in (None, ""):
+            identities.add(("event_id", str(item["source_namespace"]), str(event_id)))
+        else:
+            identities.add(("retained_row", str(item["source_namespace"]), str(item["digest"])))
+    return len(identities)
+
+
+def _entry_relationship(
+    *,
+    terminal: str | None,
+    entry_at: str | None,
+    coverage_complete: bool,
+    entry_evidence_present: bool,
+) -> str:
+    if entry_at:
+        return "after_entry"
+    if terminal == SetupLifecycleState.SL_HIT.value:
+        return "uncertain"
+    if terminal in {
+        SetupLifecycleState.INVALIDATED.value,
+        SetupLifecycleState.EXPIRED.value,
+    }:
+        if entry_evidence_present or not coverage_complete:
+            return "uncertain"
+        return "before_entry"
+    return "uncertain"
+
+
+def _event_is_entry_evidence(item: Mapping[str, Any]) -> bool:
+    return _event_reason(item) in {_ENTRY_ACTIVATED, _ENTRY_FILL_SIMULATED}
+
+
+def _split_analytics_by_plan(
+    related_analytics: Sequence[Mapping[str, Any]],
+    plan_identity: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    bound: list[dict[str, Any]] = []
+    unbound: list[dict[str, Any]] = []
+    for item in related_analytics:
+        bound_id = _analytics_plan_identity(item)
+        if bound_id is not None and bound_id == plan_identity:
+            bound.append(item)
+        else:
+            unbound.append(item)
+    return bound, unbound
+
+
+def _analytics_plan_identity(item: Mapping[str, Any]) -> str | None:
+    payload = item["payload"]
+    direct = _optional_text(payload.get("plan_identity"))
+    if direct:
+        return direct
+    nested = payload.get("outcome_progress")
+    if isinstance(nested, Mapping):
+        noted = _optional_text(nested.get("plan_identity"))
+        if noted:
+            return noted
+    raw = payload.get("raw_payload_json")
+    if not raw or raw == NA:
+        return None
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, Mapping):
+        return None
+    nested = parsed.get("outcome_progress")
+    if isinstance(nested, Mapping):
+        return _optional_text(nested.get("plan_identity"))
+    return _optional_text(parsed.get("plan_identity"))
 
 
 def _event_matches_plan(item: Mapping[str, Any], plan_identity: str) -> bool:

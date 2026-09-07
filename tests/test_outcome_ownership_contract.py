@@ -145,6 +145,34 @@ def _interpretable(payload: dict[str, object]) -> list[dict[str, object]]:
     return [item for item in payload["plan_interpretations"] if item.get("interpretable")]
 
 
+def _progress_row(record: SetupLifecycleRecord, **updates) -> dict[str, object]:
+    row: dict[str, object] = {
+        "lifecycle_id": record.lifecycle_id,
+        "plan_identity": canonical_plan_identity(record),
+        "symbol": "BTCUSDT",
+        "mode": "challenge",
+        "direction": "long",
+        "execution_timeframe": "5m",
+        "terminal_outcome": NA,
+        "first_evaluated_at": _decision(0),
+        "last_evaluated_at": _decision(0),
+    }
+    row.update(updates)
+    return row
+
+
+def _provenance(**updates) -> dict[str, object]:
+    values: dict[str, object] = {
+        "synthetic": True,
+        "label": "p3a-test",
+        "audited_commit": AUDITED_COMMIT,
+        "source_namespace": "synthetic-test",
+        "coverage_complete": True,
+    }
+    values.update(updates)
+    return values
+
+
 def test_repeated_scans_one_plan_interpretation_retains_events(tmp_path: Path) -> None:
     with SQLiteSetupLifecycleRepository(tmp_path / "repeat.db") as repository:
         record = _latched()
@@ -378,32 +406,48 @@ def test_pre_entry_invalidation_and_expiry_are_not_stops(tmp_path: Path) -> None
         invalidated = _latched(current_state=SetupLifecycleState.INVALIDATED)
         repository.upsert_record(invalidated)
         _evaluate(repository, invalidated, [_candle(0, high="99", low="95")])
+        stored = repository.list_outcome_progress(lifecycle_id=invalidated.lifecycle_id)[0]
+        assert stored.tracking_start_at is None
+        assert stored.entry_at is None
+        assert stored.terminal_outcome == SetupLifecycleState.INVALIDATED.value
         invalid_payload = _project(repository, [invalidated.lifecycle_id])
-        assert _interpretable(invalid_payload)[0]["economic_status"] == "invalidation_before_entry"
+        evaluation = invalid_payload["evaluations"][0]
+        assert evaluation["raw_labels"]["progress_terminal_outcome"] == "INVALIDATED"
+        assert evaluation["economic"]["semantic_terminal"] == "invalidation_before_entry"
+        assert evaluation["economic"]["entry_relationship"] == "before_entry"
+        assert _interpretable(invalid_payload) == []
+        unresolved = invalid_payload["plan_interpretations"][0]
+        assert unresolved["interpretable"] is False
+        assert unresolved["integrity_status"] == STATUS_AMBIGUOUS_CONTEXT
+        assert unresolved["retained_raw_terminal_outcome"] == "INVALIDATED"
+        assert unresolved["economic_status"] is None
 
     with SQLiteSetupLifecycleRepository(tmp_path / "expired.db") as repository:
         expired = _latched(lifecycle_id="life-exp", current_state=SetupLifecycleState.EXPIRED)
         repository.upsert_record(expired)
         _evaluate(repository, expired, [_candle(0, high="99", low="95")])
+        stored = repository.list_outcome_progress(lifecycle_id=expired.lifecycle_id)[0]
+        assert stored.tracking_start_at is None
         expired_payload = _project(repository, [expired.lifecycle_id])
-        assert _interpretable(expired_payload)[0]["economic_status"] == "expiry_before_entry"
+        evaluation = expired_payload["evaluations"][0]
+        assert evaluation["raw_labels"]["progress_terminal_outcome"] == "EXPIRED"
+        assert evaluation["economic"]["semantic_terminal"] == "expiry_before_entry"
+        assert evaluation["economic"]["entry_relationship"] == "before_entry"
+        assert _interpretable(expired_payload) == []
+        unresolved = expired_payload["plan_interpretations"][0]
+        assert unresolved["integrity_status"] == STATUS_AMBIGUOUS_CONTEXT
+        assert unresolved["retained_raw_terminal_outcome"] == "EXPIRED"
 
     open_record = _latched(lifecycle_id="life-open")
     uncertain = project_outcome_ownership(
         lifecycle_records=[open_record],
         progress_rows=[
-            {
-                "lifecycle_id": "life-open",
-                "plan_identity": canonical_plan_identity(open_record),
-                "symbol": "BTCUSDT",
-                "tracking_start_at": BASE.isoformat(),
-                "execution_timeframe": "5m",
-                "terminal_outcome": NA,
-                "first_evaluated_at": _decision(0),
-                "last_evaluated_at": _decision(0),
-            }
+            _progress_row(
+                open_record,
+                tracking_start_at=BASE.isoformat(),
+            )
         ],
-        provenance={"synthetic": True, "source_namespace": "uncertain", "coverage_complete": False},
+        provenance=_provenance(source_namespace="uncertain", coverage_complete=False),
     )
     interpretation = _interpretable(uncertain)[0]
     assert interpretation["economic_status"] == "open_or_unresolved_without_entry"
@@ -837,3 +881,241 @@ def test_evidence_baseline_audit_still_does_not_project_ownership(tmp_path: Path
     baseline = build_evidence_baseline(path, start="2026-09-01T00:00:00Z", cutoff="2026-09-03T00:00:00Z")
     assert "outcome_ownership" not in baseline
     assert "activation_accounting" in baseline
+
+
+def test_event_record_identity_preserves_source_namespace() -> None:
+    live = {
+        "event_id": 10,
+        "lifecycle_id": "life-1",
+        "reason": SetupTransitionReason.ENTRY_ACTIVATED.value,
+        "timestamp": _decision(1),
+        "source_namespace": "live-monitoring",
+        "to_state": SetupLifecycleState.CONFIRMED.value,
+    }
+    duplicate_live = copy.deepcopy(live)
+    replay = {**live, "source_namespace": "replay-run-a"}
+    payload = project_outcome_ownership(
+        event_rows=[live, duplicate_live, replay],
+        provenance=_provenance(source_namespace="default"),
+    )
+    units = payload["p2a_event_units"]
+    assert payload["source_evidence"]["lifecycle_events"]["retained_count"] == 2
+    assert units["entry_activated_event_records"]["value"] == 2
+    assert units["event_record_identity"].startswith("(source_namespace, event_id)")
+    assert units["not_a_fill_occurrence"] is True
+    assert units["not_a_unique_trade"] is True
+    assert units["entry_activated_event_records"]["not"] == "unique fill occurrence"
+    assert payload["unavailable_metrics"]["fill_occurrence_count"]["value"] is None
+    assert payload["unavailable_metrics"]["unique_trade_count"]["value"] is None
+    assert payload["counts"]["interpretable_plan_outcomes"]["value"] == 0
+
+    same_namespace = project_outcome_ownership(
+        event_rows=[live, copy.deepcopy(live)],
+        provenance=_provenance(source_namespace="live-monitoring"),
+    )
+    assert same_namespace["p2a_event_units"]["entry_activated_event_records"]["value"] == 1
+    assert same_namespace["unavailable_metrics"]["fill_occurrence_count"]["status"] == UNAVAILABLE
+
+
+def test_complete_coverage_supports_pre_entry_invalidation_when_window_is_bound() -> None:
+    record = _latched(current_state=SetupLifecycleState.INVALIDATED)
+    payload = project_outcome_ownership(
+        lifecycle_records=[record],
+        progress_rows=[
+            _progress_row(
+                record,
+                tracking_start_at=BASE.isoformat(),
+                terminal_outcome=SetupLifecycleState.INVALIDATED.value,
+                invalidated_at=_decision(1),
+                last_evaluated_at=_decision(1),
+            )
+        ],
+        provenance=_provenance(source_namespace="complete-pre-entry"),
+    )
+    evaluation = payload["evaluations"][0]
+    assert evaluation["raw_labels"]["progress_terminal_outcome"] == "INVALIDATED"
+    assert evaluation["economic"]["semantic_terminal"] == "invalidation_before_entry"
+    assert evaluation["economic"]["entry_relationship"] == "before_entry"
+    interpretation = _interpretable(payload)[0]
+    assert interpretation["economic_status"] == "invalidation_before_entry"
+    assert interpretation["progress_terminal_outcome"] == "INVALIDATED"
+    assert interpretation["not_a_fill_occurrence"] is True
+    assert interpretation["not_a_unique_trade"] is True
+
+
+def test_incomplete_coverage_missing_entry_does_not_prove_pre_entry_or_stop() -> None:
+    invalidated = _latched(current_state=SetupLifecycleState.INVALIDATED)
+    expired = _latched(lifecycle_id="life-exp", current_state=SetupLifecycleState.EXPIRED)
+    stopped = _latched(lifecycle_id="life-sl")
+    cases = (
+        (invalidated, SetupLifecycleState.INVALIDATED.value, "invalidation_entry_relationship_uncertain"),
+        (expired, SetupLifecycleState.EXPIRED.value, "expiry_entry_relationship_uncertain"),
+        (stopped, SetupLifecycleState.SL_HIT.value, "stop_entry_relationship_uncertain"),
+    )
+    for record, terminal, expected_semantic in cases:
+        payload = project_outcome_ownership(
+            lifecycle_records=[record],
+            progress_rows=[
+                _progress_row(
+                    record,
+                    tracking_start_at=BASE.isoformat(),
+                    terminal_outcome=terminal,
+                    last_evaluated_at=_decision(1),
+                )
+            ],
+            provenance=_provenance(
+                source_namespace=f"incomplete-{terminal.lower()}",
+                coverage_complete=False,
+            ),
+        )
+        evaluation = payload["evaluations"][0]
+        assert evaluation["raw_labels"]["progress_terminal_outcome"] == terminal
+        assert evaluation["economic"]["entry_at"] is None
+        assert evaluation["economic"]["entry_relationship"] == "uncertain"
+        assert evaluation["economic"]["semantic_terminal"] == expected_semantic
+        assert "before_entry" not in expected_semantic
+        interpretation = _interpretable(payload)[0]
+        assert interpretation["economic_status"] == expected_semantic
+        assert interpretation["progress_terminal_outcome"] == terminal
+
+
+def test_sl_hit_missing_entry_is_never_before_entry_even_when_coverage_complete() -> None:
+    record = _latched()
+    payload = project_outcome_ownership(
+        lifecycle_records=[record],
+        progress_rows=[
+            _progress_row(
+                record,
+                tracking_start_at=BASE.isoformat(),
+                terminal_outcome=SetupLifecycleState.SL_HIT.value,
+                stop_at=_decision(3),
+                last_evaluated_at=_decision(3),
+            )
+        ],
+        provenance=_provenance(source_namespace="sl-missing-entry"),
+    )
+    evaluation = payload["evaluations"][0]
+    assert evaluation["raw_labels"]["progress_terminal_outcome"] == "SL_HIT"
+    assert evaluation["economic"]["entry_relationship"] == "uncertain"
+    assert evaluation["economic"]["semantic_terminal"] == "stop_entry_relationship_uncertain"
+    assert evaluation["economic"]["semantic_terminal"] != "stop_after_entry"
+    interpretation = _interpretable(payload)[0]
+    assert interpretation["economic_status"] == "stop_entry_relationship_uncertain"
+    assert interpretation["progress_terminal_outcome"] == "SL_HIT"
+
+
+def test_terminal_without_tracking_start_is_ambiguous_not_authoritative() -> None:
+    record = _latched(current_state=SetupLifecycleState.INVALIDATED)
+    payload = project_outcome_ownership(
+        lifecycle_records=[record],
+        progress_rows=[
+            _progress_row(
+                record,
+                terminal_outcome=SetupLifecycleState.INVALIDATED.value,
+                invalidated_at=_decision(1),
+                last_evaluated_at=_decision(1),
+            )
+        ],
+        provenance=_provenance(source_namespace="missing-window"),
+    )
+    evaluation = payload["evaluations"][0]
+    assert evaluation["attribution"]["plan_version_id"] == record.plan_version_id
+    assert evaluation["evaluation_context"]["tracking_start_at"] is None
+    assert evaluation["evaluation_context"]["complete"] is False
+    assert evaluation["raw_labels"]["progress_terminal_outcome"] == "INVALIDATED"
+    assert _interpretable(payload) == []
+    interpretation = payload["plan_interpretations"][0]
+    assert interpretation["interpretable"] is False
+    assert interpretation["integrity_status"] == STATUS_AMBIGUOUS_CONTEXT
+    assert interpretation["economic_status"] is None
+    assert interpretation["retained_raw_terminal_outcome"] == "INVALIDATED"
+    assert "not invented" in interpretation["reason"]
+
+
+def test_unbound_lifecycle_analytics_do_not_decide_plan_economic_conflict() -> None:
+    record = _latched()
+    identity = canonical_plan_identity(record)
+    other_identity = "other-plan-identity"
+    unbound_analytics = {
+        "lifecycle_id": record.lifecycle_id,
+        "final_outcome": "TP3_HIT",
+        "symbol": "BTCUSDT",
+        "raw_payload_json": json.dumps(
+            {"lifecycle_id": record.lifecycle_id, "outcome_progress": None},
+            sort_keys=True,
+        ),
+    }
+    payload = project_outcome_ownership(
+        lifecycle_records=[record],
+        progress_rows=[
+            _progress_row(
+                record,
+                plan_identity=identity,
+                tracking_start_at=BASE.isoformat(),
+                entry_at=_decision(1),
+                stop_at=_decision(3),
+                terminal_outcome=SetupLifecycleState.SL_HIT.value,
+                last_evaluated_at=_decision(3),
+            ),
+            _progress_row(
+                record,
+                plan_identity=other_identity,
+                tracking_start_at=BASE.isoformat(),
+                terminal_outcome=NA,
+            ),
+        ],
+        analytics_rows=[unbound_analytics],
+        provenance=_provenance(source_namespace="unbound-analytics"),
+    )
+    sl_eval = next(item for item in payload["evaluations"] if item["plan_identity"] == identity)
+    other_eval = next(item for item in payload["evaluations"] if item["plan_identity"] == other_identity)
+    assert sl_eval["analytics_evidence"]
+    assert sl_eval["analytics_plan_bound_evidence"] == []
+    assert sl_eval["analytics_lifecycle_unbound_evidence"]
+    assert sl_eval["raw_labels"]["analytics_lifecycle_unbound_final_outcomes"] == ["TP3_HIT"]
+    assert sl_eval["economic"]["conflict"] is False
+    assert sl_eval["integrity_status"] != STATUS_CONFLICTING_ECONOMIC
+    assert other_eval["analytics_lifecycle_unbound_evidence"]
+    interpretation = _interpretable(payload)[0]
+    assert interpretation["economic_status"] == "stop_after_entry"
+    assert interpretation["plan_identity"] == identity
+
+
+def test_plan_bound_analytics_may_still_flag_plan_economic_conflict() -> None:
+    record = _latched()
+    identity = canonical_plan_identity(record)
+    bound_analytics = {
+        "lifecycle_id": record.lifecycle_id,
+        "final_outcome": "TP3_HIT",
+        "symbol": "BTCUSDT",
+        "raw_payload_json": json.dumps(
+            {
+                "lifecycle_id": record.lifecycle_id,
+                "outcome_progress": {"plan_identity": identity},
+            },
+            sort_keys=True,
+        ),
+    }
+    payload = project_outcome_ownership(
+        lifecycle_records=[record],
+        progress_rows=[
+            _progress_row(
+                record,
+                tracking_start_at=BASE.isoformat(),
+                entry_at=_decision(1),
+                stop_at=_decision(3),
+                terminal_outcome=SetupLifecycleState.SL_HIT.value,
+                last_evaluated_at=_decision(3),
+            )
+        ],
+        analytics_rows=[bound_analytics],
+        provenance=_provenance(source_namespace="bound-analytics"),
+    )
+    evaluation = payload["evaluations"][0]
+    assert evaluation["analytics_plan_bound_evidence"]
+    assert evaluation["analytics_lifecycle_unbound_evidence"] == []
+    assert evaluation["economic"]["conflict"] is True
+    assert evaluation["economic"]["conflict_reason"] == "analytics_tp3_conflicts_with_progress_stop"
+    assert evaluation["integrity_status"] == STATUS_CONFLICTING_ECONOMIC
+    assert evaluation["raw_labels"]["progress_terminal_outcome"] == "SL_HIT"
+    assert _interpretable(payload) == []

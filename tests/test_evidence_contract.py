@@ -68,4 +68,8 @@ def test_fixture_examples_keep_counting_units_separate() -> None:
     assert ownership["feeds_operational_decisions"] is False
     assert ownership["schema_version_unchanged"] is True
     assert ownership["canonical_outcome_per_plan_version"]["established"] is False
+    assert "tracking_start_at" in ownership["evaluation_context_anchor"]
+    assert "source_namespace" in ownership["event_record_identity"]
+    assert "uncertain" in ownership["missing_entry_evidence"]
+    assert "lifecycle-level" in ownership["analytics_plan_authority"]
     assert "not a unique trade" in examples["plan_outcome_versus_trade_occurrence"]["example"]
