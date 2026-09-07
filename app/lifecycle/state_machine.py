@@ -730,8 +730,15 @@ def next_state_for_observation(
         if observation.expired:
             return SetupLifecycleState.EXPIRED
         if observation.actionable_a_grade_candidate and not observation.entry_filled:
+            # Keep CONFIRMED when confirmation evidence is still satisfied.
+            # Returning current (not deleting this branch) avoids falling through
+            # to valid_trade_idea → EXECUTING for an unfilled A-grade observation.
+            if _confirmed_observation_ready(observation):
+                return current
             return SetupLifecycleState.ACTIONABLE_A_GRADE
         if observation.a_grade_watch_candidate and not observation.entry_filled:
+            if _confirmed_observation_ready(observation):
+                return current
             return SetupLifecycleState.A_GRADE_WATCH
         if observation.entry_filled:
             return SetupLifecycleState.EXECUTING

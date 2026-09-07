@@ -421,11 +421,14 @@ def test_audit_is_read_only_with_activation_events(tmp_path: Path) -> None:
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
 
 
-def test_confirmed_actionable_oscillation_is_characterized_not_repaired() -> None:
-    """P2A characterization: existing CONFIRMED/ACTIONABLE ping-pong remains.
+def test_confirmed_actionable_oscillation_is_no_longer_produced() -> None:
+    """P2B regression of the P2A-characterized CONFIRMED/ACTIONABLE ping-pong.
 
-    Repair belongs to P2B. This assertion documents current state_machine
-    behavior so accounting-only changes cannot silently alter it.
+    Former defect (compact pre-edit trace, identical confirmed-ready + A-grade
+    observation, unfilled): CONFIRMED → ACTIONABLE_A_GRADE (ACTIONABLE_A_GRADE)
+    → CONFIRMED (PULLBACK_RR_VALID) → ACTIONABLE_A_GRADE → ...
+    Prospective repair: stay CONFIRMED; do not invent EXECUTING from that
+    unfilled observation.
     """
 
     record = _lifecycle_record(state=SetupLifecycleState.CONFIRMED).model_copy(
@@ -441,26 +444,36 @@ def test_confirmed_actionable_oscillation_is_characterized_not_repaired() -> Non
             "setup_identity": "BTCUSDT|swing|long|100|102|95|Invalid if price accepts below 95.",
         }
     )
-    observation = _confirmed_observation()
-    demote = evaluate_lifecycle_transition(
+    observation = _confirmed_observation(actionability_state="A_GRADE_ACTIONABLE")
+    first = evaluate_lifecycle_transition(
         record,
         observation,
         lifecycle_id=record.lifecycle_id,
         now="2026-09-01T12:00:00+00:00",
     )
-    assert demote.transitioned is True
-    assert demote.to_state == SetupLifecycleState.ACTIONABLE_A_GRADE
-    assert demote.reason == SetupTransitionReason.ACTIONABLE_A_GRADE
+    assert first.transitioned is False
+    assert first.to_state == SetupLifecycleState.CONFIRMED
+    assert first.reason == SetupTransitionReason.NO_CHANGE
+    assert first.event is None
+    assert first.record is not None
+    assert first.record.current_state == SetupLifecycleState.CONFIRMED
+    assert first.record.confirmation_count == 2
+    assert first.record.confirmed_at == record.confirmed_at
+    assert first.record.actionability_state == "A_GRADE_ACTIONABLE"
 
-    promote = evaluate_lifecycle_transition(
-        demote.record,
+    second = evaluate_lifecycle_transition(
+        first.record,
         observation,
         lifecycle_id=record.lifecycle_id,
         now="2026-09-01T12:05:00+00:00",
     )
-    assert promote.transitioned is True
-    assert promote.to_state == SetupLifecycleState.CONFIRMED
-    assert promote.reason == SetupTransitionReason.PULLBACK_RR_VALID
+    assert second.transitioned is False
+    assert second.to_state == SetupLifecycleState.CONFIRMED
+    assert second.reason == SetupTransitionReason.NO_CHANGE
+    assert second.event is None
+    assert second.record is not None
+    assert second.record.current_state == SetupLifecycleState.CONFIRMED
+    assert second.record.last_transition_at == first.record.last_transition_at
 
 
 def test_accounting_module_is_not_an_operational_input() -> None:
