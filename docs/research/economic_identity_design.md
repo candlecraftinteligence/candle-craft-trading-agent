@@ -113,8 +113,9 @@ rotates `lifecycle_id`. Unstable while `N/A` or before freeze. Producer:
 **YES (surfaces exist).** Shared `setup_identity` across TPs/generations; raw vs
 normalized decimals; `N/A` tokens; mode-neutral public vs mode-split lifecycle;
 `_fallback_signal_id` from current snapshot; UUID generations when anchor is `N/A`;
-multi-row outcomes per lifecycle; `CONFIRMED`↔`ACTIONABLE_A_GRADE` oscillation
-(lifecycle ownership, later phase).
+multi-row outcomes per lifecycle; historical `CONFIRMED`↔`ACTIONABLE_A_GRADE`
+oscillation (P2B guards the accidental prospective quality demote; history is
+not rewritten).
 
 ### 13. Does any code reconstruct identity from the current symbol snapshot rather than the original frozen plan?
 

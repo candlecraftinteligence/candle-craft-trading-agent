@@ -818,7 +818,11 @@ def _metrics() -> dict[str, Any]:
             inclusion_rules="CONFIRMED state only; ACTIONABLE_A_GRADE is not included",
             counting_unit="symbol observation in this run with CONFIRMED lifecycle",
             scope="run / observation / lifecycle snapshot",
-            repeated_observations_counted="yes; oscillation CONFIRMED↔ACTIONABLE_A_GRADE will move this count across runs",
+            repeated_observations_counted=(
+                "yes; current-state snapshot per run. Prospective CONFIRMED↔ACTIONABLE_A_GRADE "
+                "quality/actionability oscillation is guarded and no longer moves this count; "
+                "historical event rows may still oscillate"
+            ),
             unique_economic_plans_counted="no",
             snapshot_time="persist-time lifecycle snapshot",
             relative_to_lifecycle="after lifecycle apply on the scan result",
@@ -827,7 +831,10 @@ def _metrics() -> dict[str, Any]:
             categories_overlap="can overlap A-grade counters if states and actionability disagree; typically different labels",
             research_funnel_suitable="no — snapshot of a mutable state",
             trust_status=UNSAFE,
-            limitations="does not reconstruct history; audit-reported oscillation makes time series of this counter non-monotonic for the same idea",
+            limitations=(
+                "does not reconstruct history; still a mutable current-state snapshot, not unique "
+                "confirmations. Historical CONFIRMED↔ACTIONABLE_A_GRADE rows are not rewritten"
+            ),
         ),
         "actionable_a_grade_setups": _metric(
             producer="_a_grade_actionability_counts",
