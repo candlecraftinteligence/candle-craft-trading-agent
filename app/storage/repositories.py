@@ -316,7 +316,22 @@ def _runtime_stats_payload(result: ScannerRunResult) -> dict[str, Any]:
     queue_diagnostics = metadata.get("symbol_queue")
     if isinstance(queue_diagnostics, Mapping):
         payload["symbol_queue"] = dict(queue_diagnostics)
+    payload["research_provenance"] = _research_provenance_payload(result)
     return payload
+
+
+def _research_provenance_payload(result: ScannerRunResult) -> dict[str, Any]:
+    try:
+        from app.storage.run_provenance import collect_run_provenance_safe
+
+        return collect_run_provenance_safe(scanner_config=result.config)
+    except Exception:
+        return {
+            "schema_version": "cci-run-provenance-v1",
+            "status": "unavailable",
+            "reason": "collection_failed",
+            "run_association": "scan_runs.runtime_stats_json.research_provenance",
+        }
 
 
 def _metadata_symbol_count(metadata: Mapping[str, Any], key: str) -> int | None:
