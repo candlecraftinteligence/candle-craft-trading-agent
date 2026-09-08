@@ -28,6 +28,7 @@ from app.lifecycle.outcome_events import (
     record_terminal_transition as _record_terminal_transition,
     target_reason as _target_reason,
 )
+from app.lifecycle.economic_identity import proven_progress_plan_version_id
 from app.lifecycle.outcome_policy import (
     _text,
     candle_range as _candle_range,
@@ -643,6 +644,7 @@ def _new_progress(
         ),
         first_evaluated_at=evaluated_at,
         last_evaluated_at=evaluated_at,
+        plan_version_id=proven_progress_plan_version_id(record),
     )
 
 

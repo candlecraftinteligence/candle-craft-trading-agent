@@ -148,7 +148,11 @@ and the structured contract `build_evidence_contract()["outcome_ownership"]`.
 
 It does not change producers, schema, public delivery, or research consumers. The
 authoritative stored outcome key remains `UNIQUE(lifecycle_id, plan_identity)`.
-`plan_version_id` is still absent from outcome progress/analytics write columns.
+`plan_version_id` may be persisted prospectively on new `setup_lifecycle_outcome_progress`
+rows when the closed-candle evaluator can prove the existing P1 identity remints from the
+frozen economics being evaluated. Legacy, unproven, reconstructed, and invariant-conflicting
+rows remain NULL. The authoritative stored outcome key remains `UNIQUE(lifecycle_id, plan_identity)`.
+Analytics persistence is unchanged. Canonical plan-outcome ownership remains unestablished.
 
 See `docs/research/outcome_ownership_p3a.md` for the ownership report. The
 projection may interpret a single coherent evaluation as a plan-level simulation

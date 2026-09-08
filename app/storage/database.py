@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -602,6 +602,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 lifecycle_id TEXT NOT NULL REFERENCES setup_lifecycle_records(lifecycle_id) ON DELETE CASCADE,
                 plan_identity TEXT NOT NULL,
+                plan_version_id TEXT,
                 symbol TEXT NOT NULL,
                 mode TEXT NOT NULL DEFAULT 'N/A',
                 direction TEXT NOT NULL DEFAULT 'N/A',
@@ -1044,6 +1045,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _migrate_lifecycle_generation_identity_v17(connection)
         if existing_version < 21:
             _migrate_economic_identity_v21(connection)
+        if existing_version < 22:
+            _migrate_outcome_progress_plan_version_v22(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
@@ -1076,6 +1079,17 @@ def _migrate_economic_identity_v21(connection: sqlite3.Connection) -> None:
 
     for column in ("setup_id", "plan_version_id", "economic_identity_reason"):
         _ensure_column(connection, "setup_lifecycle_records", column, "TEXT")
+
+
+def _migrate_outcome_progress_plan_version_v22(connection: sqlite3.Connection) -> None:
+    """Add nullable progress plan_version_id without attributing historical rows."""
+
+    _ensure_column(
+        connection,
+        "setup_lifecycle_outcome_progress",
+        "plan_version_id",
+        "TEXT",
+    )
 
 
 def _migrate_public_signal_truth_audit_v20(connection: sqlite3.Connection) -> None:

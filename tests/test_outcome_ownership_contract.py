@@ -757,7 +757,7 @@ def test_helper_leaves_inputs_and_sqlite_rows_unchanged(tmp_path: Path) -> None:
         after_rows = {table: _sql_rows(repository, table) for table in before_rows}
         schema_after = repository._connection.execute("PRAGMA user_version").fetchone()[0]
     assert before_rows == after_rows
-    assert schema_before == schema_after == SCHEMA_VERSION == 21
+    assert schema_before == schema_after == SCHEMA_VERSION == 22
     source = Path("app/analytics/outcome_ownership.py").read_text(encoding="utf-8")
     assert "sqlite3" not in source
     assert "open_initialized_database" not in source
@@ -782,11 +782,11 @@ def test_helper_is_not_wired_into_runtime_or_research_consumers() -> None:
         evidence_baseline_audit,
     ):
         assert banned not in inspect.getsource(module)
-    assert SCHEMA_VERSION == 21
+    assert SCHEMA_VERSION == 22
     assert evidence_contract_payload()["outcome_ownership"]["feeds_operational_decisions"] is False
 
 
-def test_fresh_schema_remains_v21_and_progress_has_no_plan_version_column(tmp_path: Path) -> None:
+def test_fresh_schema_is_v22_and_progress_has_nullable_plan_version_column(tmp_path: Path) -> None:
     path = tmp_path / "fresh.sqlite"
     with open_initialized_database(path) as connection:
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -796,10 +796,15 @@ def test_fresh_schema_remains_v21_and_progress_has_no_plan_version_column(tmp_pa
         record_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)")
         }
-    assert user_version == 21 == SCHEMA_VERSION
+        indexes = [
+            dict(row)
+            for row in connection.execute("PRAGMA index_list(setup_lifecycle_outcome_progress)")
+        ]
+    assert user_version == 22 == SCHEMA_VERSION
     assert "plan_identity" in progress_columns
-    assert "plan_version_id" not in progress_columns
+    assert "plan_version_id" in progress_columns
     assert "plan_version_id" in record_columns
+    assert any(item["unique"] for item in indexes)
 
 
 def test_synthetic_report_artifact_is_labeled_and_matches_helper(tmp_path: Path) -> None:

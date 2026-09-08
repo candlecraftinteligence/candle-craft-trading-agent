@@ -24,7 +24,7 @@ from app.lifecycle.economic_identity import (
     REASON_PLAN_VERSION_INVARIANT_VIOLATION,
     mint_plan_version_id,
 )
-from app.lifecycle.models import SetupLifecycleState, SetupTransitionReason
+from app.lifecycle.models import SetupLifecycleOutcomeProgress, SetupLifecycleState, SetupTransitionReason
 from app.lifecycle.outcome_policy import canonical_plan_identity, compatible_plan_identities
 
 OUTCOME_OWNERSHIP_VERSION: Final[str] = "cci-outcome-ownership-v1"
@@ -142,8 +142,9 @@ def project_outcome_ownership(
             "unit": "persisted authoritative plan-outcome",
             "reason": (
                 "Current producers persist outcomes on UNIQUE(lifecycle_id, plan_identity). "
-                "plan_version_id is not a column on outcome progress or analytics. "
-                "A diagnostic interpretation is not a canonical stored owner."
+                "P3B1 may persist a nullable prospective plan_version_id on progress; that is "
+                "evidence attribution, not a canonical stored owner. Analytics remains "
+                "lifecycle-level and is not a plan-outcome authority."
             ),
         },
         "provenance": meta,
@@ -199,7 +200,10 @@ def _provenance(value: Mapping[str, Any] | None) -> dict[str, Any]:
 def _mapping(row: Any) -> dict[str, Any]:
     if hasattr(row, "model_dump"):
         dumped = row.model_dump(mode="json")
-        return copy.deepcopy(dumped)
+        payload = copy.deepcopy(dumped)
+        if isinstance(row, SetupLifecycleOutcomeProgress):
+            payload["plan_version_id"] = row.plan_version_id
+        return payload
     if isinstance(row, Mapping):
         return copy.deepcopy(dict(row))
     raise TypeError(f"unsupported outcome-ownership input type: {type(row)!r}")
@@ -448,7 +452,11 @@ def _attribute_progress(
             "multiple lifecycle records were supplied for one lifecycle_id in the same namespace",
         )
     record = record_match["payload"]
-    stored_plan = _optional_text(record.get("plan_version_id"))
+    progress_has_plan_version_key = "plan_version_id" in progress
+    if progress_has_plan_version_key:
+        stored_plan = _optional_text(progress.get("plan_version_id"))
+    else:
+        stored_plan = _optional_text(record.get("plan_version_id"))
     reason = _optional_text(record.get("economic_identity_reason"))
     identity_conflict = bool(reason and REASON_PLAN_VERSION_INVARIANT_VIOLATION in reason)
     compatible = _compatible_identities(record)
@@ -468,7 +476,13 @@ def _attribute_progress(
         )
     if stored_plan is None:
         status = STATUS_MISSING_LEGACY
-        detail = "plan_version_id is unavailable on the supplied lifecycle record (legacy/unlocked/null)"
+        if progress_has_plan_version_key:
+            detail = (
+                "plan_version_id is unavailable on the supplied progress row "
+                "(legacy/unproven/null); do not lend a later lifecycle id"
+            )
+        else:
+            detail = "plan_version_id is unavailable on the supplied lifecycle record (legacy/unlocked/null)"
         if not matches_current_geometry:
             detail += "; progress plan_identity also does not match current record geometry"
         return _attribution(
