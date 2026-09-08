@@ -44,6 +44,7 @@ class ScanRunRecord:
     data_issues: int
     data_issues_json: str
     raw_payload_json: str
+    raw_payload_format: str = "inline_v1"
     is_watch_iteration: int = 0
     watch_iteration_number: int | None = None
     started_at: str | None = None

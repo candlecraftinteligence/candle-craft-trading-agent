@@ -1082,6 +1082,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 command_used=_command_used(argv),
                 raw_payload=raw_payload,
                 run_id=stored_scan_run_id,
+                inline_raw_payload=_scan_raw_payload_inline_only(),
             )
         except StorageError as exc:
             raise SystemExit(str(exc)) from exc
@@ -2308,6 +2309,10 @@ def _telegram_manual_signal_settings() -> Settings:
         return Settings()
     except Exception as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def _scan_raw_payload_inline_only() -> bool:
+    return bool(_telegram_manual_signal_settings().scan_raw_payload_inline_only)
 
 
 def _telegram_manual_signals_enabled(args: argparse.Namespace) -> bool:
@@ -3907,6 +3912,7 @@ def _store_watch_iteration_scan_run(
             raw_payload=raw_payload,
             run_id=execution.storage_run_id,
             watch_iteration=metadata,
+            inline_raw_payload=_scan_raw_payload_inline_only(),
         )
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc

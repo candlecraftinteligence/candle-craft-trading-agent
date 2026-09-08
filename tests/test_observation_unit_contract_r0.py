@@ -266,7 +266,7 @@ def test_fresh_synthetic_schema_is_v24_without_admission_columns(tmp_path: Path)
         analytics_cols = {
             row[1] for row in connection.execute("PRAGMA table_info(setup_outcome_analytics)")
         }
-    assert user_version == SCHEMA_VERSION == 24
+    assert user_version == SCHEMA_VERSION == 25
     assert sqlite_schema_version != user_version
     assert "UNIQUE(lifecycle_id, plan_identity)" in progress_sql
     assert "UNIQUE(lifecycle_id, final_outcome)" in analytics_sql

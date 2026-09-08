@@ -744,7 +744,7 @@ def test_p3a_diagnostics_and_stronger_claims_remain_false(tmp_path: Path) -> Non
         schema = repository._connection.execute("PRAGMA user_version").fetchone()[0]
     context = known["evaluations"][0]["evaluation_context"]
     assert before == after
-    assert schema == SCHEMA_VERSION == 24
+    assert schema == SCHEMA_VERSION == 25
     assert context["last_eligibility_prefix_evidence_status"] == PREFIX_EVIDENCE_STATUS_KNOWN
     assert context["prefix_disposition"] == DISPOSITION_PENDING_SUFFIX_EXHAUSTED
     assert context["pending_suffix_exhausted"] is True
@@ -849,7 +849,7 @@ def test_ordinary_dumps_and_runtime_consumers_do_not_take_prefix_envelope() -> N
     assert evidence_contract_payload()["outcome_ownership"]["feeds_operational_decisions"] is False
     assert evidence_contract_payload()["unique_trade_count"]["status"] == UNAVAILABLE
     assert evidence_contract_payload()["outcome_ownership"]["schema_version_unchanged"] is True
-    assert SCHEMA_VERSION == 24
+    assert SCHEMA_VERSION == 25
 
 
 def test_exchange_close_convention_and_bounded_envelope_size(tmp_path: Path) -> None:
@@ -919,7 +919,7 @@ def test_v23_to_v24_migration_adds_nullable_envelope_without_backfill(tmp_path: 
             FROM setup_lifecycle_outcome_progress WHERE lifecycle_id = 'v23-active-cutoff'
             """
         ).fetchone()
-    assert version == SCHEMA_VERSION == 24
+    assert version == SCHEMA_VERSION == 25
     assert {row[2] for row in rows} == {None}
     assert {row[1] for row in rows if row[0] == "v23-active-cutoff"} == {"2026-09-01T10:00:00+00:00"}
     assert after[0] == "2026-09-01T10:00:00+00:00"
