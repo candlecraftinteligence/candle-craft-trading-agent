@@ -53,3 +53,9 @@ transactions preserve the previously committed tuple. Do not backfill history.
 `conflicting`. Internally contradictory disposition, exhaustion, count, or
 chronological bounds are `malformed`. A `known` status never carries an
 impossible combination. This still does not prove complete coverage.
+
+Disposition / W / P / C / exhaustion must match the current
+`evaluate_closed_candle_outcomes` write sites. Zero pending work uses
+`NO_NEW_PENDING_CANDLES` or `WAITING_FOR_TRACKING_START`, never
+`PENDING_SUFFIX_EXHAUSTED`. Pre-filter lifecycle terminals do not mint a
+fresh `POLICY_TERMINAL` envelope.

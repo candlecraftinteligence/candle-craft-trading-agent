@@ -1148,6 +1148,126 @@ def test_contradictory_prefix_envelopes_are_not_known() -> None:
     half_cursor["cursor_after"] = {"open_at": _open_at(2), "close_at": None}
     assert _assert_not_known(half_cursor)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
 
+    no_eligible_with_work = copy.deepcopy(_valid_prefix_envelope())
+    no_eligible_with_work["disposition"] = DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES
+    no_eligible_with_work["pending_suffix_exhausted"] = None
+    assert _assert_not_known(no_eligible_with_work)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    no_eligible_exhausted_false = {
+        "contract_version": PREFIX_EVIDENCE_CONTRACT_VERSION,
+        "lifecycle_id": "life-1",
+        "plan_identity": "plan-1",
+        "applied_cutoff": _close_at(0),
+        "execution_timeframe": "5m",
+        "tracking_start_at": None,
+        "cursor_before": None,
+        "supplied_window": {
+            "count": 0,
+            "first_open_at": None,
+            "last_open_at": None,
+            "last_close_at": None,
+        },
+        "pending_suffix": {
+            "established": False,
+            "count": None,
+            "first_open_at": None,
+            "last_open_at": None,
+            "last_close_at": None,
+            "expected_next_open_at": None,
+            "unknown_reason": "pending_rules_not_evaluated",
+        },
+        "completed_work": {"count": 0, "last_open_at": None, "last_close_at": None},
+        "cursor_after": None,
+        "disposition": DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES,
+        "pending_suffix_exhausted": False,
+    }
+    assert _assert_not_known(no_eligible_exhausted_false)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    zero_work_exhausted = copy.deepcopy(_valid_prefix_envelope())
+    zero_work_exhausted["disposition"] = DISPOSITION_PENDING_SUFFIX_EXHAUSTED
+    zero_work_exhausted["pending_suffix_exhausted"] = True
+    zero_work_exhausted["pending_suffix"] = {
+        "established": True,
+        "count": 0,
+        "first_open_at": None,
+        "last_open_at": None,
+        "last_close_at": None,
+        "expected_next_open_at": _open_at(3),
+        "unknown_reason": None,
+    }
+    zero_work_exhausted["completed_work"] = {"count": 0, "last_open_at": None, "last_close_at": None}
+    zero_work_exhausted["cursor_before"] = {"open_at": _open_at(2), "close_at": _close_at(2)}
+    zero_work_exhausted["cursor_after"] = {"open_at": _open_at(2), "close_at": _close_at(2)}
+    assert _assert_not_known(zero_work_exhausted)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    aborted_empty_pending = copy.deepcopy(zero_work_exhausted)
+    aborted_empty_pending["disposition"] = DISPOSITION_PROCESSING_ABORTED
+    aborted_empty_pending["pending_suffix_exhausted"] = False
+    assert _assert_not_known(aborted_empty_pending)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    aborted_complete = copy.deepcopy(_valid_prefix_envelope())
+    aborted_complete["disposition"] = DISPOSITION_PROCESSING_ABORTED
+    aborted_complete["pending_suffix_exhausted"] = False
+    assert _assert_not_known(aborted_complete)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    terminal_empty_pending = copy.deepcopy(zero_work_exhausted)
+    terminal_empty_pending["disposition"] = DISPOSITION_POLICY_TERMINAL
+    terminal_empty_pending["pending_suffix_exhausted"] = True
+    assert _assert_not_known(terminal_empty_pending)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    waiting_unestablished = copy.deepcopy(_valid_prefix_envelope())
+    waiting_unestablished["disposition"] = DISPOSITION_WAITING_FOR_TRACKING_START
+    waiting_unestablished["pending_suffix_exhausted"] = None
+    waiting_unestablished["pending_suffix"] = {
+        "established": False,
+        "count": None,
+        "first_open_at": None,
+        "last_open_at": None,
+        "last_close_at": None,
+        "expected_next_open_at": None,
+        "unknown_reason": "pending_rules_not_evaluated",
+    }
+    waiting_unestablished["completed_work"] = {"count": 0, "last_open_at": None, "last_close_at": None}
+    waiting_unestablished["cursor_after"] = None
+    assert _assert_not_known(waiting_unestablished)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    waiting_exhausted_false = copy.deepcopy(_valid_prefix_envelope())
+    waiting_exhausted_false["disposition"] = DISPOSITION_WAITING_FOR_TRACKING_START
+    waiting_exhausted_false["pending_suffix_exhausted"] = False
+    waiting_exhausted_false["pending_suffix"] = {
+        "established": True,
+        "count": 0,
+        "first_open_at": None,
+        "last_open_at": None,
+        "last_close_at": None,
+        "expected_next_open_at": _open_at(1),
+        "unknown_reason": None,
+    }
+    waiting_exhausted_false["completed_work"] = {"count": 0, "last_open_at": None, "last_close_at": None}
+    waiting_exhausted_false["cursor_after"] = None
+    assert _assert_not_known(waiting_exhausted_false)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    blocked_with_completed = copy.deepcopy(_valid_prefix_envelope())
+    blocked_with_completed["disposition"] = DISPOSITION_POST_FILTER_BLOCKED
+    blocked_with_completed["pending_suffix_exhausted"] = None
+    assert _assert_not_known(blocked_with_completed)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    blocked_exhausted_false = copy.deepcopy(_valid_prefix_envelope())
+    blocked_exhausted_false["disposition"] = DISPOSITION_POST_FILTER_BLOCKED
+    blocked_exhausted_false["pending_suffix_exhausted"] = False
+    blocked_exhausted_false["pending_suffix"] = {
+        "established": False,
+        "count": None,
+        "first_open_at": None,
+        "last_open_at": None,
+        "last_close_at": None,
+        "expected_next_open_at": None,
+        "unknown_reason": "pending_rules_not_evaluated",
+    }
+    blocked_exhausted_false["completed_work"] = {"count": 0, "last_open_at": None, "last_close_at": None}
+    blocked_exhausted_false["cursor_after"] = None
+    assert _assert_not_known(blocked_exhausted_false)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
 
 def test_legal_policy_terminal_and_unassessable_dispositions_remain_known() -> None:
     early_terminal = copy.deepcopy(_valid_prefix_envelope())
@@ -1239,3 +1359,196 @@ def test_legal_policy_terminal_and_unassessable_dispositions_remain_known() -> N
     }
     aborted["cursor_after"] = {"open_at": _open_at(0), "close_at": _close_at(0)}
     assert _diagnose_envelope(aborted)["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+
+    blocked_unestablished = copy.deepcopy(_valid_prefix_envelope())
+    blocked_unestablished["disposition"] = DISPOSITION_POST_FILTER_BLOCKED
+    blocked_unestablished["pending_suffix_exhausted"] = None
+    blocked_unestablished["pending_suffix"] = {
+        "established": False,
+        "count": None,
+        "first_open_at": None,
+        "last_open_at": None,
+        "last_close_at": None,
+        "expected_next_open_at": None,
+        "unknown_reason": "pending_rules_not_evaluated",
+    }
+    blocked_unestablished["completed_work"] = {"count": 0, "last_open_at": None, "last_close_at": None}
+    blocked_unestablished["cursor_after"] = None
+    assert _diagnose_envelope(blocked_unestablished)["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+
+    blocked_established = copy.deepcopy(blocked_unestablished)
+    blocked_established["pending_suffix"] = {
+        "established": True,
+        "count": 2,
+        "first_open_at": _open_at(1),
+        "last_open_at": _open_at(2),
+        "last_close_at": _close_at(2),
+        "expected_next_open_at": _open_at(1),
+        "unknown_reason": None,
+    }
+    blocked_established["cursor_before"] = {"open_at": _open_at(0), "close_at": _close_at(0)}
+    blocked_established["cursor_after"] = {"open_at": _open_at(0), "close_at": _close_at(0)}
+    assert _diagnose_envelope(blocked_established)["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+
+
+def _diagnose_row(row: dict[str, object]) -> dict[str, object]:
+    raw = row["last_eligibility_prefix_evidence_json"]
+    cutoff = row["last_eligibility_decision_at"]
+    return diagnose_prefix_evidence(
+        raw_json=None if raw is None else str(raw),
+        lifecycle_id=str(row["lifecycle_id"]),
+        plan_identity=str(row["plan_identity"]),
+        applied_cutoff=None if cutoff is None else str(cutoff),
+        execution_timeframe=str(row["execution_timeframe"]),
+    )
+
+
+def test_producer_generated_dispositions_diagnose_known(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_candles = [_candle(0, high="99", low="95"), _candle(1, high="103", low="99")]
+
+    with SQLiteSetupLifecycleRepository(tmp_path / "empty.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        _evaluate(
+            repository,
+            record,
+            [_candle(0, high="99", low="95")],
+            decision_timestamp=BASE + timedelta(minutes=1),
+        )
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES
+        assert diagnostic["pending_suffix_exhausted"] is None
+
+    with SQLiteSetupLifecycleRepository(tmp_path / "wait.db") as repository:
+        record = _latched(confirmed_at=(BASE + timedelta(minutes=1)).isoformat())
+        repository.upsert_record(record)
+        _evaluate(repository, record, [_candle(0, high="99", low="95")], decision_timestamp=_close(0))
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_WAITING_FOR_TRACKING_START
+        assert diagnostic["pending_suffix_exhausted"] is None
+
+    with SQLiteSetupLifecycleRepository(tmp_path / "exhausted.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        first = _evaluate(repository, record, first_candles, decision_timestamp=_close(1))
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_PENDING_SUFFIX_EXHAUSTED
+        assert diagnostic["pending_suffix_exhausted"] is True
+        _evaluate(repository, first.record, first_candles, decision_timestamp=_close(1))
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_NO_NEW_PENDING_CANDLES
+        assert diagnostic["pending_suffix_exhausted"] is True
+
+    with SQLiteSetupLifecycleRepository(tmp_path / "range.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        _evaluate(
+            repository,
+            record,
+            [_candle(0, high="99", low="95"), _candle(1, high="90", low="103")],
+            decision_timestamp=_close(1),
+        )
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_POST_FILTER_BLOCKED
+        assert diagnostic["pending_suffix_exhausted"] is None
+
+    with SQLiteSetupLifecycleRepository(tmp_path / "stale.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        first = _evaluate(repository, record, first_candles, decision_timestamp=_close(1))
+        _evaluate(
+            repository,
+            first.record,
+            [_candle(0, high="99", low="95")],
+            decision_timestamp=_close(0),
+        )
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_POST_FILTER_BLOCKED
+        assert diagnostic["pending_suffix_exhausted"] is None
+
+    with SQLiteSetupLifecycleRepository(tmp_path / "gap.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        first = _evaluate(repository, record, first_candles, decision_timestamp=_close(1))
+        _evaluate(
+            repository,
+            first.record,
+            [_candle(4, high="111", low="103"), _candle(5, high="112", low="110")],
+            decision_timestamp=_close(5),
+        )
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_POST_FILTER_BLOCKED
+        assert diagnostic["pending_suffix_exhausted"] is None
+
+    with SQLiteSetupLifecycleRepository(tmp_path / "terminal.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        _evaluate(repository, record, _tp_prefix(), decision_timestamp=_close(4))
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_POLICY_TERMINAL
+        assert diagnostic["pending_suffix_exhausted"] is True
+
+    with SQLiteSetupLifecycleRepository(tmp_path / "early.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        _evaluate(
+            repository,
+            record,
+            _tp_prefix() + [_candle(5, high="132", low="130")],
+            decision_timestamp=_close(5),
+        )
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_POLICY_TERMINAL
+        assert diagnostic["pending_suffix_exhausted"] is False
+
+    with SQLiteSetupLifecycleRepository(tmp_path / "prefilter.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        seeded = _evaluate(repository, record, first_candles, decision_timestamp=_close(1) + timedelta(minutes=1))
+        prior = _sql_progress(repository, record.lifecycle_id)[0]
+        terminal_lifecycle = seeded.record.model_copy(update={"current_state": SetupLifecycleState.EXPIRED})
+        repository.upsert_record(terminal_lifecycle)
+        _evaluate(repository, terminal_lifecycle, first_candles, decision_timestamp=_close(2))
+        preserved = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(preserved)
+        assert preserved["last_eligibility_prefix_evidence_json"] == prior["last_eligibility_prefix_evidence_json"]
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_PENDING_SUFFIX_EXHAUSTED
+
+    from app.lifecycle import outcomes as outcomes_module
+
+    def _fail_managing(record, **kwargs):
+        del kwargs
+        return record, None, ()
+
+    monkeypatch.setattr(outcomes_module, "_advance_to_managing", _fail_managing)
+    with SQLiteSetupLifecycleRepository(tmp_path / "abort.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        _evaluate(repository, record, first_candles, decision_timestamp=_close(1))
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+        diagnostic = _diagnose_row(row)
+        assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+        assert diagnostic["disposition"] == DISPOSITION_PROCESSING_ABORTED
+        assert diagnostic["pending_suffix_exhausted"] is False

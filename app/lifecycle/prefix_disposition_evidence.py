@@ -445,7 +445,33 @@ def _structurally_valid_envelope(payload: Mapping[str, Any]) -> bool:
 
 
 def _semantically_consistent_envelope(payload: Mapping[str, Any]) -> bool:
-    """Reject internally contradictory disposition, exhaustion, count, and bounds."""
+    """Match disposition/W/P/C/exhaustion to the current outcomes.py write sites.
+
+    Producer truth table for a qualifying envelope (filter returned and bound):
+
+    NO_ELIGIBLE_CLOSED_CANDLES
+        empty returned window; pending never marked; loop not entered
+        W=0, P unestablished/count null, C=0, exhausted null, cursor unchanged
+    WAITING_FOR_TRACKING_START
+        nonempty W, empty pending marked, fresh cursor, latest open before start
+        P established count 0, C=0, exhausted null, cursor unchanged
+    NO_NEW_PENDING_CANDLES
+        nonempty W, empty pending marked, existing cursor; only P=0/C=0 exhaustion
+        P established count 0, C=0, exhausted true, cursor unchanged
+    POST_FILTER_BLOCKED
+        before or after mark_pending; loop not entered; no completed work
+        W>=1, C=0, exhausted null, cursor unchanged; P may be unestablished,
+        established 0, or established >0
+    PENDING_SUFFIX_EXHAUSTED
+        loop entered and finished without terminal/abort
+        P established >0, C=P, exhausted true, cursor follows last completed
+    POLICY_TERMINAL
+        loop entered; terminal recorded then that candle completed
+        P established >0, C>0, C<=P, exhausted==(C==P), cursor follows last completed
+    PROCESSING_ABORTED
+        loop entered; abort before completing the failing candle
+        P established >0, C<P, exhausted false; cursor unchanged iff C=0
+    """
 
     disposition = payload.get("disposition")
     pending = payload.get("pending_suffix")
@@ -459,43 +485,16 @@ def _semantically_consistent_envelope(payload: Mapping[str, Any]) -> bool:
     pending_established = pending.get("established") is True
     pending_count = pending.get("count")
     completed_count = completed.get("count")
-    if not _non_negative_int(completed_count):
+    supplied_count = supplied.get("count")
+    if not _non_negative_int(completed_count) or not _non_negative_int(supplied_count):
         return False
-
-    if disposition == DISPOSITION_PENDING_SUFFIX_EXHAUSTED:
-        if not pending_established or not _non_negative_int(pending_count):
-            return False
-        if completed_count != pending_count or exhausted is not True:
-            return False
-    elif disposition == DISPOSITION_NO_NEW_PENDING_CANDLES:
-        if not pending_established or pending_count != 0:
-            return False
-        if completed_count != 0 or exhausted is not True:
-            return False
-    elif disposition == DISPOSITION_PROCESSING_ABORTED:
-        if not pending_established or not _non_negative_int(pending_count):
-            return False
-        if exhausted is not False or completed_count > pending_count:
-            return False
-    elif disposition == DISPOSITION_POLICY_TERMINAL:
-        if not pending_established or not _non_negative_int(pending_count):
-            return False
-        if not isinstance(exhausted, bool):
-            return False
-        if exhausted != (completed_count == pending_count):
-            return False
-    elif disposition == DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES:
-        if supplied.get("count") != 0 or exhausted is True:
-            return False
-    elif disposition == DISPOSITION_WAITING_FOR_TRACKING_START:
-        if exhausted is True:
-            return False
-    elif disposition == DISPOSITION_POST_FILTER_BLOCKED:
-        if exhausted is True:
-            return False
-    else:
+    if pending_established and _non_negative_int(pending_count) and supplied_count < pending_count:
         return False
-
+    if completed_count == 0:
+        if not _cursor_pairs_equivalent(payload.get("cursor_before"), payload.get("cursor_after")):
+            return False
+    elif not _cursor_matches_completed(payload.get("cursor_after"), completed):
+        return False
     if pending_established and _non_negative_int(pending_count) and pending_count > 0 and completed_count > 0:
         pending_first = _parsed_utc(pending.get("first_open_at"), field_name="pending_first_open_at")
         pending_last_open = _parsed_utc(pending.get("last_open_at"), field_name="pending_last_open_at")
@@ -521,7 +520,50 @@ def _semantically_consistent_envelope(payload: Mapping[str, Any]) -> bool:
             return False
         if completed_last_close < pending_first or completed_last_close > pending_last_close:
             return False
-    return True
+
+    if disposition == DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES:
+        return (
+            supplied_count == 0
+            and pending_established is False
+            and pending_count is None
+            and completed_count == 0
+            and exhausted is None
+        )
+    if disposition == DISPOSITION_NO_NEW_PENDING_CANDLES:
+        return (
+            supplied_count >= 1
+            and pending_established
+            and pending_count == 0
+            and completed_count == 0
+            and exhausted is True
+        )
+    if disposition == DISPOSITION_WAITING_FOR_TRACKING_START:
+        return (
+            supplied_count >= 1
+            and pending_established
+            and pending_count == 0
+            and completed_count == 0
+            and exhausted is None
+        )
+    if disposition == DISPOSITION_POST_FILTER_BLOCKED:
+        return supplied_count >= 1 and completed_count == 0 and exhausted is None
+    if disposition == DISPOSITION_PENDING_SUFFIX_EXHAUSTED:
+        if not pending_established or not _non_negative_int(pending_count) or pending_count < 1:
+            return False
+        return completed_count == pending_count and exhausted is True
+    if disposition == DISPOSITION_PROCESSING_ABORTED:
+        if not pending_established or not _non_negative_int(pending_count) or pending_count < 1:
+            return False
+        return exhausted is False and completed_count < pending_count
+    if disposition == DISPOSITION_POLICY_TERMINAL:
+        if not pending_established or not _non_negative_int(pending_count) or pending_count < 1:
+            return False
+        if completed_count < 1 or completed_count > pending_count:
+            return False
+        if not isinstance(exhausted, bool):
+            return False
+        return exhausted == (completed_count == pending_count)
+    return False
 
 
 def _valid_window(
@@ -553,6 +595,48 @@ def _valid_window(
     if first_open is None or last_open is None or last_close is None:
         return False
     return first_open <= last_open <= last_close
+
+
+def _cursor_pairs_equivalent(left: Any, right: Any) -> bool:
+    if left is None and right is None:
+        return True
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        return False
+    return _optional_utc_equal(
+        left.get("open_at"),
+        right.get("open_at"),
+        field_name="cursor_open_at",
+    ) and _optional_utc_equal(
+        left.get("close_at"),
+        right.get("close_at"),
+        field_name="cursor_close_at",
+    )
+
+
+def _cursor_matches_completed(cursor_after: Any, completed: Mapping[str, Any]) -> bool:
+    if not isinstance(cursor_after, Mapping):
+        return False
+    return _optional_utc_equal(
+        cursor_after.get("open_at"),
+        completed.get("last_open_at"),
+        field_name="cursor_after_open_at",
+    ) and _optional_utc_equal(
+        cursor_after.get("close_at"),
+        completed.get("last_close_at"),
+        field_name="cursor_after_close_at",
+    )
+
+
+def _optional_utc_equal(left: Any, right: Any, *, field_name: str) -> bool:
+    left_text = _optional_text(left)
+    right_text = _optional_text(right)
+    if left_text is None and right_text is None:
+        return True
+    left_parsed = _parsed_utc(left, field_name=f"{field_name}_left")
+    right_parsed = _parsed_utc(right, field_name=f"{field_name}_right")
+    if left_parsed is None or right_parsed is None:
+        return False
+    return left_parsed == right_parsed
 
 
 def _valid_cursor_pair(value: Any, *, field_name: str) -> bool:
