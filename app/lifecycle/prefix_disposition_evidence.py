@@ -421,9 +421,17 @@ def _structurally_valid_envelope(payload: Mapping[str, Any]) -> bool:
         if completed.get("last_open_at") is not None or completed.get("last_close_at") is not None:
             return False
     else:
-        if not _valid_timestamp(completed.get("last_open_at"), field_name="completed_last_open_at"):
+        completed_last_open = _parsed_utc(
+            completed.get("last_open_at"),
+            field_name="completed_last_open_at",
+        )
+        completed_last_close = _parsed_utc(
+            completed.get("last_close_at"),
+            field_name="completed_last_close_at",
+        )
+        if completed_last_open is None or completed_last_close is None:
             return False
-        if not _valid_timestamp(completed.get("last_close_at"), field_name="completed_last_close_at"):
+        if completed_last_open > completed_last_close:
             return False
     if pending["established"] and _non_negative_int(pending.get("count")):
         if completed["count"] > int(pending["count"]):
@@ -433,6 +441,86 @@ def _structurally_valid_envelope(payload: Mapping[str, Any]) -> bool:
     exhausted = payload.get("pending_suffix_exhausted")
     if exhausted is not None and not isinstance(exhausted, bool):
         return False
+    return _semantically_consistent_envelope(payload)
+
+
+def _semantically_consistent_envelope(payload: Mapping[str, Any]) -> bool:
+    """Reject internally contradictory disposition, exhaustion, count, and bounds."""
+
+    disposition = payload.get("disposition")
+    pending = payload.get("pending_suffix")
+    completed = payload.get("completed_work")
+    supplied = payload.get("supplied_window")
+    if not isinstance(pending, Mapping) or not isinstance(completed, Mapping):
+        return False
+    if not isinstance(supplied, Mapping):
+        return False
+    exhausted = payload.get("pending_suffix_exhausted")
+    pending_established = pending.get("established") is True
+    pending_count = pending.get("count")
+    completed_count = completed.get("count")
+    if not _non_negative_int(completed_count):
+        return False
+
+    if disposition == DISPOSITION_PENDING_SUFFIX_EXHAUSTED:
+        if not pending_established or not _non_negative_int(pending_count):
+            return False
+        if completed_count != pending_count or exhausted is not True:
+            return False
+    elif disposition == DISPOSITION_NO_NEW_PENDING_CANDLES:
+        if not pending_established or pending_count != 0:
+            return False
+        if completed_count != 0 or exhausted is not True:
+            return False
+    elif disposition == DISPOSITION_PROCESSING_ABORTED:
+        if not pending_established or not _non_negative_int(pending_count):
+            return False
+        if exhausted is not False or completed_count > pending_count:
+            return False
+    elif disposition == DISPOSITION_POLICY_TERMINAL:
+        if not pending_established or not _non_negative_int(pending_count):
+            return False
+        if not isinstance(exhausted, bool):
+            return False
+        if exhausted != (completed_count == pending_count):
+            return False
+    elif disposition == DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES:
+        if supplied.get("count") != 0 or exhausted is True:
+            return False
+    elif disposition == DISPOSITION_WAITING_FOR_TRACKING_START:
+        if exhausted is True:
+            return False
+    elif disposition == DISPOSITION_POST_FILTER_BLOCKED:
+        if exhausted is True:
+            return False
+    else:
+        return False
+
+    if pending_established and _non_negative_int(pending_count) and pending_count > 0 and completed_count > 0:
+        pending_first = _parsed_utc(pending.get("first_open_at"), field_name="pending_first_open_at")
+        pending_last_open = _parsed_utc(pending.get("last_open_at"), field_name="pending_last_open_at")
+        pending_last_close = _parsed_utc(pending.get("last_close_at"), field_name="pending_last_close_at")
+        completed_last_open = _parsed_utc(
+            completed.get("last_open_at"),
+            field_name="completed_last_open_at",
+        )
+        completed_last_close = _parsed_utc(
+            completed.get("last_close_at"),
+            field_name="completed_last_close_at",
+        )
+        bounds = (
+            pending_first,
+            pending_last_open,
+            pending_last_close,
+            completed_last_open,
+            completed_last_close,
+        )
+        if any(item is None for item in bounds):
+            return False
+        if completed_last_open < pending_first or completed_last_open > pending_last_open:
+            return False
+        if completed_last_close < pending_first or completed_last_close > pending_last_close:
+            return False
     return True
 
 
@@ -459,11 +547,12 @@ def _valid_window(
             and value.get("last_open_at") is None
             and value.get("last_close_at") is None
         )
-    return (
-        _valid_timestamp(value.get("first_open_at"), field_name="first_open_at")
-        and _valid_timestamp(value.get("last_open_at"), field_name="last_open_at")
-        and _valid_timestamp(value.get("last_close_at"), field_name="last_close_at")
-    )
+    first_open = _parsed_utc(value.get("first_open_at"), field_name="first_open_at")
+    last_open = _parsed_utc(value.get("last_open_at"), field_name="last_open_at")
+    last_close = _parsed_utc(value.get("last_close_at"), field_name="last_close_at")
+    if first_open is None or last_open is None or last_close is None:
+        return False
+    return first_open <= last_open <= last_close
 
 
 def _valid_cursor_pair(value: Any, *, field_name: str) -> bool:
@@ -473,13 +562,13 @@ def _valid_cursor_pair(value: Any, *, field_name: str) -> bool:
         return False
     open_at = value.get("open_at")
     close_at = value.get("close_at")
-    if open_at is None and close_at is None:
+    if open_at is None or close_at is None:
         return False
-    if open_at is not None and not _valid_timestamp(open_at, field_name=f"{field_name}_open_at"):
+    opened = _parsed_utc(open_at, field_name=f"{field_name}_open_at")
+    closed = _parsed_utc(close_at, field_name=f"{field_name}_close_at")
+    if opened is None or closed is None:
         return False
-    if close_at is not None and not _valid_timestamp(close_at, field_name=f"{field_name}_close_at"):
-        return False
-    return True
+    return opened <= closed
 
 
 def _owner_conflicts(
@@ -506,14 +595,17 @@ def _owner_conflicts(
 
 
 def _valid_timestamp(value: Any, *, field_name: str) -> bool:
+    return _parsed_utc(value, field_name=field_name) is not None
+
+
+def _parsed_utc(value: Any, *, field_name: str) -> datetime | None:
     text = _optional_text(value)
     if text is None:
-        return False
+        return None
     try:
-        normalize_utc_timestamp(text, field_name=field_name)
+        return normalize_utc_timestamp(text, field_name=field_name)
     except ValueError:
-        return False
-    return True
+        return None
 
 
 def _non_negative_int(value: Any) -> bool:

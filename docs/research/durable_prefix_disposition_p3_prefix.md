@@ -46,3 +46,10 @@ envelope NULL rather than pairing a new application with an older envelope.
 
 Pre-filter shortcuts, omitted-witness upserts, rejected writes, and rolled-back
 transactions preserve the previously committed tuple. Do not backfill history.
+
+## Read diagnostic
+
+`diagnose_prefix_evidence()` reports owner, cutoff, or timeframe mismatch as
+`conflicting`. Internally contradictory disposition, exhaustion, count, or
+chronological bounds are `malformed`. A `known` status never carries an
+impossible combination. This still does not prove complete coverage.

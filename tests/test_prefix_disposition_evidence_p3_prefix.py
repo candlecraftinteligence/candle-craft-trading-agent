@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -30,6 +31,8 @@ from app.lifecycle.prefix_disposition_evidence import (
     PREFIX_EVIDENCE_STATUS_CONFLICTING,
     PREFIX_EVIDENCE_STATUS_KNOWN,
     PREFIX_EVIDENCE_STATUS_MALFORMED,
+    diagnose_prefix_evidence,
+    serialize_prefix_evidence,
 )
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.storage.database import SCHEMA_VERSION, open_initialized_database
@@ -937,3 +940,302 @@ def test_v23_to_v24_migration_adds_nullable_envelope_without_backfill(tmp_path: 
     )
     assert payload["evaluations"][0]["evaluation_context"]["last_eligibility_prefix_evidence_status"] == "unavailable"
     assert payload["evaluations"][0]["evaluation_context"]["complete"] is False
+
+
+def _open_at(index: int) -> str:
+    return (BASE + timedelta(minutes=5 * index)).isoformat()
+
+
+def _close_at(index: int) -> str:
+    return _close(index).isoformat()
+
+
+def _valid_prefix_envelope() -> dict[str, object]:
+    return {
+        "contract_version": PREFIX_EVIDENCE_CONTRACT_VERSION,
+        "lifecycle_id": "life-1",
+        "plan_identity": "plan-1",
+        "applied_cutoff": _close_at(2),
+        "execution_timeframe": "5m",
+        "tracking_start_at": _open_at(0),
+        "cursor_before": None,
+        "supplied_window": {
+            "count": 3,
+            "first_open_at": _open_at(0),
+            "last_open_at": _open_at(2),
+            "last_close_at": _close_at(2),
+        },
+        "pending_suffix": {
+            "established": True,
+            "count": 3,
+            "first_open_at": _open_at(0),
+            "last_open_at": _open_at(2),
+            "last_close_at": _close_at(2),
+            "expected_next_open_at": _open_at(0),
+            "unknown_reason": None,
+        },
+        "completed_work": {
+            "count": 3,
+            "last_open_at": _open_at(2),
+            "last_close_at": _close_at(2),
+        },
+        "cursor_after": {"open_at": _open_at(2), "close_at": _close_at(2)},
+        "disposition": DISPOSITION_PENDING_SUFFIX_EXHAUSTED,
+        "pending_suffix_exhausted": True,
+    }
+
+
+def _diagnose_envelope(payload: dict[str, object], **overrides) -> dict[str, object]:
+    return diagnose_prefix_evidence(
+        raw_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        lifecycle_id=str(overrides.get("lifecycle_id", payload["lifecycle_id"])),
+        plan_identity=str(overrides.get("plan_identity", payload["plan_identity"])),
+        applied_cutoff=str(overrides.get("applied_cutoff", payload["applied_cutoff"])),
+        execution_timeframe=str(overrides.get("execution_timeframe", payload["execution_timeframe"])),
+    )
+
+
+def _assert_not_known(payload: dict[str, object]) -> dict[str, object]:
+    diagnostic = _diagnose_envelope(payload)
+    assert diagnostic["status"] != PREFIX_EVIDENCE_STATUS_KNOWN
+    assert diagnostic["status"] in {
+        PREFIX_EVIDENCE_STATUS_MALFORMED,
+        PREFIX_EVIDENCE_STATUS_CONFLICTING,
+    }
+    assert diagnostic["disposition"] is None
+    assert diagnostic["pending_suffix_exhausted"] is None
+    assert serialize_prefix_evidence(payload) is None
+    return diagnostic
+
+
+def test_producer_valid_envelope_remains_known_and_serializable() -> None:
+    payload = _valid_prefix_envelope()
+    diagnostic = _diagnose_envelope(payload)
+    encoded = serialize_prefix_evidence(payload)
+    assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+    assert diagnostic["disposition"] == DISPOSITION_PENDING_SUFFIX_EXHAUSTED
+    assert diagnostic["pending_suffix_exhausted"] is True
+    assert encoded == json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def test_contradictory_prefix_envelopes_are_not_known() -> None:
+    exhausted_incomplete = copy.deepcopy(_valid_prefix_envelope())
+    exhausted_incomplete["completed_work"] = {
+        "count": 1,
+        "last_open_at": _open_at(0),
+        "last_close_at": _close_at(0),
+    }
+    exhausted_incomplete["cursor_after"] = {"open_at": _open_at(0), "close_at": _close_at(0)}
+    assert _assert_not_known(exhausted_incomplete)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    no_new_nonzero_pending = copy.deepcopy(_valid_prefix_envelope())
+    no_new_nonzero_pending["disposition"] = DISPOSITION_NO_NEW_PENDING_CANDLES
+    no_new_nonzero_pending["pending_suffix_exhausted"] = True
+    no_new_nonzero_pending["completed_work"] = {
+        "count": 0,
+        "last_open_at": None,
+        "last_close_at": None,
+    }
+    no_new_nonzero_pending["cursor_after"] = None
+    assert _assert_not_known(no_new_nonzero_pending)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    aborted_exhausted = copy.deepcopy(_valid_prefix_envelope())
+    aborted_exhausted["disposition"] = DISPOSITION_PROCESSING_ABORTED
+    aborted_exhausted["pending_suffix_exhausted"] = True
+    aborted_exhausted["completed_work"] = {
+        "count": 1,
+        "last_open_at": _open_at(0),
+        "last_close_at": _close_at(0),
+    }
+    aborted_exhausted["cursor_after"] = {"open_at": _open_at(0), "close_at": _close_at(0)}
+    assert _assert_not_known(aborted_exhausted)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    terminal_true_but_incomplete = copy.deepcopy(_valid_prefix_envelope())
+    terminal_true_but_incomplete["disposition"] = DISPOSITION_POLICY_TERMINAL
+    terminal_true_but_incomplete["pending_suffix_exhausted"] = True
+    terminal_true_but_incomplete["completed_work"] = {
+        "count": 2,
+        "last_open_at": _open_at(1),
+        "last_close_at": _close_at(1),
+    }
+    terminal_true_but_incomplete["cursor_after"] = {"open_at": _open_at(1), "close_at": _close_at(1)}
+    assert _assert_not_known(terminal_true_but_incomplete)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    terminal_false_but_complete = copy.deepcopy(_valid_prefix_envelope())
+    terminal_false_but_complete["disposition"] = DISPOSITION_POLICY_TERMINAL
+    terminal_false_but_complete["pending_suffix_exhausted"] = False
+    assert _assert_not_known(terminal_false_but_complete)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    empty_window_nonempty_w = {
+        "contract_version": PREFIX_EVIDENCE_CONTRACT_VERSION,
+        "lifecycle_id": "life-1",
+        "plan_identity": "plan-1",
+        "applied_cutoff": _close_at(0),
+        "execution_timeframe": "5m",
+        "tracking_start_at": None,
+        "cursor_before": None,
+        "supplied_window": {
+            "count": 1,
+            "first_open_at": _open_at(0),
+            "last_open_at": _open_at(0),
+            "last_close_at": _close_at(0),
+        },
+        "pending_suffix": {
+            "established": False,
+            "count": None,
+            "first_open_at": None,
+            "last_open_at": None,
+            "last_close_at": None,
+            "expected_next_open_at": None,
+            "unknown_reason": "pending_rules_not_evaluated",
+        },
+        "completed_work": {"count": 0, "last_open_at": None, "last_close_at": None},
+        "cursor_after": None,
+        "disposition": DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES,
+        "pending_suffix_exhausted": None,
+    }
+    assert _assert_not_known(empty_window_nonempty_w)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    waiting_exhausted = copy.deepcopy(_valid_prefix_envelope())
+    waiting_exhausted["disposition"] = DISPOSITION_WAITING_FOR_TRACKING_START
+    waiting_exhausted["pending_suffix_exhausted"] = True
+    waiting_exhausted["pending_suffix"] = {
+        "established": True,
+        "count": 0,
+        "first_open_at": None,
+        "last_open_at": None,
+        "last_close_at": None,
+        "expected_next_open_at": _open_at(1),
+        "unknown_reason": None,
+    }
+    waiting_exhausted["completed_work"] = {"count": 0, "last_open_at": None, "last_close_at": None}
+    waiting_exhausted["cursor_after"] = None
+    assert _assert_not_known(waiting_exhausted)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    blocked_exhausted = copy.deepcopy(_valid_prefix_envelope())
+    blocked_exhausted["disposition"] = DISPOSITION_POST_FILTER_BLOCKED
+    blocked_exhausted["pending_suffix_exhausted"] = True
+    blocked_exhausted["pending_suffix"]["established"] = False
+    blocked_exhausted["pending_suffix"]["count"] = None
+    blocked_exhausted["pending_suffix"]["first_open_at"] = None
+    blocked_exhausted["pending_suffix"]["last_open_at"] = None
+    blocked_exhausted["pending_suffix"]["last_close_at"] = None
+    blocked_exhausted["pending_suffix"]["unknown_reason"] = "pending_rules_not_evaluated"
+    blocked_exhausted["completed_work"] = {"count": 0, "last_open_at": None, "last_close_at": None}
+    blocked_exhausted["cursor_after"] = None
+    assert _assert_not_known(blocked_exhausted)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    reversed_window = copy.deepcopy(_valid_prefix_envelope())
+    reversed_window["supplied_window"]["first_open_at"] = _open_at(2)
+    reversed_window["supplied_window"]["last_open_at"] = _open_at(0)
+    reversed_window["supplied_window"]["last_close_at"] = _close_at(0)
+    assert _assert_not_known(reversed_window)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    completed_after_pending = copy.deepcopy(_valid_prefix_envelope())
+    completed_after_pending["completed_work"] = {
+        "count": 3,
+        "last_open_at": _open_at(5),
+        "last_close_at": _close_at(5),
+    }
+    completed_after_pending["cursor_after"] = {"open_at": _open_at(5), "close_at": _close_at(5)}
+    assert _assert_not_known(completed_after_pending)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    impossible_cursor = copy.deepcopy(_valid_prefix_envelope())
+    impossible_cursor["cursor_after"] = {"open_at": _close_at(2), "close_at": _open_at(2)}
+    assert _assert_not_known(impossible_cursor)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    half_cursor = copy.deepcopy(_valid_prefix_envelope())
+    half_cursor["cursor_after"] = {"open_at": _open_at(2), "close_at": None}
+    assert _assert_not_known(half_cursor)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+
+def test_legal_policy_terminal_and_unassessable_dispositions_remain_known() -> None:
+    early_terminal = copy.deepcopy(_valid_prefix_envelope())
+    early_terminal["disposition"] = DISPOSITION_POLICY_TERMINAL
+    early_terminal["pending_suffix_exhausted"] = False
+    early_terminal["completed_work"] = {
+        "count": 2,
+        "last_open_at": _open_at(1),
+        "last_close_at": _close_at(1),
+    }
+    early_terminal["cursor_after"] = {"open_at": _open_at(1), "close_at": _close_at(1)}
+    early = _diagnose_envelope(early_terminal)
+    assert early["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+    assert early["pending_suffix_exhausted"] is False
+
+    waiting = {
+        "contract_version": PREFIX_EVIDENCE_CONTRACT_VERSION,
+        "lifecycle_id": "life-1",
+        "plan_identity": "plan-1",
+        "applied_cutoff": _close_at(0),
+        "execution_timeframe": "5m",
+        "tracking_start_at": _open_at(1),
+        "cursor_before": None,
+        "supplied_window": {
+            "count": 1,
+            "first_open_at": _open_at(0),
+            "last_open_at": _open_at(0),
+            "last_close_at": _close_at(0),
+        },
+        "pending_suffix": {
+            "established": True,
+            "count": 0,
+            "first_open_at": None,
+            "last_open_at": None,
+            "last_close_at": None,
+            "expected_next_open_at": _open_at(1),
+            "unknown_reason": None,
+        },
+        "completed_work": {"count": 0, "last_open_at": None, "last_close_at": None},
+        "cursor_after": None,
+        "disposition": DISPOSITION_WAITING_FOR_TRACKING_START,
+        "pending_suffix_exhausted": None,
+    }
+    assert _diagnose_envelope(waiting)["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+
+    no_eligible = copy.deepcopy(waiting)
+    no_eligible["disposition"] = DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES
+    no_eligible["supplied_window"] = {
+        "count": 0,
+        "first_open_at": None,
+        "last_open_at": None,
+        "last_close_at": None,
+    }
+    no_eligible["pending_suffix"] = {
+        "established": False,
+        "count": None,
+        "first_open_at": None,
+        "last_open_at": None,
+        "last_close_at": None,
+        "expected_next_open_at": None,
+        "unknown_reason": "pending_rules_not_evaluated",
+    }
+    assert _diagnose_envelope(no_eligible)["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+
+    no_new = copy.deepcopy(_valid_prefix_envelope())
+    no_new["disposition"] = DISPOSITION_NO_NEW_PENDING_CANDLES
+    no_new["pending_suffix_exhausted"] = True
+    no_new["pending_suffix"] = {
+        "established": True,
+        "count": 0,
+        "first_open_at": None,
+        "last_open_at": None,
+        "last_close_at": None,
+        "expected_next_open_at": _open_at(3),
+        "unknown_reason": None,
+    }
+    no_new["completed_work"] = {"count": 0, "last_open_at": None, "last_close_at": None}
+    no_new["cursor_before"] = {"open_at": _open_at(2), "close_at": _close_at(2)}
+    no_new["cursor_after"] = {"open_at": _open_at(2), "close_at": _close_at(2)}
+    assert _diagnose_envelope(no_new)["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+
+    aborted = copy.deepcopy(_valid_prefix_envelope())
+    aborted["disposition"] = DISPOSITION_PROCESSING_ABORTED
+    aborted["pending_suffix_exhausted"] = False
+    aborted["completed_work"] = {
+        "count": 1,
+        "last_open_at": _open_at(0),
+        "last_close_at": _close_at(0),
+    }
+    aborted["cursor_after"] = {"open_at": _open_at(0), "close_at": _close_at(0)}
+    assert _diagnose_envelope(aborted)["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
