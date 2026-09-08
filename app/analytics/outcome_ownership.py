@@ -38,6 +38,12 @@ STATUS_CONFLICTING_IDENTITY: Final[str] = "conflicting_identity_economics"
 STATUS_AMBIGUOUS_CONTEXT: Final[str] = "ambiguous_evaluation_context"
 STATUS_INCOMPLETE: Final[str] = "incomplete_evidence"
 STATUS_CONFLICTING_ECONOMIC: Final[str] = "conflicting_economic_results"
+ELIGIBILITY_CUTOFF_KNOWN: Final[str] = "known"
+ELIGIBILITY_CUTOFF_CONTRACT: Final[str] = (
+    "Exact cutoff used by the most recent completed outcome candle-eligibility "
+    "computation whose same-pass progress write was accepted and committed. "
+    "Not complete coverage, not an evaluation occurrence, and not a canonical outcome."
+)
 
 INTEGRITY_CATEGORIES: Final[tuple[str, ...]] = (
     STATUS_VERIFIED,
@@ -158,11 +164,11 @@ def project_outcome_ownership(
             "status": "unproven",
             "unit": "causal evaluation context for UNIQUE(lifecycle_id, plan_identity)",
             "reason": (
-                "Progress may persist tracking_start_at, cursors, and processing-time stamps. "
-                "It does not persist the evaluator decision/as-of cutoff, an authoritative "
-                "live/replay namespace, or proof that every candle in a claimed interval was "
-                "evaluated. A nonempty tracking_start_at is a supplied-row anchor, not complete "
-                "durable causal context."
+                "Progress may persist tracking_start_at, cursors, processing-time stamps, and "
+                "nullable last_eligibility_decision_at as last applied eligibility input. "
+                "That cutoff does not prove contiguous evaluated coverage, an authoritative "
+                "live/replay namespace, or complete durable causal context. A nonempty "
+                "tracking_start_at remains a supplied-row anchor, not completeness."
             ),
         },
         "provenance": meta,
@@ -224,6 +230,7 @@ def _mapping(row: Any) -> dict[str, Any]:
         payload = copy.deepcopy(dumped)
         if isinstance(row, SetupLifecycleOutcomeProgress):
             payload["plan_version_id"] = row.plan_version_id
+            payload["last_eligibility_decision_at"] = row.last_eligibility_decision_at
         return payload
     if isinstance(row, Mapping):
         return copy.deepcopy(dict(row))
@@ -396,6 +403,21 @@ def _describe_evaluation_context(
     else:
         start_provenance = "unproven"
 
+    cutoff_text, cutoff_present, cutoff_ok = _parse_context_time(
+        progress.get("last_eligibility_decision_at"),
+        "last_eligibility_decision_at",
+    )
+    if cutoff_present and not cutoff_ok:
+        conflicts.append(
+            {"field": "last_eligibility_decision_at", "reason": "not_normalizable_utc_timestamp"}
+        )
+    if cutoff_present and cutoff_ok:
+        cutoff_status = ELIGIBILITY_CUTOFF_KNOWN
+        durable_cutoff = cutoff_text
+    else:
+        cutoff_status = UNAVAILABLE
+        durable_cutoff = None
+
     return {
         "tracking_start_at": tracking_text,
         "execution_timeframe": _optional_text(progress.get("execution_timeframe")),
@@ -411,12 +433,15 @@ def _describe_evaluation_context(
         "context_conflicts": conflicts,
         "complete": False,
         "complete_scope": (
-            "complete would require a coherent producer-established start, a durable "
-            "decision/as-of cutoff, an authoritative evaluation namespace, and proven "
-            "evaluated coverage. Current persisted progress cannot prove that set."
+            "complete would require a coherent producer-established start, proven contiguous "
+            "evaluated coverage through a cutoff, and an authoritative evaluation namespace. "
+            "A known last_eligibility_decision_at records last applied eligibility input only."
         ),
-        "durable_decision_timestamp": None,
-        "durable_decision_timestamp_status": UNAVAILABLE,
+        "durable_decision_timestamp": durable_cutoff,
+        "durable_decision_timestamp_status": cutoff_status,
+        "last_eligibility_decision_at": cutoff_text if cutoff_present else None,
+        "last_eligibility_decision_at_status": cutoff_status,
+        "last_eligibility_decision_at_contract": ELIGIBILITY_CUTOFF_CONTRACT,
         "caller_coverage_complete": bool(caller_coverage_complete),
         "caller_coverage_complete_is_row_provenance": False,
         "supplied_snapshot_anchor": bool(tracking_present and tracking_ok and not conflicts),
@@ -1061,6 +1086,14 @@ def _plan_interpretations(evaluations: Sequence[Mapping[str, Any]]) -> list[dict
                         "start_boundary_provenance": context.get("start_boundary_provenance"),
                         "context_conflicts": list(context.get("context_conflicts") or ()),
                         "complete": False,
+                        "durable_decision_timestamp": context.get("durable_decision_timestamp"),
+                        "durable_decision_timestamp_status": context.get(
+                            "durable_decision_timestamp_status"
+                        ),
+                        "last_eligibility_decision_at": context.get("last_eligibility_decision_at"),
+                        "last_eligibility_decision_at_status": context.get(
+                            "last_eligibility_decision_at_status"
+                        ),
                     },
                     "source_refs": list(member["progress_evidence"]),
                 }
@@ -1102,8 +1135,13 @@ def _plan_interpretations(evaluations: Sequence[Mapping[str, Any]]) -> list[dict
                     "start_boundary_provenance": context.get("start_boundary_provenance"),
                     "supplied_snapshot_interpretation": True,
                     "complete": False,
+                    "durable_decision_timestamp": context.get("durable_decision_timestamp"),
                     "durable_decision_timestamp_status": context.get(
                         "durable_decision_timestamp_status"
+                    ),
+                    "last_eligibility_decision_at": context.get("last_eligibility_decision_at"),
+                    "last_eligibility_decision_at_status": context.get(
+                        "last_eligibility_decision_at_status"
                     ),
                 },
                 "contexts_observed": len(contexts),
@@ -1466,6 +1504,8 @@ def _sort_tuple(item: Mapping[str, Any]) -> tuple[Any, ...]:
 
 
 __all__ = [
+    "ELIGIBILITY_CUTOFF_CONTRACT",
+    "ELIGIBILITY_CUTOFF_KNOWN",
     "INTEGRITY_CATEGORIES",
     "OUTCOME_OWNERSHIP_VERSION",
     "STATUS_AMBIGUOUS_CONTEXT",

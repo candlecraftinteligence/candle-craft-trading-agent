@@ -9,6 +9,7 @@ from typing import Any
 from app.data.candle_integrity import (
     CandleIntegrityError,
     CausalCandle,
+    ClosedCandleWindow,
     closed_candles_as_of,
     normalize_utc_timestamp,
     timeframe_duration,
@@ -176,6 +177,7 @@ def evaluate_closed_candle_outcomes(
             minimum_closed_history=0,
             require_continuity=True,
         )
+        progress = _with_applied_eligibility_cutoff(progress, window)
         candle_ranges = tuple(_candle_range(item) for item in window.timeline)
     except (CandleIntegrityError, ValueError) as exc:
         progress = _integrity_failure(
@@ -912,6 +914,18 @@ def _with_entry_evidence(
         update={
             "entry_at": entry_at,
             "metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        }
+    )
+
+
+def _with_applied_eligibility_cutoff(
+    progress: SetupLifecycleOutcomeProgress,
+    window: ClosedCandleWindow,
+) -> SetupLifecycleOutcomeProgress:
+    return progress.model_copy(
+        update={
+            "last_eligibility_decision_at": window.decision_timestamp.isoformat(),
+            "eligibility_cutoff_observed": True,
         }
     )
 

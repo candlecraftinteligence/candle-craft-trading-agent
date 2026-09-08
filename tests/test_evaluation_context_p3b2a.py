@@ -169,7 +169,7 @@ def _interpretable(payload: dict[str, object]) -> list[dict[str, object]]:
     return [item for item in payload["plan_interpretations"] if item.get("interpretable")]
 
 
-def test_schema_remains_v22_with_no_new_context_column(tmp_path: Path) -> None:
+def test_schema_is_v23_with_nullable_eligibility_cutoff(tmp_path: Path) -> None:
     path = tmp_path / "schema.sqlite"
     with open_initialized_database(path) as connection:
         version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -177,12 +177,19 @@ def test_schema_remains_v22_with_no_new_context_column(tmp_path: Path) -> None:
             row[1]
             for row in connection.execute("PRAGMA table_info(setup_lifecycle_outcome_progress)")
         }
+        nullability = {
+            str(row[1]): (int(row[3]), row[4])
+            for row in connection.execute("PRAGMA table_info(setup_lifecycle_outcome_progress)")
+            if str(row[1]) == "last_eligibility_decision_at"
+        }
         unique_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'setup_lifecycle_outcome_progress'"
         ).fetchone()[0]
-    assert version == SCHEMA_VERSION == 22
+    assert version == SCHEMA_VERSION == 23
     assert "tracking_start_at" in columns
     assert "plan_version_id" in columns
+    assert "last_eligibility_decision_at" in columns
+    assert nullability["last_eligibility_decision_at"] == (0, None)
     assert "decision_timestamp" not in columns
     assert "evaluation_id" not in columns
     assert "UNIQUE(lifecycle_id, plan_identity)" in unique_sql
@@ -209,8 +216,9 @@ def test_nonempty_tracking_start_is_anchor_not_complete(tmp_path: Path) -> None:
     assert context["complete"] is False
     assert context["caller_coverage_complete"] is True
     assert context["caller_coverage_complete_is_row_provenance"] is False
-    assert context["durable_decision_timestamp"] is None
-    assert context["durable_decision_timestamp_status"] == UNAVAILABLE
+    assert context["durable_decision_timestamp"] == sql["last_eligibility_decision_at"]
+    assert context["durable_decision_timestamp_status"] == "known"
+    assert context["last_eligibility_decision_at_status"] == "known"
     assert "as_of" not in context
     assert payload["provenance"]["as_of"] == _decision(9)
     assert payload["provenance"]["as_of_is_report_timestamp_not_evaluator_cutoff"] is True
@@ -356,8 +364,10 @@ def test_distinct_as_of_same_closed_prefix_is_not_reconstructable(tmp_path: Path
                 for event in repository.list_events(lifecycle_id=record.lifecycle_id)
             ]
             scan_runs = repository._connection.execute("SELECT run_id FROM scan_runs").fetchall()
+            sql = _sql_progress(repository, record.lifecycle_id)[0]
         return {
             "progress": progress,
+            "sql": sql,
             "events": events,
             "scan_runs": scan_runs,
             "entry_at": result.progress.entry_at,
@@ -372,8 +382,14 @@ def test_distinct_as_of_same_closed_prefix_is_not_reconstructable(tmp_path: Path
     assert "decision_timestamp" not in first["progress"]
     notes = json.loads(first["events"][0][2])
     assert "decision_timestamp" not in notes
+    first_cutoff = first["sql"]["last_eligibility_decision_at"]
+    second_cutoff = second["sql"]["last_eligibility_decision_at"]
+    assert first_cutoff == cutoff_a.isoformat()
+    assert second_cutoff == cutoff_b.isoformat()
+    assert first_cutoff != second_cutoff
     payload = _project(record, first["progress"])
-    assert payload["evaluations"][0]["evaluation_context"]["durable_decision_timestamp"] is None
+    assert payload["evaluations"][0]["evaluation_context"]["complete"] is False
+    assert payload["durable_evaluation_context"]["established"] is False
 
 
 def test_later_processing_clock_does_not_admit_future_candles(tmp_path: Path) -> None:
@@ -649,7 +665,7 @@ def test_v19_cursor_backfill_is_unproven_origin_not_prospective_proof(tmp_path: 
         connection.row_factory = sqlite3.Row
         raw = connection.execute("SELECT * FROM setup_lifecycle_outcome_progress").fetchone()
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-    assert version == SCHEMA_VERSION == 22
+    assert version == SCHEMA_VERSION == 23
     assert raw["tracking_start_at"] == cursor
     assert raw["evaluation_cursor_open_at"] == cursor
     metadata = json.loads(raw["metadata_json"])

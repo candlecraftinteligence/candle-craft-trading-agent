@@ -284,6 +284,8 @@ class SetupLifecycleOutcomeProgress(BaseModel):
     first_evaluated_at: str
     last_evaluated_at: str
     plan_version_id: str | None = Field(default=None, exclude=True)
+    last_eligibility_decision_at: str | None = Field(default=None, exclude=True)
+    eligibility_cutoff_observed: bool = Field(default=False, exclude=True)
 
     model_config = ConfigDict(frozen=True)
 
@@ -313,9 +315,9 @@ class SetupLifecycleOutcomeProgress(BaseModel):
         text = str(value).strip()
         return text if text else NA
 
-    @field_validator("plan_version_id", mode="before")
+    @field_validator("plan_version_id", "last_eligibility_decision_at", mode="before")
     @classmethod
-    def _normalize_optional_progress_plan_version(cls, value: str | None) -> str | None:
+    def _normalize_optional_progress_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
         text = str(value).strip()
