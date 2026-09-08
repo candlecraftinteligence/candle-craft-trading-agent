@@ -50,7 +50,8 @@
       "economic_status": "stop_after_entry",
       "not_a_fill_occurrence": true,
       "not_a_unique_trade": true,
-      "reason": "single verified evaluation context with monotonic progress evidence; TP1 timestamp retained with terminal SL_HIT"
+      "evaluation_context_complete": false,
+      "reason": "single verified plan binding with a coherent supplied-row tracking_start_at; this is a supplied-snapshot interpretation, not durable causal completeness"
     }
   ],
   "unavailable_metrics": {
