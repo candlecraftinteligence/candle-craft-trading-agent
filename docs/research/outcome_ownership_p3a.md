@@ -46,11 +46,14 @@ Otherwise the helper reports missing/legacy identity, conflicting identity/econo
 
 Progress stores `tracking_start_at`, cursors, and `execution_timeframe`. As-of cutoff and replay/run identity are **not** columns on progress. One `plan_version_id` across lifecycle generations is one inventory item, not automatically one outcome. Replay and live namespaces must not be merged. Missing anchors are not invented.
 
+P3B2A: a nonempty `tracking_start_at` is a **supplied-row anchor**, not durable causal completeness. `evaluation_context.complete` and `evaluation_context_complete` remain `false` under current persistence. A single verified plan binding with a normalizable `tracking_start_at` may still receive a supplied-snapshot interpretation. That interpretation does not prove start-origin, exact decision/as-of cutoff, namespace, or full evaluated coverage. Caller `coverage_complete` / report `as_of` are assertions, not row-level provenance. Invalid or contradictory timestamps are retained and not repaired.
+
 **Producer invariant — terminal-before-cursor path.** `evaluate_closed_candle_outcomes` copies an already-terminal lifecycle `current_state` onto progress via `_terminal_progress_for_record`. That path sets `terminal_outcome` (and `invalidated_at` when INVALIDATED) and may mark `integrity_status=Unverified` with `diagnostic=terminal_state_preceded_canonical_outcome_cursor`. It does **not** set `tracking_start_at`. `first_evaluated_at` is the evaluation-pass clock, not a proven tracking window. A retained terminal is raw/source evidence; it does not by itself prove a coherent evaluation context or authorize a plan-level interpretation.
 
-**Producer invariant — closed-candle path.** When the evaluator tracks a live window, `_with_tracking_start` durably binds `tracking_start_at`. That field is the P3A evaluation-window anchor.
+**Producer invariant — closed-candle path.** When the evaluator tracks a live window, `_with_tracking_start` durably binds `tracking_start_at`. That field is the P3A evaluation-window **anchor**. Presence of the string is not complete causal-history authority. Producer metadata may include `tracking_boundary_source`; a v19 cursor-derived backfill does not write that marker, so origin remains unproven after migration.
 
 **Canonical one-outcome-per-plan-version is unproven** as a persisted research unit.
+**Durable causal evaluation context is unproven** as a persisted research unit. See `docs/research/evaluation_context_p3b2a.md`.
 
 ## Event-record identity
 

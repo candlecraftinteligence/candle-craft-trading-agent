@@ -5,9 +5,11 @@ It does not open a database, evaluate candles, write storage, mint occurrence
 ids, or feed public delivery, scanner, health, memory, or replay consumers.
 
 This projection may group evidence under a proven ``plan_version_id`` and may
-emit a diagnostic plan-level interpretation when a single coherent evaluation
-context already exists in the supplied records. It does **not** establish a
-persisted canonical outcome owner, a fill occurrence, or a unique trade.
+emit a diagnostic plan-level interpretation when a single coherent supplied-row
+anchor already exists in the records. A nonempty ``tracking_start_at`` is an
+anchor, not durable causal completeness. The helper does **not** establish a
+persisted canonical outcome owner, a fill occurrence, a unique trade, or an
+authoritative evaluation occurrence.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 from app.analytics.evidence_contract import UNAVAILABLE, UNSAFE
+from app.data.candle_integrity import normalize_utc_timestamp
 from app.data.dtos import NA
 from app.lifecycle.economic_identity import (
     REASON_PLAN_VERSION_INVARIANT_VIOLATION,
@@ -63,6 +66,9 @@ CONTEXT_FIELDS: Final[tuple[str, ...]] = (
     "tracking_start_at",
     "execution_timeframe",
     "first_evaluated_at",
+    "last_evaluated_at",
+    "evaluation_cursor_open_at",
+    "evaluation_cursor_close_at",
 )
 ECONOMIC_TERMINALS: Final[frozenset[str]] = frozenset(
     {
@@ -147,6 +153,18 @@ def project_outcome_ownership(
                 "lifecycle-level and is not a plan-outcome authority."
             ),
         },
+        "durable_evaluation_context": {
+            "established": False,
+            "status": "unproven",
+            "unit": "causal evaluation context for UNIQUE(lifecycle_id, plan_identity)",
+            "reason": (
+                "Progress may persist tracking_start_at, cursors, and processing-time stamps. "
+                "It does not persist the evaluator decision/as-of cutoff, an authoritative "
+                "live/replay namespace, or proof that every candle in a claimed interval was "
+                "evaluated. A nonempty tracking_start_at is a supplied-row anchor, not complete "
+                "durable causal context."
+            ),
+        },
         "provenance": meta,
         "source_evidence": {
             "lifecycle_records": _source_summary(records),
@@ -189,10 +207,13 @@ def _provenance(value: Mapping[str, Any] | None) -> dict[str, Any]:
         "coverage_complete": coverage_complete,
         "coverage_note": (
             "Supplied records are the population. Absence of a row is not a losing "
-            "trade and not proof of an empty historical universe."
+            "trade and not proof of an empty historical universe. coverage_complete is "
+            "a caller assertion, not row-level causal provenance."
             if not coverage_complete
-            else "Caller asserted that the supplied records are complete for this fixture."
+            else "Caller asserted that the supplied records are complete for this fixture. "
+            "That assertion is not a persisted evaluator cutoff or row-level provenance."
         ),
+        "as_of_is_report_timestamp_not_evaluator_cutoff": True,
         "not_live_audit": True,
     }
 
@@ -282,6 +303,126 @@ def _source_summary(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _parse_context_time(value: Any, field_name: str) -> tuple[str | None, bool, bool]:
+    """Return ``(text, present, normalizable)`` without repairing the input."""
+
+    text = _optional_text(value)
+    if text is None:
+        return None, False, False
+    try:
+        normalize_utc_timestamp(text, field_name=field_name)
+    except (TypeError, ValueError):
+        return text, True, False
+    return text, True, True
+
+
+def _progress_metadata(progress: Mapping[str, Any]) -> dict[str, Any]:
+    nested = progress.get("metadata")
+    if isinstance(nested, Mapping):
+        return dict(nested)
+    raw = progress.get("metadata_json")
+    if raw in (None, "", NA):
+        return {}
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if not isinstance(raw, str):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _describe_evaluation_context(
+    progress: Mapping[str, Any],
+    *,
+    namespace: str,
+    caller_coverage_complete: bool,
+) -> dict[str, Any]:
+    tracking_text, tracking_present, tracking_ok = _parse_context_time(
+        progress.get("tracking_start_at"),
+        "tracking_start_at",
+    )
+    first_text, first_present, first_ok = _parse_context_time(
+        progress.get("first_evaluated_at"),
+        "first_evaluated_at",
+    )
+    last_text, last_present, last_ok = _parse_context_time(
+        progress.get("last_evaluated_at"),
+        "last_evaluated_at",
+    )
+    cursor_open_text, cursor_open_present, cursor_open_ok = _parse_context_time(
+        progress.get("evaluation_cursor_open_at"),
+        "evaluation_cursor_open_at",
+    )
+    cursor_close_text, cursor_close_present, cursor_close_ok = _parse_context_time(
+        progress.get("evaluation_cursor_close_at"),
+        "evaluation_cursor_close_at",
+    )
+    conflicts: list[dict[str, str]] = []
+    if tracking_present and not tracking_ok:
+        conflicts.append({"field": "tracking_start_at", "reason": "not_normalizable_utc_timestamp"})
+    if first_present and not first_ok:
+        conflicts.append({"field": "first_evaluated_at", "reason": "not_normalizable_utc_timestamp"})
+    if last_present and not last_ok:
+        conflicts.append({"field": "last_evaluated_at", "reason": "not_normalizable_utc_timestamp"})
+    if cursor_open_present and not cursor_open_ok:
+        conflicts.append(
+            {"field": "evaluation_cursor_open_at", "reason": "not_normalizable_utc_timestamp"}
+        )
+    if cursor_close_present and not cursor_close_ok:
+        conflicts.append(
+            {"field": "evaluation_cursor_close_at", "reason": "not_normalizable_utc_timestamp"}
+        )
+    if cursor_open_ok and cursor_close_ok:
+        open_dt = normalize_utc_timestamp(
+            cursor_open_text,
+            field_name="evaluation_cursor_open_at",
+        )
+        close_dt = normalize_utc_timestamp(
+            cursor_close_text,
+            field_name="evaluation_cursor_close_at",
+        )
+        if close_dt < open_dt:
+            conflicts.append({"field": "evaluation_cursor", "reason": "cursor_close_before_open"})
+
+    metadata = _progress_metadata(progress)
+    boundary_source = _optional_text(metadata.get("tracking_boundary_source"))
+    if not tracking_present:
+        start_provenance = "absent"
+    elif boundary_source:
+        start_provenance = "producer_metadata"
+    else:
+        start_provenance = "unproven"
+
+    return {
+        "tracking_start_at": tracking_text,
+        "execution_timeframe": _optional_text(progress.get("execution_timeframe")),
+        "first_evaluated_at": first_text,
+        "last_evaluated_at": last_text,
+        "evaluation_cursor_open_at": cursor_open_text,
+        "evaluation_cursor_close_at": cursor_close_text,
+        "tracking_boundary_source": boundary_source,
+        "start_boundary_provenance": start_provenance,
+        "source_namespace": namespace,
+        "anchor_present": tracking_present,
+        "anchor_normalizable": tracking_ok,
+        "context_conflicts": conflicts,
+        "complete": False,
+        "complete_scope": (
+            "complete would require a coherent producer-established start, a durable "
+            "decision/as-of cutoff, an authoritative evaluation namespace, and proven "
+            "evaluated coverage. Current persisted progress cannot prove that set."
+        ),
+        "durable_decision_timestamp": None,
+        "durable_decision_timestamp_status": UNAVAILABLE,
+        "caller_coverage_complete": bool(caller_coverage_complete),
+        "caller_coverage_complete_is_row_provenance": False,
+        "supplied_snapshot_anchor": bool(tracking_present and tracking_ok and not conflicts),
+    }
+
+
 def _build_evaluations(
     records: Sequence[Mapping[str, Any]],
     progress: Sequence[Mapping[str, Any]],
@@ -359,13 +500,11 @@ def _build_evaluations(
                         record_match["payload"].get("economic_identity_reason") if record_match else None
                     ),
                 },
-                "evaluation_context": {
-                    "tracking_start_at": _optional_text(merged.get("tracking_start_at")),
-                    "execution_timeframe": _optional_text(merged.get("execution_timeframe")),
-                    "first_evaluated_at": _optional_text(merged.get("first_evaluated_at")),
-                    "source_namespace": namespace,
-                    "complete": bool(_optional_text(merged.get("tracking_start_at"))),
-                },
+                "evaluation_context": _describe_evaluation_context(
+                    merged,
+                    namespace=namespace,
+                    caller_coverage_complete=coverage_complete,
+                ),
             }
         )
     evaluations.sort(key=lambda item: (item["source_namespace"], item["lifecycle_id"], item["plan_identity"]))
@@ -749,11 +888,11 @@ def _record_only_evaluations(
                     "lifecycle_current_state": _optional_text(item["payload"].get("current_state")),
                     "economic_identity_reason": reason,
                 },
-                "evaluation_context": {
-                    "tracking_start_at": None,
-                    "source_namespace": item["source_namespace"],
-                    "complete": False,
-                },
+                "evaluation_context": _describe_evaluation_context(
+                    {},
+                    namespace=item["source_namespace"],
+                    caller_coverage_complete=False,
+                ),
             }
         )
         seen.add(key)
@@ -880,33 +1019,47 @@ def _plan_interpretations(evaluations: Sequence[Mapping[str, Any]]) -> list[dict
                 }
             )
             continue
-        if not member["evaluation_context"].get("complete"):
+        context = member["evaluation_context"]
+        if not context.get("supplied_snapshot_anchor"):
             terminal = member["economic"].get("progress_terminal_outcome")
+            if context.get("context_conflicts"):
+                reason = (
+                    "verified plan binding is retained, but supplied evaluation timestamps "
+                    "or cursors are contradictory or not normalizable; inputs are not repaired"
+                )
+            elif terminal:
+                reason = (
+                    "verified plan binding is present and terminal progress evidence is retained, "
+                    "but tracking_start_at is missing; a lifecycle terminal does not by itself "
+                    "prove a coherent evaluation window. Missing anchors are not invented."
+                )
+            else:
+                reason = (
+                    "evaluation start/horizon is not durably bound; missing anchors are not invented"
+                )
             interpretations.append(
                 {
                     "interpretable": False,
                     "plan_version_id": plan_id,
                     "source_namespace": namespace,
                     "integrity_status": STATUS_AMBIGUOUS_CONTEXT,
-                    "reason": (
-                        "verified plan binding is present and terminal progress evidence is retained, "
-                        "but tracking_start_at is missing; a lifecycle terminal does not by itself "
-                        "prove a coherent evaluation window. Missing anchors are not invented."
-                        if terminal
-                        else "evaluation start/horizon is not durably bound; missing anchors are not invented"
-                    ),
+                    "reason": reason,
                     "member_evaluations": [
                         {
                             "lifecycle_id": member["lifecycle_id"],
                             "plan_identity": member["plan_identity"],
-                            "tracking_start_at": member["evaluation_context"].get("tracking_start_at"),
+                            "tracking_start_at": context.get("tracking_start_at"),
                         }
                     ],
                     "economic_status": None,
                     "retained_raw_terminal_outcome": terminal,
                     "retained_raw_labels": member.get("raw_labels"),
                     "evaluation_context": {
-                        "tracking_start_at": member["evaluation_context"].get("tracking_start_at"),
+                        "tracking_start_at": context.get("tracking_start_at"),
+                        "anchor_present": context.get("anchor_present"),
+                        "anchor_normalizable": context.get("anchor_normalizable"),
+                        "start_boundary_provenance": context.get("start_boundary_provenance"),
+                        "context_conflicts": list(context.get("context_conflicts") or ()),
                         "complete": False,
                     },
                     "source_refs": list(member["progress_evidence"]),
@@ -937,8 +1090,22 @@ def _plan_interpretations(evaluations: Sequence[Mapping[str, Any]]) -> list[dict
                 "not_a_unique_trade": True,
                 "source_refs": list(member["progress_evidence"]),
                 "retained_event_refs": list(member["event_evidence"]),
-                "reason": "single verified evaluation context with monotonic progress evidence",
-                "evaluation_context_complete": True,
+                "reason": (
+                    "single verified plan binding with a coherent supplied-row tracking_start_at; "
+                    "this is a supplied-snapshot interpretation, not durable causal completeness"
+                ),
+                "evaluation_context_complete": False,
+                "evaluation_context": {
+                    "tracking_start_at": context.get("tracking_start_at"),
+                    "anchor_present": True,
+                    "anchor_normalizable": True,
+                    "start_boundary_provenance": context.get("start_boundary_provenance"),
+                    "supplied_snapshot_interpretation": True,
+                    "complete": False,
+                    "durable_decision_timestamp_status": context.get(
+                        "durable_decision_timestamp_status"
+                    ),
+                },
                 "contexts_observed": len(contexts),
             }
         )
