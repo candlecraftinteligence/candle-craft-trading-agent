@@ -59,3 +59,9 @@ Disposition / W / P / C / exhaustion must match the current
 `NO_NEW_PENDING_CANDLES` or `WAITING_FOR_TRACKING_START`, never
 `PENDING_SUFFIX_EXHAUSTED`. Pre-filter lifecycle terminals do not mint a
 fresh `POLICY_TERMINAL` envelope.
+
+Same-pass causal containment: nonempty `supplied_window.last_close_at` is at
+or before `applied_cutoff`. An established nonempty pending suffix is a
+suffix of that window (`W.first_open <= P.first_open` and
+`P.last_open/last_close == W.last_open/last_close`). This does not prove
+complete acquired history.

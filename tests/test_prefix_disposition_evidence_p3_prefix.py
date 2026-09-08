@@ -1268,6 +1268,52 @@ def test_contradictory_prefix_envelopes_are_not_known() -> None:
     blocked_exhausted_false["cursor_after"] = None
     assert _assert_not_known(blocked_exhausted_false)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
 
+    pending_outside_window = copy.deepcopy(_valid_prefix_envelope())
+    pending_outside_window["pending_suffix"]["first_open_at"] = _open_at(10)
+    pending_outside_window["pending_suffix"]["last_open_at"] = _open_at(12)
+    pending_outside_window["pending_suffix"]["last_close_at"] = _close_at(12)
+    pending_outside_window["completed_work"] = {
+        "count": 3,
+        "last_open_at": _open_at(12),
+        "last_close_at": _close_at(12),
+    }
+    pending_outside_window["cursor_after"] = {"open_at": _open_at(12), "close_at": _close_at(12)}
+    assert _assert_not_known(pending_outside_window)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    pending_starts_before_window = copy.deepcopy(_valid_prefix_envelope())
+    pending_starts_before_window["supplied_window"] = {
+        "count": 3,
+        "first_open_at": _open_at(1),
+        "last_open_at": _open_at(3),
+        "last_close_at": _close_at(3),
+    }
+    pending_starts_before_window["applied_cutoff"] = _close_at(3)
+    pending_starts_before_window["pending_suffix"]["last_open_at"] = _open_at(3)
+    pending_starts_before_window["pending_suffix"]["last_close_at"] = _close_at(3)
+    pending_starts_before_window["completed_work"] = {
+        "count": 3,
+        "last_open_at": _open_at(3),
+        "last_close_at": _close_at(3),
+    }
+    pending_starts_before_window["cursor_after"] = {"open_at": _open_at(3), "close_at": _close_at(3)}
+    assert _assert_not_known(pending_starts_before_window)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    pending_ends_after_window = copy.deepcopy(_valid_prefix_envelope())
+    pending_ends_after_window["pending_suffix"]["last_open_at"] = _open_at(5)
+    pending_ends_after_window["pending_suffix"]["last_close_at"] = _close_at(5)
+    pending_ends_after_window["completed_work"] = {
+        "count": 3,
+        "last_open_at": _open_at(5),
+        "last_close_at": _close_at(5),
+    }
+    pending_ends_after_window["cursor_after"] = {"open_at": _open_at(5), "close_at": _close_at(5)}
+    assert _assert_not_known(pending_ends_after_window)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
+    supplied_close_after_cutoff = copy.deepcopy(_valid_prefix_envelope())
+    supplied_close_after_cutoff["supplied_window"]["last_close_at"] = _close_at(5)
+    supplied_close_after_cutoff["pending_suffix"]["last_close_at"] = _close_at(5)
+    assert _assert_not_known(supplied_close_after_cutoff)["status"] == PREFIX_EVIDENCE_STATUS_MALFORMED
+
 
 def test_legal_policy_terminal_and_unassessable_dispositions_remain_known() -> None:
     early_terminal = copy.deepcopy(_valid_prefix_envelope())
@@ -1552,3 +1598,39 @@ def test_producer_generated_dispositions_diagnose_known(
         assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
         assert diagnostic["disposition"] == DISPOSITION_PROCESSING_ABORTED
         assert diagnostic["pending_suffix_exhausted"] is False
+
+
+def test_producer_pending_suffix_is_contained_in_supplied_window(tmp_path: Path) -> None:
+    first_candles = [_candle(0, high="99", low="95"), _candle(1, high="103", low="99")]
+    extended = first_candles + [_candle(2, high="99", low="95")]
+    later_cutoff = _close(2) + timedelta(minutes=1)
+    with SQLiteSetupLifecycleRepository(tmp_path / "suffix.db") as repository:
+        record = _latched()
+        repository.upsert_record(record)
+        first = _evaluate(
+            repository,
+            record,
+            first_candles,
+            decision_timestamp=_close(1) + timedelta(minutes=1),
+        )
+        first_row = _sql_progress(repository, record.lifecycle_id)[0]
+        _evaluate(repository, first.record, extended, decision_timestamp=later_cutoff)
+        row = _sql_progress(repository, record.lifecycle_id)[0]
+    first_envelope = _envelope(first_row)
+    envelope = _envelope(row)
+    first_diag = _diagnose_row(first_row)
+    diagnostic = _diagnose_row(row)
+    assert first_diag["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+    assert diagnostic["status"] == PREFIX_EVIDENCE_STATUS_KNOWN
+    assert first_envelope["pending_suffix"]["count"] == first_envelope["supplied_window"]["count"] == 2
+    assert envelope["disposition"] == DISPOSITION_PENDING_SUFFIX_EXHAUSTED
+    assert envelope["supplied_window"]["count"] == 3
+    assert envelope["pending_suffix"]["established"] is True
+    assert envelope["pending_suffix"]["count"] == 1
+    assert envelope["pending_suffix"]["first_open_at"] == _open_at(2)
+    assert envelope["supplied_window"]["first_open_at"] == _open_at(0)
+    assert envelope["pending_suffix"]["last_open_at"] == envelope["supplied_window"]["last_open_at"]
+    assert envelope["pending_suffix"]["last_close_at"] == envelope["supplied_window"]["last_close_at"]
+    assert envelope["supplied_window"]["last_close_at"] <= envelope["applied_cutoff"]
+    assert envelope["applied_cutoff"] == later_cutoff.isoformat()
+    assert envelope["supplied_window"]["last_close_at"] < envelope["applied_cutoff"]

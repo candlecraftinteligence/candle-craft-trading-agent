@@ -490,6 +490,8 @@ def _semantically_consistent_envelope(payload: Mapping[str, Any]) -> bool:
         return False
     if pending_established and _non_negative_int(pending_count) and supplied_count < pending_count:
         return False
+    if not _causal_windows_contained(payload):
+        return False
     if completed_count == 0:
         if not _cursor_pairs_equivalent(payload.get("cursor_before"), payload.get("cursor_after")):
             return False
@@ -564,6 +566,54 @@ def _semantically_consistent_envelope(payload: Mapping[str, Any]) -> bool:
             return False
         return exhausted == (completed_count == pending_count)
     return False
+
+
+def _causal_windows_contained(payload: Mapping[str, Any]) -> bool:
+    """Same-pass W/P bounds from closed_candles_as_of and pending filtering.
+
+    Non-empty W is eligible at the applied cutoff (last_close <= cutoff).
+    Established nonempty P is a suffix of that same timeline, so it shares
+    W's last open/close. This does not prove complete market history.
+    """
+
+    supplied = payload.get("supplied_window")
+    pending = payload.get("pending_suffix")
+    if not isinstance(supplied, Mapping) or not isinstance(pending, Mapping):
+        return False
+    supplied_count = supplied.get("count")
+    if _non_negative_int(supplied_count) and supplied_count > 0:
+        cutoff = _parsed_utc(payload.get("applied_cutoff"), field_name="applied_cutoff")
+        last_close = _parsed_utc(supplied.get("last_close_at"), field_name="supplied_last_close_at")
+        if cutoff is None or last_close is None:
+            return False
+        if last_close > cutoff:
+            return False
+    if pending.get("established") is not True:
+        return True
+    pending_count = pending.get("count")
+    if not _non_negative_int(pending_count) or pending_count == 0:
+        return True
+    window_first = _parsed_utc(supplied.get("first_open_at"), field_name="supplied_first_open_at")
+    window_last_open = _parsed_utc(supplied.get("last_open_at"), field_name="supplied_last_open_at")
+    window_last_close = _parsed_utc(supplied.get("last_close_at"), field_name="supplied_last_close_at")
+    pending_first = _parsed_utc(pending.get("first_open_at"), field_name="pending_first_open_at")
+    pending_last_open = _parsed_utc(pending.get("last_open_at"), field_name="pending_last_open_at")
+    pending_last_close = _parsed_utc(pending.get("last_close_at"), field_name="pending_last_close_at")
+    bounds = (
+        window_first,
+        window_last_open,
+        window_last_close,
+        pending_first,
+        pending_last_open,
+        pending_last_close,
+    )
+    if any(item is None for item in bounds):
+        return False
+    if window_first > pending_first:
+        return False
+    if pending_last_open > window_last_open or pending_last_close > window_last_close:
+        return False
+    return pending_last_open == window_last_open and pending_last_close == window_last_close
 
 
 def _valid_window(
