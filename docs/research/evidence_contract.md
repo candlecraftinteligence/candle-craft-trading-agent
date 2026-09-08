@@ -140,3 +140,17 @@ A unique-trade count would require associating an entry occurrence with:
 3. An explicit exit policy and one authoritative outcome owner for that fill.
 
 Those requirements are not jointly satisfied. Unique-trade count status: **unavailable**.
+
+## P3A outcome ownership (diagnostic)
+
+P3A adds a **read-only** projection (`app.analytics.outcome_ownership.project_outcome_ownership`)
+and the structured contract `build_evidence_contract()["outcome_ownership"]`.
+
+It does not change producers, schema, public delivery, or research consumers. The
+authoritative stored outcome key remains `UNIQUE(lifecycle_id, plan_identity)`.
+`plan_version_id` is still absent from outcome progress/analytics write columns.
+
+See `docs/research/outcome_ownership_p3a.md` for the ownership report. The
+projection may interpret a single coherent evaluation as a plan-level simulation
+when binding is proven. That interpretation is not a unique trade. Fill/occurrence
+metrics remain **unavailable**.

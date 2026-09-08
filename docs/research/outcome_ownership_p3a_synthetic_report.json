@@ -1,0 +1,71 @@
+{
+  "ownership_version": "cci-outcome-ownership-v1",
+  "feeds_operational_decisions": false,
+  "schema_version_unchanged": true,
+  "canonical_outcome_per_plan_version": {
+    "established": false,
+    "status": "unproven",
+    "unit": "persisted authoritative plan-outcome",
+    "reason": "Current producers persist outcomes on UNIQUE(lifecycle_id, plan_identity). plan_version_id is not a column on outcome progress or analytics. A diagnostic interpretation is not a canonical stored owner."
+  },
+  "provenance": {
+    "synthetic": true,
+    "label": "p3a-synthetic-tp1-then-sl",
+    "audited_commit": "da43358f552626c6ef48235a691fb3a53228c36b",
+    "source_namespace": "synthetic-report",
+    "evaluation_context": "closed-candle producer fixture; not a live audit",
+    "coverage_complete": true,
+    "not_live_audit": true
+  },
+  "counts": {
+    "raw_source_rows": {
+      "lifecycle_records": 1,
+      "outcome_progress": 1,
+      "lifecycle_events": "producer-appended event records (not unique fills)",
+      "unit": "retained supplied rows after exact-duplicate collapse",
+      "denominator": "caller-supplied synthetic fixture only"
+    },
+    "verified_plan_identities": {
+      "value": 1,
+      "unit": "verified plan_version_id represented in supplied evidence"
+    },
+    "interpretable_plan_outcomes": {
+      "value": 1,
+      "unit": "diagnostic plan-level interpretation with one coherent evaluation context",
+      "not": "unique trades, fills, or persisted canonical outcomes"
+    },
+    "overlapping_milestones": {
+      "entry_activation": 1,
+      "tp1": 1,
+      "tp2": 0,
+      "tp3": 0,
+      "stop_after_entry": 1,
+      "overlapping": true,
+      "note": "A plan that reaches TP3 may also count toward TP1 and TP2. These counts are not disjoint trades."
+    }
+  },
+  "plan_interpretations": [
+    {
+      "interpretable": true,
+      "economic_status": "stop_after_entry",
+      "not_a_fill_occurrence": true,
+      "not_a_unique_trade": true,
+      "reason": "single verified evaluation context with monotonic progress evidence; TP1 timestamp retained with terminal SL_HIT"
+    }
+  ],
+  "unavailable_metrics": {
+    "fill_occurrence_count": {"status": "unavailable", "value": null},
+    "unique_trade_count": {"status": "unavailable", "value": null},
+    "win_rate": {"status": "unavailable", "value": null},
+    "expectancy": {"status": "unavailable", "value": null},
+    "realized_pnl": {"status": "unavailable", "value": null}
+  },
+  "raw_versus_diagnostic": [
+    {
+      "comparison": "raw_progress_rows_versus_interpretable_plan_outcomes",
+      "raw": 1,
+      "diagnostic": 1,
+      "reason": "This synthetic fixture has one progress row and one interpretable plan-level stop-after-entry. That is not a live audit, backtest improvement, or win-rate improvement."
+    }
+  ]
+}

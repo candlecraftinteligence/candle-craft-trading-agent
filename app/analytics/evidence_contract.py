@@ -189,6 +189,7 @@ def build_evidence_contract() -> dict[str, Any]:
         "timestamps": _timestamps(),
         "counting_unit_examples": _counting_unit_examples(),
         "activation_accounting": _activation_accounting_contract(),
+        "outcome_ownership": _outcome_ownership_contract(),
     }
 
 
@@ -332,7 +333,10 @@ def _entities() -> dict[str, Any]:
             cardinality="0..1 latched plan_version_id per lifecycle row; historical rows remain NULL",
             research_statistics_safe=UNSAFE,
             producers=("app.lifecycle.economic_identity.latch_economic_identities",),
-            consumers=(),
+            consumers=(
+                "app.analytics.outcome_ownership.project_outcome_ownership "
+                "(P3A diagnostic of explicitly supplied records; not a runtime consumer)",
+            ),
             enforcement="additive nullable columns; no uniqueness; tests/test_economic_identity.py",
         ),
         "LIFECYCLE": _entity(
@@ -557,7 +561,7 @@ def _entities() -> dict[str, Any]:
             ),
             intended_research_meaning="One authoritative result per immutable plan version / fill",
             current_authoritative_id="NOT FOUND as a single owner; dual tables keyed by lifecycle_id",
-            proposed_future_id="authoritative outcome per plan_version_id (later phase)",
+            proposed_future_id="authoritative outcome per plan_version_id (later phase; P3A is diagnostic only)",
             unit="progress row or analytics row",
             owner="app.lifecycle.outcomes / service._outcome_analytics_record",
             creation_point="evaluate_closed_candle_outcomes; terminal analytics upsert",
@@ -570,7 +574,11 @@ def _entities() -> dict[str, Any]:
                 "app.lifecycle.outcomes.evaluate_closed_candle_outcomes",
                 "app.lifecycle.service._outcome_analytics_record",
             ),
-            consumers=("lifecycle hygiene", "telegram outcome matching; research.queries does not read these tables"),
+            consumers=(
+                "lifecycle hygiene",
+                "telegram outcome matching; research.queries does not read these tables",
+                "app.analytics.outcome_ownership.project_outcome_ownership (supplied records only)",
+            ),
             enforcement="UNIQUE keys as above; join fan-out is a known limitation",
         ),
         "REPLAY RECORD": _entity(
@@ -1093,6 +1101,14 @@ def _counting_unit_examples() -> dict[str, Any]:
             "unit": "outcome row vs lifecycle vs trade",
             "example": "Three progress rows for one lifecycle_id are not three completed trades",
         },
+        "plan_outcome_versus_trade_occurrence": {
+            "unit": "verified plan_version_id inventory vs unavailable fill/trade occurrence",
+            "example": (
+                "P3A may count a verified plan identity once across lifecycle generations "
+                "and may interpret one coherent evaluation as a plan-level simulation. "
+                "That interpretation is not a unique trade. Fill-occurrence identity remains unavailable."
+            ),
+        },
         "boundary_window": {
             "unit": "half-open [start, cutoff)",
             "example": "A scan_runs.timestamp equal to cutoff is excluded",
@@ -1249,6 +1265,103 @@ def _activation_accounting_contract() -> dict[str, Any]:
             "manual_fill_count": UNAVAILABLE,
             "unique_activation_occurrence_count": UNAVAILABLE,
         },
+    }
+
+
+def _outcome_ownership_contract() -> dict[str, Any]:
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "ownership_version": "cci-outcome-ownership-v1",
+        "schema_version_unchanged": True,
+        "feeds_operational_decisions": False,
+        "canonical_outcome_per_plan_version": {
+            "established": False,
+            "status": "unproven",
+            "current_owner": "setup_lifecycle_outcome_progress UNIQUE(lifecycle_id, plan_identity)",
+            "plan_version_id_at_outcome_write_boundary": "absent",
+            "reason": (
+                "evaluate_closed_candle_outcomes persists progress by plan_identity, which "
+                "hashes lifecycle_id plus geometry. plan_version_id is latched only on "
+                "setup_lifecycle_records and is not written onto progress, events, or analytics."
+            ),
+        },
+        "source_evidence_row": (
+            "One supplied record from setup_lifecycle_records, setup_lifecycle_outcome_progress, "
+            "setup_lifecycle_events, or setup_outcome_analytics, identified by its table and "
+            "physical key. Exact duplicate payloads collapse; contradictory payloads for the "
+            "same physical key remain a conflict."
+        ),
+        "verified_immutable_plan_identity": (
+            "A plan_version_id that remints from the supplied lifecycle snapshot economics "
+            "and, for progress rows, whose plan_identity matches compatible_plan_identities "
+            "of that same snapshot. Missing/null/legacy ids stay unavailable."
+        ),
+        "plan_level_outcome": (
+            "A diagnostic interpretation of one coherent evaluation context for a verified "
+            "plan_version_id. Requires verified ownership binding, a durable evaluation "
+            "window (progress.tracking_start_at), and justified reduction. A retained "
+            "progress terminal_outcome without tracking_start_at stays raw/source evidence "
+            "and is classified ambiguous_evaluation_context. Not a persisted canonical "
+            "owner and not a trade."
+        ),
+        "fill_trade_occurrence_outcome": (
+            "Unavailable. ENTRY_ACTIVATED, ENTRY_FILL_SIMULATED, watch alerts, public delivery, "
+            "and generic activation labels are not fill-occurrence identity."
+        ),
+        "event_record_identity": (
+            "Diagnostic P2A event-record counts use (source_namespace, event_id) when "
+            "event_id is present. Same event_id in distinct namespaces counts as two "
+            "supplied event records. Duplicate copies in one namespace do not inflate "
+            "the count. This is not a fill occurrence or unique trade."
+        ),
+        "evaluation_context_anchor": (
+            "tracking_start_at is the durable evaluation-window field on progress. "
+            "first_evaluated_at is the evaluation-pass clock. The terminal-before-cursor "
+            "producer copies an already-terminal lifecycle state onto progress without "
+            "setting tracking_start_at; that terminal is retained and does not by itself "
+            "authorize a plan-level interpretation. Missing anchors are not invented."
+        ),
+        "missing_entry_evidence": (
+            "Missing entry_at does not prove that entry never occurred unless coverage is "
+            "complete and no entry evidence is present. Incomplete coverage remains "
+            "uncertain. SL_HIT is never classified as before-entry."
+        ),
+        "analytics_plan_authority": (
+            "setup_outcome_analytics is UNIQUE(lifecycle_id, final_outcome) and is "
+            "lifecycle-level unless a proven plan_identity binding is present (direct "
+            "field or nested outcome_progress.plan_identity). Unbound analytics is "
+            "retained and does not decide a plan-specific economic conflict."
+        ),
+        "append_only_versus_canonical_projection": (
+            "Events are append-only. Progress is a mutable current projection per "
+            "(lifecycle_id, plan_identity). Analytics is a lifecycle-terminal snapshot that "
+            "can store COOLDOWN as final_outcome without replacing an economic terminal. "
+            "P3A does not persist or register a canonical plan-outcome projection. Terminal "
+            "stability on progress is producer early-return once terminal_outcome is set; "
+            "later COOLDOWN/ARCHIVED is successor lifecycle, not economic supersession. "
+            "No correction protocol is invented."
+        ),
+        "authority_rules": {
+            "not_used": (
+                "updated_at, MAX, latest-row-only, first-terminal-wins, DISTINCT, "
+                "table-name precedence"
+            ),
+            "used": (
+                "producer unique keys, reminted P1 identity, compatible plan_identity match, "
+                "monotonic non-null milestone timestamps on the same physical progress key"
+            ),
+        },
+        "unresolved_ownership_cases": (
+            "legacy null plan_version_id; TRIGGERED unlocked geometry; "
+            "plan_version_invariant_violation; historical progress whose plan_identity does "
+            "not match the supplied snapshot; multiple generations/windows for one plan; "
+            "replay versus live namespaces; missing tracking_start_at"
+        ),
+        "prospective_applicability": (
+            "Diagnostic only. Applies to explicitly supplied records. Historical rows are "
+            "not rewritten. Missing P1 identities stay missing. No backfill."
+        ),
+        "consumers": "tests and fixture-derived synthetic report only",
     }
 
 
