@@ -180,16 +180,18 @@ def test_schema_is_v23_with_nullable_eligibility_cutoff(tmp_path: Path) -> None:
         nullability = {
             str(row[1]): (int(row[3]), row[4])
             for row in connection.execute("PRAGMA table_info(setup_lifecycle_outcome_progress)")
-            if str(row[1]) == "last_eligibility_decision_at"
+            if str(row[1]) in {"last_eligibility_decision_at", "last_eligibility_prefix_evidence_json"}
         }
         unique_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'setup_lifecycle_outcome_progress'"
         ).fetchone()[0]
-    assert version == SCHEMA_VERSION == 23
+    assert version == SCHEMA_VERSION == 24
     assert "tracking_start_at" in columns
     assert "plan_version_id" in columns
     assert "last_eligibility_decision_at" in columns
+    assert "last_eligibility_prefix_evidence_json" in columns
     assert nullability["last_eligibility_decision_at"] == (0, None)
+    assert nullability["last_eligibility_prefix_evidence_json"] == (0, None)
     assert "decision_timestamp" not in columns
     assert "evaluation_id" not in columns
     assert "UNIQUE(lifecycle_id, plan_identity)" in unique_sql
@@ -665,7 +667,7 @@ def test_v19_cursor_backfill_is_unproven_origin_not_prospective_proof(tmp_path: 
         connection.row_factory = sqlite3.Row
         raw = connection.execute("SELECT * FROM setup_lifecycle_outcome_progress").fetchone()
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-    assert version == SCHEMA_VERSION == 23
+    assert version == SCHEMA_VERSION == 24
     assert raw["tracking_start_at"] == cursor
     assert raw["evaluation_cursor_open_at"] == cursor
     metadata = json.loads(raw["metadata_json"])

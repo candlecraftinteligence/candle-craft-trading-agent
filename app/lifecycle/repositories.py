@@ -292,8 +292,8 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 tracking_start_at, evaluation_cursor_open_at, evaluation_cursor_close_at, entry_at, tp1_at,
                 tp2_at, tp3_at, stop_at, invalidated_at, outcome_at, terminal_outcome,
                 integrity_status, diagnostic, metadata_json, first_evaluated_at, last_evaluated_at,
-                last_eligibility_decision_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_eligibility_decision_at, last_eligibility_prefix_evidence_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lifecycle_id, plan_identity) DO UPDATE SET
                 symbol = excluded.symbol,
                 mode = excluded.mode,
@@ -318,10 +318,15 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                     WHEN ? = 1 THEN excluded.last_eligibility_decision_at
                     ELSE setup_lifecycle_outcome_progress.last_eligibility_decision_at
                 END,
+                last_eligibility_prefix_evidence_json = CASE
+                    WHEN ? = 1 THEN excluded.last_eligibility_prefix_evidence_json
+                    ELSE setup_lifecycle_outcome_progress.last_eligibility_prefix_evidence_json
+                END,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (
                 *_outcome_progress_params(progress),
+                1 if progress.eligibility_cutoff_observed else 0,
                 1 if progress.eligibility_cutoff_observed else 0,
             ),
         )
@@ -391,6 +396,11 @@ def _outcome_progress_params(progress: SetupLifecycleOutcomeProgress) -> tuple[A
     eligibility_cutoff = (
         progress.last_eligibility_decision_at if progress.eligibility_cutoff_observed else None
     )
+    prefix_evidence = (
+        progress.last_eligibility_prefix_evidence_json
+        if progress.eligibility_cutoff_observed
+        else None
+    )
     return (
         progress.lifecycle_id,
         progress.plan_identity,
@@ -416,6 +426,7 @@ def _outcome_progress_params(progress: SetupLifecycleOutcomeProgress) -> tuple[A
         progress.first_evaluated_at,
         progress.last_evaluated_at,
         eligibility_cutoff,
+        prefix_evidence,
     )
 
 
@@ -447,6 +458,11 @@ def _outcome_progress_from_row(row: sqlite3.Row) -> SetupLifecycleOutcomeProgres
         last_evaluated_at=row["last_evaluated_at"],
         last_eligibility_decision_at=(
             row["last_eligibility_decision_at"] if "last_eligibility_decision_at" in keys else None
+        ),
+        last_eligibility_prefix_evidence_json=(
+            row["last_eligibility_prefix_evidence_json"]
+            if "last_eligibility_prefix_evidence_json" in keys
+            else None
         ),
         eligibility_cutoff_observed=False,
     )

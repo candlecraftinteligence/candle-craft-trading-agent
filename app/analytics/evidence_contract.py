@@ -1077,6 +1077,31 @@ def _timestamps() -> dict[str, Any]:
                 "do not treat a known cutoff as complete evaluation context or a canonical outcome"
             ),
         ),
+        "eligibility_prefix_disposition": _timestamp(
+            existing_field="setup_lifecycle_outcome_progress.last_eligibility_prefix_evidence_json",
+            producer=(
+                "evaluate_closed_candle_outcomes after closed_candles_as_of returns; "
+                "atomic with the same-pass progress upsert and last_eligibility_decision_at"
+            ),
+            meaning=(
+                "Compact same-pass record of the supplied eligible window, pending suffix, "
+                "completed work, cursor after the accepted write, and why that pass stopped"
+            ),
+            format_timezone="JSON envelope; candle bounds use evaluator-accepted UTC isoformat",
+            null_semantics=(
+                "NULL means no durable observation under this contract: legacy row, "
+                "early return, terminal shortcut before the filter, invalid new envelope, "
+                "or unpersisted pass. NULL does not identify which of those origins applied."
+            ),
+            event_or_wall="evaluator pass-local input/disposition, not processing time",
+            as_of_suitable=(
+                "records last-application supplied-prefix disposition; does not prove "
+                "complete acquired history or a canonical outcome"
+            ),
+            missing_and_future=(
+                "do not treat pending_suffix_exhausted as complete coverage or expectancy"
+            ),
+        ),
         "lifecycle_event_time": _timestamp(
             existing_field="setup_lifecycle_events.timestamp; record first_seen_at/last_seen_at/last_transition_at/confirmed_at",
             producer="app.lifecycle.state_machine.now_utc_iso unless outcome path passes evaluation time",
@@ -1319,7 +1344,9 @@ def _outcome_ownership_contract() -> dict[str, Any]:
                 "and invariant-conflicting rows remain SQL NULL. Physical uniqueness remains "
                 "UNIQUE(lifecycle_id, plan_identity). last_eligibility_decision_at is optional "
                 "eligibility-input evidence on the same row and does not establish a canonical "
-                "plan-outcome owner. Analytics and events are unchanged."
+                "plan-outcome owner. last_eligibility_prefix_evidence_json is optional same-pass "
+                "supplied-prefix disposition on that last qualifying application. Analytics and "
+                "events are unchanged."
             ),
         },
         "source_evidence_row": (
@@ -1358,7 +1385,9 @@ def _outcome_ownership_contract() -> dict[str, Any]:
             "tracking_start_at is the durable evaluation-window field on progress. "
             "first_evaluated_at is the evaluation-pass clock. last_eligibility_decision_at "
             "is last applied eligibility input for a committed same-pass progress write; "
-            "it is not complete coverage. The terminal-before-cursor producer copies an "
+            "it is not complete coverage. last_eligibility_prefix_evidence_json is the compact "
+            "supplied-prefix disposition for that same last qualifying application; it is not "
+            "complete acquired history. The terminal-before-cursor producer copies an "
             "already-terminal lifecycle state onto progress without setting tracking_start_at "
             "and without applying the eligibility filter; that terminal is retained and does "
             "not by itself authorize a plan-level interpretation. Missing anchors and missing "

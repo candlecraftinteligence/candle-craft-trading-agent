@@ -30,6 +30,18 @@ from app.lifecycle.outcome_events import (
     target_reason as _target_reason,
 )
 from app.lifecycle.economic_identity import proven_progress_plan_version_id
+from app.lifecycle.prefix_disposition_evidence import (
+    DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES,
+    DISPOSITION_NO_NEW_PENDING_CANDLES,
+    DISPOSITION_PENDING_SUFFIX_EXHAUSTED,
+    DISPOSITION_POLICY_TERMINAL,
+    DISPOSITION_POST_FILTER_BLOCKED,
+    DISPOSITION_PROCESSING_ABORTED,
+    DISPOSITION_WAITING_FOR_TRACKING_START,
+    PrefixPassEvidence,
+    bind_prefix_disposition,
+    start_prefix_pass_evidence,
+)
 from app.lifecycle.outcome_policy import (
     _text,
     candle_range as _candle_range,
@@ -169,6 +181,7 @@ def evaluate_closed_candle_outcomes(
         repository.upsert_outcome_progress(progress)
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
+    prefix_evidence: PrefixPassEvidence | None = None
     try:
         window = closed_candles_as_of(
             execution_candles,
@@ -178,6 +191,11 @@ def evaluate_closed_candle_outcomes(
             require_continuity=True,
         )
         progress = _with_applied_eligibility_cutoff(progress, window)
+        prefix_evidence = start_prefix_pass_evidence(
+            progress,
+            window,
+            execution_timeframe=normalized_timeframe,
+        )
         candle_ranges = tuple(_candle_range(item) for item in window.timeline)
     except (CandleIntegrityError, ValueError) as exc:
         progress = _integrity_failure(
@@ -186,7 +204,12 @@ def evaluate_closed_candle_outcomes(
             diagnostic=str(exc),
             evaluated_at=evaluated_at,
         )
-        repository.upsert_outcome_progress(progress)
+        progress = _write_progress(
+            repository,
+            progress,
+            prefix_evidence,
+            disposition=DISPOSITION_POST_FILTER_BLOCKED,
+        )
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
     if not window.timeline:
@@ -196,7 +219,12 @@ def evaluate_closed_candle_outcomes(
             diagnostic="no_closed_execution_candles_at_decision_boundary",
             evaluated_at=evaluated_at,
         )
-        repository.upsert_outcome_progress(progress)
+        progress = _write_progress(
+            repository,
+            progress,
+            prefix_evidence,
+            disposition=DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES,
+        )
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
     if (
@@ -256,7 +284,12 @@ def evaluate_closed_candle_outcomes(
                 diagnostic=str(exc),
                 evaluated_at=evaluated_at,
             )
-            repository.upsert_outcome_progress(progress)
+            progress = _write_progress(
+                repository,
+                progress,
+                prefix_evidence,
+                disposition=DISPOSITION_POST_FILTER_BLOCKED,
+            )
             return LifecycleOutcomeEvaluation(record=record, progress=progress)
         progress = _with_tracking_start(
             progress,
@@ -309,7 +342,12 @@ def evaluate_closed_candle_outcomes(
                     diagnostic=str(exc),
                     evaluated_at=evaluated_at,
                 )
-                repository.upsert_outcome_progress(progress)
+                progress = _write_progress(
+                    repository,
+                    progress,
+                    prefix_evidence,
+                    disposition=DISPOSITION_POST_FILTER_BLOCKED,
+                )
                 return LifecycleOutcomeEvaluation(record=record, progress=progress)
             progress = _with_tracking_start(
                 progress,
@@ -332,7 +370,12 @@ def evaluate_closed_candle_outcomes(
                     diagnostic=f"invalid_persisted_evaluation_cursor:{exc}",
                     evaluated_at=evaluated_at,
                 )
-                repository.upsert_outcome_progress(progress)
+                progress = _write_progress(
+                    repository,
+                    progress,
+                    prefix_evidence,
+                    disposition=DISPOSITION_POST_FILTER_BLOCKED,
+                )
                 return LifecycleOutcomeEvaluation(record=record, progress=progress)
             progress = _with_tracking_start(
                 progress,
@@ -355,7 +398,12 @@ def evaluate_closed_candle_outcomes(
             diagnostic=f"invalid_persisted_tracking_start:{exc}",
             evaluated_at=evaluated_at,
         )
-        repository.upsert_outcome_progress(progress)
+        progress = _write_progress(
+            repository,
+            progress,
+            prefix_evidence,
+            disposition=DISPOSITION_POST_FILTER_BLOCKED,
+        )
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
     latest_open = window.timeline[-1].open_timestamp
@@ -379,7 +427,12 @@ def evaluate_closed_candle_outcomes(
                 diagnostic=f"invalid_persisted_evaluation_cursor:{exc}",
                 evaluated_at=evaluated_at,
             )
-            repository.upsert_outcome_progress(progress)
+            progress = _write_progress(
+                repository,
+                progress,
+                prefix_evidence,
+                disposition=DISPOSITION_POST_FILTER_BLOCKED,
+            )
             return LifecycleOutcomeEvaluation(record=record, progress=progress)
         if latest_open < cursor_open:
             progress = _integrity_failure(
@@ -391,7 +444,12 @@ def evaluate_closed_candle_outcomes(
                 ),
                 evaluated_at=evaluated_at,
             )
-            repository.upsert_outcome_progress(progress)
+            progress = _write_progress(
+                repository,
+                progress,
+                prefix_evidence,
+                disposition=DISPOSITION_POST_FILTER_BLOCKED,
+            )
             return LifecycleOutcomeEvaluation(record=record, progress=progress)
         expected_open = max(
             cursor_open + timeframe_duration(normalized_timeframe),
@@ -401,6 +459,12 @@ def evaluate_closed_candle_outcomes(
             (causal, high, low)
             for causal, (high, low) in zip(window.timeline, candle_ranges, strict=True)
             if causal.open_timestamp >= expected_open
+        )
+
+    if prefix_evidence is not None:
+        prefix_evidence.mark_pending(
+            tuple(causal for causal, _high, _low in pending),
+            expected_next_open=expected_open,
         )
 
     if not pending:
@@ -420,7 +484,12 @@ def evaluate_closed_candle_outcomes(
                         "last_evaluated_at": evaluated_at,
                     }
                 )
-                repository.upsert_outcome_progress(progress)
+                progress = _write_progress(
+                    repository,
+                    progress,
+                    prefix_evidence,
+                    disposition=DISPOSITION_WAITING_FOR_TRACKING_START,
+                )
                 return LifecycleOutcomeEvaluation(record=record, progress=progress)
             progress = _integrity_failure(
                 progress,
@@ -432,7 +501,12 @@ def evaluate_closed_candle_outcomes(
                 ),
                 evaluated_at=evaluated_at,
             )
-            repository.upsert_outcome_progress(progress)
+            progress = _write_progress(
+                repository,
+                progress,
+                prefix_evidence,
+                disposition=DISPOSITION_POST_FILTER_BLOCKED,
+            )
             return LifecycleOutcomeEvaluation(record=record, progress=progress)
         progress = progress.model_copy(
             update={
@@ -441,7 +515,12 @@ def evaluate_closed_candle_outcomes(
                 "last_evaluated_at": evaluated_at,
             }
         )
-        repository.upsert_outcome_progress(progress)
+        progress = _write_progress(
+            repository,
+            progress,
+            prefix_evidence,
+            disposition=DISPOSITION_NO_NEW_PENDING_CANDLES,
+        )
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
     if pending[0][0].open_timestamp != expected_open:
@@ -455,13 +534,19 @@ def evaluate_closed_candle_outcomes(
             ),
             evaluated_at=evaluated_at,
         )
-        repository.upsert_outcome_progress(progress)
+        progress = _write_progress(
+            repository,
+            progress,
+            prefix_evidence,
+            disposition=DISPOSITION_POST_FILTER_BLOCKED,
+        )
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
     current_record = record
     last_transition: SetupTransitionResult | None = None
     transitions: list[SetupTransitionResult] = []
     processed = 0
+    processing_aborted = False
     for causal, high, low in pending:
         processed += 1
         candle_close = causal.close_timestamp.isoformat()
@@ -515,6 +600,7 @@ def evaluate_closed_candle_outcomes(
                         ),
                         evaluated_at=evaluated_at,
                     )
+                    processing_aborted = True
                     break
                 if _stop_touched(high, low, geometry):
                     current_record, last_transition, progress = _record_stop(
@@ -538,6 +624,8 @@ def evaluate_closed_candle_outcomes(
                 evaluated_at=evaluated_at,
                 processed_candles=1,
             )
+            if prefix_evidence is not None:
+                prefix_evidence.record_completed(causal)
             if progress.terminal_outcome != NA:
                 break
             continue
@@ -603,11 +691,24 @@ def evaluate_closed_candle_outcomes(
             evaluated_at=evaluated_at,
             processed_candles=1,
         )
+        if prefix_evidence is not None:
+            prefix_evidence.record_completed(causal)
         if progress.terminal_outcome != NA:
             break
 
+    if processing_aborted:
+        loop_disposition = DISPOSITION_PROCESSING_ABORTED
+    elif progress.terminal_outcome != NA:
+        loop_disposition = DISPOSITION_POLICY_TERMINAL
+    else:
+        loop_disposition = DISPOSITION_PENDING_SUFFIX_EXHAUSTED
     repository.upsert_record(current_record)
-    repository.upsert_outcome_progress(progress)
+    progress = _write_progress(
+        repository,
+        progress,
+        prefix_evidence,
+        disposition=loop_disposition,
+    )
     return LifecycleOutcomeEvaluation(
         record=current_record,
         progress=progress,
@@ -918,6 +1019,23 @@ def _with_entry_evidence(
     )
 
 
+def _write_progress(
+    repository: SQLiteSetupLifecycleRepository,
+    progress: SetupLifecycleOutcomeProgress,
+    prefix_evidence: PrefixPassEvidence | None = None,
+    *,
+    disposition: str | None = None,
+) -> SetupLifecycleOutcomeProgress:
+    if prefix_evidence is not None:
+        progress = bind_prefix_disposition(
+            progress,
+            prefix_evidence,
+            disposition=disposition,
+        )
+    repository.upsert_outcome_progress(progress)
+    return progress
+
+
 def _with_applied_eligibility_cutoff(
     progress: SetupLifecycleOutcomeProgress,
     window: ClosedCandleWindow,
@@ -926,6 +1044,7 @@ def _with_applied_eligibility_cutoff(
         update={
             "last_eligibility_decision_at": window.decision_timestamp.isoformat(),
             "eligibility_cutoff_observed": True,
+            "last_eligibility_prefix_evidence_json": None,
         }
     )
 

@@ -29,6 +29,7 @@ from app.lifecycle.economic_identity import (
 )
 from app.lifecycle.models import SetupLifecycleOutcomeProgress, SetupLifecycleState, SetupTransitionReason
 from app.lifecycle.outcome_policy import canonical_plan_identity, compatible_plan_identities
+from app.lifecycle.prefix_disposition_evidence import diagnose_prefix_evidence
 
 OUTCOME_OWNERSHIP_VERSION: Final[str] = "cci-outcome-ownership-v1"
 
@@ -164,10 +165,11 @@ def project_outcome_ownership(
             "status": "unproven",
             "unit": "causal evaluation context for UNIQUE(lifecycle_id, plan_identity)",
             "reason": (
-                "Progress may persist tracking_start_at, cursors, processing-time stamps, and "
-                "nullable last_eligibility_decision_at as last applied eligibility input. "
-                "That cutoff does not prove contiguous evaluated coverage, an authoritative "
-                "live/replay namespace, or complete durable causal context. A nonempty "
+                "Progress may persist tracking_start_at, cursors, processing-time stamps, "
+                "nullable last_eligibility_decision_at as last applied eligibility input, and "
+                "nullable last_eligibility_prefix_evidence_json as last-application supplied-prefix "
+                "disposition. That envelope does not prove contiguous evaluated coverage, an "
+                "authoritative live/replay namespace, or complete durable causal context. A nonempty "
                 "tracking_start_at remains a supplied-row anchor, not completeness."
             ),
         },
@@ -231,6 +233,7 @@ def _mapping(row: Any) -> dict[str, Any]:
         if isinstance(row, SetupLifecycleOutcomeProgress):
             payload["plan_version_id"] = row.plan_version_id
             payload["last_eligibility_decision_at"] = row.last_eligibility_decision_at
+            payload["last_eligibility_prefix_evidence_json"] = row.last_eligibility_prefix_evidence_json
         return payload
     if isinstance(row, Mapping):
         return copy.deepcopy(dict(row))
@@ -418,6 +421,14 @@ def _describe_evaluation_context(
         cutoff_status = UNAVAILABLE
         durable_cutoff = None
 
+    prefix = diagnose_prefix_evidence(
+        raw_json=_optional_text(progress.get("last_eligibility_prefix_evidence_json")),
+        lifecycle_id=_text(progress.get("lifecycle_id")),
+        plan_identity=_text(progress.get("plan_identity")),
+        applied_cutoff=durable_cutoff,
+        execution_timeframe=_optional_text(progress.get("execution_timeframe")),
+    )
+
     return {
         "tracking_start_at": tracking_text,
         "execution_timeframe": _optional_text(progress.get("execution_timeframe")),
@@ -435,13 +446,21 @@ def _describe_evaluation_context(
         "complete_scope": (
             "complete would require a coherent producer-established start, proven contiguous "
             "evaluated coverage through a cutoff, and an authoritative evaluation namespace. "
-            "A known last_eligibility_decision_at records last applied eligibility input only."
+            "A known last_eligibility_decision_at records last applied eligibility input only. "
+            "A known prefix envelope records last-application supplied-window disposition only."
         ),
         "durable_decision_timestamp": durable_cutoff,
         "durable_decision_timestamp_status": cutoff_status,
         "last_eligibility_decision_at": cutoff_text if cutoff_present else None,
         "last_eligibility_decision_at_status": cutoff_status,
         "last_eligibility_decision_at_contract": ELIGIBILITY_CUTOFF_CONTRACT,
+        "last_eligibility_prefix_evidence": prefix.get("payload"),
+        "last_eligibility_prefix_evidence_raw": prefix.get("raw"),
+        "last_eligibility_prefix_evidence_status": prefix.get("status"),
+        "last_eligibility_prefix_evidence_contract": prefix.get("contract"),
+        "last_eligibility_prefix_evidence_conflicts": list(prefix.get("conflicts") or []),
+        "prefix_disposition": prefix.get("disposition"),
+        "pending_suffix_exhausted": prefix.get("pending_suffix_exhausted"),
         "caller_coverage_complete": bool(caller_coverage_complete),
         "caller_coverage_complete_is_row_provenance": False,
         "supplied_snapshot_anchor": bool(tracking_present and tracking_ok and not conflicts),
@@ -1094,6 +1113,10 @@ def _plan_interpretations(evaluations: Sequence[Mapping[str, Any]]) -> list[dict
                         "last_eligibility_decision_at_status": context.get(
                             "last_eligibility_decision_at_status"
                         ),
+                        "last_eligibility_prefix_evidence_status": context.get(
+                            "last_eligibility_prefix_evidence_status"
+                        ),
+                        "pending_suffix_exhausted": context.get("pending_suffix_exhausted"),
                     },
                     "source_refs": list(member["progress_evidence"]),
                 }
@@ -1143,6 +1166,10 @@ def _plan_interpretations(evaluations: Sequence[Mapping[str, Any]]) -> list[dict
                     "last_eligibility_decision_at_status": context.get(
                         "last_eligibility_decision_at_status"
                     ),
+                    "last_eligibility_prefix_evidence_status": context.get(
+                        "last_eligibility_prefix_evidence_status"
+                    ),
+                    "pending_suffix_exhausted": context.get("pending_suffix_exhausted"),
                 },
                 "contexts_observed": len(contexts),
             }
