@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -623,6 +623,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 first_evaluated_at TEXT NOT NULL,
                 last_evaluated_at TEXT NOT NULL,
+                last_eligibility_decision_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(lifecycle_id, plan_identity)
@@ -1047,6 +1048,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             _migrate_economic_identity_v21(connection)
         if existing_version < 22:
             _migrate_outcome_progress_plan_version_v22(connection)
+        if existing_version < 23:
+            _migrate_outcome_progress_eligibility_cutoff_v23(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
@@ -1088,6 +1091,17 @@ def _migrate_outcome_progress_plan_version_v22(connection: sqlite3.Connection) -
         connection,
         "setup_lifecycle_outcome_progress",
         "plan_version_id",
+        "TEXT",
+    )
+
+
+def _migrate_outcome_progress_eligibility_cutoff_v23(connection: sqlite3.Connection) -> None:
+    """Add nullable eligibility-cutoff evidence without inferring historical values."""
+
+    _ensure_column(
+        connection,
+        "setup_lifecycle_outcome_progress",
+        "last_eligibility_decision_at",
         "TEXT",
     )
 

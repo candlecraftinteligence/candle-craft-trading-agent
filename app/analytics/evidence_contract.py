@@ -1047,7 +1047,35 @@ def _timestamps() -> dict[str, Any]:
             null_semantics="resolved before scan work in runner",
             event_or_wall="decision / as-of processing clock",
             as_of_suitable="best current causal replay anchor, still not a receipt time",
-            missing_and_future="persist on scan_runs would require a migration or JSON sidecar; not added as a column in this phase",
+            missing_and_future=(
+                "scan_runs still has no decision_timestamp column. Outcome progress may persist "
+                "last_eligibility_decision_at as last applied eligibility input only."
+            ),
+        ),
+        "eligibility_cutoff": _timestamp(
+            existing_field="setup_lifecycle_outcome_progress.last_eligibility_decision_at",
+            producer=(
+                "evaluate_closed_candle_outcomes after closed_candles_as_of returns; "
+                "atomic with the same-pass progress upsert"
+            ),
+            meaning=(
+                "Exact cutoff used by the most recent completed outcome candle-eligibility "
+                "computation whose same-pass progress write was accepted and committed"
+            ),
+            format_timezone="aware UTC datetime isoformat as used by closed_candles_as_of",
+            null_semantics=(
+                "NULL means no durable observation under this contract: legacy row, "
+                "early return, terminal shortcut before the filter, or unpersisted pass. "
+                "NULL does not identify which of those origins applied."
+            ),
+            event_or_wall="evaluator eligibility input, not processing time",
+            as_of_suitable=(
+                "records the applied input; does not prove coverage, continuity, or "
+                "that later eligible candles were processed"
+            ),
+            missing_and_future=(
+                "do not treat a known cutoff as complete evaluation context or a canonical outcome"
+            ),
         ),
         "lifecycle_event_time": _timestamp(
             existing_field="setup_lifecycle_events.timestamp; record first_seen_at/last_seen_at/last_transition_at/confirmed_at",
@@ -1289,8 +1317,9 @@ def _outcome_ownership_contract() -> dict[str, Any]:
                 "evaluate_closed_candle_outcomes may persist a proven P1 plan_version_id on "
                 "new setup_lifecycle_outcome_progress rows. Legacy, unproven, reconstructed, "
                 "and invariant-conflicting rows remain SQL NULL. Physical uniqueness remains "
-                "UNIQUE(lifecycle_id, plan_identity). Analytics and events are unchanged. "
-                "Canonical plan-outcome ownership remains unestablished."
+                "UNIQUE(lifecycle_id, plan_identity). last_eligibility_decision_at is optional "
+                "eligibility-input evidence on the same row and does not establish a canonical "
+                "plan-outcome owner. Analytics and events are unchanged."
             ),
         },
         "source_evidence_row": (
@@ -1327,10 +1356,13 @@ def _outcome_ownership_contract() -> dict[str, Any]:
         ),
         "evaluation_context_anchor": (
             "tracking_start_at is the durable evaluation-window field on progress. "
-            "first_evaluated_at is the evaluation-pass clock. The terminal-before-cursor "
-            "producer copies an already-terminal lifecycle state onto progress without "
-            "setting tracking_start_at; that terminal is retained and does not by itself "
-            "authorize a plan-level interpretation. Missing anchors are not invented."
+            "first_evaluated_at is the evaluation-pass clock. last_eligibility_decision_at "
+            "is last applied eligibility input for a committed same-pass progress write; "
+            "it is not complete coverage. The terminal-before-cursor producer copies an "
+            "already-terminal lifecycle state onto progress without setting tracking_start_at "
+            "and without applying the eligibility filter; that terminal is retained and does "
+            "not by itself authorize a plan-level interpretation. Missing anchors and missing "
+            "cutoffs are not invented."
         ),
         "missing_entry_evidence": (
             "Missing entry_at does not prove that entry never occurred unless coverage is "
