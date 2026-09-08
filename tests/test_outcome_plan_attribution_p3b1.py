@@ -498,7 +498,7 @@ def test_runtime_consumers_do_not_import_progress_plan_version_helper() -> None:
     banned = "proven_progress_plan_version_id"
     for module in (telegram_lifecycle, symbol_health, performance_memory, queries):
         assert banned not in inspect.getsource(module)
-    assert SCHEMA_VERSION == 24
+    assert SCHEMA_VERSION == 25
     assert evidence_contract_payload()["outcome_ownership"]["feeds_operational_decisions"] is False
     assert evidence_contract_payload()["outcome_ownership"]["canonical_outcome_per_plan_version"][
         "established"
@@ -517,7 +517,7 @@ def test_fresh_schema_progress_column_is_nullable_and_analytics_unchanged(tmp_pa
             for row in connection.execute("PRAGMA table_info(setup_outcome_analytics)")
         }
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
-    assert user_version == SCHEMA_VERSION == 24
+    assert user_version == SCHEMA_VERSION == 25
     assert "plan_version_id" in progress
     assert progress["plan_version_id"] == (0, None)
     assert "last_eligibility_decision_at" in progress

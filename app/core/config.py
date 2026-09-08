@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     candle_craft_donate_url: str | None = None
     local_manual_mode: bool = True
     order_execution_enabled: bool = False
+    scan_raw_payload_inline_only: bool = False
     scanner_confirmation_cycles: int = 2
     scanner_setup_merge_tolerance_pct: float = 0.5
     global_context_enabled: bool = True

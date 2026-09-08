@@ -54,6 +54,7 @@ def test_default_settings_are_safe() -> None:
     assert settings.btc_d_request_timeout_sec == 5.0
     assert settings.local_manual_mode is True
     assert settings.order_execution_enabled is False
+    assert settings.scan_raw_payload_inline_only is False
 
 
 def test_log_level_is_normalized() -> None:

@@ -35,6 +35,7 @@ from app.storage.models import (
     SymbolResultRecord,
     WatchIterationMetadata,
 )
+from app.storage.scan_payloads import EncodedScanPayload, INLINE_V1, encode_scan_raw_payload
 from app.storage.symbol_health import (
     _load_symbol_health_records,
     _insert_symbol_health_events,
@@ -55,6 +56,7 @@ def store_scan_result(
     raw_payload: Mapping[str, Any] | None = None,
     run_id: str | None = None,
     watch_iteration: WatchIterationMetadata | None = None,
+    inline_raw_payload: bool = False,
 ) -> str:
     run_id = run_id or uuid4().hex
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -65,16 +67,6 @@ def store_scan_result(
         else _storage_payload(result, ranked_by_symbol, replay_summary, portfolio_selection)
     )
     portfolio_decisions = _portfolio_decisions(portfolio_selection)
-
-    scan_record = _scan_run_record(
-        run_id=run_id,
-        timestamp=timestamp,
-        result=result,
-        command_preset=command_preset,
-        command_used=command_used,
-        raw_payload=payload,
-        watch_iteration=watch_iteration,
-    )
     symbol_records = tuple(
         _symbol_result_record(
             run_id=run_id,
@@ -84,6 +76,22 @@ def store_scan_result(
             portfolio_decision=portfolio_decisions.get(symbol_result.symbol, NA),
         )
         for symbol_result in result.results
+    )
+    encoded_payload = encode_scan_raw_payload(
+        payload,
+        symbol_records,
+        dumps=_json_dump,
+        inline_only=inline_raw_payload,
+    )
+    scan_record = _scan_run_record(
+        run_id=run_id,
+        timestamp=timestamp,
+        result=result,
+        command_preset=command_preset,
+        command_used=command_used,
+        raw_payload=payload,
+        encoded_payload=encoded_payload,
+        watch_iteration=watch_iteration,
     )
     setup_records = tuple(
         record
@@ -210,7 +218,8 @@ def _scan_run_record(
     command_preset: str | None,
     command_used: str | None,
     raw_payload: Mapping[str, Any],
-    watch_iteration: WatchIterationMetadata | None,
+    encoded_payload: EncodedScanPayload | None = None,
+    watch_iteration: WatchIterationMetadata | None = None,
 ) -> ScanRunRecord:
     counts = _bucket_counts(raw_payload)
     lifecycle_counts = _lifecycle_state_counts(raw_payload, result)
@@ -251,7 +260,10 @@ def _scan_run_record(
         rejected=counts["no_setup"],
         data_issues=watch_data_issues,
         data_issues_json=_json_dump(data_issues),
-        raw_payload_json=_json_dump(raw_payload),
+        raw_payload_json=(
+            encoded_payload.physical_json if encoded_payload is not None else _json_dump(raw_payload)
+        ),
+        raw_payload_format=encoded_payload.format if encoded_payload is not None else INLINE_V1,
         is_watch_iteration=1 if watch_iteration is not None else 0,
         watch_iteration_number=watch_iteration.iteration_number if watch_iteration is not None else None,
         started_at=watch_iteration.started_at if watch_iteration is not None else None,
@@ -634,7 +646,7 @@ def _insert_scan_run(connection: sqlite3.Connection, record: ScanRunRecord) -> N
             strategy, timeframes_json, market_regime, regime_confidence,
             regime_compatibility_json, environment_notes_json, runtime_stats_json,
             command_preset, command_used, total_valid_setups, near_misses, rejected,
-            data_issues, data_issues_json, raw_payload_json, is_watch_iteration,
+            data_issues, data_issues_json, raw_payload_json, raw_payload_format, is_watch_iteration,
             watch_iteration_number, started_at, completed_at, symbols_requested,
             symbols_queued, symbols_completed, valid_activations, still_watching,
             rejected_no_edge, runtime_sec, portfolio_summary_json, symbol_health_summary_json,

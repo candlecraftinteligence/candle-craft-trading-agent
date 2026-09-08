@@ -144,7 +144,7 @@ Do not claim that leaving discovery always stops tracking. Do not claim that act
 
 ### Storage
 
-`store_scan_result` still writes `scan_runs.raw_payload_json` from `_storage_payload` (or a supplied `raw_payload`) and separately `symbol_results.raw_result_json` from `_symbol_result_record`. The supplied-raw route is not assumed identical to the generated route. Original ~81.21 GiB / ~3.65 GB/day figures remain historical audit estimates, not current measurements. This phase adds no runtime payload. Current live size/runway was not measured (live DB not accessed). Storage remains a mandatory checkpoint before high-volume capture, pass ledgers, or long-duration replay expansion.
+`store_scan_result` still writes `scan_runs.raw_payload_json` from `_storage_payload` (or a supplied `raw_payload`) and separately `symbol_results.raw_result_json` from `_symbol_result_record`. The supplied-raw route is not assumed identical to the generated route. Original ~81.21 GiB / ~3.65 GB/day figures remain historical audit estimates, not current measurements. This phase adds no runtime payload. Current live size/runway was not measured (live DB not accessed). Storage remains a mandatory checkpoint before high-volume capture, pass ledgers, or long-duration replay expansion. Prospective lossless removal of the nested `results[]` copy is specified separately in `docs/research/storage_single_copy.md` (application schema v25); this EVAL_SEMANTICS document does not implement that change.
 
 ### Strategy-research gate
 

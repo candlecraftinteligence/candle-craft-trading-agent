@@ -239,7 +239,7 @@ def test_schema_remains_v24_without_admission_policy_or_source_binding(tmp_path:
         table_names = {
             row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-    assert user_version == SCHEMA_VERSION == 24
+    assert user_version == SCHEMA_VERSION == 25
     assert sqlite_schema_version != user_version
     for forbidden in (
         "admission_id",

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.data.dtos import NA
 from app.storage.database import StorageError, open_read_only_database
+from app.storage.scan_payloads import ScanPayloadIntegrityError, load_logical_scan_payload
 
 
 @dataclass(frozen=True)
@@ -57,13 +58,14 @@ def load_latest_db_scan_artifacts(
                 LIMIT 1
                 """
             ).fetchone()
+            if row is None:
+                return WolfScanArtifacts(manifest_row=None, scan_payload=None, source_path=path)
+            payload = load_logical_scan_payload(connection, row["run_id"])
+    except ScanPayloadIntegrityError:
+        raise
     except (OSError, StorageError, sqlite3.Error):
         return WolfScanArtifacts(manifest_row=None, scan_payload=None, source_path=path)
 
-    if row is None:
-        return WolfScanArtifacts(manifest_row=None, scan_payload=None, source_path=path)
-
-    payload = _json_mapping(row["raw_payload_json"])
     manifest = {
         "run_id": _display(row["run_id"]),
         "timestamp": _display(row["timestamp"]),

@@ -742,7 +742,7 @@ def test_p3a_projection_does_not_mutate_or_open_database(tmp_path: Path) -> None
         after = _sql_progress(repository, record.lifecycle_id)[0]
         schema_after = repository._connection.execute("PRAGMA user_version").fetchone()[0]
     assert before == after
-    assert schema_before == schema_after == SCHEMA_VERSION == 24
+    assert schema_before == schema_after == SCHEMA_VERSION == 25
     source = Path("app/analytics/outcome_ownership.py").read_text(encoding="utf-8")
     assert "sqlite3" not in source
     assert "open_initialized_database" not in source
@@ -796,4 +796,4 @@ def test_public_health_memory_do_not_consume_cutoff_field() -> None:
         assert banned not in inspect.getsource(module)
     assert evidence_contract_payload()["outcome_ownership"]["feeds_operational_decisions"] is False
     assert evidence_contract_payload()["unique_trade_count"]["status"] == UNAVAILABLE
-    assert SCHEMA_VERSION == 24
+    assert SCHEMA_VERSION == 25

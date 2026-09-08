@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25  # STORAGE_SINGLE_COPY: additive raw_payload_format on scan_runs
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -415,6 +415,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 data_issues INTEGER NOT NULL,
                 data_issues_json TEXT NOT NULL,
                 raw_payload_json TEXT NOT NULL,
+                raw_payload_format TEXT NOT NULL DEFAULT 'inline_v1',
                 is_watch_iteration INTEGER NOT NULL DEFAULT 0,
                 watch_iteration_number INTEGER,
                 started_at TEXT,
@@ -1053,6 +1054,8 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             _migrate_outcome_progress_eligibility_cutoff_v23(connection)
         if existing_version < 24:
             _migrate_outcome_progress_prefix_evidence_v24(connection)
+        if existing_version < 25:
+            _migrate_scan_raw_payload_format_v25(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
@@ -1117,6 +1120,17 @@ def _migrate_outcome_progress_prefix_evidence_v24(connection: sqlite3.Connection
         "setup_lifecycle_outcome_progress",
         "last_eligibility_prefix_evidence_json",
         "TEXT",
+    )
+
+
+def _migrate_scan_raw_payload_format_v25(connection: sqlite3.Connection) -> None:
+    """Label existing inline scan payloads without rewriting historical JSON."""
+
+    _ensure_column(
+        connection,
+        "scan_runs",
+        "raw_payload_format",
+        "TEXT NOT NULL DEFAULT 'inline_v1'",
     )
 
 
