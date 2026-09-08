@@ -132,7 +132,7 @@ def _symbol_from_transition(result, *, signal_id: str = LIFE):
 
 
 def test_schema_version_unchanged_for_p2b() -> None:
-    assert SCHEMA_VERSION == 23
+    assert SCHEMA_VERSION == 24
     assert SetupLifecycleState.CONFIRMED in PLAN_LOCK_STATES
     assert SetupLifecycleState.ACTIONABLE_A_GRADE in PLAN_LOCK_STATES
     assert SetupLifecycleState.TRIGGERED not in PLAN_LOCK_STATES

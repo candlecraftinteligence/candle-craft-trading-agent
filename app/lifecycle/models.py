@@ -285,6 +285,7 @@ class SetupLifecycleOutcomeProgress(BaseModel):
     last_evaluated_at: str
     plan_version_id: str | None = Field(default=None, exclude=True)
     last_eligibility_decision_at: str | None = Field(default=None, exclude=True)
+    last_eligibility_prefix_evidence_json: str | None = Field(default=None, exclude=True)
     eligibility_cutoff_observed: bool = Field(default=False, exclude=True)
 
     model_config = ConfigDict(frozen=True)
@@ -324,6 +325,14 @@ class SetupLifecycleOutcomeProgress(BaseModel):
         if not text or text.upper() == NA:
             return None
         return text
+
+    @field_validator("last_eligibility_prefix_evidence_json", mode="before")
+    @classmethod
+    def _normalize_optional_prefix_evidence_json(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
 
 class SetupTransitionResult(BaseModel):

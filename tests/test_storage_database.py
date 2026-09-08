@@ -344,6 +344,8 @@ def test_scanner_process_improvement_schema_columns_exist(tmp_path) -> None:
         "integrity_status",
         "diagnostic",
         "metadata_json",
+        "last_eligibility_decision_at",
+        "last_eligibility_prefix_evidence_json",
     } <= progress_columns
     assert {"raw_candles_json", "execution_candles_json"}.isdisjoint(
         progress_columns
@@ -421,7 +423,7 @@ def test_schema_v19_backfills_existing_cursor_without_rewind_or_milestone_loss(
         progress.entry_at,
         progress.tp1_at,
     )
-    assert version == SCHEMA_VERSION == 23
+    assert version == SCHEMA_VERSION == 24
 
 
 def _create_schema_v19_public_truth_fixture(db_path: Path) -> None:
@@ -570,7 +572,7 @@ def test_schema_v19_to_v20_adds_public_truth_audit_columns_idempotently(
             """
         ).fetchone()
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 23
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 24
 
     assert expected_columns <= columns
     assert audit_defaults == ("N/A", "N/A", "N/A", "N/A", "N/A")
@@ -1665,7 +1667,7 @@ def test_schema_v14_to_v17_preserves_lifecycle_and_telegram_data(
 
     assert _representative_v14_rows(db_path) == before
     version, tables, attempt_columns, public_columns = _schema_contract(db_path)
-    assert version == SCHEMA_VERSION == 23
+    assert version == SCHEMA_VERSION == 24
     assert "setup_lifecycle_outcome_progress" in tables
     assert "public_alert_delivery_parts" in tables
     assert "delivery_state" in attempt_columns
@@ -1925,7 +1927,7 @@ def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:
         "v15-plan", "SENT", "2026-07-01T10:00:01Z", "SENT"
     )
     assert "public_alert_delivery_parts" in tables
-    assert version == SCHEMA_VERSION == 23
+    assert version == SCHEMA_VERSION == 24
 
 
 def test_schema_v16_migration_is_idempotent_for_v15_delivery_data(tmp_path) -> None:
@@ -2192,7 +2194,7 @@ def test_schema_v20_to_v21_adds_economic_identity_columns_without_backfill(
             ).fetchall()
         }
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 23
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 24
 
     assert {"setup_id", "plan_version_id", "economic_identity_reason"} <= columns
     assert after is not None
@@ -2234,7 +2236,7 @@ def test_fresh_database_contains_economic_identity_schema(tmp_path: Path) -> Non
             str(row[1])
             for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
         }
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 23
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 24
         assert {"setup_id", "plan_version_id", "economic_identity_reason"} <= columns
         nullability = {
             str(row[1]): int(row[3])
@@ -2424,7 +2426,7 @@ def test_schema_v21_to_v22_adds_progress_plan_version_without_backfill(
             WHERE type = 'table' AND name = 'setup_lifecycle_outcome_progress'
             """
         ).fetchone()[0]
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 23
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 24
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert "plan_version_id" in after_columns
@@ -2474,11 +2476,13 @@ def test_fresh_database_contains_progress_plan_version_schema(tmp_path: Path) ->
             str(row[1])
             for row in connection.execute("PRAGMA table_info(setup_outcome_analytics)").fetchall()
         }
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 23
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 24
         assert columns["plan_version_id"] == 0
         assert columns["last_eligibility_decision_at"] == 0
+        assert columns["last_eligibility_prefix_evidence_json"] == 0
         assert "plan_version_id" not in analytics_columns
         assert "last_eligibility_decision_at" not in analytics_columns
+        assert "last_eligibility_prefix_evidence_json" not in analytics_columns
 
 
 def _create_schema_v22_outcome_progress_fixture(db_path: Path) -> None:
@@ -2620,6 +2624,116 @@ def _create_schema_v22_outcome_progress_fixture(db_path: Path) -> None:
         connection.commit()
 
 
+def _create_schema_v23_outcome_progress_fixture(db_path: Path) -> None:
+    """Build a genuine v23 progress table from the pre-P3_PREFIX DDL, not a lowered v24 marker."""
+
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE setup_lifecycle_records (
+                lifecycle_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                current_state TEXT NOT NULL,
+                previous_state TEXT NOT NULL DEFAULT 'N/A',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                last_transition_at TEXT NOT NULL,
+                entry_low TEXT NOT NULL DEFAULT 'N/A',
+                entry_high TEXT NOT NULL DEFAULT 'N/A',
+                stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                tp1 TEXT NOT NULL DEFAULT 'N/A',
+                tp2 TEXT NOT NULL DEFAULT 'N/A',
+                tp3 TEXT NOT NULL DEFAULT 'N/A',
+                invalidation_logic TEXT NOT NULL DEFAULT 'N/A',
+                setup_identity TEXT NOT NULL DEFAULT 'N/A',
+                structural_anchor TEXT NOT NULL DEFAULT 'N/A',
+                is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0, 1)),
+                setup_id TEXT,
+                plan_version_id TEXT,
+                economic_identity_reason TEXT
+            );
+            CREATE TABLE setup_lifecycle_outcome_progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lifecycle_id TEXT NOT NULL REFERENCES setup_lifecycle_records(lifecycle_id) ON DELETE CASCADE,
+                plan_identity TEXT NOT NULL,
+                plan_version_id TEXT,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'N/A',
+                direction TEXT NOT NULL DEFAULT 'N/A',
+                execution_timeframe TEXT NOT NULL DEFAULT 'N/A',
+                tracking_start_at TEXT,
+                evaluation_cursor_open_at TEXT,
+                evaluation_cursor_close_at TEXT,
+                entry_at TEXT,
+                tp1_at TEXT,
+                tp2_at TEXT,
+                tp3_at TEXT,
+                stop_at TEXT,
+                invalidated_at TEXT,
+                outcome_at TEXT,
+                terminal_outcome TEXT NOT NULL DEFAULT 'N/A',
+                integrity_status TEXT NOT NULL DEFAULT 'N/A',
+                diagnostic TEXT NOT NULL DEFAULT 'N/A',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                first_evaluated_at TEXT NOT NULL,
+                last_evaluated_at TEXT NOT NULL,
+                last_eligibility_decision_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(lifecycle_id, plan_identity)
+            );
+            INSERT INTO setup_lifecycle_records (
+                lifecycle_id, symbol, mode, direction, current_state,
+                first_seen_at, last_seen_at, last_transition_at,
+                entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                invalidation_logic, setup_identity, structural_anchor, is_current,
+                setup_id, plan_version_id, economic_identity_reason
+            ) VALUES (
+                'v23-active-cutoff', 'BTCUSDT', 'swing', 'long', 'MANAGING',
+                '2026-09-01T09:00:00+00:00', '2026-09-01T10:00:00+00:00', '2026-09-01T10:00:00+00:00',
+                '100', '102', '90', '110', '120', '130',
+                'Closed structure beyond the stored stop invalidates the plan.',
+                'BTCUSDT|swing|long|v23-cutoff', 'setup_generation_anchor|sweep-v23-cutoff', 1,
+                'setup-v23-cutoff', NULL, NULL
+            ), (
+                'v23-active-null', 'ETHUSDT', 'swing', 'long', 'MANAGING',
+                '2026-09-01T09:00:00+00:00', '2026-09-01T10:00:00+00:00', '2026-09-01T10:00:00+00:00',
+                '100', '102', '90', '110', '120', '130',
+                'Closed structure beyond the stored stop invalidates the plan.',
+                'ETHUSDT|swing|long|v23-null', 'setup_generation_anchor|sweep-v23-null', 1,
+                'setup-v23-null', 'plan-version-v23', NULL
+            );
+            INSERT INTO setup_lifecycle_outcome_progress (
+                lifecycle_id, plan_identity, plan_version_id, symbol, mode, direction, execution_timeframe,
+                tracking_start_at, evaluation_cursor_open_at, evaluation_cursor_close_at,
+                entry_at, tp1_at, tp2_at, tp3_at, stop_at, invalidated_at, outcome_at,
+                terminal_outcome, integrity_status, diagnostic, metadata_json,
+                first_evaluated_at, last_evaluated_at, last_eligibility_decision_at, created_at, updated_at
+            ) VALUES (
+                'v23-active-cutoff', 'plan-v23-active-cutoff', NULL, 'BTCUSDT', 'swing', 'long', '15m',
+                '2026-09-01T09:30:00+00:00', '2026-09-01T09:45:00+00:00', '2026-09-01T10:00:00+00:00',
+                '2026-09-01T09:45:00+00:00', NULL, NULL, NULL, NULL, NULL, NULL,
+                'N/A', 'Verified', 'N/A', '{"source":"v23-active-cutoff"}',
+                '2026-09-01T09:30:00+00:00', '2026-09-01T10:00:00+00:00',
+                '2026-09-01T10:00:00+00:00',
+                '2026-09-01T09:30:00+00:00', '2026-09-01T10:00:00+00:00'
+            ), (
+                'v23-active-null', 'plan-v23-active-null', 'plan-version-v23', 'ETHUSDT', 'swing', 'long', '15m',
+                '2026-09-01T09:30:00+00:00', '2026-09-01T09:45:00+00:00', '2026-09-01T10:00:00+00:00',
+                '2026-09-01T09:45:00+00:00', NULL, NULL, NULL, NULL, NULL, NULL,
+                'N/A', 'Verified', 'N/A', '{"source":"v23-active-null"}',
+                '2026-09-01T09:30:00+00:00', '2026-09-01T10:00:00+00:00',
+                NULL,
+                '2026-09-01T09:30:00+00:00', '2026-09-01T10:00:00+00:00'
+            );
+            PRAGMA user_version = 23;
+            """
+        )
+        connection.commit()
+
+
 def test_schema_v22_to_v23_adds_eligibility_cutoff_without_backfill(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2658,10 +2772,11 @@ def test_schema_v22_to_v23_adds_eligibility_cutoff_without_backfill(
             WHERE type = 'table' AND name = 'setup_lifecycle_outcome_progress'
             """
         ).fetchone()[0]
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 23
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 24
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert "last_eligibility_decision_at" in after_columns
+    assert "last_eligibility_prefix_evidence_json" in after_columns
     assert nullability["last_eligibility_decision_at"] == (0, None)
     assert "UNIQUE(lifecycle_id, plan_identity)" in unique_sql
     assert len(after_rows) == len(before_rows) == 4
@@ -2669,6 +2784,7 @@ def test_schema_v22_to_v23_adds_eligibility_cutoff_without_backfill(
         for column in before_columns:
             assert after[column] == before[column]
         assert after["last_eligibility_decision_at"] is None
+        assert after["last_eligibility_prefix_evidence_json"] is None
 
     def unexpected_repeat_migration(connection: sqlite3.Connection) -> None:
         del connection
@@ -2678,6 +2794,74 @@ def test_schema_v22_to_v23_adds_eligibility_cutoff_without_backfill(
         database_module,
         "_migrate_outcome_progress_eligibility_cutoff_v23",
         unexpected_repeat_migration,
+    )
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        _, reopened_rows = _progress_row_maps(connection)
+        assert identify_schema_version(connection) == SCHEMA_VERSION
+    assert reopened_rows == after_rows
+
+
+def test_schema_v23_to_v24_adds_prefix_evidence_without_backfill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.storage.database as database_module
+
+    db_path = tmp_path / "v23-prefix-evidence.db"
+    _create_schema_v23_outcome_progress_fixture(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        before_columns, before_rows = _progress_row_maps(connection)
+        assert identify_schema_version(connection) == 23
+        assert "last_eligibility_decision_at" in before_columns
+        assert "last_eligibility_prefix_evidence_json" not in before_columns
+        assert len(before_rows) == 2
+
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        after_columns, after_rows = _progress_row_maps(connection)
+        nullability = {
+            str(row[1]): (int(row[3]), row[4])
+            for row in connection.execute(
+                "PRAGMA table_info(setup_lifecycle_outcome_progress)"
+            ).fetchall()
+            if str(row[1]) == "last_eligibility_prefix_evidence_json"
+        }
+        unique_sql = connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'setup_lifecycle_outcome_progress'
+            """
+        ).fetchone()[0]
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 24
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    assert "last_eligibility_prefix_evidence_json" in after_columns
+    assert nullability["last_eligibility_prefix_evidence_json"] == (0, None)
+    assert "UNIQUE(lifecycle_id, plan_identity)" in unique_sql
+    assert len(after_rows) == len(before_rows) == 2
+    for before, after in zip(before_rows, after_rows, strict=True):
+        for column in before_columns:
+            assert after[column] == before[column]
+        assert after["last_eligibility_prefix_evidence_json"] is None
+    by_id = {row["lifecycle_id"]: row for row in after_rows}
+    assert by_id["v23-active-cutoff"]["last_eligibility_decision_at"] == "2026-09-01T10:00:00+00:00"
+    assert by_id["v23-active-null"]["last_eligibility_decision_at"] is None
+    assert by_id["v23-active-null"]["plan_version_id"] == "plan-version-v23"
+
+    def unexpected_repeat_v24(connection: sqlite3.Connection) -> None:
+        del connection
+        raise AssertionError("v24 reopen attempted the v23-to-v24 migration")
+
+    monkeypatch.setattr(
+        database_module,
+        "_migrate_outcome_progress_prefix_evidence_v24",
+        unexpected_repeat_v24,
     )
     with open_initialized_database(db_path):
         pass
