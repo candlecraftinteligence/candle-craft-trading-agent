@@ -23,7 +23,10 @@ No live or existing scan database was read.
 
 - **Authoritative stored outcome projection:** `setup_lifecycle_outcome_progress` keyed by `UNIQUE(lifecycle_id, plan_identity)`.
 - **`plan_identity`** hashes `lifecycle_id` plus geometry (`app.lifecycle.outcome_policy.canonical_plan_identity`). Compatibility aliases (`compatible_plan_identities`) are lookup variants, not proof of equal immutable economics.
-- **P1 `plan_version_id`** is latched on `setup_lifecycle_records` only. `evaluate_closed_candle_outcomes` does not receive or persist it.
+- **P1 `plan_version_id`** is latched on `setup_lifecycle_records`. P3B1 may also persist that
+  same id on new `setup_lifecycle_outcome_progress` rows when the evaluator can prove it.
+  Legacy/unproven progress remains NULL. `evaluate_closed_candle_outcomes` still keys rows
+  by `plan_identity`.
 - **Analytics** `setup_outcome_analytics` is keyed by `UNIQUE(lifecycle_id, final_outcome)` and has no `plan_identity` column. Nested `raw_payload_json.outcome_progress.plan_identity` may exist when the producer passed a progress snapshot. That nested identity is the only proven plan binding. Unbound analytics remains lifecycle-level evidence and must not decide a plan-specific economic conflict. P3A does not change analytics persistence.
 - **Events** are append-only; no event idempotency key. Repeated scans can append additional `ENTRY_FILL_SIMULATED` event records while a single progress row remains.
 - **Public delivery** uses `event_key` / `(signal_id, alert_type)` and is not an outcome owner.
@@ -78,16 +81,17 @@ Diagnostic P2A event-record counts use `(source_namespace, event_id)` when `even
 
 Reproduced with `evaluate_closed_candle_outcomes` on temporary SQLite:
 
-1. Repeated scans of one latched plan: **one** progress row; additional event records; `plan_version_id` remains absent from progress columns.
+1. Repeated scans of one latched plan: **one** progress row; additional event records; prospective
+   `plan_version_id` is stored on that progress row when P1 proof holds.
 2. Geometry change after latch: **two** progress `plan_identity` rows; old entry preserved; latched `plan_version_id` **preserved** with `plan_version_invariant_violation` (P1), so the new geometry must not inherit that id.
 3. TP1 then stop: `tp1_at` retained with `terminal_outcome=SL_HIT`.
 4. Two current generations of identical economics require superseding the first `is_current` row; `plan_version_id` can match while `plan_identity` differs.
 
-## Unresolved dependencies (next phase, not this PR)
+## Unresolved dependencies (later phases, not P3A)
 
-- Prospective `plan_version_id` on the outcome write boundary (producer/identity propagation).
 - Durable evaluation-anchor / run-namespace binding if one plan-outcome per version is required.
+- Analytics plan-binding proof before any analytics attribution.
 - Occurrence identity only if fill/trade statistics are required (separate from plan-level simulation).
 - Consumer query/denominator migration (research `tp_hit_rate` is lifecycle reachability; public follow-ups use compatible `plan_identity`).
 
-P3A does not implement those.
+P3A does not implement those. Prospective progress `plan_version_id` is P3B1.

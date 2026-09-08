@@ -329,6 +329,7 @@ def test_scanner_process_improvement_schema_columns_exist(tmp_path) -> None:
     assert {
         "lifecycle_id",
         "plan_identity",
+        "plan_version_id",
         "execution_timeframe",
         "tracking_start_at",
         "evaluation_cursor_open_at",
@@ -420,7 +421,7 @@ def test_schema_v19_backfills_existing_cursor_without_rewind_or_milestone_loss(
         progress.entry_at,
         progress.tp1_at,
     )
-    assert version == SCHEMA_VERSION == 21
+    assert version == SCHEMA_VERSION == 22
 
 
 def _create_schema_v19_public_truth_fixture(db_path: Path) -> None:
@@ -569,14 +570,14 @@ def test_schema_v19_to_v20_adds_public_truth_audit_columns_idempotently(
             """
         ).fetchone()
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert identify_schema_version(connection) == 21 == SCHEMA_VERSION
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 22
 
     assert expected_columns <= columns
     assert audit_defaults == ("N/A", "N/A", "N/A", "N/A", "N/A")
     assert _v19_public_truth_rows(db_path) == before
 
     with open_read_only_database(db_path) as connection:
-        assert identify_schema_version(connection) == 21
+        assert identify_schema_version(connection) == SCHEMA_VERSION
 
     def unexpected_repeat_migration(connection: sqlite3.Connection) -> None:
         del connection
@@ -1664,7 +1665,7 @@ def test_schema_v14_to_v17_preserves_lifecycle_and_telegram_data(
 
     assert _representative_v14_rows(db_path) == before
     version, tables, attempt_columns, public_columns = _schema_contract(db_path)
-    assert version == 21 == SCHEMA_VERSION
+    assert version == SCHEMA_VERSION == 22
     assert "setup_lifecycle_outcome_progress" in tables
     assert "public_alert_delivery_parts" in tables
     assert "delivery_state" in attempt_columns
@@ -1924,7 +1925,7 @@ def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:
         "v15-plan", "SENT", "2026-07-01T10:00:01Z", "SENT"
     )
     assert "public_alert_delivery_parts" in tables
-    assert version == 21 == SCHEMA_VERSION
+    assert version == SCHEMA_VERSION == 22
 
 
 def test_schema_v16_migration_is_idempotent_for_v15_delivery_data(tmp_path) -> None:
@@ -2191,7 +2192,7 @@ def test_schema_v20_to_v21_adds_economic_identity_columns_without_backfill(
             ).fetchall()
         }
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert identify_schema_version(connection) == 21 == SCHEMA_VERSION
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 22
 
     assert {"setup_id", "plan_version_id", "economic_identity_reason"} <= columns
     assert after is not None
@@ -2233,7 +2234,7 @@ def test_fresh_database_contains_economic_identity_schema(tmp_path: Path) -> Non
             str(row[1])
             for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
         }
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 21
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 22
         assert {"setup_id", "plan_version_id", "economic_identity_reason"} <= columns
         nullability = {
             str(row[1]): int(row[3])
@@ -2242,3 +2243,235 @@ def test_fresh_database_contains_economic_identity_schema(tmp_path: Path) -> Non
         }
         assert nullability == {"setup_id": 0, "plan_version_id": 0, "economic_identity_reason": 0}
 
+
+def _create_schema_v21_outcome_progress_fixture(db_path: Path) -> None:
+    """Build a genuine v21 progress table from the pre-P3B1 DDL, not a lowered v22 marker."""
+
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE setup_lifecycle_records (
+                lifecycle_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                current_state TEXT NOT NULL,
+                previous_state TEXT NOT NULL DEFAULT 'N/A',
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                last_transition_at TEXT NOT NULL,
+                entry_low TEXT NOT NULL DEFAULT 'N/A',
+                entry_high TEXT NOT NULL DEFAULT 'N/A',
+                stop_loss TEXT NOT NULL DEFAULT 'N/A',
+                tp1 TEXT NOT NULL DEFAULT 'N/A',
+                tp2 TEXT NOT NULL DEFAULT 'N/A',
+                tp3 TEXT NOT NULL DEFAULT 'N/A',
+                invalidation_logic TEXT NOT NULL DEFAULT 'N/A',
+                setup_identity TEXT NOT NULL DEFAULT 'N/A',
+                structural_anchor TEXT NOT NULL DEFAULT 'N/A',
+                is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0, 1)),
+                setup_id TEXT,
+                plan_version_id TEXT,
+                economic_identity_reason TEXT
+            );
+            CREATE TABLE setup_lifecycle_outcome_progress (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lifecycle_id TEXT NOT NULL REFERENCES setup_lifecycle_records(lifecycle_id) ON DELETE CASCADE,
+                plan_identity TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'N/A',
+                direction TEXT NOT NULL DEFAULT 'N/A',
+                execution_timeframe TEXT NOT NULL DEFAULT 'N/A',
+                tracking_start_at TEXT,
+                evaluation_cursor_open_at TEXT,
+                evaluation_cursor_close_at TEXT,
+                entry_at TEXT,
+                tp1_at TEXT,
+                tp2_at TEXT,
+                tp3_at TEXT,
+                stop_at TEXT,
+                invalidated_at TEXT,
+                outcome_at TEXT,
+                terminal_outcome TEXT NOT NULL DEFAULT 'N/A',
+                integrity_status TEXT NOT NULL DEFAULT 'N/A',
+                diagnostic TEXT NOT NULL DEFAULT 'N/A',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                first_evaluated_at TEXT NOT NULL,
+                last_evaluated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(lifecycle_id, plan_identity)
+            );
+            CREATE INDEX ix_lifecycle_outcome_progress_active_plan
+                ON setup_lifecycle_outcome_progress(lifecycle_id, plan_identity);
+            INSERT INTO setup_lifecycle_records (
+                lifecycle_id, symbol, mode, direction, current_state,
+                first_seen_at, last_seen_at, last_transition_at,
+                entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                invalidation_logic, setup_identity, structural_anchor, is_current,
+                setup_id, plan_version_id, economic_identity_reason
+            ) VALUES (
+                'v21-active', 'BTCUSDT', 'swing', 'long', 'MANAGING',
+                '2026-09-01T09:00:00+00:00',
+                '2026-09-01T10:00:00+00:00',
+                '2026-09-01T10:00:00+00:00',
+                '100', '102', '90', '110', '120', '130',
+                'Closed structure beyond the stored stop invalidates the plan.',
+                'BTCUSDT|swing|long|active', 'setup_generation_anchor|sweep-active', 1,
+                'setup-active', 'plan-version-active', NULL
+            ), (
+                'v21-terminal', 'ETHUSDT', 'swing', 'long', 'TP_HIT',
+                '2026-09-01T09:00:00+00:00',
+                '2026-09-01T11:00:00+00:00',
+                '2026-09-01T11:00:00+00:00',
+                '100', '102', '90', '110', '120', '130',
+                'Closed structure beyond the stored stop invalidates the plan.',
+                'ETHUSDT|swing|long|terminal', 'setup_generation_anchor|sweep-terminal', 1,
+                'setup-terminal', 'plan-version-terminal', NULL
+            );
+            INSERT INTO setup_lifecycle_outcome_progress (
+                lifecycle_id, plan_identity, symbol, mode, direction, execution_timeframe,
+                tracking_start_at, evaluation_cursor_open_at, evaluation_cursor_close_at,
+                entry_at, tp1_at, tp2_at, tp3_at, stop_at, invalidated_at, outcome_at,
+                terminal_outcome, integrity_status, diagnostic, metadata_json,
+                first_evaluated_at, last_evaluated_at, created_at, updated_at
+            ) VALUES (
+                'v21-active', 'plan-v21-active', 'BTCUSDT', 'swing', 'long', '15m',
+                '2026-09-01T09:30:00+00:00',
+                '2026-09-01T09:45:00+00:00',
+                '2026-09-01T10:00:00+00:00',
+                '2026-09-01T09:45:00+00:00',
+                NULL, NULL, NULL, NULL, NULL, NULL,
+                'N/A', 'Verified', 'N/A', '{"source":"v21-active"}',
+                '2026-09-01T09:30:00+00:00',
+                '2026-09-01T10:00:00+00:00',
+                '2026-09-01T09:30:00+00:00',
+                '2026-09-01T10:00:00+00:00'
+            ), (
+                'v21-terminal', 'plan-v21-terminal', 'ETHUSDT', 'swing', 'long', '15m',
+                '2026-09-01T09:30:00+00:00',
+                '2026-09-01T09:45:00+00:00',
+                '2026-09-01T11:00:00+00:00',
+                '2026-09-01T09:45:00+00:00',
+                '2026-09-01T10:00:00+00:00',
+                '2026-09-01T10:30:00+00:00',
+                '2026-09-01T11:00:00+00:00',
+                NULL, NULL,
+                '2026-09-01T11:00:00+00:00',
+                'TP_HIT', 'Verified', 'N/A', '{"source":"v21-terminal"}',
+                '2026-09-01T09:30:00+00:00',
+                '2026-09-01T11:00:00+00:00',
+                '2026-09-01T09:30:00+00:00',
+                '2026-09-01T11:00:00+00:00'
+            );
+            PRAGMA user_version = 21;
+            """
+        )
+        connection.commit()
+
+
+def _progress_row_maps(connection: sqlite3.Connection) -> tuple[list[str], list[dict[str, object]]]:
+    cursor = connection.execute(
+        "SELECT * FROM setup_lifecycle_outcome_progress ORDER BY id"
+    )
+    columns = [item[0] for item in cursor.description]
+    rows = [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+    return columns, rows
+
+
+def test_schema_v21_to_v22_adds_progress_plan_version_without_backfill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.storage.database as database_module
+
+    db_path = tmp_path / "v21-progress-attribution.db"
+    _create_schema_v21_outcome_progress_fixture(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        before_columns, before_rows = _progress_row_maps(connection)
+        record_before = connection.execute(
+            """
+            SELECT lifecycle_id, symbol, tp3, setup_id, plan_version_id
+            FROM setup_lifecycle_records ORDER BY lifecycle_id
+            """
+        ).fetchall()
+        assert identify_schema_version(connection) == 21
+        assert "plan_version_id" not in before_columns
+        assert len(before_rows) == 2
+
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        after_columns, after_rows = _progress_row_maps(connection)
+        record_after = connection.execute(
+            """
+            SELECT lifecycle_id, symbol, tp3, setup_id, plan_version_id
+            FROM setup_lifecycle_records ORDER BY lifecycle_id
+            """
+        ).fetchall()
+        nullability = {
+            str(row[1]): int(row[3])
+            for row in connection.execute(
+                "PRAGMA table_info(setup_lifecycle_outcome_progress)"
+            ).fetchall()
+            if str(row[1]) == "plan_version_id"
+        }
+        unique_sql = connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'setup_lifecycle_outcome_progress'
+            """
+        ).fetchone()[0]
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 22
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    assert "plan_version_id" in after_columns
+    assert nullability == {"plan_version_id": 0}
+    assert "UNIQUE(lifecycle_id, plan_identity)" in unique_sql.replace(" ", "") or (
+        "UNIQUE(lifecycle_id, plan_identity)" in unique_sql
+    )
+    assert record_after == record_before
+    assert len(after_rows) == len(before_rows) == 2
+    for before, after in zip(before_rows, after_rows, strict=True):
+        for column in before_columns:
+            assert after[column] == before[column]
+        assert after["plan_version_id"] is None
+
+    def unexpected_repeat_migration(connection: sqlite3.Connection) -> None:
+        del connection
+        raise AssertionError("v22 reopen attempted the v21-to-v22 migration")
+
+    monkeypatch.setattr(
+        database_module,
+        "_migrate_outcome_progress_plan_version_v22",
+        unexpected_repeat_migration,
+    )
+    with open_initialized_database(db_path):
+        pass
+
+    with sqlite3.connect(db_path) as connection:
+        _, reopened_rows = _progress_row_maps(connection)
+        assert identify_schema_version(connection) == SCHEMA_VERSION
+    assert reopened_rows == after_rows
+
+
+def test_fresh_database_contains_progress_plan_version_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "fresh-progress-plan-version.db"
+    with open_initialized_database(db_path):
+        pass
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            str(row[1]): int(row[3])
+            for row in connection.execute(
+                "PRAGMA table_info(setup_lifecycle_outcome_progress)"
+            ).fetchall()
+        }
+        analytics_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(setup_outcome_analytics)").fetchall()
+        }
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 22
+        assert columns["plan_version_id"] == 0
+        assert "plan_version_id" not in analytics_columns

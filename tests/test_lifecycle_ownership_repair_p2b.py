@@ -132,7 +132,7 @@ def _symbol_from_transition(result, *, signal_id: str = LIFE):
 
 
 def test_schema_version_unchanged_for_p2b() -> None:
-    assert SCHEMA_VERSION == 21
+    assert SCHEMA_VERSION == 22
     assert SetupLifecycleState.CONFIRMED in PLAN_LOCK_STATES
     assert SetupLifecycleState.ACTIONABLE_A_GRADE in PLAN_LOCK_STATES
     assert SetupLifecycleState.TRIGGERED not in PLAN_LOCK_STATES
@@ -369,10 +369,10 @@ def test_watch_activation_accounting_is_not_implied_by_lifecycle_stay() -> None:
     ).symbol == "BTCUSDT"
 
 
-def test_fresh_database_stays_on_schema_v21(tmp_path: Path) -> None:
+def test_fresh_database_stays_on_current_schema(tmp_path: Path) -> None:
     path = tmp_path / "fresh.sqlite"
     with open_initialized_database(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_public_first_confirmation_is_preserved_and_reentry_is_not_required(tmp_path: Path) -> None:

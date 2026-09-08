@@ -283,6 +283,7 @@ class SetupLifecycleOutcomeProgress(BaseModel):
     metadata_json: str = "{}"
     first_evaluated_at: str
     last_evaluated_at: str
+    plan_version_id: str | None = Field(default=None, exclude=True)
 
     model_config = ConfigDict(frozen=True)
 
@@ -311,6 +312,16 @@ class SetupLifecycleOutcomeProgress(BaseModel):
             return NA
         text = str(value).strip()
         return text if text else NA
+
+    @field_validator("plan_version_id", mode="before")
+    @classmethod
+    def _normalize_optional_progress_plan_version(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text or text.upper() == NA:
+            return None
+        return text
 
 
 class SetupTransitionResult(BaseModel):

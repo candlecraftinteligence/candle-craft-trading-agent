@@ -314,14 +314,17 @@ def _entities() -> dict[str, Any]:
             current_meaning=(
                 "P1 parallel foundation: setup_lifecycle_records.plan_version_id is a SHA-256 "
                 "of immutable plan economics (schema, setup_id, entry/stop/TPs, invalidation) "
-                "without lifecycle_id. It is not yet used by outcome, public, or Telegram "
-                "consumers. Current consumer joins still use plan_identity, which includes "
-                "lifecycle_id. TRIGGERED remains outside PLAN_LOCK_STATES, so plan_version_id "
-                "is not latched in that state. No exit/fill-policy version exists to include."
+                "without lifecycle_id. Outcome progress may persist that same id prospectively "
+                "when the closed-candle evaluator can prove it remints from the frozen economics "
+                "being evaluated. Public, Telegram, health, memory, and analytics consumers still "
+                "join on plan_identity. TRIGGERED remains outside PLAN_LOCK_STATES, so "
+                "plan_version_id is not latched in that state. No exit/fill-policy version exists to include."
             ),
             intended_research_meaning="Immutable snapshot of economics; supersession creates a new version",
             current_authoritative_id=(
-                "setup_lifecycle_records.plan_version_id (P1 parallel; not used by outcome/public consumers)"
+                "setup_lifecycle_records.plan_version_id (P1 parallel); "
+                "setup_lifecycle_outcome_progress.plan_version_id is prospective evidence "
+                "attribution only and is not a public/runtime decision input"
             ),
             proposed_future_id="plan_version_id as outcome/trade authority after consumer migration",
             unit="hashed plan economics independent of lifecycle_id; NULL when unavailable/legacy",
@@ -330,9 +333,12 @@ def _entities() -> dict[str, Any]:
             mutability="latched once in PLAN_LOCK_STATES; later geometry change is invariant_violation, not overwrite",
             timestamp_semantics="No dedicated plan-version timestamp; uses lifecycle first_seen_at / last_transition_at",
             relationships="Many lifecycle_ids may share one setup_id; plan_version_id is per latched economics; no UNIQUE constraint",
-            cardinality="0..1 latched plan_version_id per lifecycle row; historical rows remain NULL",
+            cardinality="0..1 latched plan_version_id per lifecycle row; 0..1 prospective nullable plan_version_id per progress row; historical progress remains NULL",
             research_statistics_safe=UNSAFE,
-            producers=("app.lifecycle.economic_identity.latch_economic_identities",),
+            producers=(
+                "app.lifecycle.economic_identity.latch_economic_identities",
+                "app.lifecycle.outcomes.evaluate_closed_candle_outcomes",
+            ),
             consumers=(
                 "app.analytics.outcome_ownership.project_outcome_ownership "
                 "(P3A diagnostic of explicitly supplied records; not a runtime consumer)",
@@ -1278,11 +1284,13 @@ def _outcome_ownership_contract() -> dict[str, Any]:
             "established": False,
             "status": "unproven",
             "current_owner": "setup_lifecycle_outcome_progress UNIQUE(lifecycle_id, plan_identity)",
-            "plan_version_id_at_outcome_write_boundary": "absent",
+            "plan_version_id_at_outcome_write_boundary": "prospective_progress_nullable",
             "reason": (
-                "evaluate_closed_candle_outcomes persists progress by plan_identity, which "
-                "hashes lifecycle_id plus geometry. plan_version_id is latched only on "
-                "setup_lifecycle_records and is not written onto progress, events, or analytics."
+                "evaluate_closed_candle_outcomes may persist a proven P1 plan_version_id on "
+                "new setup_lifecycle_outcome_progress rows. Legacy, unproven, reconstructed, "
+                "and invariant-conflicting rows remain SQL NULL. Physical uniqueness remains "
+                "UNIQUE(lifecycle_id, plan_identity). Analytics and events are unchanged. "
+                "Canonical plan-outcome ownership remains unestablished."
             ),
         },
         "source_evidence_row": (
@@ -1292,9 +1300,12 @@ def _outcome_ownership_contract() -> dict[str, Any]:
             "same physical key remain a conflict."
         ),
         "verified_immutable_plan_identity": (
-            "A plan_version_id that remints from the supplied lifecycle snapshot economics "
-            "and, for progress rows, whose plan_identity matches compatible_plan_identities "
-            "of that same snapshot. Missing/null/legacy ids stay unavailable."
+            "A plan_version_id that remints from the evaluated frozen economics. Progress rows "
+            "use a persisted non-NULL plan_version_id when present; an explicit NULL is not "
+            "filled from a later lifecycle snapshot. Payloads without the key keep the "
+            "lifecycle-snapshot remint check. plan_identity must match "
+            "compatible_plan_identities of that same snapshot. Missing/null/legacy ids stay "
+            "unavailable."
         ),
         "plan_level_outcome": (
             "A diagnostic interpretation of one coherent evaluation context for a verified "

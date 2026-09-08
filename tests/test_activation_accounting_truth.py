@@ -139,7 +139,7 @@ def _confirmed_observation(**overrides: object) -> LifecycleObservation:
 
 
 def test_schema_version_is_unchanged() -> None:
-    assert SCHEMA_VERSION == 21
+    assert SCHEMA_VERSION == 22
     assert evidence_contract_payload()["activation_accounting"]["schema_version_unchanged"] is True
     assert CONTRACT_VERSION == "cci-evidence-contract-v2"
 
@@ -486,10 +486,10 @@ def test_accounting_module_is_not_an_operational_input() -> None:
     assert banned not in inspect.getsource(service)
     assert banned not in inspect.getsource(telegram_lifecycle)
     assert banned not in inspect.getsource(watch_summary)
-    assert SCHEMA_VERSION == 21
+    assert SCHEMA_VERSION == 22
 
 
-def test_fresh_database_stays_on_schema_v21(tmp_path: Path) -> None:
+def test_fresh_database_stays_on_current_schema(tmp_path: Path) -> None:
     path = tmp_path / "fresh.sqlite"
     with open_initialized_database(path) as connection:
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -497,5 +497,5 @@ def test_fresh_database_stays_on_schema_v21(tmp_path: Path) -> None:
             row[1]
             for row in connection.execute("PRAGMA table_info(scan_runs)").fetchall()
         }
-    assert user_version == 21
+    assert user_version == SCHEMA_VERSION
     assert "valid_activations" in columns

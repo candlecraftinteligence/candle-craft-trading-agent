@@ -288,11 +288,11 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         self._connection.execute(
             """
             INSERT INTO setup_lifecycle_outcome_progress (
-                lifecycle_id, plan_identity, symbol, mode, direction, execution_timeframe,
+                lifecycle_id, plan_identity, plan_version_id, symbol, mode, direction, execution_timeframe,
                 tracking_start_at, evaluation_cursor_open_at, evaluation_cursor_close_at, entry_at, tp1_at,
                 tp2_at, tp3_at, stop_at, invalidated_at, outcome_at, terminal_outcome,
                 integrity_status, diagnostic, metadata_json, first_evaluated_at, last_evaluated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lifecycle_id, plan_identity) DO UPDATE SET
                 symbol = excluded.symbol,
                 mode = excluded.mode,
@@ -383,6 +383,7 @@ def _outcome_progress_params(progress: SetupLifecycleOutcomeProgress) -> tuple[A
     return (
         progress.lifecycle_id,
         progress.plan_identity,
+        progress.plan_version_id,
         progress.symbol,
         progress.mode,
         progress.direction,
@@ -410,6 +411,7 @@ def _outcome_progress_from_row(row: sqlite3.Row) -> SetupLifecycleOutcomeProgres
     return SetupLifecycleOutcomeProgress(
         lifecycle_id=row["lifecycle_id"],
         plan_identity=row["plan_identity"],
+        plan_version_id=row["plan_version_id"] if "plan_version_id" in row.keys() else None,
         symbol=row["symbol"],
         mode=row["mode"],
         direction=row["direction"],

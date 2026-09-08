@@ -275,6 +275,38 @@ def latch_economic_identities(
     )
 
 
+def proven_progress_plan_version_id(record: SetupLifecycleRecord) -> str | None:
+    """Return the existing P1 id only when it remints from the evaluated economics.
+
+    This does not mint a replacement identity. Invariant-conflicting replacement
+    geometry keeps the latched lifecycle id but must not attribute a new
+    progress row to that old owner.
+    """
+
+    stored = _optional_latched_id(record.plan_version_id)
+    if stored is None:
+        return None
+    reason = record.economic_identity_reason or ""
+    if REASON_PLAN_VERSION_INVARIANT_VIOLATION in reason:
+        return None
+    setup_id = _optional_latched_id(record.setup_id)
+    if setup_id is None:
+        return None
+    candidate = mint_plan_version_id(
+        setup_id=setup_id,
+        entry_low=record.entry_low,
+        entry_high=record.entry_high,
+        stop_loss=record.stop_loss,
+        tp1=record.tp1,
+        tp2=record.tp2,
+        tp3=record.tp3,
+        invalidation=_stored_invalidation(record),
+    )
+    if not candidate.available or candidate.identity != stored:
+        return None
+    return stored
+
+
 def _preserved_latched_plan_result(
     latched_plan: str,
     candidate: IdentityMintResult,
@@ -502,4 +534,5 @@ __all__ = [
     "latch_economic_identities",
     "mint_plan_version_id",
     "mint_setup_id",
+    "proven_progress_plan_version_id",
 ]
