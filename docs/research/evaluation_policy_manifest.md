@@ -6,7 +6,6 @@
 **Schema:** application `SCHEMA_VERSION` / SQLite `PRAGMA user_version` = **25** unchanged. No admission, episode, policy-hash, or source-namespace columns exist.
 
 Machine-readable catalog: `app/analytics/evaluation_policy.py` (`cci-evaluation-policy-manifest-v1`).
-Copy-paste ChatGPT / ASTRA return report: `docs/research/CCI_EVAL_POLICY_CHATGPT_ASTRA_REPORT.md`.
 Fixtures in `tests/test_evaluation_policy_manifest.py` are labeled synthetic. No live or existing scan database was read.
 
 This phase is a finite successor to EVAL_SEMANTICS. EVAL_SEMANTICS specified **what current evaluators mean** and proved paired non-equivalence. This phase names that policy surface as an inspectable **manifest** and proves it is **not** an immutable evaluation-policy binding.
