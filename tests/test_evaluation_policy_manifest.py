@@ -315,3 +315,27 @@ def test_claim_preservation_admission_and_replay_authority_remain_unproven() -> 
     assert manifest["authority"]["expectancy"] == UNAVAILABLE
     assert ReplayConfig().same_candle_policy == "conservative"
     _ = EVIDENCE_SOURCE_ONLY
+
+
+def test_chatgpt_astra_return_report_is_copy_paste_complete() -> None:
+    report = Path("docs/research/CCI_EVAL_POLICY_CHATGPT_ASTRA_REPORT.md").read_text(encoding="utf-8")
+    assert "BEGIN ASTRA REPORT" in report
+    assert "END ASTRA REPORT" in report
+    assert report.index("BEGIN ASTRA REPORT") < report.index("END ASTRA REPORT")
+    required = (
+        "Admission STOP remains",
+        "SCHEMA_VERSION",
+        "evaluation_policy_id",
+        "policy_hash",
+        "unavailable",
+        "replay as runtime outcome authority",
+        "CORRECTNESS > COMPLETION",
+        "NOT authorized",
+        "unique_trade_count",
+        "https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/117",
+    )
+    for token in required:
+        assert token in report, token
+        body = report.split("\nBEGIN ASTRA REPORT\n", 1)[1].split("\nEND ASTRA REPORT", 1)[0]
+        assert "Do not implement it from this" in body
+        assert "The original master-prompt file body was not available to Cursor." in body
