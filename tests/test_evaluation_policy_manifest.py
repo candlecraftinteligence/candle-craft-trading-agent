@@ -46,10 +46,13 @@ from app.research.evaluation_policy import (
     MANIFEST_FORMAT_VERSION,
     POLICY_ID_PREFIX,
     REPLAY_CALL_BOUNDARY,
+    REPLAY_SOURCE_SYMBOL,
     RUNTIME_CALL_BOUNDARY,
+    RUNTIME_SOURCE_SYMBOL,
     UNUSED_REPLAY_HELPER,
     build_replay_evaluation_policy,
     build_runtime_evaluation_policy,
+    evaluation_policy_provenance,
     parse_evaluation_policy_payload,
     resolve_replay_effective_parameters,
 )
@@ -206,6 +209,73 @@ def test_runtime_and_replay_families_and_replay_policies_have_distinct_identitie
     assert replay_conservative.policy_id != replay_hour.policy_id
     assert runtime.to_canonical_dict()["scope"]["call_boundary"] == RUNTIME_CALL_BOUNDARY
     assert replay_conservative.to_canonical_dict()["scope"]["call_boundary"] == REPLAY_CALL_BOUNDARY
+    assert RUNTIME_CALL_BOUNDARY == "runtime_closed_candle_outcome_evaluation"
+    assert REPLAY_CALL_BOUNDARY == "replay_trade_simulation"
+
+
+def test_source_audit_provenance_is_outside_policy_identity() -> None:
+    runtime = _runtime_policy()
+    replay = _replay_policy()
+    runtime_provenance = evaluation_policy_provenance(family=EVALUATOR_FAMILY_RUNTIME)
+    replay_provenance = evaluation_policy_provenance(family=EVALUATOR_FAMILY_REPLAY)
+    runtime_encoded = runtime.canonical_bytes.decode("utf-8")
+    replay_encoded = replay.canonical_bytes.decode("utf-8")
+    relocated_runtime = dict(runtime_provenance)
+    relocated_runtime["source_symbol"] = "app.lifecycle.outcomes.evaluate_closed_candle_outcomes_relocated"
+    relocated_replay = dict(replay_provenance)
+    relocated_replay["source_symbol"] = "app.backtesting.strategy_replay.simulate_trade_relocated"
+
+    assert runtime_provenance["source_symbol"] == RUNTIME_SOURCE_SYMBOL
+    assert replay_provenance["source_symbol"] == REPLAY_SOURCE_SYMBOL
+    assert replay_provenance["unused_helper_source_symbol"] == UNUSED_REPLAY_HELPER
+    assert runtime.to_canonical_dict()["scope"]["call_boundary"] == runtime_provenance["semantic_call_boundary"]
+    assert "app.lifecycle" not in runtime_encoded
+    assert "app.backtesting" not in replay_encoded
+    assert RUNTIME_SOURCE_SYMBOL not in runtime_encoded
+    assert REPLAY_SOURCE_SYMBOL not in replay_encoded
+    assert UNUSED_REPLAY_HELPER not in replay_encoded
+    assert inspect.signature(build_runtime_evaluation_policy).parameters.keys().isdisjoint(
+        {"source_symbol", "provenance", "git_sha"}
+    )
+    assert inspect.signature(build_replay_evaluation_policy).parameters.keys().isdisjoint(
+        {"source_symbol", "provenance", "git_sha"}
+    )
+    assert runtime.policy_id == _runtime_policy().policy_id
+    assert replay.policy_id == _replay_policy().policy_id
+    assert relocated_runtime["source_symbol"] != runtime_provenance["source_symbol"]
+    assert relocated_replay["source_symbol"] not in replay_encoded
+
+    sourced = deepcopy(runtime.to_canonical_dict())
+    sourced["scope"]["call_boundary"] = RUNTIME_SOURCE_SYMBOL
+    with pytest.raises(EvaluationPolicyError):
+        parse_evaluation_policy_payload(sourced)
+    replay_sourced = deepcopy(replay.to_canonical_dict())
+    replay_sourced["scope"]["call_boundary"] = REPLAY_SOURCE_SYMBOL
+    with pytest.raises(EvaluationPolicyError):
+        parse_evaluation_policy_payload(replay_sourced)
+
+
+def test_semantic_scope_rules_and_parameters_invalidate_or_change_identity() -> None:
+    runtime = _runtime_policy(timeframe="5m")
+    replay = _replay_policy(execution_timeframe="5m", max_fill_candles=20, max_hold_candles=20)
+    other_tf = _runtime_policy(timeframe="15m")
+    other_hold = _replay_policy(execution_timeframe="5m", max_fill_candles=20, max_hold_candles=21)
+    assert runtime.policy_id != replay.policy_id
+    assert runtime.policy_id != other_tf.policy_id
+    assert replay.policy_id != other_hold.policy_id
+
+    swapped_scope = deepcopy(runtime.to_canonical_dict())
+    swapped_scope["scope"]["call_boundary"] = REPLAY_CALL_BOUNDARY
+    with pytest.raises(EvaluationPolicyError, match="unknown_value:scope.call_boundary"):
+        parse_evaluation_policy_payload(swapped_scope)
+    mutated_rules = deepcopy(runtime.to_canonical_dict())
+    mutated_rules["rules"]["entry_representation"]["model"] = "invented_zone"
+    with pytest.raises(EvaluationPolicyError, match="rules_must_match_declared_vocabulary"):
+        parse_evaluation_policy_payload(mutated_rules)
+    mutated_family = deepcopy(runtime.to_canonical_dict())
+    mutated_family["evaluator_family"] = EVALUATOR_FAMILY_REPLAY
+    with pytest.raises(EvaluationPolicyError):
+        parse_evaluation_policy_payload(mutated_family)
 
 
 def test_equivalent_explicit_and_default_limits_share_identity_unrelated_fields_do_not() -> None:
@@ -331,6 +401,8 @@ def test_plan_ids_prices_sha_time_and_db_filename_are_not_identity_inputs() -> N
         "main_live_runtime.sqlite",
         "BTCUSDT",
         "101",
+        RUNTIME_SOURCE_SYMBOL,
+        REPLAY_SOURCE_SYMBOL,
     ):
         assert token not in encoded
 

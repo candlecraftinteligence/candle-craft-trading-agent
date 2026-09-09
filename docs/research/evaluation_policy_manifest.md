@@ -47,7 +47,7 @@ Identity payload fields, and only these, are hashed:
 | --- | --- |
 | `manifest_format_version` | `cci-evaluation-policy-manifest-v1` |
 | `evaluator_family` | `runtime_lifecycle_closed_candle` or `replay_trade_simulation` |
-| `scope` | call boundary, includes, excludes |
+| `scope` | semantic call-boundary token, includes, excludes — not Python source paths |
 | `rule_vocabulary_version` | family-specific rule corpus |
 | `rules` | operational definitions of in-scope predicates |
 | `effective_parameters` | normalized evaluator parameters |
@@ -73,10 +73,20 @@ Outside identity (audit only, not hashed): code SHA, source paths, line numbers,
 
 Deep immutability: nested `MappingProxyType` / tuples; `to_canonical_dict()` is a JSON round-trip copy. Mutating caller-owned inputs or exported copies cannot change `canonical_bytes` / `policy_id`.
 
-Call boundaries:
+Call-boundary identity is semantic, not a Python source path:
 
-- runtime: `app.lifecycle.outcomes.evaluate_closed_candle_outcomes`
-- replay: `app.backtesting.strategy_replay._simulate_trade`
+| Family | Hashed `scope.call_boundary` |
+| --- | --- |
+| runtime | `runtime_closed_candle_outcome_evaluation` |
+| replay | `replay_trade_simulation` |
+
+Audit/provenance, via `evaluation_policy_provenance()` and module constants, remains **outside** `canonical_bytes` and `policy_id`:
+
+- runtime source: `app.lifecycle.outcomes.evaluate_closed_candle_outcomes`
+- replay source: `app.backtesting.strategy_replay._simulate_trade`
+- unused helper (excluded from policy): `app.backtesting.strategy_replay._evaluate_exit_candle`
+
+A pure refactor or module/function move with identical evaluator semantics must not churn the policy ID. A changed semantic call-boundary, rule vocabulary, or effective parameter must change or reject identity.
 
 A runtime evaluator invoked on synthetic or reconstructed candles remains the runtime family. Family name does not assert live observation.
 
@@ -139,7 +149,7 @@ Evidence classes:
 
 | Path | Class | Note |
 | --- | --- | --- |
-| `evaluate_closed_candle_outcomes` with constructed record | 2 | Not scanner discovery |
+| `evaluate_closed_candle_outcomes` with constructed record (audit owner; not identity) | 2 | Not scanner discovery |
 | `SetupLifecycleService.apply_to_symbol_result` after planted record | mixed 1+2 | Ordinary service evaluation; dump excludes execution candles/TF/decision timestamp |
 | `StrategyReplayEngine.run` bullish fixture | 1 | Not the same opportunity as runtime paired plans |
 | Empty list / REJECTED / continuity gap | 2/3 | Unresolved, not invented outcomes |

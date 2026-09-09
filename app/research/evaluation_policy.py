@@ -95,10 +95,17 @@ _REPLAY_RULE_KEYS: Final[tuple[str, ...]] = (
     "price_consumption",
 )
 
-# Provenance is intentionally outside the identity payload.
-RUNTIME_CALL_BOUNDARY: Final[str] = "app.lifecycle.outcomes.evaluate_closed_candle_outcomes"
-REPLAY_CALL_BOUNDARY: Final[str] = "app.backtesting.strategy_replay._simulate_trade"
+# Semantic call-boundary tokens are part of identity. Python source symbols are not.
+RUNTIME_CALL_BOUNDARY: Final[str] = "runtime_closed_candle_outcome_evaluation"
+REPLAY_CALL_BOUNDARY: Final[str] = "replay_trade_simulation"
+RUNTIME_SOURCE_SYMBOL: Final[str] = "app.lifecycle.outcomes.evaluate_closed_candle_outcomes"
+REPLAY_SOURCE_SYMBOL: Final[str] = "app.backtesting.strategy_replay._simulate_trade"
 UNUSED_REPLAY_HELPER: Final[str] = "app.backtesting.strategy_replay._evaluate_exit_candle"
+_FORBIDDEN_IDENTITY_SOURCE_SYMBOLS: Final[tuple[str, ...]] = (
+    RUNTIME_SOURCE_SYMBOL,
+    REPLAY_SOURCE_SYMBOL,
+    UNUSED_REPLAY_HELPER,
+)
 
 
 class EvaluationPolicyError(ValueError):
@@ -227,6 +234,7 @@ def parse_evaluation_policy_payload(payload: Mapping[str, Any]) -> EvaluationPol
         "rules": rules,
         "effective_parameters": params,
     }
+    _reject_embedded_source_symbols(validated)
     frozen = _freeze(validated)
     canonical = canonical_json_bytes(validated)
     policy_id = _policy_id_for(canonical)
@@ -253,6 +261,29 @@ def canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
     except (TypeError, ValueError) as exc:
         raise EvaluationPolicyError("canonical_json_rejected") from exc
     return text.encode("utf-8")
+
+
+def evaluation_policy_provenance(*, family: str) -> Mapping[str, Any]:
+    """Return audit-only source locations for a family. Not part of policy identity."""
+
+    if family == EVALUATOR_FAMILY_RUNTIME:
+        return MappingProxyType(
+            {
+                "evaluator_family": EVALUATOR_FAMILY_RUNTIME,
+                "semantic_call_boundary": RUNTIME_CALL_BOUNDARY,
+                "source_symbol": RUNTIME_SOURCE_SYMBOL,
+            }
+        )
+    if family == EVALUATOR_FAMILY_REPLAY:
+        return MappingProxyType(
+            {
+                "evaluator_family": EVALUATOR_FAMILY_REPLAY,
+                "semantic_call_boundary": REPLAY_CALL_BOUNDARY,
+                "source_symbol": REPLAY_SOURCE_SYMBOL,
+                "unused_helper_source_symbol": UNUSED_REPLAY_HELPER,
+            }
+        )
+    raise EvaluationPolicyError("unknown_evaluator_family")
 
 
 def resolve_replay_effective_parameters(
@@ -553,6 +584,7 @@ def _validate_scope(value: Any, expected: Mapping[str, Any]) -> dict[str, Any]:
         path="scope.call_boundary",
         allowed={expected["call_boundary"]},
     )
+    _reject_embedded_source_symbols(call_boundary, path="scope.call_boundary")
     identity_describes = _require_token(
         value.get("identity_describes"),
         path="scope.identity_describes",
@@ -702,6 +734,24 @@ def _reject_unknown_keys(value: Mapping[str, Any], allowed: Sequence[str], *, pa
             raise EvaluationPolicyError(f"unknown_field:{location}")
 
 
+def _reject_embedded_source_symbols(value: Any, *, path: str = "") -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            location = f"{path}.{key}" if path else str(key)
+            _reject_embedded_source_symbols(item, path=location)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for index, item in enumerate(value):
+            _reject_embedded_source_symbols(item, path=f"{path}[{index}]")
+        return
+    if isinstance(value, str):
+        for symbol in _FORBIDDEN_IDENTITY_SOURCE_SYMBOLS:
+            if symbol in value:
+                raise EvaluationPolicyError(f"source_symbol_not_identity:{path}")
+        if value.startswith("app.") and value.count(".") >= 2:
+            raise EvaluationPolicyError(f"source_symbol_not_identity:{path}")
+
+
 def _reject_placeholder(value: str, *, path: str) -> None:
     if value.strip().lower() in FORBIDDEN_PLACEHOLDERS:
         raise EvaluationPolicyError(f"unresolved_placeholder:{path}")
@@ -750,12 +800,15 @@ __all__ = [
     "POLICY_ID_PREFIX",
     "REPLAY_CALL_BOUNDARY",
     "REPLAY_RULE_VOCABULARY_VERSION",
+    "REPLAY_SOURCE_SYMBOL",
     "RUNTIME_CALL_BOUNDARY",
     "RUNTIME_RULE_VOCABULARY_VERSION",
+    "RUNTIME_SOURCE_SYMBOL",
     "UNUSED_REPLAY_HELPER",
     "build_replay_evaluation_policy",
     "build_runtime_evaluation_policy",
     "canonical_json_bytes",
+    "evaluation_policy_provenance",
     "parse_evaluation_policy_payload",
     "resolve_replay_effective_parameters",
 ]
