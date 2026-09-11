@@ -790,6 +790,22 @@ def assess_runtime_checkpoint_evidence(packet: Mapping[str, Any]) -> dict[str, A
     )
 
 
+def planning_reserve_floor_bytes(volume_total_bytes: int) -> int:
+    """Planning floor: max(10 GiB, 10% of that volume). A stronger reserve may only raise it."""
+
+    return max(OPERATING_RESERVE_FLOOR_BYTES, int(volume_total_bytes) * OPERATING_RESERVE_FLOOR_PERCENT // 100)
+
+
+def classify_windows_local_device(drive_type: str) -> bool | dict[str, str]:
+    """Map GetDriveTypeW names. Unknown/unavailable is not proven local."""
+
+    if drive_type in {"DRIVE_FIXED", "DRIVE_REMOVABLE", "DRIVE_RAMDISK"}:
+        return True
+    if drive_type == "DRIVE_REMOTE":
+        return False
+    return {"status": UNAVAILABLE, "reason": f"drive_type_{drive_type}"}
+
+
 def assess_capacity_budget(capacity: Mapping[str, Any]) -> dict[str, Any]:
     missing: list[str] = []
     total = capacity.get("volume_total_bytes")
@@ -815,6 +831,36 @@ def assess_capacity_budget(capacity: Mapping[str, Any]) -> dict[str, Any]:
         else:
             terms[key] = int(value)
 
+    backup_shares = capacity.get("backup_shares_db_volume", True)
+    restore_shares = capacity.get("restore_shares_db_volume", True)
+    if backup_shares is not True and backup_shares is not False:
+        missing.append("capacity.backup_shares_db_volume")
+    if restore_shares is not True and restore_shares is not False:
+        missing.append("capacity.restore_shares_db_volume")
+    if backup_shares is False and not _is_non_negative_int(capacity.get("backup_volume_free_bytes")):
+        missing.append("capacity.backup_volume_free_bytes")
+    if restore_shares is False and not _is_non_negative_int(capacity.get("restore_volume_free_bytes")):
+        missing.append("capacity.restore_volume_free_bytes")
+
+    reserve_floor = planning_reserve_floor_bytes(total) if _is_positive_int(total) else None
+    declared_reserve = terms.get("operating_reserve_bytes")
+    if reserve_floor is not None and declared_reserve is not None and declared_reserve < reserve_floor:
+        missing.append(
+            "capacity.operating_reserve_bytes below planning floor "
+            f"(max(10GiB, 10% of volume)={reserve_floor}); a stronger requirement cannot be smaller than the floor"
+        )
+    # stronger_reserve_requirement_recorded is ignored: a boolean cannot waive the floor.
+    stronger = capacity.get("stronger_reserve_requirement_bytes")
+    if stronger is not None:
+        if not _is_positive_int(stronger):
+            missing.append("capacity.stronger_reserve_requirement_bytes")
+            stronger = None
+        elif reserve_floor is not None and stronger < reserve_floor:
+            missing.append(
+                "capacity.stronger_reserve_requirement_bytes below planning floor "
+                f"(max(10GiB, 10% of volume)={reserve_floor})"
+            )
+
     if missing:
         return {
             "status": "incomplete",
@@ -822,62 +868,119 @@ def assess_capacity_budget(capacity: Mapping[str, Any]) -> dict[str, Any]:
             "missing": missing,
             "required_free_bytes": UNAVAILABLE,
             "volume_free_bytes": free if _is_non_negative_int(free) else UNAVAILABLE,
-            "planning_reserve_floor_bytes": UNAVAILABLE,
+            "planning_reserve_floor_bytes": reserve_floor if reserve_floor is not None else UNAVAILABLE,
+            "sufficient_on_packet": False,
         }
 
     assert isinstance(total, int) and isinstance(free, int)
-    required = sum(terms[key] for key in CAPACITY_TERM_KEYS)
-    reserve_floor = max(OPERATING_RESERVE_FLOOR_BYTES, total * OPERATING_RESERVE_FLOOR_PERCENT // 100)
-    reserve = terms["operating_reserve_bytes"]
-    reserve_note = None
-    if reserve < reserve_floor and capacity.get("stronger_reserve_requirement_recorded") is not True:
-        return {
-            "status": "incomplete",
-            "reason": "STOP_FOR_CAPACITY_EVIDENCE",
-            "missing": [
-                "capacity.operating_reserve_bytes below planning floor "
-                f"(max(10GiB, 10% of volume)={reserve_floor}) without a recorded stronger requirement"
-            ],
-            "required_free_bytes": required,
-            "volume_free_bytes": free,
-            "planning_reserve_floor_bytes": reserve_floor,
-        }
-    if reserve < reserve_floor:
-        reserve_note = "operator recorded a stronger requirement below the default planning floor"
+    assert reserve_floor is not None and declared_reserve is not None
+    applied_reserve = declared_reserve
+    if _is_positive_int(stronger):
+        applied_reserve = max(applied_reserve, int(stronger))
+    applied_reserve = max(applied_reserve, reserve_floor)
 
-    shared = bool(capacity.get("backup_shares_db_volume", True)) and bool(
-        capacity.get("restore_shares_db_volume", True)
+    db_allocations = [
+        "migration_temp_bytes",
+        "additional_peak_WAL_and_log_bytes",
+        "growth_budget_bytes",
+        "operating_reserve_bytes",
+    ]
+    db_required = (
+        terms["migration_temp_bytes"]
+        + terms["additional_peak_WAL_and_log_bytes"]
+        + terms["growth_budget_bytes"]
+        + applied_reserve
     )
-    if not shared:
-        for extra in ("backup_volume_free_bytes", "restore_volume_free_bytes"):
-            if not _is_non_negative_int(capacity.get(extra)):
-                return {
-                    "status": "incomplete",
-                    "reason": "STOP_FOR_CAPACITY_EVIDENCE",
-                    "missing": [f"capacity.{extra}"],
-                    "required_free_bytes": required,
-                    "volume_free_bytes": free,
-                    "planning_reserve_floor_bytes": reserve_floor,
-                }
+    if backup_shares is True:
+        db_allocations.append("new_backup_bytes")
+        db_required += terms["new_backup_bytes"]
+    if restore_shares is True:
+        db_allocations.append("concurrent_restore_or_candidate_bytes")
+        db_required += terms["concurrent_restore_or_candidate_bytes"]
 
-    sufficient = free >= required
+    volumes: dict[str, dict[str, Any]] = {
+        "db": _capacity_volume_entry(
+            role="db",
+            total_bytes=total,
+            free_bytes=free,
+            required_bytes=db_required,
+            allocations=db_allocations,
+            planning_reserve_floor_bytes=reserve_floor,
+            applied_reserve_bytes=applied_reserve,
+        )
+    }
+    if backup_shares is False:
+        backup_total = capacity.get("backup_volume_total_bytes")
+        volumes["backup"] = _capacity_volume_entry(
+            role="backup",
+            total_bytes=backup_total if _is_positive_int(backup_total) else UNAVAILABLE,
+            free_bytes=int(capacity["backup_volume_free_bytes"]),
+            required_bytes=terms["new_backup_bytes"],
+            allocations=["new_backup_bytes"],
+        )
+    if restore_shares is False:
+        restore_total = capacity.get("restore_volume_total_bytes")
+        volumes["restore"] = _capacity_volume_entry(
+            role="restore",
+            total_bytes=restore_total if _is_positive_int(restore_total) else UNAVAILABLE,
+            free_bytes=int(capacity["restore_volume_free_bytes"]),
+            required_bytes=terms["concurrent_restore_or_candidate_bytes"],
+            allocations=["concurrent_restore_or_candidate_bytes"],
+        )
+
+    sufficient = all(bool(item["sufficient"]) for item in volumes.values())
+    reserve_note = None
+    if applied_reserve > reserve_floor:
+        reserve_note = (
+            "applied max(planning floor, declared operating_reserve_bytes, "
+            "stronger_reserve_requirement_bytes when supplied)"
+        )
     return {
         "status": "measured" if sufficient else "insufficient",
         "reason": None if sufficient else "insufficient_free_capacity",
         "missing": [],
-        "required_free_bytes": required,
+        "required_free_bytes": db_required,
         "volume_total_bytes": total,
         "volume_free_bytes": free,
         "planning_reserve_floor_bytes": reserve_floor,
+        "applied_reserve_bytes": applied_reserve,
         "terms": terms,
-        "shared_volume_accounting": shared,
+        "shared_volume_accounting": backup_shares is True and restore_shares is True,
         "sufficient_on_packet": sufficient,
+        "volumes": volumes,
         "reserve_note": reserve_note,
         "note": (
+            "Each affected physical volume is compared against its own free space. "
             "Existing allocations are already reflected in measured free space and are not charged twice. "
+            "Migration temp is charged to the DB volume unless a later contract names another volume. "
             "This is a planning assessment of a supplied packet, not Runtime-observed capacity."
         ),
     }
+
+
+def _capacity_volume_entry(
+    *,
+    role: str,
+    total_bytes: Any,
+    free_bytes: int,
+    required_bytes: int,
+    allocations: list[str],
+    planning_reserve_floor_bytes: int | None = None,
+    applied_reserve_bytes: int | None = None,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "role": role,
+        "total_bytes": total_bytes,
+        "free_bytes": free_bytes,
+        "required_bytes": required_bytes,
+        "allocations": list(allocations),
+        "sufficient": free_bytes >= required_bytes,
+    }
+    if planning_reserve_floor_bytes is not None:
+        entry["planning_reserve_floor_bytes"] = planning_reserve_floor_bytes
+    if applied_reserve_bytes is not None:
+        entry["applied_reserve_bytes"] = applied_reserve_bytes
+    return entry
 
 
 def _recent_run_sample(
@@ -1018,10 +1121,11 @@ def _windows_volume_facts(source_path: Path) -> dict[str, Any]:
             "status": UNAVAILABLE,
             "reason": "GetVolumeInformationW_failed",
         },
-        "local_device": drive_type != "DRIVE_REMOTE",
+        "local_device": classify_windows_local_device(drive_type),
         "note": (
-            "local_device reports Windows GetDriveTypeW != DRIVE_REMOTE; it is not proof of "
-            "durability, exclusive ownership, or backup capacity."
+            "local_device is True only for DRIVE_FIXED, DRIVE_REMOVABLE, or DRIVE_RAMDISK. "
+            "DRIVE_UNKNOWN and DRIVE_NO_ROOT_DIR remain unavailable; not-remote is not proven local. "
+            "This is not proof of durability, exclusive ownership, or backup capacity."
         ),
     }
 
@@ -1245,11 +1349,13 @@ __all__ = [
     "assess_capacity_budget",
     "assess_runtime_checkpoint_evidence",
     "assert_sql_is_read_only",
+    "classify_windows_local_device",
     "collect_filesystem_observation",
     "collect_runtime_checkpoint_preflight",
     "collect_sqlite_metadata",
     "collect_volume_facts",
     "collector_identity",
+    "planning_reserve_floor_bytes",
     "load_json_object",
     "write_report_exclusive",
 ]

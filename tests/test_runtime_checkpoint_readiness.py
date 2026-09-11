@@ -94,20 +94,46 @@ def _attach_sql_guard(connection: sqlite3.Connection) -> None:
     connection.set_trace_callback(readiness.assert_sql_is_read_only)
 
 
+GIB = 1024**3
+
+
+def _gib(n: int) -> int:
+    return n * GIB
+
+
 def _capacity_ok() -> dict[str, int | bool]:
-    total = 100 * 1024**3
+    total = _gib(100)
     return {
         "volume_total_bytes": total,
-        "volume_free_bytes": 80 * 1024**3,
-        "new_backup_bytes": 20 * 1024**3,
-        "concurrent_restore_or_candidate_bytes": 20 * 1024**3,
-        "migration_temp_bytes": 5 * 1024**3,
-        "additional_peak_WAL_and_log_bytes": 2 * 1024**3,
-        "growth_budget_bytes": 8 * 1024**3,
-        "operating_reserve_bytes": max(10 * 1024**3, total // 10),
+        "volume_free_bytes": _gib(80),
+        "new_backup_bytes": _gib(20),
+        "concurrent_restore_or_candidate_bytes": _gib(20),
+        "migration_temp_bytes": _gib(5),
+        "additional_peak_WAL_and_log_bytes": _gib(2),
+        "growth_budget_bytes": _gib(8),
+        "operating_reserve_bytes": max(_gib(10), total // 10),
         "backup_shares_db_volume": True,
         "restore_shares_db_volume": True,
     }
+
+
+def _measured_collector() -> dict[str, Any]:
+    return {"sqlite": {"status": "measured", "schema_version": 25}, "filesystem": {"status": "measured"}}
+
+
+def _db_volume_only_required(capacity: dict[str, int | bool], *, applied_reserve: int | None = None) -> int:
+    reserve = capacity["operating_reserve_bytes"] if applied_reserve is None else applied_reserve
+    required = (
+        int(capacity["migration_temp_bytes"])
+        + int(capacity["additional_peak_WAL_and_log_bytes"])
+        + int(capacity["growth_budget_bytes"])
+        + int(reserve)
+    )
+    if capacity.get("backup_shares_db_volume", True):
+        required += int(capacity["new_backup_bytes"])
+    if capacity.get("restore_shares_db_volume", True):
+        required += int(capacity["concurrent_restore_or_candidate_bytes"])
+    return required
 
 
 def _complete_packet(collector: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -521,6 +547,173 @@ def test_assessment_adversarial_inputs_never_fabricate_go() -> None:
     failed_restore["operator"]["restore_evidence"]["integrity_ok"] = False
     failed = readiness.assess_runtime_checkpoint_evidence(failed_restore)
     assert failed["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+
+
+def test_separate_backup_volume_insufficient_is_adverse() -> None:
+    capacity = _capacity_ok()
+    capacity["backup_shares_db_volume"] = False
+    capacity["restore_shares_db_volume"] = True
+    capacity["backup_volume_free_bytes"] = _gib(1)
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] == "insufficient"
+    assert result["sufficient_on_packet"] is False
+    assert result["volumes"]["db"]["sufficient"] is True
+    assert result["volumes"]["backup"]["sufficient"] is False
+    assert result["volumes"]["backup"]["required_bytes"] == capacity["new_backup_bytes"]
+    assert "new_backup_bytes" not in result["volumes"]["db"]["allocations"]
+
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = capacity
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert assessment["go_for_runtime_deployment"] is False
+    assert assessment["overall_disposition"] != "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+
+
+def test_separate_restore_volume_insufficient_is_adverse() -> None:
+    capacity = _capacity_ok()
+    capacity["backup_shares_db_volume"] = True
+    capacity["restore_shares_db_volume"] = False
+    capacity["restore_volume_free_bytes"] = _gib(1)
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] == "insufficient"
+    assert result["volumes"]["db"]["sufficient"] is True
+    assert result["volumes"]["restore"]["sufficient"] is False
+    assert result["volumes"]["restore"]["required_bytes"] == capacity["concurrent_restore_or_candidate_bytes"]
+    assert "concurrent_restore_or_candidate_bytes" not in result["volumes"]["db"]["allocations"]
+
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = capacity
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert assessment["go_for_runtime_deployment"] is False
+
+
+def test_separate_backup_and_restore_volumes_sufficient_are_not_double_charged() -> None:
+    capacity = _capacity_ok()
+    capacity["backup_shares_db_volume"] = False
+    capacity["restore_shares_db_volume"] = False
+    capacity["backup_volume_free_bytes"] = _gib(40)
+    capacity["restore_volume_free_bytes"] = _gib(40)
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] == "measured"
+    assert result["sufficient_on_packet"] is True
+    db = result["volumes"]["db"]
+    assert db["required_bytes"] == _db_volume_only_required(capacity)
+    assert db["required_bytes"] == _gib(5) + _gib(2) + _gib(8) + _gib(10)
+    assert "new_backup_bytes" not in db["allocations"]
+    assert "concurrent_restore_or_candidate_bytes" not in db["allocations"]
+    assert result["volumes"]["backup"]["required_bytes"] == _gib(20)
+    assert result["volumes"]["restore"]["required_bytes"] == _gib(20)
+    assert db["required_bytes"] + result["volumes"]["backup"]["required_bytes"] + result["volumes"]["restore"][
+        "required_bytes"
+    ] == (
+        capacity["new_backup_bytes"]
+        + capacity["concurrent_restore_or_candidate_bytes"]
+        + capacity["migration_temp_bytes"]
+        + capacity["additional_peak_WAL_and_log_bytes"]
+        + capacity["growth_budget_bytes"]
+        + capacity["operating_reserve_bytes"]
+    )
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = capacity
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    assert assessment["go_for_runtime_deployment"] is False
+
+
+def test_mixed_topology_charges_only_the_correct_volume() -> None:
+    backup_on_db = _capacity_ok()
+    backup_on_db["backup_shares_db_volume"] = True
+    backup_on_db["restore_shares_db_volume"] = False
+    backup_on_db["restore_volume_free_bytes"] = _gib(40)
+    mixed_backup = readiness.assess_capacity_budget(backup_on_db)
+    db = mixed_backup["volumes"]["db"]
+    assert "new_backup_bytes" in db["allocations"]
+    assert "concurrent_restore_or_candidate_bytes" not in db["allocations"]
+    assert db["required_bytes"] == _db_volume_only_required(backup_on_db)
+    assert mixed_backup["volumes"]["restore"]["required_bytes"] == backup_on_db["concurrent_restore_or_candidate_bytes"]
+    assert "backup" not in mixed_backup["volumes"]
+    assert mixed_backup["status"] == "measured"
+
+    restore_on_db = _capacity_ok()
+    restore_on_db["backup_shares_db_volume"] = False
+    restore_on_db["restore_shares_db_volume"] = True
+    restore_on_db["backup_volume_free_bytes"] = _gib(40)
+    mixed_restore = readiness.assess_capacity_budget(restore_on_db)
+    db = mixed_restore["volumes"]["db"]
+    assert "concurrent_restore_or_candidate_bytes" in db["allocations"]
+    assert "new_backup_bytes" not in db["allocations"]
+    assert db["required_bytes"] == _db_volume_only_required(restore_on_db)
+    assert mixed_restore["volumes"]["backup"]["required_bytes"] == restore_on_db["new_backup_bytes"]
+    assert "restore" not in mixed_restore["volumes"]
+    assert mixed_restore["status"] == "measured"
+
+
+def test_operating_reserve_below_floor_never_sufficient_even_with_stronger_flag() -> None:
+    capacity = _capacity_ok()
+    floor = max(_gib(10), int(capacity["volume_total_bytes"]) // 10)
+    capacity["operating_reserve_bytes"] = floor - 1
+    capacity["stronger_reserve_requirement_recorded"] = True
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] != "measured"
+    assert result.get("sufficient_on_packet") is not True
+    assert result["status"] in {"incomplete", "insufficient"}
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = capacity
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] in {"INCOMPLETE_PREREQUISITES", "ADVERSE_MEASURED_RESULT"}
+    assert assessment["overall_disposition"] != "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    assert assessment["go_for_runtime_deployment"] is False
+    assert assessment["capacity"].get("sufficient_on_packet") is not True
+
+
+def test_stronger_reserve_above_floor_is_applied() -> None:
+    capacity = _capacity_ok()
+    floor = max(_gib(10), int(capacity["volume_total_bytes"]) // 10)
+    stronger = floor + _gib(15)
+    capacity["stronger_reserve_requirement_bytes"] = stronger
+    capacity["volume_free_bytes"] = _db_volume_only_required(capacity, applied_reserve=stronger) + _gib(1)
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] == "measured"
+    assert result["volumes"]["db"]["applied_reserve_bytes"] == stronger
+    assert result["volumes"]["db"]["required_bytes"] == _db_volume_only_required(capacity, applied_reserve=stronger)
+    assert result["volumes"]["db"]["planning_reserve_floor_bytes"] == floor
+    too_small = dict(capacity)
+    too_small["volume_free_bytes"] = _db_volume_only_required(capacity, applied_reserve=floor) + _gib(1)
+    blocked = readiness.assess_capacity_budget(too_small)
+    assert blocked["status"] == "insufficient"
+    assert blocked["volumes"]["db"]["applied_reserve_bytes"] == stronger
+
+
+def test_shared_volume_sufficient_and_insufficient_behavior_is_preserved() -> None:
+    ok = readiness.assess_capacity_budget(_capacity_ok())
+    assert ok["status"] == "measured"
+    assert ok["shared_volume_accounting"] is True
+    assert ok["sufficient_on_packet"] is True
+    assert ok["volumes"]["db"]["required_bytes"] == _db_volume_only_required(_capacity_ok())
+
+    short = _capacity_ok()
+    short["volume_free_bytes"] = 1
+    adverse = readiness.assess_capacity_budget(short)
+    assert adverse["status"] == "insufficient"
+    assert adverse["shared_volume_accounting"] is True
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = short
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert "insufficient_free_capacity" in assessment["adverse_results"]
+
+
+def test_windows_local_device_does_not_treat_unknown_as_local() -> None:
+    assert readiness.classify_windows_local_device("DRIVE_FIXED") is True
+    assert readiness.classify_windows_local_device("DRIVE_REMOVABLE") is True
+    assert readiness.classify_windows_local_device("DRIVE_RAMDISK") is True
+    assert readiness.classify_windows_local_device("DRIVE_REMOTE") is False
+    unknown = readiness.classify_windows_local_device("DRIVE_UNKNOWN")
+    assert unknown == {"status": readiness.UNAVAILABLE, "reason": "drive_type_DRIVE_UNKNOWN"}
+    missing = readiness.classify_windows_local_device("DRIVE_NO_ROOT_DIR")
+    assert missing == {"status": readiness.UNAVAILABLE, "reason": "drive_type_DRIVE_NO_ROOT_DIR"}
 
 
 def test_complete_packet_is_reviewable_but_not_authorized(tmp_path: Path) -> None:

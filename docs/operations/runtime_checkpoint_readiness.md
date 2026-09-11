@@ -62,7 +62,7 @@ Normal new `symbol_refs_v1` encoding is allowed only after every relevant reader
 | Runtime code (reported) | `C:\Users\aspir\Desktop\Candle Craft Inteligence` | Must be re-verified from process evidence |
 | Live DB (reported) | `S:\CandleCraftRuntime\scan_runs\main_live_runtime.sqlite` | Must be re-verified from process/configuration evidence |
 
-`S:` is a drive letter, not a volume identity. Map it on Runtime with `Get-Volume` / `Get-Partition` / `Get-Disk` and the collector's volume block. A drive letter does not establish local storage, durability, or free capacity on another destination.
+`S:` is a drive letter, not a volume identity. Map it on Runtime with `Get-Volume` / `Get-Partition` / `Get-Disk` and the collector's volume block. A drive letter does not establish local storage, durability, or free capacity on another destination. Collector `local_device` is True only for `DRIVE_FIXED`, `DRIVE_REMOVABLE`, or `DRIVE_RAMDISK`; `DRIVE_REMOTE` is False; `DRIVE_UNKNOWN` / `DRIVE_NO_ROOT_DIR` remain unavailable. Not-remote is not proven local.
 
 The listener has its own `--database-path`, `--manifest-path`, `--state-path`, and `--audit-path`. Do not assume its defaults point at the scanner database.
 
@@ -156,17 +156,32 @@ Historical ~81 GiB and older audit means are not current measurements or p95. Th
 
 ### 6.2 Capacity gate
 
-For each affected physical volume:
+Capacity is accounted **per affected physical volume**. Do not sum every allocation against the DB volume when backup or restore lives elsewhere.
 
-`required_free = new_backup_bytes + concurrent_restore_or_candidate_bytes + migration_temp_bytes + additional_peak_WAL_and_log_bytes + growth_budget_bytes + operating_reserve_bytes`
+DB volume obligations:
 
-Existing allocations are already reflected in measured free space; do not charge them twice. Include all copies that coexist, target/temp volumes, future backups during observation, and recovery headroom. Do not assume compression, half-size storage, or immediate space reclamation.
+- `migration_temp_bytes` (kept on the DB volume; this contract does not name another temp volume)
+- `additional_peak_WAL_and_log_bytes`
+- `growth_budget_bytes`
+- `operating_reserve_bytes` (at least the planning floor; a stronger reviewed reserve may only raise it)
+- `new_backup_bytes` only if `backup_shares_db_volume=true`
+- `concurrent_restore_or_candidate_bytes` only if `restore_shares_db_volume=true`
+
+Separate backup volume obligations:
+
+- `new_backup_bytes` when `backup_shares_db_volume=false`, compared with `backup_volume_free_bytes`
+
+Separate restore/candidate volume obligations:
+
+- `concurrent_restore_or_candidate_bytes` when `restore_shares_db_volume=false`, compared with `restore_volume_free_bytes`
+
+A separate volume with insufficient free space is an adverse capacity result even if the DB volume has ample free space. Do not charge an allocation onto the DB volume when it lives on a separate volume. Existing allocations are already reflected in measured free space; do not charge them twice. Include all copies that coexist, target/temp volumes, future backups during observation, and recovery headroom. Do not assume compression, half-size storage, or immediate space reclamation.
 
 Budget at least the seven-day observation window plus three days of response runway. Justify `growth_budget_bytes` from the actual baseline and workload. Missing, flat, or inconsistent samples do not establish zero future growth or infinite runway.
 
-Operating reserve planning floor: the greater of **10 GiB** and **10% of volume capacity**, unless the pre-cutover operational review records a stronger requirement. This is a planning floor, not a guarantee.
+Operating reserve planning floor, for the DB volume: the greater of **10 GiB** and **10% of that volume's capacity**. This is a true floor. A stronger reviewed reserve may only increase the requirement (`max(floor, declared reserve, stronger_reserve_requirement_bytes)`). A boolean flag cannot waive the floor downward. A declared reserve below the floor is `STOP_FOR_CAPACITY_EVIDENCE`, never capacity-sufficient.
 
-Unknown critical terms or insufficient free capacity: `STOP_FOR_CAPACITY_EVIDENCE` (or a named storage prerequisite). New durable writers require their own incremental write/WAL/backup model and a new readiness decision.
+Unknown critical terms or insufficient free capacity on any required volume: `STOP_FOR_CAPACITY_EVIDENCE` (or a named storage prerequisite). New durable writers require their own incremental write/WAL/backup model and a new readiness decision.
 
 Retention for this checkpoint: preserve current evidence and recovery artifacts. No automatic deletion or pruning. The finite observation period must fit without unimplemented retention. Protect active-plan dependencies, rejected observations needed for selection analysis, and admission/tracking evidence from future age-only deletion.
 
