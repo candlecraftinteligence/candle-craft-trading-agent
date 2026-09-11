@@ -1,6 +1,7 @@
 # CCI SOURCE_EVIDENCE_BOUNDARY — Executable Source-Evidence Contract and Producer Boundary Proof
 
-**Status:** Unused contract library + synthetic producer-boundary proofs. No production consumer.
+**Status:** Unused contract library + synthetic producer-boundary proofs. No production consumer of this descriptor.
+**Successor:** [Prospective batch-delivery capture](prospective_batch_delivery_capture.md) transports local in-memory observations on the candle path. It does not bind this descriptor, upgrade assessment fields, persist source evidence, or create admission.
 **Does not** capture acquisition, persist source evidence, mint source IDs/namespaces, bind policy IDs, admit episodes, change evaluators, or alter scanner/cache/lifecycle behavior.
 **Base commit:** `7455e36b3988bc50a8f0974204e3c43394688310` (`main`, merge of PR #118 / EVALUATION_POLICY_MANIFEST).
 **Schema:** application `SCHEMA_VERSION` / SQLite `PRAGMA user_version` = **25** unchanged. Fresh synthetic `PRAGMA schema_version` is a distinct SQLite catalog revision. No admission, episode, policy-hash, or source-namespace columns exist.
