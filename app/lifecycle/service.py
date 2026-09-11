@@ -13,6 +13,11 @@ from typing import Any
 from app.core.confirmed_data_health import confirmed_data_health_for_symbol
 from app.core.minimum_rr import hard_mode_minimum_rr
 from app.core.trade_plan_integrity import validate_trade_plan
+from app.data.candle_batch_evidence import (
+    BatchHandoffAssociation,
+    HANDOFF_UNAVAILABLE,
+    associate_execution_handoff,
+)
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
 from app.lifecycle.identity import generation_rotation_reason, new_setup_generation_id
@@ -354,6 +359,24 @@ class SetupLifecycleService:
         _log_lifecycle_actionability_audit(symbol_result, observation, transition)
 
         execution_candles = symbol_result.lifecycle_execution_candles
+        try:
+            batch_handoff = associate_execution_handoff(
+                symbol_result.lifecycle_execution_batch_delivery,
+                execution_candles=execution_candles,
+                execution_timeframe=symbol_result.lifecycle_execution_timeframe,
+                logical_cutoff=symbol_result.lifecycle_decision_timestamp or now,
+            )
+        except Exception:
+            batch_handoff = BatchHandoffAssociation(
+                disposition=HANDOFF_UNAVAILABLE,
+                reason="capture_representation_failed",
+                delivery=None,
+                execution_timeframe=symbol_result.lifecycle_execution_timeframe,
+                logical_cutoff=None,
+                execution_snapshot=None,
+                matched_fingerprint=None,
+                observed_at=None,
+            )
         if final_record is not None and execution_candles is not None:
             outcome_evaluation = evaluate_closed_candle_outcomes(
                 final_record,
@@ -403,6 +426,7 @@ class SetupLifecycleService:
                 "lifecycle_transition": effective_transition,
                 "lifecycle_transitions": tuple(generated_transitions),
                 "lifecycle_outcome_progress": outcome_progress,
+                "lifecycle_batch_handoff": batch_handoff,
                 **audit_updates,
             }
         )

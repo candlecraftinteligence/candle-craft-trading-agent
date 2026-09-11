@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -100,6 +100,16 @@ from app.context.macro_scanner_enrichment import (
     apply_macro_event_context_to_symbol_result,
 )
 from app.core.process_memory import ProcessMemoryReading, read_process_rss
+from app.data.candle_batch_evidence import (
+    BatchHandoffAssociation,
+    CandleBatchDelivery,
+    default_capture_clock,
+    fetch_klines_with_delivery,
+    observe_closed_subset,
+    observe_empty_execution,
+    observe_synthetic_2d_resample,
+    unavailable_delivery,
+)
 from app.data.candle_integrity import (
     CandleIntegrityError,
     closed_candles_as_of,
@@ -622,9 +632,10 @@ class ScannerSymbolResult(BaseModel):
     lifecycle_execution_candles: tuple[Any, ...] | None = Field(default=None, exclude=True, repr=False)
     lifecycle_execution_timeframe: str = Field(default=NA, exclude=True)
     lifecycle_decision_timestamp: datetime | None = Field(default=None, exclude=True)
+    lifecycle_execution_batch_delivery: CandleBatchDelivery | None = Field(default=None, exclude=True, repr=False)
+    lifecycle_batch_handoff: BatchHandoffAssociation | None = Field(default=None, exclude=True, repr=False)
 
-
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     @model_validator(mode="after")
     def _derive_iteration_outcome(self) -> ScannerSymbolResult:
@@ -781,8 +792,14 @@ class _StrategyExecution(BaseModel):
     execution_timeframe: str = NA
     liquidation_flow: LiquidationFlowSnapshot | None = None
     decision_timestamp: datetime | None = None
+    execution_batch_delivery: CandleBatchDelivery | None = Field(default=None, exclude=True, repr=False)
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+
+class _CandleBatch(NamedTuple):
+    candles: tuple[Any, ...]
+    delivery: CandleBatchDelivery
 
 
 class _TargetIntegrityDecision(BaseModel):
@@ -821,6 +838,7 @@ class ScannerRunner:
         sector_rotation_engine: SectorRotationEngine | None = None,
         macro_calendar_service: MacroCalendarService | None = None,
         clock: Callable[[], datetime] | None = None,
+        capture_clock: Callable[[], datetime] | None = None,
         process_memory_sampler: Callable[[], ProcessMemoryReading] | None = None,
         liquidation_flow_service: LiquidationFlowService | None = None,
         log: logging.Logger | None = None,
@@ -841,6 +859,7 @@ class ScannerRunner:
         self.sector_rotation_engine = sector_rotation_engine or SectorRotationEngine()
         self.macro_calendar_service = macro_calendar_service
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.capture_clock = capture_clock or default_capture_clock
         self.process_memory_sampler = process_memory_sampler or read_process_rss
         self.liquidation_flow_service = liquidation_flow_service
         self.logger = log or logger
@@ -1405,7 +1424,8 @@ class ScannerRunner:
         symbol = symbol_config.symbol
         microstructure_flow = self._microstructure_snapshot(symbol, config)
         order_book_liquidity = self._order_book_snapshot(symbol, config)
-        candles = await self._fetch_primary_candles(client, symbol, config, progress=progress)
+        candles_batch = await self._fetch_primary_candles(client, symbol, config, progress=progress)
+        candles = candles_batch.candles
         liquidation_flow = self._liquidation_snapshot(symbol, config)
         technical_candles = _technical_candles(candles)
         current_price = _current_price_from_candles(candles)
@@ -1466,6 +1486,7 @@ class ScannerRunner:
                 symbol=symbol,
                 config=config,
                 primary_candles=candles,
+                primary_delivery=candles_batch.delivery,
                 current_price=current_price,
                 optional_data=optional_data,
                 technical=technical,
@@ -1844,45 +1865,62 @@ class ScannerRunner:
         config: ScannerRunConfig,
         *,
         progress: Callable[[str], Any] | None = None,
-    ) -> Sequence[Any]:
+    ) -> _CandleBatch:
         primary_timeframe = config.interval.strip().lower()
         limit_warnings: list[str] = []
         await _emit_progress(progress, _progress_message_for_timeframe(config, primary_timeframe))
         if config.exchange == "binance" and primary_timeframe == "2d":
             source_limit = _synthetic_2d_source_limit(config, limit_warnings)
-            source_candles = await self._request_public_api(
+            source_delivery = await self._request_klines_delivery(
+                client,
                 config,
+                symbol,
+                SYNTHETIC_2D_SOURCE_TIMEFRAME,
+                source_limit,
                 f"{symbol} {SYNTHETIC_2D_SOURCE_TIMEFRAME} candles for synthetic 2d",
-                lambda: client.get_klines(symbol, SYNTHETIC_2D_SOURCE_TIMEFRAME, source_limit),
             )
             for warning in _unique_strings(limit_warnings):
                 self.logger.warning("Scanner candle limit adjusted for symbol=%s: %s", symbol, warning)
+            closed_source = self._observe_closed_delivery(
+                source_delivery,
+                symbol=symbol,
+                timeframe=SYNTHETIC_2D_SOURCE_TIMEFRAME,
+                config=config,
+            )
             synthetic = resample_ohlcv_candles(
-                source_candles,
+                source_delivery.returned_sequence,
                 target_interval="2d",
                 decision_timestamp=config.decision_timestamp,
             )
-            return self._closed_candles_for_analysis(
+            transform_delivery = self._observe_2d_delivery(
+                closed_source.delivery,
                 synthetic,
+                logical_cutoff=config.decision_timestamp,
+            )
+            closed = self._observe_closed_delivery(
+                transform_delivery,
                 symbol=symbol,
                 timeframe="2d",
                 config=config,
-                minimum_closed_history=0,
+                candles=synthetic,
             )
+            return closed
         fetch_limit = _timeframe_fetch_limit(config, primary_timeframe, limit_warnings)
         for warning in _unique_strings(limit_warnings):
             self.logger.warning("Scanner candle limit adjusted for symbol=%s: %s", symbol, warning)
-        candles = await self._request_public_api(
+        fetched = await self._request_klines_delivery(
+            client,
             config,
+            symbol,
+            config.interval,
+            fetch_limit,
             f"{symbol} {config.interval} candles",
-            lambda: client.get_klines(symbol, config.interval, fetch_limit),
         )
-        return self._closed_candles_for_analysis(
-            candles,
+        return self._observe_closed_delivery(
+            fetched,
             symbol=symbol,
             timeframe=primary_timeframe,
             config=config,
-            minimum_closed_history=0,
         )
 
     async def _fetch_market_regime_context(
@@ -1933,6 +1971,7 @@ class ScannerRunner:
         symbol: str,
         config: ScannerRunConfig,
         primary_candles: Sequence[Any],
+        primary_delivery: CandleBatchDelivery,
         current_price: MaybeDecimal,
         optional_data: _OptionalMarketData,
         technical: TechnicalStructureResult,
@@ -1945,7 +1984,16 @@ class ScannerRunner:
         if not config.enable_strategy_output or config.strategy_name is None:
             execution_timeframe = config.execution_timeframe.strip().lower()
             primary_timeframe = config.interval.strip().lower()
-            profile_candles = primary_candles if primary_timeframe == execution_timeframe else ()
+            if primary_timeframe == execution_timeframe:
+                profile_candles = tuple(primary_candles)
+                execution_delivery = primary_delivery
+            else:
+                profile_candles = ()
+                execution_delivery = self._observe_empty_execution(
+                    execution_timeframe=execution_timeframe,
+                    logical_cutoff=config.decision_timestamp,
+                    parent=primary_delivery,
+                )
             volume_profile = _volume_profile_for_timeframe(
                 symbol=symbol,
                 timeframe=execution_timeframe,
@@ -1954,17 +2002,21 @@ class ScannerRunner:
             return _StrategyExecution(
                 strategy_missing_data=volume_profile.missing_data,
                 volume_profile=volume_profile,
-                execution_candles=tuple(profile_candles),
+                execution_candles=profile_candles,
                 execution_timeframe=execution_timeframe,
                 decision_timestamp=config.decision_timestamp,
+                execution_batch_delivery=execution_delivery,
             )
 
-        candles_by_timeframe, timeframe_missing, timeframe_context = await self._fetch_strategy_timeframe_candles(
-            client=client,
-            symbol=symbol,
-            config=config,
-            primary_candles=primary_candles,
-            progress=progress,
+        candles_by_timeframe, deliveries_by_timeframe, timeframe_missing, timeframe_context = (
+            await self._fetch_strategy_timeframe_candles(
+                client=client,
+                symbol=symbol,
+                config=config,
+                primary_candles=primary_candles,
+                primary_delivery=primary_delivery,
+                progress=progress,
+            )
         )
         execution_timeframe = config.execution_timeframe.strip().lower()
         execution_volume_profile = _volume_profile_for_timeframe(
@@ -2065,6 +2117,12 @@ class ScannerRunner:
             execution_candles=tuple(candles_by_timeframe.get(execution_timeframe, ())),
             execution_timeframe=execution_timeframe,
             decision_timestamp=config.decision_timestamp,
+            execution_batch_delivery=deliveries_by_timeframe.get(execution_timeframe)
+            or self._observe_empty_execution(
+                execution_timeframe=execution_timeframe,
+                logical_cutoff=config.decision_timestamp,
+                parent=primary_delivery,
+            ),
             pullback_intelligence=_representative_pullback_intelligence(
                 diagnostics,
                 valid_modes=_unique_strings(valid_modes),
@@ -2084,9 +2142,11 @@ class ScannerRunner:
         symbol: str,
         config: ScannerRunConfig,
         primary_candles: Sequence[Any],
+        primary_delivery: CandleBatchDelivery,
         progress: Callable[[str], Any] | None = None,
-    ) -> tuple[dict[str, Sequence[Any]], tuple[str, ...], dict[str, Any]]:
+    ) -> tuple[dict[str, Sequence[Any]], dict[str, CandleBatchDelivery], tuple[str, ...], dict[str, Any]]:
         candles_by_timeframe: dict[str, Sequence[Any]] = {}
+        deliveries_by_timeframe: dict[str, CandleBatchDelivery] = {}
         missing_data: list[str] = []
         limit_warnings: list[str] = []
         primary_timeframe = config.interval.strip().lower()
@@ -2094,18 +2154,24 @@ class ScannerRunner:
 
         if config.htf_timeframe.strip().lower() == "2d":
             source_candles: Sequence[Any] = ()
+            source_delivery: CandleBatchDelivery | None = None
             synthetic_data_error = False
             await _emit_progress(progress, "Fetching HTF 2d...")
             try:
                 if primary_timeframe == SYNTHETIC_2D_SOURCE_TIMEFRAME:
                     source_candles = primary_candles
+                    source_delivery = primary_delivery
                 else:
                     source_limit = _synthetic_2d_source_limit(config, limit_warnings)
-                    source_candles = await self._request_public_api(
+                    source_delivery = await self._request_klines_delivery(
+                        client,
                         config,
+                        symbol,
+                        SYNTHETIC_2D_SOURCE_TIMEFRAME,
+                        source_limit,
                         f"{symbol} {SYNTHETIC_2D_SOURCE_TIMEFRAME} candles for synthetic 2d",
-                        lambda: client.get_klines(symbol, SYNTHETIC_2D_SOURCE_TIMEFRAME, source_limit),
                     )
+                    source_candles = source_delivery.returned_sequence
                 synthetic_2d = resample_ohlcv_candles(
                     source_candles,
                     target_interval="2d",
@@ -2123,18 +2189,36 @@ class ScannerRunner:
                 synthetic_data_error = True
 
             if synthetic_2d:
-                closed_synthetic_2d = self._closed_candles_for_analysis(
+                transform_parent = source_delivery or unavailable_delivery(
+                    source_candles,
+                    reason="2d_parent_unavailable",
+                    capture_clock=self.capture_clock,
+                )
+                if primary_timeframe != SYNTHETIC_2D_SOURCE_TIMEFRAME and source_delivery is not None:
+                    transform_parent = self._observe_closed_delivery(
+                        source_delivery,
+                        symbol=symbol,
+                        timeframe=SYNTHETIC_2D_SOURCE_TIMEFRAME,
+                        config=config,
+                    ).delivery
+                transform_delivery = self._observe_2d_delivery(
+                    transform_parent,
                     synthetic_2d,
+                    logical_cutoff=config.decision_timestamp,
+                )
+                closed_synthetic_2d = self._observe_closed_delivery(
+                    transform_delivery,
                     symbol=symbol,
                     timeframe="2d",
                     config=config,
-                    minimum_closed_history=0,
+                    candles=synthetic_2d,
                 )
-                if len(closed_synthetic_2d) >= MIN_STRATEGY_CLOSED_CANDLES:
-                    candles_by_timeframe["2d"] = closed_synthetic_2d
+                if len(closed_synthetic_2d.candles) >= MIN_STRATEGY_CLOSED_CANDLES:
+                    candles_by_timeframe["2d"] = closed_synthetic_2d.candles
+                    deliveries_by_timeframe["2d"] = closed_synthetic_2d.delivery
                     htf_source = "synthetic_from_1d"
                 else:
-                    missing_data.extend(_strategy_history_diagnostics("2d", len(closed_synthetic_2d)))
+                    missing_data.extend(_strategy_history_diagnostics("2d", len(closed_synthetic_2d.candles)))
             else:
                 if synthetic_data_error or not source_candles:
                     missing_data.extend(_strategy_data_error_diagnostics("2d"))
@@ -2145,6 +2229,7 @@ class ScannerRunner:
             if timeframe == primary_timeframe:
                 if len(primary_candles) >= MIN_STRATEGY_CLOSED_CANDLES:
                     candles_by_timeframe[timeframe] = primary_candles
+                    deliveries_by_timeframe[timeframe] = primary_delivery
                 else:
                     missing_data.extend(_strategy_history_diagnostics(timeframe, len(primary_candles)))
                 continue
@@ -2157,36 +2242,40 @@ class ScannerRunner:
             await _emit_progress(progress, _progress_message_for_timeframe(config, timeframe))
             try:
                 fetch_limit = _timeframe_fetch_limit(config, timeframe, limit_warnings)
-                candles = await self._request_public_api(
+                fetched = await self._request_klines_delivery(
+                    client,
                     config,
+                    symbol,
+                    timeframe,
+                    fetch_limit,
                     f"{symbol} {timeframe} candles",
-                    lambda: client.get_klines(symbol, timeframe, fetch_limit),
                 )
             except Exception as exc:
                 self.logger.warning("Optional strategy candles fetch failed for symbol=%s timeframe=%s: %s", symbol, timeframe, exc)
                 missing_data.extend(_strategy_data_error_diagnostics(timeframe))
                 continue
 
-            if not candles:
+            if not fetched.returned_sequence:
                 missing_data.extend(_strategy_data_error_diagnostics(timeframe))
                 continue
             try:
-                closed_candles = self._closed_candles_for_analysis(
-                    candles,
+                closed_batch = self._observe_closed_delivery(
+                    fetched,
                     symbol=symbol,
                     timeframe=timeframe,
                     config=config,
-                    minimum_closed_history=0,
                 )
             except CandleIntegrityError:
                 raise
-            if len(closed_candles) >= MIN_STRATEGY_CLOSED_CANDLES:
-                candles_by_timeframe[timeframe] = closed_candles
+            if len(closed_batch.candles) >= MIN_STRATEGY_CLOSED_CANDLES:
+                candles_by_timeframe[timeframe] = closed_batch.candles
+                deliveries_by_timeframe[timeframe] = closed_batch.delivery
             else:
-                missing_data.extend(_strategy_history_diagnostics(timeframe, len(closed_candles)))
+                missing_data.extend(_strategy_history_diagnostics(timeframe, len(closed_batch.candles)))
 
         return (
             candles_by_timeframe,
+            deliveries_by_timeframe,
             _unique_strings(missing_data),
             {
                 "htf_2d_context_source": htf_source,
@@ -2287,6 +2376,104 @@ class ScannerRunner:
         except Exception as exc:
             self.logger.debug("Optional %s fetch failed for symbol=%s: %s", label, symbol, exc)
             return label, None, f"{label}: N/A", f"{label} unavailable from public endpoint: {exc}"
+
+    async def _request_klines_delivery(
+        self,
+        client: BaseExchangeClient,
+        config: ScannerRunConfig,
+        symbol: str,
+        interval: str,
+        limit: int,
+        label: str,
+        *,
+        timeout_sec: float | None = None,
+    ) -> CandleBatchDelivery:
+        async def call() -> CandleBatchDelivery:
+            return await fetch_klines_with_delivery(
+                client,
+                symbol,
+                interval,
+                limit,
+                capture_clock=self.capture_clock,
+            )
+
+        return await self._request_public_api(config, label, call, timeout_sec=timeout_sec)
+
+    def _observe_closed_delivery(
+        self,
+        parent: CandleBatchDelivery,
+        *,
+        symbol: str,
+        timeframe: str,
+        config: ScannerRunConfig,
+        candles: Sequence[Any] | None = None,
+        minimum_closed_history: int = 0,
+    ) -> _CandleBatch:
+        source = candles if candles is not None else parent.returned_sequence
+        closed = self._closed_candles_for_analysis(
+            source,
+            symbol=symbol,
+            timeframe=timeframe,
+            config=config,
+            minimum_closed_history=minimum_closed_history,
+        )
+        try:
+            delivery = observe_closed_subset(
+                parent,
+                closed,
+                logical_cutoff=config.decision_timestamp,
+                capture_clock=self.capture_clock,
+            )
+        except Exception:
+            delivery = unavailable_delivery(
+                closed,
+                reason="capture_representation_failed",
+                capture_clock=self.capture_clock,
+            )
+        return _CandleBatch(tuple(closed), delivery)
+
+    def _observe_2d_delivery(
+        self,
+        parent: CandleBatchDelivery,
+        output_candles: Sequence[Any],
+        *,
+        logical_cutoff: datetime | None,
+    ) -> CandleBatchDelivery:
+        try:
+            return observe_synthetic_2d_resample(
+                parent,
+                output_candles,
+                target_interval="2d",
+                logical_cutoff=logical_cutoff,
+                capture_clock=self.capture_clock,
+            )
+        except Exception:
+            return unavailable_delivery(
+                output_candles,
+                reason="capture_representation_failed",
+                capture_clock=self.capture_clock,
+            )
+
+    def _observe_empty_execution(
+        self,
+        *,
+        execution_timeframe: str,
+        logical_cutoff: datetime | None,
+        parent: CandleBatchDelivery | None,
+    ) -> CandleBatchDelivery:
+        try:
+            return observe_empty_execution(
+                execution_timeframe=execution_timeframe,
+                logical_cutoff=logical_cutoff,
+                capture_clock=self.capture_clock,
+                parent=parent,
+            )
+        except Exception:
+            return unavailable_delivery(
+                (),
+                reason="capture_representation_failed",
+                capture_clock=self.capture_clock,
+            )
 
     async def _request_public_api(
         self,
@@ -2440,6 +2627,7 @@ class ScannerRunner:
             lifecycle_execution_candles=tuple(strategy_execution.execution_candles),
             lifecycle_execution_timeframe=strategy_execution.execution_timeframe,
             lifecycle_decision_timestamp=strategy_execution.decision_timestamp,
+            lifecycle_execution_batch_delivery=strategy_execution.execution_batch_delivery,
             strategy_name=strategy_execution.strategy_name,
             strategy_results=strategy_execution.strategy_results,
             formatted_strategy_output=strategy_execution.formatted_strategy_output,

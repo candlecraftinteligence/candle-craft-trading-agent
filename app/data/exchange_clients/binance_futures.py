@@ -1,11 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 import httpx
 
+from app.data.candle_batch_evidence import (
+    CandleBatchDelivery,
+    default_capture_clock,
+    new_capture_occurrence_token,
+    observe_adapter_normalized_batch,
+    unavailable_delivery,
+)
 from app.data.dtos import CandleDTO, FundingDTO, OpenInterestDTO, TickerDTO
 from app.data.exceptions import ExchangeResponseError
 from app.data.exchange_clients.base import PublicHTTPExchangeClient
@@ -22,6 +30,7 @@ from app.data.normalizers.binance import (
 
 class BinanceFuturesClient(PublicHTTPExchangeClient):
     BASE_URL = "https://fapi.binance.com"
+    _cci_klines_delivery_capture = True
 
     def __init__(
         self,
@@ -44,13 +53,67 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         )
 
     async def get_klines(self, symbol: str, interval: str, limit: int) -> list[CandleDTO]:
+        delivery = await self._get_klines_delivery(symbol, interval, limit)
+        return list(delivery.returned_sequence)
+
+    async def get_klines_with_delivery(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+        occurrence_factory: Callable[[], str] | None = None,
+    ) -> CandleBatchDelivery:
+        return await self._get_klines_delivery(
+            symbol,
+            interval,
+            limit,
+            capture_clock=capture_clock,
+            occurrence_factory=occurrence_factory,
+        )
+
+    async def _get_klines_delivery(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+        occurrence_factory: Callable[[], str] | None = None,
+    ) -> CandleBatchDelivery:
         safe_limit = _clamp_limit(limit, maximum=1500)
         normalized_symbol = symbol.upper()
         payload = await self._get_json(
             "/fapi/v1/klines",
             params={"symbol": normalized_symbol, "interval": interval, "limit": safe_limit},
         )
-        return normalize_binance_klines(normalized_symbol, interval, payload)
+        candles = normalize_binance_klines(normalized_symbol, interval, payload)
+        clock = capture_clock or default_capture_clock
+        token_factory = occurrence_factory or new_capture_occurrence_token
+        try:
+            return observe_adapter_normalized_batch(
+                candles,
+                requested_symbol=symbol,
+                requested_interval=interval,
+                requested_limit=limit,
+                effective_symbol=normalized_symbol,
+                effective_interval=interval,
+                effective_limit=safe_limit,
+                endpoint_path="/fapi/v1/klines",
+                adapter_class_label=f"{type(self).__module__}.{type(self).__qualname__}",
+                capture_clock=clock,
+                occurrence_factory=token_factory,
+                http_client_injected=not self._owns_client,
+                base_url_label=self.base_url,
+            )
+        except Exception:
+            return unavailable_delivery(
+                candles,
+                reason="capture_representation_failed",
+                capture_clock=clock,
+                occurrence_factory=token_factory,
+            )
 
     async def get_ticker(self, symbol: str) -> TickerDTO:
         normalized_symbol = symbol.upper()

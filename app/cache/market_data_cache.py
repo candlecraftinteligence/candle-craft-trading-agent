@@ -5,19 +5,45 @@ import importlib
 import inspect
 import json
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from app.data.candle_batch_evidence import (
+    CACHE_KIND_EXPIRY_REFETCH,
+    CACHE_KIND_HIT,
+    CACHE_KIND_MISS,
+    CACHE_KIND_NOT_APPLICABLE,
+    LIMIT_FILE_CACHE_ACQUISITION,
+    LIMIT_UNINSTRUMENTED_INSERT,
+    CandleBatchDelivery,
+    default_capture_clock,
+    fetch_klines_with_delivery,
+    new_capture_occurrence_token,
+    observe_cache_delivery,
+    unavailable_delivery,
+)
 from app.data.exchange_clients import BaseExchangeClient
 
 T = TypeVar("T")
 
 CACHE_FILE_VERSION = 1
 CACHE_TYPE_FIELD = "__cache_type__"
+
+
+@dataclass(frozen=True)
+class LocalCacheFetchResult:
+    value: Any
+    delivery_kind: str
+    bookkeeping_created_at: float | None
+    expires_at: float | None
+    retained_upstream: Any | None
+    file_loaded_entry: bool
 
 DEFAULT_TTLS_SECONDS: dict[str, int] = {
     "candles": 60,
@@ -51,6 +77,8 @@ class MarketDataCache:
         self.file_path = Path(file_path) if file_path is not None else None
         self._now = now or time.time
         self._entries: dict[str, dict[str, Any]] = {}
+        self._capture_by_entry_id: dict[int, Any] = {}
+        self._file_loaded_entry_ids: set[int] = set()
         self.hits = 0
         self.misses = 0
         self.expired = 0
@@ -83,8 +111,32 @@ class MarketDataCache:
         key_parts: Mapping[str, Any],
         fetch: Callable[[], Awaitable[T]],
     ) -> T:
+        recorded = await self.get_or_fetch_with_local_delivery(
+            data_type=data_type,
+            key_parts=key_parts,
+            fetch=fetch,
+        )
+        return recorded.value
+
+    async def get_or_fetch_with_local_delivery(
+        self,
+        *,
+        data_type: str,
+        key_parts: Mapping[str, Any],
+        fetch: Callable[[], Awaitable[T]],
+        bind_upstream: Callable[[], Any] | None = None,
+    ) -> LocalCacheFetchResult:
         if not self.enabled:
-            return await fetch()
+            value = await fetch()
+            upstream = bind_upstream() if bind_upstream is not None else None
+            return LocalCacheFetchResult(
+                value=value,
+                delivery_kind=CACHE_KIND_NOT_APPLICABLE,
+                bookkeeping_created_at=None,
+                expires_at=None,
+                retained_upstream=upstream,
+                file_loaded_entry=False,
+            )
 
         cache_key = self.cache_key(data_type=data_type, key_parts=key_parts)
         now = self._now()
@@ -93,14 +145,29 @@ class MarketDataCache:
             expires_at = float(entry.get("expires_at", 0))
             if expires_at > now:
                 self.hits += 1
-                return _deserialize_value(entry.get("value"))
+                value = _deserialize_value(entry.get("value"))
+                created_at = entry.get("created_at")
+                return LocalCacheFetchResult(
+                    value=value,
+                    delivery_kind=CACHE_KIND_HIT,
+                    bookkeeping_created_at=float(created_at) if created_at is not None else None,
+                    expires_at=expires_at,
+                    retained_upstream=self._capture_by_entry_id.get(id(entry)),
+                    file_loaded_entry=id(entry) in self._file_loaded_entry_ids,
+                )
 
             self.expired += 1
+            self._forget_entry_capture(entry)
             self._entries.pop(cache_key, None)
+            delivery_kind = CACHE_KIND_EXPIRY_REFETCH
+        else:
+            delivery_kind = CACHE_KIND_MISS
 
         self.misses += 1
         value = await fetch()
-        self._entries[cache_key] = {
+        previous = self._entries.get(cache_key)
+        self._forget_entry_capture(previous)
+        new_entry = {
             "version": CACHE_FILE_VERSION,
             "data_type": data_type,
             "key": _json_safe_key(dict(key_parts)),
@@ -108,10 +175,31 @@ class MarketDataCache:
             "expires_at": now + self._ttl_for(data_type),
             "value": _serialize_value(value),
         }
+        self._entries[cache_key] = new_entry
+        upstream = bind_upstream() if bind_upstream is not None else None
+        if upstream is not None:
+            self._capture_by_entry_id[id(new_entry)] = upstream
         self.writes += 1
         if self.file_path is not None:
             self._write_file()
-        return value
+        return LocalCacheFetchResult(
+            value=value,
+            delivery_kind=delivery_kind,
+            bookkeeping_created_at=now,
+            expires_at=float(new_entry["expires_at"]),
+            retained_upstream=upstream,
+            file_loaded_entry=False,
+        )
+
+    def _forget_entry_capture(self, entry: Mapping[str, Any] | None) -> None:
+        if entry is None:
+            return
+        entry_id = id(entry)
+        self._capture_by_entry_id.pop(entry_id, None)
+        self._file_loaded_entry_ids.discard(entry_id)
+
+    def capture_association_size(self) -> int:
+        return len(self._capture_by_entry_id)
 
     def cache_key(self, *, data_type: str, key_parts: Mapping[str, Any]) -> str:
         payload = {
@@ -146,6 +234,8 @@ class MarketDataCache:
             for key, value in entries.items()
             if isinstance(value, Mapping) and value.get("version") == CACHE_FILE_VERSION
         }
+        self._capture_by_entry_id = {}
+        self._file_loaded_entry_ids = {id(entry) for entry in self._entries.values()}
 
     def _write_file(self) -> None:
         if self.file_path is None:
@@ -172,6 +262,8 @@ class MarketDataCache:
 class CachedMarketDataClient(BaseExchangeClient):
     """Read-only public market-data cache wrapper."""
 
+    _cci_klines_delivery_capture = True
+
     def __init__(self, client: BaseExchangeClient, cache: MarketDataCache) -> None:
         self.client = client
         self.cache = cache
@@ -192,6 +284,80 @@ class CachedMarketDataClient(BaseExchangeClient):
             },
             fetch=lambda: self.client.get_klines(normalized_symbol, interval, limit),
         )
+
+    async def get_klines_with_delivery(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+        occurrence_factory: Callable[[], str] | None = None,
+    ) -> CandleBatchDelivery:
+        clock = capture_clock or default_capture_clock
+        tokens = occurrence_factory or new_capture_occurrence_token
+        normalized_symbol = symbol.upper()
+        normalized_interval = interval.strip()
+        upstream_box: list[CandleBatchDelivery] = []
+
+        async def fetch() -> Any:
+            delivery = await fetch_klines_with_delivery(
+                self.client,
+                normalized_symbol,
+                interval,
+                limit,
+                capture_clock=clock,
+                occurrence_factory=tokens,
+            )
+            upstream_box.append(delivery)
+            return list(delivery.returned_sequence)
+
+        recorded = await self.cache.get_or_fetch_with_local_delivery(
+            data_type="candles",
+            key_parts={
+                "exchange": self.exchange_name,
+                "symbol": normalized_symbol,
+                "endpoint": "get_klines",
+                "interval": normalized_interval,
+                "limit": limit,
+                "params": {},
+            },
+            fetch=fetch,
+            bind_upstream=lambda: upstream_box[-1] if upstream_box else None,
+        )
+        candles = recorded.value
+        if not isinstance(candles, Sequence) or isinstance(candles, (str, bytes)):
+            sequence: list[Any] = []
+        else:
+            sequence = list(candles)
+        upstream = recorded.retained_upstream if isinstance(recorded.retained_upstream, CandleBatchDelivery) else None
+        upstream_reason = None
+        if recorded.delivery_kind == CACHE_KIND_HIT and upstream is None:
+            upstream_reason = (
+                LIMIT_FILE_CACHE_ACQUISITION if recorded.file_loaded_entry else LIMIT_UNINSTRUMENTED_INSERT
+            )
+        try:
+            return observe_cache_delivery(
+                sequence,
+                delivery_kind=recorded.delivery_kind,
+                capture_clock=clock,
+                occurrence_factory=tokens,
+                cache_bookkeeping_created_at=recorded.bookkeeping_created_at,
+                cache_expires_at=recorded.expires_at,
+                cache_enabled=self.cache.enabled,
+                upstream=upstream,
+                upstream_unavailable_reason=upstream_reason,
+                symbol=normalized_symbol,
+                interval=normalized_interval,
+                limit=limit,
+            )
+        except Exception:
+            return unavailable_delivery(
+                sequence,
+                reason="capture_representation_failed",
+                capture_clock=clock,
+                occurrence_factory=tokens,
+            )
 
     async def get_ticker(self, symbol: str) -> Any:
         normalized_symbol = symbol.upper()
