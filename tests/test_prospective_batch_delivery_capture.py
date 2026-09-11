@@ -43,6 +43,7 @@ from app.data.candle_batch_evidence import (
     associate_execution_handoff,
     client_offers_same_path_klines_delivery,
     fetch_klines_with_delivery,
+    observe_closed_subset,
     observe_unsupported_client_return,
     snapshot_candle_batch,
 )
@@ -150,6 +151,24 @@ def _rows_for_interval(interval: str, limit: int, *, close_value: str = "100.0")
     duration = durations[interval]
     start = 1_700_000_000_000
     return [_kline_row(start + index * duration, duration_ms=duration, close=close_value) for index in range(limit)]
+
+
+def _mutable_mapping_candle(
+    *,
+    timestamp: int,
+    close: Decimal,
+    interval: str = "15m",
+) -> dict[str, Any]:
+    return {
+        "timestamp": timestamp,
+        "interval": interval,
+        "open": Decimal("1"),
+        "high": Decimal("2"),
+        "low": Decimal("0"),
+        "close": close,
+        "volume": Decimal("1"),
+        "raw_source": ["original"],
+    }
 
 
 def _decision_after_rows(interval: str, count: int) -> datetime:
@@ -770,6 +789,142 @@ def test_snapshot_immutability_and_false_handoff_rejected() -> None:
 
     run(scenario())
     assert EVIDENCE_MALFORMED
+    assert EVIDENCE_NORMAL_PRODUCER
+
+
+def test_inplace_included_field_mutation_rejects_handoff_match() -> None:
+    cutoff = datetime(2026, 1, 12, tzinfo=UTC)
+    clock = ControllableDatetimeClock(cutoff)
+    candle = _mutable_mapping_candle(timestamp=1, close=Decimal("1"))
+    delivery = observe_unsupported_client_return(
+        [candle],
+        symbol="BTCUSDT",
+        interval="15m",
+        limit=1,
+        capture_clock=clock,
+        client_class_label="MutableMappingClient",
+    )
+    assert delivery.returned_sequence[0] is candle
+    assert delivery.snapshot.records[0].values["close"] == Decimal("1")
+    candle["close"] = Decimal("50")
+    handoff = associate_execution_handoff(
+        delivery,
+        execution_candles=delivery.returned_sequence,
+        execution_timeframe="15m",
+        logical_cutoff=cutoff,
+        capture_clock=clock,
+    )
+    assert handoff.disposition != HANDOFF_MATCHED
+    assert handoff.disposition == HANDOFF_MISMATCHED
+    assert handoff.reason == "execution_projection_does_not_match_captured_batch"
+    assert delivery.snapshot.records[0].values["close"] == Decimal("1")
+    assert handoff.execution_snapshot is not None
+    assert handoff.execution_snapshot.records[0].values["close"] == Decimal("50")
+    assert EVIDENCE_MALFORMED
+
+
+def test_excluded_field_mutation_keeps_valid_handoff() -> None:
+    cutoff = datetime(2026, 1, 12, tzinfo=UTC)
+    clock = ControllableDatetimeClock(cutoff)
+    candle = _mutable_mapping_candle(timestamp=1, close=Decimal("1"))
+    delivery = observe_unsupported_client_return(
+        [candle],
+        symbol="BTCUSDT",
+        interval="15m",
+        limit=1,
+        capture_clock=clock,
+        client_class_label="MutableMappingClient",
+    )
+    candle["raw_source"] = ["mutated", "payload"]
+    handoff = associate_execution_handoff(
+        delivery,
+        execution_candles=delivery.returned_sequence,
+        execution_timeframe="15m",
+        logical_cutoff=cutoff,
+        capture_clock=clock,
+    )
+    assert handoff.disposition == HANDOFF_MATCHED
+    assert delivery.snapshot.records[0].values["close"] == Decimal("1")
+    assert "raw_source" not in delivery.snapshot.records[0].values
+    assert EVIDENCE_MALFORMED
+
+
+def test_real_multi_candle_reorder_rejects_handoff_match() -> None:
+    cutoff = datetime(2026, 1, 12, tzinfo=UTC)
+    clock = ControllableDatetimeClock(cutoff)
+    first = _mutable_mapping_candle(timestamp=1, close=Decimal("1"))
+    second = _mutable_mapping_candle(timestamp=2, close=Decimal("2"))
+    delivery = observe_unsupported_client_return(
+        [first, second],
+        symbol="BTCUSDT",
+        interval="15m",
+        limit=2,
+        capture_clock=clock,
+        client_class_label="MutableMappingClient",
+    )
+    handoff = associate_execution_handoff(
+        delivery,
+        execution_candles=(second, first),
+        execution_timeframe="15m",
+        logical_cutoff=cutoff,
+        capture_clock=clock,
+    )
+    assert handoff.disposition != HANDOFF_MATCHED
+    assert handoff.disposition == HANDOFF_MISMATCHED
+    assert handoff.reason == "execution_projection_does_not_match_captured_batch"
+    assert EVIDENCE_MALFORMED
+
+
+def test_replacement_copy_does_not_establish_exact_membership() -> None:
+    cutoff = datetime(2026, 1, 12, tzinfo=UTC)
+    clock = ControllableDatetimeClock(cutoff)
+    original = _mutable_mapping_candle(timestamp=1, close=Decimal("1"))
+    replacement = _mutable_mapping_candle(timestamp=1, close=Decimal("1"))
+    assert replacement is not original
+    parent = observe_unsupported_client_return(
+        [original],
+        symbol="BTCUSDT",
+        interval="15m",
+        limit=1,
+        capture_clock=clock,
+        client_class_label="MutableMappingClient",
+    )
+    selected = observe_closed_subset(
+        parent,
+        [replacement],
+        logical_cutoff=cutoff,
+        capture_clock=clock,
+    )
+    assert selected.selection is not None
+    assert selected.selection.membership_complete is False
+    assert selected.lineage_complete is False
+    assert selected.selection.selected_membership_indices is None
+    assert selected.selection.projection_equivalent_indices == (0,)
+    assert "closed_selection_membership_incomplete" in selected.limitations
+    assert "closed_selection_projection_equivalent_not_exact_membership" in selected.limitations
+    assert EVIDENCE_MALFORMED
+
+
+def test_ordinary_closed_candle_path_preserves_exact_membership() -> None:
+    client = FakeExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes={"2d"})
+    decision = datetime(2026, 1, 1, tzinfo=UTC)
+    result = run(
+        ScannerRunner(exchange_client=client, capture_clock=ControllableDatetimeClock(decision)).run(
+            _scan_config(decision_timestamp=decision, enable_strategy_output=False)
+        )
+    )
+    symbol = result.results[0]
+    delivery = symbol.lifecycle_execution_batch_delivery
+    assert delivery is not None
+    assert delivery.selection is not None
+    assert delivery.selection.membership_complete is True
+    assert delivery.parent is not None
+    assert delivery.selection.selected_membership_indices is not None
+    assert len(delivery.selection.selected_membership_indices) == len(delivery.returned_sequence)
+    for index, candle in zip(delivery.selection.selected_membership_indices, delivery.returned_sequence, strict=True):
+        assert delivery.parent.returned_sequence[index] is candle
+    assert delivery.parent.producer_boundary == PRODUCER_CLIENT_RETURN
+    assert delivery.lineage_complete is False
     assert EVIDENCE_NORMAL_PRODUCER
 
 

@@ -75,7 +75,7 @@ Distinct clocks: candle event time, scanner logical cutoff, cache bookkeeping, a
 
 ### 2.6 Filtering and 2d lineage
 
-Closed-candle selection records supplied cutoff, ordered membership indices when reconstructible, and the output snapshot. Slicing is not identity-preserving merely because some prices match.
+Closed-candle selection records supplied cutoff, ordered **exact** membership indices, and the output snapshot. Exact membership requires object identity with the parent returned sequence (`closed_candles_as_of` preserves `item.source`). Projection equality of a replacement/copy is recorded only as `projection_equivalent_indices` plus `closed_selection_projection_equivalent_not_exact_membership`; it does **not** set `membership_complete=True` or `lineage_complete=True`. Slicing is not identity-preserving merely because some prices match.
 
 Both 2d routes are instrumented:
 
@@ -88,7 +88,7 @@ Both 2d routes are instrumented:
 
 Carriers travel through `_StrategyExecution.execution_batch_delivery` and `ScannerSymbolResult.lifecycle_execution_batch_delivery` (`exclude=True`). Ordinary `model_dump` / `store_scan_result` omit them.
 
-At `SetupLifecycleService._apply_to_symbol_result_with_meta`, immediately before `evaluate_closed_candle_outcomes` when `final_record` and `execution_candles is not None`, the service associates the carrier with the actual execution tuple, timeframe, and cutoff. Mismatch or missing carrier yields `mismatched` / `unavailable`. The evaluator signature and semantics are unchanged. Direct-supplied `ScannerSymbolResult` objects cannot invent adapter/cache history.
+At `SetupLifecycleService._apply_to_symbol_result_with_meta`, immediately before `evaluate_closed_candle_outcomes` when `final_record` and `execution_candles is not None`, the service associates the carrier with the actual execution tuple, timeframe, and cutoff. The frozen `delivery.snapshot` remains the captured projection. Handoff always projects the **current** execution candles and compares that projection to the captured one. Object identity may help identify the same batch; it does **not** certify a match after in-place mutation of an included field. Reorder of two or more candles with the same timeframe/cutoff is `mismatched` (`execution_projection_does_not_match_captured_batch`). Mutation of excluded `raw_source` alone does not create a projected mismatch. Missing or mismatched carriers yield `mismatched` / `unavailable`. The evaluator signature and semantics are unchanged. Direct-supplied `ScannerSymbolResult` objects cannot invent adapter/cache history.
 
 None is not an empty tuple. `not_run` is not a successful evaluation. Capture runs before setup outcome selection and includes rejected/no-setup flows. That is not a research denominator.
 
@@ -131,7 +131,7 @@ Next operational checkpoint before any durable capture writer: deployed SHA, dec
 
 ## 6. Tests
 
-`tests/test_prospective_batch_delivery_capture.py` covers adapter clamping, cache delivery kinds, concurrency, restart, both 2d routes, closed filtering, no-strategy TF match/mismatch, ordinary handoff, direct/None/empty/`not_run`/fetch failure, snapshot isolation, capture-clock failure, unbound source/policy, override-safe weaker observation, accepted and rejected flows, and bounded association lifetime.
+`tests/test_prospective_batch_delivery_capture.py` covers adapter clamping, cache delivery kinds, concurrency, restart, both 2d routes, closed filtering, no-strategy TF match/mismatch, ordinary handoff, direct/None/empty/`not_run`/fetch failure, snapshot isolation, same-object included-field mutation (rejected), excluded-field mutation (still matched), multi-candle reorder with identical timeframe/cutoff, replacement-copy membership incompleteness, ordinary closed-path exact membership, capture-clock failure, unbound source/policy, override-safe weaker observation, accepted and rejected flows, and bounded association lifetime.
 
 ## 7. Updated A–W matrix
 

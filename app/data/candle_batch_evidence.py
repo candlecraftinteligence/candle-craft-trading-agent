@@ -86,6 +86,9 @@ LIMIT_WEAKER_CLIENT_RETURN: Final[str] = "unsupported_client_return_is_not_adapt
 LIMIT_FILE_CACHE_ACQUISITION: Final[str] = "legacy_cache_entry_lacks_acquisition_observation"
 LIMIT_UNINSTRUMENTED_INSERT: Final[str] = "cache_entry_populated_without_capture"
 LIMIT_PROJECTION_NOT_RAW_EQUALITY: Final[str] = "projection_equality_is_not_raw_response_equality"
+LIMIT_PROJECTION_EQUIVALENCE_NOT_EXACT_MEMBERSHIP: Final[str] = (
+    "closed_selection_projection_equivalent_not_exact_membership"
+)
 LIMIT_ONE_METHOD_RETURN_NOT_RETRY_LEDGER: Final[str] = "successful_method_return_is_not_http_retry_ledger"
 LIMIT_WALL_CLOCK_NOT_TOTAL_ORDER: Final[str] = "wall_clock_observation_is_not_trusted_total_order"
 
@@ -190,6 +193,7 @@ class SelectionObservation:
     selected_membership_indices: tuple[int, ...] | None
     membership_complete: bool
     output_snapshot: CandleBatchSnapshot
+    projection_equivalent_indices: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -458,8 +462,14 @@ def observe_closed_subset(
 ) -> CandleBatchDelivery:
     occurrence = occurrence_factory()
     observed_at = _sample_capture_clock(capture_clock)
-    indices = _selected_membership_indices(parent.returned_sequence, selected_candles)
+    indices = _exact_membership_indices(parent.returned_sequence, selected_candles)
     membership_complete = indices is not None
+    projection_equivalent_indices = None
+    if not membership_complete:
+        projection_equivalent_indices = _projection_equivalent_indices(
+            parent.returned_sequence,
+            selected_candles,
+        )
     if (
         membership_complete
         and indices is not None
@@ -482,10 +492,13 @@ def observe_closed_subset(
         selected_membership_indices=indices,
         membership_complete=membership_complete,
         output_snapshot=output_snapshot,
+        projection_equivalent_indices=projection_equivalent_indices,
     )
     limitations = parent.limitations + (LIMIT_CUTOFF_NOT_POSSESSION, LIMIT_POSSESSION_UNAVAILABLE)
     if not membership_complete:
         limitations = limitations + ("closed_selection_membership_incomplete",)
+        if projection_equivalent_indices is not None:
+            limitations = limitations + (LIMIT_PROJECTION_EQUIVALENCE_NOT_EXACT_MEMBERSHIP,)
     disposition = DISPOSITION_UNAVAILABLE if output_snapshot.unavailable else DISPOSITION_CAPTURED
     return CandleBatchDelivery(
         format_version=CAPTURE_FORMAT_VERSION,
@@ -650,10 +663,7 @@ def associate_execution_handoff(
             observed_at=observed_at,
         )
     try:
-        if delivery is not None and _same_object_sequence(delivery.returned_sequence, execution_candles):
-            execution_snapshot = delivery.snapshot
-        else:
-            execution_snapshot = snapshot_candle_batch(execution_candles)
+        execution_snapshot = snapshot_candle_batch(execution_candles)
     except Exception:
         return BatchHandoffAssociation(
             disposition=HANDOFF_UNAVAILABLE,
@@ -698,12 +708,10 @@ def associate_execution_handoff(
             matched_fingerprint=None,
             observed_at=observed_at,
         )
-    if execution_snapshot is not delivery.snapshot and (
-        execution_snapshot.content_fingerprint != delivery.snapshot.content_fingerprint
-    ):
+    if not _projections_match(execution_snapshot, delivery.snapshot):
         return BatchHandoffAssociation(
             disposition=HANDOFF_MISMATCHED,
-            reason="execution_sequence_does_not_match_captured_batch",
+            reason="execution_projection_does_not_match_captured_batch",
             delivery=delivery,
             execution_timeframe=execution_timeframe,
             logical_cutoff=cutoff,
@@ -935,6 +943,17 @@ def _same_object_sequence(left: Sequence[Any], right: Sequence[Any]) -> bool:
     return all(first is second for first, second in zip(left, right, strict=True))
 
 
+def _projections_match(left: CandleBatchSnapshot, right: CandleBatchSnapshot) -> bool:
+    if left.unavailable or right.unavailable:
+        return False
+    if left.record_count != right.record_count or len(left.records) != len(right.records):
+        return False
+    return all(
+        left_record.to_canonical_dict() == right_record.to_canonical_dict()
+        for left_record, right_record in zip(left.records, right.records, strict=True)
+    )
+
+
 def _normalize_interval(value: str | None) -> str:
     if value is None or value == NA:
         return ""
@@ -960,13 +979,12 @@ def _int_timestamp(candle: Any) -> int | None:
     return None
 
 
-def _selected_membership_indices(
+def _exact_membership_indices(
     parent_sequence: Sequence[Any],
     selected: Sequence[Any],
 ) -> tuple[int, ...] | None:
     used: set[int] = set()
     indices: list[int] = []
-    parent_projections: list[CandleProjectionRecord] | None = None
     for child in selected:
         found: int | None = None
         for index, parent in enumerate(parent_sequence):
@@ -976,18 +994,31 @@ def _selected_membership_indices(
                 found = index
                 break
         if found is None:
-            if parent_projections is None:
-                parent_projections = [_project_candle(item) for item in parent_sequence]
-            child_record = _project_candle(child)
-            for index, parent_record in enumerate(parent_projections):
-                if index in used:
-                    continue
-                if (
-                    not child_record.representation_unsupported
-                    and parent_record.to_canonical_dict() == child_record.to_canonical_dict()
-                ):
-                    found = index
-                    break
+            return None
+        used.add(found)
+        indices.append(found)
+    return tuple(indices)
+
+
+def _projection_equivalent_indices(
+    parent_sequence: Sequence[Any],
+    selected: Sequence[Any],
+) -> tuple[int, ...] | None:
+    used: set[int] = set()
+    indices: list[int] = []
+    parent_projections = [_project_candle(item) for item in parent_sequence]
+    for child in selected:
+        child_record = _project_candle(child)
+        found: int | None = None
+        for index, parent_record in enumerate(parent_projections):
+            if index in used:
+                continue
+            if (
+                not child_record.representation_unsupported
+                and parent_record.to_canonical_dict() == child_record.to_canonical_dict()
+            ):
+                found = index
+                break
         if found is None:
             return None
         used.add(found)
