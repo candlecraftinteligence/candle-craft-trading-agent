@@ -831,34 +831,125 @@ def assess_capacity_budget(capacity: Mapping[str, Any]) -> dict[str, Any]:
         else:
             terms[key] = int(value)
 
-    backup_shares = capacity.get("backup_shares_db_volume", True)
-    restore_shares = capacity.get("restore_shares_db_volume", True)
-    if backup_shares is not True and backup_shares is not False:
-        missing.append("capacity.backup_shares_db_volume")
-    if restore_shares is not True and restore_shares is not False:
-        missing.append("capacity.restore_shares_db_volume")
-    if backup_shares is False and not _is_non_negative_int(capacity.get("backup_volume_free_bytes")):
-        missing.append("capacity.backup_volume_free_bytes")
-    if restore_shares is False and not _is_non_negative_int(capacity.get("restore_volume_free_bytes")):
-        missing.append("capacity.restore_volume_free_bytes")
+    backup_shares = _required_bool_field(capacity, "backup_shares_db_volume", missing)
+    restore_shares = _required_bool_field(capacity, "restore_shares_db_volume", missing)
+    share_external = _resolve_backup_restore_share(capacity, backup_shares, restore_shares, missing)
+    db_label = _optional_declared_label(capacity, "db_volume_label", missing)
+    backup_label = _optional_declared_label(capacity, "backup_volume_label", missing)
+    restore_label = _optional_declared_label(capacity, "restore_volume_label", missing)
+    _record_topology_contradictions(
+        missing,
+        backup_shares=backup_shares,
+        restore_shares=restore_shares,
+        share_external=share_external,
+        db_label=db_label,
+        backup_label=backup_label,
+        restore_label=restore_label,
+        capacity=capacity,
+    )
 
-    reserve_floor = planning_reserve_floor_bytes(total) if _is_positive_int(total) else None
-    declared_reserve = terms.get("operating_reserve_bytes")
-    if reserve_floor is not None and declared_reserve is not None and declared_reserve < reserve_floor:
-        missing.append(
-            "capacity.operating_reserve_bytes below planning floor "
-            f"(max(10GiB, 10% of volume)={reserve_floor}); a stronger requirement cannot be smaller than the floor"
-        )
+    db_floor = planning_reserve_floor_bytes(total) if _is_positive_int(total) else None
+    declared_db_reserve = terms.get("operating_reserve_bytes")
     # stronger_reserve_requirement_recorded is ignored: a boolean cannot waive the floor.
-    stronger = capacity.get("stronger_reserve_requirement_bytes")
-    if stronger is not None:
-        if not _is_positive_int(stronger):
-            missing.append("capacity.stronger_reserve_requirement_bytes")
-            stronger = None
-        elif reserve_floor is not None and stronger < reserve_floor:
-            missing.append(
-                "capacity.stronger_reserve_requirement_bytes below planning floor "
-                f"(max(10GiB, 10% of volume)={reserve_floor})"
+    db_stronger = _optional_stronger_reserve(capacity, "stronger_reserve_requirement_bytes", missing)
+    if db_floor is not None:
+        _reject_reserve_below_floor(
+            missing,
+            floor=db_floor,
+            declared=declared_db_reserve,
+            declared_field="capacity.operating_reserve_bytes",
+            stronger=db_stronger,
+            stronger_field="capacity.stronger_reserve_requirement_bytes",
+        )
+
+    topology = _physical_volume_keys(
+        backup_shares=backup_shares,
+        restore_shares=restore_shares,
+        share_external=share_external,
+        db_label=db_label,
+        backup_label=backup_label,
+        restore_label=restore_label,
+        missing=missing,
+    )
+
+    volume_specs: dict[str, dict[str, Any]] = {}
+    if topology is not None and _is_positive_int(total) and _is_non_negative_int(free) and declared_db_reserve is not None:
+        db_key = topology["db"]
+        _add_volume_role(
+            volume_specs,
+            key=db_key,
+            role="db",
+            allocation_names=[
+                "migration_temp_bytes",
+                "additional_peak_WAL_and_log_bytes",
+                "growth_budget_bytes",
+                "operating_reserve_bytes",
+            ],
+            occupancy_bytes=(
+                terms.get("migration_temp_bytes", 0)
+                + terms.get("additional_peak_WAL_and_log_bytes", 0)
+                + terms.get("growth_budget_bytes", 0)
+            ),
+            total_bytes=int(total),
+            free_bytes=int(free),
+            declared_reserve=declared_db_reserve,
+            stronger_reserve=db_stronger,
+            declared_reserve_required=True,
+            missing=missing,
+        )
+        if backup_shares is True:
+            _add_volume_role(
+                volume_specs,
+                key=db_key,
+                role="backup",
+                allocation_names=["new_backup_bytes"],
+                occupancy_bytes=terms.get("new_backup_bytes", 0),
+                total_bytes=int(total),
+                free_bytes=int(free),
+                declared_reserve=declared_db_reserve,
+                stronger_reserve=db_stronger,
+                declared_reserve_required=True,
+                missing=missing,
+            )
+        if restore_shares is True:
+            _add_volume_role(
+                volume_specs,
+                key=db_key,
+                role="restore",
+                allocation_names=["concurrent_restore_or_candidate_bytes"],
+                occupancy_bytes=terms.get("concurrent_restore_or_candidate_bytes", 0),
+                total_bytes=int(total),
+                free_bytes=int(free),
+                declared_reserve=declared_db_reserve,
+                stronger_reserve=db_stronger,
+                declared_reserve_required=True,
+                missing=missing,
+            )
+        if backup_shares is False:
+            _add_external_role(
+                volume_specs,
+                capacity=capacity,
+                key=topology["backup"],
+                role="backup",
+                allocation_name="new_backup_bytes",
+                occupancy_bytes=terms.get("new_backup_bytes", 0),
+                prefix="backup",
+                share_external=share_external is True,
+                peer_prefix="restore" if restore_shares is False else None,
+                missing=missing,
+            )
+        if restore_shares is False:
+            _add_external_role(
+                volume_specs,
+                capacity=capacity,
+                key=topology["restore"],
+                role="restore",
+                allocation_name="concurrent_restore_or_candidate_bytes",
+                occupancy_bytes=terms.get("concurrent_restore_or_candidate_bytes", 0),
+                prefix="restore",
+                share_external=share_external is True,
+                peer_prefix="backup" if backup_shares is False else None,
+                missing=missing,
             )
 
     if missing:
@@ -868,119 +959,488 @@ def assess_capacity_budget(capacity: Mapping[str, Any]) -> dict[str, Any]:
             "missing": missing,
             "required_free_bytes": UNAVAILABLE,
             "volume_free_bytes": free if _is_non_negative_int(free) else UNAVAILABLE,
-            "planning_reserve_floor_bytes": reserve_floor if reserve_floor is not None else UNAVAILABLE,
+            "planning_reserve_floor_bytes": db_floor if db_floor is not None else UNAVAILABLE,
+            "sufficient_on_packet": False,
+            "topology": {
+                "backup_shares_db_volume": backup_shares if backup_shares is not None else UNAVAILABLE,
+                "restore_shares_db_volume": restore_shares if restore_shares is not None else UNAVAILABLE,
+                "backup_restore_share_volume": share_external if share_external is not None else UNAVAILABLE,
+                "note": (
+                    "Role-to-volume keys are operator-declared associations for assessment, "
+                    "not proof of hardware identity. Missing topology is never assumed to share the DB volume."
+                ),
+            },
+        }
+
+    volumes: dict[str, dict[str, Any]] = {}
+    for key, spec in volume_specs.items():
+        volume_total = spec["total_bytes"]
+        volume_free = spec["free_bytes"]
+        if not _is_positive_int(volume_total):
+            missing.append(f"capacity volume_total_bytes for declared volume {key}")
+            continue
+        if not _is_non_negative_int(volume_free):
+            missing.append(f"capacity volume_free_bytes for declared volume {key}")
+            continue
+        floor = planning_reserve_floor_bytes(int(volume_total))
+        _reject_reserve_below_floor(
+            missing,
+            floor=floor,
+            declared=spec["declared_reserve"],
+            declared_field=spec["declared_field"],
+            stronger=spec["stronger_reserve"],
+            stronger_field=spec["stronger_field"],
+        )
+        if spec["declared_reserve_required"] and spec["declared_reserve"] is None:
+            missing.append(spec["declared_field"])
+        applied = _apply_physical_reserve(
+            floor=floor,
+            declared=spec["declared_reserve"],
+            stronger=spec["stronger_reserve"],
+        )
+        required = int(spec["occupancy_bytes"]) + applied
+        if "operating_reserve_bytes" not in spec["allocation_names"]:
+            spec["allocation_names"].append("operating_reserve_bytes")
+        volumes[key] = _capacity_volume_entry(
+            key=key,
+            roles=spec["roles"],
+            total_bytes=int(volume_total),
+            free_bytes=int(volume_free),
+            required_bytes=required,
+            allocations=spec["allocation_names"],
+            planning_reserve_floor_bytes=floor,
+            applied_reserve_bytes=applied,
+        )
+
+    if missing or topology is None or not volumes:
+        if not missing:
+            missing.append("capacity physical-volume topology")
+        return {
+            "status": "incomplete",
+            "reason": "STOP_FOR_CAPACITY_EVIDENCE",
+            "missing": missing,
+            "required_free_bytes": UNAVAILABLE,
+            "volume_free_bytes": free if _is_non_negative_int(free) else UNAVAILABLE,
+            "planning_reserve_floor_bytes": db_floor if db_floor is not None else UNAVAILABLE,
             "sufficient_on_packet": False,
         }
 
-    assert isinstance(total, int) and isinstance(free, int)
-    assert reserve_floor is not None and declared_reserve is not None
-    applied_reserve = declared_reserve
-    if _is_positive_int(stronger):
-        applied_reserve = max(applied_reserve, int(stronger))
-    applied_reserve = max(applied_reserve, reserve_floor)
-
-    db_allocations = [
-        "migration_temp_bytes",
-        "additional_peak_WAL_and_log_bytes",
-        "growth_budget_bytes",
-        "operating_reserve_bytes",
-    ]
-    db_required = (
-        terms["migration_temp_bytes"]
-        + terms["additional_peak_WAL_and_log_bytes"]
-        + terms["growth_budget_bytes"]
-        + applied_reserve
-    )
-    if backup_shares is True:
-        db_allocations.append("new_backup_bytes")
-        db_required += terms["new_backup_bytes"]
-    if restore_shares is True:
-        db_allocations.append("concurrent_restore_or_candidate_bytes")
-        db_required += terms["concurrent_restore_or_candidate_bytes"]
-
-    volumes: dict[str, dict[str, Any]] = {
-        "db": _capacity_volume_entry(
-            role="db",
-            total_bytes=total,
-            free_bytes=free,
-            required_bytes=db_required,
-            allocations=db_allocations,
-            planning_reserve_floor_bytes=reserve_floor,
-            applied_reserve_bytes=applied_reserve,
-        )
-    }
-    if backup_shares is False:
-        backup_total = capacity.get("backup_volume_total_bytes")
-        volumes["backup"] = _capacity_volume_entry(
-            role="backup",
-            total_bytes=backup_total if _is_positive_int(backup_total) else UNAVAILABLE,
-            free_bytes=int(capacity["backup_volume_free_bytes"]),
-            required_bytes=terms["new_backup_bytes"],
-            allocations=["new_backup_bytes"],
-        )
-    if restore_shares is False:
-        restore_total = capacity.get("restore_volume_total_bytes")
-        volumes["restore"] = _capacity_volume_entry(
-            role="restore",
-            total_bytes=restore_total if _is_positive_int(restore_total) else UNAVAILABLE,
-            free_bytes=int(capacity["restore_volume_free_bytes"]),
-            required_bytes=terms["concurrent_restore_or_candidate_bytes"],
-            allocations=["concurrent_restore_or_candidate_bytes"],
-        )
-
     sufficient = all(bool(item["sufficient"]) for item in volumes.values())
+    db_key = topology["db"]
+    db_entry = volumes[db_key]
     reserve_note = None
-    if applied_reserve > reserve_floor:
+    if db_entry["applied_reserve_bytes"] > db_entry["planning_reserve_floor_bytes"]:
         reserve_note = (
             "applied max(planning floor, declared operating_reserve_bytes, "
-            "stronger_reserve_requirement_bytes when supplied)"
+            "stronger_reserve_requirement_bytes when supplied) per physical volume; "
+            "a boolean cannot waive a floor downward"
         )
     return {
         "status": "measured" if sufficient else "insufficient",
         "reason": None if sufficient else "insufficient_free_capacity",
         "missing": [],
-        "required_free_bytes": db_required,
-        "volume_total_bytes": total,
-        "volume_free_bytes": free,
-        "planning_reserve_floor_bytes": reserve_floor,
-        "applied_reserve_bytes": applied_reserve,
+        "required_free_bytes": db_entry["required_bytes"],
+        "volume_total_bytes": db_entry["total_bytes"],
+        "volume_free_bytes": db_entry["free_bytes"],
+        "planning_reserve_floor_bytes": db_entry["planning_reserve_floor_bytes"],
+        "applied_reserve_bytes": db_entry["applied_reserve_bytes"],
         "terms": terms,
         "shared_volume_accounting": backup_shares is True and restore_shares is True,
         "sufficient_on_packet": sufficient,
         "volumes": volumes,
+        "topology": {
+            "backup_shares_db_volume": backup_shares,
+            "restore_shares_db_volume": restore_shares,
+            "backup_restore_share_volume": share_external,
+            "physical_volume_keys": list(volumes.keys()),
+            "role_volume_keys": topology,
+            "declared_topology_association": True,
+            "note": (
+                "Declared topology association for assessment, not proof of hardware identity. "
+                "Collector-observed volume facts are separate evidence and are not used as topology proof."
+            ),
+        },
         "reserve_note": reserve_note,
         "note": (
-            "Each affected physical volume is compared against its own free space. "
-            "Existing allocations are already reflected in measured free space and are not charged twice. "
-            "Migration temp is charged to the DB volume unless a later contract names another volume. "
-            "This is a planning assessment of a supplied packet, not Runtime-observed capacity."
+            "Concurrent obligations that share a declared physical volume are aggregated before "
+            "comparison with that volume's free space. Each affected physical volume includes its "
+            "own planning reserve. Existing allocations are already reflected in measured free space "
+            "and are not charged twice. Migration temp is charged to the DB volume unless a later "
+            "contract names another volume. This is a planning assessment of a supplied packet, "
+            "not Runtime-observed capacity."
         ),
     }
 
 
+def _required_bool_field(capacity: Mapping[str, Any], key: str, missing: list[str]) -> bool | None:
+    if key not in capacity:
+        missing.append(f"capacity.{key}")
+        return None
+    value = capacity[key]
+    if value is not True and value is not False:
+        missing.append(f"capacity.{key}")
+        return None
+    return bool(value)
+
+
+def _optional_declared_label(capacity: Mapping[str, Any], key: str, missing: list[str]) -> str | None:
+    if key not in capacity:
+        return None
+    value = capacity[key]
+    if not isinstance(value, str) or not value.strip():
+        missing.append(f"capacity.{key}")
+        return None
+    return value.strip()
+
+
+def _optional_stronger_reserve(capacity: Mapping[str, Any], key: str, missing: list[str]) -> int | None:
+    if key not in capacity:
+        return None
+    value = capacity[key]
+    if not _is_positive_int(value):
+        missing.append(f"capacity.{key}")
+        return None
+    return int(value)
+
+
+def _optional_positive_int_field(capacity: Mapping[str, Any], key: str) -> int | None:
+    value = capacity.get(key)
+    return int(value) if _is_positive_int(value) else None
+
+
+def _optional_non_negative_int_field(capacity: Mapping[str, Any], key: str) -> int | None:
+    value = capacity.get(key)
+    return int(value) if _is_non_negative_int(value) else None
+
+
+def _resolve_backup_restore_share(
+    capacity: Mapping[str, Any],
+    backup_shares: bool | None,
+    restore_shares: bool | None,
+    missing: list[str],
+) -> bool | None:
+    present = "backup_restore_share_volume" in capacity
+    raw = capacity.get("backup_restore_share_volume") if present else None
+    parsed: bool | None = None
+    if present:
+        if raw is not True and raw is not False:
+            missing.append("capacity.backup_restore_share_volume")
+        else:
+            parsed = bool(raw)
+    if backup_shares is False and restore_shares is False and parsed is None:
+        missing.append("capacity.backup_restore_share_volume")
+        return None
+    if parsed is True and backup_shares is True and restore_shares is False:
+        missing.append(
+            "contradictory topology: backup_restore_share_volume=true while restore is off the DB volume "
+            "and backup shares the DB volume"
+        )
+    if parsed is True and backup_shares is False and restore_shares is True:
+        missing.append(
+            "contradictory topology: backup_restore_share_volume=true while backup is off the DB volume "
+            "and restore shares the DB volume"
+        )
+    if parsed is False and backup_shares is True and restore_shares is True:
+        missing.append(
+            "contradictory topology: backup_restore_share_volume=false while both roles share the DB volume"
+        )
+    return parsed
+
+
+def _record_topology_contradictions(
+    missing: list[str],
+    *,
+    backup_shares: bool | None,
+    restore_shares: bool | None,
+    share_external: bool | None,
+    db_label: str | None,
+    backup_label: str | None,
+    restore_label: str | None,
+    capacity: Mapping[str, Any],
+) -> None:
+    backup_distinct = (
+        "backup_volume_total_bytes",
+        "backup_volume_free_bytes",
+        "backup_operating_reserve_bytes",
+        "backup_stronger_reserve_requirement_bytes",
+    )
+    restore_distinct = (
+        "restore_volume_total_bytes",
+        "restore_volume_free_bytes",
+        "restore_operating_reserve_bytes",
+        "restore_stronger_reserve_requirement_bytes",
+    )
+    if backup_shares is True:
+        for field in backup_distinct:
+            if field in capacity:
+                missing.append(
+                    f"contradictory topology: {field} declared while backup_shares_db_volume=true"
+                )
+        if db_label is not None and backup_label is not None and db_label != backup_label:
+            missing.append(
+                "contradictory topology: backup_volume_label differs from db_volume_label "
+                "while backup_shares_db_volume=true"
+            )
+    if restore_shares is True:
+        for field in restore_distinct:
+            if field in capacity:
+                missing.append(
+                    f"contradictory topology: {field} declared while restore_shares_db_volume=true"
+                )
+        if db_label is not None and restore_label is not None and db_label != restore_label:
+            missing.append(
+                "contradictory topology: restore_volume_label differs from db_volume_label "
+                "while restore_shares_db_volume=true"
+            )
+    if backup_shares is False and db_label is not None and backup_label is not None and db_label == backup_label:
+        missing.append(
+            "contradictory topology: backup_volume_label equals db_volume_label "
+            "while backup_shares_db_volume=false"
+        )
+    if restore_shares is False and db_label is not None and restore_label is not None and db_label == restore_label:
+        missing.append(
+            "contradictory topology: restore_volume_label equals db_volume_label "
+            "while restore_shares_db_volume=false"
+        )
+    if backup_shares is False and restore_shares is False and share_external is True:
+        if backup_label is not None and restore_label is not None and backup_label != restore_label:
+            missing.append(
+                "contradictory topology: backup_volume_label differs from restore_volume_label "
+                "while backup_restore_share_volume=true"
+            )
+    if backup_shares is False and restore_shares is False and share_external is False:
+        if backup_label is not None and restore_label is not None and backup_label == restore_label:
+            missing.append(
+                "contradictory topology: backup_volume_label equals restore_volume_label "
+                "while backup_restore_share_volume=false"
+            )
+
+
+def _physical_volume_keys(
+    *,
+    backup_shares: bool | None,
+    restore_shares: bool | None,
+    share_external: bool | None,
+    db_label: str | None,
+    backup_label: str | None,
+    restore_label: str | None,
+    missing: list[str],
+) -> dict[str, str] | None:
+    if backup_shares is None or restore_shares is None:
+        return None
+    if backup_shares is False and restore_shares is False and share_external is None:
+        return None
+    db_key = db_label or "db"
+    if backup_shares is True:
+        backup_key = db_key
+    elif share_external is True:
+        backup_key = backup_label or restore_label or "backup_restore"
+    else:
+        backup_key = backup_label or "backup"
+    if restore_shares is True:
+        restore_key = db_key
+    elif share_external is True:
+        restore_key = backup_key
+    else:
+        restore_key = restore_label or "restore"
+    if backup_shares is False and backup_key == db_key:
+        missing.append(
+            "contradictory topology: backup declared association equals the DB volume "
+            "while backup_shares_db_volume=false"
+        )
+        return None
+    if restore_shares is False and restore_key == db_key:
+        missing.append(
+            "contradictory topology: restore declared association equals the DB volume "
+            "while restore_shares_db_volume=false"
+        )
+        return None
+    if backup_shares is False and restore_shares is False and share_external is False and backup_key == restore_key:
+        missing.append(
+            "contradictory topology: backup and restore declare the same volume association "
+            "while backup_restore_share_volume=false"
+        )
+        return None
+    return {"db": db_key, "backup": backup_key, "restore": restore_key}
+
+
+def _reject_reserve_below_floor(
+    missing: list[str],
+    *,
+    floor: int,
+    declared: int | None,
+    declared_field: str,
+    stronger: int | None,
+    stronger_field: str,
+) -> None:
+    if declared is not None and declared < floor:
+        missing.append(
+            f"{declared_field} below planning floor "
+            f"(max(10GiB, 10% of volume)={floor}); a stronger requirement cannot be smaller than the floor"
+        )
+    if stronger is not None and stronger < floor:
+        missing.append(
+            f"{stronger_field} below planning floor (max(10GiB, 10% of volume)={floor})"
+        )
+
+
+def _apply_physical_reserve(*, floor: int, declared: int | None, stronger: int | None) -> int:
+    applied = floor
+    if declared is not None:
+        applied = max(applied, declared)
+    if stronger is not None:
+        applied = max(applied, stronger)
+    return applied
+
+
+def _coalesce_measurement(
+    existing: int | None,
+    incoming: int | None,
+    *,
+    field: str,
+    missing: list[str],
+) -> int | None:
+    if incoming is None:
+        return existing
+    if existing is None:
+        return incoming
+    if existing != incoming:
+        missing.append(f"contradictory topology: {field} does not match the other role on the same declared volume")
+    return existing
+
+
+def _add_volume_role(
+    volume_specs: dict[str, dict[str, Any]],
+    *,
+    key: str,
+    role: str,
+    allocation_names: list[str],
+    occupancy_bytes: int,
+    total_bytes: int | None,
+    free_bytes: int | None,
+    declared_reserve: int | None,
+    stronger_reserve: int | None,
+    declared_reserve_required: bool,
+    missing: list[str],
+    declared_field: str = "capacity.operating_reserve_bytes",
+    stronger_field: str = "capacity.stronger_reserve_requirement_bytes",
+) -> None:
+    spec = volume_specs.get(key)
+    if spec is None:
+        volume_specs[key] = {
+            "roles": [role],
+            "allocation_names": list(allocation_names),
+            "occupancy_bytes": occupancy_bytes,
+            "total_bytes": total_bytes,
+            "free_bytes": free_bytes,
+            "declared_reserve": declared_reserve,
+            "stronger_reserve": stronger_reserve,
+            "declared_reserve_required": declared_reserve_required,
+            "declared_field": declared_field,
+            "stronger_field": stronger_field,
+        }
+        return
+    if role not in spec["roles"]:
+        spec["roles"].append(role)
+    for name in allocation_names:
+        if name not in spec["allocation_names"]:
+            spec["allocation_names"].append(name)
+    spec["occupancy_bytes"] += occupancy_bytes
+    spec["total_bytes"] = _coalesce_measurement(
+        spec["total_bytes"], total_bytes, field=f"{key}.total_bytes", missing=missing
+    )
+    spec["free_bytes"] = _coalesce_measurement(
+        spec["free_bytes"], free_bytes, field=f"{key}.free_bytes", missing=missing
+    )
+    spec["declared_reserve"] = _coalesce_measurement(
+        spec["declared_reserve"], declared_reserve, field=f"{key}.operating_reserve_bytes", missing=missing
+    )
+    spec["stronger_reserve"] = _coalesce_measurement(
+        spec["stronger_reserve"], stronger_reserve, field=f"{key}.stronger_reserve_requirement_bytes", missing=missing
+    )
+    spec["declared_reserve_required"] = spec["declared_reserve_required"] or declared_reserve_required
+
+
+def _add_external_role(
+    volume_specs: dict[str, dict[str, Any]],
+    *,
+    capacity: Mapping[str, Any],
+    key: str,
+    role: str,
+    allocation_name: str,
+    occupancy_bytes: int,
+    prefix: str,
+    share_external: bool,
+    peer_prefix: str | None,
+    missing: list[str],
+) -> None:
+    total_field = f"{prefix}_volume_total_bytes"
+    free_field = f"{prefix}_volume_free_bytes"
+    reserve_field = f"{prefix}_operating_reserve_bytes"
+    stronger_field = f"{prefix}_stronger_reserve_requirement_bytes"
+    total = _optional_positive_int_field(capacity, total_field)
+    free = _optional_non_negative_int_field(capacity, free_field)
+    if total_field in capacity and total is None:
+        missing.append(f"capacity.{total_field}")
+    if free_field in capacity and free is None:
+        missing.append(f"capacity.{free_field}")
+    if share_external and peer_prefix:
+        peer_total = _optional_positive_int_field(capacity, f"{peer_prefix}_volume_total_bytes")
+        peer_free = _optional_non_negative_int_field(capacity, f"{peer_prefix}_volume_free_bytes")
+        total = _coalesce_measurement(
+            total, peer_total, field=f"capacity.{peer_prefix}_volume_total_bytes", missing=missing
+        )
+        free = _coalesce_measurement(
+            free, peer_free, field=f"capacity.{peer_prefix}_volume_free_bytes", missing=missing
+        )
+    if total is None:
+        missing.append(f"capacity.{total_field}")
+    if free is None:
+        missing.append(f"capacity.{free_field}")
+    declared = _optional_non_negative_int_field(capacity, reserve_field)
+    if reserve_field in capacity and declared is None:
+        missing.append(f"capacity.{reserve_field}")
+    stronger = _optional_stronger_reserve(capacity, stronger_field, missing)
+    _add_volume_role(
+        volume_specs,
+        key=key,
+        role=role,
+        allocation_names=[allocation_name],
+        occupancy_bytes=occupancy_bytes,
+        total_bytes=total,
+        free_bytes=free,
+        declared_reserve=declared,
+        stronger_reserve=stronger,
+        declared_reserve_required=False,
+        missing=missing,
+        declared_field=f"capacity.{reserve_field}",
+        stronger_field=f"capacity.{stronger_field}",
+    )
+
+
 def _capacity_volume_entry(
     *,
-    role: str,
+    key: str,
+    roles: list[str],
     total_bytes: Any,
     free_bytes: int,
     required_bytes: int,
     allocations: list[str],
-    planning_reserve_floor_bytes: int | None = None,
-    applied_reserve_bytes: int | None = None,
+    planning_reserve_floor_bytes: int,
+    applied_reserve_bytes: int,
 ) -> dict[str, Any]:
-    entry: dict[str, Any] = {
-        "role": role,
+    return {
+        "key": key,
+        "roles": list(roles),
+        "declared_topology_association": True,
         "total_bytes": total_bytes,
         "free_bytes": free_bytes,
         "required_bytes": required_bytes,
         "allocations": list(allocations),
+        "planning_reserve_floor_bytes": planning_reserve_floor_bytes,
+        "applied_reserve_bytes": applied_reserve_bytes,
         "sufficient": free_bytes >= required_bytes,
     }
-    if planning_reserve_floor_bytes is not None:
-        entry["planning_reserve_floor_bytes"] = planning_reserve_floor_bytes
-    if applied_reserve_bytes is not None:
-        entry["applied_reserve_bytes"] = applied_reserve_bytes
-    return entry
 
 
 def _recent_run_sample(

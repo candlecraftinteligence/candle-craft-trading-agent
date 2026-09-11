@@ -101,7 +101,7 @@ def _gib(n: int) -> int:
     return n * GIB
 
 
-def _capacity_ok() -> dict[str, int | bool]:
+def _capacity_ok() -> dict[str, Any]:
     total = _gib(100)
     return {
         "volume_total_bytes": total,
@@ -121,7 +121,11 @@ def _measured_collector() -> dict[str, Any]:
     return {"sqlite": {"status": "measured", "schema_version": 25}, "filesystem": {"status": "measured"}}
 
 
-def _db_volume_only_required(capacity: dict[str, int | bool], *, applied_reserve: int | None = None) -> int:
+def _volume_floor(total: int) -> int:
+    return max(_gib(10), int(total) // 10)
+
+
+def _db_volume_only_required(capacity: dict[str, Any], *, applied_reserve: int | None = None) -> int:
     reserve = capacity["operating_reserve_bytes"] if applied_reserve is None else applied_reserve
     required = (
         int(capacity["migration_temp_bytes"])
@@ -129,11 +133,50 @@ def _db_volume_only_required(capacity: dict[str, int | bool], *, applied_reserve
         + int(capacity["growth_budget_bytes"])
         + int(reserve)
     )
-    if capacity.get("backup_shares_db_volume", True):
+    if capacity["backup_shares_db_volume"]:
         required += int(capacity["new_backup_bytes"])
-    if capacity.get("restore_shares_db_volume", True):
+    if capacity["restore_shares_db_volume"]:
         required += int(capacity["concurrent_restore_or_candidate_bytes"])
     return required
+
+
+def _external_required(allocation: int, total: int, *, declared: int | None = None, stronger: int | None = None) -> int:
+    applied = _volume_floor(total)
+    if declared is not None:
+        applied = max(applied, declared)
+    if stronger is not None:
+        applied = max(applied, stronger)
+    return int(allocation) + applied
+
+
+def _same_external_capacity(*, free_bytes: int, total_bytes: int | None = None) -> dict[str, Any]:
+    capacity = _capacity_ok()
+    total = _gib(100) if total_bytes is None else total_bytes
+    capacity["backup_shares_db_volume"] = False
+    capacity["restore_shares_db_volume"] = False
+    capacity["backup_restore_share_volume"] = True
+    capacity["backup_volume_label"] = "ext-shared"
+    capacity["restore_volume_label"] = "ext-shared"
+    capacity["backup_volume_total_bytes"] = total
+    capacity["backup_volume_free_bytes"] = free_bytes
+    capacity["restore_volume_total_bytes"] = total
+    capacity["restore_volume_free_bytes"] = free_bytes
+    return capacity
+
+
+def _distinct_external_capacity(*, backup_free: int, restore_free: int, total_bytes: int | None = None) -> dict[str, Any]:
+    capacity = _capacity_ok()
+    total = _gib(100) if total_bytes is None else total_bytes
+    capacity["backup_shares_db_volume"] = False
+    capacity["restore_shares_db_volume"] = False
+    capacity["backup_restore_share_volume"] = False
+    capacity["backup_volume_label"] = "ext-backup"
+    capacity["restore_volume_label"] = "ext-restore"
+    capacity["backup_volume_total_bytes"] = total
+    capacity["backup_volume_free_bytes"] = backup_free
+    capacity["restore_volume_total_bytes"] = total
+    capacity["restore_volume_free_bytes"] = restore_free
+    return capacity
 
 
 def _complete_packet(collector: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -553,13 +596,16 @@ def test_separate_backup_volume_insufficient_is_adverse() -> None:
     capacity = _capacity_ok()
     capacity["backup_shares_db_volume"] = False
     capacity["restore_shares_db_volume"] = True
+    capacity["backup_volume_total_bytes"] = _gib(100)
     capacity["backup_volume_free_bytes"] = _gib(1)
     result = readiness.assess_capacity_budget(capacity)
     assert result["status"] == "insufficient"
     assert result["sufficient_on_packet"] is False
     assert result["volumes"]["db"]["sufficient"] is True
     assert result["volumes"]["backup"]["sufficient"] is False
-    assert result["volumes"]["backup"]["required_bytes"] == capacity["new_backup_bytes"]
+    assert result["volumes"]["backup"]["required_bytes"] == _external_required(
+        capacity["new_backup_bytes"], capacity["backup_volume_total_bytes"]
+    )
     assert "new_backup_bytes" not in result["volumes"]["db"]["allocations"]
 
     packet = _complete_packet(_measured_collector())
@@ -574,12 +620,15 @@ def test_separate_restore_volume_insufficient_is_adverse() -> None:
     capacity = _capacity_ok()
     capacity["backup_shares_db_volume"] = True
     capacity["restore_shares_db_volume"] = False
+    capacity["restore_volume_total_bytes"] = _gib(100)
     capacity["restore_volume_free_bytes"] = _gib(1)
     result = readiness.assess_capacity_budget(capacity)
     assert result["status"] == "insufficient"
     assert result["volumes"]["db"]["sufficient"] is True
     assert result["volumes"]["restore"]["sufficient"] is False
-    assert result["volumes"]["restore"]["required_bytes"] == capacity["concurrent_restore_or_candidate_bytes"]
+    assert result["volumes"]["restore"]["required_bytes"] == _external_required(
+        capacity["concurrent_restore_or_candidate_bytes"], capacity["restore_volume_total_bytes"]
+    )
     assert "concurrent_restore_or_candidate_bytes" not in result["volumes"]["db"]["allocations"]
 
     packet = _complete_packet(_measured_collector())
@@ -590,31 +639,21 @@ def test_separate_restore_volume_insufficient_is_adverse() -> None:
 
 
 def test_separate_backup_and_restore_volumes_sufficient_are_not_double_charged() -> None:
-    capacity = _capacity_ok()
-    capacity["backup_shares_db_volume"] = False
-    capacity["restore_shares_db_volume"] = False
-    capacity["backup_volume_free_bytes"] = _gib(40)
-    capacity["restore_volume_free_bytes"] = _gib(40)
+    capacity = _distinct_external_capacity(backup_free=_gib(40), restore_free=_gib(40))
     result = readiness.assess_capacity_budget(capacity)
     assert result["status"] == "measured"
     assert result["sufficient_on_packet"] is True
     db = result["volumes"]["db"]
+    backup = result["volumes"]["ext-backup"]
+    restore = result["volumes"]["ext-restore"]
     assert db["required_bytes"] == _db_volume_only_required(capacity)
     assert db["required_bytes"] == _gib(5) + _gib(2) + _gib(8) + _gib(10)
     assert "new_backup_bytes" not in db["allocations"]
     assert "concurrent_restore_or_candidate_bytes" not in db["allocations"]
-    assert result["volumes"]["backup"]["required_bytes"] == _gib(20)
-    assert result["volumes"]["restore"]["required_bytes"] == _gib(20)
-    assert db["required_bytes"] + result["volumes"]["backup"]["required_bytes"] + result["volumes"]["restore"][
-        "required_bytes"
-    ] == (
-        capacity["new_backup_bytes"]
-        + capacity["concurrent_restore_or_candidate_bytes"]
-        + capacity["migration_temp_bytes"]
-        + capacity["additional_peak_WAL_and_log_bytes"]
-        + capacity["growth_budget_bytes"]
-        + capacity["operating_reserve_bytes"]
-    )
+    assert backup["required_bytes"] == _external_required(_gib(20), _gib(100))
+    assert restore["required_bytes"] == _external_required(_gib(20), _gib(100))
+    assert "concurrent_restore_or_candidate_bytes" not in backup["allocations"]
+    assert "new_backup_bytes" not in restore["allocations"]
     packet = _complete_packet(_measured_collector())
     packet["operator"]["capacity"] = capacity
     assessment = readiness.assess_runtime_checkpoint_evidence(packet)
@@ -626,26 +665,36 @@ def test_mixed_topology_charges_only_the_correct_volume() -> None:
     backup_on_db = _capacity_ok()
     backup_on_db["backup_shares_db_volume"] = True
     backup_on_db["restore_shares_db_volume"] = False
+    backup_on_db["restore_volume_total_bytes"] = _gib(100)
     backup_on_db["restore_volume_free_bytes"] = _gib(40)
     mixed_backup = readiness.assess_capacity_budget(backup_on_db)
     db = mixed_backup["volumes"]["db"]
+    restore = mixed_backup["volumes"]["restore"]
     assert "new_backup_bytes" in db["allocations"]
     assert "concurrent_restore_or_candidate_bytes" not in db["allocations"]
     assert db["required_bytes"] == _db_volume_only_required(backup_on_db)
-    assert mixed_backup["volumes"]["restore"]["required_bytes"] == backup_on_db["concurrent_restore_or_candidate_bytes"]
+    assert restore["required_bytes"] == _external_required(
+        backup_on_db["concurrent_restore_or_candidate_bytes"], backup_on_db["restore_volume_total_bytes"]
+    )
+    assert restore["applied_reserve_bytes"] == _volume_floor(backup_on_db["restore_volume_total_bytes"])
     assert "backup" not in mixed_backup["volumes"]
     assert mixed_backup["status"] == "measured"
 
     restore_on_db = _capacity_ok()
     restore_on_db["backup_shares_db_volume"] = False
     restore_on_db["restore_shares_db_volume"] = True
+    restore_on_db["backup_volume_total_bytes"] = _gib(100)
     restore_on_db["backup_volume_free_bytes"] = _gib(40)
     mixed_restore = readiness.assess_capacity_budget(restore_on_db)
     db = mixed_restore["volumes"]["db"]
+    backup = mixed_restore["volumes"]["backup"]
     assert "concurrent_restore_or_candidate_bytes" in db["allocations"]
     assert "new_backup_bytes" not in db["allocations"]
     assert db["required_bytes"] == _db_volume_only_required(restore_on_db)
-    assert mixed_restore["volumes"]["backup"]["required_bytes"] == restore_on_db["new_backup_bytes"]
+    assert backup["required_bytes"] == _external_required(
+        restore_on_db["new_backup_bytes"], restore_on_db["backup_volume_total_bytes"]
+    )
+    assert backup["applied_reserve_bytes"] == _volume_floor(restore_on_db["backup_volume_total_bytes"])
     assert "restore" not in mixed_restore["volumes"]
     assert mixed_restore["status"] == "measured"
 
@@ -692,6 +741,7 @@ def test_shared_volume_sufficient_and_insufficient_behavior_is_preserved() -> No
     assert ok["shared_volume_accounting"] is True
     assert ok["sufficient_on_packet"] is True
     assert ok["volumes"]["db"]["required_bytes"] == _db_volume_only_required(_capacity_ok())
+    assert set(ok["volumes"]["db"]["roles"]) == {"db", "backup", "restore"}
 
     short = _capacity_ok()
     short["volume_free_bytes"] = 1
@@ -703,6 +753,139 @@ def test_shared_volume_sufficient_and_insufficient_behavior_is_preserved() -> No
     assessment = readiness.assess_runtime_checkpoint_evidence(packet)
     assert assessment["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
     assert "insufficient_free_capacity" in assessment["adverse_results"]
+
+
+def test_same_external_volume_does_not_reuse_free_space_twice() -> None:
+    capacity = _same_external_capacity(free_bytes=_gib(30))
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] == "insufficient"
+    assert result["sufficient_on_packet"] is False
+    shared = result["volumes"]["ext-shared"]
+    assert set(shared["roles"]) == {"backup", "restore"}
+    assert shared["required_bytes"] == _external_required(_gib(20) + _gib(20), _gib(100))
+    assert shared["free_bytes"] == _gib(30)
+    assert shared["required_bytes"] > shared["free_bytes"]
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = capacity
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert assessment["overall_disposition"] != "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    assert assessment["go_for_runtime_deployment"] is False
+
+
+def test_same_external_volume_sufficient_when_combined_plus_reserve_fits() -> None:
+    capacity = _same_external_capacity(free_bytes=_gib(51))
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] == "measured"
+    shared = result["volumes"]["ext-shared"]
+    assert shared["required_bytes"] == _gib(20) + _gib(20) + _volume_floor(_gib(100))
+    assert shared["applied_reserve_bytes"] == _volume_floor(_gib(100))
+    assert result["volumes"]["db"]["required_bytes"] == _db_volume_only_required(capacity)
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = capacity
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    assert assessment["go_for_runtime_deployment"] is False
+
+
+def test_distinct_external_volumes_do_not_charge_each_other() -> None:
+    capacity = _distinct_external_capacity(backup_free=_gib(31), restore_free=_gib(31))
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] == "measured"
+    backup = result["volumes"]["ext-backup"]
+    restore = result["volumes"]["ext-restore"]
+    assert backup["required_bytes"] == _external_required(_gib(20), _gib(100))
+    assert restore["required_bytes"] == _external_required(_gib(20), _gib(100))
+    assert "concurrent_restore_or_candidate_bytes" not in backup["allocations"]
+    assert "new_backup_bytes" not in restore["allocations"]
+    assert backup["roles"] == ["backup"]
+    assert restore["roles"] == ["restore"]
+
+
+def test_external_volume_matching_allocation_without_reserve_is_not_sufficient() -> None:
+    capacity = _capacity_ok()
+    capacity["backup_shares_db_volume"] = False
+    capacity["restore_shares_db_volume"] = True
+    capacity["backup_volume_total_bytes"] = _gib(100)
+    capacity["backup_volume_free_bytes"] = capacity["new_backup_bytes"]
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] == "insufficient"
+    backup = result["volumes"]["backup"]
+    assert backup["free_bytes"] == capacity["new_backup_bytes"]
+    assert backup["required_bytes"] == _external_required(capacity["new_backup_bytes"], _gib(100))
+    assert backup["applied_reserve_bytes"] == _volume_floor(_gib(100))
+    assert backup["required_bytes"] > backup["free_bytes"]
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = capacity
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+
+
+def test_missing_topology_is_incomplete_and_does_not_default_to_shared_db() -> None:
+    capacity = _capacity_ok()
+    del capacity["backup_shares_db_volume"]
+    del capacity["restore_shares_db_volume"]
+    result = readiness.assess_capacity_budget(capacity)
+    assert result["status"] == "incomplete"
+    assert result["sufficient_on_packet"] is False
+    assert "capacity.backup_shares_db_volume" in result["missing"]
+    assert "capacity.restore_shares_db_volume" in result["missing"]
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = capacity
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert assessment["overall_disposition"] != "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+
+    both_off = _capacity_ok()
+    both_off["backup_shares_db_volume"] = False
+    both_off["restore_shares_db_volume"] = False
+    both_off["backup_volume_total_bytes"] = _gib(100)
+    both_off["backup_volume_free_bytes"] = _gib(80)
+    both_off["restore_volume_total_bytes"] = _gib(100)
+    both_off["restore_volume_free_bytes"] = _gib(80)
+    missing_share = readiness.assess_capacity_budget(both_off)
+    assert missing_share["status"] == "incomplete"
+    assert "capacity.backup_restore_share_volume" in missing_share["missing"]
+
+
+def test_contradictory_topology_is_incomplete_never_sufficient() -> None:
+    shares_db_and_distinct = _capacity_ok()
+    shares_db_and_distinct["db_volume_label"] = "vol-db"
+    shares_db_and_distinct["backup_volume_label"] = "vol-external"
+    labeled = readiness.assess_capacity_budget(shares_db_and_distinct)
+    assert labeled["status"] == "incomplete"
+    assert labeled["sufficient_on_packet"] is not True
+    assert any("backup_volume_label" in item for item in labeled["missing"])
+
+    shares_and_fields = _capacity_ok()
+    shares_and_fields["backup_volume_total_bytes"] = _gib(100)
+    shares_and_fields["backup_volume_free_bytes"] = _gib(40)
+    fields = readiness.assess_capacity_budget(shares_and_fields)
+    assert fields["status"] == "incomplete"
+    assert any("backup_volume_total_bytes" in item for item in fields["missing"])
+
+    mixed_and_shared = _capacity_ok()
+    mixed_and_shared["backup_shares_db_volume"] = True
+    mixed_and_shared["restore_shares_db_volume"] = False
+    mixed_and_shared["backup_restore_share_volume"] = True
+    mixed_and_shared["restore_volume_total_bytes"] = _gib(100)
+    mixed_and_shared["restore_volume_free_bytes"] = _gib(80)
+    mixed = readiness.assess_capacity_budget(mixed_and_shared)
+    assert mixed["status"] == "incomplete"
+    assert any("backup_restore_share_volume=true" in item for item in mixed["missing"])
+
+    same_label_but_distinct = _distinct_external_capacity(backup_free=_gib(80), restore_free=_gib(80))
+    same_label_but_distinct["backup_volume_label"] = "same"
+    same_label_but_distinct["restore_volume_label"] = "same"
+    labels = readiness.assess_capacity_budget(same_label_but_distinct)
+    assert labels["status"] == "incomplete"
+    assert labels["sufficient_on_packet"] is not True
+
+    packet = _complete_packet(_measured_collector())
+    packet["operator"]["capacity"] = shares_db_and_distinct
+    assessment = readiness.assess_runtime_checkpoint_evidence(packet)
+    assert assessment["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert assessment["go_for_runtime_deployment"] is False
 
 
 def test_windows_local_device_does_not_treat_unknown_as_local() -> None:

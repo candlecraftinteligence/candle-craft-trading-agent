@@ -156,32 +156,51 @@ Historical ~81 GiB and older audit means are not current measurements or p95. Th
 
 ### 6.2 Capacity gate
 
-Capacity is accounted **per affected physical volume**. Do not sum every allocation against the DB volume when backup or restore lives elsewhere.
+Capacity is accounted **per affected physical volume**, not per logical role.
 
-DB volume obligations:
+Do not infer physical topology from the names `db`, `backup`, and `restore`. Those are roles. Two off-DB roles may occupy the same physical volume. Role-by-role comparison against the same free-space pool is not sufficient.
+
+Required topology evidence (no silent defaults):
+
+- `backup_shares_db_volume` (boolean; required)
+- `restore_shares_db_volume` (boolean; required)
+- `backup_restore_share_volume` (boolean; required when both roles are off the DB volume)
+
+Missing topology is `INCOMPLETE_PREREQUISITES`. Absent share flags are never assumed to mean "shares the DB volume."
+
+Optional `db_volume_label` / `backup_volume_label` / `restore_volume_label` are operator-declared associations for grouping obligations. They are not proof of hardware identity. Collector-observed volume facts remain separate evidence and do not prove backup/restore topology.
+
+Contradictory topology (role claims to share the DB volume while also declaring a distinct external volume identity or measurements; labels that disagree with the share flags; `backup_restore_share_volume=true` in mixed topology; unequal measurements for a claimed shared volume) is `INCOMPLETE_PREREQUISITES`, never capacity-sufficient.
+
+After topology is resolved, aggregate **all concurrent obligations that occupy the same declared physical volume** before comparing with that volume's free space.
+
+DB volume occupancy:
 
 - `migration_temp_bytes` (kept on the DB volume; this contract does not name another temp volume)
 - `additional_peak_WAL_and_log_bytes`
 - `growth_budget_bytes`
-- `operating_reserve_bytes` (at least the planning floor; a stronger reviewed reserve may only raise it)
 - `new_backup_bytes` only if `backup_shares_db_volume=true`
 - `concurrent_restore_or_candidate_bytes` only if `restore_shares_db_volume=true`
 
-Separate backup volume obligations:
+External backup occupancy: `new_backup_bytes` when `backup_shares_db_volume=false`.
 
-- `new_backup_bytes` when `backup_shares_db_volume=false`, compared with `backup_volume_free_bytes`
+External restore/candidate occupancy: `concurrent_restore_or_candidate_bytes` when `restore_shares_db_volume=false`.
 
-Separate restore/candidate volume obligations:
+If backup and restore both occupy one declared external volume X:
 
-- `concurrent_restore_or_candidate_bytes` when `restore_shares_db_volume=false`, compared with `restore_volume_free_bytes`
+`required_X = new_backup_bytes + concurrent_restore_or_candidate_bytes + reserve_X`
 
-A separate volume with insufficient free space is an adverse capacity result even if the DB volume has ample free space. Do not charge an allocation onto the DB volume when it lives on a separate volume. Existing allocations are already reflected in measured free space; do not charge them twice. Include all copies that coexist, target/temp volumes, future backups during observation, and recovery headroom. Do not assume compression, half-size storage, or immediate space reclamation.
+Do not compare that volume's free space independently once per role.
+
+Every affected physical volume requires `volume_total_bytes` and `volume_free_bytes` (DB: `volume_total_bytes` / `volume_free_bytes`; distinct backup: `backup_volume_total_bytes` / `backup_volume_free_bytes`; distinct restore: `restore_volume_total_bytes` / `restore_volume_free_bytes`; shared external volume: either role's pair, and both pairs if present must match).
+
+Every affected physical volume has a planning reserve. Default floor: the greater of **10 GiB** and **10% of that physical volume's capacity**. A reviewed stronger reserve may only increase the requirement (`max(floor, declared reserve, stronger_reserve_requirement_bytes)` on that volume). A boolean flag cannot waive a floor downward. Free space equal to occupancy without reserve is not sufficient.
+
+Existing allocations are already reflected in measured free space; do not charge them twice. Include all copies that coexist, target/temp volumes, future backups during observation, and recovery headroom. Do not assume compression, half-size storage, or immediate space reclamation.
 
 Budget at least the seven-day observation window plus three days of response runway. Justify `growth_budget_bytes` from the actual baseline and workload. Missing, flat, or inconsistent samples do not establish zero future growth or infinite runway.
 
-Operating reserve planning floor, for the DB volume: the greater of **10 GiB** and **10% of that volume's capacity**. This is a true floor. A stronger reviewed reserve may only increase the requirement (`max(floor, declared reserve, stronger_reserve_requirement_bytes)`). A boolean flag cannot waive the floor downward. A declared reserve below the floor is `STOP_FOR_CAPACITY_EVIDENCE`, never capacity-sufficient.
-
-Unknown critical terms or insufficient free capacity on any required volume: `STOP_FOR_CAPACITY_EVIDENCE` (or a named storage prerequisite). New durable writers require their own incremental write/WAL/backup model and a new readiness decision.
+Unknown critical terms, missing/contradictory topology, or insufficient free capacity on any required physical volume: `STOP_FOR_CAPACITY_EVIDENCE` (or a named storage prerequisite). New durable writers require their own incremental write/WAL/backup model and a new readiness decision.
 
 Retention for this checkpoint: preserve current evidence and recovery artifacts. No automatic deletion or pruning. The finite observation period must fit without unimplemented retention. Protect active-plan dependencies, rejected observations needed for selection analysis, and admission/tracking evidence from future age-only deletion.
 
