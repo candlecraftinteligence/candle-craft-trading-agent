@@ -29,7 +29,7 @@ Cohort labels remain only `LEGACY_OR_UNATTRIBUTED` and `CURRENT_EPOCH_OPERATIONA
 - Baseline main SHA: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
 - Prior architecture-reviewed PR HEAD (second review): `01cd99f146ea607cdc60650bbddc724af19e5155`
 - Verdict on that HEAD: `CHANGES_REQUIRED_CROSS_RECORD_OWNERSHIP_AND_OPERATIONAL_OPEN_BYPASSES`
-- Second bounded repair is committed on the same branch after this document is updated; the exact final PR HEAD is the commit that contains this handoff.
+- Second bounded repair commit: `869154aba3db80ce07b400552845e926d4e12626`
 
 Previous repair (kept, not regressed): origin unspecified default, pre-cutoff cache rejection, BTC origin cannot insert ETH lifecycle, missing lifecycle cannot auto-create a public event, legacy watch payload adoption blocked, genuine-v25 fixture, unchanged strategy/economic gates.
 
@@ -249,5 +249,5 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 
 - Baseline main: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
 - Prior reviewed HEAD: `01cd99f146ea607cdc60650bbddc724af19e5155`
-- Second bounded repair commit(s): this handoff commit and any immediately preceding scoped repair commit on `feature/prospective-runtime-epoch-isolation`
-- Final PR HEAD: the SHA of the commit that contains this updated handoff after push
+- Second bounded repair commit: `869154aba3db80ce07b400552845e926d4e12626`
+- Final PR HEAD: `869154aba3db80ce07b400552845e926d4e12626`
