@@ -21,7 +21,8 @@ This document is the architecture handoff. It is not a Runtime runbook and does 
 
 - Reviewed main SHA: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
 - Feature branch: `feature/prospective-runtime-epoch-isolation`
-- Final commit SHA: *filled after commit*
+- Implementation commit SHA: `3e754ecfb649cee057bc30b742ac21714a75732b`
+- Final commit SHA: *branch tip after identifier commits*
 - PR URL: *filled after open*
 
 ## What was implemented
