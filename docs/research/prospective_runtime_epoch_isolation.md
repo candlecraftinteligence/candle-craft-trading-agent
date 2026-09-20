@@ -27,7 +27,7 @@ This repair does **not** claim research admission, source provenance completenes
 - Old reviewed blocked PR HEAD: `d616069843a3d27eb6f223bf3f4ea7d2e1afbc00`
 - Architecture review verdict on that HEAD: `CHANGES_REQUIRED_ORIGIN_AND_PUBLIC_OWNERSHIP_BYPASSES`
 - Repair commit SHA: `68fa3af330b4a4228cf164c9a591f0205543caf7`
-- Final PR HEAD: `68fa3af330b4a4228cf164c9a591f0205543caf7` (updated again if a pin commit follows)
+- Final PR HEAD: `bdd65d92bba524c9b362208a14dee13765dfda54`
 
 ## What remains from the original phase (kept)
 
@@ -192,7 +192,7 @@ Results (DEV PC, `C:\CandleCraftDev`, 2026-09-20):
 - Focused epoch/isolation, producer/cache, public/outbox/recovery, admin/watch suites: passed (including T01–T22 and R01–R29).
 - `python -m pytest` (`-q --tb=line`): **2578 collected, 2578 passed**, exit 0, elapsed 970477 ms. One unrelated `StarletteDeprecationWarning` from FastAPI's TestClient (`httpx`/`starlette.testclient`). No skips added to hide failures.
 - `git diff --check`: clean (exit 0).
-- GitHub CI: recorded after push of the repaired HEAD.
+- GitHub CI: `Python 3.11 tests` **in_progress** on `bdd65d92bba524c9b362208a14dee13765dfda54` after push — https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/35522643615
 
 Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=false` / `LOCAL_MANUAL_MODE=true` / `ORDER_EXECUTION_ENABLED=false`. No Runtime filesystem, live exchange, listener, or scanner watch loop.
 
@@ -200,4 +200,4 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 
 - Old reviewed blocked HEAD: `d616069843a3d27eb6f223bf3f4ea7d2e1afbc00`
 - Repair commit SHA: `68fa3af330b4a4228cf164c9a591f0205543caf7`
-- Final PR HEAD: `68fa3af330b4a4228cf164c9a591f0205543caf7`
+- Final PR HEAD: `bdd65d92bba524c9b362208a14dee13765dfda54`
