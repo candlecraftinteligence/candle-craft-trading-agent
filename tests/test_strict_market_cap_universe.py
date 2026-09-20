@@ -33,6 +33,7 @@ from app.universe.symbol_universe import (
     resolve_symbol_universe,
 )
 from scripts import run_scan
+from tests.runtime_epoch_support import SYNTHETIC_IDENTITY, bootstrap_operational_test_database
 
 GENERATED_AT = "2026-08-22T00:00:00Z"
 
@@ -419,6 +420,7 @@ def test_active_lifecycle_history_is_preserved_but_cannot_expand_strict_membersh
 
 def test_cooldown_symbol_health_and_adaptive_priority_cannot_inject_membership(tmp_path) -> None:
     db_path = tmp_path / "health.sqlite"
+    bootstrap_operational_test_database(db_path)
     save_symbol_health_records(
         db_path,
         {
@@ -437,6 +439,7 @@ def test_cooldown_symbol_health_and_adaptive_priority_cannot_inject_membership(t
         adaptive_symbol_priority=True,
         watch=True,
         universe_size=1,
+        runtime_identity=SYNTHETIC_IDENTITY,
     )
     watchlist = run_scan.WatchlistResolution(
         symbols=("INUSDT",),

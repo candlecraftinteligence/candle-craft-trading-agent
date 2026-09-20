@@ -575,6 +575,7 @@ def test_t15_timing_contract_fail_closed(tmp_path: Path) -> None:
         update={
             "evaluation_origin_kind": "live_scan",
             "lifecycle_decision_timestamp": equal_cutoff,
+            "evaluation_completed_at": datetime.fromisoformat(NOW.replace("Z", "+00:00")),
         }
     )
     result = apply_lifecycle_to_run_result(
@@ -626,24 +627,13 @@ def test_t17_missing_epoch_blocks_before_writes(tmp_path: Path) -> None:
         assert load_active_runtime_epoch(connection) is None
         assert identify_schema_version(connection) == SCHEMA_VERSION
     with pytest.raises(RuntimeEpochConfigurationError):
-        require_operational_runtime(database_path=db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        require_operational_runtime(database_path=db_path, expected_identity=SYNTHETIC_IDENTITY)
     missing = tmp_path / "missing.db"
     with pytest.raises(RuntimeEpochConfigurationError):
-        require_operational_runtime(database_path=missing, expected_epoch_id=SYNTHETIC_EPOCH_ID)
-    with SQLiteSetupLifecycleRepository(db_path) as repository:
-        with pytest.raises(RuntimeEpochError):
-            repository.upsert_record(
-                SetupLifecycleRecord(
-                    lifecycle_id="should-not-write",
-                    symbol="BTCUSDT",
-                    mode="swing",
-                    direction="long",
-                    current_state=SetupLifecycleState.WATCHLISTED,
-                    first_seen_at=NOW,
-                    last_seen_at=NOW,
-                    last_transition_at=NOW,
-                )
-            )
+        require_operational_runtime(database_path=missing, expected_identity=SYNTHETIC_IDENTITY)
+    with pytest.raises(RuntimeEpochConfigurationError):
+        with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY):
+            pass
 
 
 def test_t18_crash_and_concurrent_init_leave_no_unowned_live_state(tmp_path: Path) -> None:

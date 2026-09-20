@@ -13,6 +13,9 @@ from app.data.dtos import NA
 from app.runtime_epoch.errors import RuntimeEpochOwnershipError
 from app.runtime_epoch.ownership import (
     decide_public_effect,
+    require_event_part_association,
+    require_event_reservation_association,
+    require_part_claim_association,
     require_public_event_mutation,
     require_public_part_mutation,
 )
@@ -88,6 +91,10 @@ def persist_intent_parts(
         (int(event_id),),
     ).fetchone()
     require_public_event_mutation(connection, event)
+    supplied_key = str(event_key or "").strip()
+    actual_key = str(event["event_key"] or "").strip() if event is not None else ""
+    if not supplied_key or not actual_key or supplied_key != actual_key:
+        raise RuntimeEpochOwnershipError("public_intent_event_key_mismatch")
     connection.execute(
         """
         UPDATE public_alert_events
@@ -188,6 +195,18 @@ class SQLitePublicTelegramOutbox:
             row = self.connection.execute(
                 "SELECT * FROM public_alert_events WHERE id = ?", (int(event_id),)
             ).fetchone()
+            try:
+                require_event_reservation_association(
+                    self.connection,
+                    event_id=int(event_id),
+                    reservation_id=int(reservation_id),
+                )
+            except RuntimeEpochOwnershipError as exc:
+                return TelegramOutboxClaimResult(
+                    None,
+                    _state(row["delivery_state"]) if row is not None else FAILED_FINAL,
+                    str(exc) or "public_reservation_event_mismatch",
+                )
             decision = decide_public_effect(self.connection, row)
             if not decision.allowed:
                 return TelegramOutboxClaimResult(
@@ -272,7 +291,11 @@ class SQLitePublicTelegramOutbox:
         timestamp = now or _now_iso()
         with self._transaction():
             try:
-                require_public_part_mutation(self.connection, int(part_id))
+                require_part_claim_association(
+                    self.connection,
+                    part_id=int(part_id),
+                    attempt_id=str(attempt_id),
+                )
             except RuntimeEpochOwnershipError:
                 return False
             cursor = self.connection.execute(
@@ -313,18 +336,29 @@ class SQLitePublicTelegramOutbox:
             detail = "Telegram success could not be proven without a message ID."
         sent_at = _optional_text(result.get("sent_at")) or (timestamp if result_state == SENT else None)
         with self._transaction():
+            try:
+                require_event_reservation_association(
+                    self.connection,
+                    event_id=int(event_id),
+                    reservation_id=int(reservation_id),
+                )
+                require_event_part_association(
+                    self.connection,
+                    event_id=int(event_id),
+                    part_id=int(part_id),
+                )
+            except RuntimeEpochOwnershipError:
+                owned = self.connection.execute(
+                    "SELECT * FROM public_alert_events WHERE id = ?",
+                    (int(event_id),),
+                ).fetchone()
+                return _state(owned["delivery_state"]) if owned is not None else FAILED_FINAL
             owned = self.connection.execute(
                 "SELECT * FROM public_alert_events WHERE id = ?",
                 (int(event_id),),
             ).fetchone()
             decision = decide_public_effect(self.connection, owned)
             if not decision.allowed:
-                return _state(owned["delivery_state"]) if owned is not None else FAILED_FINAL
-            part_row = self.connection.execute(
-                "SELECT public_alert_event_id FROM public_alert_delivery_parts WHERE id = ?",
-                (int(part_id),),
-            ).fetchone()
-            if part_row is None or int(part_row["public_alert_event_id"]) != int(event_id):
                 return _state(owned["delivery_state"]) if owned is not None else FAILED_FINAL
             event = self.connection.execute(
                 "SELECT attempt_count, max_attempts FROM public_alert_events WHERE id = ? AND attempt_id = ?",
@@ -394,6 +428,14 @@ class SQLitePublicTelegramOutbox:
             raise ValueError(f"Unsupported no-send terminal state: {state}")
         timestamp = now or _now_iso()
         with self._transaction():
+            try:
+                require_event_reservation_association(
+                    self.connection,
+                    event_id=int(event_id),
+                    reservation_id=int(reservation_id),
+                )
+            except RuntimeEpochOwnershipError:
+                return
             owned = self.connection.execute(
                 "SELECT * FROM public_alert_events WHERE id = ?",
                 (int(event_id),),
@@ -417,6 +459,14 @@ class SQLitePublicTelegramOutbox:
     ) -> None:
         try:
             with self._transaction():
+                try:
+                    require_event_reservation_association(
+                        self.connection,
+                        event_id=int(event_id),
+                        reservation_id=int(reservation_id),
+                    )
+                except RuntimeEpochOwnershipError:
+                    return
                 owned = self.connection.execute(
                     "SELECT * FROM public_alert_events WHERE id = ?",
                     (int(event_id),),

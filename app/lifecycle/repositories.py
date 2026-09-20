@@ -22,6 +22,7 @@ from app.runtime_epoch.ownership import (
     require_current_epoch_lifecycle_id,
     require_current_epoch_lifecycle_write,
 )
+from app.runtime_epoch.models import RuntimeEpochIdentity
 from app.runtime_epoch.startup import open_repository_database
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError
 
@@ -32,14 +33,17 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         database_path: Path | str = DEFAULT_DATABASE_PATH,
         *,
         expected_epoch_id: str | None = None,
+        expected_identity: RuntimeEpochIdentity | None = None,
     ) -> None:
         self.database_path = Path(database_path)
         self.expected_epoch_id = expected_epoch_id
+        self.expected_identity = expected_identity
         self.connection: sqlite3.Connection | None = None
 
     def __enter__(self) -> SQLiteSetupLifecycleRepository:
         self.connection = open_repository_database(
             self.database_path,
+            expected_identity=self.expected_identity,
             expected_epoch_id=self.expected_epoch_id,
         )
         return self

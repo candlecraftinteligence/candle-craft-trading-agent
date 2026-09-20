@@ -10,6 +10,11 @@ from app.lifecycle.models import SetupLifecycleRecord
 from app.runtime_epoch.authority import initialize_runtime_epoch, load_active_runtime_epoch
 from app.runtime_epoch.models import RUNTIME_EPOCH_CONTRACT_VERSION, RuntimeEpochIdentity
 from app.runtime_epoch.origin import evaluate_symbol_origin, register_operational_run
+from app.runtime_epoch.ownership import (
+    PUBLIC_CHAIN_STARTER_EVENT_TYPES,
+    PUBLIC_ROOT_EVENT_TYPES,
+    normalize_public_event_type,
+)
 from app.storage.database import open_initialized_database
 
 SYNTHETIC_EPOCH_ID = "cci-test-epoch-synthetic"
@@ -142,7 +147,9 @@ def stamp_sql_public_event(
     if epoch is None:
         return
     normalized_symbol = str(symbol).upper()
-    origin_lifecycle_id = f"{event_key}::epoch-origin"
+    normalized_side = str(side or "long").strip().lower() or "long"
+    normalized_type = normalize_public_event_type(event_type)
+    origin_lifecycle_id = f"epoch-origin::{normalized_symbol}::{normalized_side}"
     existing_life = connection.execute(
         "SELECT lifecycle_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
         (origin_lifecycle_id,),
@@ -151,7 +158,7 @@ def stamp_sql_public_event(
         decision = grant_synthetic_origin(
             connection,
             symbol=normalized_symbol,
-            run_id=f"test-stamp-{event_key}",
+            run_id=f"test-stamp-{origin_lifecycle_id}",
             now=SYNTHETIC_NOW,
         )
         if decision.granted and decision.origin_id:
@@ -173,38 +180,142 @@ def stamp_sql_public_event(
                     decision.origin_id,
                 ),
             )
+    origin_root_event_id = None
+    if normalized_type not in PUBLIC_ROOT_EVENT_TYPES:
+        origin_root_event_id = _lookup_stamped_chain_starter_id(
+            connection,
+            origin_lifecycle_id=origin_lifecycle_id,
+            epoch_id=epoch.epoch_id,
+        )
+        if origin_root_event_id is None and normalized_type not in PUBLIC_CHAIN_STARTER_EVENT_TYPES:
+            origin_root_event_id = _seed_stamped_initial_watchlist_root(
+                connection,
+                origin_lifecycle_id=origin_lifecycle_id,
+                symbol=normalized_symbol,
+                side=normalized_side,
+                epoch_id=epoch.epoch_id,
+                timestamp=timestamp,
+            )
+    if normalized_type in PUBLIC_ROOT_EVENT_TYPES:
+        origin_root_event_id = None
+    delivery_state = "SENT" if str(status).strip().upper() == "SENT" else "PENDING"
+    sent_at = timestamp if delivery_state == "SENT" else None
+    completed_at = timestamp if delivery_state == "SENT" else None
     connection.execute(
         """
         INSERT OR IGNORE INTO public_alert_events (
             canonical_plan_id, event_type, event_key, symbol, side, status,
             reserved_at, sent_at, created_at, updated_at, runtime_epoch_id,
-            origin_lifecycle_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            origin_lifecycle_id, origin_root_event_id, delivery_state, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event_key,
-            event_type,
+            normalized_type,
             event_key,
             normalized_symbol,
-            str(side).lower(),
+            normalized_side,
             status,
             timestamp,
-            timestamp if str(status).upper() == "SENT" else None,
+            sent_at,
             timestamp,
             timestamp,
             epoch.epoch_id,
             origin_lifecycle_id,
+            origin_root_event_id,
+            delivery_state,
+            completed_at,
         ),
     )
     connection.execute(
         """
         UPDATE public_alert_events
-        SET origin_lifecycle_id = COALESCE(NULLIF(origin_lifecycle_id, ''), ?)
+        SET origin_lifecycle_id = COALESCE(NULLIF(origin_lifecycle_id, ''), ?),
+            event_type = CASE
+                WHEN event_type IS NULL OR event_type = '' THEN ?
+                ELSE event_type
+            END,
+            origin_root_event_id = CASE
+                WHEN origin_root_event_id IS NULL THEN ?
+                ELSE origin_root_event_id
+            END
         WHERE event_key = ?
           AND runtime_epoch_id = ?
-          AND (origin_lifecycle_id IS NULL OR origin_lifecycle_id = '')
         """,
-        (origin_lifecycle_id, event_key, epoch.epoch_id),
+        (
+            origin_lifecycle_id,
+            normalized_type,
+            origin_root_event_id,
+            event_key,
+            epoch.epoch_id,
+        ),
+    )
+
+
+def _lookup_stamped_chain_starter_id(
+    connection: sqlite3.Connection,
+    *,
+    origin_lifecycle_id: str,
+    epoch_id: str,
+) -> int | None:
+    row = connection.execute(
+        """
+        SELECT id FROM public_alert_events
+        WHERE origin_lifecycle_id = ?
+          AND runtime_epoch_id = ?
+          AND event_type IN ('initial_watchlist', 'setup_triggered', 'signal_confirmed')
+        ORDER BY
+          CASE event_type
+            WHEN 'initial_watchlist' THEN 0
+            WHEN 'setup_triggered' THEN 1
+            ELSE 2
+          END,
+          id ASC
+        LIMIT 1
+        """,
+        (origin_lifecycle_id, epoch_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row[0] if not hasattr(row, "keys") else row["id"])
+
+
+def _seed_stamped_initial_watchlist_root(
+    connection: sqlite3.Connection,
+    *,
+    origin_lifecycle_id: str,
+    symbol: str,
+    side: str,
+    epoch_id: str,
+    timestamp: str,
+) -> int | None:
+    event_key = f"stamp-root|{origin_lifecycle_id}|initial_watchlist"
+    connection.execute(
+        """
+        INSERT OR IGNORE INTO public_alert_events (
+            canonical_plan_id, event_type, event_key, symbol, side, status,
+            reserved_at, sent_at, created_at, updated_at, runtime_epoch_id,
+            origin_lifecycle_id, origin_root_event_id, delivery_state, completed_at
+        ) VALUES (?, 'initial_watchlist', ?, ?, ?, 'SENT', ?, ?, ?, ?, ?, ?, NULL, 'SENT', ?)
+        """,
+        (
+            origin_lifecycle_id,
+            event_key,
+            symbol,
+            side,
+            timestamp,
+            timestamp,
+            timestamp,
+            timestamp,
+            epoch_id,
+            origin_lifecycle_id,
+            timestamp,
+        ),
+    )
+    return _lookup_stamped_chain_starter_id(
+        connection,
+        origin_lifecycle_id=origin_lifecycle_id,
+        epoch_id=epoch_id,
     )
 
 

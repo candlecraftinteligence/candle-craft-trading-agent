@@ -658,30 +658,33 @@ def _attempt_is_current_epoch_operational(
     if epoch is None:
         return False
     event_key = _clean(row.get("public_watchlist_event_key"))
-    if event_key != NA and _table_exists(connection, "public_alert_events"):
-        event = connection.execute(
-            "SELECT * FROM public_alert_events WHERE event_key = ?",
-            (event_key,),
-        ).fetchone()
-        if event is not None:
-            return decide_public_effect(connection, event, epoch=epoch).allowed
-    signal_id = _clean(row.get("signal_id"))
-    candidates = [signal_id] if signal_id != NA else []
-    if signal_id != NA:
-        prefix, marker, digest = signal_id.rpartition("-SETUP-")
-        if marker and prefix and len(digest) == 16:
-            candidates.append(prefix)
-    for candidate in candidates:
-        try:
-            require_lifecycle_public_intent(
-                connection,
-                origin_lifecycle_id=candidate,
-                epoch=epoch,
-            )
-            return True
-        except RuntimeEpochError:
-            continue
-    return False
+    if event_key == NA or not _table_exists(connection, "public_alert_events"):
+        return False
+    event = connection.execute(
+        "SELECT * FROM public_alert_events WHERE event_key = ?",
+        (event_key,),
+    ).fetchone()
+    if event is None:
+        return False
+    if not decide_public_effect(connection, event, epoch=epoch).allowed:
+        return False
+    attempt_symbol = _clean(row.get("symbol"))
+    event_symbol = _clean(event["symbol"]) if "symbol" in event.keys() else NA
+    if attempt_symbol != NA and event_symbol != NA and attempt_symbol != event_symbol:
+        return False
+    origin_lifecycle = _clean(event["origin_lifecycle_id"]) if "origin_lifecycle_id" in event.keys() else NA
+    if origin_lifecycle == NA:
+        return False
+    try:
+        require_lifecycle_public_intent(
+            connection,
+            origin_lifecycle_id=origin_lifecycle,
+            epoch=epoch,
+            expected_symbol=attempt_symbol if attempt_symbol != NA else None,
+        )
+    except RuntimeEpochError:
+        return False
+    return True
 
 
 def _sent_alert_attempt_rows(
@@ -1086,7 +1089,11 @@ def _active_signal_items_from_rows(
         signal_row = _active_signal_base_row(signal_rows)
         if signal_row is None:
             continue
-        outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
+        outcome_rows = tuple(
+            row
+            for row in _active_signal_outcome_rows(signal_rows, signal_row)
+            if _attempt_is_current_epoch_operational(connection, row)
+        )
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
         lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
         outcome_progress = _lifecycle_outcome_progress(connection, lifecycle_row)

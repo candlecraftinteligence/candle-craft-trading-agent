@@ -95,6 +95,19 @@ def decision_cutoff_from_symbol_result(symbol_result: Any) -> str | None:
     return None
 
 
+def evaluation_completed_at_from_symbol_result(symbol_result: Any) -> str | None:
+    """Return producer evaluation-completion evidence. Never substitute processing time."""
+
+    timestamp = getattr(symbol_result, "evaluation_completed_at", None)
+    parsed = comparable_utc(timestamp)
+    if parsed is not None:
+        return parsed
+    iso = getattr(timestamp, "isoformat", None) if timestamp is not None else None
+    if callable(iso):
+        return comparable_utc(iso())
+    return None
+
+
 def producer_acquisition_from_delivery(delivery: Any) -> str | None:
     """Use adapter acquisition time only. Cache/subset observation is not acquisition."""
 
@@ -149,8 +162,12 @@ def evaluate_symbol_origin(
     evaluation_at = comparable_utc(evaluation_completed_at)
     cutoff_at = comparable_utc(decision_cutoff_at)
     producer_at = comparable_utc(producer_observed_at)
-    if evaluation_at is None or cutoff_at is None or producer_at is None:
-        return _blocked(normalized_run_id, normalized_symbol, "origin_times_unknown")
+    if evaluation_at is None:
+        return _blocked(normalized_run_id, normalized_symbol, "evaluation_completed_at_missing")
+    if cutoff_at is None:
+        return _blocked(normalized_run_id, normalized_symbol, "decision_cutoff_at_missing")
+    if producer_at is None:
+        return _blocked(normalized_run_id, normalized_symbol, "producer_observed_at_missing")
     if not strictly_after(evaluation_at, epoch.cutoff_at):
         return _blocked(normalized_run_id, normalized_symbol, "evaluation_not_after_epoch_cutoff")
     if not strictly_after(cutoff_at, epoch.cutoff_at):

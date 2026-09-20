@@ -146,13 +146,16 @@ from app.storage import (  # noqa: E402
     export_history_payload,
     format_history_table,
     list_scan_history,
-    load_symbol_health_records,
     store_scan_result,
     update_symbol_health_for_result,
 )
 from app.storage.database import UnsupportedSchemaVersionError  # noqa: E402
 from app.runtime_epoch.errors import RuntimeEpochConfigurationError, RuntimeEpochError  # noqa: E402
-from app.runtime_epoch.startup import require_operational_runtime  # noqa: E402
+from app.runtime_epoch.models import RuntimeEpochIdentity  # noqa: E402
+from app.runtime_epoch.startup import (  # noqa: E402
+    require_expected_operational_identity,
+    require_operational_runtime,
+)
 from app.runtime_epoch.watch_state import load_or_initialize_operational_watch_payload  # noqa: E402
 from app.universe.symbol_universe import (  # noqa: E402
     BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
@@ -214,6 +217,7 @@ from app.watch_supervisor import (  # noqa: E402
 DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 LATEST_RUN_PATH = DEFAULT_LATEST_RUN_PATH
 WATCH_STATE_PATH = DEFAULT_WATCH_STATE_PATH
+WATCH_STATE_CANONICAL_BASE_DIR = DEFAULT_WATCH_STATE_PATH.parent
 PERFORMANCE_MEMORY_PATH = PROJECT_ROOT / "scan_runs" / "performance_memory.json"
 SCAN_RUN_MANIFEST_PATH = PROJECT_ROOT / "scan_runs" / "scan_run_manifest.jsonl"
 NIGHTLY_SCAN_HISTORY_PATH = PROJECT_ROOT / "scan_runs" / "nightly_scan_history.json"
@@ -626,6 +630,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--store-scan", action="store_true")
     parser.add_argument("--database-path", type=Path, default=DEFAULT_DATABASE_PATH)
     parser.add_argument("--runtime-epoch-id", dest="runtime_epoch_id")
+    parser.add_argument("--runtime-epoch-cutoff-at", dest="runtime_epoch_cutoff_at")
+    parser.add_argument("--runtime-reviewed-release-sha", dest="runtime_reviewed_release_sha")
+    parser.add_argument("--runtime-generation-binding", dest="runtime_generation_binding")
     parser.add_argument(
         "--telegram-manual-signals",
         "--telegram-signals",
@@ -1090,6 +1097,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 raw_payload=raw_payload,
                 run_id=stored_scan_run_id,
                 inline_raw_payload=_scan_raw_payload_inline_only(),
+                expected_identity=getattr(args, "runtime_identity", None),
             )
         except StorageError as exc:
             raise SystemExit(str(exc)) from exc
@@ -2294,23 +2302,53 @@ def _reset_lifecycle_state(args: argparse.Namespace) -> None:
 
 def _prepare_operational_runtime_if_needed(args: argparse.Namespace, settings: Settings) -> None:
     global WATCH_STATE_PATH
-    expected = str(getattr(args, "runtime_epoch_id", None) or settings.runtime_epoch_id or "").strip()
-    if not expected:
-        raise SystemExit(
-            "Operational runtime requires --runtime-epoch-id or RUNTIME_EPOCH_ID; refusing to start without an epoch."
-        )
-    watch_state_base_dir = WATCH_STATE_PATH.parent
+    identity = _runtime_identity_from_args_or_settings(args, settings)
+    watch_state_base_dir = _canonical_watch_state_base_dir(args)
     try:
         runtime = require_operational_runtime(
             database_path=args.database_path,
-            expected_epoch_id=expected,
+            expected_identity=identity,
             watch_state_base_dir=watch_state_base_dir,
         )
     except (RuntimeEpochError, UnsupportedSchemaVersionError) as exc:
         raise SystemExit(str(exc)) from exc
     WATCH_STATE_PATH = runtime.watch_state_path
     args.runtime_epoch_id = runtime.epoch.epoch_id
+    args.runtime_identity = runtime.epoch.identity
     args.watch_state_base_dir = watch_state_base_dir
+
+
+def _runtime_identity_from_args_or_settings(args: argparse.Namespace, settings: Settings) -> RuntimeEpochIdentity:
+    stored = getattr(args, "runtime_identity", None)
+    if isinstance(stored, RuntimeEpochIdentity):
+        return stored
+    try:
+        return require_expected_operational_identity(
+            epoch_id=getattr(args, "runtime_epoch_id", None) or settings.runtime_epoch_id,
+            cutoff_at=getattr(args, "runtime_epoch_cutoff_at", None) or settings.runtime_epoch_cutoff_at,
+            reviewed_release_sha=(
+                getattr(args, "runtime_reviewed_release_sha", None) or settings.runtime_reviewed_release_sha
+            ),
+            generation_binding=(
+                getattr(args, "runtime_generation_binding", None) or settings.runtime_generation_binding
+            ),
+            contract_version=settings.runtime_epoch_contract_version,
+        )
+    except RuntimeEpochConfigurationError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def _canonical_watch_state_base_dir(args: argparse.Namespace) -> Path:
+    stored = getattr(args, "watch_state_base_dir", None)
+    if stored:
+        return Path(stored)
+    path = Path(WATCH_STATE_PATH)
+    parts = path.parts
+    if "epochs" in parts:
+        idx = parts.index("epochs")
+        if idx > 0:
+            return Path(*parts[:idx])
+    return path.parent
 
 
 def _runtime_watch_epoch_id(args: argparse.Namespace) -> str:
@@ -2321,7 +2359,7 @@ def _runtime_watch_base_dir(args: argparse.Namespace) -> Path:
     stored = getattr(args, "watch_state_base_dir", None)
     if stored:
         return Path(stored)
-    return WATCH_STATE_PATH.parent
+    return _canonical_watch_state_base_dir(args)
 
 
 def _load_runtime_watch_state(args: argparse.Namespace):
@@ -2362,7 +2400,12 @@ def _apply_lifecycle_if_enabled(
     if not _lifecycle_enabled(args):
         return result
     try:
-        return apply_lifecycle_to_run_result(result, database_path=args.database_path, scan_run_id=scan_run_id)
+        return apply_lifecycle_to_run_result(
+            result,
+            database_path=args.database_path,
+            scan_run_id=scan_run_id,
+            expected_identity=getattr(args, "runtime_identity", None),
+        )
     except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -2436,6 +2479,7 @@ async def _deliver_telegram_manual_signals_if_enabled(
             settings=settings,
             min_rr=result.config.min_rr,
             min_score_for_idea=Decimal(args.min_score_for_idea),
+            expected_identity=getattr(args, "runtime_identity", None),
         ).deliver_for_run(result, scan_run_id=scan_run_id)
     except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -2461,7 +2505,11 @@ def _watchlist_with_lifecycle_priority(
         return watchlist
     original_symbols = watchlist.symbols
     try:
-        all_active_symbols = active_lifecycle_symbols(original_symbols, database_path=args.database_path)
+        all_active_symbols = active_lifecycle_symbols(
+            original_symbols,
+            database_path=args.database_path,
+            expected_identity=getattr(args, "runtime_identity", None),
+        )
     except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -2559,7 +2607,22 @@ def _symbol_priority_plan_for_watchlist(
     if not enabled:
         return empty_symbol_priority_plan(watchlist.symbols, enabled=False)
     try:
-        health_records = load_symbol_health_records(args.database_path, watchlist.symbols)
+        identity = getattr(args, "runtime_identity", None)
+        if identity is None:
+            raise SystemExit("Operational symbol-health priority requires an explicit expected runtime identity.")
+        from app.runtime_epoch.startup import open_operational_database
+        from app.storage.symbol_health import load_symbol_health_records_from_connection
+
+        connection, _epoch = open_operational_database(
+            args.database_path,
+            expected_identity=identity,
+        )
+        try:
+            health_records = load_symbol_health_records_from_connection(
+                connection, watchlist.symbols
+            )
+        finally:
+            connection.close()
         lifecycle_states = _lifecycle_states_for_symbols(args, watchlist.symbols)
     except (StorageError, RuntimeEpochError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -2575,7 +2638,10 @@ def _lifecycle_states_for_symbols(args: argparse.Namespace, symbols: Sequence[st
     if not symbols:
         return {}
     try:
-        with SQLiteSetupLifecycleRepository(args.database_path) as repository:
+        with SQLiteSetupLifecycleRepository(
+            args.database_path,
+            expected_identity=getattr(args, "runtime_identity", None),
+        ) as repository:
             records = repository.get_records_for_symbols(symbols)
     except StorageError:
         raise
@@ -2744,6 +2810,7 @@ def _apply_symbol_health_if_enabled(
             cooldown_minutes=args.symbol_cooldown_minutes,
             max_timeout_strikes=args.max_timeout_strikes,
             enabled=symbol_priority_plan.enabled or args.show_symbol_health,
+            expected_identity=getattr(args, "runtime_identity", None),
         )
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc
@@ -3979,6 +4046,7 @@ def _store_watch_iteration_scan_run(
             run_id=execution.storage_run_id,
             watch_iteration=metadata,
             inline_raw_payload=_scan_raw_payload_inline_only(),
+            expected_identity=getattr(args, "runtime_identity", None),
         )
     except StorageError as exc:
         raise SystemExit(str(exc)) from exc

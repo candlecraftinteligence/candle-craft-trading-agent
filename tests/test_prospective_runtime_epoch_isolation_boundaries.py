@@ -48,12 +48,17 @@ from app.runtime_epoch.models import (
 from app.runtime_epoch.origin import (
     decision_cutoff_from_symbol_result,
     evaluate_symbol_origin,
+    evaluation_completed_at_from_symbol_result,
     origin_kind_from_symbol_result,
     producer_acquisition_from_symbol_result,
     register_operational_run,
 )
 from app.runtime_epoch.ownership import decide_public_effect, require_lifecycle_public_intent
-from app.runtime_epoch.startup import inspect_operational_database, open_repository_database, require_operational_runtime
+from app.runtime_epoch.startup import (
+    inspect_operational_database,
+    open_repository_database,
+    require_operational_runtime,
+)
 from app.runtime_epoch.watch_state import (
     canonical_legacy_watch_state_path,
     load_or_initialize_operational_watch_payload,
@@ -70,7 +75,12 @@ from app.storage.models import TelegramAlertAttemptRecord
 from app.telegram_admin.draft_router import build_admin_drafts, format_admin_scan_report
 from app.telegram_admin.signal_detail import load_active_signal_detail
 
-from test_lifecycle_outcomes import _record as _outcome_record
+from test_lifecycle_outcomes import (
+    _baseline as _outcome_baseline,
+    _entry as _outcome_entry,
+    _evaluate as _evaluate_outcomes,
+    _record as _outcome_record,
+)
 from test_telegram_admin_draft_router import _run_result as _admin_run_result
 from test_telegram_admin_draft_router import _valid_result
 from test_telegram_lifecycle_delivery_phase42 import (
@@ -82,10 +92,11 @@ from test_telegram_lifecycle_delivery_phase42 import (
     _symbol,
     run,
 )
-from test_triggered_confirmed_telegram_delivery import _generated_entry_batch, _service
 from tests.fixtures.genuine_v25 import create_genuine_v25_database
 from tests.runtime_epoch_support import (
+    SYNTHETIC_CUTOFF_AT,
     SYNTHETIC_EPOCH_ID,
+    SYNTHETIC_GENERATION_BINDING,
     SYNTHETIC_IDENTITY,
     SYNTHETIC_RELEASE_SHA,
     grant_synthetic_origin,
@@ -192,6 +203,7 @@ def _fresh_symbol(
     delivery=None,
     symbol: str = "BTCUSDT",
     signal_id: str = "boundary-fresh",
+    evaluation_completed_at: datetime | None = None,
 ) -> ScannerSymbolResult:
     return _symbol(SetupLifecycleState.WATCHLISTED, signal_id=signal_id).model_copy(
         update={
@@ -199,15 +211,20 @@ def _fresh_symbol(
             "evaluation_origin_kind": origin_kind,
             "lifecycle_decision_timestamp": decision,
             "lifecycle_execution_batch_delivery": delivery,
+            "evaluation_completed_at": evaluation_completed_at,
         }
     )
 
 
-def _plan(symbol: str = "BTCUSDT", plan_id: str = "owned-plan") -> PublicWatchlistPlanIdentity:
+def _plan(
+    symbol: str = "BTCUSDT",
+    plan_id: str = "owned-plan",
+    side: str = "long",
+) -> PublicWatchlistPlanIdentity:
     return PublicWatchlistPlanIdentity(
         plan_id=plan_id,
         symbol=symbol,
-        side="long",
+        side=side,
         setup_family="sweep_bos",
         source_modes=("swing",),
         raw_entry_low="100",
@@ -219,12 +236,18 @@ def _plan(symbol: str = "BTCUSDT", plan_id: str = "owned-plan") -> PublicWatchli
     )
 
 
-def _owned_record(origin_id: str, *, lifecycle_id: str, symbol: str = "BTCUSDT") -> SetupLifecycleRecord:
+def _owned_record(
+    origin_id: str,
+    *,
+    lifecycle_id: str,
+    symbol: str = "BTCUSDT",
+    direction: str = "long",
+) -> SetupLifecycleRecord:
     return SetupLifecycleRecord(
         lifecycle_id=lifecycle_id,
         symbol=symbol,
         mode="swing",
-        direction="long",
+        direction=direction,
         current_state=SetupLifecycleState.ACTIONABLE_A_GRADE,
         first_seen_at=NOW,
         last_seen_at=NOW,
@@ -270,6 +293,7 @@ def test_r01_missing_evidence_does_not_grant_live_fresh(tmp_path: Path) -> None:
         database_path=db_path,
         scan_run_id="r01-run",
         now=PROCESS_NOW,
+        expected_identity=CUTOFF_IDENTITY,
     )
     live_without_times = _fresh_symbol(origin_kind="live_scan", decision=None, delivery=None, signal_id="r01-live")
     apply_lifecycle_to_run_result(
@@ -277,6 +301,7 @@ def test_r01_missing_evidence_does_not_grant_live_fresh(tmp_path: Path) -> None:
         database_path=db_path,
         scan_run_id="r01-live",
         now=PROCESS_NOW,
+        expected_identity=CUTOFF_IDENTITY,
     )
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -286,7 +311,7 @@ def test_r01_missing_evidence_does_not_grant_live_fresh(tmp_path: Path) -> None:
             "SELECT block_reason FROM runtime_operational_origins WHERE symbol = 'BTCUSDT' ORDER BY rowid"
         ).fetchall()
         reasons = " ".join(str(row["block_reason"] or "") for row in blocked)
-        assert "evaluation_kind_not_live:unspecified" in reasons or "origin_times_unknown" in reasons
+        assert "evaluation_kind_not_live:unspecified" in reasons or "evaluation_completed_at_missing" in reasons
 
 
 def test_r02_pre_epoch_adapter_post_epoch_cache_does_not_grant_live_fresh(tmp_path: Path) -> None:
@@ -316,6 +341,7 @@ def test_r02_pre_epoch_adapter_post_epoch_cache_does_not_grant_live_fresh(tmp_pa
         decision=PROCESS_DT,
         delivery=selected,
         signal_id="r02-cache",
+        evaluation_completed_at=PROCESS_DT,
     )
     producer = producer_acquisition_from_symbol_result(result)
     assert producer is not None
@@ -325,6 +351,7 @@ def test_r02_pre_epoch_adapter_post_epoch_cache_does_not_grant_live_fresh(tmp_pa
         database_path=db_path,
         scan_run_id="r02-run",
         now=PROCESS_NOW,
+        expected_identity=CUTOFF_IDENTITY,
     )
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -345,12 +372,14 @@ def test_r03_fresh_post_epoch_producer_can_grant_origin(tmp_path: Path) -> None:
         decision=DECISION,
         delivery=delivery,
         signal_id="r03-fresh",
+        evaluation_completed_at=PROCESS_DT,
     )
     apply_lifecycle_to_run_result(
         _run_result(result),
         database_path=db_path,
         scan_run_id="r03-run",
         now=PROCESS_NOW,
+        expected_identity=CUTOFF_IDENTITY,
     )
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -380,7 +409,7 @@ def test_r04_lost_provenance_does_not_default_to_live() -> None:
 
 def test_r05_btc_origin_cannot_create_eth_lifecycle(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r05.db")
-    with SQLiteSetupLifecycleRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
+    with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         origin = grant_synthetic_origin(repository.connection, symbol="BTCUSDT", run_id="r05", now=NOW)
         eth = _owned_record(origin.origin_id, lifecycle_id="life-eth", symbol="ETHUSDT")
         with pytest.raises(RuntimeEpochOriginError, match="symbol"):
@@ -390,7 +419,7 @@ def test_r05_btc_origin_cannot_create_eth_lifecycle(tmp_path: Path) -> None:
 
 def test_r06_missing_lifecycle_cannot_create_public_intent(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r06.db")
-    with SQLiteTelegramAlertAttemptRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         with pytest.raises(RuntimeEpochOwnershipError, match="persisted originating lifecycle"):
             require_lifecycle_public_intent(repository._connection, origin_lifecycle_id="missing-life")
         event, created = _insert_public_alert_event(
@@ -418,7 +447,7 @@ def test_r07_foreign_and_legacy_lifecycle_cannot_create_public_intent(tmp_path: 
             current_state=SetupLifecycleState.ACTIONABLE_A_GRADE.value,
         )
         connection.commit()
-    with SQLiteTelegramAlertAttemptRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         with pytest.raises(RuntimeEpochOwnershipError):
             require_lifecycle_public_intent(repository._connection, origin_lifecycle_id="life-legacy")
         event, created = _insert_public_alert_event(
@@ -437,10 +466,10 @@ def test_r07_foreign_and_legacy_lifecycle_cannot_create_public_intent(tmp_path: 
 
 def test_r08_owned_lifecycle_can_create_public_intent(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r08.db")
-    with SQLiteSetupLifecycleRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as lifecycle:
+    with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as lifecycle:
         origin = grant_synthetic_origin(lifecycle.connection, symbol="BTCUSDT", run_id="r08", now=NOW)
         lifecycle.upsert_record(_owned_record(origin.origin_id, lifecycle_id="life-r08"))
-    with SQLiteTelegramAlertAttemptRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         event, created = _insert_public_alert_event(
             repository,
             plan=_plan(plan_id="life-r08-plan"),
@@ -461,10 +490,10 @@ def test_r08_owned_lifecycle_can_create_public_intent(tmp_path: Path) -> None:
 
 def test_r09_forged_event_lifecycle_chain_is_rejected(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r09.db")
-    with SQLiteSetupLifecycleRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as lifecycle:
+    with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as lifecycle:
         origin = grant_synthetic_origin(lifecycle.connection, symbol="BTCUSDT", run_id="r09", now=NOW)
         lifecycle.upsert_record(_owned_record(origin.origin_id, lifecycle_id="life-r09"))
-    with SQLiteTelegramAlertAttemptRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         event, created = _insert_public_alert_event(
             repository,
             plan=_plan(plan_id="life-r09-plan"),
@@ -544,7 +573,7 @@ def test_r11_watchlist_reservation_cannot_mutate_legacy_attempt(tmp_path: Path) 
             delivery_state=PENDING,
         )
         connection.commit()
-    with SQLiteTelegramAlertAttemptRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         before = dict(
             repository._connection.execute(
                 "SELECT * FROM telegram_alert_attempts WHERE id = ?",
@@ -597,7 +626,7 @@ def test_r12_replace_attempt_cannot_reown_legacy_attempt(tmp_path: Path) -> None
         public_watchlist_event_key="r12:owned",
         attempted_at=NOW,
     )
-    with SQLiteTelegramAlertAttemptRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         before = dict(
             repository._connection.execute(
                 "SELECT * FROM telegram_alert_attempts WHERE id = ?",
@@ -689,7 +718,7 @@ def test_r13_remaining_direct_delivery_mutations_are_guarded(tmp_path: Path) -> 
         assert event_after == event_before
         assert part_after == part_before
         assert attempt_after == attempt_before
-    with SQLiteTelegramAlertAttemptRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         inserted = repository.insert_attempt(
             TelegramAlertAttemptRecord(
                 signal_id="r13-insert",
@@ -741,13 +770,13 @@ def test_r14_operational_open_does_not_migrate_genuine_v25(
     before = _schema_snapshot(db_path)
     monkeypatch.setenv("RUNTIME_EPOCH_ID", SYNTHETIC_EPOCH_ID)
     with pytest.raises(RuntimeEpochError):
-        inspect_operational_database(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        inspect_operational_database(db_path, expected_identity=SYNTHETIC_IDENTITY)
     with pytest.raises(RuntimeEpochError):
-        open_repository_database(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        open_repository_database(db_path, expected_identity=SYNTHETIC_IDENTITY)
     with pytest.raises(RuntimeEpochError):
-        require_operational_runtime(database_path=db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        require_operational_runtime(database_path=db_path, expected_identity=SYNTHETIC_IDENTITY)
     with pytest.raises(RuntimeEpochError):
-        with SQLiteSetupLifecycleRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID):
+        with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY):
             pass
     with pytest.raises(RuntimeEpochError):
         run(
@@ -755,6 +784,7 @@ def test_r14_operational_open_does_not_migrate_genuine_v25(
                 database_path=db_path,
                 settings=_settings(),
                 sender=FakeSender(),
+                expected_identity=SYNTHETIC_IDENTITY,
             ).deliver_for_run(_run_result(_public_v1_symbol()), scan_run_id="r14")
         )
     after = _schema_snapshot(db_path)
@@ -770,11 +800,11 @@ def test_r15_operational_open_does_not_create_missing_db(
     db_path = tmp_path / "missing.db"
     monkeypatch.setenv("RUNTIME_EPOCH_ID", SYNTHETIC_EPOCH_ID)
     with pytest.raises(RuntimeEpochConfigurationError):
-        inspect_operational_database(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        inspect_operational_database(db_path, expected_identity=SYNTHETIC_IDENTITY)
     with pytest.raises(RuntimeEpochConfigurationError):
-        open_repository_database(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        open_repository_database(db_path, expected_identity=SYNTHETIC_IDENTITY)
     with pytest.raises(RuntimeEpochError):
-        with SQLiteSetupLifecycleRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID):
+        with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY):
             pass
     assert not db_path.exists()
 
@@ -790,9 +820,9 @@ def test_r16_v26_without_epoch_fails_before_mutation(
     assert before["version"] == 26
     monkeypatch.setenv("RUNTIME_EPOCH_ID", SYNTHETIC_EPOCH_ID)
     with pytest.raises(RuntimeEpochError):
-        inspect_operational_database(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        inspect_operational_database(db_path, expected_identity=SYNTHETIC_IDENTITY)
     with pytest.raises(RuntimeEpochError):
-        open_repository_database(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        open_repository_database(db_path, expected_identity=SYNTHETIC_IDENTITY)
     after = _schema_snapshot(db_path)
     assert after["version"] == 26
     assert after["epoch_count"] == 0
@@ -804,10 +834,17 @@ def test_r17_wrong_expected_epoch_fails_before_mutation(
     db_path = _bootstrap(tmp_path / "r17.db")
     before = _schema_snapshot(db_path)
     monkeypatch.setenv("RUNTIME_EPOCH_ID", "epoch-other")
+    other_identity = RuntimeEpochIdentity(
+        epoch_id="epoch-other",
+        cutoff_at=SYNTHETIC_CUTOFF_AT,
+        contract_version=RUNTIME_EPOCH_CONTRACT_VERSION,
+        reviewed_release_sha=SYNTHETIC_RELEASE_SHA,
+        generation_binding=SYNTHETIC_GENERATION_BINDING,
+    )
     with pytest.raises(RuntimeEpochError):
-        inspect_operational_database(db_path, expected_epoch_id="epoch-other")
+        inspect_operational_database(db_path, expected_identity=other_identity)
     with pytest.raises(RuntimeEpochError):
-        open_repository_database(db_path, expected_epoch_id="epoch-other")
+        open_repository_database(db_path, expected_identity=other_identity)
     after = _schema_snapshot(db_path)
     assert after["epoch_count"] == before["epoch_count"]
     with sqlite3.connect(db_path) as connection:
@@ -821,8 +858,15 @@ def test_r18_wrong_db_and_unsupported_schema_fail_before_mutation(
     selected = _bootstrap(tmp_path / "selected.db")
     other = _bootstrap(tmp_path / "other.db")
     monkeypatch.setenv("RUNTIME_EPOCH_ID", SYNTHETIC_EPOCH_ID)
+    foreign_identity = RuntimeEpochIdentity(
+        epoch_id="not-the-selected-epoch",
+        cutoff_at=SYNTHETIC_CUTOFF_AT,
+        contract_version=RUNTIME_EPOCH_CONTRACT_VERSION,
+        reviewed_release_sha=SYNTHETIC_RELEASE_SHA,
+        generation_binding=SYNTHETIC_GENERATION_BINDING,
+    )
     with pytest.raises(RuntimeEpochError):
-        inspect_operational_database(other, expected_epoch_id="not-the-selected-epoch")
+        inspect_operational_database(other, expected_identity=foreign_identity)
     unsupported = tmp_path / "unsupported.db"
     with sqlite3.connect(unsupported) as connection:
         connection.execute("CREATE TABLE dummy (id INTEGER)")
@@ -830,9 +874,9 @@ def test_r18_wrong_db_and_unsupported_schema_fail_before_mutation(
         connection.commit()
     before = _schema_snapshot(unsupported)
     with pytest.raises(RuntimeEpochError):
-        inspect_operational_database(unsupported, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        inspect_operational_database(unsupported, expected_identity=SYNTHETIC_IDENTITY)
     with pytest.raises(RuntimeEpochError):
-        open_repository_database(unsupported, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        open_repository_database(unsupported, expected_identity=SYNTHETIC_IDENTITY)
     after = _schema_snapshot(unsupported)
     assert after["version"] == 24
     assert after["version"] == before["version"]
@@ -842,7 +886,7 @@ def test_r18_wrong_db_and_unsupported_schema_fail_before_mutation(
         connection.execute("PRAGMA user_version = 99")
         connection.commit()
     with pytest.raises((RuntimeEpochError, UnsupportedSchemaVersionError)):
-        inspect_operational_database(future, expected_epoch_id=SYNTHETIC_EPOCH_ID)
+        inspect_operational_database(future, expected_identity=SYNTHETIC_IDENTITY)
     assert selected.exists()
 
 
@@ -892,6 +936,7 @@ def test_r22_research_watch_cannot_bypass_operational_ownership(tmp_path: Path) 
         database_path=db_path,
         settings=_research_settings(),
         sender=sender,
+        expected_identity=SYNTHETIC_IDENTITY,
     )
     summary = run(service.deliver_for_run(_run_result(_research_symbol()), scan_run_id="r22"))
     assert sender.messages == []
@@ -967,6 +1012,64 @@ def test_r26_injected_v26_failure_preserves_pre_operational_state(
     test_t20_v25_upgrade_preserves_rows_and_rolls_back_failure(tmp_path, monkeypatch)
 
 
+def _seed_owned_root_event(
+    connection: sqlite3.Connection,
+    *,
+    lifecycle_id: str,
+    symbol: str = "BTCUSDT",
+    side: str = "long",
+    plan_id: str | None = None,
+) -> int:
+    plan = plan_id if plan_id is not None else "N/A"
+    event_key = f"{lifecycle_id}|initial_watchlist|{side.lower()}"
+    existing = connection.execute(
+        "SELECT id FROM public_alert_events WHERE event_key = ?",
+        (event_key,),
+    ).fetchone()
+    if existing is not None:
+        return int(existing[0])
+    connection.execute(
+        """
+        INSERT INTO public_alert_events (
+            canonical_plan_id, event_type, event_key, symbol, side, setup_family,
+            status, reserved_at, created_at, updated_at, runtime_epoch_id, origin_lifecycle_id
+        ) VALUES (?, 'initial_watchlist', ?, ?, ?, 'N/A', 'RESERVED', ?, ?, ?, ?, ?)
+        """,
+        (plan, event_key, symbol.upper(), side.lower(), NOW, NOW, NOW, SYNTHETIC_EPOCH_ID, lifecycle_id),
+    )
+    return int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
+def _attempt_record(
+    *,
+    signal_id: str,
+    event_key: str = "N/A",
+    status: str = "pending",
+    delivery_state: str = "N/A",
+    blocked_reason: str = "N/A",
+    alert_type: str = "WATCHLIST",
+    symbol: str = "BTCUSDT",
+    direction: str = "long",
+) -> TelegramAlertAttemptRecord:
+    return TelegramAlertAttemptRecord(
+        signal_id=signal_id,
+        symbol=symbol,
+        direction=direction,
+        previous_state="WATCHLISTED",
+        new_state="WATCHLISTED",
+        alert_type=alert_type,
+        lifecycle_state="WATCHLISTED",
+        sent_at=None,
+        telegram_status=status,
+        message_hash="hash",
+        public_watchlist_event_key=event_key,
+        attempted_at=NOW,
+        delivery_state=delivery_state,
+        blocked_reason=blocked_reason,
+        error_message=blocked_reason,
+    )
+
+
 def test_r27_owned_fresh_path_can_claim_outbox_and_fake_send(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r27.db")
     delivery = _live_adapter_delivery(acquired_at=datetime.fromisoformat(NOW.replace("Z", "+00:00")))
@@ -986,17 +1089,57 @@ def test_r27_owned_fresh_path_can_claim_outbox_and_fake_send(tmp_path: Path) -> 
         )
         assert origin.granted is True
         connection.commit()
-    primed = _outcome_record(lifecycle_id="fresh-progress", mode="swing").model_copy(
+
+    def _owned(record: SetupLifecycleRecord) -> SetupLifecycleRecord:
+        return record.model_copy(
+            update={
+                "runtime_epoch_id": SYNTHETIC_EPOCH_ID,
+                "creation_origin_id": origin.origin_id,
+            }
+        )
+
+    with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+        record = _owned(_outcome_record(lifecycle_id="fresh-progress", mode="swing"))
+        repository.upsert_record(record)
+        candles = [_outcome_baseline("long")]
+        primed = _evaluate_outcomes(repository, record, candles)
+        owned_primed = _owned(primed.record)
+        repository.upsert_record(owned_primed)
+        candles.append(_outcome_entry(1, "long"))
+        outcome = _evaluate_outcomes(repository, owned_primed, candles)
+        owned_record = _owned(outcome.record)
+        repository.upsert_record(owned_record)
+        stamped_transitions = tuple(
+            item.model_copy(update={"record": _owned(item.record)}) if item.record is not None else item
+            for item in outcome.transitions
+        )
+        last_transition = stamped_transitions[-1] if stamped_transitions else outcome.last_transition
+        if last_transition is not None and last_transition.record is not None:
+            last_transition = last_transition.model_copy(update={"record": _owned(last_transition.record)})
+        _seed_owned_root_event(repository.connection, lifecycle_id="fresh-progress")
+    batch = _symbol(
+        SetupLifecycleState.MANAGING,
+        previous=SetupLifecycleState.EXECUTING,
+        signal_id="fresh-progress",
+    ).model_copy(
         update={
-            "runtime_epoch_id": SYNTHETIC_EPOCH_ID,
-            "creation_origin_id": origin.origin_id,
+            "lifecycle_state": owned_record,
+            "lifecycle_transition": last_transition,
+            "lifecycle_transitions": stamped_transitions,
+            "lifecycle_outcome_progress": outcome.progress,
         }
     )
-    with SQLiteSetupLifecycleRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
-        repository.upsert_record(primed)
-    batch = _generated_entry_batch(db_path, lifecycle_id="fresh-progress")
     sender = FakeSender()
-    summary = run(_service(db_path, sender).deliver_for_run(_run_result(batch), scan_run_id="r27"))
+    summary = run(
+        TelegramLifecycleDeliveryService(
+            database_path=db_path,
+            settings=_settings(),
+            sender=sender,
+            min_rr=Decimal("3"),
+            min_score_for_idea=Decimal("88"),
+            expected_identity=SYNTHETIC_IDENTITY,
+        ).deliver_for_run(_run_result(batch), scan_run_id="r27")
+    )
     assert summary.sent == 1
     assert sender.messages
     with sqlite3.connect(db_path) as connection:
@@ -1016,10 +1159,10 @@ def test_r28_global_legacy_sent_event_key_remains_consumed(tmp_path: Path) -> No
         connection.row_factory = sqlite3.Row
         seed_legacy_public_event(connection, event_key=event_key, status="SENT", delivery_state=SENT)
         connection.commit()
-    with SQLiteSetupLifecycleRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as lifecycle:
+    with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as lifecycle:
         origin = grant_synthetic_origin(lifecycle.connection, symbol="BTCUSDT", run_id="r28", now=NOW)
         lifecycle.upsert_record(_owned_record(origin.origin_id, lifecycle_id="life-r28"))
-    with SQLiteTelegramAlertAttemptRepository(db_path, expected_epoch_id=SYNTHETIC_EPOCH_ID) as repository:
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         event, created = _insert_public_alert_event(
             repository,
             plan=_plan(plan_id="life-r28-plan"),

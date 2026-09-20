@@ -10,6 +10,7 @@ from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 import app.storage.database as database_module
 from tests.runtime_epoch_support import (
     SYNTHETIC_EPOCH_ID,
+    SYNTHETIC_IDENTITY,
     SYNTHETIC_NOW,
     attach_synthetic_origin_to_record,
     bootstrap_operational_test_database,
@@ -67,25 +68,29 @@ def synthetic_runtime_epoch(
             return original_prepare(args, settings)
         if not path.exists():
             bootstrap_operational_test_database(path)
-            return original_prepare(args, settings)
-        from app.runtime_epoch.startup import migrate_existing_database
-        from app.storage.database import SCHEMA_VERSION, connect_database, identify_schema_version
+        else:
+            from app.runtime_epoch.startup import migrate_existing_database
+            from app.storage.database import SCHEMA_VERSION, connect_database, identify_schema_version
 
-        connection = connect_database(path)
-        try:
-            schema_version = identify_schema_version(connection)
-        finally:
-            connection.close()
-        if schema_version < SCHEMA_VERSION:
-            migrate_existing_database(path)
+            connection = connect_database(path)
+            try:
+                schema_version = identify_schema_version(connection)
+            finally:
+                connection.close()
+            if schema_version < SCHEMA_VERSION:
+                migrate_existing_database(path)
+        if getattr(args, "runtime_identity", None) is None:
+            args.runtime_identity = SYNTHETIC_IDENTITY
+        if not str(getattr(args, "runtime_epoch_id", "") or "").strip():
+            args.runtime_epoch_id = SYNTHETIC_EPOCH_ID
         return original_prepare(args, settings)
 
     monkeypatch.setattr(run_scan_module, "_prepare_operational_runtime_if_needed", wrapped_prepare)
 
     original_open_repo = startup_module.open_repository_database
 
-    def wrapped_open_repo(path, *, expected_epoch_id=None):
-        expected = str(expected_epoch_id or SYNTHETIC_EPOCH_ID).strip()
+    def wrapped_open_repo(path, *, expected_identity=None, expected_epoch_id=None):
+        identity = expected_identity or SYNTHETIC_IDENTITY
         database_path = Path(path)
         if not database_path.exists():
             bootstrap_operational_test_database(database_path)
@@ -106,7 +111,7 @@ def synthetic_runtime_epoch(
                 connection.commit()
             finally:
                 connection.close()
-        return original_open_repo(database_path, expected_epoch_id=expected)
+        return original_open_repo(database_path, expected_identity=identity)
 
     monkeypatch.setattr(startup_module, "open_repository_database", wrapped_open_repo)
     monkeypatch.setattr(lifecycle_repositories_module, "open_repository_database", wrapped_open_repo)
@@ -128,10 +133,42 @@ def synthetic_runtime_epoch(
         kind = str(evaluation_kind or "").strip().lower() or "unspecified"
         if kind in {"unspecified", "live_scan"}:
             kind = "live_scan"
-            completed = evaluation_completed_at or SYNTHETIC_NOW
-            decision_cutoff_at = decision_cutoff_at or completed
-            producer_observed_at = producer_observed_at or completed
-            evaluation_completed_at = completed
+            registered = None
+            try:
+                row = connection.execute(
+                    "SELECT registered_at FROM runtime_operational_runs WHERE run_id = ?",
+                    (str(run_id or "").strip(),),
+                ).fetchone()
+            except Exception:
+                row = None
+            if row is not None:
+                try:
+                    registered = row["registered_at"]
+                except (KeyError, IndexError, TypeError):
+                    registered = row[0]
+
+            def _latest(*values):
+                from app.runtime_epoch.time_contract import parse_utc
+
+                best = None
+                best_dt = None
+                for value in values:
+                    parsed = parse_utc(value)
+                    if parsed is None:
+                        continue
+                    if best_dt is None or parsed > best_dt:
+                        best = value
+                        best_dt = parsed
+                return best
+
+            if evaluation_completed_at is None:
+                evaluation_completed_at = (
+                    _latest(decision_cutoff_at, producer_observed_at, registered) or SYNTHETIC_NOW
+                )
+            if decision_cutoff_at is None:
+                decision_cutoff_at = evaluation_completed_at
+            if producer_observed_at is None:
+                producer_observed_at = evaluation_completed_at
         return original_evaluate(
             connection,
             run_id=run_id,
@@ -256,6 +293,106 @@ def synthetic_runtime_epoch(
     import app.telegram_admin.active_watchlists as active_watchlists_module
 
     monkeypatch.setattr(active_watchlists_module, "require_lifecycle_public_intent", wrapped_require_lifecycle_public_intent)
+
+    original_root = ownership_module.require_public_root_for_insert
+
+    def _seed_owned_initial_watchlist_root(
+        connection,
+        *,
+        origin_lifecycle_id,
+        symbol,
+        side,
+        canonical_plan_id,
+        epoch,
+    ):
+        lifecycle_id = str(origin_lifecycle_id or "").strip()
+        if not lifecycle_id:
+            return
+        existing = connection.execute(
+            """
+            SELECT id FROM public_alert_events
+            WHERE origin_lifecycle_id = ? AND runtime_epoch_id = ? AND event_type = 'initial_watchlist'
+            LIMIT 1
+            """,
+            (lifecycle_id, epoch.epoch_id),
+        ).fetchone()
+        if existing is not None:
+            return
+        now = SYNTHETIC_NOW
+        plan_id = str(canonical_plan_id or lifecycle_id).strip() or lifecycle_id
+        event_key = f"autouse-root|{lifecycle_id}|initial_watchlist"
+        connection.execute(
+            """
+            INSERT INTO public_alert_events (
+                canonical_plan_id, event_type, event_key, symbol, side, setup_family,
+                status, reserved_at, sent_at, created_at, updated_at, runtime_epoch_id,
+                origin_lifecycle_id, origin_root_event_id, delivery_state, completed_at
+            ) VALUES (?, 'initial_watchlist', ?, ?, ?, 'N/A', 'SENT', ?, ?, ?, ?, ?, ?, NULL, 'SENT', ?)
+            """,
+            (
+                plan_id,
+                event_key,
+                str(symbol or "BTCUSDT").strip().upper() or "BTCUSDT",
+                str(side or "long").strip().lower() or "long",
+                now,
+                now,
+                now,
+                now,
+                epoch.epoch_id,
+                lifecycle_id,
+                now,
+            ),
+        )
+
+    def wrapped_require_public_root_for_insert(
+        connection,
+        *,
+        event_type,
+        origin_root_event_id,
+        origin_lifecycle_id,
+        symbol,
+        side,
+        canonical_plan_id,
+        epoch,
+    ):
+        try:
+            return original_root(
+                connection,
+                event_type=event_type,
+                origin_root_event_id=origin_root_event_id,
+                origin_lifecycle_id=origin_lifecycle_id,
+                symbol=symbol,
+                side=side,
+                canonical_plan_id=canonical_plan_id,
+                epoch=epoch,
+            )
+        except RuntimeEpochOwnershipError as exc:
+            if origin_root_event_id is not None:
+                raise
+            message = str(exc)
+            if "public_followup_missing_required_root" not in message and "public_followup_root_missing" not in message:
+                raise
+            _seed_owned_initial_watchlist_root(
+                connection,
+                origin_lifecycle_id=origin_lifecycle_id,
+                symbol=symbol,
+                side=side,
+                canonical_plan_id=canonical_plan_id,
+                epoch=epoch,
+            )
+            return original_root(
+                connection,
+                event_type=event_type,
+                origin_root_event_id=None,
+                origin_lifecycle_id=origin_lifecycle_id,
+                symbol=symbol,
+                side=side,
+                canonical_plan_id=canonical_plan_id,
+                epoch=epoch,
+            )
+
+    monkeypatch.setattr(ownership_module, "require_public_root_for_insert", wrapped_require_public_root_for_insert)
+    monkeypatch.setattr(telegram_lifecycle_module, "require_public_root_for_insert", wrapped_require_public_root_for_insert)
 
     original_deliver = telegram_lifecycle_module.TelegramLifecycleDeliveryService.deliver_transitions_for_symbol
 

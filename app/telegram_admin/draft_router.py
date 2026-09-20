@@ -264,7 +264,7 @@ def format_admin_scan_report(
         if summary["display_status"] == "valid_setup"
         and (
             database_path is None
-            or _operational_setup_recommendation_allowed(str(summary.get("symbol") or ""), database_path)
+            or _operational_setup_recommendation_allowed(summary, database_path)
         )
     ]
     near = [
@@ -435,6 +435,10 @@ def _source_row_summary(symbol_result: ScannerSymbolResult, *, run_id: str, time
         "short_reason": display.short_reason,
         "next_trigger_needed": display.next_trigger_needed,
         "lifecycle_current_state": fields.get("lifecycle_current_state", NA),
+        "lifecycle_id": _display(getattr(getattr(symbol_result, "lifecycle_state", None), "lifecycle_id", NA)),
+        "setup_id": _display(getattr(getattr(symbol_result, "lifecycle_state", None), "setup_id", NA)),
+        "plan_version_id": _display(getattr(getattr(symbol_result, "lifecycle_state", None), "plan_version_id", NA)),
+        "setup_identity": _display(getattr(getattr(symbol_result, "lifecycle_state", None), "setup_identity", NA)),
         "lifecycle_integrity_status": fields.get("lifecycle_integrity_status", NA),
         "lifecycle_integrity_warning": fields.get("lifecycle_integrity_warning", NA),
         "target_integrity_failure_type": target_failure_type,
@@ -485,7 +489,7 @@ def _symbol_draft_types(
 ) -> tuple[AdminDraftType, ...]:
     draft_types: list[AdminDraftType] = []
     if summary.get("display_status") == "valid_setup":
-        if _operational_setup_recommendation_allowed(str(summary.get("symbol") or ""), database_path):
+        if _operational_setup_recommendation_allowed(summary, database_path):
             draft_types.append("valid_setup")
     if summary.get("display_status") == "near_miss" and summary.get("failed_stage") != "target_integrity":
         draft_types.append("near_miss")
@@ -857,32 +861,61 @@ def _first_non_na(*values: Any) -> str:
 
 
 def _operational_setup_recommendation_allowed(
-    symbol: str,
+    summary: Mapping[str, Any] | str,
     database_path: Path | str | None,
+    *,
+    expected_identity: Any | None = None,
 ) -> bool:
-    expected = str(os.environ.get("RUNTIME_EPOCH_ID") or "").strip()
-    if not expected:
-        return True
+    if isinstance(summary, str):
+        payload = {"symbol": summary}
+    else:
+        payload = summary
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    if not symbol or symbol == NA:
+        return False
     if database_path is None:
         return False
     from app.runtime_epoch.errors import RuntimeEpochError
-    from app.runtime_epoch.ownership import require_lifecycle_public_intent
-    from app.runtime_epoch.startup import open_operational_service_database
+    from app.runtime_epoch.models import RuntimeEpochIdentity
+    from app.runtime_epoch.ownership import require_lifecycle_public_intent, canonical_operational_symbol
+    from app.runtime_epoch.startup import identity_from_settings, open_operational_service_database
+    from app.core.config import Settings
 
+    identity = expected_identity
+    if identity is None:
+        try:
+            identity = identity_from_settings(Settings())
+        except Exception:
+            return False
+    if not isinstance(identity, RuntimeEpochIdentity):
+        return False
     try:
         connection, epoch = open_operational_service_database(
             database_path,
-            expected_epoch_id=expected,
+            expected_identity=identity,
         )
     except Exception:
         return False
     try:
+        direction = str(payload.get("direction") or payload.get("side") or "").strip().lower()
+        lifecycle_id = str(payload.get("lifecycle_id") or "").strip()
+        setup_id = str(payload.get("setup_id") or "").strip()
+        setup_identity = str(payload.get("setup_identity") or "").strip()
+        if lifecycle_id.upper() == NA:
+            lifecycle_id = ""
+        if setup_id.upper() == NA:
+            setup_id = ""
+        if setup_identity.upper() == NA:
+            setup_identity = ""
+        if not lifecycle_id and not setup_id and not setup_identity:
+            return False
         rows = connection.execute(
             """
-            SELECT lifecycle_id FROM setup_lifecycle_records
-            WHERE symbol = ? AND runtime_epoch_id = ?
+            SELECT lifecycle_id, symbol, direction, setup_id, setup_identity
+            FROM setup_lifecycle_records
+            WHERE symbol = ? AND runtime_epoch_id = ? AND is_current = 1
             """,
-            (str(symbol or "").strip().upper(), epoch.epoch_id),
+            (canonical_operational_symbol(symbol), epoch.epoch_id),
         ).fetchall()
         for row in rows:
             try:
@@ -892,9 +925,20 @@ def _operational_setup_recommendation_allowed(
                     epoch=epoch,
                     expected_symbol=symbol,
                 )
-                return True
             except RuntimeEpochError:
                 continue
+            row_direction = str(row["direction"] or "").strip().lower()
+            if direction and row_direction and direction != row_direction:
+                continue
+            if lifecycle_id and str(row["lifecycle_id"]) != lifecycle_id:
+                continue
+            row_setup_id = str(row["setup_id"] or "").strip()
+            if setup_id and row_setup_id and setup_id != row_setup_id:
+                continue
+            row_setup_identity = str(row["setup_identity"] or "").strip()
+            if setup_identity and row_setup_identity and setup_identity != row_setup_identity:
+                continue
+            return True
         return False
     finally:
         connection.close()

@@ -27,9 +27,16 @@ def load_symbol_health_records(
 ) -> dict[str, SymbolHealthRecord]:
     try:
         with closing(open_initialized_database(database_path)) as connection:
-            return _load_symbol_health_records(connection, symbols)
+            return load_symbol_health_records_from_connection(connection, symbols)
     except sqlite3.Error as exc:
         raise StorageError(f"Unable to read symbol health database: {database_path}") from exc
+
+
+def load_symbol_health_records_from_connection(
+    connection: sqlite3.Connection,
+    symbols: Sequence[str] | None = None,
+) -> dict[str, SymbolHealthRecord]:
+    return _load_symbol_health_records(connection, symbols)
 
 
 def save_symbol_health_records(
@@ -53,12 +60,22 @@ def update_symbol_health_for_result(
     max_timeout_strikes: int = DEFAULT_MAX_TIMEOUT_STRIKES,
     now: str | None = None,
     enabled: bool = True,
+    expected_identity: Any | None = None,
 ) -> tuple[dict[str, SymbolHealthRecord], dict[str, Any]]:
     timestamp = now or now_utc_iso()
     symbols = _health_symbols_for_result(result, plan)
     priority_by_symbol = plan.priority_by_symbol() if plan is not None else {}
     try:
-        with closing(open_initialized_database(database_path)) as connection:
+        if expected_identity is not None:
+            from app.runtime_epoch.startup import open_operational_database
+
+            opened, _epoch = open_operational_database(
+                database_path,
+                expected_identity=expected_identity,
+            )
+        else:
+            opened = open_initialized_database(database_path)
+        with closing(opened) as connection:
             existing = _load_symbol_health_records(connection, symbols)
             updated = update_symbol_health_records(
                 existing,

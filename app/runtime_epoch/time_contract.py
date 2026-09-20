@@ -9,6 +9,11 @@ from app.data.dtos import NA
 
 
 def parse_utc(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     text = _text(value)
     if text == NA:
         return None

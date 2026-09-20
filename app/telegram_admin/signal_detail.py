@@ -90,7 +90,11 @@ def _detail_from_rows(
             continue
         if not _attempt_is_current_epoch_operational(connection, signal_row):
             continue
-        outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
+        outcome_rows = tuple(
+            row
+            for row in _active_signal_outcome_rows(signal_rows, signal_row)
+            if _attempt_is_current_epoch_operational(connection, row)
+        )
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
         lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
         if not _active_signal_group_is_eligible(

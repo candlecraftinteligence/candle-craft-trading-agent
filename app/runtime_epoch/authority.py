@@ -126,13 +126,16 @@ def require_active_runtime_epoch(connection: sqlite3.Connection) -> RuntimeEpoch
 
 def require_expected_runtime_epoch(
     connection: sqlite3.Connection,
-    expected_epoch_id: str,
+    expected: RuntimeEpochIdentity | str,
 ) -> RuntimeEpochRecord:
-    expected = _required_text(expected_epoch_id, "expected_epoch_id")
     epoch = require_active_runtime_epoch(connection)
-    if epoch.epoch_id != expected:
+    if isinstance(expected, str):
         raise RuntimeEpochConfigurationError(
-            f"Selected runtime epoch {expected} does not match durable epoch {epoch.epoch_id}."
+            "Operational open requires the complete expected runtime identity, not epoch id alone."
+        )
+    if not _same_identity(epoch.identity, expected):
+        raise RuntimeEpochConfigurationError(
+            "Selected runtime identity does not match the durable epoch, release, or generation binding."
         )
     return epoch
 

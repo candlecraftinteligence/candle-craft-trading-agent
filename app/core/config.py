@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     order_book_liquidity_bootstrap_concurrency: int = 2
     order_book_liquidity_event_buffer_size: int = 256
     runtime_epoch_id: str | None = None
+    runtime_epoch_cutoff_at: str | None = None
+    runtime_reviewed_release_sha: str | None = None
+    runtime_generation_binding: str | None = None
+    runtime_epoch_contract_version: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

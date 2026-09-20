@@ -109,6 +109,55 @@ class LegacyResearchWatchDeliveryService(TelegramLifecycleDeliveryService):
         return False
 
 
+def _legacy_research_watch_service(db_path, settings, sender) -> LegacyResearchWatchDeliveryService:
+    from tests.runtime_epoch_support import SYNTHETIC_IDENTITY, bootstrap_operational_test_database
+
+    path = Path(db_path)
+    bootstrap_operational_test_database(path)
+    return LegacyResearchWatchDeliveryService(
+        database_path=path,
+        settings=settings,
+        sender=sender,
+        expected_identity=SYNTHETIC_IDENTITY,
+    )
+
+
+def _seed_owned_research_lifecycle(db_path: Path, *, symbol: str, direction: str = "long") -> SetupLifecycleRecord:
+    from tests.runtime_epoch_support import (
+        SYNTHETIC_EPOCH_ID,
+        SYNTHETIC_IDENTITY,
+        bootstrap_operational_test_database,
+        grant_synthetic_origin,
+    )
+
+    bootstrap_operational_test_database(db_path)
+    lifecycle_id = f"research-life-{symbol.lower()}"
+    with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+        origin = grant_synthetic_origin(
+            repository.connection,
+            symbol=symbol,
+            run_id=f"research-run-{symbol}",
+            now="2026-06-07T00:00:00+00:00",
+        )
+        record = _record(SetupLifecycleState.WATCHLISTED, signal_id=lifecycle_id).model_copy(
+            update={
+                "symbol": symbol,
+                "direction": direction,
+                "runtime_epoch_id": SYNTHETIC_EPOCH_ID,
+                "creation_origin_id": origin.origin_id,
+                "setup_identity": f"{symbol}|swing|{direction}|research",
+            }
+        )
+        repository.upsert_record(record)
+        return record
+
+
+def _owned_research_symbol(db_path: Path, **kwargs) -> ScannerSymbolResult:
+    symbol = str(kwargs.get("symbol") or "FILUSDT")
+    record = _seed_owned_research_lifecycle(db_path, symbol=symbol)
+    return _research_symbol(**kwargs).model_copy(update={"lifecycle_state": record})
+
+
 
 def Settings(*args, **kwargs):
     kwargs.setdefault("telegram_public_watchlist_terminal_updates_enabled", True)
@@ -975,7 +1024,10 @@ def _insert_research_attempt_record(
     sent_at: str | None = "2026-06-07T00:00:00+00:00",
     signal_id: str = "research-link",
 ) -> None:
-    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+    from tests.runtime_epoch_support import SYNTHETIC_IDENTITY, bootstrap_operational_test_database
+
+    bootstrap_operational_test_database(db_path)
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         repository.insert_attempt(
             TelegramAlertAttemptRecord(
                 signal_id=signal_id,
@@ -1100,11 +1152,7 @@ def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldo
 ) -> None:
     db_path = tmp_path / "research-cooldown.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
     times = iter(
         (
             "2026-06-07T00:00:00+00:00",
@@ -1114,7 +1162,7 @@ def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldo
         )
     )
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
-    result = _run_result(_research_symbol(symbol="LINKUSDT"))
+    result = _run_result(_owned_research_symbol(db_path, symbol="LINKUSDT"))
 
     first = run(service.deliver_for_run(result, scan_run_id="research-1"))
     second = run(service.deliver_for_run(result, scan_run_id="research-2"))
@@ -1139,11 +1187,7 @@ def test_research_watch_cooldown_uses_config_override(
 ) -> None:
     db_path = tmp_path / "research-cooldown-override.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(cooldown_minutes=10),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(cooldown_minutes=10), sender)
     times = iter(
         (
             "2026-06-07T00:00:00+00:00",
@@ -1152,7 +1196,7 @@ def test_research_watch_cooldown_uses_config_override(
         )
     )
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
-    result = _run_result(_research_symbol(symbol="LINKUSDT"))
+    result = _run_result(_owned_research_symbol(db_path, symbol="LINKUSDT"))
 
     first = run(service.deliver_for_run(result, scan_run_id="research-override-1"))
     second = run(service.deliver_for_run(result, scan_run_id="research-override-2"))
@@ -1171,18 +1215,14 @@ def test_research_watch_cooldown_normalizes_perp_suffix(
 ) -> None:
     db_path = tmp_path / "research-cooldown-symbol-normalized.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
     times = iter(("2026-06-07T00:00:00+00:00", "2026-06-07T00:05:00+00:00"))
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
 
-    first = run(service.deliver_for_run(_run_result(_research_symbol(symbol="LINKUSDT")), scan_run_id="research-link"))
+    first = run(service.deliver_for_run(_run_result(_owned_research_symbol(db_path, symbol="LINKUSDT")), scan_run_id="research-link"))
     second = run(
         service.deliver_for_run(
-            _run_result(_research_symbol(symbol="LINKUSDT.P")),
+            _run_result(_owned_research_symbol(db_path, symbol="LINKUSDT.P")),
             scan_run_id="research-link-perp",
         )
     )
@@ -1212,14 +1252,10 @@ def test_research_watch_cooldown_ignores_unsent_rows(
         signal_id=f"research-link-{status}",
     )
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: "2026-06-07T00:05:00+00:00")
 
-    summary = run(service.deliver_for_run(_run_result(_research_symbol(symbol="LINKUSDT")), scan_run_id="research-after-unsent"))
+    summary = run(service.deliver_for_run(_run_result(_owned_research_symbol(db_path, symbol="LINKUSDT")), scan_run_id="research-after-unsent"))
 
     assert summary.sent == 1
     assert len(sender.messages) == 1
@@ -1233,14 +1269,10 @@ def test_research_watch_cooldown_only_sent_rows_suppress(
     db_path = tmp_path / "research-cooldown-sent-only.db"
     _insert_research_attempt_record(db_path, symbol="LINKUSDT", status="sent", signal_id="research-link-sent")
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: "2026-06-07T00:05:00+00:00")
 
-    summary = run(service.deliver_for_run(_run_result(_research_symbol(symbol="LINKUSDT")), scan_run_id="research-after-sent"))
+    summary = run(service.deliver_for_run(_run_result(_owned_research_symbol(db_path, symbol="LINKUSDT")), scan_run_id="research-after-sent"))
 
     assert summary.skipped == 1
     assert sender.messages == []
@@ -1258,18 +1290,14 @@ def test_research_watch_cooldown_skips_do_not_consume_send_cap(
     db_path = tmp_path / "research-cooldown-cap.db"
     _insert_research_attempt_record(db_path, symbol="LINKUSDT", status="sent", signal_id="research-link-sent")
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(max_per_scan=1),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(max_per_scan=1), sender)
     times = iter(("2026-06-07T00:05:00+00:00", "2026-06-07T00:05:01+00:00"))
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
     result = ScannerRunResult(
         config=_config(),
         results=(
-            _research_symbol(symbol="LINKUSDT", quality_score=90, signal_id="research-link"),
-            _research_symbol(symbol="ETHUSDT", quality_score=80, signal_id="research-eth"),
+            _owned_research_symbol(db_path, symbol="LINKUSDT", quality_score=90, signal_id="research-link"),
+            _owned_research_symbol(db_path, symbol="ETHUSDT", quality_score=80, signal_id="research-eth"),
         ),
         scanned_symbols=2,
         failed_symbols=0,
@@ -1291,22 +1319,14 @@ def test_research_watch_cooldown_skips_do_not_consume_send_cap(
 def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path: Path) -> None:
     sent_db = tmp_path / "research-sent-at.db"
     sent_sender = FakeSender(status="sent")
-    sent_service = LegacyResearchWatchDeliveryService(
-        database_path=sent_db,
-        settings=_research_settings(),
-        sender=sent_sender,
-    )
-    run(sent_service.deliver_for_run(_run_result(_research_symbol()), scan_run_id="sent"))
+    sent_service = _legacy_research_watch_service(sent_db, _research_settings(), sent_sender)
+    run(sent_service.deliver_for_run(_run_result(_owned_research_symbol(sent_db)), scan_run_id="sent"))
     sent_row = _research_attempt_rows(sent_db)[0]
 
     failed_db = tmp_path / "research-failed-at.db"
     failed_sender = FakeSender(status="failed")
-    failed_service = LegacyResearchWatchDeliveryService(
-        database_path=failed_db,
-        settings=_research_settings(),
-        sender=failed_sender,
-    )
-    run(failed_service.deliver_for_run(_run_result(_research_symbol()), scan_run_id="failed"))
+    failed_service = _legacy_research_watch_service(failed_db, _research_settings(), failed_sender)
+    run(failed_service.deliver_for_run(_run_result(_owned_research_symbol(failed_db)), scan_run_id="failed"))
     failed_row = _research_attempt_rows(failed_db)[0]
 
     assert sent_row[1] == "sent"
@@ -1319,17 +1339,13 @@ def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path:
 def test_research_watch_respects_per_scan_cap_and_quality_sort(tmp_path: Path) -> None:
     db_path = tmp_path / "research-cap.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(max_per_scan=2),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(max_per_scan=2), sender)
     result = ScannerRunResult(
         config=_config(),
         results=(
-            _research_symbol(symbol="LOWUSDT", quality_score=61, signal_id="research-low"),
-            _research_symbol(symbol="HIGHUSDT", quality_score=80, signal_id="research-high"),
-            _research_symbol(symbol="MIDUSDT", quality_score=70, signal_id="research-mid"),
+            _owned_research_symbol(db_path, symbol="LOWUSDT", quality_score=61, signal_id="research-low"),
+            _owned_research_symbol(db_path, symbol="HIGHUSDT", quality_score=80, signal_id="research-high"),
+            _owned_research_symbol(db_path, symbol="MIDUSDT", quality_score=70, signal_id="research-mid"),
         ),
         scanned_symbols=3,
         failed_symbols=0,
@@ -1350,15 +1366,11 @@ def test_research_watch_respects_per_scan_cap_and_quality_sort(tmp_path: Path) -
 def test_research_watch_valid_trade_map_renders_but_remains_research_watch(tmp_path: Path) -> None:
     db_path = tmp_path / "research-valid-map.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
 
     summary = run(
         service.deliver_for_run(
-            _run_result(_research_symbol(missing_trade_map=False)),
+            _run_result(_owned_research_symbol(db_path, missing_trade_map=False)),
             scan_run_id="research-map",
         )
     )

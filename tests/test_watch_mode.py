@@ -40,7 +40,7 @@ from app.watch_mode import (
 )
 from scripts import run_scan
 from app.runtime_epoch.watch_state import operational_watch_state_path
-from tests.runtime_epoch_support import SYNTHETIC_EPOCH_ID, bootstrap_operational_test_database
+from tests.runtime_epoch_support import SYNTHETIC_EPOCH_ID, SYNTHETIC_IDENTITY, bootstrap_operational_test_database
 
 
 class SequenceWatchRunner:
@@ -130,7 +130,7 @@ def _trade_idea(symbol: str = "BTCUSDT"):
             "entry_low": Decimal("100"),
             "entry_high": Decimal("102"),
             "stop_loss": Decimal("95"),
-            "take_profit_targets": (Decimal("112"), Decimal("120")),
+            "take_profit_targets": (Decimal("110"), Decimal("115"), Decimal("120")),
             "invalidation": "Invalid below 95.",
             "opportunity_score": Decimal("88"),
             "opportunity_grade": "A",
@@ -164,11 +164,30 @@ def _valid_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
                 "execution_sweep_status": "passed",
                 "confirmation_structure_shift_status": "passed",
                 "pullback_zone_status": "valid",
+                "target_integrity_status": "passed",
                 "rr_to_tp2": Decimal("3.2"),
-                "gates_passed": ("sweep", "bos_choch", "pullback_zone", "rr", "trust_meter"),
+                "entry_low": Decimal("100"),
+                "entry_high": Decimal("102"),
+                "stop": Decimal("95"),
+                "tp1": Decimal("110"),
+                "tp2": Decimal("115"),
+                "tp3": Decimal("120"),
+                "technical_score": Decimal("70"),
+                "opportunity_score": Decimal("88"),
+                "quality_grade": "A+",
+                "gates_passed": (
+                    "sweep",
+                    "bos_choch",
+                    "pullback_zone",
+                    "rr",
+                    "trust_meter",
+                    "target_integrity",
+                ),
+                "gates_failed": (),
                 "derivatives_supports_trade": True,
             }
         },
+        technical_score=70,
         setup_quality=validate_setup_quality(
             {
                 "symbol": symbol,
@@ -870,6 +889,7 @@ def test_active_lifecycle_outside_universe_gets_capacity_and_cooldown_exemption(
         adaptive_symbol_priority=True,
         watch=True,
         universe_size=3,
+        runtime_identity=SYNTHETIC_IDENTITY,
     )
     base_symbols = ("AAAUSDT", "BBBUSDT", "CCCUSDT")
     watchlist = run_scan.WatchlistResolution(
@@ -988,6 +1008,7 @@ def test_active_timeout_history_is_preserved_and_symbol_retries_next_iteration(t
         adaptive_symbol_priority=True,
         watch=True,
         universe_size=2,
+        runtime_identity=SYNTHETIC_IDENTITY,
     )
     discovery = ("OTHERUSDT",)
 
