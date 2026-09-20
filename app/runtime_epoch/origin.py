@@ -8,13 +8,14 @@ from uuid import uuid4
 
 from app.data.dtos import NA
 from app.runtime_epoch.authority import require_active_runtime_epoch
-from app.runtime_epoch.errors import RuntimeEpochConfigurationError, RuntimeEpochOriginError
+from app.runtime_epoch.errors import RuntimeEpochOriginError
 from app.runtime_epoch.models import (
     LIVE_SCAN_EVALUATION,
     ORIGIN_KIND_LIVE_FRESH,
     ORIGIN_STATUS_BLOCKED,
     ORIGIN_STATUS_GRANTED,
     RUN_STATUS_REGISTERED,
+    UNSPECIFIED_EVALUATION,
     OperationalRunRegistration,
     RuntimeEpochRecord,
     SymbolOriginDecision,
@@ -76,6 +77,44 @@ def register_operational_run(
     )
 
 
+def origin_kind_from_symbol_result(symbol_result: Any) -> str:
+    kind = str(getattr(symbol_result, "evaluation_origin_kind", None) or "").strip().lower()
+    return kind or UNSPECIFIED_EVALUATION
+
+
+def decision_cutoff_from_symbol_result(symbol_result: Any) -> str | None:
+    """Return the explicit decision timestamp. Never substitute processing time."""
+
+    timestamp = getattr(symbol_result, "lifecycle_decision_timestamp", None)
+    parsed = comparable_utc(timestamp)
+    if parsed is not None:
+        return parsed
+    iso = getattr(timestamp, "isoformat", None) if timestamp is not None else None
+    if callable(iso):
+        return comparable_utc(iso())
+    return None
+
+
+def producer_acquisition_from_delivery(delivery: Any) -> str | None:
+    """Use adapter acquisition time only. Cache/subset observation is not acquisition."""
+
+    adapter = _adapter_acquisition(delivery)
+    if adapter is None:
+        return None
+    return comparable_utc(getattr(adapter, "observed_completed_at", None))
+
+
+def producer_acquisition_from_symbol_result(symbol_result: Any) -> str | None:
+    delivery = getattr(symbol_result, "lifecycle_execution_batch_delivery", None)
+    producer = producer_acquisition_from_delivery(delivery)
+    if producer is not None:
+        return producer
+    handoff = getattr(symbol_result, "lifecycle_batch_handoff", None)
+    if handoff is not None:
+        return producer_acquisition_from_delivery(getattr(handoff, "delivery", None))
+    return None
+
+
 def evaluate_symbol_origin(
     connection: sqlite3.Connection,
     *,
@@ -103,13 +142,13 @@ def evaluate_symbol_origin(
     if str(run_row["runtime_epoch_id"]) != epoch.epoch_id:
         return _blocked(normalized_run_id, normalized_symbol, "run_epoch_mismatch")
 
-    kind = str(evaluation_kind or UNSPECIFIED).strip().lower() or UNSPECIFIED
+    kind = str(evaluation_kind or UNSPECIFIED_EVALUATION).strip().lower() or UNSPECIFIED_EVALUATION
     if kind not in _LIVE_ORIGIN_KINDS:
         return _blocked(normalized_run_id, normalized_symbol, f"evaluation_kind_not_live:{kind}")
 
     evaluation_at = comparable_utc(evaluation_completed_at)
     cutoff_at = comparable_utc(decision_cutoff_at)
-    producer_at = comparable_utc(producer_observed_at) or evaluation_at
+    producer_at = comparable_utc(producer_observed_at)
     if evaluation_at is None or cutoff_at is None or producer_at is None:
         return _blocked(normalized_run_id, normalized_symbol, "origin_times_unknown")
     if not strictly_after(evaluation_at, epoch.cutoff_at):
@@ -231,6 +270,23 @@ def load_granted_origin(
     ).fetchone()
 
 
+def _adapter_acquisition(delivery: Any) -> Any | None:
+    if delivery is None:
+        return None
+    adapter = getattr(delivery, "adapter", None)
+    if adapter is not None:
+        return adapter
+    parent = getattr(delivery, "parent", None)
+    if parent is not None:
+        return _adapter_acquisition(parent)
+    cache = getattr(delivery, "cache", None)
+    if cache is not None:
+        upstream = getattr(cache, "upstream_acquisition", None)
+        if upstream is not None:
+            return upstream
+    return None
+
+
 def _blocked(run_id: str, symbol: str, reason: str) -> SymbolOriginDecision:
     return SymbolOriginDecision(
         granted=False,
@@ -238,6 +294,7 @@ def _blocked(run_id: str, symbol: str, reason: str) -> SymbolOriginDecision:
         run_id=run_id,
         symbol=symbol,
         reason=reason,
+        origin_kind=UNSPECIFIED_EVALUATION,
     )
 
 
@@ -253,6 +310,3 @@ def _required_utc(value: Any, field_name: str) -> str:
     if parsed is None:
         raise RuntimeEpochOriginError(f"Operational origin {field_name} must be a parseable UTC timestamp.")
     return parsed
-
-
-UNSPECIFIED = "unspecified"

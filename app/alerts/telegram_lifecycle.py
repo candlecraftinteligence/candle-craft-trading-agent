@@ -77,11 +77,17 @@ from app.lifecycle.outcome_policy import (
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
-from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
+from app.storage.database import DEFAULT_DATABASE_PATH, StorageError
+from app.runtime_epoch.startup import open_repository_database
 from app.storage.models import PublicAlertEventRecord, TelegramAlertAttemptRecord
-from app.runtime_epoch.authority import load_active_runtime_epoch, require_active_runtime_epoch
-from app.runtime_epoch.errors import RuntimeEpochError
-from app.runtime_epoch.ownership import decide_public_effect, require_lifecycle_public_intent
+from app.runtime_epoch.authority import load_active_runtime_epoch
+from app.runtime_epoch.errors import RuntimeEpochError, RuntimeEpochOwnershipError
+from app.runtime_epoch.ownership import (
+    decide_public_effect,
+    require_lifecycle_public_intent,
+    require_public_attempt_mutation,
+    require_public_event_mutation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +166,7 @@ WATCHLIST_EXPIRY_ATTEMPT = "WATCHLIST_EXPIRY"
 RESEARCH_WATCH_DISABLED_REASON = "research_watch_disabled"
 RESEARCH_WATCH_PUBLIC_DISABLED_REASON = "research_watch_public_delivery_disabled"
 RESEARCH_WATCH_COOLDOWN_REASON = "research_watch_cooldown_active"
+RESEARCH_WATCH_OPERATIONAL_OWNERSHIP_REASON = "research_watch_operational_ownership_required"
 RESEARCH_WATCH_SETUP_ONLY_POLICY_DISABLED_REASON = (
     "research_watch_public_delivery_disabled_by_setup_only_policy"
 )
@@ -1110,12 +1117,21 @@ class WatchlistLivePriceSnapshot:
 
 
 class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegramAlertAttemptRepository"]):
-    def __init__(self, database_path: Path | str = DEFAULT_DATABASE_PATH) -> None:
+    def __init__(
+        self,
+        database_path: Path | str = DEFAULT_DATABASE_PATH,
+        *,
+        expected_epoch_id: str | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
+        self.expected_epoch_id = expected_epoch_id
         self.connection: sqlite3.Connection | None = None
 
     def __enter__(self) -> SQLiteTelegramAlertAttemptRepository:
-        self.connection = open_initialized_database(self.database_path)
+        self.connection = open_repository_database(
+            self.database_path,
+            expected_epoch_id=self.expected_epoch_id,
+        )
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
@@ -1668,6 +1684,26 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         return None, False, False
 
     def replace_attempt_with_reservation(self, *, attempt_id: int, record: TelegramAlertAttemptRecord) -> bool:
+        existing = self._connection.execute(
+            "SELECT public_watchlist_event_key FROM telegram_alert_attempts WHERE id = ?",
+            (int(attempt_id),),
+        ).fetchone()
+        if existing is None:
+            return False
+        existing_event_key = _text(existing["public_watchlist_event_key"])
+        try:
+            if existing_event_key != NA:
+                require_public_attempt_mutation(self._connection, int(attempt_id))
+            else:
+                new_event_key = _text(record.public_watchlist_event_key)
+                if new_event_key != NA:
+                    event = self._connection.execute(
+                        "SELECT * FROM public_alert_events WHERE event_key = ?",
+                        (new_event_key,),
+                    ).fetchone()
+                    require_public_event_mutation(self._connection, event)
+        except RuntimeEpochError:
+            return False
         now = _text(record.attempted_at)
         if now == NA:
             now = now_utc_iso()
@@ -1790,6 +1826,10 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         dedupe_status: str,
         dedupe_reason: str,
     ) -> bool:
+        try:
+            require_public_attempt_mutation(self._connection, int(attempt_id))
+        except RuntimeEpochError:
+            return False
         now = now_utc_iso()
         cursor = self._connection.execute(
             """
@@ -1822,6 +1862,18 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         return cursor.rowcount > 0
 
     def insert_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
+        event_key = _text(record.public_watchlist_event_key)
+        if event_key != NA:
+            event = self._connection.execute(
+                "SELECT * FROM public_alert_events WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+            if event is not None:
+                try:
+                    require_public_event_mutation(self._connection, event)
+                except RuntimeEpochError:
+                    if _text(record.telegram_status).lower() not in {"skipped", "blocked"}:
+                        return False
         telegram_status = _text(record.telegram_status)
         attempted_at = _text(record.attempted_at)
         if attempted_at == NA:
@@ -1930,6 +1982,17 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         status = _text(record.telegram_status)
         if status not in {"blocked", "skipped"}:
             return False
+        event_key = _text(record.public_watchlist_event_key)
+        if event_key != NA:
+            event = self._connection.execute(
+                "SELECT * FROM public_alert_events WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+            if event is not None:
+                try:
+                    require_public_event_mutation(self._connection, event)
+                except RuntimeEpochError:
+                    return False
         now = _text(record.last_seen_at if _text(record.last_seen_at) != NA else now_utc_iso())
         cursor = self._connection.execute(
             """
@@ -2277,7 +2340,12 @@ def _insert_public_alert_event(
     if lifecycle_id == NA:
         return None, False
     try:
-        require_lifecycle_public_intent(db._connection, origin_lifecycle_id=lifecycle_id, epoch=epoch)
+        require_lifecycle_public_intent(
+            db._connection,
+            origin_lifecycle_id=lifecycle_id,
+            epoch=epoch,
+            expected_symbol=_symbol(plan.symbol),
+        )
     except RuntimeEpochError:
         return None, False
     source_modes = ",".join(plan.source_modes) if plan.source_modes else NA
@@ -3580,7 +3648,6 @@ class TelegramLifecycleDeliveryService:
                     signal_confirmed_sent += 1
 
         with SQLiteTelegramAlertAttemptRepository(self.database_path) as repository:
-            require_active_runtime_epoch(repository._connection)
             with SQLiteSetupLifecycleRepository(self.database_path) as lifecycle_repository:
                 prior_sent_watchlists = repository.list_sent_watchlist_alerts()
                 min_score_for_idea = self.min_score_for_idea
@@ -4650,6 +4717,25 @@ class TelegramLifecycleDeliveryService:
                         message_hash=message_hash,
                         blocked_reason=RESEARCH_WATCH_PUBLIC_DISABLED_REASON,
                         error_message=RESEARCH_WATCH_PUBLIC_DISABLED_REASON,
+                    )
+                )
+                if len(deliveries) >= max_per_scan:
+                    break
+                continue
+
+            if load_active_runtime_epoch(repository._connection) is not None:
+                deliveries.append(
+                    _persist_research_watch_attempt(
+                        repository,
+                        message_candidate,
+                        signal_id=signal_id,
+                        scan_run_id=scan_run_id,
+                        attempted_at=attempted_at,
+                        status="blocked",
+                        detail="Research Watch setup-derived send requires compatible operational ownership.",
+                        message_hash=message_hash,
+                        blocked_reason=RESEARCH_WATCH_OPERATIONAL_OWNERSHIP_REASON,
+                        error_message=RESEARCH_WATCH_OPERATIONAL_OWNERSHIP_REASON,
                     )
                 )
                 if len(deliveries) >= max_per_scan:
@@ -12935,18 +13021,22 @@ def _resolve_origin_lifecycle_id_for_plan(
     claimed_missing = NA
     for candidate in candidates:
         row = connection.execute(
-            "SELECT runtime_epoch_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+            "SELECT * FROM setup_lifecycle_records WHERE lifecycle_id = ?",
             (candidate,),
         ).fetchone()
         if row is None:
-            if claimed_missing == NA:
-                claimed_missing = candidate
             continue
-        stored = row["runtime_epoch_id"]
-        if stored is not None and str(stored).strip() == epoch.epoch_id:
-            return candidate
-        return NA
-    return claimed_missing
+        try:
+            require_lifecycle_public_intent(
+                connection,
+                origin_lifecycle_id=candidate,
+                epoch=epoch,
+                expected_symbol=_symbol(getattr(plan, "symbol", NA)),
+            )
+        except RuntimeEpochError:
+            continue
+        return candidate
+    return NA
 
 
 def _public_tracking_root_source_modes(

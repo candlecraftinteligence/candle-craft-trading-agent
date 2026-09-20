@@ -141,18 +141,51 @@ def stamp_sql_public_event(
     epoch = load_active_runtime_epoch(connection)
     if epoch is None:
         return
+    normalized_symbol = str(symbol).upper()
+    origin_lifecycle_id = f"{event_key}::epoch-origin"
+    existing_life = connection.execute(
+        "SELECT lifecycle_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+        (origin_lifecycle_id,),
+    ).fetchone()
+    if existing_life is None:
+        decision = grant_synthetic_origin(
+            connection,
+            symbol=normalized_symbol,
+            run_id=f"test-stamp-{event_key}",
+            now=SYNTHETIC_NOW,
+        )
+        if decision.granted and decision.origin_id:
+            connection.execute(
+                """
+                INSERT INTO setup_lifecycle_records (
+                    lifecycle_id, symbol, mode, direction, current_state,
+                    first_seen_at, last_seen_at, last_transition_at, is_current,
+                    runtime_epoch_id, creation_origin_id
+                ) VALUES (?, ?, 'epoch-origin', 'ownership-anchor', 'WATCHLISTED', ?, ?, ?, 0, ?, ?)
+                """,
+                (
+                    origin_lifecycle_id,
+                    normalized_symbol,
+                    SYNTHETIC_NOW,
+                    SYNTHETIC_NOW,
+                    SYNTHETIC_NOW,
+                    epoch.epoch_id,
+                    decision.origin_id,
+                ),
+            )
     connection.execute(
         """
         INSERT OR IGNORE INTO public_alert_events (
             canonical_plan_id, event_type, event_key, symbol, side, status,
-            reserved_at, sent_at, created_at, updated_at, runtime_epoch_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            reserved_at, sent_at, created_at, updated_at, runtime_epoch_id,
+            origin_lifecycle_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event_key,
             event_type,
             event_key,
-            str(symbol).upper(),
+            normalized_symbol,
             str(side).lower(),
             status,
             timestamp,
@@ -160,7 +193,18 @@ def stamp_sql_public_event(
             timestamp,
             timestamp,
             epoch.epoch_id,
+            origin_lifecycle_id,
         ),
+    )
+    connection.execute(
+        """
+        UPDATE public_alert_events
+        SET origin_lifecycle_id = COALESCE(NULLIF(origin_lifecycle_id, ''), ?)
+        WHERE event_key = ?
+          AND runtime_epoch_id = ?
+          AND (origin_lifecycle_id IS NULL OR origin_lifecycle_id = '')
+        """,
+        (origin_lifecycle_id, event_key, epoch.epoch_id),
     )
 
 
@@ -243,28 +287,47 @@ def seed_legacy_public_event(
     created_at: str = "2026-09-09T15:37:42Z",
     origin_lifecycle_id: str | None = None,
 ) -> int:
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(public_alert_events)")
+    }
+    fields = [
+        "canonical_plan_id",
+        "event_type",
+        "event_key",
+        "symbol",
+        "side",
+        "status",
+        "reserved_at",
+        "sent_at",
+        "delivery_state",
+        "payload_text",
+        "message_hash",
+        "created_at",
+        "updated_at",
+    ]
+    values: list[Any] = [
+        "legacy-plan",
+        "initial_watchlist",
+        event_key,
+        symbol.upper(),
+        "long",
+        status,
+        created_at,
+        created_at if delivery_state == "SENT" else None,
+        delivery_state,
+        payload_text,
+        message_hash,
+        created_at,
+        created_at,
+    ]
+    if "origin_lifecycle_id" in columns:
+        fields.append("origin_lifecycle_id")
+        values.append(origin_lifecycle_id)
+    placeholders = ", ".join("?" for _ in fields)
     cursor = connection.execute(
-        """
-        INSERT INTO public_alert_events (
-            canonical_plan_id, event_type, event_key, symbol, side, status,
-            reserved_at, sent_at, delivery_state, payload_text, message_hash,
-            created_at, updated_at, origin_lifecycle_id
-        ) VALUES (?, 'initial_watchlist', ?, ?, 'long', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            "legacy-plan",
-            event_key,
-            symbol.upper(),
-            status,
-            created_at,
-            created_at if delivery_state == "SENT" else None,
-            delivery_state,
-            payload_text,
-            message_hash,
-            created_at,
-            created_at,
-            origin_lifecycle_id,
-        ),
+        f"INSERT INTO public_alert_events ({', '.join(fields)}) VALUES ({placeholders})",
+        values,
     )
     return int(cursor.lastrowid)
 

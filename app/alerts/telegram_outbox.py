@@ -11,7 +11,11 @@ from typing import Any, Iterator, Mapping, Sequence
 from app.alerts.templates import TELEGRAM_MAX_MESSAGE_LENGTH, split_message
 from app.data.dtos import NA
 from app.runtime_epoch.errors import RuntimeEpochOwnershipError
-from app.runtime_epoch.ownership import decide_public_effect, require_public_event_mutation
+from app.runtime_epoch.ownership import (
+    decide_public_effect,
+    require_public_event_mutation,
+    require_public_part_mutation,
+)
 
 PENDING = "PENDING"
 IN_FLIGHT = "IN_FLIGHT"
@@ -267,6 +271,10 @@ class SQLitePublicTelegramOutbox:
     ) -> bool:
         timestamp = now or _now_iso()
         with self._transaction():
+            try:
+                require_public_part_mutation(self.connection, int(part_id))
+            except RuntimeEpochOwnershipError:
+                return False
             cursor = self.connection.execute(
                 """
                 UPDATE public_alert_delivery_parts
@@ -311,6 +319,12 @@ class SQLitePublicTelegramOutbox:
             ).fetchone()
             decision = decide_public_effect(self.connection, owned)
             if not decision.allowed:
+                return _state(owned["delivery_state"]) if owned is not None else FAILED_FINAL
+            part_row = self.connection.execute(
+                "SELECT public_alert_event_id FROM public_alert_delivery_parts WHERE id = ?",
+                (int(part_id),),
+            ).fetchone()
+            if part_row is None or int(part_row["public_alert_event_id"]) != int(event_id):
                 return _state(owned["delivery_state"]) if owned is not None else FAILED_FINAL
             event = self.connection.execute(
                 "SELECT attempt_count, max_attempts FROM public_alert_events WHERE id = ? AND attempt_id = ?",

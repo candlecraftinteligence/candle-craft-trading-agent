@@ -29,8 +29,11 @@ from app.runtime_epoch.models import (
 from app.runtime_epoch.origin import evaluate_symbol_origin, register_operational_run
 from app.runtime_epoch.startup import (
     OperationalRuntime,
+    inspect_operational_database,
     migrate_existing_database,
     open_operational_database,
+    open_operational_service_database,
+    open_repository_database,
     require_operational_runtime,
 )
 
@@ -53,8 +56,11 @@ __all__ = [
     "evaluate_symbol_origin",
     "initialize_runtime_epoch",
     "load_active_runtime_epoch",
+    "inspect_operational_database",
     "migrate_existing_database",
     "open_operational_database",
+    "open_operational_service_database",
+    "open_repository_database",
     "register_operational_run",
     "require_active_runtime_epoch",
     "require_expected_runtime_epoch",

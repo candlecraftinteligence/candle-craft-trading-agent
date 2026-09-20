@@ -81,7 +81,7 @@ class SymbolOriginDecision:
     evaluation_completed_at: str | None = None
     decision_cutoff_at: str | None = None
     producer_observed_at: str | None = None
-    origin_kind: str = ORIGIN_KIND_LIVE_FRESH
+    origin_kind: str = UNSPECIFIED_EVALUATION
 
 
 @dataclass(frozen=True)

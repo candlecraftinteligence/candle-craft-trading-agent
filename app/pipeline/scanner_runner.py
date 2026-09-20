@@ -637,7 +637,7 @@ class ScannerSymbolResult(BaseModel):
         "replay",
         "imported",
         "unspecified",
-    ] = Field(default="live_scan", exclude=True)
+    ] = Field(default="unspecified", exclude=True)
     lifecycle_execution_candles: tuple[Any, ...] | None = Field(default=None, exclude=True, repr=False)
     lifecycle_execution_timeframe: str = Field(default=NA, exclude=True)
     lifecycle_decision_timestamp: datetime | None = Field(default=None, exclude=True)
@@ -2637,6 +2637,7 @@ class ScannerRunner:
             lifecycle_execution_timeframe=strategy_execution.execution_timeframe,
             lifecycle_decision_timestamp=strategy_execution.decision_timestamp,
             lifecycle_execution_batch_delivery=strategy_execution.execution_batch_delivery,
+            evaluation_origin_kind="live_scan",
             strategy_name=strategy_execution.strategy_name,
             strategy_results=strategy_execution.strategy_results,
             formatted_strategy_output=strategy_execution.formatted_strategy_output,

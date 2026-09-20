@@ -719,74 +719,105 @@ def test_t19_direct_and_recoverable_paths_cannot_bypass(tmp_path: Path) -> None:
 def test_t20_v25_upgrade_preserves_rows_and_rolls_back_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    db_path = tmp_path / "t20.db"
-    original_v26 = database_module._migrate_runtime_epoch_isolation_v26
-    monkeypatch.setattr(database_module, "_migrate_runtime_epoch_isolation_v26", lambda connection: None)
-    monkeypatch.setattr(database_module, "SCHEMA_VERSION", 25)
-    with open_initialized_database(db_path) as connection:
+    from tests.fixtures.genuine_v25 import create_genuine_v25_database
+
+    db_path = create_genuine_v25_database(tmp_path / "t20.db")
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
         seed_legacy_lifecycle(
             connection,
             lifecycle_id="v25-row",
             symbol="BTCUSDT",
             current_state=SetupLifecycleState.ACTIONABLE_A_GRADE.value,
         )
-        connection.execute("PRAGMA user_version = 25")
-        before = dict(_row(connection, "v25-row"))
+        seed_legacy_public_event(
+            connection,
+            event_key="v25-plan|initial_watchlist",
+            status="SENT",
+            delivery_state="SENT",
+        )
         connection.commit()
-    monkeypatch.setattr(database_module, "SCHEMA_VERSION", 26)
-    monkeypatch.setattr(database_module, "_migrate_runtime_epoch_isolation_v26", original_v26)
+        before_life = dict(_row(connection, "v25-row"))
+        before_event = dict(
+            connection.execute(
+                "SELECT * FROM public_alert_events WHERE event_key = ?",
+                ("v25-plan|initial_watchlist",),
+            ).fetchone()
+        )
+        assert "runtime_epoch_id" not in before_life
+        assert "creation_origin_id" not in before_life
+        names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        assert "ux_lifecycle_records_current_symbol_mode_direction" in names
+
     with open_initialized_database(db_path) as connection:
         assert identify_schema_version(connection) == 26
         after = dict(_row(connection, "v25-row"))
         assert after["runtime_epoch_id"] is None
-        assert after["lifecycle_id"] == before["lifecycle_id"]
-        assert after["current_state"] == before["current_state"]
+        assert after["creation_origin_id"] is None
+        assert after["lifecycle_id"] == before_life["lifecycle_id"]
+        assert after["current_state"] == before_life["current_state"]
+        after_event = dict(
+            connection.execute(
+                "SELECT * FROM public_alert_events WHERE event_key = ?",
+                ("v25-plan|initial_watchlist",),
+            ).fetchone()
+        )
+        assert after_event["runtime_epoch_id"] is None
+        assert after_event["event_key"] == before_event["event_key"]
+        assert after_event["status"] == before_event["status"]
         names = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
         }
         assert "ux_lifecycle_records_current_symbol_mode_direction" not in names
         assert "ux_lifecycle_records_legacy_current_symbol_mode_direction" in names
         assert "ux_lifecycle_records_epoch_current_symbol_mode_direction" in names
         assert load_active_runtime_epoch(connection) is None
-    with open_initialized_database(db_path) as connection:
-        names_again = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index'"
-            )
-        }
-        assert "ux_lifecycle_records_current_symbol_mode_direction" not in names_again
 
-    fail_path = tmp_path / "t20-fail.db"
-    monkeypatch.setattr(database_module, "_migrate_runtime_epoch_isolation_v26", lambda connection: None)
-    monkeypatch.setattr(database_module, "SCHEMA_VERSION", 25)
-    with open_initialized_database(fail_path) as connection:
+    fail_path = create_genuine_v25_database(tmp_path / "t20-fail.db")
+    with sqlite3.connect(fail_path) as connection:
+        connection.row_factory = sqlite3.Row
         seed_legacy_lifecycle(
             connection,
             lifecycle_id="fail-row",
             symbol="ETHUSDT",
             current_state=SetupLifecycleState.WATCHLISTED.value,
         )
-        connection.execute("PRAGMA user_version = 25")
         connection.commit()
 
     def boom(connection: sqlite3.Connection) -> None:
         connection.execute("DROP INDEX IF EXISTS ux_lifecycle_records_current_symbol_mode_direction")
-        raise RuntimeError("injected migration failure")
+        raise RuntimeError("injected v26 migration failure")
 
-    monkeypatch.setattr(database_module, "SCHEMA_VERSION", 26)
     monkeypatch.setattr(database_module, "_ensure_lifecycle_epoch_current_indexes", boom)
-    monkeypatch.setattr(database_module, "_migrate_runtime_epoch_isolation_v26", original_v26)
     with pytest.raises(Exception):
         open_initialized_database(fail_path)
     with sqlite3.connect(fail_path) as connection:
         connection.row_factory = sqlite3.Row
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         assert version == 25
+        names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        assert "ux_lifecycle_records_current_symbol_mode_direction" in names
+        epoch_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'runtime_epoch%'"
+            )
+        }
+        assert epoch_tables == set()
         assert load_active_runtime_epoch(connection) is None
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)")
+        }
+        assert "runtime_epoch_id" not in columns
+
 
 
 def test_t21_cohort_labels_are_honest(tmp_path: Path) -> None:

@@ -15,6 +15,8 @@ from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import RANGE_DASH, TelegramAlertType, format_telegram_price, format_telegram_rr
 from app.lifecycle.eligibility import active_signal_eligible, public_watchlist_eligible
 from app.runtime_epoch.authority import load_active_runtime_epoch
+from app.runtime_epoch.errors import RuntimeEpochError
+from app.runtime_epoch.ownership import decide_public_effect, require_lifecycle_public_intent
 from app.storage.database import StorageError, open_read_only_database
 
 ACTIVE_WATCHLIST_DISPLAY_LIMIT = 10
@@ -657,30 +659,28 @@ def _attempt_is_current_epoch_operational(
         return False
     event_key = _clean(row.get("public_watchlist_event_key"))
     if event_key != NA and _table_exists(connection, "public_alert_events"):
-        event_columns = _table_columns(connection, "public_alert_events")
-        if "runtime_epoch_id" in event_columns:
-            event = connection.execute(
-                "SELECT runtime_epoch_id FROM public_alert_events WHERE event_key = ?",
-                (event_key,),
-            ).fetchone()
-            if event is not None and str(event["runtime_epoch_id"] or "") == epoch.epoch_id:
-                return True
+        event = connection.execute(
+            "SELECT * FROM public_alert_events WHERE event_key = ?",
+            (event_key,),
+        ).fetchone()
+        if event is not None:
+            return decide_public_effect(connection, event, epoch=epoch).allowed
     signal_id = _clean(row.get("signal_id"))
     candidates = [signal_id] if signal_id != NA else []
     if signal_id != NA:
         prefix, marker, digest = signal_id.rpartition("-SETUP-")
         if marker and prefix and len(digest) == 16:
             candidates.append(prefix)
-    if candidates and _table_exists(connection, "setup_lifecycle_records"):
-        lifecycle_columns = _table_columns(connection, "setup_lifecycle_records")
-        if "runtime_epoch_id" in lifecycle_columns:
-            for candidate in candidates:
-                lifecycle = connection.execute(
-                    "SELECT runtime_epoch_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
-                    (candidate,),
-                ).fetchone()
-                if lifecycle is not None and str(lifecycle["runtime_epoch_id"] or "") == epoch.epoch_id:
-                    return True
+    for candidate in candidates:
+        try:
+            require_lifecycle_public_intent(
+                connection,
+                origin_lifecycle_id=candidate,
+                epoch=epoch,
+            )
+            return True
+        except RuntimeEpochError:
+            continue
     return False
 
 

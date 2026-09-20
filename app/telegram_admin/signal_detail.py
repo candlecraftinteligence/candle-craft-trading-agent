@@ -17,6 +17,7 @@ from app.telegram_admin.active_watchlists import (
     _active_signal_base_row,
     _active_signal_group_is_eligible,
     _active_signal_outcome_rows,
+    _attempt_is_current_epoch_operational,
     _clean,
     _connect_readonly,
     _first_non_na,
@@ -86,6 +87,8 @@ def _detail_from_rows(
     for signal_id, signal_rows in by_signal.items():
         signal_row = _active_signal_base_row(signal_rows)
         if signal_row is None:
+            continue
+        if not _attempt_is_current_epoch_operational(connection, signal_row):
             continue
         outcome_rows = _active_signal_outcome_rows(signal_rows, signal_row)
         latest_row = max((signal_row, *outcome_rows), key=_row_id)

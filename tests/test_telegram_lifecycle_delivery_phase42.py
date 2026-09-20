@@ -1093,6 +1093,7 @@ def test_research_watch_respects_quality_and_readiness_thresholds(tmp_path: Path
         assert _research_attempt_rows(db_path) == []
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1131,6 +1132,7 @@ def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldo
     assert rows[1][4] == "research_watch_cooldown_active"
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_uses_config_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1162,6 +1164,7 @@ def test_research_watch_cooldown_uses_config_override(
     assert len(sender.messages) == 2
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_normalizes_perp_suffix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1194,6 +1197,7 @@ def test_research_watch_cooldown_normalizes_perp_suffix(
 
 
 @pytest.mark.parametrize("status", ("blocked", "skipped", "failed"))
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_ignores_unsent_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1221,6 +1225,7 @@ def test_research_watch_cooldown_ignores_unsent_rows(
     assert len(sender.messages) == 1
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_only_sent_rows_suppress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1245,6 +1250,7 @@ def test_research_watch_cooldown_only_sent_rows_suppress(
     assert rows[-1][4] == "research_watch_cooldown_active"
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_skips_do_not_consume_send_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1281,6 +1287,7 @@ def test_research_watch_cooldown_skips_do_not_consume_send_cap(
     assert "LINKUSDT" not in sender.messages[0]
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path: Path) -> None:
     sent_db = tmp_path / "research-sent-at.db"
     sent_sender = FakeSender(status="sent")
@@ -1308,6 +1315,7 @@ def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path:
     assert failed_row[2] is None
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_respects_per_scan_cap_and_quality_sort(tmp_path: Path) -> None:
     db_path = tmp_path / "research-cap.db"
     sender = FakeSender()
@@ -1338,6 +1346,7 @@ def test_research_watch_respects_per_scan_cap_and_quality_sort(tmp_path: Path) -
     assert all("LOWUSDT" not in message for message in sender.messages)
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_valid_trade_map_renders_but_remains_research_watch(tmp_path: Path) -> None:
     db_path = tmp_path / "research-valid-map.db"
     sender = FakeSender()
@@ -2786,6 +2795,23 @@ def test_concurrent_public_watchlist_reservations_allow_one_sender(tmp_path: Pat
     symbol_result = _syn_watchlist_snapshot(signal_id="concurrent-watchlist")
     message = telegram_signal_message_from_symbol(symbol_result)
     plan = _public_watchlist_canonical_plan(symbol_result, message)
+    _store_lifecycle_record(
+        db_path,
+        SetupLifecycleRecord(
+            lifecycle_id="concurrent-watchlist",
+            symbol=symbol_result.symbol,
+            mode="swing",
+            direction=str(message.direction).lower(),
+            current_state=SetupLifecycleState.WATCHLISTED,
+            first_seen_at="2026-06-25T18:50:00+00:00",
+            last_seen_at="2026-06-25T18:50:00+00:00",
+            last_transition_at="2026-06-25T18:50:00+00:00",
+            is_current=True,
+            entry_low=plan.raw_entry_low,
+            entry_high=plan.raw_entry_high,
+            stop_loss=plan.raw_invalidation,
+        ),
+    )
 
     def reserve_once(index: int):
         attempted_at = f"2026-06-25T18:5{index}:00+00:00"

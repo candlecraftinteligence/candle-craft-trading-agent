@@ -10,7 +10,11 @@ from app.runtime_epoch.models import (
     COHORT_CURRENT_EPOCH_OPERATIONAL,
     COHORT_LEGACY_OR_UNATTRIBUTED,
 )
-from app.runtime_epoch.ownership import lifecycle_row_epoch_id, public_event_epoch_id
+from app.runtime_epoch.ownership import (
+    lifecycle_row_epoch_id,
+    public_event_epoch_id,
+    public_ownership_chain_reason,
+)
 
 CohortLabel = Literal["LEGACY_OR_UNATTRIBUTED", "CURRENT_EPOCH_OPERATIONAL"]
 
@@ -27,7 +31,8 @@ def classify_public_cohort(connection: sqlite3.Connection, row: sqlite3.Row | An
     epoch = load_active_runtime_epoch(connection)
     event_epoch = public_event_epoch_id(row)
     if epoch is not None and event_epoch == epoch.epoch_id:
-        return COHORT_CURRENT_EPOCH_OPERATIONAL
+        if public_ownership_chain_reason(connection, row, epoch=epoch) is None:
+            return COHORT_CURRENT_EPOCH_OPERATIONAL
     return COHORT_LEGACY_OR_UNATTRIBUTED
 
 

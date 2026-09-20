@@ -382,7 +382,8 @@ def test_dry_run_mode_persists_local_drafts_without_network(tmp_path) -> None:
     assert routed.delivery_status == "dry_run"
     assert transport.calls == []
     records = _read_jsonl(routed.draft_path)
-    assert "valid_setup" in {record["draft_type"] for record in records}
+    assert "valid_setup" not in {record["draft_type"] for record in records}
+    assert "scan_health" in {record["draft_type"] for record in records}
 
 
 def test_enabled_admin_mode_sends_one_admin_report_and_ignores_public_vip(tmp_path) -> None:

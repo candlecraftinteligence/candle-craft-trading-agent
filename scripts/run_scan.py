@@ -151,8 +151,9 @@ from app.storage import (  # noqa: E402
     update_symbol_health_for_result,
 )
 from app.storage.database import UnsupportedSchemaVersionError  # noqa: E402
-from app.runtime_epoch.errors import RuntimeEpochError  # noqa: E402
+from app.runtime_epoch.errors import RuntimeEpochConfigurationError, RuntimeEpochError  # noqa: E402
 from app.runtime_epoch.startup import require_operational_runtime  # noqa: E402
+from app.runtime_epoch.watch_state import load_or_initialize_operational_watch_payload  # noqa: E402
 from app.universe.symbol_universe import (  # noqa: E402
     BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
     MANUAL_UNIVERSE_MODE,
@@ -1109,6 +1110,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         result,
         ranked_results=ranked_results,
         manifest_row=manifest_row,
+        database_path=args.database_path,
     )
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
@@ -2108,6 +2110,7 @@ async def _route_admin_report(
     ranked_results: Sequence[Any],
     manifest_row: Mapping[str, Any],
     console_presenter: ScannerConsolePresenter | None = None,
+    database_path: Path | str | None = None,
 ) -> None:
     try:
         route_result = await route_admin_scan_report(
@@ -2116,6 +2119,7 @@ async def _route_admin_report(
             manifest_row=manifest_row,
             settings=Settings(),
             drafts_dir=ADMIN_DRAFTS_DIR,
+            database_path=database_path,
         )
     except Exception as exc:
         if console_presenter is not None:
@@ -2295,55 +2299,54 @@ def _prepare_operational_runtime_if_needed(args: argparse.Namespace, settings: S
         raise SystemExit(
             "Operational runtime requires --runtime-epoch-id or RUNTIME_EPOCH_ID; refusing to start without an epoch."
         )
+    watch_state_base_dir = WATCH_STATE_PATH.parent
     try:
         runtime = require_operational_runtime(
             database_path=args.database_path,
             expected_epoch_id=expected,
-            watch_state_base_dir=WATCH_STATE_PATH.parent,
+            watch_state_base_dir=watch_state_base_dir,
         )
     except (RuntimeEpochError, UnsupportedSchemaVersionError) as exc:
         raise SystemExit(str(exc)) from exc
     WATCH_STATE_PATH = runtime.watch_state_path
     args.runtime_epoch_id = runtime.epoch.epoch_id
+    args.watch_state_base_dir = watch_state_base_dir
 
 
 def _runtime_watch_epoch_id(args: argparse.Namespace) -> str:
     return str(getattr(args, "runtime_epoch_id", "") or "").strip()
 
 
+def _runtime_watch_base_dir(args: argparse.Namespace) -> Path:
+    stored = getattr(args, "watch_state_base_dir", None)
+    if stored:
+        return Path(stored)
+    return WATCH_STATE_PATH.parent
+
+
 def _load_runtime_watch_state(args: argparse.Namespace):
     expected = _runtime_watch_epoch_id(args)
-    if not WATCH_STATE_PATH.exists():
-        return WatchState(runtime_epoch_id=expected or None)
+    if not expected:
+        return load_watch_state(WATCH_STATE_PATH)
     try:
-        state = load_watch_state(WATCH_STATE_PATH)
-    except WatchModeError as exc:
+        payload = load_or_initialize_operational_watch_payload(
+            WATCH_STATE_PATH,
+            expected,
+            base_dir=_runtime_watch_base_dir(args),
+        )
+    except (WatchModeError, RuntimeEpochConfigurationError) as exc:
         raise SystemExit(str(exc)) from exc
-    if expected and state.runtime_epoch_id not in (None, expected):
-        raise SystemExit(
-            "Operational watch state epoch does not match the active runtime epoch."
-        )
-    if expected and state.runtime_epoch_id is None:
-        return state.model_copy(update={"runtime_epoch_id": expected})
-    return state
+    try:
+        return WatchState.model_validate(payload)
+    except Exception as exc:
+        raise SystemExit(f"watch state has an invalid shape: {WATCH_STATE_PATH}") from exc
 
 
 def _stamp_runtime_watch_state(args: argparse.Namespace, state):
     expected = _runtime_watch_epoch_id(args)
-    if expected and state.runtime_epoch_id is None:
-        return state.model_copy(update={"runtime_epoch_id": expected})
-    if expected and state.runtime_epoch_id not in (None, expected):
-        raise SystemExit(
-            "Operational watch state epoch does not match the active runtime epoch."
-        )
-    return state
-
-
-def _stamp_runtime_watch_state(args: argparse.Namespace, state):
-    expected = _runtime_watch_epoch_id(args)
-    if expected and state.runtime_epoch_id is None:
-        return state.model_copy(update={"runtime_epoch_id": expected})
-    if expected and state.runtime_epoch_id not in (None, expected):
+    if not expected:
+        return state
+    if state.runtime_epoch_id != expected:
         raise SystemExit(
             "Operational watch state epoch does not match the active runtime epoch."
         )
@@ -3334,6 +3337,7 @@ async def _run_watch_mode(
                 ranked_results=execution.ranked_results,
                 manifest_row=manifest_row,
                 console_presenter=console,
+                database_path=args.database_path,
             )
             console.emit(
                 console.format_watch_iteration(

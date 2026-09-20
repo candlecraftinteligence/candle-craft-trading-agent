@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -101,6 +102,7 @@ async def route_admin_scan_report(
     drafts_dir: Path = DEFAULT_ADMIN_DRAFTS_DIR,
     client: TelegramAdminClient | None = None,
     transport: TelegramAdminTransport | None = None,
+    database_path: Path | str | None = None,
 ) -> AdminDraftRoutingResult:
     telegram_config = config or TelegramAdminConfig.from_settings(settings)
     admin_client = client or TelegramAdminClient(telegram_config, transport=transport)
@@ -112,6 +114,7 @@ async def route_admin_scan_report(
         ranked_results=ranked,
         manifest_row=manifest_row,
         draft_artifact_path=draft_path,
+        database_path=database_path,
     )
     delivery = _duplicate_sent_admin_delivery(
         draft_path,
@@ -132,6 +135,7 @@ async def route_admin_scan_report(
         telegram_metadata=telegram_metadata,
         error_message=delivery.error_message,
         report=report,
+        database_path=database_path,
     )
 
     try:
@@ -170,6 +174,7 @@ def build_admin_drafts(
     error_message: str = NA,
     report: str | None = None,
     created_at: str | None = None,
+    database_path: Path | str | None = None,
 ) -> tuple[AdminDraftRecord, ...]:
     timestamp = created_at or _now_utc_iso()
     run_id = _run_id(result, manifest_row)
@@ -191,7 +196,7 @@ def build_admin_drafts(
     for ranked in _ranked(result, ranked_results):
         symbol_result = ranked.symbol_result
         summary = _source_row_summary(symbol_result, run_id=run_id, timestamp=manifest_timestamp)
-        for draft_type in _symbol_draft_types(summary):
+        for draft_type in _symbol_draft_types(summary, database_path=database_path):
             records.append(
                 _draft_record(
                     run_id=run_id,
@@ -249,10 +254,19 @@ def format_admin_scan_report(
     manifest_row: Mapping[str, Any] | None = None,
     draft_artifact_path: Path | str | None = None,
     max_rows_per_section: int = 6,
+    database_path: Path | str | None = None,
 ) -> str:
     ranked = _ranked(result, ranked_results)
     summaries = [_source_row_summary(item.symbol_result, run_id=_run_id(result, manifest_row), timestamp=_timestamp(manifest_row)) for item in ranked]
-    valid = [summary for summary in summaries if summary["display_status"] == "valid_setup"]
+    valid = [
+        summary
+        for summary in summaries
+        if summary["display_status"] == "valid_setup"
+        and (
+            database_path is None
+            or _operational_setup_recommendation_allowed(str(summary.get("symbol") or ""), database_path)
+        )
+    ]
     near = [
         summary
         for summary in summaries
@@ -464,10 +478,15 @@ def _scan_health_summary(
     }
 
 
-def _symbol_draft_types(summary: Mapping[str, Any]) -> tuple[AdminDraftType, ...]:
+def _symbol_draft_types(
+    summary: Mapping[str, Any],
+    *,
+    database_path: Path | str | None = None,
+) -> tuple[AdminDraftType, ...]:
     draft_types: list[AdminDraftType] = []
     if summary.get("display_status") == "valid_setup":
-        draft_types.append("valid_setup")
+        if _operational_setup_recommendation_allowed(str(summary.get("symbol") or ""), database_path):
+            draft_types.append("valid_setup")
     if summary.get("display_status") == "near_miss" and summary.get("failed_stage") != "target_integrity":
         draft_types.append("near_miss")
     if _is_target_blocked_summary(summary):
@@ -835,6 +854,50 @@ def _first_non_na(*values: Any) -> str:
         if text != NA:
             return text
     return NA
+
+
+def _operational_setup_recommendation_allowed(
+    symbol: str,
+    database_path: Path | str | None,
+) -> bool:
+    expected = str(os.environ.get("RUNTIME_EPOCH_ID") or "").strip()
+    if not expected:
+        return True
+    if database_path is None:
+        return False
+    from app.runtime_epoch.errors import RuntimeEpochError
+    from app.runtime_epoch.ownership import require_lifecycle_public_intent
+    from app.runtime_epoch.startup import open_operational_service_database
+
+    try:
+        connection, epoch = open_operational_service_database(
+            database_path,
+            expected_epoch_id=expected,
+        )
+    except Exception:
+        return False
+    try:
+        rows = connection.execute(
+            """
+            SELECT lifecycle_id FROM setup_lifecycle_records
+            WHERE symbol = ? AND runtime_epoch_id = ?
+            """,
+            (str(symbol or "").strip().upper(), epoch.epoch_id),
+        ).fetchall()
+        for row in rows:
+            try:
+                require_lifecycle_public_intent(
+                    connection,
+                    origin_lifecycle_id=str(row["lifecycle_id"]),
+                    epoch=epoch,
+                    expected_symbol=symbol,
+                )
+                return True
+            except RuntimeEpochError:
+                continue
+        return False
+    finally:
+        connection.close()
 
 
 def _display(value: Any) -> str:

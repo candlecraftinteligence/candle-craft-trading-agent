@@ -52,9 +52,15 @@ from app.runtime_epoch.errors import (
     RuntimeEpochOriginError,
     RuntimeEpochOwnershipError,
 )
-from app.runtime_epoch.origin import evaluate_symbol_origin, persist_blocked_symbol_origin, register_operational_run
+from app.runtime_epoch.origin import (
+    decision_cutoff_from_symbol_result,
+    evaluate_symbol_origin,
+    origin_kind_from_symbol_result,
+    persist_blocked_symbol_origin,
+    producer_acquisition_from_symbol_result,
+    register_operational_run,
+)
 from app.runtime_epoch.ownership import legacy_cooldown_veto
-from app.runtime_epoch.time_contract import comparable_utc
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
 from app.storage.database import DEFAULT_DATABASE_PATH
 from app.storage.symbol_health import load_symbol_health_records
@@ -347,10 +353,10 @@ class SetupLifecycleService:
             connection,
             run_id=str(scan_run_id or ""),
             symbol=observation.symbol,
-            evaluation_kind=getattr(symbol_result, "evaluation_origin_kind", "live_scan") or "live_scan",
+            evaluation_kind=origin_kind_from_symbol_result(symbol_result),
             evaluation_completed_at=now,
-            decision_cutoff_at=_decision_cutoff_text(symbol_result, now),
-            producer_observed_at=_producer_observed_text(symbol_result, now),
+            decision_cutoff_at=decision_cutoff_from_symbol_result(symbol_result),
+            producer_observed_at=producer_acquisition_from_symbol_result(symbol_result),
         )
         if not origin.granted:
             persist_blocked_symbol_origin(connection, origin)
@@ -759,32 +765,6 @@ def active_lifecycle_symbols(
             ),
         )
     )
-
-
-def _decision_cutoff_text(symbol_result: Any, now: str) -> str | None:
-    timestamp = getattr(symbol_result, "lifecycle_decision_timestamp", None)
-    parsed = comparable_utc(timestamp)
-    if parsed is not None:
-        return parsed
-    iso = getattr(timestamp, "isoformat", None) if timestamp is not None else None
-    if callable(iso):
-        parsed = comparable_utc(iso())
-        if parsed is not None:
-            return parsed
-    kind = str(getattr(symbol_result, "evaluation_origin_kind", "live_scan") or "live_scan")
-    if kind == "live_scan":
-        return now
-    return None
-
-
-def _producer_observed_text(symbol_result: Any, now: str) -> str | None:
-    delivery = getattr(symbol_result, "lifecycle_execution_batch_delivery", None)
-    if delivery is not None:
-        for attr in ("observed_at", "completed_at", "capture_completed_at"):
-            parsed = comparable_utc(getattr(delivery, attr, None))
-            if parsed is not None:
-                return parsed
-    return _decision_cutoff_text(symbol_result, now)
 
 
 def _confirmation_cycles(value: int | None) -> int:

@@ -1,3 +1,7 @@
+"""Genuine baseline-v25 schema snapshot from eef92b89f168bbb016715f3486b9f6bf2824f53f.
+
+Imported only by migration regression tests. Do not use as the HEAD schema.
+"""
 from __future__ import annotations
 
 import sqlite3
@@ -5,7 +9,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 26  # PROSPECTIVE_RUNTIME_EPOCH_ISOLATION: epoch/origin/currentness indexes
+SCHEMA_VERSION = 25  # STORAGE_SINGLE_COPY: additive raw_payload_format on scan_runs
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -1056,7 +1060,6 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             _migrate_outcome_progress_prefix_evidence_v24(connection)
         if existing_version < 25:
             _migrate_scan_raw_payload_format_v25(connection)
-        _migrate_runtime_epoch_isolation_v26(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
@@ -1316,14 +1319,6 @@ def _has_legacy_lifecycle_tuple_unique(connection: sqlite3.Connection) -> bool:
     return False
 
 
-def _lifecycle_has_runtime_epoch_column(connection: sqlite3.Connection) -> bool:
-    columns = {
-        str(row[1])
-        for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
-    }
-    return "runtime_epoch_id" in columns
-
-
 def _ensure_lifecycle_generation_indexes(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -1333,126 +1328,17 @@ def _ensure_lifecycle_generation_indexes(connection: sqlite3.Connection) -> None
     )
     connection.execute(
         """
-        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_generation_lookup
-            ON setup_lifecycle_records(symbol, mode, direction, is_current, last_seen_at)
-        """
-    )
-    if _lifecycle_has_runtime_epoch_column(connection):
-        _ensure_lifecycle_epoch_current_indexes(connection)
-        return
-    connection.execute(
-        """
         CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_records_current_symbol_mode_direction
             ON setup_lifecycle_records(symbol, mode, direction)
             WHERE is_current = 1
         """
     )
-
-
-def _ensure_lifecycle_epoch_current_indexes(connection: sqlite3.Connection) -> None:
-    connection.execute("DROP INDEX IF EXISTS ux_lifecycle_records_current_symbol_mode_direction")
     connection.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_records_legacy_current_symbol_mode_direction
-            ON setup_lifecycle_records(symbol, mode, direction)
-            WHERE is_current = 1 AND runtime_epoch_id IS NULL
+        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_generation_lookup
+            ON setup_lifecycle_records(symbol, mode, direction, is_current, last_seen_at)
         """
     )
-    connection.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_records_epoch_current_symbol_mode_direction
-            ON setup_lifecycle_records(runtime_epoch_id, symbol, mode, direction)
-            WHERE is_current = 1 AND runtime_epoch_id IS NOT NULL
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_runtime_epoch
-            ON setup_lifecycle_records(runtime_epoch_id, symbol)
-        """
-    )
-
-
-def _migrate_runtime_epoch_isolation_v26(connection: sqlite3.Connection) -> None:
-    """Add epoch/origin tables and split current-row uniqueness. Do not create an epoch."""
-
-    if connection.in_transaction:
-        connection.commit()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runtime_epochs (
-                epoch_id TEXT PRIMARY KEY,
-                contract_version TEXT NOT NULL,
-                activated_at TEXT NOT NULL,
-                cutoff_at TEXT NOT NULL,
-                reviewed_release_sha TEXT NOT NULL,
-                generation_binding TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runtime_epoch_control (
-                control_key TEXT PRIMARY KEY CHECK (control_key = 'active'),
-                epoch_id TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runtime_operational_runs (
-                run_id TEXT PRIMARY KEY,
-                runtime_epoch_id TEXT NOT NULL,
-                registered_at TEXT NOT NULL,
-                status TEXT NOT NULL,
-                producer_started_at TEXT
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runtime_operational_origins (
-                origin_id TEXT PRIMARY KEY,
-                runtime_epoch_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                evaluation_completed_at TEXT,
-                decision_cutoff_at TEXT,
-                producer_observed_at TEXT,
-                origin_kind TEXT NOT NULL,
-                status TEXT NOT NULL,
-                block_reason TEXT,
-                created_at TEXT,
-                UNIQUE(run_id, symbol)
-            )
-            """
-        )
-        _ensure_column(connection, "setup_lifecycle_records", "runtime_epoch_id", "TEXT")
-        _ensure_column(connection, "setup_lifecycle_records", "creation_origin_id", "TEXT")
-        _ensure_column(connection, "public_alert_events", "runtime_epoch_id", "TEXT")
-        _ensure_column(connection, "public_alert_events", "origin_lifecycle_id", "TEXT")
-        _ensure_column(connection, "public_alert_events", "origin_root_event_id", "INTEGER")
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS ix_runtime_operational_origins_run_symbol
-                ON runtime_operational_origins(run_id, symbol)
-            """
-        )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS ix_public_alert_events_runtime_epoch
-                ON public_alert_events(runtime_epoch_id)
-            """
-        )
-        _ensure_lifecycle_epoch_current_indexes(connection)
-        connection.commit()
-    except Exception:
-        if connection.in_transaction:
-            connection.rollback()
-        raise
 
 
 def _ensure_telegram_alert_attempt_indexes(connection: sqlite3.Connection) -> None:

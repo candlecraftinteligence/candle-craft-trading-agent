@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -21,16 +22,26 @@ from app.runtime_epoch.ownership import (
     require_current_epoch_lifecycle_id,
     require_current_epoch_lifecycle_write,
 )
-from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
+from app.runtime_epoch.startup import open_repository_database
+from app.storage.database import DEFAULT_DATABASE_PATH, StorageError
 
 
 class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycleRepository"]):
-    def __init__(self, database_path: Path | str = DEFAULT_DATABASE_PATH) -> None:
+    def __init__(
+        self,
+        database_path: Path | str = DEFAULT_DATABASE_PATH,
+        *,
+        expected_epoch_id: str | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
+        self.expected_epoch_id = expected_epoch_id
         self.connection: sqlite3.Connection | None = None
 
     def __enter__(self) -> SQLiteSetupLifecycleRepository:
-        self.connection = open_initialized_database(self.database_path)
+        self.connection = open_repository_database(
+            self.database_path,
+            expected_epoch_id=self.expected_epoch_id,
+        )
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
@@ -162,6 +173,7 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
             record_epoch_id=record.runtime_epoch_id,
             creation_origin_id=record.creation_origin_id,
             inserting=existing is None,
+            symbol=record.symbol,
         )
         params = _record_params(record)
         placeholders = ", ".join("?" for _ in params)
@@ -537,13 +549,13 @@ def _record_params(record: SetupLifecycleRecord) -> tuple[Any, ...]:
         record.invalidation_reason,
         record.cooldown_until,
         record.archived_at,
-        record.entry_low,
-        record.entry_high,
-        record.stop_loss,
-        record.tp1,
-        record.tp2,
-        record.tp3,
-        record.rr,
+        _bind_text(record.entry_low),
+        _bind_text(record.entry_high),
+        _bind_text(record.stop_loss),
+        _bind_text(record.tp1),
+        _bind_text(record.tp2),
+        _bind_text(record.tp3),
+        _bind_text(record.rr),
         record.invalidation_logic,
         record.confirmation_count,
         record.required_confirmation_cycles,
@@ -735,6 +747,12 @@ def _reason_from_value(value: Any) -> SetupTransitionReason:
         if reason.value == text or reason.name == text:
             return reason
     return SetupTransitionReason.NO_CHANGE
+
+
+def _bind_text(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    return value
 
 
 def _symbol(value: str) -> str:

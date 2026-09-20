@@ -36,23 +36,51 @@ def is_canonical_legacy_watch_state_path(path: Path | str, *, base_dir: Path | s
         return Path(path) == canonical_legacy_watch_state_path(base_dir)
 
 
+def _epoch_id(epoch: RuntimeEpochRecord | str) -> str:
+    return epoch if isinstance(epoch, str) else epoch.epoch_id
+
+
 def require_operational_watch_payload(
     payload: Any,
-    epoch: RuntimeEpochRecord,
+    epoch: RuntimeEpochRecord | str,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeEpochConfigurationError("Operational watch state must be a JSON object.")
-    payload_epoch = str(payload.get("runtime_epoch_id") or "").strip()
-    if payload_epoch != epoch.epoch_id:
+    raw_epoch = payload.get("runtime_epoch_id")
+    if raw_epoch is None:
+        raise RuntimeEpochConfigurationError(
+            "Operational watch state is missing runtime_epoch_id; refusing to adopt untagged state."
+        )
+    payload_epoch = str(raw_epoch).strip()
+    if not payload_epoch:
+        raise RuntimeEpochConfigurationError(
+            "Operational watch state runtime_epoch_id is empty; refusing to adopt untagged state."
+        )
+    if payload_epoch != _epoch_id(epoch):
         raise RuntimeEpochConfigurationError(
             "Operational watch state epoch does not match the active runtime epoch."
         )
     return payload
 
 
-def stamp_watch_payload(payload: dict[str, Any], epoch: RuntimeEpochRecord) -> dict[str, Any]:
+def load_or_initialize_operational_watch_payload(
+    path: Path,
+    epoch: RuntimeEpochRecord | str,
+    *,
+    base_dir: Path | str = Path("scan_runs"),
+) -> dict[str, Any]:
+    refuse_legacy_watch_fallback(path, epoch, base_dir=base_dir)
+    if not path.exists():
+        return stamp_watch_payload({}, epoch)
+    payload = read_json_object(path)
+    if payload is None:
+        return stamp_watch_payload({}, epoch)
+    return require_operational_watch_payload(payload, epoch)
+
+
+def stamp_watch_payload(payload: dict[str, Any], epoch: RuntimeEpochRecord | str) -> dict[str, Any]:
     stamped = dict(payload)
-    stamped["runtime_epoch_id"] = epoch.epoch_id
+    stamped["runtime_epoch_id"] = _epoch_id(epoch)
     return stamped
 
 
@@ -70,7 +98,7 @@ def read_json_object(path: Path) -> dict[str, Any] | None:
 
 def refuse_legacy_watch_fallback(
     path: Path,
-    epoch: RuntimeEpochRecord,
+    epoch: RuntimeEpochRecord | str,
     *,
     base_dir: Path | str = Path("scan_runs"),
 ) -> None:
@@ -78,7 +106,7 @@ def refuse_legacy_watch_fallback(
         raise RuntimeEpochConfigurationError(
             "Refusing to load or overwrite canonical legacy watch_state.json for operational use."
         )
-    expected = operational_watch_state_path(epoch.epoch_id, base_dir=base_dir)
+    expected = operational_watch_state_path(_epoch_id(epoch), base_dir=base_dir)
     try:
         same = path.resolve() == expected.resolve()
     except OSError:
