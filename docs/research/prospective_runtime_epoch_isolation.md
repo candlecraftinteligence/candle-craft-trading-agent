@@ -6,7 +6,9 @@ This document is the architecture handoff. It is not a Runtime runbook and does 
 
 ## Disposition
 
-- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_2` — PR #123 repaired again
+- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_2`
+- `REAL_POSITIVE_PATH_PROVEN` = **TRUE**
+- `STRATEGY_GATES_UNCHANGED` = **TRUE**
 - PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/123
 - Feature branch: `feature/prospective-runtime-epoch-isolation`
 - Runtime restart authorized: **false**
@@ -146,15 +148,19 @@ Regression: R56.
 
 R27 remains a narrower **seeded-delivery** proof (owned origin/lifecycle already present, then public event → reservation → claim → fake sender). It is not the full producer pipeline.
 
-R57 is the actual producer pipeline on a temp DB:
+R57 is the actual normal production pipeline on a temp/synthetic DB, with a fake deterministic market producer and a fake Telegram sender. No real network. No real Telegram.
 
-fake adapter/exchange → `ScannerRunner` result with producer evaluation-completion and acquisition evidence → `SetupLifecycleService` origin grant → lifecycle creation → confirmation progression → unchanged quality/RR/target gates
+Required chain, now proven:
 
-Explicit test-only epoch initialization is allowed. The test does **not** manually insert `runtime_operational_origin`, epoch lifecycle ownership, `ACTIONABLE_A_GRADE`, or `CONFIRMED`.
+fake deterministic market producer → actual producer acquisition → explicit evaluation-completion evidence → valid post-epoch origin (granted by `SetupLifecycleService`, not stamped by the test) → actual `SetupLifecycleService` path → normal lifecycle creation → existing confirmation cycles (2) → existing quality gates → existing planned RR >= unchanged public minimum **3R** → existing target-integrity requirements (production warning path, not a stubbed A-grade target) → public event reservation (`signal_confirmed`) → correct event/reservation/part association → outbox claim → fake sender call
 
-Honest result: the only deterministic pullback producer fixture yields planned RR **2.66**, which is below unchanged public min RR **3**. After two confirmation cycles the lifecycle is owned and progressed, and public watchlist send remains **zero**. Gates were not weakened. R27 remains the seeded fake-send path.
+The test does **not** manually insert `runtime_operational_origins`, does **not** stamp lifecycle epoch ownership, and does **not** seed `ACTIONABLE_A_GRADE` or `CONFIRMED`. Confirmation cycles are the existing service path.
 
-R58 is the paired negative: insufficient quality/confirmation/origin evidence, zero public send.
+Honest result: a geometry-only synthetic fixture (`_public_min_rr_pullback_candles`) makes the **unchanged** strategy emit planned RR **3.06779661**. After two confirmation cycles the owned lifecycle is `CONFIRMED`, a `signal_confirmed` public event is reserved against that lifecycle/epoch, the outbox is claimed, and `FakeSender` is called once. Public min RR remains `PUBLIC_SIGNAL_MIN_RR = 3`. Strategy configured floor remains `DEFAULT_CONFIGURED_MINIMUM_RR = 2.5`. No scoring, target, confirmation, quality, or identity algorithm was changed.
+
+R58 is the paired negative on the canonical `_strategy_pullback_candles` series: planned RR **2.65955826**, which remains below the unchanged 3R public gate. The setup can still form under the 2.5 strategy floor; public send stays **zero**. That is valid gate behavior, not a bypass.
+
+R27 remains the seeded fake-send path.
 
 Regression: R57, R58.
 
@@ -213,8 +219,8 @@ Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`
 | R54 | Research-watch flags enabled + missing epoch/context = zero fake sender calls |
 | R55 | Admin/draft exact-setup mismatch on the same symbol is rejected |
 | R56 | Active detail does not combine owned event with orphan/foreign attempt fields |
-| R57 | Real producer path creates owned origin/lifecycle and confirmation progress; public send stays blocked by unchanged min RR 3 |
-| R58 | Paired negative pipeline remains blocked by insufficient quality/confirmation/origin evidence |
+| R57 | Real producer path reaches fake sender without manual ownership stamping; planned RR 3.06779661 >= unchanged public min 3 |
+| R58 | Canonical 2.66R pullback still fails under the unchanged 3R public gate |
 | R59 | Global legacy SENT `event_key` remains consumed |
 | R60 | Legacy UNCERTAIN and legacy reservation/attempt rows remain unchanged under borrowed-current-event attacks |
 
@@ -224,7 +230,6 @@ Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`
 - Research admission, tracking obligation, canonical outcomes, expectancy
 - Champion/challenger, adaptive strategy, execution
 - Runtime cutover, epoch initialization on Runtime, capacity refresh
-- A deterministic pullback fixture that also satisfies unchanged public min RR 3 (R57 therefore proves owned producer→lifecycle, not a public fake send)
 
 ## Test commands
 
@@ -236,10 +241,12 @@ python -m pytest
 git diff --check
 ```
 
-Results (DEV PC, `C:\CandleCraftDev`, 2026-09-20):
+Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21):
 
-- Focused origin/producer, lifecycle ownership, public/outbox cross-record, operational-open, watch/admin/research-watch, genuine-v25, and R31–R60 proofs: passed.
-- `python -m pytest`: **2608 passed**, exit 0, elapsed **439.28 s**. One unrelated `StarletteDeprecationWarning` from FastAPI's TestClient (`httpx`/`starlette.testclient`). No skips added to hide failures.
+- `test_r57_real_producer_pipeline_creates_owned_public_send`: passed.
+- `test_r58_insufficient_public_rr_pipeline_does_not_send`: passed.
+- Focused epoch/isolation plus authoritative RR suite (`tests/test_prospective_runtime_epoch_isolation.py`, `tests/test_prospective_runtime_epoch_isolation_boundaries.py`, `tests/test_prospective_runtime_epoch_isolation_repair2.py`, `tests/test_authoritative_minimum_rr.py`): **125 passed**, exit 0, elapsed **16.75 s**.
+- `python -m pytest`: **2608 passed**, exit 0, elapsed **415.41 s**. One unrelated `StarletteDeprecationWarning` from FastAPI's TestClient (`httpx`/`starlette.testclient`). No skips added to hide failures.
 - `git diff --check`: clean (exit 0).
 - GitHub CI: recorded after push of this repair, if the run has completed.
 
@@ -250,4 +257,6 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 - Baseline main: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
 - Prior reviewed HEAD: `01cd99f146ea607cdc60650bbddc724af19e5155`
 - Second bounded repair commit: `869154aba3db80ce07b400552845e926d4e12626`
-- Final PR HEAD: `43cba9c0b57c741ebcca6169b0b73e430738ff13`
+- Prior PR HEAD before this fixture repair: `1303fec1688c77c4dbf9d02f7d0d0c136d273fef`
+- Positive-path fixture commit: recorded in the following pin commit
+- Final PR #123 HEAD: recorded in the following pin commit

@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from app.alerts.telegram_lifecycle import (
+    PUBLIC_SIGNAL_MIN_RR,
     PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
     SQLiteTelegramAlertAttemptRepository,
     TelegramLifecycleDeliveryService,
@@ -30,6 +31,7 @@ from app.alerts.telegram_outbox import (
     persist_intent_parts,
 )
 from app.core.config import Settings
+from app.core.minimum_rr import DEFAULT_CONFIGURED_MINIMUM_RR
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.service import apply_lifecycle_to_run_result
@@ -99,12 +101,61 @@ from tests.test_scanner_runner import (
     FakeExchangeClient,
     _clean_target_intelligence,
     _config,
-    _flat_candles,
     _strategy_pullback_candles,
     run as run_scanner,
 )
 
 pytestmark = pytest.mark.no_auto_epoch
+
+
+def _public_min_rr_pullback_candles() -> list[dict[str, Decimal | int]]:
+    """Deterministic OHLC whose existing strategy output already clears public 3R.
+
+    Same liquidity-grab skeleton as `_strategy_pullback_candles` (sweep, BOS,
+    pullback, impulse), with a tighter pre-pattern range and a larger impulse so
+    fib TP2 RR is >= 3 without changing strategy, scoring, target, or identity
+    code. The canonical `_strategy_pullback_candles` series remains 2.66R.
+    """
+
+    candles: list[dict[str, Decimal | int]] = []
+    for index in range(184):
+        candles.append(
+            {
+                "timestamp": index,
+                "open": Decimal("100"),
+                "high": Decimal("102"),
+                "low": Decimal("98"),
+                "close": Decimal("100"),
+                "volume": Decimal("100"),
+            }
+        )
+    pattern: list[dict[str, Decimal | int]] = []
+    for index in range(36):
+        pattern.append(
+            {
+                "timestamp": 184 + index,
+                "open": Decimal("100"),
+                "high": Decimal("102"),
+                "low": Decimal("98"),
+                "close": Decimal("100"),
+                "volume": Decimal("100"),
+            }
+        )
+    pattern[20]["low"] = Decimal("90")
+    pattern[24]["high"] = Decimal("122")
+    pattern[30]["low"] = Decimal("85")
+    pattern[30]["close"] = Decimal("91")
+    pattern[30]["volume"] = Decimal("200")
+    pattern[33]["open"] = Decimal("99")
+    pattern[33]["close"] = Decimal("97")
+    pattern[33]["low"] = Decimal("95")
+    pattern[33]["high"] = Decimal("100")
+    pattern[35]["open"] = Decimal("116")
+    pattern[35]["high"] = Decimal("126")
+    pattern[35]["low"] = Decimal("113")
+    pattern[35]["close"] = Decimal("124")
+    pattern[35]["volume"] = Decimal("300")
+    return candles + pattern
 
 
 class FakeAdapterExchangeClient(FakeExchangeClient):
@@ -1057,30 +1108,19 @@ def test_r56_active_detail_does_not_combine_owned_event_with_orphan_attempt(tmp_
     del event_id
 
 
-def test_r57_real_producer_pipeline_creates_owned_public_send(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Producer→origin→owned lifecycle; public send stays blocked by unchanged min RR 3.
-
-    The repository's only deterministic pullback producer fixture yields planned RR
-    2.66. Scanner unit tests stub target intelligence for this OHLC; this proof reuses
-    that same test double so lifecycle can reach ACTIONABLE_A_GRADE, then shows the
-    public watchlist path still refuses to send because public min RR is unchanged.
-    Inventing a new strategy-valid OHLC series or lowering RR would be out of scope.
-    """
-    import app.pipeline.scanner_runner as scanner_runner_module
-
-    monkeypatch.setattr(
-        scanner_runner_module,
-        "build_target_intelligence",
-        lambda *args, **kwargs: _clean_target_intelligence(),
-    )
-    db_path = tmp_path / "r57.db"
+def _producer_lifecycle_then_deliver(
+    tmp_path: Path,
+    *,
+    db_name: str,
+    candles: list[dict[str, Decimal | int]],
+    run_prefix: str,
+):
+    db_path = tmp_path / db_name
     with open_initialized_database(db_path) as connection:
         initialize_runtime_epoch(connection, SYNTHETIC_IDENTITY, activated_at=SYNTHETIC_CUTOFF_AT)
         connection.commit()
     clock = {"now": datetime(2026, 3, 1, 14, 0, tzinfo=UTC)}
-    client = FakeAdapterExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    client = FakeAdapterExchangeClient({"BTCUSDT": candles}, failing_timeframes={"2d"})
     runner = ScannerRunner(
         exchange_client=client,
         clock=lambda: clock["now"],
@@ -1093,38 +1133,21 @@ def test_r57_real_producer_pipeline_creates_owned_public_send(
     applied_first = apply_lifecycle_to_run_result(
         first,
         database_path=db_path,
-        scan_run_id="r57-run-1",
+        scan_run_id=f"{run_prefix}-run-1",
         now="2026-03-01T14:00:00Z",
         expected_identity=SYNTHETIC_IDENTITY,
         confirmation_cycles=2,
     )
-    first_life = applied_first.results[0].lifecycle_state
     clock["now"] = datetime(2026, 3, 1, 14, 5, tzinfo=UTC)
     second = run_scanner(runner.run(_config(["BTCUSDT"])))
     applied = apply_lifecycle_to_run_result(
         second,
         database_path=db_path,
-        scan_run_id="r57-run-2",
+        scan_run_id=f"{run_prefix}-run-2",
         now="2026-03-01T14:05:00Z",
         expected_identity=SYNTHETIC_IDENTITY,
         confirmation_cycles=2,
     )
-    with sqlite3.connect(db_path) as connection:
-        origin = connection.execute(
-            "SELECT status, origin_id FROM runtime_operational_origins WHERE symbol = 'BTCUSDT' AND status = 'granted'"
-        ).fetchone()
-        life = connection.execute(
-            "SELECT lifecycle_id, runtime_epoch_id, creation_origin_id, current_state FROM setup_lifecycle_records WHERE symbol = 'BTCUSDT'"
-        ).fetchone()
-    assert origin is not None
-    assert life is not None
-    assert life[1] == SYNTHETIC_EPOCH_ID
-    assert life[2]
-    second_life = applied.results[0].lifecycle_state
-    assert first_life is not None
-    assert second_life is not None
-    assert first_life.current_state != SetupLifecycleState.REJECTED
-    assert second_life.confirmation_count >= first_life.confirmation_count
     sender = FakeSender()
     summary = run(
         TelegramLifecycleDeliveryService(
@@ -1141,69 +1164,157 @@ def test_r57_real_producer_pipeline_creates_owned_public_send(
             min_rr=Decimal("3"),
             min_score_for_idea=Decimal("88"),
             expected_identity=SYNTHETIC_IDENTITY,
-        ).deliver_for_run(applied_first, scan_run_id="r57-deliver")
+        ).deliver_for_run(applied, scan_run_id=f"{run_prefix}-deliver")
     )
     with sqlite3.connect(db_path) as connection:
         connection.row_factory = sqlite3.Row
-        event = connection.execute(
-            "SELECT id, event_key, runtime_epoch_id, origin_lifecycle_id FROM public_alert_events WHERE runtime_epoch_id IS NOT NULL"
+        life = connection.execute(
+            "SELECT lifecycle_id, runtime_epoch_id, creation_origin_id, current_state, confirmation_count "
+            "FROM setup_lifecycle_records WHERE symbol = 'BTCUSDT'"
         ).fetchone()
-    assert first.results[0].trade_idea is not None
+        origin = None
+        if life is not None:
+            origin = connection.execute(
+                "SELECT status, origin_id FROM runtime_operational_origins "
+                "WHERE origin_id = ? AND symbol = 'BTCUSDT' AND status = 'granted'",
+                (life["creation_origin_id"],),
+            ).fetchone()
+        event = connection.execute(
+            "SELECT id, event_key, event_type, runtime_epoch_id, origin_lifecycle_id, "
+            "status, delivery_state, claim_owner, attempt_id "
+            "FROM public_alert_events WHERE runtime_epoch_id IS NOT NULL"
+        ).fetchone()
+        attempt = connection.execute(
+            "SELECT id, public_watchlist_event_key, public_alert_event_type, telegram_status, "
+            "delivery_state, rr_planned, min_rr, lifecycle_state "
+            "FROM telegram_alert_attempts"
+        ).fetchone()
+        part = None
+        if event is not None:
+            part = connection.execute(
+                "SELECT id, public_alert_event_id, event_key, delivery_state, attempt_id "
+                "FROM public_alert_delivery_parts WHERE public_alert_event_id = ?",
+                (event["id"],),
+            ).fetchone()
+    return first, applied_first, applied, summary, sender, origin, life, event, attempt, part, db_path
+
+
+def test_r57_real_producer_pipeline_creates_owned_public_send(tmp_path: Path) -> None:
+    """Fake producer → owned origin/lifecycle → confirmation → public reservation → fake send.
+
+    Geometry-only change: `_public_min_rr_pullback_candles` makes the unchanged
+    strategy emit planned RR >= public min 3. No origin/lifecycle stamps, no
+    ACTIONABLE_A_GRADE/CONFIRMED seeding, no RR/target/scoring/identity edits.
+    """
+    assert PUBLIC_SIGNAL_MIN_RR == Decimal("3")
+    assert DEFAULT_CONFIGURED_MINIMUM_RR == Decimal("2.5")
+    (
+        first,
+        applied_first,
+        applied,
+        summary,
+        sender,
+        origin,
+        life,
+        event,
+        attempt,
+        part,
+        _db_path,
+    ) = _producer_lifecycle_then_deliver(
+        tmp_path,
+        db_name="r57.db",
+        candles=_public_min_rr_pullback_candles(),
+        run_prefix="r57",
+    )
+    symbol = first.results[0]
+    planned_rr = Decimal(str((symbol.strategy_diagnostics.get("swing") or {}).get("rr_to_tp2")))
+    assert symbol.trade_idea is not None
+    assert planned_rr >= PUBLIC_SIGNAL_MIN_RR
+    assert origin is not None
+    assert origin["status"] == "granted"
+    assert life is not None
+    assert life["runtime_epoch_id"] == SYNTHETIC_EPOCH_ID
+    assert life["creation_origin_id"]
+    assert origin["origin_id"] == life["creation_origin_id"]
+    first_life = applied_first.results[0].lifecycle_state
+    second_life = applied.results[0].lifecycle_state
     assert first_life is not None
+    assert second_life is not None
     assert first_life.current_state != SetupLifecycleState.REJECTED
+    assert second_life.confirmation_count >= 2
+    assert second_life.confirmation_count >= first_life.confirmation_count
+    assert second_life.current_state == SetupLifecycleState.CONFIRMED
+    assert summary.sent == 1
+    assert sender.messages
+    assert sender.calls
+    assert event is not None
+    assert event["runtime_epoch_id"] == SYNTHETIC_EPOCH_ID
+    assert event["origin_lifecycle_id"] == life["lifecycle_id"]
+    assert event["event_type"] == "signal_confirmed"
+    assert event["claim_owner"]
+    assert event["delivery_state"] == SENT
+    assert attempt is not None
+    assert attempt["public_watchlist_event_key"] == event["event_key"]
+    assert attempt["public_alert_event_type"] == "SIGNAL_CONFIRMED"
+    assert Decimal(str(attempt["rr_planned"])) >= PUBLIC_SIGNAL_MIN_RR
+    assert Decimal(str(attempt["min_rr"])) == PUBLIC_SIGNAL_MIN_RR
+    assert attempt["lifecycle_state"] == "CONFIRMED"
+    assert part is not None
+    assert part["public_alert_event_id"] == event["id"]
+    assert part["event_key"] == event["event_key"]
+    assert part["attempt_id"] == event["attempt_id"]
+
+
+def test_r58_insufficient_public_rr_pipeline_does_not_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Canonical 2.66R pullback remains blocked by unchanged public min RR 3."""
+    import app.pipeline.scanner_runner as scanner_runner_module
+
+    assert PUBLIC_SIGNAL_MIN_RR == Decimal("3")
+    assert DEFAULT_CONFIGURED_MINIMUM_RR == Decimal("2.5")
+    monkeypatch.setattr(
+        scanner_runner_module,
+        "build_target_intelligence",
+        lambda *args, **kwargs: _clean_target_intelligence(),
+    )
+    (
+        first,
+        applied_first,
+        applied,
+        summary,
+        sender,
+        origin,
+        life,
+        event,
+        _attempt,
+        _part,
+        _db_path,
+    ) = _producer_lifecycle_then_deliver(
+        tmp_path,
+        db_name="r58.db",
+        candles=_strategy_pullback_candles(),
+        run_prefix="r58",
+    )
+    symbol = first.results[0]
+    planned_rr = Decimal(str((symbol.strategy_diagnostics.get("swing") or {}).get("rr_to_tp2")))
+    assert symbol.trade_idea is not None
+    assert planned_rr == Decimal("2.65955826")
+    assert planned_rr < PUBLIC_SIGNAL_MIN_RR
+    assert origin is not None
+    assert life is not None
+    first_life = applied_first.results[0].lifecycle_state
+    second_life = applied.results[0].lifecycle_state
+    assert first_life is not None
+    assert second_life is not None
+    assert first_life.current_state != SetupLifecycleState.REJECTED
+    assert second_life.confirmation_count >= first_life.confirmation_count
     assert summary.sent == 0
     assert sender.messages == []
     assert sender.calls == []
     assert event is None
     reasons = " ".join(summary.public_watchlist_audit.skipped_by_reason)
-    assert "rr_below_public_min" in reasons or "public_block_low_opportunity_score" in reasons
-
-
-def test_r58_insufficient_quality_pipeline_does_not_send(tmp_path: Path) -> None:
-    db_path = tmp_path / "r58.db"
-    with open_initialized_database(db_path) as connection:
-        initialize_runtime_epoch(connection, SYNTHETIC_IDENTITY, activated_at=SYNTHETIC_CUTOFF_AT)
-        connection.commit()
-    clock_now = datetime(2026, 3, 1, 14, 0, tzinfo=UTC)
-    client = FakeAdapterExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes={"2d"})
-    scanned = run_scanner(
-        ScannerRunner(
-            exchange_client=client,
-            clock=lambda: clock_now,
-            capture_clock=lambda: clock_now,
-        ).run(_config(["BTCUSDT"]))
-    )
-    applied = apply_lifecycle_to_run_result(
-        scanned,
-        database_path=db_path,
-        scan_run_id="r58-run",
-        now="2026-03-01T14:00:00Z",
-        expected_identity=SYNTHETIC_IDENTITY,
-    )
-    sender = FakeSender()
-    summary = run(
-        TelegramLifecycleDeliveryService(
-            database_path=db_path,
-            settings=Settings(
-                _env_file=None,
-                telegram_dry_run=True,
-                telegram_signals_enabled=False,
-                telegram_public_watchlist_enabled=True,
-                local_manual_mode=True,
-                order_execution_enabled=False,
-            ),
-            sender=sender,
-            expected_identity=SYNTHETIC_IDENTITY,
-        ).deliver_for_run(applied, scan_run_id="r58-deliver")
-    )
-    assert summary.sent == 0
-    assert sender.messages == []
-    assert sender.calls == []
-    with sqlite3.connect(db_path) as connection:
-        events = connection.execute(
-            "SELECT COUNT(*) FROM public_alert_events WHERE runtime_epoch_id IS NOT NULL"
-        ).fetchone()[0]
-    assert events == 0
+    assert "rr_below_public_min" in reasons or "public_block_rr_below_3" in reasons or "public_watchlist_rr_below_min" in reasons
 
 
 def test_r59_global_legacy_sent_event_key_remains_consumed(tmp_path: Path) -> None:
