@@ -671,7 +671,7 @@ def test_ordinary_runner_to_lifecycle_handoff(tmp_path: Path) -> None:
         raw = connection.execute("SELECT raw_payload_json FROM scan_runs").fetchone()[0]
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert "lifecycle_batch_handoff" not in raw
-    assert user_version == SCHEMA_VERSION == 25
+    assert user_version == SCHEMA_VERSION == 26
     assert symbol.status in {
         ScannerPipelineStatus.SCANNED_NO_SETUP,
         ScannerPipelineStatus.REJECTED_BY_TECHNICAL,
@@ -1060,7 +1060,7 @@ def test_schema_and_source_contract_remain_v25_unbound(tmp_path: Path) -> None:
         columns: set[str] = set()
         for table in tables:
             columns.update(row[1] for row in connection.execute(f"PRAGMA table_info({table})"))
-    assert user_version == 25
+    assert user_version == 26
     assert "candle_batch_evidence" not in tables
     assert "source_evidence" not in tables
     for forbidden in ("admission_id", "source_namespace", "capture_occurrence_id", "evaluation_policy_id"):

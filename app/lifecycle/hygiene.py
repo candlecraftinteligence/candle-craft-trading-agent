@@ -805,6 +805,10 @@ def _apply_item(
     if row is None:
         raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} no longer exists.")
     record_row = dict(row)
+    if record_row.get("runtime_epoch_id") in (None, "", "N/A"):
+        raise LifecycleHygieneError(
+            f"Lifecycle {item.lifecycle_id} is legacy or unattributed and cannot be mutated by hygiene."
+        )
     failure = stored_plan_geometry_failure(record_row)
     if failure is None:
         raise LifecycleHygieneError(f"Lifecycle {item.lifecycle_id} geometry is no longer malformed.")

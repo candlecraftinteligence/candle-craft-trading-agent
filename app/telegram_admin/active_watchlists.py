@@ -14,6 +14,7 @@ from app.alerts.watchlist_expiry import parse_utc_timestamp, watchlist_expiry_de
 from app.data.dtos import NA
 from app.formatters.telegram_signal_formatter import RANGE_DASH, TelegramAlertType, format_telegram_price, format_telegram_rr
 from app.lifecycle.eligibility import active_signal_eligible, public_watchlist_eligible
+from app.runtime_epoch.authority import load_active_runtime_epoch
 from app.storage.database import StorageError, open_read_only_database
 
 ACTIVE_WATCHLIST_DISPLAY_LIMIT = 10
@@ -647,6 +648,42 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return open_read_only_database(path)
 
 
+def _attempt_is_current_epoch_operational(
+    connection: sqlite3.Connection,
+    row: Mapping[str, Any],
+) -> bool:
+    epoch = load_active_runtime_epoch(connection)
+    if epoch is None:
+        return False
+    event_key = _clean(row.get("public_watchlist_event_key"))
+    if event_key != NA and _table_exists(connection, "public_alert_events"):
+        event_columns = _table_columns(connection, "public_alert_events")
+        if "runtime_epoch_id" in event_columns:
+            event = connection.execute(
+                "SELECT runtime_epoch_id FROM public_alert_events WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+            if event is not None and str(event["runtime_epoch_id"] or "") == epoch.epoch_id:
+                return True
+    signal_id = _clean(row.get("signal_id"))
+    candidates = [signal_id] if signal_id != NA else []
+    if signal_id != NA:
+        prefix, marker, digest = signal_id.rpartition("-SETUP-")
+        if marker and prefix and len(digest) == 16:
+            candidates.append(prefix)
+    if candidates and _table_exists(connection, "setup_lifecycle_records"):
+        lifecycle_columns = _table_columns(connection, "setup_lifecycle_records")
+        if "runtime_epoch_id" in lifecycle_columns:
+            for candidate in candidates:
+                lifecycle = connection.execute(
+                    "SELECT runtime_epoch_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+                    (candidate,),
+                ).fetchone()
+                if lifecycle is not None and str(lifecycle["runtime_epoch_id"] or "") == epoch.epoch_id:
+                    return True
+    return False
+
+
 def _sent_alert_attempt_rows(
     connection: sqlite3.Connection,
     *,
@@ -681,6 +718,7 @@ def _sent_alert_attempt_rows(
         _select_or_na("invalid_target_fields", columns),
         _select_or_na("error_message", columns),
         _select_or_na("last_error_message", columns),
+        _select_or_na("public_watchlist_event_key", columns),
         *(_select_or_na(column, columns) for column in _LEVEL_COLUMNS),
     ]
     placeholders = ",".join("?" for _ in alert_types)
@@ -707,6 +745,8 @@ def _stage_items_from_alert_rows(
     for row in rows:
         signal_id = _clean(row.get("signal_id"))
         if signal_id == NA:
+            continue
+        if not _attempt_is_current_epoch_operational(connection, row):
             continue
         by_signal.setdefault(signal_id, []).append(row)
 
@@ -803,6 +843,13 @@ def _stage_items_from_lifecycle_records(connection: sqlite3.Connection) -> tuple
     if not required <= columns:
         return ()
     current_clause = "WHERE is_current = 1" if "is_current" in columns else ""
+    if "runtime_epoch_id" in columns:
+        epoch_filter = (
+            "runtime_epoch_id = (SELECT epoch_id FROM runtime_epoch_control WHERE control_key = 'active')"
+        )
+        current_clause = f"{current_clause} AND {epoch_filter}" if current_clause else f"WHERE {epoch_filter}"
+    else:
+        return ()
     select_columns = [
         "lifecycle_id",
         "symbol",
@@ -968,6 +1015,8 @@ def _active_items_from_rows(
         signal_id = _clean(row.get("signal_id"))
         if signal_id == NA:
             continue
+        if not _attempt_is_current_epoch_operational(connection, row):
+            continue
         by_signal.setdefault(signal_id, []).append(row)
 
     items: list[ActiveWatchlistItem] = []
@@ -1027,6 +1076,8 @@ def _active_signal_items_from_rows(
     for row in rows:
         signal_id = _clean(row.get("signal_id"))
         if signal_id == NA:
+            continue
+        if not _attempt_is_current_epoch_operational(connection, row):
             continue
         by_signal.setdefault(signal_id, []).append(row)
 

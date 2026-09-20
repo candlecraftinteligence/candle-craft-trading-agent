@@ -115,7 +115,7 @@ CONSUMER_INVENTORY: Final[tuple[dict[str, Any], ...]] = (
         "module": "scripts/run_scan.py + app.storage.repositories.store_scan_result",
         "role": "writer",
         "db_path": "explicit --database-path; default scan_runs/candle_craft.db relative to CWD",
-        "payload": "encodes via encode_scan_raw_payload; decoder-capable v25 writer",
+        "payload": "encodes via encode_scan_raw_payload; decoder-capable v26 writer",
         "startup": "scripts/run_scan.py including --watch / watch_supervisor",
     },
     {

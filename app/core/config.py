@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     order_book_liquidity_snapshot_limit: Literal[5, 10, 20, 50, 100, 500, 1000] = 500
     order_book_liquidity_bootstrap_concurrency: int = 2
     order_book_liquidity_event_buffer_size: int = 256
+    runtime_epoch_id: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

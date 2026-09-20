@@ -17,6 +17,7 @@ from app.analytics.outcome_ownership import (
 from app.data.candle_integrity import normalize_utc_timestamp
 from app.data.dtos import NA
 from app.lifecycle.economic_identity import latch_economic_identities, proven_progress_plan_version_id
+from app.runtime_epoch.errors import RuntimeEpochOwnershipError
 from app.lifecycle.models import SetupLifecycleOutcomeProgress, SetupLifecycleRecord, SetupLifecycleState
 from app.lifecycle.outcome_policy import canonical_plan_identity
 from app.lifecycle.outcomes import evaluate_closed_candle_outcomes
@@ -742,7 +743,7 @@ def test_p3a_projection_does_not_mutate_or_open_database(tmp_path: Path) -> None
         after = _sql_progress(repository, record.lifecycle_id)[0]
         schema_after = repository._connection.execute("PRAGMA user_version").fetchone()[0]
     assert before == after
-    assert schema_before == schema_after == SCHEMA_VERSION == 25
+    assert schema_before == schema_after == SCHEMA_VERSION == 26
     source = Path("app/analytics/outcome_ownership.py").read_text(encoding="utf-8")
     assert "sqlite3" not in source
     assert "open_initialized_database" not in source
@@ -763,7 +764,8 @@ def test_migrated_legacy_row_reload_does_not_populate_cutoff(tmp_path: Path) -> 
         assert loaded is not None
         assert loaded.last_eligibility_decision_at is None
         assert loaded.plan_version_id is None
-        repository.upsert_outcome_progress(loaded)
+        with pytest.raises(RuntimeEpochOwnershipError):
+            repository.upsert_outcome_progress(loaded)
         attributed = repository.get_outcome_progress(
             lifecycle_id="v22-active-attributed",
             plan_identity="plan-v22-active-attr",
@@ -771,7 +773,8 @@ def test_migrated_legacy_row_reload_does_not_populate_cutoff(tmp_path: Path) -> 
         assert attributed is not None
         assert attributed.last_eligibility_decision_at is None
         assert attributed.plan_version_id == "plan-version-active"
-        repository.upsert_outcome_progress(attributed)
+        with pytest.raises(RuntimeEpochOwnershipError):
+            repository.upsert_outcome_progress(attributed)
         rows = repository._connection.execute(
             """
             SELECT lifecycle_id, plan_version_id, last_eligibility_decision_at
@@ -796,4 +799,4 @@ def test_public_health_memory_do_not_consume_cutoff_field() -> None:
         assert banned not in inspect.getsource(module)
     assert evidence_contract_payload()["outcome_ownership"]["feeds_operational_decisions"] is False
     assert evidence_contract_payload()["unique_trade_count"]["status"] == UNAVAILABLE
-    assert SCHEMA_VERSION == 25
+    assert SCHEMA_VERSION == 26

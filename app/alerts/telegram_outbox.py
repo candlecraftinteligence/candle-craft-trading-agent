@@ -10,6 +10,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from app.alerts.templates import TELEGRAM_MAX_MESSAGE_LENGTH, split_message
 from app.data.dtos import NA
+from app.runtime_epoch.errors import RuntimeEpochOwnershipError
+from app.runtime_epoch.ownership import decide_public_effect, require_public_event_mutation
 
 PENDING = "PENDING"
 IN_FLIGHT = "IN_FLIGHT"
@@ -77,6 +79,11 @@ def persist_intent_parts(
 
     chunks = split_message(message_text, max_message_length)
     now = _now_iso()
+    event = connection.execute(
+        "SELECT * FROM public_alert_events WHERE id = ?",
+        (int(event_id),),
+    ).fetchone()
+    require_public_event_mutation(connection, event)
     connection.execute(
         """
         UPDATE public_alert_events
@@ -152,6 +159,12 @@ class SQLitePublicTelegramOutbox:
 
     def recover_stale_in_flight(self, *, event_id: int, now: str | None = None) -> bool:
         with self._transaction():
+            row = self.connection.execute(
+                "SELECT * FROM public_alert_events WHERE id = ?", (int(event_id),)
+            ).fetchone()
+            decision = decide_public_effect(self.connection, row)
+            if not decision.allowed:
+                return False
             return self._recover_stale_locked(event_id=event_id, now=now or _now_iso())
 
     def claim(
@@ -168,6 +181,16 @@ class SQLitePublicTelegramOutbox:
         delivery_attempt_id = attempt_id or uuid.uuid4().hex
         lease_expires_at = _add_seconds(timestamp, max(1, int(lease_seconds)))
         with self._transaction():
+            row = self.connection.execute(
+                "SELECT * FROM public_alert_events WHERE id = ?", (int(event_id),)
+            ).fetchone()
+            decision = decide_public_effect(self.connection, row)
+            if not decision.allowed:
+                return TelegramOutboxClaimResult(
+                    None,
+                    _state(row["delivery_state"]) if row is not None else FAILED_FINAL,
+                    decision.reason,
+                )
             self._recover_stale_locked(event_id=event_id, now=timestamp)
             row = self.connection.execute(
                 "SELECT * FROM public_alert_events WHERE id = ?", (int(event_id),)
@@ -282,6 +305,13 @@ class SQLitePublicTelegramOutbox:
             detail = "Telegram success could not be proven without a message ID."
         sent_at = _optional_text(result.get("sent_at")) or (timestamp if result_state == SENT else None)
         with self._transaction():
+            owned = self.connection.execute(
+                "SELECT * FROM public_alert_events WHERE id = ?",
+                (int(event_id),),
+            ).fetchone()
+            decision = decide_public_effect(self.connection, owned)
+            if not decision.allowed:
+                return _state(owned["delivery_state"]) if owned is not None else FAILED_FINAL
             event = self.connection.execute(
                 "SELECT attempt_count, max_attempts FROM public_alert_events WHERE id = ? AND attempt_id = ?",
                 (int(event_id), attempt_id),
@@ -350,6 +380,12 @@ class SQLitePublicTelegramOutbox:
             raise ValueError(f"Unsupported no-send terminal state: {state}")
         timestamp = now or _now_iso()
         with self._transaction():
+            owned = self.connection.execute(
+                "SELECT * FROM public_alert_events WHERE id = ?",
+                (int(event_id),),
+            ).fetchone()
+            if not decide_public_effect(self.connection, owned).allowed:
+                return
             self.connection.execute(
                 """
                 UPDATE public_alert_delivery_parts
@@ -367,6 +403,12 @@ class SQLitePublicTelegramOutbox:
     ) -> None:
         try:
             with self._transaction():
+                owned = self.connection.execute(
+                    "SELECT * FROM public_alert_events WHERE id = ?",
+                    (int(event_id),),
+                ).fetchone()
+                if not decide_public_effect(self.connection, owned).allowed:
+                    return
                 self._mark_event_locked(
                     event_id, reservation_id, UNCERTAIN,
                     "sent_persistence_failed", detail, now or _now_iso(),

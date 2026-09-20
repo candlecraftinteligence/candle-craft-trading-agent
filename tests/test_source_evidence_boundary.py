@@ -233,7 +233,7 @@ def test_schema_remains_v25_without_source_policy_or_admission_binding(tmp_path:
         analytics_unique = connection.execute(
             "PRAGMA index_info(sqlite_autoindex_setup_outcome_analytics_1)"
         ).fetchall()
-    assert user_version == SCHEMA_VERSION == 25
+    assert user_version == SCHEMA_VERSION == 26
     assert sqlite_schema_version != user_version
     assert sqlite_schema_version > 0
     assert len(tables) >= 13

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.data.dtos import NA
 from app.storage.database import open_initialized_database
+from tests.runtime_epoch_support import stamp_sql_lifecycle_row, stamp_sql_public_event
 from app.telegram_admin import TelegramAdminCommandService, TelegramAdminConfig, process_telegram_admin_commands
 from app.telegram_admin.active_watchlists import (
     WATCHLIST_DASHBOARD_FOOTER,
@@ -84,6 +85,7 @@ def _insert_attempt(
     effective_first_seen_at = first_seen_at or effective_sent_at
     effective_state = new_state or _default_state_for_alert_type(alert_type)
     effective_lifecycle_state = lifecycle_state or effective_state
+    event_key = f"epoch-test:{signal_id}:{alert_type}:{symbol}"
     connection = open_initialized_database(db_path)
     try:
         connection.execute(
@@ -92,8 +94,8 @@ def _insert_attempt(
                 signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
                 sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score, rr_planned, price_level,
                 first_seen_at, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
-                blocked_reason, error_message, last_error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                blocked_reason, error_message, last_error_message, public_watchlist_event_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal_id,
@@ -119,7 +121,17 @@ def _insert_attempt(
                 blocked_reason,
                 error_message,
                 last_error_message,
+                event_key,
             ),
+        )
+        stamp_sql_public_event(
+            connection,
+            event_key=event_key,
+            symbol=symbol,
+            side=direction,
+            event_type=alert_type,
+            status=status.upper() if status.lower() == "sent" else status,
+            timestamp=effective_sent_at,
         )
         connection.commit()
     finally:
@@ -273,6 +285,7 @@ def _insert_lifecycle_record(
                 tp3,
             ),
         )
+        stamp_sql_lifecycle_row(connection, lifecycle_id=lifecycle_id, symbol=symbol)
         connection.commit()
     finally:
         connection.close()

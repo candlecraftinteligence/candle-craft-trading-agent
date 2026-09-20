@@ -12,6 +12,7 @@ import httpx
 from app.alerts.integrity_manifest import build_alert_integrity_manifest
 from app.core.config import Settings
 from app.storage.database import open_initialized_database
+from tests.runtime_epoch_support import stamp_sql_public_event
 from app.telegram_admin import (
     HttpxTelegramAdminCommandTransport,
     TelegramAdminCommandService,
@@ -214,6 +215,7 @@ def _insert_runtime_attempt(
     sent_at: str | None = None,
 ) -> None:
     effective_sent_at = sent_at or datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    event_key = f"epoch-test:{signal_id}:{alert_type}:{symbol}"
     connection = open_initialized_database(db_path)
     try:
         connection.execute(
@@ -221,8 +223,9 @@ def _insert_runtime_attempt(
             INSERT INTO telegram_alert_attempts (
                 signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
                 sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score,
-                rr_planned, entry_low, entry_high, stop_loss, tp1, tp2, tp3
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rr_planned, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                public_watchlist_event_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal_id,
@@ -243,7 +246,17 @@ def _insert_runtime_attempt(
                 tp1,
                 tp2,
                 tp3,
+                event_key,
             ),
+        )
+        stamp_sql_public_event(
+            connection,
+            event_key=event_key,
+            symbol=symbol,
+            side=direction,
+            event_type=alert_type,
+            status=status.upper() if status.lower() == "sent" else status,
+            timestamp=effective_sent_at,
         )
         connection.commit()
     finally:

@@ -614,11 +614,14 @@ def test_legacy_sent_watchlist_remains_canonical_outcome_trackable(tmp_path) -> 
     first = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
     repeated = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
 
-    assert first.sent == 1
+    assert first.sent == 0
     assert repeated.sent == 0
-    assert [item.alert_type for item in _sent_outcomes(db_path)] == [
-        TelegramAlertType.TP1_HIT.value
-    ]
+    assert sender.messages == []
+    assert _sent_outcomes(db_path) == ()
+    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        types = {item.alert_type for item in repository.list_attempts()}
+    assert TelegramAlertType.WATCHLIST.value in types
+    assert TelegramAlertType.TP1_HIT.value not in types
 
 
 def test_pr96_equivalent_mode_projection_has_one_tp1(tmp_path) -> None:

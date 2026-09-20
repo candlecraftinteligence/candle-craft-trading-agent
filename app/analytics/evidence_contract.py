@@ -372,7 +372,7 @@ def _entities() -> dict[str, Any]:
                 "setup_outcome_analytics",
                 "telegram signal_id",
             ),
-            enforcement="PK lifecycle_id; partial unique current triple; tests/test_lifecycle.py",
+            enforcement="PK lifecycle_id; split partial unique (legacy NULL vs epoch-scoped current triple); tests/test_lifecycle.py",
         ),
         "READINESS": _entity(
             current_meaning=(

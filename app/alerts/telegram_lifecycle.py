@@ -79,6 +79,9 @@ from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
 from app.storage.models import PublicAlertEventRecord, TelegramAlertAttemptRecord
+from app.runtime_epoch.authority import load_active_runtime_epoch, require_active_runtime_epoch
+from app.runtime_epoch.errors import RuntimeEpochError
+from app.runtime_epoch.ownership import decide_public_effect, require_lifecycle_public_intent
 
 logger = logging.getLogger(__name__)
 
@@ -2059,7 +2062,28 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
 def _public_alert_event_from_row(row: sqlite3.Row | None) -> PublicAlertEventRecord | None:
     if row is None:
         return None
-    return PublicAlertEventRecord(**{key: row[key] for key in row.keys()})
+    allowed = {item.name for item in PublicAlertEventRecord.__dataclass_fields__.values()}
+    return PublicAlertEventRecord(**{key: row[key] for key in row.keys() if key in allowed})
+
+
+def _legacy_public_intent_claim_block(
+    db: SQLiteTelegramAlertAttemptRepository,
+    prior_event: PublicAlertEventRecord,
+) -> PublicWatchlistReservationResult | None:
+    decision = decide_public_effect(db._connection, prior_event)
+    if decision.allowed:
+        return None
+    delivery_state = _text(prior_event.delivery_state).upper()
+    if prior_event.status == PUBLIC_ALERT_EVENT_SENT_STATUS or delivery_state == SENT:
+        return None
+    return PublicWatchlistReservationResult(
+        granted=False,
+        event_key=prior_event.event_key,
+        event_id=prior_event.id,
+        status="blocked",
+        reason=decision.reason,
+        detail="Legacy or unattributed public intents cannot be claimed, recovered, retried, or rewritten.",
+    )
 
 
 def _public_alert_event_status(value: Any) -> str:
@@ -2163,14 +2187,19 @@ def _public_alert_event_with_resolved_structural_anchor(
     anchor = _text(row["structural_anchor"])
     if anchor == NA:
         return event
-    db._connection.execute(
-        """
-        UPDATE public_alert_events
-        SET structural_anchor = ?, updated_at = ?
-        WHERE id = ? AND structural_anchor IN ('', 'N/A')
-        """,
-        (anchor, now_utc_iso(), event.id),
-    )
+    event_row = db._connection.execute(
+        "SELECT * FROM public_alert_events WHERE id = ?",
+        (int(event.id),),
+    ).fetchone()
+    if event_row is not None and decide_public_effect(db._connection, event_row).allowed:
+        db._connection.execute(
+            """
+            UPDATE public_alert_events
+            SET structural_anchor = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (anchor, now_utc_iso(), int(event.id)),
+        )
     return replace(event, structural_anchor=anchor)
 
 
@@ -2227,9 +2256,29 @@ def _insert_public_alert_event(
     matched_prior_alert_id: int | None = None,
     matched_prior_event_id: int | None = None,
     failure_reason: str = NA,
+    origin_lifecycle_id: str | None = None,
+    origin_root_event_id: int | None = None,
 ) -> tuple[PublicAlertEventRecord | None, bool]:
     normalized_event_key = _text(event_key)
     if normalized_event_key == NA:
+        return None, False
+    existing = _get_public_alert_event(db, event_key=normalized_event_key)
+    if existing is not None:
+        return existing, False
+    epoch = load_active_runtime_epoch(db._connection)
+    if epoch is None:
+        return None, False
+    lifecycle_id = _resolve_origin_lifecycle_id_for_plan(
+        db._connection,
+        origin_lifecycle_id=origin_lifecycle_id,
+        plan=plan,
+        epoch=epoch,
+    )
+    if lifecycle_id == NA:
+        return None, False
+    try:
+        require_lifecycle_public_intent(db._connection, origin_lifecycle_id=lifecycle_id, epoch=epoch)
+    except RuntimeEpochError:
         return None, False
     source_modes = ",".join(plan.source_modes) if plan.source_modes else NA
     ledger_status = _public_alert_event_status(status)
@@ -2243,8 +2292,8 @@ def _insert_public_alert_event(
                 normalized_zone_low, normalized_zone_high, normalized_invalidation,
                 raw_entry_low, raw_entry_high, raw_stop_loss, status, reserved_at, sent_at,
                 source_modes, matched_prior_alert_id, matched_prior_event_id, failure_reason,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, runtime_epoch_id, origin_lifecycle_id, origin_root_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
 ,
             (
@@ -2270,6 +2319,9 @@ def _insert_public_alert_event(
                 _text(failure_reason),
                 timestamp,
                 timestamp,
+                epoch.epoch_id,
+                lifecycle_id,
+                int(origin_root_event_id) if origin_root_event_id is not None else None,
             ),
         )
     except sqlite3.IntegrityError:
@@ -2285,6 +2337,12 @@ def _mark_public_alert_event_result(
     sent_at: str | None,
     failure_reason: str,
 ) -> bool:
+    row = db._connection.execute(
+        "SELECT * FROM public_alert_events WHERE id = ?",
+        (int(event_id),),
+    ).fetchone()
+    if not decide_public_effect(db._connection, row).allowed:
+        return False
     ledger_status = PUBLIC_ALERT_EVENT_SENT_STATUS if _text(status) == "sent" else PUBLIC_ALERT_EVENT_FAILED_STATUS
     now = now_utc_iso()
     cursor = db._connection.execute(
@@ -2314,6 +2372,12 @@ def _reserve_existing_public_alert_event(
     event_id: int,
     reserved_at: str,
 ) -> bool:
+    row = db._connection.execute(
+        "SELECT * FROM public_alert_events WHERE id = ?",
+        (int(event_id),),
+    ).fetchone()
+    if not decide_public_effect(db._connection, row).allowed:
+        return False
     timestamp = reserved_at if _text(reserved_at) != NA else now_utc_iso()
     cursor = db._connection.execute(
         """
@@ -2361,6 +2425,7 @@ def _block_duplicate_public_alert_event(
         matched_prior_alert_id=matched_prior_alert_id,
         matched_prior_event_id=matched_prior_event_id,
         failure_reason=reason,
+        origin_lifecycle_id=_text(plan.plan_id),
     )
     return event
 
@@ -2412,6 +2477,9 @@ def reserve_public_watchlist_event(
             event_type=event_type,
         )
     if prior_event is not None:
+        blocked = _legacy_public_intent_claim_block(db, prior_event)
+        if blocked is not None:
+            return blocked
         prior_attempt = db.find_successful_public_watchlist_event(event_key=prior_event.event_key)
         delivery_state = _text(prior_event.delivery_state).upper()
         if delivery_state in {PENDING, RETRYABLE, IN_FLIGHT}:
@@ -2549,6 +2617,7 @@ def reserve_public_watchlist_event(
                 event_type=event_type,
                 status=PUBLIC_ALERT_EVENT_RESERVED_STATUS,
                 reserved_at=_text(reservation_record.attempted_at),
+                origin_lifecycle_id=_text(reservation_record.signal_id),
             )
             if ledger_event is None:
                 return PublicWatchlistReservationResult(
@@ -2596,6 +2665,7 @@ def reserve_public_watchlist_event(
         event_type=event_type,
         status=PUBLIC_ALERT_EVENT_RESERVED_STATUS,
         reserved_at=_text(reservation_record.attempted_at),
+        origin_lifecycle_id=_text(reservation_record.signal_id),
     )
     if ledger_event is None:
         return PublicWatchlistReservationResult(
@@ -2750,6 +2820,9 @@ def _reserve_public_lifecycle_event(
             event_type=event_type,
         )
     if prior_event is not None:
+        blocked = _legacy_public_intent_claim_block(db, prior_event)
+        if blocked is not None:
+            return blocked
         state = _text(prior_event.delivery_state).upper()
         attempt = db.get_public_watchlist_event_attempt(event_key=prior_event.event_key)
         if attempt is None:
@@ -2862,6 +2935,7 @@ def _reserve_public_lifecycle_event(
         event_type=event_type,
         status=PUBLIC_ALERT_EVENT_RESERVED_STATUS,
         reserved_at=_text(reservation_record.attempted_at),
+        origin_lifecycle_id=_text(reservation_record.signal_id),
     )
     if event is None or event.id is None:
         return PublicWatchlistReservationResult(
@@ -3506,6 +3580,7 @@ class TelegramLifecycleDeliveryService:
                     signal_confirmed_sent += 1
 
         with SQLiteTelegramAlertAttemptRepository(self.database_path) as repository:
+            require_active_runtime_epoch(repository._connection)
             with SQLiteSetupLifecycleRepository(self.database_path) as lifecycle_repository:
                 prior_sent_watchlists = repository.list_sent_watchlist_alerts()
                 min_score_for_idea = self.min_score_for_idea
@@ -3820,6 +3895,8 @@ class TelegramLifecycleDeliveryService:
             event = _public_alert_event_from_row(row)
             if event is None or event.id is None:
                 continue
+            if not decide_public_effect(repository._connection, row).allowed:
+                continue
             alert_type = PUBLIC_LIFECYCLE_OUTBOX_ALERT_BY_EVENT_TYPE.get(
                 _status_key(event.event_type)
             )
@@ -3932,6 +4009,16 @@ class TelegramLifecycleDeliveryService:
         public_watchlist_hourly_cap_reached: bool | None = None,
     ) -> TelegramLifecycleDelivery | None:
         lifecycle = symbol_result.lifecycle_state
+        if lifecycle is not None:
+            epoch = load_active_runtime_epoch(repository._connection)
+            if epoch is None:
+                return None
+            stored = repository._connection.execute(
+                "SELECT runtime_epoch_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+                (lifecycle.lifecycle_id,),
+            ).fetchone()
+            if stored is not None and stored["runtime_epoch_id"] != epoch.epoch_id:
+                return None
         alert_type_hint = (
             _alert_type_for_transition(symbol_result, symbol_result.lifecycle_transition)
             if symbol_result.lifecycle_transition
@@ -4634,6 +4721,14 @@ class TelegramLifecycleDeliveryService:
         matches_by_plan: dict[str, list[CanonicalPublicOutcomeMatch]] = {}
         audit_deliveries: list[TelegramLifecycleDelivery] = []
         for prior_alert in publicly_tracked_signals:
+            prior_event = _get_public_alert_event(
+                repository,
+                event_key=_text(prior_alert.public_watchlist_event_key),
+            )
+            if prior_event is None or not decide_public_effect(
+                repository._connection, prior_event
+            ).allowed:
+                continue
             match, blocked_reason = _match_public_tracking_outcome(
                 prior_alert,
                 alert_repository=repository,
@@ -4886,6 +4981,14 @@ class TelegramLifecycleDeliveryService:
         snapshot_watchlists_by_symbol = _sent_watchlist_snapshot_by_symbol(sent_watchlists)
         for prior_alert in sent_watchlists:
             if prior_alert.alert_type != TelegramAlertType.WATCHLIST.value or prior_alert.telegram_status != "sent":
+                continue
+            prior_event = _get_public_alert_event(
+                repository,
+                event_key=_text(prior_alert.public_watchlist_event_key),
+            )
+            if prior_event is None or not decide_public_effect(
+                repository._connection, prior_event
+            ).allowed:
                 continue
             if _symbol(prior_alert.symbol) in current_run_identity_blocked_symbols:
                 continue
@@ -12520,6 +12623,8 @@ def _match_sent_watchlist_lifecycle(
     snapshot_watchlists_by_symbol: Mapping[str, tuple[TelegramAlertAttemptRecord, ...]],
 ) -> SentWatchlistLifecycleMatch:
     exact = lifecycle_repository.get_record_by_lifecycle_id(prior_alert.signal_id)
+    if exact is not None and not _lifecycle_record_is_operational(lifecycle_repository, exact):
+        exact = None
     if exact is not None:
         return SentWatchlistLifecycleMatch(record=exact)
 
@@ -12559,15 +12664,17 @@ def _match_public_tracking_outcome(
     anchored_lifecycle_id = _setup_delivery_lifecycle_id(prior_alert.signal_id)
     exact_lookup_id = anchored_lifecycle_id or prior_alert.signal_id
     exact = lifecycle_repository.get_record_by_lifecycle_id(exact_lookup_id)
-    if exact is not None:
+    if exact is not None and _lifecycle_record_is_operational(lifecycle_repository, exact):
         records[exact.lifecycle_id] = exact
     for record in _current_lifecycle_records_for_signal_id(prior_alert.signal_id, current_results):
-        records.setdefault(record.lifecycle_id, record)
+        if _lifecycle_record_is_operational(lifecycle_repository, record):
+            records.setdefault(record.lifecycle_id, record)
     for record in lifecycle_repository.list_records_for_symbol(
         symbol=prior_alert.symbol,
         direction=prior_alert.direction,
     ):
-        records.setdefault(record.lifecycle_id, record)
+        if _lifecycle_record_is_operational(lifecycle_repository, record):
+            records.setdefault(record.lifecycle_id, record)
 
     anchored_record = (
         records.get(anchored_lifecycle_id)
@@ -12808,6 +12915,38 @@ def _setup_delivery_lifecycle_id(signal_id: Any) -> str | None:
     if any(character not in "0123456789abcdef" for character in digest.lower()):
         return None
     return prefix
+
+
+def _resolve_origin_lifecycle_id_for_plan(
+    connection,
+    *,
+    origin_lifecycle_id: Any,
+    plan: PublicWatchlistPlanIdentity,
+    epoch,
+) -> str:
+    candidates: list[str] = []
+    for raw in (origin_lifecycle_id, getattr(plan, "plan_id", NA)):
+        text = _text(raw)
+        if text != NA and text not in candidates:
+            candidates.append(text)
+        stripped = _setup_delivery_lifecycle_id(text) if text != NA else None
+        if stripped and stripped not in candidates:
+            candidates.append(stripped)
+    claimed_missing = NA
+    for candidate in candidates:
+        row = connection.execute(
+            "SELECT runtime_epoch_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+            (candidate,),
+        ).fetchone()
+        if row is None:
+            if claimed_missing == NA:
+                claimed_missing = candidate
+            continue
+        stored = row["runtime_epoch_id"]
+        if stored is not None and str(stored).strip() == epoch.epoch_id:
+            return candidate
+        return NA
+    return claimed_missing
 
 
 def _public_tracking_root_source_modes(
@@ -13317,10 +13456,12 @@ def _supersede_public_target_intent(
         alert_type.value,
     )
     row = repository._connection.execute(
-        "SELECT id, delivery_state FROM public_alert_events WHERE event_key = ?",
+        "SELECT * FROM public_alert_events WHERE event_key = ?",
         (event_key,),
     ).fetchone()
-    if row is not None and _text(row["delivery_state"]).upper() in {
+    if row is None or not decide_public_effect(repository._connection, row).allowed:
+        return
+    if _text(row["delivery_state"]).upper() in {
         PENDING,
         RETRYABLE,
         FAILED_FINAL,
@@ -13684,6 +13825,11 @@ def _fallback_lifecycle_records_for_prior_alert(
     prior_alert: TelegramAlertAttemptRecord,
 ) -> tuple[SetupLifecycleRecord, ...]:
     records = lifecycle_repository.list_records_for_symbol(symbol=prior_alert.symbol)
+    records = tuple(
+        record
+        for record in records
+        if _lifecycle_record_is_operational(lifecycle_repository, record)
+    )
     direction = _status_key(prior_alert.direction)
     if direction not in {"long", "short"}:
         return records
@@ -13693,6 +13839,18 @@ def _fallback_lifecycle_records_for_prior_alert(
         if _status_key(record.direction) in {direction, ""}
     )
     return matched
+
+
+def _lifecycle_record_is_operational(
+    lifecycle_repository: SQLiteSetupLifecycleRepository,
+    record: SetupLifecycleRecord | None,
+) -> bool:
+    if record is None:
+        return False
+    epoch = load_active_runtime_epoch(lifecycle_repository._connection)
+    if epoch is None:
+        return False
+    return record.runtime_epoch_id == epoch.epoch_id
 
 
 def _current_result_for_lifecycle_record(

@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.runtime_epoch_support import stamp_sql_public_event
 from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
@@ -820,7 +821,17 @@ def _seed_prior_active_alert(
         else f"{stored_entry_low}-{stored_entry_high}"
     )
     stored_sent_at = sent_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    event_key = f"{signal_id}|{alert_type.value}"
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+        stamp_sql_public_event(
+            repository._connection,
+            event_key=event_key,
+            symbol=symbol,
+            side=direction,
+            event_type=alert_type.value,
+            status="SENT" if status == "sent" else status,
+            timestamp=stored_sent_at,
+        )
         repository.insert_attempt(
             TelegramAlertAttemptRecord(
                 signal_id=signal_id,
@@ -843,6 +854,8 @@ def _seed_prior_active_alert(
                 tp2=stored_tp2,
                 tp3=stored_tp3,
                 first_seen_at=stored_sent_at,
+                public_watchlist_event_key=event_key,
+                public_watchlist_plan_id=signal_id,
             )
         )
 
