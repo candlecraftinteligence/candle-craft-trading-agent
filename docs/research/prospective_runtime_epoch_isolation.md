@@ -250,4 +250,4 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 - Baseline main: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
 - Prior reviewed HEAD: `01cd99f146ea607cdc60650bbddc724af19e5155`
 - Second bounded repair commit: `869154aba3db80ce07b400552845e926d4e12626`
-- Final PR HEAD: `869154aba3db80ce07b400552845e926d4e12626`
+- Final PR HEAD: `43cba9c0b57c741ebcca6169b0b73e430738ff13`
