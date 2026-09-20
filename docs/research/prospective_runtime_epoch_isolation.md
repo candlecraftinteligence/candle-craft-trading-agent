@@ -26,8 +26,8 @@ This repair does **not** claim research admission, source provenance completenes
 - Baseline main SHA: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
 - Old reviewed blocked PR HEAD: `d616069843a3d27eb6f223bf3f4ea7d2e1afbc00`
 - Architecture review verdict on that HEAD: `CHANGES_REQUIRED_ORIGIN_AND_PUBLIC_OWNERSHIP_BYPASSES`
-- Repair commit SHA: recorded after commit in this same document section (see Git record below)
-- Final PR HEAD: recorded after push
+- Repair commit SHA: `68fa3af330b4a4228cf164c9a591f0205543caf7`
+- Final PR HEAD: `68fa3af330b4a4228cf164c9a591f0205543caf7` (updated again if a pin commit follows)
 
 ## What remains from the original phase (kept)
 
@@ -199,5 +199,5 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 ## Git record
 
 - Old reviewed blocked HEAD: `d616069843a3d27eb6f223bf3f4ea7d2e1afbc00`
-- Repair commit SHA: *filled at commit time*
-- Final PR HEAD: *filled after push*
+- Repair commit SHA: `68fa3af330b4a4228cf164c9a591f0205543caf7`
+- Final PR HEAD: `68fa3af330b4a4228cf164c9a591f0205543caf7`
