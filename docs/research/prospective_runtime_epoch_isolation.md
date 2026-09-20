@@ -22,8 +22,7 @@ This document is the architecture handoff. It is not a Runtime runbook and does 
 - Reviewed main SHA: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
 - Feature branch: `feature/prospective-runtime-epoch-isolation`
 - Implementation commit SHA: `3e754ecfb649cee057bc30b742ac21714a75732b`
-- Final commit SHA: *branch tip after identifier commits*
-- PR URL: *filled after open*
+- PR URL: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/123
 
 ## What was implemented
 
