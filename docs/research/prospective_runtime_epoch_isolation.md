@@ -258,5 +258,5 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 - Prior reviewed HEAD: `01cd99f146ea607cdc60650bbddc724af19e5155`
 - Second bounded repair commit: `869154aba3db80ce07b400552845e926d4e12626`
 - Prior PR HEAD before this fixture repair: `1303fec1688c77c4dbf9d02f7d0d0c136d273fef`
-- Positive-path fixture commit: recorded in the following pin commit
-- Final PR #123 HEAD: recorded in the following pin commit
+- Positive-path fixture commit: `bad6251ef6fb86fdb081d35999a0be45d577d456`
+- Final PR #123 HEAD: `bad6251ef6fb86fdb081d35999a0be45d577d456`
