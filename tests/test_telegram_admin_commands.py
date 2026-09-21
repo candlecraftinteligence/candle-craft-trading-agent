@@ -11,8 +11,9 @@ import httpx
 
 from app.alerts.integrity_manifest import build_alert_integrity_manifest
 from app.core.config import Settings
+from app.data.dtos import NA
 from app.storage.database import open_initialized_database
-from tests.runtime_epoch_support import stamp_sql_public_event
+from tests.runtime_epoch_support import stamp_sql_lifecycle_row, stamp_sql_public_event
 from app.telegram_admin import (
     HttpxTelegramAdminCommandTransport,
     TelegramAdminCommandService,
@@ -218,14 +219,52 @@ def _insert_runtime_attempt(
     event_key = f"epoch-test:{signal_id}:{alert_type}:{symbol}"
     connection = open_initialized_database(db_path)
     try:
+        if status.lower() == "sent" and alert_type in {"SIGNAL_CONFIRMED", "SETUP_TRIGGERED"}:
+            invalidation = NA
+            if stop_loss not in {NA, "N/A"}:
+                if direction.lower() == "short":
+                    invalidation = f"Invalid if price accepts above {stop_loss}."
+                else:
+                    invalidation = f"Invalid if price accepts below {stop_loss}."
+            existing = connection.execute(
+                "SELECT lifecycle_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+                (signal_id,),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO setup_lifecycle_records (
+                        lifecycle_id, symbol, mode, direction, current_state, previous_state,
+                        first_seen_at, last_seen_at, last_transition_at, quality_score,
+                        invalidation_reason, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                        is_current
+                    ) VALUES (?, ?, 'scalp', ?, 'CONFIRMED', 'N/A', ?, ?, ?, 90, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (
+                        signal_id,
+                        symbol,
+                        direction,
+                        effective_sent_at,
+                        effective_sent_at,
+                        effective_sent_at,
+                        invalidation,
+                        entry_low,
+                        entry_high,
+                        stop_loss,
+                        tp1,
+                        tp2,
+                        tp3,
+                    ),
+                )
+            stamp_sql_lifecycle_row(connection, lifecycle_id=signal_id, symbol=symbol)
         connection.execute(
             """
             INSERT INTO telegram_alert_attempts (
                 signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
                 sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score,
                 rr_planned, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
-                public_watchlist_event_key
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                public_watchlist_event_key, public_watchlist_plan_id, public_alert_event_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal_id,
@@ -247,6 +286,8 @@ def _insert_runtime_attempt(
                 tp2,
                 tp3,
                 event_key,
+                event_key,
+                alert_type,
             ),
         )
         stamp_sql_public_event(
@@ -1271,6 +1312,7 @@ def test_public_lastscan_shows_summary_without_admin_internals(tmp_path) -> None
 def test_public_active_signals_only_include_confirmed_signal_rows(tmp_path) -> None:
     service = _write_artifacts(tmp_path, rows=[_alert_row(), _near_row(), _blocked_row(), _rejected_row()])
     db_path = tmp_path / "scan_runs" / "candle_craft.db"
+    service = TelegramAdminCommandService(project_root=tmp_path, database_path=db_path)
     _insert_runtime_attempt(
         db_path,
         signal_id="sig-alert",

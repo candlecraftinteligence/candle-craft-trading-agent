@@ -65,13 +65,24 @@ OPERATIONAL_DELIVERY_STATES = frozenset(
         "RESERVED",
     }
 )
-AUDIT_ONLY_ATTEMPT_STATUSES = frozenset({"skipped", "blocked"})
+AUDIT_ONLY_ATTEMPT_STATUSES = frozenset({"skipped", "blocked", "failed"})
 
 
 def canonical_operational_symbol(value: Any) -> str:
     text = str(value or "").strip().upper()
     if not text or text.upper() == NA:
         return ""
+    return text
+
+
+def canonical_operational_direction(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text or text.upper() == NA:
+        return ""
+    if text in {"long", "buy"}:
+        return "long"
+    if text in {"short", "sell"}:
+        return "short"
     return text
 
 
@@ -280,6 +291,10 @@ def public_ownership_chain_reason(
     lifecycle_symbol = canonical_operational_symbol(lifecycle["symbol"])
     if not event_symbol or event_symbol != lifecycle_symbol:
         return "public_event_symbol_mismatch"
+    event_side = canonical_operational_direction(_field(event, "side"))
+    lifecycle_direction = canonical_operational_direction(lifecycle["direction"])
+    if not event_side or not lifecycle_direction or event_side != lifecycle_direction:
+        return "public_event_direction_mismatch"
     root_reason = public_root_relationship_reason(connection, event, epoch=epoch)
     if root_reason is not None:
         return root_reason
@@ -305,6 +320,7 @@ def require_lifecycle_public_intent(
     origin_lifecycle_id: str,
     epoch: RuntimeEpochRecord | None = None,
     expected_symbol: str | None = None,
+    expected_direction: str | None = None,
 ) -> sqlite3.Row:
     epoch = epoch or require_active_runtime_epoch(connection)
     normalized_id = str(origin_lifecycle_id or "").strip()
@@ -321,6 +337,10 @@ def require_lifecycle_public_intent(
     actual = canonical_operational_symbol(owned["symbol"])
     if expected and actual and expected != actual:
         raise RuntimeEpochOwnershipError("Public intent lifecycle symbol does not match the plan symbol.")
+    expected_dir = canonical_operational_direction(expected_direction)
+    actual_dir = canonical_operational_direction(owned["direction"])
+    if expected_dir and actual_dir and expected_dir != actual_dir:
+        raise RuntimeEpochOwnershipError("Public intent lifecycle direction does not match the event side.")
     return owned
 
 
@@ -367,6 +387,11 @@ def require_public_attempt_mutation(
     if event is None:
         raise RuntimeEpochOwnershipError("Public event for attempt is missing.")
     require_public_event_mutation(connection, event, epoch=epoch)
+    if attempt_is_audit_only(attempt):
+        raise RuntimeEpochOwnershipError("public_attempt_is_audit_only")
+    canonical = canonical_reservation_attempt_id(event)
+    if canonical is not None and int(canonical) != int(attempt_id):
+        raise RuntimeEpochOwnershipError("public_attempt_not_canonical")
     return attempt
 
 
@@ -478,8 +503,8 @@ def public_root_event_mismatch_reason(
     root_symbol = canonical_operational_symbol(_field(root, "symbol"))
     if not event_symbol or event_symbol != root_symbol:
         return "public_followup_root_symbol_mismatch"
-    event_side = normalize_public_event_type(_field(event, "side"))
-    root_side = normalize_public_event_type(_field(root, "side"))
+    event_side = canonical_operational_direction(_field(event, "side"))
+    root_side = canonical_operational_direction(_field(root, "side"))
     if not event_side or event_side != root_side:
         return "public_followup_root_side_mismatch"
     try:
@@ -488,6 +513,7 @@ def public_root_event_mismatch_reason(
             origin_lifecycle_id=str(root_lifecycle),
             epoch=epoch,
             expected_symbol=root_symbol,
+            expected_direction=root_side,
         )
     except (RuntimeEpochOwnershipError, RuntimeEpochOriginError) as exc:
         return str(exc) or "public_followup_root_lifecycle_unowned"
@@ -508,6 +534,13 @@ def require_public_root_for_insert(
     normalized_type = normalize_public_event_type(event_type)
     if normalized_type not in PUBLIC_EVENT_FAMILY_TYPES:
         raise RuntimeEpochOwnershipError("public_event_family_unknown")
+    require_lifecycle_public_intent(
+        connection,
+        origin_lifecycle_id=origin_lifecycle_id,
+        epoch=epoch,
+        expected_symbol=symbol,
+        expected_direction=side,
+    )
     if normalized_type in PUBLIC_ROOT_EVENT_TYPES:
         if origin_root_event_id is not None:
             raise RuntimeEpochOwnershipError("public_root_event_must_not_have_predecessor")
@@ -574,6 +607,17 @@ def require_event_reservation_association(
     event_symbol = canonical_operational_symbol(event["symbol"])
     if reservation_symbol and event_symbol and reservation_symbol != event_symbol:
         raise RuntimeEpochOwnershipError("public_reservation_symbol_mismatch")
+    reservation_dir = canonical_operational_direction(reservation["direction"])
+    event_side = canonical_operational_direction(event["side"])
+    if reservation_dir and event_side and reservation_dir != event_side:
+        raise RuntimeEpochOwnershipError("public_reservation_direction_mismatch")
+    if attempt_is_audit_only(reservation):
+        raise RuntimeEpochOwnershipError("public_reservation_is_audit_only")
+    canonical = canonical_reservation_attempt_id(event)
+    if canonical is None:
+        raise RuntimeEpochOwnershipError("public_canonical_reservation_missing")
+    if int(canonical) != int(reservation_id):
+        raise RuntimeEpochOwnershipError("public_reservation_not_canonical")
     return event, reservation
 
 
@@ -630,6 +674,90 @@ def attempt_has_operational_history(row: sqlite3.Row | Any) -> bool:
     return False
 
 
+def attempt_is_audit_only(row: sqlite3.Row | Any) -> bool:
+    status = str(_field(row, "telegram_status") or "").strip().lower()
+    delivery = str(_field(row, "delivery_state") or "").strip().upper()
+    if delivery in OPERATIONAL_DELIVERY_STATES:
+        return False
+    return status in AUDIT_ONLY_ATTEMPT_STATUSES
+
+
+def canonical_reservation_attempt_id(event: sqlite3.Row | Any | None) -> int | None:
+    return _optional_int(_field(event, "canonical_reservation_attempt_id"))
+
+
+def bind_canonical_reservation_attempt(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int,
+    attempt_id: int,
+) -> None:
+    """Stamp canonical reservation only when the owned event has none. Never backfill."""
+
+    connection.execute(
+        """
+        UPDATE public_alert_events
+        SET canonical_reservation_attempt_id = ?
+        WHERE id = ?
+          AND canonical_reservation_attempt_id IS NULL
+        """,
+        (int(attempt_id), int(event_id)),
+    )
+
+
+def public_reservation_record_mismatch_reason(
+    connection: sqlite3.Connection,
+    record: sqlite3.Row | Any,
+    event: sqlite3.Row | Any,
+    *,
+    epoch: RuntimeEpochRecord | None = None,
+) -> str | None:
+    loaded = epoch or require_active_runtime_epoch(connection)
+    chain_reason = public_ownership_chain_reason(connection, event, epoch=loaded)
+    if chain_reason is not None:
+        return chain_reason
+    record_key = _optional_text(_field(record, "public_watchlist_event_key"))
+    event_key = _optional_text(_field(event, "event_key"))
+    if record_key is None or event_key is None or record_key != event_key:
+        return "public_reservation_event_mismatch"
+    record_symbol = canonical_operational_symbol(_field(record, "symbol"))
+    event_symbol = canonical_operational_symbol(_field(event, "symbol"))
+    if not record_symbol or record_symbol != event_symbol:
+        return "public_reservation_symbol_mismatch"
+    record_dir = canonical_operational_direction(_field(record, "direction"))
+    event_side = canonical_operational_direction(_field(event, "side"))
+    if not record_dir or record_dir != event_side:
+        return "public_reservation_direction_mismatch"
+    event_plan = _optional_text(_field(event, "canonical_plan_id"))
+    record_plan = _optional_text(_field(record, "public_watchlist_plan_id"))
+    if event_plan is None or record_plan is None or record_plan != event_plan:
+        return "public_reservation_plan_mismatch"
+    event_type = normalize_public_event_type(_field(event, "event_type"))
+    record_type = normalize_public_event_type(
+        _field(record, "public_alert_event_type") or _field(record, "alert_type")
+    )
+    if not event_type or event_type not in PUBLIC_EVENT_FAMILY_TYPES:
+        return "public_event_family_unknown"
+    if not record_type or record_type not in PUBLIC_EVENT_FAMILY_TYPES:
+        return "public_reservation_event_family_unknown"
+    if record_type != event_type:
+        return "public_reservation_event_family_mismatch"
+    origin_lifecycle_id = _optional_text(_field(event, "origin_lifecycle_id"))
+    if origin_lifecycle_id is None:
+        return "public_event_missing_origin_lifecycle"
+    try:
+        require_lifecycle_public_intent(
+            connection,
+            origin_lifecycle_id=origin_lifecycle_id,
+            epoch=loaded,
+            expected_symbol=event_symbol,
+            expected_direction=event_side,
+        )
+    except (RuntimeEpochOwnershipError, RuntimeEpochOriginError) as exc:
+        return str(exc) or "public_reservation_lifecycle_unowned"
+    return None
+
+
 def _lookup_owned_public_root_id(
     connection: sqlite3.Connection,
     *,
@@ -655,7 +783,7 @@ def _lookup_owned_public_root_id(
             lifecycle_id,
             epoch.epoch_id,
             canonical_operational_symbol(symbol),
-            normalize_public_event_type(side),
+            canonical_operational_direction(side),
         ),
     ).fetchall()
     expected_plan = _optional_text(canonical_plan_id)

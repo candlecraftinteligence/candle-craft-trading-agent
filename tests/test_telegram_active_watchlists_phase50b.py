@@ -86,6 +86,23 @@ def _insert_attempt(
     effective_state = new_state or _default_state_for_alert_type(alert_type)
     effective_lifecycle_state = lifecycle_state or effective_state
     event_key = f"epoch-test:{signal_id}:{alert_type}:{symbol}"
+    if status.lower() == "sent" and alert_type in {"SIGNAL_CONFIRMED", "SETUP_TRIGGERED"}:
+        _insert_lifecycle_record(
+            db_path,
+            lifecycle_id=signal_id,
+            symbol=symbol,
+            current_state=effective_lifecycle_state if effective_lifecycle_state != NA else "CONFIRMED",
+            direction=direction,
+            last_seen_at=effective_sent_at,
+            last_transition_at=effective_sent_at,
+            entry_low=entry_low,
+            entry_high=entry_high,
+            stop_loss=stop_loss,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            update_state=False,
+        )
     connection = open_initialized_database(db_path)
     try:
         connection.execute(
@@ -94,8 +111,9 @@ def _insert_attempt(
                 signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
                 sent_at, telegram_status, message_hash, scan_run_id, setup_quality_score, rr_planned, price_level,
                 first_seen_at, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
-                blocked_reason, error_message, last_error_message, public_watchlist_event_key
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                blocked_reason, error_message, last_error_message, public_watchlist_event_key,
+                public_watchlist_plan_id, public_alert_event_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal_id,
@@ -122,6 +140,8 @@ def _insert_attempt(
                 error_message,
                 last_error_message,
                 event_key,
+                event_key,
+                alert_type,
             ),
         )
         stamp_sql_public_event(
@@ -248,43 +268,103 @@ def _insert_lifecycle_record(
     readiness_score: int = 70,
     last_seen_at: str = "2026-06-04T12:00:00Z",
     last_transition_at: str = "2026-06-04T12:00:00Z",
+    update_state: bool = True,
 ) -> None:
+    if invalidation_reason == NA and stop_loss != NA:
+        if str(direction).strip().lower() == "short":
+            invalidation_reason = f"Invalid if price accepts above {stop_loss}."
+        else:
+            invalidation_reason = f"Invalid if price accepts below {stop_loss}."
     connection = open_initialized_database(db_path)
     try:
-        connection.execute(
-            """
-            INSERT INTO setup_lifecycle_records (
-                lifecycle_id, symbol, mode, direction, current_state, previous_state,
-                first_seen_at, last_seen_at, last_transition_at, failed_gate,
-                readiness_score, quality_score, edge_score, regime_state, action_label,
-                invalidation_reason, entry_low, entry_high, stop_loss, tp1, tp2, tp3
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                lifecycle_id,
-                symbol,
-                mode,
-                direction,
-                current_state,
-                NA,
-                "2026-06-04T10:00:00Z",
-                last_seen_at,
-                last_transition_at,
-                failed_gate,
-                readiness_score,
-                quality_score,
-                NA,
-                "mixed",
-                "watchlist",
-                invalidation_reason,
-                entry_low,
-                entry_high,
-                stop_loss,
-                tp1,
-                tp2,
-                tp3,
-            ),
-        )
+        existing = connection.execute(
+            "SELECT lifecycle_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+            (lifecycle_id,),
+        ).fetchone()
+        if existing is not None:
+            current = connection.execute(
+                """
+                SELECT current_state, entry_low, entry_high, stop_loss, tp1, tp2, tp3, invalidation_reason
+                FROM setup_lifecycle_records WHERE lifecycle_id = ?
+                """,
+                (lifecycle_id,),
+            ).fetchone()
+
+            def _keep(incoming: str, column: str) -> str:
+                if incoming != NA:
+                    return incoming
+                stored = current[column] if current is not None else NA
+                return stored if stored not in (None, "") else NA
+
+            stored_state = current["current_state"] if current is not None else current_state
+            if not update_state and stored_state not in (None, "", NA):
+                current_state = stored_state
+
+            connection.execute(
+                """
+                UPDATE setup_lifecycle_records
+                SET symbol = ?, mode = ?, direction = ?, current_state = ?,
+                    last_seen_at = ?, last_transition_at = ?, failed_gate = ?,
+                    readiness_score = ?, quality_score = ?, invalidation_reason = ?,
+                    entry_low = ?, entry_high = ?, stop_loss = ?, tp1 = ?, tp2 = ?, tp3 = ?
+                WHERE lifecycle_id = ?
+                """,
+                (
+                    symbol,
+                    mode,
+                    direction,
+                    current_state,
+                    last_seen_at,
+                    last_transition_at,
+                    failed_gate,
+                    readiness_score,
+                    quality_score,
+                    _keep(invalidation_reason, "invalidation_reason"),
+                    _keep(entry_low, "entry_low"),
+                    _keep(entry_high, "entry_high"),
+                    _keep(stop_loss, "stop_loss"),
+                    _keep(tp1, "tp1"),
+                    _keep(tp2, "tp2"),
+                    _keep(tp3, "tp3"),
+                    lifecycle_id,
+                ),
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO setup_lifecycle_records (
+                    lifecycle_id, symbol, mode, direction, current_state, previous_state,
+                    first_seen_at, last_seen_at, last_transition_at, failed_gate,
+                    readiness_score, quality_score, edge_score, regime_state, action_label,
+                    invalidation_reason, entry_low, entry_high, stop_loss, tp1, tp2, tp3,
+                    is_current
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    lifecycle_id,
+                    symbol,
+                    mode,
+                    direction,
+                    current_state,
+                    NA,
+                    "2026-06-04T10:00:00Z",
+                    last_seen_at,
+                    last_transition_at,
+                    failed_gate,
+                    readiness_score,
+                    quality_score,
+                    NA,
+                    "mixed",
+                    "watchlist",
+                    invalidation_reason,
+                    entry_low,
+                    entry_high,
+                    stop_loss,
+                    tp1,
+                    tp2,
+                    tp3,
+                ),
+            )
         stamp_sql_lifecycle_row(connection, lifecycle_id=lifecycle_id, symbol=symbol)
         connection.commit()
     finally:
@@ -940,6 +1020,21 @@ def test_runtime_database_auto_discovery_skips_main_live_runtime(tmp_path: Path)
 
 def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="crcl-limit-zone-hit",
+        symbol="CRCLUSDT",
+        current_state="EXECUTING",
+        entry_low="42.123456",
+        entry_high="42.987654",
+        stop_loss="40.75",
+        tp1="45.25",
+        tp2="47.5",
+        tp3="50",
+        invalidation_reason="Invalid if price accepts below 40.75.",
+        last_seen_at=_fresh_timestamp(),
+        last_transition_at=_fresh_timestamp(),
+    )
     _insert_attempt(
         db_path,
         signal_id="crcl-limit-zone-hit",
@@ -971,19 +1066,6 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
         tp1="45.25",
         tp2="47.5",
         tp3="50",
-    )
-    _insert_lifecycle_record(
-        db_path,
-        lifecycle_id="crcl-limit-zone-hit",
-        symbol="CRCLUSDT",
-        current_state="EXECUTING",
-        entry_low="42.123456",
-        entry_high="42.987654",
-        stop_loss="40.75",
-        tp1="45.25",
-        tp2="47.5",
-        tp3="50",
-        invalidation_reason="Invalid if price accepts below 40.75.",
     )
     _insert_lifecycle_event(
         db_path,
@@ -1020,22 +1102,22 @@ def test_crclusdt_limit_zone_hit_active_signal_detail_regression(tmp_path: Path)
 
 def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
-    _insert_attempt(
+    _insert_lifecycle_record(
         db_path,
-        signal_id="sig-detail",
+        lifecycle_id="sig-detail",
         symbol="BTCUSDT",
-        alert_type="SIGNAL_CONFIRMED",
-        new_state="CONFIRMED",
-        lifecycle_state="CONFIRMED",
-        setup_quality_score="A",
-        rr_planned="3.12",
-        scan_run_id="run-detail",
+        current_state="EXECUTING",
+        direction="long",
         entry_low="100",
         entry_high="102",
         stop_loss="95",
         tp1="110",
         tp2="118",
         tp3="125",
+        invalidation_reason="Price accepts below 95.",
+        quality_score=90,
+        last_seen_at=_fresh_timestamp(),
+        last_transition_at=_fresh_timestamp(),
     )
     _insert_candidate(
         db_path,
@@ -1055,20 +1137,22 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
             "quality_gate_result": {"passed": True},
         },
     )
-    _insert_lifecycle_record(
+    _insert_attempt(
         db_path,
-        lifecycle_id="sig-detail",
+        signal_id="sig-detail",
         symbol="BTCUSDT",
-        current_state="EXECUTING",
-        direction="long",
+        alert_type="SIGNAL_CONFIRMED",
+        new_state="CONFIRMED",
+        lifecycle_state="CONFIRMED",
+        setup_quality_score="A",
+        rr_planned="3.12",
+        scan_run_id="run-detail",
         entry_low="100",
         entry_high="102",
         stop_loss="95",
         tp1="110",
         tp2="118",
         tp3="125",
-        invalidation_reason="Price accepts below 95.",
-        quality_score=90,
     )
     _insert_lifecycle_event(
         db_path,
@@ -1153,6 +1237,14 @@ def test_confirmed_signal_opens_detail_from_active_signals_and_refresh_reloads(t
 
 def test_signal_detail_callbacks_route_safely_and_legacy_active_signals_callback_is_disabled(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="sig-callback",
+        symbol="ETHUSDT",
+        current_state="CONFIRMED",
+        last_seen_at=_fresh_timestamp(),
+        last_transition_at=_fresh_timestamp(),
+    )
     _insert_attempt(
         db_path,
         signal_id="sig-callback",
@@ -1216,6 +1308,14 @@ def test_signal_detail_callbacks_route_safely_and_legacy_active_signals_callback
 
 def test_signal_detail_ui_is_not_sent_to_public_channel_group_or_supergroup(tmp_path: Path) -> None:
     db_path = tmp_path / "candle_craft.db"
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="sig-channel-safe",
+        symbol="ADAUSDT",
+        current_state="CONFIRMED",
+        last_seen_at=_fresh_timestamp(),
+        last_transition_at=_fresh_timestamp(),
+    )
     _insert_attempt(
         db_path,
         signal_id="sig-channel-safe",
@@ -1511,6 +1611,14 @@ def test_active_signals_show_runtime_progress_and_exclude_terminal_rows(tmp_path
     tp1_seen = _fresh_timestamp(minutes_ago=15)
     tp3_confirmed_seen = _fresh_timestamp(minutes_ago=10)
     tp3_hit_seen = _fresh_timestamp(minutes_ago=5)
+    _insert_lifecycle_record(
+        db_path,
+        lifecycle_id="sig-active",
+        symbol="ENAUSDT",
+        current_state="MANAGING",
+        last_seen_at=tp1_seen,
+        last_transition_at=tp1_seen,
+    )
     _insert_attempt(
         db_path,
         signal_id="sig-active",

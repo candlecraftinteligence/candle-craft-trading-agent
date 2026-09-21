@@ -15,7 +15,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.runtime_epoch_support import stamp_sql_public_event
+from tests.runtime_epoch_support import seed_legacy_public_event
+from app.storage.database import open_initialized_database
 from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
@@ -871,42 +872,53 @@ def _seed_prior_active_alert(
     )
     stored_sent_at = sent_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
     event_key = f"{signal_id}|{alert_type.value}"
-    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
-        stamp_sql_public_event(
-            repository._connection,
+    with open_initialized_database(db_path) as connection:
+        seed_legacy_public_event(
+            connection,
             event_key=event_key,
             symbol=symbol,
-            side=direction,
-            event_type=alert_type.value,
             status="SENT" if status == "sent" else status,
-            timestamp=stored_sent_at,
+            delivery_state="SENT" if status == "sent" else "FAILED_FINAL",
+            created_at=stored_sent_at,
         )
-        repository.insert_attempt(
-            TelegramAlertAttemptRecord(
-                signal_id=signal_id,
-                symbol=symbol,
-                direction=direction,
-                previous_state=NA,
-                new_state="WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
-                alert_type=alert_type.value,
-                lifecycle_state="WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
-                sent_at=stored_sent_at,
-                telegram_status=status,
-                message_hash=f"{signal_id}-active",
-                attempted_alert_type=alert_type.value,
-                setup_quality_score="B+",
-                price_level=stored_price_level,
-                entry_low=stored_entry_low,
-                entry_high=stored_entry_high,
-                stop_loss=stored_stop_loss,
-                tp1=stored_tp1,
-                tp2=stored_tp2,
-                tp3=stored_tp3,
-                first_seen_at=stored_sent_at,
-                public_watchlist_event_key=event_key,
-                public_watchlist_plan_id=signal_id,
-            )
+        connection.execute(
+            """
+            INSERT INTO telegram_alert_attempts (
+                signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
+                sent_at, attempted_at, telegram_status, message_hash, attempted_alert_type,
+                setup_quality_score, price_level, entry_low, entry_high, stop_loss,
+                tp1, tp2, tp3, first_seen_at, public_watchlist_event_key,
+                public_watchlist_plan_id, public_alert_event_type, delivery_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                symbol,
+                direction,
+                "WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
+                alert_type.value,
+                "WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
+                stored_sent_at if status == "sent" else None,
+                stored_sent_at,
+                status,
+                f"{signal_id}-active",
+                alert_type.value,
+                "B+",
+                stored_price_level,
+                str(stored_entry_low),
+                str(stored_entry_high),
+                str(stored_stop_loss),
+                str(stored_tp1),
+                str(stored_tp2),
+                str(stored_tp3),
+                stored_sent_at,
+                event_key,
+                event_key,
+                alert_type.value,
+                "SENT" if status == "sent" else NA,
+            ),
         )
+        connection.commit()
 
 
 def _sent_at_ago(*, hours: int = 0, minutes: int = 0) -> str:

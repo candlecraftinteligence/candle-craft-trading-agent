@@ -33,7 +33,7 @@ from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.service import apply_lifecycle_to_run_result
 from app.pipeline.scanner_runner import ScannerSymbolResult
-from app.runtime_epoch.authority import initialize_runtime_epoch, load_active_runtime_epoch
+from app.runtime_epoch.authority import initialize_runtime_epoch, load_active_runtime_epoch, require_active_runtime_epoch
 from app.runtime_epoch.errors import (
     RuntimeEpochConfigurationError,
     RuntimeEpochError,
@@ -171,6 +171,21 @@ def _bootstrap(path: Path, identity: RuntimeEpochIdentity = SYNTHETIC_IDENTITY) 
     return path
 
 
+def _register_run(
+    path: Path,
+    run_id: str,
+    registered_at: str = "2026-03-01T13:00:00Z",
+) -> None:
+    with open_initialized_database(path) as connection:
+        register_operational_run(
+            connection,
+            run_id=run_id,
+            registered_at=registered_at,
+            epoch=require_active_runtime_epoch(connection),
+        )
+        connection.commit()
+
+
 def _schema_snapshot(path: Path) -> dict[str, object]:
     stat = path.stat()
     with sqlite3.connect(path) as connection:
@@ -284,6 +299,8 @@ def _granted_origin_count(connection: sqlite3.Connection) -> int:
 
 def test_r01_missing_evidence_does_not_grant_live_fresh(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r01.db", CUTOFF_IDENTITY)
+    _register_run(db_path, "r01-run")
+    _register_run(db_path, "r01-live")
     missing = _fresh_symbol(origin_kind="unspecified", decision=None, delivery=None)
     assert origin_kind_from_symbol_result(missing) == "unspecified"
     assert decision_cutoff_from_symbol_result(missing) is None
@@ -316,6 +333,7 @@ def test_r01_missing_evidence_does_not_grant_live_fresh(tmp_path: Path) -> None:
 
 def test_r02_pre_epoch_adapter_post_epoch_cache_does_not_grant_live_fresh(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r02.db", CUTOFF_IDENTITY)
+    _register_run(db_path, "r02-run")
     acquired = _live_adapter_delivery(acquired_at=PRE_EPOCH)
     cached = observe_cache_delivery(
         acquired.returned_sequence,
@@ -366,6 +384,7 @@ def test_r02_pre_epoch_adapter_post_epoch_cache_does_not_grant_live_fresh(tmp_pa
 
 def test_r03_fresh_post_epoch_producer_can_grant_origin(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r03.db", CUTOFF_IDENTITY)
+    _register_run(db_path, "r03-run")
     delivery = _live_adapter_delivery(acquired_at=POST_EPOCH)
     result = _fresh_symbol(
         origin_kind="live_scan",

@@ -9,6 +9,10 @@ from typing import Any
 from app.data.dtos import NA
 from app.formatters.telegram_signal_detail import TelegramSignalDetail, lifecycle_chain_text
 from app.formatters.telegram_signal_formatter import PUBLIC_STATUS_BY_ALERT_TYPE, TelegramAlertType, safe_invalidation_text
+from app.runtime_epoch.ownership import (
+    canonical_operational_direction,
+    canonical_operational_symbol,
+)
 from app.telegram_admin.active_watchlists import (
     UNVERIFIED,
     _ACTIVE_SIGNAL_ALLOWED_STATE_KEYS,
@@ -24,8 +28,8 @@ from app.telegram_admin.active_watchlists import (
     _json_mapping,
     _latest_runtime_database,
     _latest_symbol_result_for_attempt,
-    _lifecycle_row_for_attempt,
     _lifecycle_outcome_progress,
+    _owned_lifecycle_row_for_attempt,
     _row_id,
     _select_or_na,
     _sent_alert_attempt_rows,
@@ -90,13 +94,18 @@ def _detail_from_rows(
             continue
         if not _attempt_is_current_epoch_operational(connection, signal_row):
             continue
+        lifecycle_row = _owned_lifecycle_row_for_attempt(connection, signal_row)
+        if not lifecycle_row:
+            continue
         outcome_rows = tuple(
             row
             for row in _active_signal_outcome_rows(signal_rows, signal_row)
             if _attempt_is_current_epoch_operational(connection, row)
+            and _attempt_matches_owned_chain(connection, row, lifecycle_row)
         )
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
-        lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
+        if not _attempt_matches_owned_chain(connection, latest_row, lifecycle_row):
+            continue
         if not _active_signal_group_is_eligible(
             connection,
             signal_row=signal_row,
@@ -131,7 +140,7 @@ def _detail_from_group(
     if not symbol_row:
         symbol_row = _symbol_result_for_attempt(connection, latest_row)
     raw_result = _json_mapping(symbol_row.get("raw_result_json"))
-    candidate = _candidate_detail(connection, signal_row)
+    candidate = _candidate_detail_for_owned_chain(connection, signal_row, lifecycle_row)
     candidate_raw = _json_mapping(candidate.get("raw_candidate_json"))
     lifecycle_events = _lifecycle_events(connection, _first_text(lifecycle_row.get("lifecycle_id"), signal_id))
     outcome_progress = _lifecycle_outcome_progress(connection, lifecycle_row)
@@ -202,6 +211,88 @@ def _outcome_progress_text(progress: Mapping[str, Any]) -> str:
     elif _clean(progress.get("invalidated_at")) != NA:
         labels.append("Invalidated")
     return " | ".join(labels)
+
+
+def _attempt_matches_owned_chain(
+    connection: sqlite3.Connection,
+    attempt_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> bool:
+    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+    if lifecycle_id == NA:
+        return False
+    event_key = _clean(attempt_row.get("public_watchlist_event_key"))
+    if event_key == NA or not _table_exists(connection, "public_alert_events"):
+        return False
+    event = connection.execute(
+        "SELECT * FROM public_alert_events WHERE event_key = ?",
+        (event_key,),
+    ).fetchone()
+    if event is None:
+        return False
+    origin = _clean(event["origin_lifecycle_id"]) if "origin_lifecycle_id" in event.keys() else NA
+    if origin != lifecycle_id:
+        return False
+    attempt_symbol = canonical_operational_symbol(attempt_row.get("symbol"))
+    lifecycle_symbol = canonical_operational_symbol(lifecycle_row.get("symbol"))
+    attempt_dir = canonical_operational_direction(attempt_row.get("direction"))
+    lifecycle_dir = canonical_operational_direction(lifecycle_row.get("direction"))
+    event_side = canonical_operational_direction(event["side"] if "side" in event.keys() else None)
+    if not attempt_symbol or attempt_symbol != lifecycle_symbol:
+        return False
+    if not attempt_dir or attempt_dir != lifecycle_dir:
+        return False
+    if event_side and attempt_dir != event_side:
+        return False
+    event_plan = _clean(event["canonical_plan_id"]) if "canonical_plan_id" in event.keys() else NA
+    attempt_plan = _clean(attempt_row.get("public_watchlist_plan_id"))
+    if event_plan != NA and attempt_plan != NA and event_plan != attempt_plan:
+        return False
+    if event_plan != NA and attempt_plan == NA:
+        return False
+    return True
+
+
+def _candidate_detail_for_owned_chain(
+    connection: sqlite3.Connection,
+    row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if not _table_exists(connection, "setup_candidates"):
+        return {}
+    columns = _table_columns(connection, "setup_candidates")
+    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+    if "lifecycle_id" in columns and lifecycle_id != NA:
+        candidate = connection.execute(
+            """
+            SELECT * FROM setup_candidates
+            WHERE lifecycle_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (lifecycle_id,),
+        ).fetchone()
+        if candidate is not None:
+            return dict(candidate)
+    if not {"symbol", "direction", "run_id"} <= columns:
+        return {}
+    symbol = canonical_operational_symbol(lifecycle_row.get("symbol"))
+    direction = canonical_operational_direction(lifecycle_row.get("direction"))
+    scan_run_id = _clean(row.get("scan_run_id"))
+    if not symbol or not direction or scan_run_id == NA:
+        return {}
+    candidate = connection.execute(
+        """
+        SELECT * FROM setup_candidates
+        WHERE UPPER(symbol) = UPPER(?)
+          AND LOWER(direction) = LOWER(?)
+          AND run_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (symbol, direction, scan_run_id),
+    ).fetchone()
+    return dict(candidate) if candidate is not None else {}
 
 
 def _candidate_detail(connection: sqlite3.Connection, row: Mapping[str, Any]) -> Mapping[str, Any]:

@@ -9,7 +9,6 @@ from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from app.core.confirmed_data_health import confirmed_data_health_for_symbol
 from app.core.minimum_rr import hard_mode_minimum_rr
@@ -59,7 +58,7 @@ from app.runtime_epoch.origin import (
     origin_kind_from_symbol_result,
     persist_blocked_symbol_origin,
     producer_acquisition_from_symbol_result,
-    register_operational_run,
+    require_registered_operational_run,
 )
 from app.runtime_epoch.models import RuntimeEpochIdentity
 from app.runtime_epoch.ownership import legacy_cooldown_veto
@@ -218,7 +217,11 @@ class SetupLifecycleService:
                 continue
             prepared.append((symbol_result, observation))
 
-        effective_run_id = scan_run_id or uuid4().hex
+        effective_run_id = str(scan_run_id or "").strip()
+        if not effective_run_id:
+            raise RuntimeEpochOriginError(
+                "Lifecycle consumption requires a persisted operational run_id."
+            )
         with SQLiteSetupLifecycleRepository(
             self.database_path,
             expected_identity=self.expected_identity,
@@ -228,10 +231,9 @@ class SetupLifecycleService:
             health_records = _load_health_records(connection, tuple(item.symbol for item in result.results))
             connection.execute("BEGIN IMMEDIATE")
             epoch = require_active_runtime_epoch(connection)
-            register_operational_run(
+            require_registered_operational_run(
                 connection,
                 run_id=effective_run_id,
-                registered_at=timestamp,
                 epoch=epoch,
             )
             for symbol_result, observation in prepared:
@@ -322,11 +324,14 @@ class SetupLifecycleService:
         connection = repository.connection
         assert connection is not None
         epoch = require_active_runtime_epoch(connection)
-        effective_run_id = scan_run_id or uuid4().hex
-        register_operational_run(
+        effective_run_id = str(scan_run_id or "").strip()
+        if not effective_run_id:
+            raise RuntimeEpochOriginError(
+                "Lifecycle consumption requires a persisted operational run_id."
+            )
+        require_registered_operational_run(
             connection,
             run_id=effective_run_id,
-            registered_at=now,
             epoch=epoch,
         )
         updated, _meta = self._apply_to_symbol_result_with_meta(

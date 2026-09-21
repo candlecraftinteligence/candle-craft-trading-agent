@@ -152,6 +152,7 @@ from app.storage import (  # noqa: E402
 from app.storage.database import UnsupportedSchemaVersionError  # noqa: E402
 from app.runtime_epoch.errors import RuntimeEpochConfigurationError, RuntimeEpochError  # noqa: E402
 from app.runtime_epoch.models import RuntimeEpochIdentity  # noqa: E402
+from app.runtime_epoch.origin import register_operational_scan_run  # noqa: E402
 from app.runtime_epoch.startup import (  # noqa: E402
     require_expected_operational_identity,
     require_operational_runtime,
@@ -887,6 +888,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         "run_id": scan_run_id,
         "scan_run_id": scan_run_id,
     }
+    _register_operational_scan_run_before_acquisition(args, scan_run_id)
 
     async def after_symbol(symbol_result: ScannerSymbolResult, completed: int, total: int) -> None:
         latest_results_by_symbol[symbol_result.symbol] = symbol_result
@@ -995,7 +997,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             min_confidence=args.min_memory_confidence,
         )
 
-    lifecycle_scan_run_id = scan_run_id if _lifecycle_scan_run_id_enabled(args) else None
+    lifecycle_scan_run_id = scan_run_id if _lifecycle_enabled(args) else None
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=lifecycle_scan_run_id)
     await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
@@ -1119,6 +1121,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         ranked_results=ranked_results,
         manifest_row=manifest_row,
         database_path=args.database_path,
+        expected_identity=getattr(args, "runtime_identity", None),
     )
 
     print(format_scan_dashboard(result, ranked_results=ranked_results, visible_results=visible_results))
@@ -2119,6 +2122,7 @@ async def _route_admin_report(
     manifest_row: Mapping[str, Any],
     console_presenter: ScannerConsolePresenter | None = None,
     database_path: Path | str | None = None,
+    expected_identity: RuntimeEpochIdentity | None = None,
 ) -> None:
     try:
         route_result = await route_admin_scan_report(
@@ -2128,6 +2132,7 @@ async def _route_admin_report(
             settings=Settings(),
             drafts_dir=ADMIN_DRAFTS_DIR,
             database_path=database_path,
+            expected_identity=expected_identity,
         )
     except Exception as exc:
         if console_presenter is not None:
@@ -2298,6 +2303,23 @@ def _lifecycle_scan_run_id_enabled(args: argparse.Namespace) -> bool:
 
 def _reset_lifecycle_state(args: argparse.Namespace) -> None:
     raise SystemExit("Destructive lifecycle reset is rejected under runtime epoch isolation.")
+
+
+def _register_operational_scan_run_before_acquisition(args: argparse.Namespace, scan_run_id: str) -> None:
+    if not _lifecycle_enabled(args):
+        return
+    identity = getattr(args, "runtime_identity", None)
+    if identity is None:
+        raise SystemExit("Operational scan run registration requires a validated RuntimeEpochIdentity.")
+    try:
+        register_operational_scan_run(
+            args.database_path,
+            run_id=scan_run_id,
+            registered_at=_watch_iteration_timestamp(),
+            expected_identity=identity,
+        )
+    except (StorageError, RuntimeEpochError) as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _prepare_operational_runtime_if_needed(args: argparse.Namespace, settings: Settings) -> None:
@@ -3405,6 +3427,7 @@ async def _run_watch_mode(
                 manifest_row=manifest_row,
                 console_presenter=console,
                 database_path=args.database_path,
+                expected_identity=getattr(args, "runtime_identity", None),
             )
             console.emit(
                 console.format_watch_iteration(
@@ -3781,6 +3804,7 @@ async def _run_watch_scan_iteration(
         "watch_mode": True,
         "watch_iteration": iteration,
     }
+    _register_operational_scan_run_before_acquisition(args, scan_run_id)
 
     async def after_symbol(symbol_result: ScannerSymbolResult, completed: int, total: int) -> None:
         latest_results_by_symbol[symbol_result.symbol] = symbol_result

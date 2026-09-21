@@ -16,7 +16,12 @@ from app.formatters.telegram_signal_formatter import RANGE_DASH, TelegramAlertTy
 from app.lifecycle.eligibility import active_signal_eligible, public_watchlist_eligible
 from app.runtime_epoch.authority import load_active_runtime_epoch
 from app.runtime_epoch.errors import RuntimeEpochError
-from app.runtime_epoch.ownership import decide_public_effect, require_lifecycle_public_intent
+from app.runtime_epoch.ownership import (
+    canonical_operational_direction,
+    canonical_operational_symbol,
+    decide_public_effect,
+    require_lifecycle_public_intent,
+)
 from app.storage.database import StorageError, open_read_only_database
 
 ACTIVE_WATCHLIST_DISPLAY_LIMIT = 10
@@ -672,6 +677,10 @@ def _attempt_is_current_epoch_operational(
     event_symbol = _clean(event["symbol"]) if "symbol" in event.keys() else NA
     if attempt_symbol != NA and event_symbol != NA and attempt_symbol != event_symbol:
         return False
+    attempt_dir = canonical_operational_direction(row.get("direction"))
+    event_side = canonical_operational_direction(event["side"] if "side" in event.keys() else None)
+    if attempt_dir and event_side and attempt_dir != event_side:
+        return False
     origin_lifecycle = _clean(event["origin_lifecycle_id"]) if "origin_lifecycle_id" in event.keys() else NA
     if origin_lifecycle == NA:
         return False
@@ -681,10 +690,64 @@ def _attempt_is_current_epoch_operational(
             origin_lifecycle_id=origin_lifecycle,
             epoch=epoch,
             expected_symbol=attempt_symbol if attempt_symbol != NA else None,
+            expected_direction=attempt_dir or None,
         )
     except RuntimeEpochError:
         return False
     return True
+
+
+def _owned_lifecycle_row_for_attempt(
+    connection: sqlite3.Connection,
+    attempt_row: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Resolve ACTIVE lifecycle only from the attempt's owned public event origin."""
+
+    if not _table_exists(connection, "public_alert_events"):
+        return {}
+    event_key = _clean(attempt_row.get("public_watchlist_event_key"))
+    if event_key == NA:
+        return {}
+    event = connection.execute(
+        "SELECT * FROM public_alert_events WHERE event_key = ?",
+        (event_key,),
+    ).fetchone()
+    if event is None:
+        return {}
+    origin_lifecycle_id = _clean(event["origin_lifecycle_id"]) if "origin_lifecycle_id" in event.keys() else NA
+    if origin_lifecycle_id == NA:
+        return {}
+    epoch = load_active_runtime_epoch(connection)
+    if epoch is None:
+        return {}
+    attempt_symbol = canonical_operational_symbol(attempt_row.get("symbol"))
+    event_symbol = canonical_operational_symbol(event["symbol"] if "symbol" in event.keys() else None)
+    attempt_dir = canonical_operational_direction(attempt_row.get("direction"))
+    event_side = canonical_operational_direction(event["side"] if "side" in event.keys() else None)
+    if not attempt_symbol or attempt_symbol != event_symbol:
+        return {}
+    if not attempt_dir or attempt_dir != event_side:
+        return {}
+    event_plan = _clean(event["canonical_plan_id"]) if "canonical_plan_id" in event.keys() else NA
+    attempt_plan = _clean(attempt_row.get("public_watchlist_plan_id"))
+    if event_plan != NA and attempt_plan != NA and event_plan != attempt_plan:
+        return {}
+    if event_plan != NA and attempt_plan == NA:
+        return {}
+    try:
+        owned = require_lifecycle_public_intent(
+            connection,
+            origin_lifecycle_id=origin_lifecycle_id,
+            epoch=epoch,
+            expected_symbol=event_symbol,
+            expected_direction=event_side,
+        )
+    except RuntimeEpochError:
+        return {}
+    lifecycle_dir = canonical_operational_direction(owned["direction"])
+    if lifecycle_dir and event_side and lifecycle_dir != event_side:
+        return {}
+    return dict(owned)
 
 
 def _sent_alert_attempt_rows(
@@ -722,6 +785,7 @@ def _sent_alert_attempt_rows(
         _select_or_na("error_message", columns),
         _select_or_na("last_error_message", columns),
         _select_or_na("public_watchlist_event_key", columns),
+        _select_or_na("public_watchlist_plan_id", columns),
         *(_select_or_na(column, columns) for column in _LEVEL_COLUMNS),
     ]
     placeholders = ",".join("?" for _ in alert_types)
@@ -1095,7 +1159,9 @@ def _active_signal_items_from_rows(
             if _attempt_is_current_epoch_operational(connection, row)
         )
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
-        lifecycle_row = _lifecycle_row_for_attempt(connection, latest_row)
+        lifecycle_row = _owned_lifecycle_row_for_attempt(connection, signal_row)
+        if not lifecycle_row:
+            continue
         outcome_progress = _lifecycle_outcome_progress(connection, lifecycle_row)
         if not _active_signal_group_is_eligible(
             connection,

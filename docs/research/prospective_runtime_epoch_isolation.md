@@ -6,8 +6,14 @@ This document is the architecture handoff. It is not a Runtime runbook and does 
 
 ## Disposition
 
-- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_2`
-- `REAL_POSITIVE_PATH_PROVEN` = **TRUE**
+- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_3`
+- `RUN_REGISTRATION_BEFORE_PRODUCTION` = **TRUE**
+- `CANONICAL_RESERVATION_AUTHORITY` = **TRUE**
+- `AUDIT_ATTEMPTS_NON_OPERATIONAL` = **TRUE**
+- `PUBLIC_DIRECTION_BOUND_TO_LIFECYCLE` = **TRUE**
+- `ADMIN_ROUTE_FAIL_CLOSED` = **TRUE**
+- `ACTIVE_DETAIL_OWNERSHIP_BOUND` = **TRUE**
+- `REAL_DELAYED_POSITIVE_PATH_PROVEN` = **TRUE**
 - `STRATEGY_GATES_UNCHANGED` = **TRUE**
 - PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/123
 - Feature branch: `feature/prospective-runtime-epoch-isolation`
@@ -29,11 +35,81 @@ Cohort labels remain only `LEGACY_OR_UNATTRIBUTED` and `CURRENT_EPOCH_OPERATIONA
 ## Baseline and reviewed heads
 
 - Baseline main SHA: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
+- Architecture-reviewed PR HEAD before this third repair: `3cdb78e0489d7dda298ec841f4559e0778a68637`
+- Verdict on that HEAD: `CHANGES_REQUIRED_RUN_TIMING_AND_PUBLIC_AUTHORITY_BYPASSES`
 - Prior architecture-reviewed PR HEAD (second review): `01cd99f146ea607cdc60650bbddc724af19e5155`
-- Verdict on that HEAD: `CHANGES_REQUIRED_CROSS_RECORD_OWNERSHIP_AND_OPERATIONAL_OPEN_BYPASSES`
-- Second bounded repair commit: `869154aba3db80ce07b400552845e926d4e12626`
+- Verdict on that earlier HEAD: `CHANGES_REQUIRED_CROSS_RECORD_OWNERSHIP_AND_OPERATIONAL_OPEN_BYPASSES`
 
 Previous repair (kept, not regressed): origin unspecified default, pre-cutoff cache rejection, BTC origin cannot insert ETH lifecycle, missing lifecycle cannot auto-create a public event, legacy watch payload adoption blocked, genuine-v25 fixture, unchanged strategy/economic gates.
+
+## Third bounded repair (run timing and public authority)
+
+This repair does **not** backdate `registered_at`, weaken `evaluation_completed_at >= registered_at`, or treat `event_key` as reservation authority.
+
+### Run registration owner and timing
+
+Operational owner is `scripts/run_scan.py` via `_register_operational_scan_run_before_acquisition` → `register_operational_scan_run`.
+
+Contract:
+
+1. Validate `RuntimeEpochIdentity`.
+2. Persist `runtime_operational_runs` at T0.
+3. Then live symbol acquisition / evaluation (T1, T2, …).
+4. `ScannerSymbolResult` producer evidence is generated after registration.
+5. `SetupLifecycleService.apply_to_run_result` **validates** the already-registered `run_id` with `require_registered_operational_run`. It does **not** insert or backdate registration.
+
+Missing persisted registration fails closed. Processing latency (T3 > T2 > T1 > T0) does not invalidate earlier symbols. Cached/resumed/replayed/imported results remain blocked.
+
+### Canonical reservation authority
+
+Schema v26 additive field: `public_alert_events.canonical_reservation_attempt_id` (nullable INTEGER, unique where NOT NULL). Legacy/historical rows stay NULL. No backfill. Global `UNIQUE(event_key)` is unchanged.
+
+Exactly one canonical operational reservation per public event. `insert_attempt` binds the canonical id only for operational keyed inserts against an owned parent. Claim, stale recovery, `record_part_result`, `mark_terminal_without_send`, `mark_uncertain_after_persistence_failure`, `mark_public_watchlist_reservation_result`, and `mark_part_in_flight` prove `event → canonical reservation` inside the transaction before mutation. Caller-supplied `reservation_id` must equal the persisted canonical id. Rejected calls leave rows unchanged.
+
+### Audit-only attempt contract
+
+Audit intent is explicit (`audit_only=True`) or inferred from telegram status in `{blocked, skipped, failed}`. Audit inserts:
+
+- never bind canonical reservation
+- never require operational parent mutation
+- cannot be SENT / PENDING / RETRYABLE / IN_FLIGHT / UNCERTAIN
+- strip operational `delivery_state` to `N/A`
+- are not claim, recovery, or part-delivery targets
+
+Unkeyed operational `insert_attempt` remains limited to the existing non-public research-watch exception. Other unkeyed operational statuses are rejected. Compaction may summarize diagnostic blocked/skipped history; it excludes the canonical reservation id and does not require operational mutation of a parent event.
+
+Historical SENT watchlists may still receive diagnostic expiry / identity / follow-up-suppression rows. Those rows do not authorize operational send.
+
+### Stale recovery
+
+`recover_stale_in_flight` updates only the canonical reservation / active claim of the owned target event. Same-`event_key` audit history is untouched. The SQL predicate is not a broad event-key promotion.
+
+### Direction / event-family / lifecycle binding
+
+Public ownership requires `event.symbol == lifecycle.symbol` and `event.side == lifecycle.direction` under existing normalization. A LONG lifecycle cannot authorize a SHORT root. Child/root sides matching each other cannot hide a contradiction with the owning lifecycle. `replace_attempt_with_reservation` rejects same-key replacements with opposite direction, incompatible alert/event family, or mismatched plan/setup relation.
+
+### Admin route
+
+`route_admin_scan_report` passes `database_path` and `expected_identity` through formatter, drafts, and sender. Missing database or identity is **not** permission to recommend. `_operational_setup_recommendation_allowed` must succeed for any current/valid/tradable setup line. Exact owned setup identity (lifecycle / setup / symbol / direction) is required. An owned BTC LONG setup cannot authorize a BTC SHORT setup.
+
+### ACTIVE detail ownership chain
+
+Operational ACTIVE list/detail:
+
+1. validate the public event ownership chain
+2. resolve lifecycle from `public_event.origin_lifecycle_id`
+3. require current-epoch owned lifecycle
+4. require the attempt to be associated with that same event
+5. require attempt symbol/direction/plan to agree with that chain
+6. source candidate/detail fields only from that chain
+
+No fuzzy symbol/direction/geometry fallback for ACTIVE operational output.
+
+### Delayed positive path and multi-symbol timing
+
+R57/R85 use advancing clocks: run registered T0, producer evaluation T1, lifecycle consumption T2, with T0 < T1 < T2, still reaching the fake sender. R63/R86 cover one run, two symbols, later lifecycle processing, both origins remaining eligible. R58/R87 keep planned RR **2.65955826** blocked by unchanged public min **3R**.
+
+Regression: R61–R90.
 
 ## What remains from the original phase (kept)
 
@@ -93,10 +169,11 @@ A valid `event_id` does not authorize mutation of a reservation, part, or attemp
 - `record_part_result`, `mark_terminal_without_send`, `mark_uncertain_after_persistence_failure`: part/reservation/attempt must belong to the supplied owned event
 - `mark_part_in_flight`: part and claim/attempt must belong to the same owned event
 - `persist_intent_parts`: caller-supplied `event_key` must match the fetched event
-- `insert_attempt`: operational statuses require an existing owned parent event when a public event key is present; unkeyed rows are not public reservations
-- audit-only `blocked`/`skipped` rows cannot become claimable or SENT
+- `insert_attempt`: operational statuses require an existing owned parent event when a public event key is present; unkeyed rows are not public reservations except the existing non-public research-watch exception
+- audit-only `blocked`/`skipped`/`failed` rows cannot become claimable or SENT; they do not occupy `(signal_id, alert_type)` operational uniqueness
+- table-level `UNIQUE(signal_id, alert_type)` is replaced by partial unique index `ux_telegram_alert_attempts_signal_alert_operational` excluding audit statuses (v26, no historical rewrite)
 - `replace_attempt_with_reservation`: rejects unowned/wrong replacement; unkeyed diagnostic adoption cannot carry SENT/UNCERTAIN/in-flight history
-- `compact_repeated_attempt`: mutates only rows tied to the validated owned event key (or explicitly unkeyed audit rows)
+- `compact_repeated_attempt`: mutates only matching diagnostic `blocked`/`skipped` history; never the canonical reservation. Audit inserts compact matching history before creating another diagnostic row.
 
 Rejected borrowed-current-event attacks leave affected rows unchanged. UNCERTAIN is never blindly retried. Legacy rows are not rewritten to record why they were rejected.
 
@@ -154,7 +231,7 @@ Required chain, now proven:
 
 fake deterministic market producer → actual producer acquisition → explicit evaluation-completion evidence → valid post-epoch origin (granted by `SetupLifecycleService`, not stamped by the test) → actual `SetupLifecycleService` path → normal lifecycle creation → existing confirmation cycles (2) → existing quality gates → existing planned RR >= unchanged public minimum **3R** → existing target-integrity requirements (production warning path, not a stubbed A-grade target) → public event reservation (`signal_confirmed`) → correct event/reservation/part association → outbox claim → fake sender call
 
-The test does **not** manually insert `runtime_operational_origins`, does **not** stamp lifecycle epoch ownership, and does **not** seed `ACTIONABLE_A_GRADE` or `CONFIRMED`. Confirmation cycles are the existing service path.
+The test does **not** manually insert `runtime_operational_origins`, does **not** stamp lifecycle epoch ownership, and does **not** seed `ACTIONABLE_A_GRADE` or `CONFIRMED`. Confirmation cycles are the existing service path. Run registration is created by the production owner **before** producer evaluation; lifecycle consumption is later and does not invent `registered_at`.
 
 Honest result: a geometry-only synthetic fixture (`_public_min_rr_pullback_candles`) makes the **unchanged** strategy emit planned RR **3.06779661**. After two confirmation cycles the owned lifecycle is `CONFIRMED`, a `signal_confirmed` public event is reserved against that lifecycle/epoch, the outbox is claimed, and `FakeSender` is called once. Public min RR remains `PUBLIC_SIGNAL_MIN_RR = 3`. Strategy configured floor remains `DEFAULT_CONFIGURED_MINIMUM_RR = 2.5`. No scoring, target, confirmation, quality, or identity algorithm was changed.
 
@@ -181,14 +258,15 @@ No Runtime DB testing. No performance claims from synthetic DBs.
 | Run lineage | `runtime_operational_runs` before lifecycle/public effects |
 | Symbol origin | `runtime_operational_origins` unique `(run_id, symbol)` |
 | Lifecycle membership | `setup_lifecycle_records.runtime_epoch_id` + `creation_origin_id` (nullable, immutable, both required when tagged) |
-| Public ownership | `public_alert_events.runtime_epoch_id` + `origin_lifecycle_id` + `origin_root_event_id` |
+| Public ownership | `public_alert_events.runtime_epoch_id` + `origin_lifecycle_id` + `origin_root_event_id` + side/direction bound to lifecycle |
+| Canonical reservation | `public_alert_events.canonical_reservation_attempt_id` (NULL for legacy; unique where set; no backfill) |
 | Operational watch JSON | `scan_runs/epochs/<epoch_id>/watch_state.json` |
 
 Missing expected identity is fatal operational startup. Individual unproved observations are blocked before create/send.
 
 ## Acceptance map
 
-Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`. Repair regressions R01–R29 remain in `tests/test_prospective_runtime_epoch_isolation_boundaries.py` (`no_auto_epoch`). R30 is the existing RR/quality/confirmation/target/economic-identity suite. R31–R60 are in `tests/test_prospective_runtime_epoch_isolation_repair2.py` (`no_auto_epoch`).
+Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`. Repair regressions R01–R29 remain in `tests/test_prospective_runtime_epoch_isolation_boundaries.py` (`no_auto_epoch`). R30 is the existing RR/quality/confirmation/target/economic-identity suite. R31–R60 are in `tests/test_prospective_runtime_epoch_isolation_repair2.py` (`no_auto_epoch`). R61–R90 are in `tests/test_prospective_runtime_epoch_isolation_repair3.py` (`no_auto_epoch`).
 
 | ID | Proof |
 | --- | --- |
@@ -223,6 +301,36 @@ Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`
 | R58 | Canonical 2.66R pullback still fails under the unchanged 3R public gate |
 | R59 | Global legacy SENT `event_key` remains consumed |
 | R60 | Legacy UNCERTAIN and legacy reservation/attempt rows remain unchanged under borrowed-current-event attacks |
+| R61 | Operational run is registered before producer acquisition/evaluation |
+| R62 | Fresh evaluation at T1 consumed at T2>T1 remains eligible because registration occurred at T0<T1 |
+| R63 | Multi-symbol run with later lifecycle processing does not reject earlier symbols |
+| R64 | Missing persisted run registration blocks lifecycle consumption; service does not create/backdate it |
+| R65 | Keyed blocked/skipped audit attempt cannot be used as canonical reservation |
+| R66 | Owned event + keyed audit passed to claim = reject, unchanged rows |
+| R67 | Stale recovery updates only the canonical reservation; keyed audit unchanged |
+| R68 | `record_part_result` rejects audit/noncanonical attempt for an owned event |
+| R69 | `mark_terminal_without_send` rejects audit/noncanonical attempt |
+| R70 | `mark_uncertain_after_persistence_failure` rejects audit/noncanonical attempt |
+| R71 | `mark_public_watchlist_reservation_result` rejects audit/noncanonical attempt |
+| R72 | `replace_attempt_with_reservation` rejects same-event-key opposite direction |
+| R73 | Replacement rejects incompatible alert/event family or plan/setup relation |
+| R74 | LONG lifecycle cannot create/authorize SHORT root event |
+| R75 | Child/root both SHORT cannot bypass LONG lifecycle ownership |
+| R76 | Operational `insert_attempt` with no owned parent cannot create SENT |
+| R77 | Operational `insert_attempt` with no owned parent cannot create PENDING/RETRYABLE/IN_FLIGHT/UNCERTAIN |
+| R78 | Explicit audit-only insertion cannot later be claimed or SENT |
+| R79 | Admin route with database/context absent cannot send a current Valid Setups recommendation |
+| R80 | Admin route with valid context but different same-symbol setup identity/direction cannot recommend |
+| R81 | Valid admin operational recommendation still works for the exact owned setup (fake transport) |
+| R82 | ACTIVE detail with owned event + mismatched attempt direction = no ACTIVE detail |
+| R83 | ACTIVE detail with owned event + attempt pointing to unrelated lifecycle/plan = no ACTIVE detail |
+| R84 | ACTIVE detail resolves lifecycle from `event.origin_lifecycle_id`, not a fuzzy fallback |
+| R85 | R57 real positive path succeeds with advancing producer/consumer clock |
+| R86 | Real multi-symbol producer/lifecycle integration preserves valid earlier symbol origins |
+| R87 | Canonical ~2.66R negative remains blocked by unchanged 3R public gate |
+| R88 | Legacy SENT `event_key` remains globally consumed; event row frozen |
+| R89 | Legacy UNCERTAIN remains untouched/non-auto-retryable |
+| R90 | Strategy/economic regression suite remains unchanged |
 
 ## Remaining gaps (intentionally not this phase)
 
@@ -237,17 +345,15 @@ Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`
 python -m pytest tests/test_prospective_runtime_epoch_isolation.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_boundaries.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_repair2.py
+python -m pytest tests/test_prospective_runtime_epoch_isolation_repair3.py
 python -m pytest
 git diff --check
 ```
 
-Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21):
+Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21, third bounded repair):
 
-- `test_r57_real_producer_pipeline_creates_owned_public_send`: passed.
-- `test_r58_insufficient_public_rr_pipeline_does_not_send`: passed.
-- Focused epoch/isolation plus authoritative RR suite (`tests/test_prospective_runtime_epoch_isolation.py`, `tests/test_prospective_runtime_epoch_isolation_boundaries.py`, `tests/test_prospective_runtime_epoch_isolation_repair2.py`, `tests/test_authoritative_minimum_rr.py`): **125 passed**, exit 0, elapsed **16.75 s**.
-- `python -m pytest`: **2608 passed**, exit 0, elapsed **415.41 s**. One unrelated `StarletteDeprecationWarning` from FastAPI's TestClient (`httpx`/`starlette.testclient`). No skips added to hide failures.
-- `git diff --check`: clean (exit 0).
+- `python -m pytest`: **2638 passed**, 0 failed, 1 warning (`StarletteDeprecationWarning` from FastAPI/Starlette `TestClient`), **832.51s** (0:13:52), **exit 0**
+- `git diff --check`: **clean** (exit 0)
 - GitHub CI: recorded after push of this repair, if the run has completed.
 
 Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=false` / `LOCAL_MANUAL_MODE=true` / `ORDER_EXECUTION_ENABLED=false`. No Runtime filesystem, live exchange, listener, or scanner watch loop.
@@ -255,8 +361,6 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 ## Git record
 
 - Baseline main: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
-- Prior reviewed HEAD: `01cd99f146ea607cdc60650bbddc724af19e5155`
-- Second bounded repair commit: `869154aba3db80ce07b400552845e926d4e12626`
-- Prior PR HEAD before this fixture repair: `1303fec1688c77c4dbf9d02f7d0d0c136d273fef`
-- Positive-path fixture commit: `bad6251ef6fb86fdb081d35999a0be45d577d456`
-- Final PR #123 HEAD: `b53dd52d28d42001a6614659cf4701c1279b897b`
+- Architecture-reviewed PR HEAD before this repair: `3cdb78e0489d7dda298ec841f4559e0778a68637`
+- Third bounded repair commit: recorded after commit
+- Final PR #123 HEAD: recorded after commit/push

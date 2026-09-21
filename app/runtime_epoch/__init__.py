@@ -26,7 +26,12 @@ from app.runtime_epoch.models import (
     RuntimeEpochRecord,
     SymbolOriginDecision,
 )
-from app.runtime_epoch.origin import evaluate_symbol_origin, register_operational_run
+from app.runtime_epoch.origin import (
+    evaluate_symbol_origin,
+    register_operational_run,
+    register_operational_scan_run,
+    require_registered_operational_run,
+)
 from app.runtime_epoch.startup import (
     OperationalContext,
     OperationalRuntime,
@@ -69,6 +74,8 @@ __all__ = [
     "open_operational_service_database",
     "open_repository_database",
     "register_operational_run",
+    "register_operational_scan_run",
+    "require_registered_operational_run",
     "require_expected_operational_identity",
     "require_active_runtime_epoch",
     "require_expected_runtime_epoch",

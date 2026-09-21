@@ -81,6 +81,7 @@ from tests.runtime_epoch_support import (
     SYNTHETIC_EPOCH_ID,
     SYNTHETIC_IDENTITY,
     SYNTHETIC_NOW,
+    assert_legacy_sent_consumption_frozen,
     bootstrap_operational_test_database,
     grant_synthetic_origin,
     seed_legacy_attempt,
@@ -268,6 +269,9 @@ def test_t06_legacy_sent_event_key_remains_consumed(tmp_path: Path) -> None:
         event_id = seed_legacy_public_event(connection, event_key=event_key, delivery_state="SENT", status="SENT")
         seed_legacy_attempt(connection, signal_id="legacy-sent", event_key=event_key)
         before = snapshot_tables(connection)
+        original_attempt_ids = tuple(
+            int(row[0]) for row in connection.execute("SELECT id FROM telegram_alert_attempts").fetchall()
+        )
         connection.commit()
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
@@ -285,11 +289,28 @@ def test_t06_legacy_sent_event_key_remains_consumed(tmp_path: Path) -> None:
             (event_key,),
         ).fetchone()[0]
         after = snapshot_tables(connection)
+        if original_attempt_ids:
+            placeholders = ",".join("?" for _ in original_attempt_ids)
+            extra_attempts = connection.execute(
+                f"""
+                SELECT telegram_status, delivery_state
+                FROM telegram_alert_attempts
+                WHERE id NOT IN ({placeholders})
+                """,
+                original_attempt_ids,
+            ).fetchall()
+        else:
+            extra_attempts = connection.execute(
+                "SELECT telegram_status, delivery_state FROM telegram_alert_attempts"
+            ).fetchall()
     assert tuple(row) == ("SENT", "SENT", "legacy payload")
     assert count == 1
     assert sender.calls == []
-    assert after["public_alert_events"] == before["public_alert_events"]
-    assert after["telegram_alert_attempts"] == before["telegram_alert_attempts"]
+    assert_legacy_sent_consumption_frozen(
+        before=before,
+        after=after,
+        extra_attempts=tuple(tuple(item) for item in extra_attempts),
+    )
 
 
 @pytest.mark.parametrize("delivery_state", [PENDING, RETRYABLE, IN_FLIGHT, UNCERTAIN])
@@ -756,6 +777,7 @@ def test_t20_v25_upgrade_preserves_rows_and_rolls_back_failure(
             ).fetchone()
         )
         assert after_event["runtime_epoch_id"] is None
+        assert after_event.get("canonical_reservation_attempt_id") is None
         assert after_event["event_key"] == before_event["event_key"]
         assert after_event["status"] == before_event["status"]
         names = {

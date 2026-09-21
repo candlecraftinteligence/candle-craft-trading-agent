@@ -77,6 +77,70 @@ def register_operational_run(
     )
 
 
+def require_registered_operational_run(
+    connection: sqlite3.Connection,
+    *,
+    run_id: str,
+    epoch: RuntimeEpochRecord | None = None,
+) -> OperationalRunRegistration:
+    """Validate an already-persisted run. Never create or backdate registration."""
+
+    epoch = epoch or require_active_runtime_epoch(connection)
+    normalized_run_id = _required_text(run_id, "run_id")
+    existing = connection.execute(
+        "SELECT * FROM runtime_operational_runs WHERE run_id = ?",
+        (normalized_run_id,),
+    ).fetchone()
+    if existing is None:
+        raise RuntimeEpochOriginError("Operational run is not registered.")
+    if str(existing["runtime_epoch_id"]) != epoch.epoch_id:
+        raise RuntimeEpochOriginError("Run registration is bound to a different runtime epoch.")
+    return OperationalRunRegistration(
+        run_id=str(existing["run_id"]),
+        runtime_epoch_id=str(existing["runtime_epoch_id"]),
+        registered_at=str(existing["registered_at"]),
+        status=str(existing["status"]),
+        producer_started_at=existing["producer_started_at"],
+    )
+
+
+def register_operational_scan_run(
+    database_path: Any,
+    *,
+    run_id: str,
+    registered_at: str,
+    expected_identity: Any,
+    producer_started_at: str | None = None,
+) -> OperationalRunRegistration:
+    """Production owner: persist run registration after identity validation, before acquisition."""
+
+    from pathlib import Path
+
+    from app.runtime_epoch.startup import open_operational_service_database
+
+    connection, epoch = open_operational_service_database(
+        Path(database_path),
+        expected_identity=expected_identity,
+    )
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        registration = register_operational_run(
+            connection,
+            run_id=run_id,
+            registered_at=registered_at,
+            producer_started_at=producer_started_at,
+            epoch=epoch,
+        )
+        connection.commit()
+        return registration
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def origin_kind_from_symbol_result(symbol_result: Any) -> str:
     kind = str(getattr(symbol_result, "evaluation_origin_kind", None) or "").strip().lower()
     return kind or UNSPECIFIED_EVALUATION

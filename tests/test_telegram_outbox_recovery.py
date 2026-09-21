@@ -21,6 +21,7 @@ from app.alerts.telegram_outbox import (
     persist_intent_parts,
 )
 from app.storage.database import connect_database, open_initialized_database
+from app.runtime_epoch.ownership import bind_canonical_reservation_attempt
 from tests.runtime_epoch_support import (
     SYNTHETIC_EPOCH_ID,
     grant_synthetic_origin,
@@ -114,6 +115,11 @@ def _seed_intent(
         connection.execute(
             "UPDATE telegram_alert_attempts SET delivery_part_count = ? WHERE id = ?",
             (len(parts), attempt_id),
+        )
+        bind_canonical_reservation_attempt(
+            connection,
+            event_id=event_id,
+            attempt_id=attempt_id,
         )
         connection.commit()
     return event_id, attempt_id

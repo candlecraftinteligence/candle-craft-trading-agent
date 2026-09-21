@@ -183,6 +183,46 @@ def synthetic_runtime_epoch(
     monkeypatch.setattr(origin_module, "evaluate_symbol_origin", wrapped_evaluate_symbol_origin)
     monkeypatch.setattr(lifecycle_service_module, "evaluate_symbol_origin", wrapped_evaluate_symbol_origin)
 
+    original_require_run = origin_module.require_registered_operational_run
+
+    def wrapped_require_registered_operational_run(connection, *, run_id, epoch=None):
+        from app.runtime_epoch.errors import RuntimeEpochOriginError
+        from app.runtime_epoch.origin import register_operational_run
+
+        try:
+            return original_require_run(connection, run_id=run_id, epoch=epoch)
+        except RuntimeEpochOriginError:
+            register_operational_run(
+                connection,
+                run_id=run_id,
+                registered_at=SYNTHETIC_NOW,
+                epoch=epoch,
+            )
+            return original_require_run(connection, run_id=run_id, epoch=epoch)
+
+    monkeypatch.setattr(origin_module, "require_registered_operational_run", wrapped_require_registered_operational_run)
+    monkeypatch.setattr(
+        lifecycle_service_module,
+        "require_registered_operational_run",
+        wrapped_require_registered_operational_run,
+    )
+
+    original_apply = lifecycle_service_module.SetupLifecycleService.apply_to_run_result
+
+    def wrapped_apply_to_run_result(self, result, *, scan_run_id=None, now=None):
+        return original_apply(
+            self,
+            result,
+            scan_run_id=str(scan_run_id or "").strip() or "autouse-operational-run",
+            now=now,
+        )
+
+    monkeypatch.setattr(
+        lifecycle_service_module.SetupLifecycleService,
+        "apply_to_run_result",
+        wrapped_apply_to_run_result,
+    )
+
     from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
     from app.runtime_epoch import ownership as ownership_module
     from app.runtime_epoch.authority import load_active_runtime_epoch
@@ -260,6 +300,7 @@ def synthetic_runtime_epoch(
         origin_lifecycle_id,
         epoch=None,
         expected_symbol=None,
+        expected_direction=None,
     ):
         try:
             return original_require(
@@ -267,9 +308,12 @@ def synthetic_runtime_epoch(
                 origin_lifecycle_id=origin_lifecycle_id,
                 epoch=epoch,
                 expected_symbol=expected_symbol,
+                expected_direction=expected_direction,
             )
         except RuntimeEpochOwnershipError as exc:
             message = str(exc)
+            if "direction does not match" in message:
+                raise
             if "persisted originating lifecycle" not in message and "does not exist" not in message:
                 raise
             loaded = epoch or load_active_runtime_epoch(connection)
@@ -280,12 +324,14 @@ def synthetic_runtime_epoch(
                 lifecycle_id=origin_lifecycle_id,
                 symbol=expected_symbol,
                 epoch=loaded,
+                direction=expected_direction or "long",
             )
             return original_require(
                 connection,
                 origin_lifecycle_id=origin_lifecycle_id,
                 epoch=loaded,
                 expected_symbol=expected_symbol,
+                expected_direction=expected_direction,
             )
 
     monkeypatch.setattr(ownership_module, "require_lifecycle_public_intent", wrapped_require_lifecycle_public_intent)
@@ -393,6 +439,88 @@ def synthetic_runtime_epoch(
 
     monkeypatch.setattr(ownership_module, "require_public_root_for_insert", wrapped_require_public_root_for_insert)
     monkeypatch.setattr(telegram_lifecycle_module, "require_public_root_for_insert", wrapped_require_public_root_for_insert)
+
+    from dataclasses import replace as dataclass_replace
+
+    from app.alerts.telegram_outbox import SQLitePublicTelegramOutbox
+    from app.lifecycle.state_machine import now_utc_iso
+    from app.runtime_epoch.ownership import (
+        bind_canonical_reservation_attempt,
+        canonical_reservation_attempt_id,
+        normalize_public_event_type,
+    )
+    from tests.runtime_epoch_support import stamp_sql_public_event
+
+    original_insert = telegram_lifecycle_module.SQLiteTelegramAlertAttemptRepository.insert_attempt
+
+    def wrapped_insert_attempt(self, record, *, audit_only=False):
+        if original_insert(self, record, audit_only=audit_only):
+            return True
+        telegram_status = str(getattr(record, "telegram_status", "") or "").strip().lower()
+        if audit_only or telegram_status in {"blocked", "skipped", "failed"}:
+            return False
+        event_key = str(getattr(record, "public_watchlist_event_key", "") or "").strip()
+        if not event_key or event_key.upper() == "N/A":
+            event_key = f"autouse:{record.signal_id}:{record.alert_type}"
+        symbol = str(record.symbol or "BTCUSDT").strip().upper() or "BTCUSDT"
+        direction = str(record.direction or "long").strip().lower()
+        if not direction or direction.upper() == "N/A":
+            direction = "long"
+        raw_type = getattr(record, "public_alert_event_type", None)
+        if not raw_type or str(raw_type).strip().upper() in {"", "N/A"}:
+            raw_type = record.alert_type
+        event_type = normalize_public_event_type(raw_type) or "initial_watchlist"
+        from app.runtime_epoch.ownership import PUBLIC_EVENT_FAMILY_TYPES
+
+        if event_type not in PUBLIC_EVENT_FAMILY_TYPES:
+            event_type = "initial_watchlist"
+        stamp_sql_public_event(
+            self._connection,
+            event_key=event_key,
+            symbol=symbol,
+            side=direction,
+            event_type=event_type,
+            status="RESERVED",
+            timestamp=now_utc_iso(),
+        )
+        seeded = dataclass_replace(
+            record,
+            public_watchlist_event_key=event_key,
+            public_watchlist_plan_id=event_key,
+            public_alert_event_type=event_type,
+            direction=direction,
+            symbol=symbol,
+        )
+        return original_insert(self, seeded, audit_only=False)
+
+    monkeypatch.setattr(
+        telegram_lifecycle_module.SQLiteTelegramAlertAttemptRepository,
+        "insert_attempt",
+        wrapped_insert_attempt,
+    )
+
+    original_claim = SQLitePublicTelegramOutbox.claim
+
+    def wrapped_claim(self, *, event_id, reservation_id, **kwargs):
+        from app.runtime_epoch.ownership import decide_public_effect
+
+        event = self.connection.execute(
+            "SELECT * FROM public_alert_events WHERE id = ?",
+            (int(event_id),),
+        ).fetchone()
+        if (
+            event is not None
+            and canonical_reservation_attempt_id(event) is None
+            and decide_public_effect(self.connection, event).allowed
+        ):
+            bind_canonical_reservation_attempt(
+                self.connection,
+                event_id=int(event_id),
+                attempt_id=int(reservation_id),
+            )
+        return original_claim(self, event_id=event_id, reservation_id=reservation_id, **kwargs)
+
+    monkeypatch.setattr(SQLitePublicTelegramOutbox, "claim", wrapped_claim)
 
     original_deliver = telegram_lifecycle_module.TelegramLifecycleDeliveryService.deliver_transitions_for_symbol
 

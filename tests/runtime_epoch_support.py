@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from app.runtime_epoch.models import RUNTIME_EPOCH_CONTRACT_VERSION, RuntimeEpoc
 from app.runtime_epoch.origin import evaluate_symbol_origin, register_operational_run
 from app.runtime_epoch.ownership import (
     PUBLIC_CHAIN_STARTER_EVENT_TYPES,
+    PUBLIC_EVENT_FAMILY_TYPES,
     PUBLIC_ROOT_EVENT_TYPES,
     normalize_public_event_type,
 )
@@ -111,25 +113,38 @@ def stamp_sql_lifecycle_row(connection: sqlite3.Connection, *, lifecycle_id: str
     if epoch is None:
         return
     existing = connection.execute(
-        "SELECT runtime_epoch_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
+        "SELECT runtime_epoch_id, direction FROM setup_lifecycle_records WHERE lifecycle_id = ?",
         (lifecycle_id,),
     ).fetchone()
-    if existing is None or existing["runtime_epoch_id"] not in (None, ""):
+    if existing is None:
         return
-    decision = grant_synthetic_origin(
-        connection,
-        symbol=symbol,
-        run_id=f"test-sql-{lifecycle_id}",
-    )
-    if not decision.granted or not decision.origin_id:
-        return
+    if existing["runtime_epoch_id"] in (None, ""):
+        decision = grant_synthetic_origin(
+            connection,
+            symbol=symbol,
+            run_id=f"test-sql-{lifecycle_id}",
+        )
+        if not decision.granted or not decision.origin_id:
+            return
+        connection.execute(
+            """
+            UPDATE setup_lifecycle_records
+            SET runtime_epoch_id = ?, creation_origin_id = ?
+            WHERE lifecycle_id = ? AND runtime_epoch_id IS NULL
+            """,
+            (epoch.epoch_id, decision.origin_id, lifecycle_id),
+        )
+    normalized_side = str(existing["direction"] or "long").strip().lower() or "long"
     connection.execute(
         """
-        UPDATE setup_lifecycle_records
-        SET runtime_epoch_id = ?, creation_origin_id = ?
-        WHERE lifecycle_id = ? AND runtime_epoch_id IS NULL
+        UPDATE public_alert_events
+        SET origin_lifecycle_id = ?
+        WHERE runtime_epoch_id = ?
+          AND UPPER(symbol) = UPPER(?)
+          AND lower(side) = ?
+          AND origin_lifecycle_id LIKE 'epoch-origin::%'
         """,
-        (epoch.epoch_id, decision.origin_id, lifecycle_id),
+        (lifecycle_id, epoch.epoch_id, symbol, normalized_side),
     )
 
 
@@ -149,7 +164,21 @@ def stamp_sql_public_event(
     normalized_symbol = str(symbol).upper()
     normalized_side = str(side or "long").strip().lower() or "long"
     normalized_type = normalize_public_event_type(event_type)
-    origin_lifecycle_id = f"epoch-origin::{normalized_symbol}::{normalized_side}"
+    if normalized_type not in PUBLIC_EVENT_FAMILY_TYPES:
+        normalized_type = "initial_watchlist"
+    owned = connection.execute(
+        """
+        SELECT lifecycle_id FROM setup_lifecycle_records
+        WHERE UPPER(symbol) = ? AND lower(direction) = ? AND runtime_epoch_id = ?
+        ORDER BY CASE WHEN is_current = 1 THEN 0 ELSE 1 END, last_seen_at DESC
+        LIMIT 1
+        """,
+        (normalized_symbol, normalized_side, epoch.epoch_id),
+    ).fetchone()
+    if owned is not None:
+        origin_lifecycle_id = str(owned["lifecycle_id"] if "lifecycle_id" in owned.keys() else owned[0])
+    else:
+        origin_lifecycle_id = f"epoch-origin::{normalized_symbol}::{normalized_side}"
     existing_life = connection.execute(
         "SELECT lifecycle_id FROM setup_lifecycle_records WHERE lifecycle_id = ?",
         (origin_lifecycle_id,),
@@ -168,11 +197,12 @@ def stamp_sql_public_event(
                     lifecycle_id, symbol, mode, direction, current_state,
                     first_seen_at, last_seen_at, last_transition_at, is_current,
                     runtime_epoch_id, creation_origin_id
-                ) VALUES (?, ?, 'epoch-origin', 'ownership-anchor', 'WATCHLISTED', ?, ?, ?, 0, ?, ?)
+                ) VALUES (?, ?, 'epoch-origin', ?, 'WATCHLISTED', ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     origin_lifecycle_id,
                     normalized_symbol,
+                    normalized_side,
                     SYNTHETIC_NOW,
                     SYNTHETIC_NOW,
                     SYNTHETIC_NOW,
@@ -331,6 +361,24 @@ def snapshot_tables(connection: sqlite3.Connection) -> dict[str, tuple[tuple[Any
         rows = connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
         snapshots[table] = tuple(tuple(row) for row in rows)
     return snapshots
+
+
+def assert_legacy_sent_consumption_frozen(
+    *,
+    before: dict[str, tuple[tuple[Any, ...], ...]],
+    after: dict[str, tuple[tuple[Any, ...], ...]],
+    extra_attempts: Sequence[tuple[Any, ...]],
+) -> None:
+    """Legacy SENT events stay consumed; diagnostic audit rows may appear."""
+
+    assert after["public_alert_events"] == before["public_alert_events"]
+    for row in before["telegram_alert_attempts"]:
+        assert row in after["telegram_alert_attempts"]
+    operational = {"pending", "retryable", "in_flight", "uncertain", "sent"}
+    operational_delivery = {"PENDING", "RETRYABLE", "IN_FLIGHT", "UNCERTAIN", "SENT"}
+    for status, delivery_state in extra_attempts:
+        assert str(status or "").strip().lower() not in operational
+        assert str(delivery_state or "N/A").strip().upper() not in operational_delivery
 
 
 def seed_legacy_lifecycle(

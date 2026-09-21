@@ -714,8 +714,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 normalized_entry_zone_high TEXT NOT NULL DEFAULT 'N/A',
                 normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
                 dedupe_status TEXT NOT NULL DEFAULT 'N/A',
-                dedupe_reason TEXT NOT NULL DEFAULT 'N/A',
-                UNIQUE(signal_id, alert_type)
+                dedupe_reason TEXT NOT NULL DEFAULT 'N/A'
             );
 
             CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_signal
@@ -1435,6 +1434,14 @@ def _migrate_runtime_epoch_isolation_v26(connection: sqlite3.Connection) -> None
         _ensure_column(connection, "public_alert_events", "runtime_epoch_id", "TEXT")
         _ensure_column(connection, "public_alert_events", "origin_lifecycle_id", "TEXT")
         _ensure_column(connection, "public_alert_events", "origin_root_event_id", "INTEGER")
+        _ensure_column(connection, "public_alert_events", "canonical_reservation_attempt_id", "INTEGER")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_public_alert_events_canonical_reservation
+                ON public_alert_events(canonical_reservation_attempt_id)
+                WHERE canonical_reservation_attempt_id IS NOT NULL
+            """
+        )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS ix_runtime_operational_origins_run_symbol
@@ -1491,6 +1498,14 @@ def _ensure_telegram_alert_attempt_indexes(connection: sqlite3.Connection) -> No
             WHERE telegram_status IN ('reserved', 'pending', 'in_flight', 'retryable', 'uncertain', 'sent')
               AND public_watchlist_event_key IS NOT NULL
               AND public_watchlist_event_key NOT IN ('', 'N/A')
+        """
+    )
+    connection.execute("DROP INDEX IF EXISTS ux_telegram_alert_attempts_signal_alert_operational")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_telegram_alert_attempts_signal_alert_operational
+            ON telegram_alert_attempts(signal_id, alert_type)
+            WHERE lower(telegram_status) NOT IN ('blocked', 'skipped', 'failed')
         """
     )
 
@@ -1624,8 +1639,7 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
             normalized_entry_zone_high TEXT NOT NULL DEFAULT 'N/A',
             normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
             dedupe_status TEXT NOT NULL DEFAULT 'N/A',
-            dedupe_reason TEXT NOT NULL DEFAULT 'N/A',
-            UNIQUE(signal_id, alert_type)
+            dedupe_reason TEXT NOT NULL DEFAULT 'N/A'
         )
         """
     )

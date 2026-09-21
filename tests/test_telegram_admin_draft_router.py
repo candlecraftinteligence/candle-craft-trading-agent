@@ -579,7 +579,8 @@ def test_admin_report_includes_target_blocked_lifecycle_and_no_trade_footer() ->
     report = format_admin_scan_report(result, manifest_row=_manifest())
 
     assert "Valid Setups" in report
-    assert "VALIDUSDT | long" in report
+    valid_section = report.split("Near Misses")[0]
+    assert "VALIDUSDT | long" not in valid_section
     assert "Near Misses" in report
     assert "NEARUSDT | final" in report
     assert "Target Blocked" in report

@@ -103,6 +103,7 @@ async def route_admin_scan_report(
     client: TelegramAdminClient | None = None,
     transport: TelegramAdminTransport | None = None,
     database_path: Path | str | None = None,
+    expected_identity: Any | None = None,
 ) -> AdminDraftRoutingResult:
     telegram_config = config or TelegramAdminConfig.from_settings(settings)
     admin_client = client or TelegramAdminClient(telegram_config, transport=transport)
@@ -115,6 +116,7 @@ async def route_admin_scan_report(
         manifest_row=manifest_row,
         draft_artifact_path=draft_path,
         database_path=database_path,
+        expected_identity=expected_identity,
     )
     delivery = _duplicate_sent_admin_delivery(
         draft_path,
@@ -136,6 +138,7 @@ async def route_admin_scan_report(
         error_message=delivery.error_message,
         report=report,
         database_path=database_path,
+        expected_identity=expected_identity,
     )
 
     try:
@@ -175,6 +178,7 @@ def build_admin_drafts(
     report: str | None = None,
     created_at: str | None = None,
     database_path: Path | str | None = None,
+    expected_identity: Any | None = None,
 ) -> tuple[AdminDraftRecord, ...]:
     timestamp = created_at or _now_utc_iso()
     run_id = _run_id(result, manifest_row)
@@ -186,7 +190,16 @@ def build_admin_drafts(
             draft_type="scan_health",
             symbol=NA,
             summary=_scan_health_summary(result, manifest_row=manifest_row, timestamp=manifest_timestamp),
-            message_preview=_preview(report or format_admin_scan_report(result, ranked_results=ranked_results, manifest_row=manifest_row)),
+            message_preview=_preview(
+                report
+                or format_admin_scan_report(
+                    result,
+                    ranked_results=ranked_results,
+                    manifest_row=manifest_row,
+                    database_path=database_path,
+                    expected_identity=expected_identity,
+                )
+            ),
             delivery_status=delivery_status,
             telegram_metadata=telegram_metadata,
             error_message=error_message,
@@ -196,7 +209,9 @@ def build_admin_drafts(
     for ranked in _ranked(result, ranked_results):
         symbol_result = ranked.symbol_result
         summary = _source_row_summary(symbol_result, run_id=run_id, timestamp=manifest_timestamp)
-        for draft_type in _symbol_draft_types(summary, database_path=database_path):
+        for draft_type in _symbol_draft_types(
+            summary, database_path=database_path, expected_identity=expected_identity
+        ):
             records.append(
                 _draft_record(
                     run_id=run_id,
@@ -255,6 +270,7 @@ def format_admin_scan_report(
     draft_artifact_path: Path | str | None = None,
     max_rows_per_section: int = 6,
     database_path: Path | str | None = None,
+    expected_identity: Any | None = None,
 ) -> str:
     ranked = _ranked(result, ranked_results)
     summaries = [_source_row_summary(item.symbol_result, run_id=_run_id(result, manifest_row), timestamp=_timestamp(manifest_row)) for item in ranked]
@@ -262,9 +278,10 @@ def format_admin_scan_report(
         summary
         for summary in summaries
         if summary["display_status"] == "valid_setup"
-        and (
-            database_path is None
-            or _operational_setup_recommendation_allowed(summary, database_path)
+        and _operational_setup_recommendation_allowed(
+            summary,
+            database_path,
+            expected_identity=expected_identity,
         )
     ]
     near = [
@@ -285,7 +302,7 @@ def format_admin_scan_report(
         f"Universe: {_universe_label(result, manifest_row)}",
         f"Regime: {_market_regime(result, manifest_row)} / confidence {_regime_confidence(result, manifest_row)}",
         f"Symbols scanned: {counts['symbols_scanned']}",
-        f"Valid setups: {counts['valid_setups']}",
+        f"Valid setups: {len(valid)}",
         f"Near misses: {counts['near_misses']}",
         f"Rejected: {counts['rejected']}",
         f"Target blocked: {len(target_blocked)}",
@@ -486,10 +503,13 @@ def _symbol_draft_types(
     summary: Mapping[str, Any],
     *,
     database_path: Path | str | None = None,
+    expected_identity: Any | None = None,
 ) -> tuple[AdminDraftType, ...]:
     draft_types: list[AdminDraftType] = []
     if summary.get("display_status") == "valid_setup":
-        if _operational_setup_recommendation_allowed(summary, database_path):
+        if _operational_setup_recommendation_allowed(
+            summary, database_path, expected_identity=expected_identity
+        ):
             draft_types.append("valid_setup")
     if summary.get("display_status") == "near_miss" and summary.get("failed_stage") != "target_integrity":
         draft_types.append("near_miss")
@@ -877,16 +897,14 @@ def _operational_setup_recommendation_allowed(
         return False
     from app.runtime_epoch.errors import RuntimeEpochError
     from app.runtime_epoch.models import RuntimeEpochIdentity
-    from app.runtime_epoch.ownership import require_lifecycle_public_intent, canonical_operational_symbol
-    from app.runtime_epoch.startup import identity_from_settings, open_operational_service_database
-    from app.core.config import Settings
+    from app.runtime_epoch.ownership import (
+        canonical_operational_direction,
+        canonical_operational_symbol,
+        require_lifecycle_public_intent,
+    )
+    from app.runtime_epoch.startup import open_operational_service_database
 
     identity = expected_identity
-    if identity is None:
-        try:
-            identity = identity_from_settings(Settings())
-        except Exception:
-            return False
     if not isinstance(identity, RuntimeEpochIdentity):
         return False
     try:
@@ -924,11 +942,13 @@ def _operational_setup_recommendation_allowed(
                     origin_lifecycle_id=str(row["lifecycle_id"]),
                     epoch=epoch,
                     expected_symbol=symbol,
+                    expected_direction=direction or None,
                 )
             except RuntimeEpochError:
                 continue
-            row_direction = str(row["direction"] or "").strip().lower()
-            if direction and row_direction and direction != row_direction:
+            row_direction = canonical_operational_direction(row["direction"])
+            payload_direction = canonical_operational_direction(direction)
+            if payload_direction and row_direction and payload_direction != row_direction:
                 continue
             if lifecycle_id and str(row["lifecycle_id"]) != lifecycle_id:
                 continue

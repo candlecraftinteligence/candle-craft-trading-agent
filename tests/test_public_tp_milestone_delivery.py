@@ -244,27 +244,30 @@ def _insert_sent_limit_hit(
         ):
             return True
         now = "2026-08-30T10:06:00+00:00"
-        assert repository.insert_attempt(
-            replace(
-                confirmed,
-                id=None,
-                alert_type=TelegramAlertType.LIMIT_HIT.value,
-                attempted_alert_type=TelegramAlertType.LIMIT_HIT.value,
-                previous_state=SetupLifecycleState.EXECUTING.value,
-                new_state=SetupLifecycleState.MANAGING.value,
-                lifecycle_state=SetupLifecycleState.MANAGING.value,
-                attempted_at=now,
-                sent_at=now,
-                telegram_status="sent",
-                delivery_state=NA,
-                message_hash="limit-hit",
-                telegram_message_id=None,
-                telegram_chat_id=None,
-                public_watchlist_plan_id=NA,
-                public_watchlist_event_key=NA,
-                public_alert_event_type=NA,
-            )
+        repository._connection.execute(
+            """
+            INSERT INTO telegram_alert_attempts (
+                signal_id, symbol, direction, previous_state, new_state, alert_type,
+                lifecycle_state, sent_at, attempted_at, telegram_status, message_hash,
+                attempted_alert_type, delivery_state, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sent', 'limit-hit', ?, 'N/A', ?, ?)
+            """,
+            (
+                confirmed.signal_id,
+                confirmed.symbol,
+                confirmed.direction,
+                SetupLifecycleState.EXECUTING.value,
+                SetupLifecycleState.MANAGING.value,
+                TelegramAlertType.LIMIT_HIT.value,
+                SetupLifecycleState.MANAGING.value,
+                now,
+                now,
+                TelegramAlertType.LIMIT_HIT.value,
+                now,
+                now,
+            ),
         )
+        repository._connection.commit()
         return True
 
 
@@ -272,30 +275,30 @@ def _insert_legacy_watchlist_root(db_path: Path, symbol) -> None:
     record = symbol.lifecycle_state
     sent_at = "2026-08-30T10:00:00+00:00"
     with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
-        assert repository.insert_attempt(
-            TelegramAlertAttemptRecord(
-                signal_id=record.lifecycle_id,
-                symbol=record.symbol,
-                direction=record.direction,
-                previous_state=SetupLifecycleState.DISCOVERED.value,
-                new_state=SetupLifecycleState.WATCHLISTED.value,
-                alert_type=TelegramAlertType.WATCHLIST.value,
-                lifecycle_state=SetupLifecycleState.WATCHLISTED.value,
-                sent_at=sent_at,
-                attempted_at=sent_at,
-                telegram_status="sent",
-                message_hash="legacy-watchlist",
-                attempted_alert_type=TelegramAlertType.WATCHLIST.value,
-                entry_low=record.entry_low,
-                entry_high=record.entry_high,
-                stop_loss=record.stop_loss,
-                tp1=record.tp1,
-                tp2=record.tp2,
-                tp3=record.tp3,
-                rr_planned=record.rr,
-                delivery_state=NA,
-            )
+        repository._connection.execute(
+            """
+            INSERT INTO telegram_alert_attempts (
+                signal_id, symbol, direction, previous_state, new_state, alert_type,
+                lifecycle_state, sent_at, attempted_at, telegram_status, message_hash,
+                attempted_alert_type, delivery_state, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sent', 'legacy-watchlist', ?, 'N/A', ?, ?)
+            """,
+            (
+                record.lifecycle_id,
+                record.symbol,
+                record.direction,
+                SetupLifecycleState.DISCOVERED.value,
+                SetupLifecycleState.WATCHLISTED.value,
+                TelegramAlertType.WATCHLIST.value,
+                SetupLifecycleState.WATCHLISTED.value,
+                sent_at,
+                sent_at,
+                TelegramAlertType.WATCHLIST.value,
+                sent_at,
+                sent_at,
+            ),
         )
+        repository._connection.commit()
 
 
 def test_production_like_confirmed_without_watchlist_delivers_tp1_once(tmp_path) -> None:

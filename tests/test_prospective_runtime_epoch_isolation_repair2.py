@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from argparse import Namespace
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -49,6 +50,8 @@ from app.runtime_epoch.origin import (
     evaluation_completed_at_from_symbol_result,
     origin_kind_from_symbol_result,
     producer_acquisition_from_symbol_result,
+    register_operational_run,
+    register_operational_scan_run,
 )
 from app.runtime_epoch.startup import (
     identity_from_settings,
@@ -89,6 +92,7 @@ from tests.test_prospective_runtime_epoch_isolation_boundaries import (
     _live_adapter_delivery,
     _owned_record,
     _plan,
+    _register_run,
     _schema_snapshot,
     _seed_legacy_part,
     _seed_owned_root_event,
@@ -236,13 +240,17 @@ def _owned_event_reservation(
         assert event is not None
         assert event.id is not None
         inserted = repository.insert_attempt(
-            _attempt_record(
-                signal_id=signal_id,
-                event_key=event_key,
-                status="pending",
-                delivery_state=PENDING,
-                symbol=symbol,
-                direction=direction,
+            replace(
+                _attempt_record(
+                    signal_id=signal_id,
+                    event_key=event_key,
+                    status="pending",
+                    delivery_state=PENDING,
+                    symbol=symbol,
+                    direction=direction,
+                ),
+                public_watchlist_plan_id=f"{lifecycle_id}-plan",
+                public_alert_event_type=PUBLIC_WATCHLIST_INITIAL_EVENT_TYPE,
             )
         )
         assert inserted is True
@@ -265,6 +273,9 @@ def _owned_event_reservation(
 
 def test_r31_missing_evaluation_completion_blocks_fresh_acquisition_and_decision(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r31.db", CUTOFF_IDENTITY)
+    _register_run(db_path, "r31-eval")
+    _register_run(db_path, "r31-decision")
+    _register_run(db_path, "r31-producer")
     missing_eval = _fresh_symbol(
         origin_kind="live_scan",
         decision=PROCESS_DT,
@@ -332,6 +343,7 @@ def test_r31_missing_evaluation_completion_blocks_fresh_acquisition_and_decision
 
 def test_r32_actual_producer_path_supplies_evaluation_completion(tmp_path: Path) -> None:
     db_path = _bootstrap(tmp_path / "r32.db", CUTOFF_IDENTITY)
+    _register_run(db_path, "r32-run", registered_at="2026-03-01T13:59:00Z")
     clock_now = datetime(2026, 3, 1, 14, 0, tzinfo=UTC)
     client = FakeAdapterExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
     scanned = run_scanner(
@@ -1119,6 +1131,12 @@ def _producer_lifecycle_then_deliver(
     with open_initialized_database(db_path) as connection:
         initialize_runtime_epoch(connection, SYNTHETIC_IDENTITY, activated_at=SYNTHETIC_CUTOFF_AT)
         connection.commit()
+    register_operational_scan_run(
+        db_path,
+        run_id=f"{run_prefix}-run-1",
+        registered_at="2026-03-01T13:59:00Z",
+        expected_identity=SYNTHETIC_IDENTITY,
+    )
     clock = {"now": datetime(2026, 3, 1, 14, 0, tzinfo=UTC)}
     client = FakeAdapterExchangeClient({"BTCUSDT": candles}, failing_timeframes={"2d"})
     runner = ScannerRunner(
@@ -1134,9 +1152,15 @@ def _producer_lifecycle_then_deliver(
         first,
         database_path=db_path,
         scan_run_id=f"{run_prefix}-run-1",
-        now="2026-03-01T14:00:00Z",
+        now="2026-03-01T14:00:01Z",
         expected_identity=SYNTHETIC_IDENTITY,
         confirmation_cycles=2,
+    )
+    register_operational_scan_run(
+        db_path,
+        run_id=f"{run_prefix}-run-2",
+        registered_at="2026-03-01T14:04:00Z",
+        expected_identity=SYNTHETIC_IDENTITY,
     )
     clock["now"] = datetime(2026, 3, 1, 14, 5, tzinfo=UTC)
     second = run_scanner(runner.run(_config(["BTCUSDT"])))
@@ -1144,7 +1168,7 @@ def _producer_lifecycle_then_deliver(
         second,
         database_path=db_path,
         scan_run_id=f"{run_prefix}-run-2",
-        now="2026-03-01T14:05:00Z",
+        now="2026-03-01T14:05:01Z",
         expected_identity=SYNTHETIC_IDENTITY,
         confirmation_cycles=2,
     )

@@ -18,6 +18,7 @@ from app.runtime_epoch.ownership import (
     require_part_claim_association,
     require_public_event_mutation,
     require_public_part_mutation,
+    canonical_reservation_attempt_id,
 )
 
 PENDING = "PENDING"
@@ -175,6 +176,8 @@ class SQLitePublicTelegramOutbox:
             ).fetchone()
             decision = decide_public_effect(self.connection, row)
             if not decision.allowed:
+                return False
+            if canonical_reservation_attempt_id(row) is None:
                 return False
             return self._recover_stale_locked(event_id=event_id, now=now or _now_iso())
 
@@ -494,6 +497,15 @@ class SQLitePublicTelegramOutbox:
         return tuple(dict(row) for row in rows)
 
     def _recover_stale_locked(self, *, event_id: int, now: str) -> bool:
+        event = self.connection.execute(
+            "SELECT * FROM public_alert_events WHERE id = ?",
+            (int(event_id),),
+        ).fetchone()
+        if event is None:
+            return False
+        canonical = canonical_reservation_attempt_id(event)
+        if canonical is None:
+            return False
         cursor = self.connection.execute(
             """
             UPDATE public_alert_events
@@ -527,14 +539,12 @@ class SQLitePublicTelegramOutbox:
             UPDATE telegram_alert_attempts
             SET telegram_status = 'uncertain', delivery_state = ?,
                 delivery_last_error_category = ?, error_message = ?, last_error_message = ?
-            WHERE public_watchlist_event_key = (
-                SELECT event_key FROM public_alert_events WHERE id = ?
-            )
+            WHERE id = ?
             """,
             (
                 UNCERTAIN, "stale_in_flight_acceptance_unknown",
                 "stale_in_flight_acceptance_unknown", "stale_in_flight_acceptance_unknown",
-                int(event_id),
+                int(canonical),
             ),
         )
         return True

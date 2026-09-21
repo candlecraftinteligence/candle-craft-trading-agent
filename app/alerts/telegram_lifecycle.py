@@ -91,6 +91,10 @@ from app.runtime_epoch.ownership import (
     require_public_event_mutation,
     require_public_root_for_insert,
     attempt_has_operational_history,
+    attempt_is_audit_only,
+    bind_canonical_reservation_attempt,
+    canonical_reservation_attempt_id,
+    public_reservation_record_mismatch_reason,
     OPERATIONAL_ATTEMPT_STATUSES,
     OPERATIONAL_DELIVERY_STATES,
     AUDIT_ONLY_ATTEMPT_STATUSES,
@@ -1195,15 +1199,24 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         signal_id: str,
         alert_type: TelegramAlertType | str,
     ) -> TelegramAlertAttemptRecord | None:
-        row = self._connection.execute(
+        rows = self._connection.execute(
             """
             SELECT * FROM telegram_alert_attempts
             WHERE signal_id = ? AND alert_type = ?
-            LIMIT 1
+            ORDER BY id ASC
             """,
             (_identity(signal_id), _alert_type_text(alert_type)),
-        ).fetchone()
-        return _record_from_row(row) if row is not None else None
+        ).fetchall()
+        operational = None
+        first = None
+        for row in rows:
+            if first is None:
+                first = row
+            if not attempt_is_audit_only(row):
+                operational = row
+                break
+        chosen = operational if operational is not None else first
+        return _record_from_row(chosen) if chosen is not None else None
 
     def has_prior_active_alert(self, *, signal_id: str) -> bool:
         return self.get_prior_public_alert(signal_ids=(signal_id,)) is not None
@@ -1626,6 +1639,24 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         normalized_event_key = _text(event_key)
         if normalized_event_key == NA:
             return None
+        canonical_row = None
+        event = self._connection.execute(
+            "SELECT canonical_reservation_attempt_id FROM public_alert_events WHERE event_key = ?",
+            (normalized_event_key,),
+        ).fetchone()
+        canonical_id = canonical_reservation_attempt_id(event) if event is not None else None
+        if canonical_id is not None:
+            canonical_row = self._connection.execute(
+                "SELECT * FROM telegram_alert_attempts WHERE id = ?",
+                (int(canonical_id),),
+            ).fetchone()
+            if canonical_row is not None:
+                if statuses:
+                    normalized_statuses = tuple(_text(status) for status in statuses if _text(status) != NA)
+                    if normalized_statuses and _text(canonical_row["telegram_status"]) not in normalized_statuses:
+                        canonical_row = None
+                if canonical_row is not None:
+                    return _record_from_row(canonical_row)
         params: list[Any] = [normalized_event_key]
         status_clause = ""
         if statuses:
@@ -1634,17 +1665,20 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 placeholders = ",".join("?" for _ in normalized_statuses)
                 status_clause = f"AND telegram_status IN ({placeholders})"
                 params.extend(normalized_statuses)
-        row = self._connection.execute(
+        rows = self._connection.execute(
             f"""
             SELECT * FROM telegram_alert_attempts
             WHERE public_watchlist_event_key = ?
               {status_clause}
             ORDER BY id ASC
-            LIMIT 1
             """,
             params,
-        ).fetchone()
-        return _record_from_row(row) if row is not None else None
+        ).fetchall()
+        for row in rows:
+            if attempt_is_audit_only(row):
+                continue
+            return _record_from_row(row)
+        return None
 
     def find_successful_public_watchlist_event(
         self,
@@ -1717,6 +1751,8 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             else:
                 if attempt_has_operational_history(existing):
                     return False
+                if attempt_is_audit_only(existing):
+                    return False
                 if new_event_key == NA:
                     return False
                 new_event = self._connection.execute(
@@ -1724,6 +1760,16 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     (new_event_key,),
                 ).fetchone()
                 require_public_event_mutation(self._connection, new_event)
+                if canonical_reservation_attempt_id(new_event) is not None:
+                    return False
+            mismatch = public_reservation_record_mismatch_reason(
+                self._connection,
+                record,
+                new_event,
+            )
+            if mismatch is not None:
+                return False
+            bind_event_id = int(new_event["id"])
         except RuntimeEpochError:
             return False
         now = _text(record.attempted_at)
@@ -1835,6 +1881,12 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 int(attempt_id),
             ),
         )
+        if cursor.rowcount > 0:
+            bind_canonical_reservation_attempt(
+                self._connection,
+                event_id=bind_event_id,
+                attempt_id=int(attempt_id),
+            )
         return cursor.rowcount > 0
 
     def mark_public_watchlist_reservation_result(
@@ -1849,8 +1901,18 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         dedupe_reason: str,
     ) -> bool:
         try:
-            require_public_attempt_mutation(self._connection, int(attempt_id))
-        except RuntimeEpochError:
+            attempt = require_public_attempt_mutation(self._connection, int(attempt_id))
+            event_key = _text(attempt["public_watchlist_event_key"])
+            event = self._connection.execute(
+                "SELECT * FROM public_alert_events WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+            require_event_reservation_association(
+                self._connection,
+                event_id=int(event["id"]),
+                reservation_id=int(attempt_id),
+            )
+        except (RuntimeEpochError, TypeError, ValueError):
             return False
         now = now_utc_iso()
         cursor = self._connection.execute(
@@ -1883,53 +1945,51 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         )
         return cursor.rowcount > 0
 
-    def insert_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
+    def insert_attempt(self, record: TelegramAlertAttemptRecord, *, audit_only: bool = False) -> bool:
         event_key = _text(record.public_watchlist_event_key)
-        telegram_status = _text(record.telegram_status).lower()
+        telegram_status_key = _text(record.telegram_status).lower()
         delivery_state = _text(record.delivery_state).upper()
         operational_status = (
-            telegram_status in OPERATIONAL_ATTEMPT_STATUSES
+            telegram_status_key in OPERATIONAL_ATTEMPT_STATUSES
             or delivery_state in OPERATIONAL_DELIVERY_STATES
         )
-        audit_only = telegram_status in AUDIT_ONLY_ATTEMPT_STATUSES and not operational_status
         unkeyed_attempt = event_key == NA
-        if unkeyed_attempt:
-            pass
-        elif operational_status:
-            if event_key == NA:
+        audit_intent = bool(audit_only) or telegram_status_key in AUDIT_ONLY_ATTEMPT_STATUSES
+        parent_event = None
+        if audit_intent:
+            if telegram_status_key not in AUDIT_ONLY_ATTEMPT_STATUSES:
                 return False
-            event = self._connection.execute(
-                "SELECT * FROM public_alert_events WHERE event_key = ?",
-                (event_key,),
-            ).fetchone()
-            if event is None:
+            if telegram_status_key == "sent":
                 return False
-            try:
-                require_public_event_mutation(self._connection, event)
-            except RuntimeEpochError:
-                return False
-        elif audit_only:
-            if event_key != NA:
-                event = self._connection.execute(
-                    "SELECT * FROM public_alert_events WHERE event_key = ?",
-                    (event_key,),
-                ).fetchone()
-                if event is not None:
-                    try:
-                        require_public_event_mutation(self._connection, event)
-                    except RuntimeEpochError:
-                        return False
+            if delivery_state in OPERATIONAL_DELIVERY_STATES:
+                delivery_state = NA
+            parent_event = None
+            if self.compact_repeated_attempt(record):
+                return True
         else:
-            if event_key != NA:
-                event = self._connection.execute(
+            if unkeyed_attempt or event_key == NA:
+                if operational_status and not _is_non_public_research_attempt(record):
+                    return False
+                if not _is_non_public_research_attempt(record):
+                    return False
+                parent_event = None
+            else:
+                parent_event = self._connection.execute(
                     "SELECT * FROM public_alert_events WHERE event_key = ?",
                     (event_key,),
                 ).fetchone()
-                if event is None:
+                if parent_event is None:
                     return False
                 try:
-                    require_public_event_mutation(self._connection, event)
+                    require_public_event_mutation(self._connection, parent_event)
                 except RuntimeEpochError:
+                    return False
+                mismatch = public_reservation_record_mismatch_reason(
+                    self._connection,
+                    record,
+                    parent_event,
+                )
+                if mismatch is not None:
                     return False
         telegram_status = _text(record.telegram_status)
         attempted_at = _text(record.attempted_at)
@@ -1958,7 +2018,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         if last_error_message == NA:
             last_error_message = _text(record.error_message)
         try:
-            self._connection.execute(
+            cursor = self._connection.execute(
                 """
                 INSERT INTO telegram_alert_attempts (
                     signal_id, symbol, direction, previous_state, new_state,
@@ -2025,7 +2085,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     int(record.seen_count) if record.seen_count >= 1 else 1,
                     record.last_scan_run_id or record.scan_run_id,
                     last_error_message,
-                    _text(record.delivery_state),
+                    _text(delivery_state),
                     record.telegram_message_id,
                     record.telegram_chat_id,
                     max(1, int(record.delivery_part_count)),
@@ -2033,6 +2093,12 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
             )
         except sqlite3.IntegrityError:
             return False
+        if not audit_intent and parent_event is not None and cursor.lastrowid:
+            bind_canonical_reservation_attempt(
+                self._connection,
+                event_id=int(parent_event["id"]),
+                attempt_id=int(cursor.lastrowid),
+            )
         return True
 
     def compact_repeated_attempt(self, record: TelegramAlertAttemptRecord) -> bool:
@@ -2084,16 +2150,6 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 ),
             )
             return cursor.rowcount > 0
-        event = self._connection.execute(
-            "SELECT * FROM public_alert_events WHERE event_key = ?",
-            (event_key,),
-        ).fetchone()
-        if event is None:
-            return False
-        try:
-            require_public_event_mutation(self._connection, event)
-        except RuntimeEpochError:
-            return False
         cursor = self._connection.execute(
             """
             UPDATE telegram_alert_attempts
@@ -2121,6 +2177,12 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
               AND blocked_reason = ?
               AND error_message = ?
               AND public_watchlist_event_key = ?
+              AND id IS NOT (
+                    SELECT canonical_reservation_attempt_id
+                    FROM public_alert_events
+                    WHERE event_key = ?
+                      AND canonical_reservation_attempt_id IS NOT NULL
+              )
             """,
             (
                 now,
@@ -2133,6 +2195,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 status,
                 _text(record.blocked_reason),
                 _text(record.error_message),
+                event_key,
                 event_key,
             ),
         )
@@ -2294,6 +2357,19 @@ def _get_public_alert_event(
     return _public_alert_event_from_row(row)
 
 
+def _prior_alert_has_operational_public_effect(
+    repository: SQLiteTelegramAlertAttemptRepository,
+    prior_alert: TelegramAlertAttemptRecord,
+) -> bool:
+    prior_event = _get_public_alert_event(
+        repository,
+        event_key=_text(prior_alert.public_watchlist_event_key),
+    )
+    if prior_event is None:
+        return False
+    return bool(decide_public_effect(repository._connection, prior_event).allowed)
+
+
 def _public_alert_event_matches_plan(
     event: PublicAlertEventRecord,
     plan: PublicWatchlistPlanIdentity,
@@ -2447,6 +2523,7 @@ def _insert_public_alert_event(
             origin_lifecycle_id=lifecycle_id,
             epoch=epoch,
             expected_symbol=_symbol(plan.symbol),
+            expected_direction=_status_key(plan.side),
         )
         origin_root_event_id = require_public_root_for_insert(
             db._connection,
@@ -3010,6 +3087,8 @@ def _reserve_public_lifecycle_event(
                 signal_id=reservation_record.signal_id,
                 alert_type=alert_type,
             )
+        if attempt is not None and attempt_is_audit_only(attempt):
+            attempt = None
         if state in {PENDING, RETRYABLE, IN_FLIGHT} and attempt is not None and attempt.id is not None:
             return PublicWatchlistReservationResult(
                 granted=False,
@@ -3060,6 +3139,8 @@ def _reserve_public_lifecycle_event(
         signal_id=reservation_record.signal_id,
         alert_type=alert_type,
     )
+    if existing_attempt is not None and attempt_is_audit_only(existing_attempt):
+        existing_attempt = None
     if existing_attempt is not None:
         existing_state = _text(existing_attempt.delivery_state).upper()
         if existing_attempt.telegram_status == "sent" or existing_state == SENT:
@@ -3722,6 +3803,7 @@ class TelegramLifecycleDeliveryService:
                 repository._connection,
                 origin_lifecycle_id=lifecycle_id,
                 expected_symbol=getattr(candidate.symbol_result, "symbol", None),
+                expected_direction=getattr(record, "direction", None),
             )
         except RuntimeEpochError:
             return False
@@ -4965,14 +5047,6 @@ class TelegramLifecycleDeliveryService:
         matches_by_plan: dict[str, list[CanonicalPublicOutcomeMatch]] = {}
         audit_deliveries: list[TelegramLifecycleDelivery] = []
         for prior_alert in publicly_tracked_signals:
-            prior_event = _get_public_alert_event(
-                repository,
-                event_key=_text(prior_alert.public_watchlist_event_key),
-            )
-            if prior_event is None or not decide_public_effect(
-                repository._connection, prior_event
-            ).allowed:
-                continue
             match, blocked_reason = _match_public_tracking_outcome(
                 prior_alert,
                 alert_repository=repository,
@@ -5060,6 +5134,29 @@ class TelegramLifecycleDeliveryService:
                             scan_run_id=scan_run_id,
                         )
                     )
+                if not _prior_alert_has_operational_public_effect(repository, match.prior_alert):
+                    symbol_result = _reconciliation_symbol_result(
+                        match.record,
+                        match.prior_alert,
+                        current_result=match.current_result,
+                    )
+                    message = _telegram_signal_message_for_alert(
+                        symbol_result,
+                        outcome_delivery.alert_type,
+                        eligibility_context,
+                    )
+                    deliveries.append(
+                        _persist_suppressed_watchlist_terminal_update(
+                            repository,
+                            prior_alert=match.prior_alert,
+                            symbol_result=symbol_result,
+                            alert_type=outcome_delivery.alert_type,
+                            message=message,
+                            scan_run_id=scan_run_id,
+                            eligibility_context=eligibility_context,
+                        )
+                    )
+                    continue
                 delivery = await self._send_canonical_public_outcome(
                     repository,
                     match=match,
@@ -5226,14 +5323,7 @@ class TelegramLifecycleDeliveryService:
         for prior_alert in sent_watchlists:
             if prior_alert.alert_type != TelegramAlertType.WATCHLIST.value or prior_alert.telegram_status != "sent":
                 continue
-            prior_event = _get_public_alert_event(
-                repository,
-                event_key=_text(prior_alert.public_watchlist_event_key),
-            )
-            if prior_event is None or not decide_public_effect(
-                repository._connection, prior_event
-            ).allowed:
-                continue
+            prior_owned = _prior_alert_has_operational_public_effect(repository, prior_alert)
             if _symbol(prior_alert.symbol) in current_run_identity_blocked_symbols:
                 continue
             if repository.has_sent_terminal_outcome(signal_id=prior_alert.signal_id):
@@ -5277,6 +5367,7 @@ class TelegramLifecycleDeliveryService:
                     current_result=current_result_for_prior,
                     scan_run_id=scan_run_id,
                     eligibility_context=eligibility_context,
+                    operational_send=prior_owned,
                 )
                 if outcome_delivery is not None:
                     deliveries.append(outcome_delivery)
@@ -5302,6 +5393,8 @@ class TelegramLifecycleDeliveryService:
                 )
                 continue
             if match.record is None:
+                continue
+            if not prior_owned:
                 continue
             if repository.has_canonical_lifecycle_outcome_progress(lifecycle_id=match.record.lifecycle_id):
                 continue
@@ -5385,6 +5478,7 @@ class TelegramLifecycleDeliveryService:
         current_result: ScannerSymbolResult,
         scan_run_id: str | None,
         eligibility_context: TelegramEligibilityContext,
+        operational_send: bool = True,
     ) -> TelegramLifecycleDelivery | None:
         outcome = _watchlist_outcome_for_current_result(
             repository,
@@ -5399,7 +5493,7 @@ class TelegramLifecycleDeliveryService:
             return outcome
 
         alert_type, message = outcome
-        if _public_watchlist_follow_up_alert_suppressed(alert_type):
+        if (not operational_send) or _public_watchlist_follow_up_alert_suppressed(alert_type):
             return _persist_suppressed_watchlist_terminal_update(
                 repository,
                 prior_alert=prior_alert,
@@ -13190,6 +13284,7 @@ def _resolve_origin_lifecycle_id_for_plan(
                 origin_lifecycle_id=candidate,
                 epoch=epoch,
                 expected_symbol=_symbol(getattr(plan, "symbol", NA)),
+                expected_direction=_status_key(getattr(plan, "side", NA)),
             )
         except RuntimeEpochError:
             continue
@@ -15184,6 +15279,21 @@ def _decimal_or_none(value: Any) -> Decimal | None:
 
 def _alert_type_text(value: TelegramAlertType | str) -> str:
     return value.value if isinstance(value, TelegramAlertType) else _text(value)
+
+
+def _is_non_public_research_attempt(record: TelegramAlertAttemptRecord) -> bool:
+    """Research-watch persistence is not a public reservation and may be unkeyed."""
+
+    alert = _status_key(record.alert_type)
+    event_key = _text(record.public_watchlist_event_key)
+    plan_id = _text(record.public_watchlist_plan_id)
+    event_type = _text(record.public_alert_event_type)
+    return (
+        alert == "research_watch"
+        and event_key == NA
+        and plan_id == NA
+        and event_type == NA
+    )
 
 
 def _status_key(value: Any) -> str:
