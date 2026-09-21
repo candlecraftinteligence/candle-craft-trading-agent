@@ -1,0 +1,86 @@
+{
+  "cci_setup_id": "mock_setup_avax_h1_tp",
+  "symbol": "AVAXUSDT",
+  "timeframe": "H1",
+  "direction": "LONG",
+  "quality_tier": "HUNT",
+  "title": "Partial targets, then full resolution",
+  "thesis_summary": "Synthetic H1 long marked HUNT and already resolved. The fixture records TP1, then TP2, then TP_HIT. The CCI outcome is historical inside this file. It is not a forecast.",
+  "evidence": [
+    {
+      "type": "structure",
+      "label": "Continuation base",
+      "detail": "A confirmed long base preceded the target path recorded below."
+    },
+    {
+      "type": "level",
+      "label": "Target path",
+      "detail": "TP1 and TP2 are lifecycle events in this fixture, not calculated prices."
+    },
+    {
+      "type": "invalidation",
+      "label": "Base low",
+      "detail": "The protected base low was the invalidation reference while the idea was open."
+    }
+  ],
+  "lifecycle": [
+    {
+      "cci_event_id": "evt_avax_h1_01",
+      "event_type": "SETUP_PUBLISHED",
+      "state": "ACTIVE",
+      "occurred_at": "2026-09-17T08:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_avax_h1_02",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "WATCH",
+      "occurred_at": "2026-09-17T10:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_avax_h1_03",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "STALKING",
+      "occurred_at": "2026-09-17T14:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_avax_h1_04",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TRIGGERED",
+      "occurred_at": "2026-09-17T16:30:00Z"
+    },
+    {
+      "cci_event_id": "evt_avax_h1_05",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "CONFIRMED",
+      "occurred_at": "2026-09-18T09:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_avax_h1_06",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TP1",
+      "occurred_at": "2026-09-18T15:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_avax_h1_07",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TP2",
+      "occurred_at": "2026-09-19T11:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_avax_h1_08",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TP_HIT",
+      "occurred_at": "2026-09-19T18:40:00Z",
+      "outcome_code": "TP_HIT"
+    },
+    {
+      "cci_event_id": "evt_avax_h1_09",
+      "event_type": "SETUP_RESOLVED",
+      "state": "CLOSED",
+      "occurred_at": "2026-09-19T18:41:00Z",
+      "outcome_code": "TP_HIT"
+    }
+  ],
+  "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
+  "synthetic": true
+}

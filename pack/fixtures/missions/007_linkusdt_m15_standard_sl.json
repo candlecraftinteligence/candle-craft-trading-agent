@@ -1,0 +1,74 @@
+{
+  "cci_setup_id": "mock_setup_link_m15_sl",
+  "symbol": "LINKUSDT",
+  "timeframe": "M15",
+  "direction": "SHORT",
+  "quality_tier": "STANDARD",
+  "title": "Protected level lost",
+  "thesis_summary": "Synthetic M15 short that confirmed and then stopped. The recorded outcome is SL_HIT. The loss of the protected high is the invalidation already in the timeline.",
+  "evidence": [
+    {
+      "type": "structure",
+      "label": "Short confirmation",
+      "detail": "Confirmation printed before the stop event. Both are in the timeline."
+    },
+    {
+      "type": "level",
+      "label": "Protected high",
+      "detail": "The short idea used the confirmation swing high as protection."
+    },
+    {
+      "type": "invalidation",
+      "label": "Stop",
+      "detail": "Price traded through that high. The fixture outcome is SL_HIT."
+    }
+  ],
+  "lifecycle": [
+    {
+      "cci_event_id": "evt_link_m15_01",
+      "event_type": "SETUP_PUBLISHED",
+      "state": "ACTIVE",
+      "occurred_at": "2026-09-18T07:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_link_m15_02",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "WATCH",
+      "occurred_at": "2026-09-18T09:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_link_m15_03",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "STALKING",
+      "occurred_at": "2026-09-18T12:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_link_m15_04",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TRIGGERED",
+      "occurred_at": "2026-09-18T15:30:00Z"
+    },
+    {
+      "cci_event_id": "evt_link_m15_05",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "CONFIRMED",
+      "occurred_at": "2026-09-18T18:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_link_m15_06",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "SL_HIT",
+      "occurred_at": "2026-09-19T02:10:00Z",
+      "outcome_code": "SL_HIT"
+    },
+    {
+      "cci_event_id": "evt_link_m15_07",
+      "event_type": "SETUP_RESOLVED",
+      "state": "CLOSED",
+      "occurred_at": "2026-09-19T02:11:00Z",
+      "outcome_code": "SL_HIT"
+    }
+  ],
+  "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
+  "synthetic": true
+}

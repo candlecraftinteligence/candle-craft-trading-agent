@@ -1,0 +1,74 @@
+{
+  "cci_setup_id": "mock_setup_ada_h4_expired",
+  "symbol": "ADAUSDT",
+  "timeframe": "H4",
+  "direction": "SHORT",
+  "quality_tier": "HUNT",
+  "title": "Confirmation window elapsed",
+  "thesis_summary": "Synthetic H4 short marked HUNT. It confirmed, then the working window elapsed without a target or stop event. The recorded outcome is EXPIRED, then CLOSED.",
+  "evidence": [
+    {
+      "type": "structure",
+      "label": "Confirmed short",
+      "detail": "Confirmation is an earlier timeline event. It is not repeated as a new setup."
+    },
+    {
+      "type": "context",
+      "label": "Window",
+      "detail": "The fixture clock ran out while price stayed inside the idea."
+    },
+    {
+      "type": "invalidation",
+      "label": "Expiry",
+      "detail": "EXPIRED is the CCI outcome in this file. No substitute result is supplied."
+    }
+  ],
+  "lifecycle": [
+    {
+      "cci_event_id": "evt_ada_h4_01",
+      "event_type": "SETUP_PUBLISHED",
+      "state": "ACTIVE",
+      "occurred_at": "2026-09-15T08:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_ada_h4_02",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "WATCH",
+      "occurred_at": "2026-09-15T12:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_ada_h4_03",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "STALKING",
+      "occurred_at": "2026-09-16T09:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_ada_h4_04",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TRIGGERED",
+      "occurred_at": "2026-09-16T14:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_ada_h4_05",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "CONFIRMED",
+      "occurred_at": "2026-09-17T10:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_ada_h4_06",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "EXPIRED",
+      "occurred_at": "2026-09-18T10:00:00Z",
+      "outcome_code": "EXPIRED"
+    },
+    {
+      "cci_event_id": "evt_ada_h4_07",
+      "event_type": "SETUP_RESOLVED",
+      "state": "CLOSED",
+      "occurred_at": "2026-09-18T10:01:00Z",
+      "outcome_code": "EXPIRED"
+    }
+  ],
+  "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
+  "synthetic": true
+}
