@@ -750,6 +750,296 @@ def _owned_lifecycle_row_for_attempt(
     return dict(owned)
 
 
+def _event_row_for_attempt(
+    connection: sqlite3.Connection,
+    attempt_row: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if not _table_exists(connection, "public_alert_events"):
+        return {}
+    event_key = _clean(attempt_row.get("public_watchlist_event_key"))
+    if event_key == NA:
+        return {}
+    event = connection.execute(
+        "SELECT * FROM public_alert_events WHERE event_key = ?",
+        (event_key,),
+    ).fetchone()
+    return dict(event) if event is not None else {}
+
+
+def _origin_run_id_for_lifecycle(
+    connection: sqlite3.Connection,
+    lifecycle_row: Mapping[str, Any],
+) -> str:
+    origin_id = _clean(lifecycle_row.get("creation_origin_id"))
+    if origin_id == NA or not _table_exists(connection, "runtime_operational_origins"):
+        return NA
+    row = connection.execute(
+        "SELECT run_id FROM runtime_operational_origins WHERE origin_id = ?",
+        (origin_id,),
+    ).fetchone()
+    if row is None:
+        return NA
+    keys = row.keys() if hasattr(row, "keys") else ()
+    run_id = row["run_id"] if "run_id" in keys else row[0]
+    return _clean(run_id)
+
+
+def _canonical_attempt_row_for_event(
+    connection: sqlite3.Connection,
+    event_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if not event_row or not _table_exists(connection, "telegram_alert_attempts"):
+        return {}
+    canonical_id = event_row.get("canonical_reservation_attempt_id")
+    if canonical_id in (None, "", NA):
+        return {}
+    try:
+        attempt_id = int(canonical_id)
+    except (TypeError, ValueError):
+        return {}
+    attempt = connection.execute(
+        "SELECT * FROM telegram_alert_attempts WHERE id = ?",
+        (attempt_id,),
+    ).fetchone()
+    if attempt is None:
+        return {}
+    mapping = dict(attempt)
+    event_key = _clean(event_row.get("event_key"))
+    if event_key == NA or _clean(mapping.get("public_watchlist_event_key")) != event_key:
+        return {}
+    attempt_symbol = canonical_operational_symbol(mapping.get("symbol"))
+    lifecycle_symbol = canonical_operational_symbol(lifecycle_row.get("symbol"))
+    event_symbol = canonical_operational_symbol(event_row.get("symbol"))
+    attempt_dir = canonical_operational_direction(mapping.get("direction"))
+    lifecycle_dir = canonical_operational_direction(lifecycle_row.get("direction"))
+    event_side = canonical_operational_direction(event_row.get("side"))
+    if not attempt_symbol or attempt_symbol != event_symbol or attempt_symbol != lifecycle_symbol:
+        return {}
+    if not attempt_dir or attempt_dir != event_side or attempt_dir != lifecycle_dir:
+        return {}
+    event_plan = _clean(event_row.get("canonical_plan_id"))
+    attempt_plan = _clean(mapping.get("public_watchlist_plan_id"))
+    if event_plan != NA and attempt_plan != NA and event_plan != attempt_plan:
+        return {}
+    if event_plan != NA and attempt_plan == NA:
+        return {}
+    origin = _clean(event_row.get("origin_lifecycle_id"))
+    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+    if origin == NA or lifecycle_id == NA or origin != lifecycle_id:
+        return {}
+    return mapping
+
+
+def _raw_result_belongs_to_owned_chain(
+    raw_result: Mapping[str, Any],
+    *,
+    lifecycle_row: Mapping[str, Any],
+    attempt_row: Mapping[str, Any],
+) -> bool:
+    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+    setup_id = _clean(lifecycle_row.get("setup_id"))
+    raw_lifecycle = _clean(raw_result.get("lifecycle_id"))
+    if raw_lifecycle != NA and lifecycle_id != NA and raw_lifecycle != lifecycle_id:
+        return False
+    raw_setup = _clean(raw_result.get("setup_id"))
+    if raw_setup != NA and setup_id != NA and raw_setup != setup_id:
+        return False
+    raw_direction = canonical_operational_direction(
+        raw_result.get("direction") or _mapping_or_empty(raw_result.get("trade_idea")).get("direction")
+    )
+    chain_direction = canonical_operational_direction(
+        lifecycle_row.get("direction") or attempt_row.get("direction")
+    )
+    if raw_direction and chain_direction and raw_direction != chain_direction:
+        return False
+    return True
+
+
+def _owned_chain_run_ids(
+    connection: sqlite3.Connection,
+    attempt_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> tuple[str, ...]:
+    runs: list[str] = []
+    for value in (
+        attempt_row.get("scan_run_id"),
+        _origin_run_id_for_lifecycle(connection, lifecycle_row),
+    ):
+        cleaned = _clean(value)
+        if cleaned != NA and cleaned not in runs:
+            runs.append(cleaned)
+    return tuple(runs)
+
+
+def _owned_symbol_result_for_chain(
+    connection: sqlite3.Connection,
+    attempt_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if not _table_exists(connection, "symbol_results"):
+        return {}
+    columns = _table_columns(connection, "symbol_results")
+    if "symbol" not in columns or "run_id" not in columns:
+        return {}
+    symbol = canonical_operational_symbol(lifecycle_row.get("symbol")) or canonical_operational_symbol(
+        attempt_row.get("symbol")
+    )
+    if not symbol:
+        return {}
+    select_columns = [
+        _select_or_zero("id", columns),
+        _select_or_na("run_id", columns),
+        "symbol",
+        _select_or_na("status", columns),
+        _select_or_na("display_bucket", columns),
+        _select_or_na("setup_quality_score", columns),
+        _select_or_zero("readiness_score", columns),
+        _select_or_na("failed_gate", columns),
+        _select_or_na("rejection_reason", columns),
+        _select_or_na("next_trigger_needed", columns),
+        _select_or_na("action_label", columns),
+        _select_or_na("raw_result_json", columns),
+    ]
+    rows = connection.execute(
+        f"""
+        SELECT {", ".join(select_columns)}
+        FROM symbol_results
+        WHERE UPPER(symbol) = UPPER(?)
+        ORDER BY id DESC
+        LIMIT 50
+        """,
+        (symbol,),
+    ).fetchall()
+    owned_runs = set(_owned_chain_run_ids(connection, attempt_row, lifecycle_row))
+    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+    lifecycle_match: Mapping[str, Any] = {}
+    run_match: Mapping[str, Any] = {}
+    for row in rows:
+        mapping = dict(row)
+        raw_result = _json_mapping(mapping.get("raw_result_json"))
+        if not _raw_result_belongs_to_owned_chain(
+            raw_result,
+            lifecycle_row=lifecycle_row,
+            attempt_row=attempt_row,
+        ):
+            continue
+        raw_lifecycle = _clean(raw_result.get("lifecycle_id"))
+        run_id = _clean(mapping.get("run_id"))
+        if not lifecycle_match and lifecycle_id != NA and raw_lifecycle == lifecycle_id:
+            lifecycle_match = mapping
+        if not run_match and run_id in owned_runs:
+            run_match = mapping
+        if lifecycle_match and run_match:
+            break
+    return lifecycle_match or run_match
+
+
+def _owned_candidate_for_chain(
+    connection: sqlite3.Connection,
+    attempt_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    if not _table_exists(connection, "setup_candidates"):
+        return {}
+    columns = _table_columns(connection, "setup_candidates")
+    owned_runs = _owned_chain_run_ids(connection, attempt_row, lifecycle_row)
+    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+    if "lifecycle_id" in columns and lifecycle_id != NA:
+        candidate = connection.execute(
+            """
+            SELECT * FROM setup_candidates
+            WHERE lifecycle_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (lifecycle_id,),
+        ).fetchone()
+        if candidate is not None:
+            mapping = dict(candidate)
+            if _candidate_belongs_to_owned_chain(mapping, lifecycle_row=lifecycle_row, attempt_row=attempt_row):
+                return mapping
+            return {}
+    if not owned_runs or not {"symbol", "direction", "run_id"} <= columns:
+        return {}
+    symbol = canonical_operational_symbol(lifecycle_row.get("symbol"))
+    direction = canonical_operational_direction(lifecycle_row.get("direction"))
+    if not symbol or not direction:
+        return {}
+    placeholders = ",".join("?" for _ in owned_runs)
+    candidate = connection.execute(
+        f"""
+        SELECT * FROM setup_candidates
+        WHERE run_id IN ({placeholders})
+          AND UPPER(symbol) = UPPER(?)
+          AND LOWER(direction) = LOWER(?)
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (*owned_runs, symbol, direction),
+    ).fetchone()
+    if candidate is None:
+        return {}
+    mapping = dict(candidate)
+    if not _candidate_belongs_to_owned_chain(mapping, lifecycle_row=lifecycle_row, attempt_row=attempt_row):
+        return {}
+    return mapping
+
+
+def _candidate_belongs_to_owned_chain(
+    candidate: Mapping[str, Any],
+    *,
+    lifecycle_row: Mapping[str, Any],
+    attempt_row: Mapping[str, Any],
+) -> bool:
+    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+    candidate_lifecycle = _clean(candidate.get("lifecycle_id"))
+    if candidate_lifecycle != NA and lifecycle_id != NA and candidate_lifecycle != lifecycle_id:
+        return False
+    symbol = canonical_operational_symbol(candidate.get("symbol"))
+    chain_symbol = canonical_operational_symbol(lifecycle_row.get("symbol"))
+    direction = canonical_operational_direction(candidate.get("direction"))
+    chain_direction = canonical_operational_direction(lifecycle_row.get("direction"))
+    if symbol and chain_symbol and symbol != chain_symbol:
+        return False
+    if direction and chain_direction and direction != chain_direction:
+        return False
+    raw = _json_mapping(candidate.get("raw_candidate_json"))
+    return _raw_result_belongs_to_owned_chain(
+        raw,
+        lifecycle_row=lifecycle_row,
+        attempt_row=attempt_row,
+    )
+
+
+def _owned_candidate_metadata_for_chain(
+    connection: sqlite3.Connection,
+    attempt_row: Mapping[str, Any],
+    lifecycle_row: Mapping[str, Any],
+) -> dict[str, str]:
+    candidate = _owned_candidate_for_chain(connection, attempt_row, lifecycle_row)
+    if not candidate:
+        return {}
+    raw = _json_mapping(candidate.get("raw_candidate_json"))
+    return {
+        "rr": _first_non_na(candidate.get("rr"), raw.get("rr_to_tp2"), raw.get("planned_rr")),
+        "invalidation": _first_non_na(
+            candidate.get("invalidation"),
+            raw.get("invalidation"),
+            raw.get("invalidation_reason"),
+            raw.get("cancel_condition"),
+        ),
+        "cancel_condition": _first_non_na(raw.get("cancel_condition"), raw.get("watchlist_cancel_condition")),
+        "quality_grade": _first_non_na(
+            candidate.get("quality_grade"),
+            raw.get("quality_grade"),
+            raw.get("trust_grade"),
+        ),
+        "reason": _first_non_na(raw.get("reason_for_trade"), raw.get("signal_reason"), raw.get("watchlist_reason")),
+        "confirmed_facts": _sequence_first_text(raw.get("confirmed_facts")),
+    }
+
+
 def _sent_alert_attempt_rows(
     connection: sqlite3.Connection,
     *,
@@ -1135,23 +1425,45 @@ def _active_items_from_rows(
     return tuple(items)
 
 
+def _group_operational_attempts_by_lifecycle(
+    connection: sqlite3.Connection,
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[Mapping[str, Any], tuple[Mapping[str, Any], ...]], ...]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    lifecycle_by_id: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        if not _attempt_is_current_epoch_operational(connection, row):
+            continue
+        lifecycle_row = _owned_lifecycle_row_for_attempt(connection, row)
+        if not lifecycle_row:
+            continue
+        lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
+        if lifecycle_id == NA:
+            continue
+        grouped.setdefault(lifecycle_id, []).append(row)
+        lifecycle_by_id.setdefault(lifecycle_id, lifecycle_row)
+    buckets: list[tuple[Mapping[str, Any], tuple[Mapping[str, Any], ...]]] = []
+    for lifecycle_id, signal_rows in grouped.items():
+        buckets.append((lifecycle_by_id[lifecycle_id], tuple(signal_rows)))
+    return tuple(buckets)
+
+
 def _active_signal_items_from_rows(
     connection: sqlite3.Connection,
     rows: Sequence[Mapping[str, Any]],
 ) -> tuple[ActiveSignalItem, ...]:
-    by_signal: dict[str, list[Mapping[str, Any]]] = {}
-    for row in rows:
-        signal_id = _clean(row.get("signal_id"))
-        if signal_id == NA:
-            continue
-        if not _attempt_is_current_epoch_operational(connection, row):
-            continue
-        by_signal.setdefault(signal_id, []).append(row)
-
     items: list[ActiveSignalItem] = []
-    for signal_id, signal_rows in by_signal.items():
+    for lifecycle_row, signal_rows in _group_operational_attempts_by_lifecycle(connection, rows):
         signal_row = _active_signal_base_row(signal_rows)
         if signal_row is None:
+            continue
+        event_row = _event_row_for_attempt(connection, signal_row)
+        canonical_row = _canonical_attempt_row_for_event(connection, event_row, lifecycle_row)
+        if not canonical_row or _clean(canonical_row.get("telegram_status")).lower() != "sent":
+            continue
+        signal_row = canonical_row
+        signal_id = _clean(signal_row.get("signal_id"))
+        if signal_id == NA:
             continue
         outcome_rows = tuple(
             row
@@ -1159,9 +1471,6 @@ def _active_signal_items_from_rows(
             if _attempt_is_current_epoch_operational(connection, row)
         )
         latest_row = max((signal_row, *outcome_rows), key=_row_id)
-        lifecycle_row = _owned_lifecycle_row_for_attempt(connection, signal_row)
-        if not lifecycle_row:
-            continue
         outcome_progress = _lifecycle_outcome_progress(connection, lifecycle_row)
         if not _active_signal_group_is_eligible(
             connection,
@@ -1181,7 +1490,7 @@ def _active_signal_items_from_rows(
             if _clean(row.get("alert_type")) not in {_SIGNAL_CONFIRMED_TYPE, _WATCHLIST_TYPE, NA}
         ) | _canonical_outcome_alert_types(outcome_progress)
         levels = _stored_trade_map_levels(signal_row)
-        candidate_meta = _candidate_metadata(connection, latest_row)
+        candidate_meta = _owned_candidate_metadata_for_chain(connection, latest_row, lifecycle_row)
         lifecycle_state = _first_non_na(
             lifecycle_row.get("current_state"),
             latest_row.get("lifecycle_state"),
@@ -1317,7 +1626,7 @@ def _active_signal_group_is_eligible(
     if not active_signal_eligible(_active_signal_eligibility_record(signal_row, matched_lifecycle_row)):
         return False
 
-    latest_symbol_row = _latest_symbol_result_for_attempt(connection, latest_row)
+    latest_symbol_row = _owned_symbol_result_for_chain(connection, latest_row, lifecycle_row)
     if _latest_symbol_row_blocks_active(latest_symbol_row):
         return False
     raw_result = _json_mapping(latest_symbol_row.get("raw_result_json"))
@@ -1595,8 +1904,8 @@ def _active_signal_quality_passes(
     latest_row: Mapping[str, Any],
     lifecycle_row: Mapping[str, Any],
 ) -> bool:
-    candidate_meta = _candidate_metadata(connection, latest_row)
-    latest_symbol_row = _latest_symbol_result_for_attempt(connection, latest_row)
+    candidate_meta = _owned_candidate_metadata_for_chain(connection, latest_row, lifecycle_row)
+    latest_symbol_row = _owned_symbol_result_for_chain(connection, latest_row, lifecycle_row)
     raw_result = _json_mapping(latest_symbol_row.get("raw_result_json"))
     diagnostics = _raw_diagnostics(raw_result)
     setup_quality = _mapping_or_empty(raw_result.get("setup_quality"))

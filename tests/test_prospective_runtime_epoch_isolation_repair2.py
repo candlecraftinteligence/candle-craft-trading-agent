@@ -843,20 +843,28 @@ def test_r47_compact_repeated_attempt_mutates_only_validated_owned_event_rows(tm
     )
     with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         assert repository.insert_attempt(
-            _attempt_record(
-                signal_id="r47-block-a",
-                event_key="r47:a",
-                status="blocked",
-                blocked_reason="repeat",
+            replace(
+                _attempt_record(
+                    signal_id="r47-block-a",
+                    event_key="r47:a",
+                    status="blocked",
+                    blocked_reason="repeat",
+                ),
+                scan_run_id="r47a",
+                last_scan_run_id="r47a",
             )
         )
         assert repository.insert_attempt(
-            _attempt_record(
-                signal_id="r47-block-b",
-                event_key="r47:b",
-                status="blocked",
-                blocked_reason="repeat",
-                direction="short",
+            replace(
+                _attempt_record(
+                    signal_id="r47-block-b",
+                    event_key="r47:b",
+                    status="blocked",
+                    blocked_reason="repeat",
+                    direction="short",
+                ),
+                scan_run_id="r47b",
+                last_scan_run_id="r47b",
             )
         )
         before_b = dict(
@@ -865,11 +873,15 @@ def test_r47_compact_repeated_attempt_mutates_only_validated_owned_event_rows(tm
             ).fetchone()
         )
         borrowed = repository.compact_repeated_attempt(
-            _attempt_record(
-                signal_id="r47-block-b",
-                event_key="r47:a",
-                status="blocked",
-                blocked_reason="repeat",
+            replace(
+                _attempt_record(
+                    signal_id="r47-block-b",
+                    event_key="r47:a",
+                    status="blocked",
+                    blocked_reason="repeat",
+                ),
+                scan_run_id="r47a",
+                last_scan_run_id="r47a",
             )
         )
         after_borrowed = dict(
@@ -878,11 +890,15 @@ def test_r47_compact_repeated_attempt_mutates_only_validated_owned_event_rows(tm
             ).fetchone()
         )
         compacted = repository.compact_repeated_attempt(
-            _attempt_record(
-                signal_id="r47-block-a",
-                event_key="r47:a",
-                status="blocked",
-                blocked_reason="repeat",
+            replace(
+                _attempt_record(
+                    signal_id="r47-block-a",
+                    event_key="r47:a",
+                    status="blocked",
+                    blocked_reason="repeat",
+                ),
+                scan_run_id="r47a",
+                last_scan_run_id="r47a",
             )
         )
         after_a = int(
@@ -1224,11 +1240,12 @@ def _producer_lifecycle_then_deliver(
 
 
 def test_r57_real_producer_pipeline_creates_owned_public_send(tmp_path: Path) -> None:
-    """Fake producer → owned origin/lifecycle → confirmation → public reservation → fake send.
+    """Component pipeline proof: fake producer → owned origin/lifecycle → fake send.
 
-    Geometry-only change: `_public_min_rr_pullback_candles` makes the unchanged
-    strategy emit planned RR >= public min 3. No origin/lifecycle stamps, no
-    ACTIONABLE_A_GRADE/CONFIRMED seeding, no RR/target/scoring/identity edits.
+    Run registration is created by the test calling `register_operational_scan_run`
+    before ScannerRunner. This is component-integration evidence, not the sole
+    production-orchestration proof. Production `scripts/run_scan.main` registration
+    ownership is proven by R115–R118.
     """
     assert PUBLIC_SIGNAL_MIN_RR == Decimal("3")
     assert DEFAULT_CONFIGURED_MINIMUM_RR == Decimal("2.5")

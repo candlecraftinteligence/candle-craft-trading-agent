@@ -13,6 +13,7 @@ from app.runtime_epoch.errors import (
     RuntimeEpochOwnershipError,
 )
 from app.runtime_epoch.models import ORIGIN_STATUS_GRANTED, PublicOwnershipDecision, RuntimeEpochRecord
+from app.lifecycle.outcome_policy import canonical_stored_price
 from app.runtime_epoch.origin import load_granted_origin
 from app.runtime_epoch.time_contract import parse_utc
 
@@ -618,6 +619,14 @@ def require_event_reservation_association(
         raise RuntimeEpochOwnershipError("public_canonical_reservation_missing")
     if int(canonical) != int(reservation_id):
         raise RuntimeEpochOwnershipError("public_reservation_not_canonical")
+    mismatch = public_reservation_record_mismatch_reason(
+        connection,
+        reservation,
+        event,
+        epoch=epoch,
+    )
+    if mismatch is not None:
+        raise RuntimeEpochOwnershipError(mismatch)
     return event, reservation
 
 
@@ -732,21 +741,14 @@ def public_reservation_record_mismatch_reason(
     record_plan = _optional_text(_field(record, "public_watchlist_plan_id"))
     if event_plan is None or record_plan is None or record_plan != event_plan:
         return "public_reservation_plan_mismatch"
-    event_type = normalize_public_event_type(_field(event, "event_type"))
-    record_type = normalize_public_event_type(
-        _field(record, "public_alert_event_type") or _field(record, "alert_type")
-    )
-    if not event_type or event_type not in PUBLIC_EVENT_FAMILY_TYPES:
-        return "public_event_family_unknown"
-    if not record_type or record_type not in PUBLIC_EVENT_FAMILY_TYPES:
-        return "public_reservation_event_family_unknown"
-    if record_type != event_type:
-        return "public_reservation_event_family_mismatch"
+    family_reason = _reservation_event_family_mismatch_reason(record, event)
+    if family_reason is not None:
+        return family_reason
     origin_lifecycle_id = _optional_text(_field(event, "origin_lifecycle_id"))
     if origin_lifecycle_id is None:
         return "public_event_missing_origin_lifecycle"
     try:
-        require_lifecycle_public_intent(
+        lifecycle = require_lifecycle_public_intent(
             connection,
             origin_lifecycle_id=origin_lifecycle_id,
             epoch=loaded,
@@ -755,7 +757,138 @@ def public_reservation_record_mismatch_reason(
         )
     except (RuntimeEpochOwnershipError, RuntimeEpochOriginError) as exc:
         return str(exc) or "public_reservation_lifecycle_unowned"
+    economic_reason = _reservation_economic_mismatch_reason(record, event, lifecycle)
+    if economic_reason is not None:
+        return economic_reason
     return None
+
+
+_RESERVATION_EVENT_TYPE_FIELDS = (
+    ("public_alert_event_type", "public_reservation_event_family"),
+    ("alert_type", "public_reservation_alert_type"),
+    ("attempted_alert_type", "public_reservation_attempted_alert_type"),
+)
+
+_RESERVATION_EVENT_PRICE_FIELDS = (
+    ("entry_low", "raw_entry_low"),
+    ("entry_high", "raw_entry_high"),
+    ("stop_loss", "raw_stop_loss"),
+    ("normalized_entry_zone_low", "normalized_zone_low"),
+    ("normalized_entry_zone_high", "normalized_zone_high"),
+)
+
+_RESERVATION_LIFECYCLE_PRICE_FIELDS = (
+    ("entry_low", "entry_low"),
+    ("entry_high", "entry_high"),
+    ("stop_loss", "stop_loss"),
+    ("tp1", "tp1"),
+    ("tp2", "tp2"),
+    ("tp3", "tp3"),
+)
+
+
+def _reservation_event_family_mismatch_reason(
+    record: sqlite3.Row | Any,
+    event: sqlite3.Row | Any,
+) -> str | None:
+    event_type = normalize_public_event_type(_field(event, "event_type"))
+    if not event_type or event_type not in PUBLIC_EVENT_FAMILY_TYPES:
+        return "public_event_family_unknown"
+    saw_representation = False
+    for field_name, reason_prefix in _RESERVATION_EVENT_TYPE_FIELDS:
+        text = _optional_text(_field(record, field_name))
+        if text is None:
+            continue
+        saw_representation = True
+        normalized = normalize_public_event_type(text)
+        if normalized not in PUBLIC_EVENT_FAMILY_TYPES:
+            return f"{reason_prefix}_unknown"
+        if normalized != event_type:
+            return f"{reason_prefix}_mismatch"
+    if not saw_representation:
+        return "public_reservation_event_family_unknown"
+    return None
+
+
+def _reservation_economic_mismatch_reason(
+    record: sqlite3.Row | Any,
+    event: sqlite3.Row | Any,
+    lifecycle: sqlite3.Row | Any,
+) -> str | None:
+    for record_field, event_field in _RESERVATION_EVENT_PRICE_FIELDS:
+        if _economic_values_conflict(_field(record, record_field), _field(event, event_field)):
+            return f"public_reservation_{record_field}_mismatch"
+    if _optional_text(_field(record, "normalized_invalidation")) and _optional_text(
+        _field(event, "normalized_invalidation")
+    ):
+        if _optional_text(_field(record, "normalized_invalidation")) != _optional_text(
+            _field(event, "normalized_invalidation")
+        ):
+            return "public_reservation_normalized_invalidation_mismatch"
+    for record_field, lifecycle_field in _RESERVATION_LIFECYCLE_PRICE_FIELDS:
+        if _economic_values_conflict(_field(record, record_field), _field(lifecycle, lifecycle_field)):
+            return f"public_reservation_{record_field}_mismatch"
+    if _economic_values_conflict(_field(record, "rr_planned"), _field(lifecycle, "rr")):
+        return "public_reservation_rr_planned_mismatch"
+    record_setup = _optional_text(_field(record, "setup_id"))
+    lifecycle_setup = _optional_text(_field(lifecycle, "setup_id"))
+    if record_setup is not None and lifecycle_setup is not None and record_setup != lifecycle_setup:
+        return "public_reservation_setup_mismatch"
+    record_plan_version = _optional_text(_field(record, "plan_version_id"))
+    lifecycle_plan_version = _optional_text(_field(lifecycle, "plan_version_id"))
+    if (
+        record_plan_version is not None
+        and lifecycle_plan_version is not None
+        and record_plan_version != lifecycle_plan_version
+    ):
+        return "public_reservation_plan_version_mismatch"
+    return None
+
+
+def _economic_values_conflict(left: Any, right: Any) -> bool:
+    left_price = canonical_stored_price(left)
+    right_price = canonical_stored_price(right)
+    if left_price == NA or right_price == NA:
+        return False
+    return left_price != right_price
+
+
+def operational_run_belongs_to_active_epoch(
+    connection: sqlite3.Connection,
+    run_id: Any,
+    *,
+    epoch: RuntimeEpochRecord | None = None,
+) -> bool:
+    loaded = epoch or load_active_runtime_epoch(connection)
+    if loaded is None:
+        return False
+    normalized = _optional_text(run_id)
+    if normalized is None:
+        return False
+    row = connection.execute(
+        "SELECT runtime_epoch_id FROM runtime_operational_runs WHERE run_id = ?",
+        (normalized,),
+    ).fetchone()
+    return row is not None and str(row["runtime_epoch_id"]) == loaded.epoch_id
+
+
+def attempt_has_current_epoch_run_lineage(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row | Any,
+    *,
+    epoch: RuntimeEpochRecord | None = None,
+) -> bool:
+    loaded = epoch or load_active_runtime_epoch(connection)
+    if loaded is None:
+        return False
+    for field_name in ("last_scan_run_id", "scan_run_id"):
+        if operational_run_belongs_to_active_epoch(
+            connection,
+            _field(row, field_name),
+            epoch=loaded,
+        ):
+            return True
+    return False
 
 
 def _lookup_owned_public_root_id(

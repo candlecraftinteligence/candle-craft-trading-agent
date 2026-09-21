@@ -6,7 +6,14 @@ This document is the architecture handoff. It is not a Runtime runbook and does 
 
 ## Disposition
 
-- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_3`
+- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_4`
+- `ACTIVE_DETAIL_EXACT_PROVENANCE` = **TRUE**
+- `LEGACY_AUDIT_EVIDENCE_FROZEN` = **TRUE**
+- `PROSPECTIVE_AUDIT_COMPACTION_ONLY` = **TRUE**
+- `CANONICAL_RESERVATION_SEMANTICS_BOUND` = **TRUE**
+- `GENUINE_V25_V26_SCHEMA_PARITY` = **TRUE**
+- `PRODUCTION_ORCHESTRATION_REGISTRATION_PROVEN` = **TRUE**
+- `REAL_ORCHESTRATED_POSITIVE_PATH_PROVEN` = **TRUE**
 - `RUN_REGISTRATION_BEFORE_PRODUCTION` = **TRUE**
 - `CANONICAL_RESERVATION_AUTHORITY` = **TRUE**
 - `AUDIT_ATTEMPTS_NON_OPERATIONAL` = **TRUE**
@@ -35,12 +42,96 @@ Cohort labels remain only `LEGACY_OR_UNATTRIBUTED` and `CURRENT_EPOCH_OPERATIONA
 ## Baseline and reviewed heads
 
 - Baseline main SHA: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
-- Architecture-reviewed PR HEAD before this third repair: `3cdb78e0489d7dda298ec841f4559e0778a68637`
-- Verdict on that HEAD: `CHANGES_REQUIRED_RUN_TIMING_AND_PUBLIC_AUTHORITY_BYPASSES`
+- Architecture-reviewed PR HEAD before this fourth repair: `fa2c8b99436db2bc48368fc42d4470797a29db58`
+- Verdict on that HEAD: `CHANGES_REQUIRED_PUBLIC_AUTHORITY_AND_V25_MIGRATION`
+- Prior architecture-reviewed PR HEAD (third review): `3cdb78e0489d7dda298ec841f4559e0778a68637`
+- Verdict on that earlier HEAD: `CHANGES_REQUIRED_RUN_TIMING_AND_PUBLIC_AUTHORITY_BYPASSES`
 - Prior architecture-reviewed PR HEAD (second review): `01cd99f146ea607cdc60650bbddc724af19e5155`
 - Verdict on that earlier HEAD: `CHANGES_REQUIRED_CROSS_RECORD_OWNERSHIP_AND_OPERATIONAL_OPEN_BYPASSES`
 
-Previous repair (kept, not regressed): origin unspecified default, pre-cutoff cache rejection, BTC origin cannot insert ETH lifecycle, missing lifecycle cannot auto-create a public event, legacy watch payload adoption blocked, genuine-v25 fixture, unchanged strategy/economic gates.
+Previous repairs (kept, not regressed): origin unspecified default, pre-cutoff cache rejection, BTC origin cannot insert ETH lifecycle, missing lifecycle cannot auto-create a public event, legacy watch payload adoption blocked, genuine-v25 fixture, unchanged strategy/economic gates, run registration before acquisition, canonical reservation pointer, audit non-claimable, public side bound to lifecycle.
+
+## Fourth bounded repair (public authority and v25 migration)
+
+This repair does **not** weaken strategy gates, rewrite legacy audit evidence, backfill canonical reservation, drop SQLite UNIQUE autoindexes with `DROP INDEX`, remap attempt IDs, or treat R57/R85 as the sole production-orchestration proof.
+
+### ACTIVE-detail exact provenance
+
+Operational ACTIVE list/detail starts from the already-owned public event:
+
+`public_alert_event` → `origin_lifecycle_id` → owned current-epoch lifecycle → `canonical_reservation_attempt_id` → exact originating plan/setup/run relationships.
+
+ACTIVE grouping is by `origin_lifecycle_id`, not by `event_key` or `signal_id`. Follow-up rows (`limit_hit`, `tp1_hit`, …) stay on the same owned chain as `signal_confirmed`.
+
+Operational enrichment for quality, rationale, invalidation, confirmation facts, gate text, and plan/setup fields is allowed only from records demonstrably on that chain:
+
+- canonical SENT reservation attempt for the owned event
+- `attempt.scan_run_id` and the lifecycle creation-origin run
+- later `symbol_results` only when `raw_result.lifecycle_id` matches the owned lifecycle, or the result `run_id` is one of those owned runs
+- `setup_candidates` only when `run_id` is in the owned-run set
+
+Latest same-symbol result, opposite-direction result, different-setup result, legacy/unattributed result, and foreign candidate/plan are omitted rather than borrowed. Historical/diagnostic watchlist screens retain broader lookup. Missing enrichment is omitted; it is not invented.
+
+Regression: R91–R96.
+
+### Legacy audit freeze / prospective compaction authority
+
+`compact_repeated_attempt` may mutate a target row only when **both** the incoming observation and the target row prove current-epoch run lineage:
+
+`last_scan_run_id` then `scan_run_id` → `runtime_operational_runs` → active Runtime epoch.
+
+Shared `event_key`, shared `signal_id`, shared `alert_type`, wall-clock time, NULL/`N/A` public event key, and absence of a canonical pointer are not prospective authority. Unkeyed audit rows follow the same freeze rule.
+
+If a current diagnostic matches a legacy/unattributed blocked or skipped row, the legacy snapshot is left unchanged and a new prospective diagnostic row is inserted when the schema permits it.
+
+Prospective compaction of two current-epoch diagnostic rows may remain. Canonical reservation is excluded. Compaction never promotes audit status into operational authority.
+
+Regression: R97–R102.
+
+### Canonical reservation semantic contract
+
+`canonical_reservation_attempt_id` names which row is operational. It does not prove the row's content matches the owning event/lifecycle/plan.
+
+`public_reservation_record_mismatch_reason` validates before insert, replace, claim, part delivery, SENT finalization, and terminal/uncertain update:
+
+- event key, symbol, direction, canonical plan id
+- all alert-type representations (`public_alert_event_type`, `alert_type`, `attempted_alert_type`) against `event.event_type` via existing family normalization
+- economic geometry against event + lifecycle using `canonical_stored_price` / existing `_identity_price` (entry zone, stop, TP1/TP2/TP3, planned RR where persisted)
+- setup_id / plan_version_id when both sides persist them
+
+N/A on either side is not treated as a conflict. Rejected replacement/insert leaves event, canonical pointer, parts, and attempt state unchanged. A malformed persisted canonical row cannot be claimed merely because its id is canonical.
+
+Regression: R103–R107.
+
+### Genuine v25 → v26 attempt-table schema parity
+
+A genuine v25 `telegram_alert_attempts` table has table-level `UNIQUE(signal_id, alert_type)` (SQLite autoindex, `origin='u'`). That autoindex cannot be removed with ordinary `DROP INDEX`.
+
+When `_telegram_alert_attempts_has_unconditional_signal_alert_unique` is true, `_migrate_runtime_epoch_isolation_v26` rebuilds the table inside the same v26 `BEGIN IMMEDIATE` transaction:
+
+1. rename `telegram_alert_attempts` → `telegram_alert_attempts_pre_v26_unique`
+2. recreate from the original `CREATE TABLE` SQL with the unconditional UNIQUE clause stripped
+3. copy every row through `_copy_telegram_alert_attempts_pre_v26_unique_rows` (preserves `id` and all common columns; tests may inject failure here)
+4. restore `sqlite_sequence` to `max(preserved_seq, MAX(id))`
+5. drop the pre-v26 table
+6. recreate any table triggers
+7. `_ensure_telegram_alert_attempt_indexes` restores the intended partial unique index `ux_telegram_alert_attempts_signal_alert_operational` excluding audit statuses
+
+Attempt IDs are not remapped. Legacy values are not rewritten, merged, or backfilled into canonical authority. Fresh v26 and migrated v25 then allow audit + canonical coexistence under the same partial uniqueness. Global `UNIQUE(event_key)` and canonical reservation uniqueness are unchanged.
+
+**Transaction boundary:** the rebuild is inside `_migrate_runtime_epoch_isolation_v26`'s `BEGIN IMMEDIATE`. Failure rolls back **that v26 transaction**. This document does **not** claim that the entire `initialize_database` routine and `user_version` update are one globally atomic transaction. Injected failure during the copy step leaves schema version 25, original rows/IDs, the unconditional UNIQUE, no active epoch, and a retryable `open_initialized_database`. Repeated migration is idempotent: no obsolete unique, indexes remain, row values/IDs unchanged, no epoch auto-created.
+
+Regression: R108–R114.
+
+### Production orchestration proof
+
+R57/R85 remain **component** integration evidence: those tests still call `register_operational_scan_run` themselves. They are not the sole production-orchestration proof.
+
+R115–R118 invoke the actual `scripts.run_scan.main` path that owns `_register_operational_scan_run_before_acquisition` → `_run_scanner`. The tests do not call `register_operational_scan_run` and do not stub the registration function into a fake success. Neutralizing `_register_operational_scan_run_before_acquisition` fails closed before origin/lifecycle/send.
+
+Proven on temp DB with fake market adapter and fake Telegram sender: T0 (production `runtime_operational_runs` commit) < T1 < T2 (producer acquisition) < T3 (lifecycle consumption); both symbol origins belong to the production-created run; valid ≥3R geometry reaches the fake sender.
+
+Regression: R115–R122.
 
 ## Third bounded repair (run timing and public authority)
 
@@ -99,15 +190,15 @@ Operational ACTIVE list/detail:
 1. validate the public event ownership chain
 2. resolve lifecycle from `public_event.origin_lifecycle_id`
 3. require current-epoch owned lifecycle
-4. require the attempt to be associated with that same event
+4. require the attempt to be the event's canonical reservation (not a random same-key audit/foreign attempt)
 5. require attempt symbol/direction/plan to agree with that chain
-6. source candidate/detail fields only from that chain
+6. source candidate/detail fields only from that chain (owned runs / matching `lifecycle_id`)
 
-No fuzzy symbol/direction/geometry fallback for ACTIVE operational output.
+No latest-same-symbol, fuzzy symbol/direction/geometry, or foreign-candidate fallback for ACTIVE operational output. See the fourth-repair provenance contract above.
 
 ### Delayed positive path and multi-symbol timing
 
-R57/R85 use advancing clocks: run registered T0, producer evaluation T1, lifecycle consumption T2, with T0 < T1 < T2, still reaching the fake sender. R63/R86 cover one run, two symbols, later lifecycle processing, both origins remaining eligible. R58/R87 keep planned RR **2.65955826** blocked by unchanged public min **3R**.
+R57/R85 remain component proofs with advancing clocks (those tests register the operational run themselves). R115–R117 prove the same T0 < T1 < T2 < T3 timeline through actual `scripts.run_scan.main`. R63/R86 cover one run, two symbols, later lifecycle processing, both origins remaining eligible. R58/R87/R119 keep planned RR **2.65955826** blocked by unchanged public min **3R**.
 
 Regression: R61–R90.
 
@@ -225,13 +316,15 @@ Regression: R56.
 
 R27 remains a narrower **seeded-delivery** proof (owned origin/lifecycle already present, then public event → reservation → claim → fake sender). It is not the full producer pipeline.
 
-R57 is the actual normal production pipeline on a temp/synthetic DB, with a fake deterministic market producer and a fake Telegram sender. No real network. No real Telegram.
+R57/R85 remain **component** integration on a temp/synthetic DB: they call `register_operational_scan_run` from the test, then run `ScannerRunner` with a fake deterministic market producer and a fake Telegram sender. No real network. No real Telegram. They prove the producer/lifecycle/public path after registration exists. They do **not** prove that `scripts/run_scan.py` itself is the registration owner.
 
-Required chain, now proven:
+R115–R117 are the production-orchestration proof: they invoke `scripts.run_scan.main` (or the one-shot/watch iteration that contains `_register_operational_scan_run_before_acquisition` → `_run_scanner`). Those tests do not register the run themselves and do not monkeypatch registration into a fake success.
+
+Required chain, now proven (component R57/R85 and orchestrated R115–R117):
 
 fake deterministic market producer → actual producer acquisition → explicit evaluation-completion evidence → valid post-epoch origin (granted by `SetupLifecycleService`, not stamped by the test) → actual `SetupLifecycleService` path → normal lifecycle creation → existing confirmation cycles (2) → existing quality gates → existing planned RR >= unchanged public minimum **3R** → existing target-integrity requirements (production warning path, not a stubbed A-grade target) → public event reservation (`signal_confirmed`) → correct event/reservation/part association → outbox claim → fake sender call
 
-The test does **not** manually insert `runtime_operational_origins`, does **not** stamp lifecycle epoch ownership, and does **not** seed `ACTIONABLE_A_GRADE` or `CONFIRMED`. Confirmation cycles are the existing service path. Run registration is created by the production owner **before** producer evaluation; lifecycle consumption is later and does not invent `registered_at`.
+The tests do **not** manually insert `runtime_operational_origins`, do **not** stamp lifecycle epoch ownership, and do **not** seed `ACTIONABLE_A_GRADE` or `CONFIRMED`. Confirmation cycles are the existing service path. Production orchestration (R115) persists `runtime_operational_runs` **before** producer evaluation; lifecycle consumption is later and does not invent `registered_at`.
 
 Honest result: a geometry-only synthetic fixture (`_public_min_rr_pullback_candles`) makes the **unchanged** strategy emit planned RR **3.06779661**. After two confirmation cycles the owned lifecycle is `CONFIRMED`, a `signal_confirmed` public event is reserved against that lifecycle/epoch, the outbox is claimed, and `FakeSender` is called once. Public min RR remains `PUBLIC_SIGNAL_MIN_RR = 3`. Strategy configured floor remains `DEFAULT_CONFIGURED_MINIMUM_RR = 2.5`. No scoring, target, confirmation, quality, or identity algorithm was changed.
 
@@ -245,7 +338,7 @@ Regression: R57, R58.
 
 T20 / R25 / R26 / R49 / R50 use `tests/fixtures/genuine_v25.py` (baseline-v25 schema semantics). It is not created by HEAD `initialize_database`.
 
-The v26-specific migration stage has the tested transaction rollback behavior. This document does **not** claim that the entire `initialize_database` routine and `user_version` update are one globally atomic transaction.
+The v26-specific migration stage has the tested transaction rollback behavior, including lossless rebuild of `telegram_alert_attempts` when the genuine-v25 table-level `UNIQUE(signal_id, alert_type)` autoindex is present. Injected copy-step failure rolls back that v26 `BEGIN IMMEDIATE` transaction (schema remains 25; rows/IDs preserved; retryable). This document does **not** claim that the entire `initialize_database` routine and `user_version` update are one globally atomic transaction.
 
 No Runtime DB testing. No performance claims from synthetic DBs.
 
@@ -266,7 +359,7 @@ Missing expected identity is fatal operational startup. Individual unproved obse
 
 ## Acceptance map
 
-Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`. Repair regressions R01–R29 remain in `tests/test_prospective_runtime_epoch_isolation_boundaries.py` (`no_auto_epoch`). R30 is the existing RR/quality/confirmation/target/economic-identity suite. R31–R60 are in `tests/test_prospective_runtime_epoch_isolation_repair2.py` (`no_auto_epoch`). R61–R90 are in `tests/test_prospective_runtime_epoch_isolation_repair3.py` (`no_auto_epoch`).
+Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`. Repair regressions R01–R29 remain in `tests/test_prospective_runtime_epoch_isolation_boundaries.py` (`no_auto_epoch`). R30 is the existing RR/quality/confirmation/target/economic-identity suite. R31–R60 are in `tests/test_prospective_runtime_epoch_isolation_repair2.py` (`no_auto_epoch`). R61–R90 are in `tests/test_prospective_runtime_epoch_isolation_repair3.py` (`no_auto_epoch`). R91–R122 are in `tests/test_prospective_runtime_epoch_isolation_repair4.py` (`no_auto_epoch`).
 
 | ID | Proof |
 | --- | --- |
@@ -297,7 +390,7 @@ Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`
 | R54 | Research-watch flags enabled + missing epoch/context = zero fake sender calls |
 | R55 | Admin/draft exact-setup mismatch on the same symbol is rejected |
 | R56 | Active detail does not combine owned event with orphan/foreign attempt fields |
-| R57 | Real producer path reaches fake sender without manual ownership stamping; planned RR 3.06779661 >= unchanged public min 3 |
+| R57 | Component producer path reaches fake sender without manual ownership stamping; planned RR 3.06779661 >= unchanged public min 3. Test still calls `register_operational_scan_run`; not the sole production-orchestration proof. |
 | R58 | Canonical 2.66R pullback still fails under the unchanged 3R public gate |
 | R59 | Global legacy SENT `event_key` remains consumed |
 | R60 | Legacy UNCERTAIN and legacy reservation/attempt rows remain unchanged under borrowed-current-event attacks |
@@ -325,12 +418,44 @@ Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`
 | R82 | ACTIVE detail with owned event + mismatched attempt direction = no ACTIVE detail |
 | R83 | ACTIVE detail with owned event + attempt pointing to unrelated lifecycle/plan = no ACTIVE detail |
 | R84 | ACTIVE detail resolves lifecycle from `event.origin_lifecycle_id`, not a fuzzy fallback |
-| R85 | R57 real positive path succeeds with advancing producer/consumer clock |
+| R85 | R57 component positive path succeeds with advancing producer/consumer clock (not production `run_scan.main`) |
 | R86 | Real multi-symbol producer/lifecycle integration preserves valid earlier symbol origins |
 | R87 | Canonical ~2.66R negative remains blocked by unchanged 3R public gate |
 | R88 | Legacy SENT `event_key` remains globally consumed; event row frozen |
 | R89 | Legacy UNCERTAIN remains untouched/non-auto-retryable |
 | R90 | Strategy/economic regression suite remains unchanged |
+| R91 | Positive ACTIVE detail exists from the exact owned chain; detail is not None |
+| R92 | Later opposite-direction same-symbol raw result cannot change ACTIVE operational fields |
+| R93 | Later different-setup same-symbol result cannot change ACTIVE operational fields |
+| R94 | Legacy/unattributed same-symbol result cannot enrich ACTIVE detail |
+| R95 | Foreign same-symbol candidate cannot enrich ACTIVE detail |
+| R96 | ACTIVE detail uses the event's exact canonical reservation attempt |
+| R97 | Keyed legacy blocked audit snapshot unchanged after a new current diagnostic |
+| R98 | Keyed legacy skipped audit snapshot unchanged |
+| R99 | Unkeyed legacy blocked audit snapshot unchanged |
+| R100 | Unkeyed legacy skipped audit snapshot unchanged |
+| R101 | Current-epoch audit compaction still works only against current-epoch audit state |
+| R102 | Canonical reservation is never compacted as audit |
+| R103 | Replacement with contradictory actual `alert_type` is rejected; snapshots unchanged |
+| R104 | Replacement with contradictory `attempted_alert_type` is rejected |
+| R105 | Replacement with contradictory entry/stop/targets is rejected |
+| R106 | Valid semantically equivalent replacement still succeeds; claim/result still works |
+| R107 | Malformed canonical reservation cannot be claimed merely because its ID is canonical |
+| R108 | Genuine v25→v26: canonical-first then same-signal/type audit both persist |
+| R109 | Genuine v25→v26: audit-first then canonical both persist; canonical is bound |
+| R110 | Fresh v26 has equivalent coexistence behavior to migrated v25 |
+| R111 | Migrated v25 has no obsolete unconditional `UNIQUE(signal_id, alert_type)` |
+| R112 | Repeated migration is semantically idempotent (schema, indexes, row values/IDs, no epoch) |
+| R113 | Injected v26 attempt-table rebuild failure preserves rows/IDs and retryability; v26 `BEGIN IMMEDIATE` boundary |
+| R114 | Post-migration `PRAGMA foreign_key_check` / integrity check pass; intended partial index present |
+| R115 | Actual `scripts.run_scan.main` registers the operational run before acquisition; test does not register it |
+| R116 | Actual production orchestration multi-symbol timeline satisfies T0 < T1 < T2 < T3; both origins granted |
+| R117 | Actual production orchestration valid ≥3R path reaches the fake sender |
+| R118 | Removing/neutralizing production registration fails closed before origin/lifecycle/send |
+| R119 | ~2.65955826R remains blocked by unchanged public minimum 3R |
+| R120 | Legacy SENT global event-key consumption remains intact |
+| R121 | Legacy UNCERTAIN remains frozen/non-auto-retryable |
+| R122 | Full strategy/economic regression remains unchanged |
 
 ## Remaining gaps (intentionally not this phase)
 
@@ -346,13 +471,14 @@ python -m pytest tests/test_prospective_runtime_epoch_isolation.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_boundaries.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_repair2.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_repair3.py
+python -m pytest tests/test_prospective_runtime_epoch_isolation_repair4.py
 python -m pytest
 git diff --check
 ```
 
-Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21, third bounded repair):
+Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21, fourth bounded repair):
 
-- `python -m pytest`: **2638 passed**, 0 failed, 1 warning (`StarletteDeprecationWarning` from FastAPI/Starlette `TestClient`), **832.51s** (0:13:52), **exit 0**
+- `python -m pytest`: **2670 passed**, 0 failed, 1 warning (`StarletteDeprecationWarning` from FastAPI/Starlette `TestClient`), **488.34s** (0:08:08), **exit 0**
 - `git diff --check`: **clean** (exit 0)
 - GitHub CI: recorded after push of this repair, if the run has completed.
 
@@ -361,6 +487,7 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 ## Git record
 
 - Baseline main: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
-- Architecture-reviewed PR HEAD before this repair: `3cdb78e0489d7dda298ec841f4559e0778a68637`
-- Third bounded repair commit: `f2170d2847404cdaed61988c91a56aeeed554e37`
-- Final PR #123 HEAD: `32b97dd8fdf3584cd5882d28c2cb63973eb700d2`
+- Architecture-reviewed PR HEAD before this fourth repair: `fa2c8b99436db2bc48368fc42d4470797a29db58`
+- Verdict on that HEAD: `CHANGES_REQUIRED_PUBLIC_AUTHORITY_AND_V25_MIGRATION`
+- Fourth bounded repair commit: pending pin after this commit
+- Final PR #123 HEAD: pending pin after push

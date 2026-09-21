@@ -10,11 +10,12 @@ from typing import Any
 from app.lifecycle.models import SetupLifecycleRecord
 from app.runtime_epoch.authority import initialize_runtime_epoch, load_active_runtime_epoch
 from app.runtime_epoch.models import RUNTIME_EPOCH_CONTRACT_VERSION, RuntimeEpochIdentity
-from app.runtime_epoch.origin import evaluate_symbol_origin, register_operational_run
+from app.runtime_epoch.origin import evaluate_symbol_origin, register_operational_run, register_operational_scan_run
 from app.runtime_epoch.ownership import (
     PUBLIC_CHAIN_STARTER_EVENT_TYPES,
     PUBLIC_EVENT_FAMILY_TYPES,
     PUBLIC_ROOT_EVENT_TYPES,
+    bind_canonical_reservation_attempt,
     normalize_public_event_type,
 )
 from app.storage.database import open_initialized_database
@@ -279,6 +280,45 @@ def stamp_sql_public_event(
             event_key,
             epoch.epoch_id,
         ),
+    )
+    event = connection.execute(
+        "SELECT id FROM public_alert_events WHERE event_key = ?",
+        (event_key,),
+    ).fetchone()
+    if event is None:
+        return
+    event_id = int(event["id"] if hasattr(event, "keys") and "id" in event.keys() else event[0])
+    attempt = connection.execute(
+        """
+        SELECT id FROM telegram_alert_attempts
+        WHERE public_watchlist_event_key = ?
+          AND lower(telegram_status) NOT IN ('blocked', 'skipped', 'failed')
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (event_key,),
+    ).fetchone()
+    if attempt is None:
+        return
+    attempt_id = int(attempt["id"] if hasattr(attempt, "keys") and "id" in attempt.keys() else attempt[0])
+    bind_canonical_reservation_attempt(
+        connection,
+        event_id=event_id,
+        attempt_id=attempt_id,
+    )
+
+
+def register_synthetic_scan_run(database_path: Path | str, run_id: str, *, registered_at: str = SYNTHETIC_NOW) -> None:
+    """DEV-only: persist a current-epoch operational run for diagnostic compaction tests."""
+
+    path = Path(database_path)
+    connection = open_initialized_database(path)
+    connection.close()
+    register_operational_scan_run(
+        path,
+        run_id=run_id,
+        registered_at=registered_at,
+        expected_identity=SYNTHETIC_IDENTITY,
     )
 
 

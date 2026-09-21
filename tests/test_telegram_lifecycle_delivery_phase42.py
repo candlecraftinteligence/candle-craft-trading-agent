@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.runtime_epoch_support import seed_legacy_public_event
+from tests.runtime_epoch_support import register_synthetic_scan_run, seed_legacy_public_event
 from app.storage.database import open_initialized_database
 from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
@@ -1175,6 +1175,8 @@ def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldo
     )
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
     result = _run_result(_owned_research_symbol(db_path, symbol="LINKUSDT"))
+    for run_id in ("research-1", "research-2", "research-3", "research-4"):
+        register_synthetic_scan_run(db_path, run_id, registered_at="2026-06-07T00:00:00Z")
 
     first = run(service.deliver_for_run(result, scan_run_id="research-1"))
     second = run(service.deliver_for_run(result, scan_run_id="research-2"))
@@ -5099,6 +5101,10 @@ def test_missing_entry_blocks_watchlist_outcome_tracking_and_compacts(tmp_path: 
         entry_low=NA,
         entry_high=NA,
     )
+    from tests.runtime_epoch_support import register_synthetic_scan_run
+
+    register_synthetic_scan_run(db_path, "missing-entry-1")
+    register_synthetic_scan_run(db_path, "missing-entry-2")
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,

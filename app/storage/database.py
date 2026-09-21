@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -1455,11 +1456,156 @@ def _migrate_runtime_epoch_isolation_v26(connection: sqlite3.Connection) -> None
             """
         )
         _ensure_lifecycle_epoch_current_indexes(connection)
+        _rebuild_telegram_alert_attempts_without_unconditional_signal_alert_unique(connection)
+        _ensure_telegram_alert_attempt_indexes(connection)
         connection.commit()
     except Exception:
         if connection.in_transaction:
             connection.rollback()
         raise
+
+
+_TELEGRAM_ALERT_ATTEMPTS_PRE_V26_UNIQUE = "telegram_alert_attempts_pre_v26_unique"
+_UNCONDITIONAL_SIGNAL_ALERT_UNIQUE = re.compile(
+    r",\s*UNIQUE\s*\(\s*signal_id\s*,\s*alert_type\s*\)",
+    re.IGNORECASE,
+)
+_UNCONDITIONAL_SIGNAL_ALERT_UNIQUE_LEADING = re.compile(
+    r"UNIQUE\s*\(\s*signal_id\s*,\s*alert_type\s*\)\s*,",
+    re.IGNORECASE,
+)
+
+
+def _telegram_alert_attempts_has_unconditional_signal_alert_unique(
+    connection: sqlite3.Connection,
+) -> bool:
+    try:
+        indexes = connection.execute("PRAGMA index_list('telegram_alert_attempts')").fetchall()
+    except sqlite3.Error:
+        return False
+    for index in indexes:
+        unique = int(index[2]) if len(index) > 2 else 0
+        origin = str(index[3]).lower() if len(index) > 3 and index[3] is not None else ""
+        if unique != 1 or origin != "u":
+            continue
+        columns = [
+            str(row[2])
+            for row in connection.execute(f"PRAGMA index_info({_sql_ident(index[1])})").fetchall()
+        ]
+        if columns == ["signal_id", "alert_type"]:
+            return True
+    sql = _telegram_alert_attempts_create_sql(connection)
+    if not sql:
+        return False
+    return (
+        _UNCONDITIONAL_SIGNAL_ALERT_UNIQUE.search(sql) is not None
+        or _UNCONDITIONAL_SIGNAL_ALERT_UNIQUE_LEADING.search(sql) is not None
+    )
+
+
+def _telegram_alert_attempts_create_sql(connection: sqlite3.Connection) -> str:
+    row = connection.execute(
+        """
+        SELECT sql FROM sqlite_master
+        WHERE type = 'table' AND name = 'telegram_alert_attempts'
+        """
+    ).fetchone()
+    if row is None or row[0] is None:
+        return ""
+    return str(row[0])
+
+
+def _sql_ident(value: object) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def _rebuild_telegram_alert_attempts_without_unconditional_signal_alert_unique(
+    connection: sqlite3.Connection,
+) -> None:
+    """Rebuild telegram_alert_attempts only to drop table-level UNIQUE(signal_id, alert_type).
+
+    Transaction boundary: this runs inside `_migrate_runtime_epoch_isolation_v26`'s
+    BEGIN IMMEDIATE. Failure rolls back that v26 transaction. It does not claim
+    that the entire `initialize_database` routine is globally atomic.
+    """
+
+    if not _telegram_alert_attempts_has_unconditional_signal_alert_unique(connection):
+        return
+    create_sql = _telegram_alert_attempts_create_sql(connection)
+    rebuilt_sql = _UNCONDITIONAL_SIGNAL_ALERT_UNIQUE.sub("", create_sql, count=1)
+    if rebuilt_sql == create_sql:
+        rebuilt_sql = _UNCONDITIONAL_SIGNAL_ALERT_UNIQUE_LEADING.sub("", create_sql, count=1)
+    if rebuilt_sql == create_sql:
+        raise StorageError(
+            "Unable to remove obsolete UNIQUE(signal_id, alert_type) from telegram_alert_attempts."
+        )
+    sequence_row = connection.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'telegram_alert_attempts'"
+    ).fetchone()
+    preserved_seq = int(sequence_row[0]) if sequence_row is not None else None
+    triggers = tuple(
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'trigger'
+              AND tbl_name = 'telegram_alert_attempts'
+              AND sql IS NOT NULL
+            """
+        ).fetchall()
+        if row[0]
+    )
+    connection.execute(
+        "ALTER TABLE telegram_alert_attempts RENAME TO telegram_alert_attempts_pre_v26_unique"
+    )
+    connection.execute(rebuilt_sql)
+    _copy_telegram_alert_attempts_pre_v26_unique_rows(connection)
+    max_id_row = connection.execute("SELECT MAX(id) FROM telegram_alert_attempts").fetchone()
+    max_id = int(max_id_row[0]) if max_id_row is not None and max_id_row[0] is not None else 0
+    restored_seq = max(preserved_seq or 0, max_id)
+    if restored_seq > 0:
+        existing_seq = connection.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'telegram_alert_attempts'"
+        ).fetchone()
+        if existing_seq is None:
+            connection.execute(
+                "INSERT INTO sqlite_sequence(name, seq) VALUES ('telegram_alert_attempts', ?)",
+                (restored_seq,),
+            )
+        elif int(existing_seq[0]) < restored_seq:
+            connection.execute(
+                "UPDATE sqlite_sequence SET seq = ? WHERE name = 'telegram_alert_attempts'",
+                (restored_seq,),
+            )
+    connection.execute("DROP TABLE telegram_alert_attempts_pre_v26_unique")
+    for trigger_sql in triggers:
+        connection.execute(trigger_sql)
+
+
+def _copy_telegram_alert_attempts_pre_v26_unique_rows(connection: sqlite3.Connection) -> None:
+    """Copy every attempt row with original IDs. Tests may inject failure here."""
+
+    legacy_columns = [
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(telegram_alert_attempts_pre_v26_unique)"
+        ).fetchall()
+    ]
+    target_columns = [
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(telegram_alert_attempts)").fetchall()
+    ]
+    common_columns = [column for column in target_columns if column in legacy_columns]
+    if "id" not in common_columns:
+        raise StorageError("telegram_alert_attempts rebuild refused to proceed without preserving id.")
+    column_list = ", ".join(common_columns)
+    connection.execute(
+        f"""
+        INSERT INTO telegram_alert_attempts ({column_list})
+        SELECT {column_list}
+        FROM telegram_alert_attempts_pre_v26_unique
+        """
+    )
 
 
 def _ensure_telegram_alert_attempt_indexes(connection: sqlite3.Connection) -> None:

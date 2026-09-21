@@ -90,6 +90,7 @@ from app.runtime_epoch.ownership import (
     require_public_attempt_mutation,
     require_public_event_mutation,
     require_public_root_for_insert,
+    attempt_has_current_epoch_run_lineage,
     attempt_has_operational_history,
     attempt_is_audit_only,
     bind_canonical_reservation_attempt,
@@ -2105,30 +2106,14 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         status = _text(record.telegram_status)
         if status not in {"blocked", "skipped"}:
             return False
+        if not attempt_has_current_epoch_run_lineage(self._connection, record):
+            return False
         now = _text(record.last_seen_at if _text(record.last_seen_at) != NA else now_utc_iso())
         event_key = _text(record.public_watchlist_event_key)
         if event_key == NA:
-            cursor = self._connection.execute(
+            candidates = self._connection.execute(
                 """
-                UPDATE telegram_alert_attempts
-                SET
-                    attempted_at = CASE
-                        WHEN attempted_at IS NULL OR attempted_at = 'N/A' OR attempted_at = ''
-                            THEN ?
-                        ELSE attempted_at
-                    END,
-                    first_seen_at = CASE
-                        WHEN first_seen_at IS NULL OR first_seen_at = 'N/A'
-                            THEN COALESCE(NULLIF(attempted_at, 'N/A'), NULLIF(sent_at, 'N/A'), ?)
-                        ELSE first_seen_at
-                    END,
-                    last_seen_at = ?,
-                    seen_count = CASE
-                        WHEN seen_count IS NULL OR seen_count < 1 THEN 2
-                        ELSE seen_count + 1
-                    END,
-                    last_scan_run_id = ?,
-                    last_error_message = ?
+                SELECT * FROM telegram_alert_attempts
                 WHERE signal_id = ?
                   AND alert_type = ?
                   AND telegram_status = ?
@@ -2137,21 +2122,52 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                   AND (public_watchlist_event_key IS NULL OR public_watchlist_event_key IN ('', 'N/A'))
                 """,
                 (
-                    now,
-                    now,
-                    now,
-                    record.last_scan_run_id,
-                    _text(record.last_error_message),
                     _identity(record.signal_id),
                     _text(record.alert_type),
                     status,
                     _text(record.blocked_reason),
                     _text(record.error_message),
                 ),
-            )
-            return cursor.rowcount > 0
+            ).fetchall()
+        else:
+            candidates = self._connection.execute(
+                """
+                SELECT * FROM telegram_alert_attempts
+                WHERE signal_id = ?
+                  AND alert_type = ?
+                  AND telegram_status = ?
+                  AND blocked_reason = ?
+                  AND error_message = ?
+                  AND public_watchlist_event_key = ?
+                  AND id IS NOT (
+                        SELECT canonical_reservation_attempt_id
+                        FROM public_alert_events
+                        WHERE event_key = ?
+                          AND canonical_reservation_attempt_id IS NOT NULL
+                  )
+                """,
+                (
+                    _identity(record.signal_id),
+                    _text(record.alert_type),
+                    status,
+                    _text(record.blocked_reason),
+                    _text(record.error_message),
+                    event_key,
+                    event_key,
+                ),
+            ).fetchall()
+        target_ids = [
+            int(row["id"])
+            for row in candidates
+            if attempt_is_audit_only(row)
+            and not attempt_has_operational_history(row)
+            and attempt_has_current_epoch_run_lineage(self._connection, row)
+        ]
+        if not target_ids:
+            return False
+        placeholders = ",".join("?" for _ in target_ids)
         cursor = self._connection.execute(
-            """
+            f"""
             UPDATE telegram_alert_attempts
             SET
                 attempted_at = CASE
@@ -2171,18 +2187,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 END,
                 last_scan_run_id = ?,
                 last_error_message = ?
-            WHERE signal_id = ?
-              AND alert_type = ?
-              AND telegram_status = ?
-              AND blocked_reason = ?
-              AND error_message = ?
-              AND public_watchlist_event_key = ?
-              AND id IS NOT (
-                    SELECT canonical_reservation_attempt_id
-                    FROM public_alert_events
-                    WHERE event_key = ?
-                      AND canonical_reservation_attempt_id IS NOT NULL
-              )
+            WHERE id IN ({placeholders})
             """,
             (
                 now,
@@ -2190,13 +2195,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                 now,
                 record.last_scan_run_id,
                 _text(record.last_error_message),
-                _identity(record.signal_id),
-                _text(record.alert_type),
-                status,
-                _text(record.blocked_reason),
-                _text(record.error_message),
-                event_key,
-                event_key,
+                *target_ids,
             ),
         )
         return cursor.rowcount > 0

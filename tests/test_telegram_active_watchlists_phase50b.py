@@ -1469,7 +1469,7 @@ def test_long_active_signal_invalidates_after_latest_price_below_stop(tmp_path: 
         symbol="LONGSTOPUSDT",
         status="valid_setup",
         display_bucket="valid",
-        raw_result={"current_price": "94.9"},
+        raw_result={"current_price": "94.9", "lifecycle_id": "sig-long-invalid"},
     )
 
     response = _service(tmp_path, db_path).public_response_for("/signals")
@@ -1492,7 +1492,7 @@ def test_short_active_signal_invalidates_after_latest_price_above_stop(tmp_path:
         symbol="SHORTSTOPUSDT",
         status="valid_setup",
         display_bucket="valid",
-        raw_result={"current_price": "105.1"},
+        raw_result={"current_price": "105.1", "lifecycle_id": "sig-short-invalid"},
     )
 
     response = _service(tmp_path, db_path).public_response_for("/signals")
@@ -1513,7 +1513,11 @@ def test_stale_database_row_is_not_rendered_by_signal_detail(tmp_path: Path) -> 
         failed_gate="target_integrity",
         rejection_reason="Latest scanner rejected this setup.",
         setup_quality_score="20",
-        raw_result={"display_status": "no_setup", "setup_quality": {"quality_grade": "Reject"}},
+        raw_result={
+            "display_status": "no_setup",
+            "setup_quality": {"quality_grade": "Reject"},
+            "lifecycle_id": "sig-stale-row",
+        },
     )
 
     response = _service(tmp_path, db_path).public_response_for("/signal STALEUSDT")
@@ -1560,7 +1564,7 @@ def test_refresh_button_hides_setup_after_price_invalidation(tmp_path: Path) -> 
         symbol="REFRESHUSDT",
         status="valid_setup",
         display_bucket="valid",
-        raw_result={"current_price": "94.5"},
+        raw_result={"current_price": "94.5", "lifecycle_id": "sig-refresh-invalid"},
     )
     scope, refresh_command = command_for_callback_data("public:signal:REFRESHUSDT")
     refreshed_detail = service.public_response_for(refresh_command)

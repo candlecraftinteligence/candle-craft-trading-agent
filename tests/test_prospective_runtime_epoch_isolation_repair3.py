@@ -735,6 +735,7 @@ def test_r84_active_detail_uses_event_origin_lifecycle_id(tmp_path: Path) -> Non
 
 
 def test_r85_real_positive_path_with_advancing_clock(tmp_path: Path) -> None:
+    """Component advancing-clock proof. Production orchestration is R115–R118."""
     (
         first,
         _applied_first,

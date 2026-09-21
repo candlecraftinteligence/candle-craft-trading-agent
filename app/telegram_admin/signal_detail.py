@@ -22,20 +22,22 @@ from app.telegram_admin.active_watchlists import (
     _active_signal_group_is_eligible,
     _active_signal_outcome_rows,
     _attempt_is_current_epoch_operational,
+    _canonical_attempt_row_for_event,
     _clean,
     _connect_readonly,
+    _event_row_for_attempt,
     _first_non_na,
+    _group_operational_attempts_by_lifecycle,
     _json_mapping,
     _latest_runtime_database,
-    _latest_symbol_result_for_attempt,
     _lifecycle_outcome_progress,
-    _owned_lifecycle_row_for_attempt,
+    _owned_candidate_for_chain,
+    _owned_symbol_result_for_chain,
     _row_id,
     _select_or_na,
     _sent_alert_attempt_rows,
     _stored_trade_map_levels,
     _status_key,
-    _symbol_result_for_attempt,
     _table_columns,
     _table_exists,
 )
@@ -81,21 +83,18 @@ def _detail_from_rows(
     if not selected:
         return None
 
-    by_signal: dict[str, list[Mapping[str, Any]]] = {}
-    for row in rows:
-        signal_id = _clean(row.get("signal_id"))
-        if signal_id != NA:
-            by_signal.setdefault(signal_id, []).append(row)
-
     details: list[tuple[int, TelegramSignalDetail]] = []
-    for signal_id, signal_rows in by_signal.items():
+    for lifecycle_row, signal_rows in _group_operational_attempts_by_lifecycle(connection, rows):
         signal_row = _active_signal_base_row(signal_rows)
         if signal_row is None:
             continue
-        if not _attempt_is_current_epoch_operational(connection, signal_row):
+        event_row = _event_row_for_attempt(connection, signal_row)
+        canonical_row = _canonical_attempt_row_for_event(connection, event_row, lifecycle_row)
+        if not canonical_row or _clean(canonical_row.get("telegram_status")).lower() != "sent":
             continue
-        lifecycle_row = _owned_lifecycle_row_for_attempt(connection, signal_row)
-        if not lifecycle_row:
+        signal_row = canonical_row
+        signal_id = _clean(signal_row.get("signal_id"))
+        if signal_id == NA:
             continue
         outcome_rows = tuple(
             row
@@ -114,11 +113,11 @@ def _detail_from_rows(
             lifecycle_row=lifecycle_row,
         ):
             continue
-        if not _row_matches_selector(signal_id, signal_row, selected):
+        if signal_id == NA or not _row_matches_selector(signal_id, signal_row, selected):
             continue
         details.append(
             (
-                _row_id(latest_row),
+                _row_id(canonical_row),
                 _detail_from_group(connection, signal_id, signal_row, outcome_rows, latest_row, lifecycle_row),
             )
         )
@@ -136,11 +135,9 @@ def _detail_from_group(
     latest_row: Mapping[str, Any],
     lifecycle_row: Mapping[str, Any],
 ) -> TelegramSignalDetail:
-    symbol_row = _latest_symbol_result_for_attempt(connection, latest_row)
-    if not symbol_row:
-        symbol_row = _symbol_result_for_attempt(connection, latest_row)
+    symbol_row = _owned_symbol_result_for_chain(connection, latest_row, lifecycle_row)
     raw_result = _json_mapping(symbol_row.get("raw_result_json"))
-    candidate = _candidate_detail_for_owned_chain(connection, signal_row, lifecycle_row)
+    candidate = _owned_candidate_for_chain(connection, signal_row, lifecycle_row)
     candidate_raw = _json_mapping(candidate.get("raw_candidate_json"))
     lifecycle_events = _lifecycle_events(connection, _first_text(lifecycle_row.get("lifecycle_id"), signal_id))
     outcome_progress = _lifecycle_outcome_progress(connection, lifecycle_row)
