@@ -14,6 +14,14 @@ export type LifecycleEvent = {
   outcome_code?: string;
 };
 
+export type ReplayBrief = {
+  masked_title: string;
+  masked_thesis: string;
+  teaching_note: string;
+  preferred_decision: "TRACK" | "TAKE" | "WATCH" | "NO_TRADE";
+  evidence: EvidenceBlock[];
+};
+
 export type Mission = {
   cci_setup_id: string;
   symbol: string;
@@ -31,4 +39,5 @@ export type Mission = {
   resolved: boolean;
   synthetic: boolean;
   disclaimer: string;
+  replay?: ReplayBrief | null;
 };

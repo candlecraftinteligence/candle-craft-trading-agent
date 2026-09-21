@@ -82,5 +82,23 @@
     }
   ],
   "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
-  "synthetic": true
+  "synthetic": true,
+  "replay": {
+    "masked_title": "Continuation base",
+    "masked_thesis": "Synthetic H1 long. A continuation base is the structure under study. A close through the base low ends the idea. The later record is withheld.",
+    "teaching_note": "This file resolved TP_HIT after TP1 and TP2. Quality tier was HUNT. The aligned training decision is TRACK: follow the evidence without claiming a fill. The score is pattern practice, not a profit result.",
+    "preferred_decision": "TRACK",
+    "evidence": [
+      {
+        "type": "structure",
+        "label": "Continuation base",
+        "detail": "The base is the reference structure in this drill."
+      },
+      {
+        "type": "invalidation",
+        "label": "Base low",
+        "detail": "A close through the base low ends the idea."
+      }
+    ]
+  }
 }

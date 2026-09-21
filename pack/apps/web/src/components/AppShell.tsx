@@ -36,7 +36,9 @@ export function AppShell({ children }: AppShellProps) {
         </header>
         {snapshot.isDevFallback ? (
           <p className="dev-banner" role="status">
-            {snapshot.fallbackLabel}. Telegram is not connected.
+            <span>{snapshot.fallbackLabel}</span>
+            <span className="dev-banner-sep">·</span>
+            <span>Telegram is not connected</span>
           </p>
         ) : null}
         <main className="content">

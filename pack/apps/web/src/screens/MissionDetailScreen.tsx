@@ -3,9 +3,16 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { fetchMission, MissionNotFoundError } from "../api/missions";
 import type { Mission } from "../api/types";
 import { DecisionPanel } from "../components/DecisionPanel";
+import { JournalPanel } from "../components/JournalPanel";
 import { LifecycleTimeline } from "../components/LifecycleTimeline";
+import { QuestChip } from "../components/QuestChip";
+import { XpPreview } from "../components/XpPreview";
 import { OUTCOME_SEPARATION, RISK_WARNING } from "../copy";
+import { useDecisions } from "../decisions/localDecisions";
+import { missionPreview } from "../domain/xp";
 import { toneForState } from "../presentation";
+import { useJournals } from "../storage/journals";
+import { markEvidenceRead, useMarks } from "../storage/marks";
 import { telegramBridge } from "../telegram/TelegramBridge";
 
 type LoadState =
@@ -24,21 +31,39 @@ export function MissionDetailScreen() {
   return (
     <div className="stack">
       <Link className="back-link" to="/missions">
-        Missions
+        The board
       </Link>
       {load.status === "loading" ? <p className="status-line">Reading fixture…</p> : null}
-      {load.status === "missing" ? (
-        <p className="status-line">This mission is not in the fixture set.</p>
-      ) : null}
+      {load.status === "missing" ? <p className="status-line">This mission is not in the fixture set.</p> : null}
       {load.status === "error" ? (
         <p className="status-line">{load.message} Nothing was invented in its place.</p>
       ) : null}
-      {load.status === "ready" ? <Detail mission={load.mission} /> : null}
+      {load.status === "ready" ? (
+        <div className="detail-stack">
+          <MissionDetailBody mission={load.mission} />
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function Detail({ mission }: { mission: Mission }) {
+export function MissionDetailBody({ mission }: { mission: Mission }) {
+  const decisions = useDecisions();
+  const journals = useJournals();
+  const marks = useMarks();
+  const decision = decisions[mission.cci_setup_id] ?? null;
+  const evidenceRead = marks.evidenceRead.includes(mission.cci_setup_id);
+  const journalSaved = Boolean(journals[mission.cci_setup_id]);
+  const reviewSaved = marks.reviews.includes(mission.cci_setup_id);
+  const preview = missionPreview({
+    evidenceRead,
+    decision,
+    journalSaved,
+    resolved: mission.resolved,
+    reviewSaved,
+  });
+  const tone = toneForState(mission.lifecycle_state);
+
   return (
     <>
       <header>
@@ -53,21 +78,24 @@ function Detail({ mission }: { mission: Mission }) {
         <div className="meta-row">
           <span>{mission.timeframe}</span>
           <span>{mission.direction}</span>
-          <span className="state-chip" data-tone={toneForState(mission.lifecycle_state)}>
-            {mission.lifecycle_state}
-          </span>
         </div>
         <h1 className="detail-title">{mission.title}</h1>
       </header>
 
+      <section className="status-hero" aria-label="Lifecycle status" data-tone={tone}>
+        <p className="kicker">Where the tape stands</p>
+        <p className="status-readout">{mission.lifecycle_state}</p>
+        <p className="fine">Last mark on the fixture. The Pack does not move this.</p>
+      </section>
+
       <section className="panel">
-        <p className="kicker">Thesis</p>
+        <p className="kicker">The idea</p>
         <p className="body-copy">{mission.thesis_summary}</p>
         <p className="fine">{RISK_WARNING}</p>
       </section>
 
       <section className="panel">
-        <p className="kicker">Evidence</p>
+        <p className="kicker">What the tape shows</p>
         {mission.evidence.length === 0 ? (
           <p className="status-line">No evidence blocks were included in this fixture.</p>
         ) : (
@@ -81,23 +109,44 @@ function Detail({ mission }: { mission: Mission }) {
             ))}
           </ul>
         )}
+        <button
+          type="button"
+          className="btn"
+          disabled={evidenceRead}
+          onClick={() => markEvidenceRead(mission.cci_setup_id)}
+        >
+          {evidenceRead ? "Evidence read" : "I've read the tape"}
+        </button>
       </section>
 
       <DecisionPanel missionId={mission.cci_setup_id} />
 
       <section className="panel">
-        <p className="kicker">Lifecycle</p>
-        <p className="fine">Events below are the fixture record, in order.</p>
+        <p className="kicker">The tape</p>
+        <p className="fine">Fixture events only, in the order they were written.</p>
         <LifecycleTimeline events={mission.lifecycle} />
       </section>
 
-      {mission.outcome_code ? (
-        <section className="panel outcome-block">
+      {mission.resolved ? (
+        <section className="panel outcome-block" data-testid="cci-outcome">
           <p className="kicker">CCI Outcome</p>
-          <p className="outcome-code">{mission.outcome_code}</p>
+          <p className="outcome-code">{mission.outcome_code ?? "No outcome code in this fixture."}</p>
           <p className="fine">{OUTCOME_SEPARATION}</p>
         </section>
       ) : null}
+
+      <JournalPanel missionId={mission.cci_setup_id} resolved={mission.resolved} decision={decision} />
+
+      <XpPreview lines={preview.lines} total={preview.total} />
+
+      <QuestChip
+        missionId={mission.cci_setup_id}
+        resolved={mission.resolved}
+        decision={decision}
+        evidenceRead={evidenceRead}
+        journalSaved={journalSaved}
+        reviewSaved={reviewSaved}
+      />
 
       <p className="fine">{mission.disclaimer}</p>
     </>

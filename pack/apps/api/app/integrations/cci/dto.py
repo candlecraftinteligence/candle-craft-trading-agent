@@ -38,3 +38,4 @@ class CciSetupDTO(BaseModel):
     resolved: bool
     synthetic: bool
     disclaimer: str
+    replay: dict[str, Any] | None = None

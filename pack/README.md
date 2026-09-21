@@ -1,6 +1,6 @@
 # CCI The Pack
 
-Telegram-native discipline layer beside CCI. This tree is Phase 0, Slice 1: a premium Mini App shell and a mock mission API. It does not connect to CCI Runtime, does not execute orders, and does not implement Stars, wallets, or auth.
+Telegram-native discipline layer beside CCI. This tree is the Phase 0 prototype: shell, mock missions, device-local locks and journals, Replay drills, and a cosmetic Pack XP preview. It does not connect to CCI Runtime, does not execute orders, and does not implement Stars, wallets, auth, or a server XP ledger.
 
 Product decisions live in [docs/PRODUCT_ARCHITECTURE.md](docs/PRODUCT_ARCHITECTURE.md).
 
@@ -36,8 +36,11 @@ Open `http://localhost:5173`. Vite proxies `/api` and `/health` to the API. Outs
 
 ```bash
 npm run typecheck
+npm run test
 npm run build
 ```
+
+Demo path: Pack den → Walk the board → open a card → seal one of TRACK, I TOOK THIS, WATCH ONLY, or NO TRADE → on a resolved card, save Your Journal beside the CCI Outcome → Run the tape → study a concealed setup → Reveal → Profile.
 
 ## Tests
 
@@ -45,6 +48,12 @@ From `pack/apps/api` with the virtualenv active:
 
 ```bash
 python -m pytest
+```
+
+From `pack/apps/web`:
+
+```bash
+npm run test
 ```
 
 ## Docker

@@ -8,6 +8,13 @@ import {
 } from "../decisions/localDecisions";
 import { telegramBridge } from "../telegram/TelegramBridge";
 
+const SEAL_LINE: Record<DecisionId, string> = {
+  TRACK: "Marked. Stay sharp.",
+  I_TOOK_THIS: "Logged. Journal the risk.",
+  WATCH_ONLY: "Eyes on. No fill claimed.",
+  NO_TRADE: "Passing is Pack strength.",
+};
+
 type DecisionPanelProps = {
   missionId: string;
 };
@@ -23,17 +30,23 @@ export function DecisionPanel({ missionId }: DecisionPanelProps) {
     telegramBridge.impact("medium");
     setNote(
       stored === decision
-        ? `Locked on this device · ${decisionLabel(stored)}`
-        : `Already locked · ${decisionLabel(stored)}`,
+        ? `${SEAL_LINE[stored]} Sealed on this device.`
+        : `Already sealed · ${decisionLabel(stored)}`,
     );
   }
 
   return (
     <section className="decision-panel" aria-label="Decision lock">
       <div className="panel-head">
-        <p className="kicker">Decision</p>
-        <p className="fine">{locked ? `Locked · ${decisionLabel(locked)}` : "Unlocked"}</p>
+        <p className="kicker">Your call</p>
+        <p className="fine">{locked ? "Sealed" : "Once"}</p>
       </div>
+      {locked ? (
+        <div className="lock-seal" data-testid="decision-lock">
+          <p className="kicker">Sealed on this device</p>
+          <p className="lock-choice">{decisionLabel(locked)}</p>
+        </div>
+      ) : null}
       <div className="decision-grid">
         {DECISIONS.map((decision) => (
           <button
@@ -48,8 +61,26 @@ export function DecisionPanel({ missionId }: DecisionPanelProps) {
           </button>
         ))}
       </div>
-      <p className="fine">{note ?? "Preview lock stays on this device. It is not an order."}</p>
-      <p className="fine">Pack XP is not awarded in this preview.</p>
+      <ul className="decision-hints">
+        <li>
+          <strong>TRACK</strong>
+          Mark it. Stay sharp.
+        </li>
+        <li>
+          <strong>I TOOK THIS</strong>
+          You took the risk. Journal it.
+        </li>
+        <li>
+          <strong>WATCH ONLY</strong>
+          Eyes on. No claim of a fill.
+        </li>
+        <li>
+          <strong>NO TRADE</strong>
+          Passing is Pack strength.
+        </li>
+      </ul>
+      <p className="fine">{note ?? "The seal stays on this device. It is not an order."}</p>
+      <p className="fine">Pack XP here is a cosmetic preview, not a ledger entry.</p>
     </section>
   );
 }

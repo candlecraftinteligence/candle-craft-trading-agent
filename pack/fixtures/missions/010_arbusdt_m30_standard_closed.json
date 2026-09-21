@@ -70,5 +70,23 @@
     }
   ],
   "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
-  "synthetic": true
+  "synthetic": true,
+  "replay": {
+    "masked_title": "Confirmed base",
+    "masked_thesis": "Synthetic M30 long. A confirmed base is the structure under study. The later record is withheld.",
+    "teaching_note": "The fixture outcome is TP_HIT, then CLOSED. Quality tier was STANDARD. The aligned training decision is TRACK. The score does not measure profit.",
+    "preferred_decision": "TRACK",
+    "evidence": [
+      {
+        "type": "structure",
+        "label": "Confirmed base",
+        "detail": "The base is the reference in this drill."
+      },
+      {
+        "type": "invalidation",
+        "label": "Base low",
+        "detail": "A close through the base low ends the idea."
+      }
+    ]
+  }
 }

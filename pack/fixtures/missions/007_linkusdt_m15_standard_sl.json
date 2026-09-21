@@ -70,5 +70,23 @@
     }
   ],
   "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
-  "synthetic": true
+  "synthetic": true,
+  "replay": {
+    "masked_title": "Protected high",
+    "masked_thesis": "Synthetic M15 short. A protected high defines the idea. The later record is withheld.",
+    "teaching_note": "The fixture outcome is SL_HIT. The protected high failed. The aligned training decision is NO TRADE: a deliberate pass. Passing is not a claim of profit.",
+    "preferred_decision": "NO_TRADE",
+    "evidence": [
+      {
+        "type": "level",
+        "label": "Protected high",
+        "detail": "The short idea uses that high as protection."
+      },
+      {
+        "type": "invalidation",
+        "label": "Protection lost",
+        "detail": "Trade through the protected high ends the idea."
+      }
+    ]
+  }
 }

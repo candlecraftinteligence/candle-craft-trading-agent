@@ -70,5 +70,23 @@
     }
   ],
   "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
-  "synthetic": true
+  "synthetic": true,
+  "replay": {
+    "masked_title": "Confirmed short",
+    "masked_thesis": "Synthetic H4 short. Confirmation is the state in this brief. What the window did next is withheld.",
+    "teaching_note": "The file later recorded EXPIRED and then CLOSED. Quality tier was HUNT. The aligned training decision is WATCH: observation without forcing a result.",
+    "preferred_decision": "WATCH",
+    "evidence": [
+      {
+        "type": "structure",
+        "label": "Confirmed short",
+        "detail": "Confirmation is the structure in the masked brief."
+      },
+      {
+        "type": "context",
+        "label": "Open window",
+        "detail": "The brief stops while the idea is still inside its window."
+      }
+    ]
+  }
 }

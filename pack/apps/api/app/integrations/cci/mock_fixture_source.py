@@ -14,6 +14,19 @@ EVENT_TYPES = frozenset({"SETUP_PUBLISHED", "LIFECYCLE_UPDATED", "SETUP_RESOLVED
 QUALITY_TIERS = frozenset({"STANDARD", "HUNT"})
 DIRECTIONS = frozenset({"LONG", "SHORT"})
 RESOLVED_EVENT = "SETUP_RESOLVED"
+TRAINING_DECISIONS = frozenset({"TRACK", "TAKE", "WATCH", "NO_TRADE"})
+MASKED_LEAKS = (
+    "tp_hit",
+    "tp1",
+    "tp2",
+    "sl_hit",
+    "invalidated",
+    "expired",
+    "outcome",
+    "closed",
+    "hunt",
+    "standard",
+)
 
 
 def default_pack_fixtures_dir() -> Path:
@@ -113,7 +126,45 @@ def _validate_raw(data: Any, path: Path) -> dict[str, Any]:
     if resolved_at and resolved_at[0] != len(lifecycle) - 1:
         raise FixtureContractError(f"{cci_setup_id}: SETUP_RESOLVED must be the last event")
 
+    _validate_replay(data, path, resolved=bool(resolved_at))
     return data
+
+
+def _validate_replay(data: dict[str, Any], path: Path, *, resolved: bool) -> None:
+    replay = data.get("replay")
+    if not resolved:
+        if replay is not None:
+            raise FixtureContractError(f"{path.name}: open fixtures must not include a replay brief")
+        return
+    if not isinstance(replay, dict):
+        raise FixtureContractError(f"{path.name}: resolved fixtures require a replay brief")
+
+    for key in ("masked_title", "masked_thesis", "teaching_note"):
+        value = replay.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise FixtureContractError(f"{path.name}: replay.{key} must be a non-empty string")
+    preferred = replay.get("preferred_decision")
+    if preferred not in TRAINING_DECISIONS:
+        raise FixtureContractError(f"{path.name}: replay.preferred_decision is not a training decision")
+
+    evidence = replay.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        raise FixtureContractError(f"{path.name}: replay.evidence must be a non-empty list")
+    parts = [replay["masked_title"], replay["masked_thesis"]]
+    for index, block in enumerate(evidence):
+        if not isinstance(block, dict):
+            raise FixtureContractError(f"{path.name}: replay.evidence[{index}] must be an object")
+        if not isinstance(block.get("type"), str) or not str(block["type"]).strip():
+            raise FixtureContractError(f"{path.name}: replay.evidence[{index}].type is required")
+        if not isinstance(block.get("label"), str) or not str(block["label"]).strip():
+            raise FixtureContractError(f"{path.name}: replay.evidence[{index}].label is required")
+        parts.append(str(block["label"]))
+        if block.get("detail") is not None:
+            parts.append(str(block["detail"]))
+    masked = "\n".join(parts).lower()
+    for leak in MASKED_LEAKS:
+        if leak in masked:
+            raise FixtureContractError(f"{path.name}: replay mask leaks '{leak}'")
 
 
 def _outcome_code(lifecycle: list[dict[str, Any]]) -> str | None:
@@ -150,6 +201,7 @@ def project_setup(raw: dict[str, Any]) -> CciSetupDTO:
         resolved=resolved,
         synthetic=True,
         disclaimer=raw["disclaimer"],
+        replay=raw.get("replay"),
     )
 
 

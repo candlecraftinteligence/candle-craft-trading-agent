@@ -58,5 +58,23 @@
     }
   ],
   "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
-  "synthetic": true
+  "synthetic": true,
+  "replay": {
+    "masked_title": "Shelf under watch",
+    "masked_thesis": "Synthetic H1 long. Price is stalking a shelf. No trigger is included in this masked brief. The later record is withheld.",
+    "teaching_note": "INVALIDATED arrived before any trigger, and the file then CLOSED. The aligned training decision is NO TRADE.",
+    "preferred_decision": "NO_TRADE",
+    "evidence": [
+      {
+        "type": "structure",
+        "label": "Stalking shelf",
+        "detail": "The shelf is still the area under study."
+      },
+      {
+        "type": "context",
+        "label": "No trigger in the brief",
+        "detail": "The masked brief does not include a trigger."
+      }
+    ]
+  }
 }

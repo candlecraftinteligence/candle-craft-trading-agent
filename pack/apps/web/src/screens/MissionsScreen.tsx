@@ -40,8 +40,9 @@ export function MissionsScreen() {
   return (
     <div className="stack">
       <header>
-        <p className="kicker">Board</p>
+        <p className="kicker">The board</p>
         <h1 className="display">Missions</h1>
+        <p className="tagline">Open missions on the board. No invented urgency.</p>
       </header>
       <div className="filter-row" role="group" aria-label="Mission filters">
         {FILTERS.map((item) => (
@@ -67,8 +68,8 @@ export function MissionsScreen() {
             {filter === "OPEN"
               ? QUIET_MARKET
               : filter === "MINE"
-                ? "No missions locked on this device."
-                : "No resolved fixtures in this preview."}
+                ? "No calls sealed on this device yet."
+                : "No closed fixtures in this preview."}
           </p>
         </section>
       ) : null}

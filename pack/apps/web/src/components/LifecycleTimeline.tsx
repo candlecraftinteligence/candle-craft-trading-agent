@@ -12,8 +12,11 @@ export function LifecycleTimeline({ events }: LifecycleTimelineProps) {
 
   return (
     <ol className="timeline">
-      {events.map((event) => (
-        <li key={event.cci_event_id} className="timeline-item">
+      {events.map((event, index) => (
+        <li
+          key={event.cci_event_id}
+          className={index === events.length - 1 ? "timeline-item is-latest" : "timeline-item"}
+        >
           <div className="event-type">{event.event_type}</div>
           <p className="timeline-state">
             <span className="state-chip" data-tone={toneForState(event.state)}>
