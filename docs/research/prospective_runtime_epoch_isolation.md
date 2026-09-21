@@ -715,4 +715,5 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 - Fifth-repair PR HEAD pin: `8dbe5358f2f0a21c2e1c894448c48278b5a2622e`
 - Architecture-reviewed PR HEAD before the sixth repair: `9360b1054119875a6f376271c4e02312a018e72d`
 - Sixth bounded repair commit: `cd703106af5c7af7c0ca276bfaabf0c5bcb2762f`
-- Final PR #123 HEAD: `cd703106af5c7af7c0ca276bfaabf0c5bcb2762f`
+- Sixth-repair handoff record: `d7ee768c9910ffb80849bd9ef7455552f255a18e`
+- Final PR #123 HEAD: recorded after this handoff pin is pushed and CI is known
