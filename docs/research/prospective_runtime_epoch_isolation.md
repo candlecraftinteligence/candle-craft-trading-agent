@@ -489,5 +489,5 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 - Baseline main: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
 - Architecture-reviewed PR HEAD before this fourth repair: `fa2c8b99436db2bc48368fc42d4470797a29db58`
 - Verdict on that HEAD: `CHANGES_REQUIRED_PUBLIC_AUTHORITY_AND_V25_MIGRATION`
-- Fourth bounded repair commit: pending pin after this commit
-- Final PR #123 HEAD: pending pin after push
+- Fourth bounded repair commit: `56d5f087bd10d939c71a04a1c66ce32a02212fa2`
+- Final PR #123 HEAD: `56d5f087bd10d939c71a04a1c66ce32a02212fa2`
