@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { fetchMissions } from "../api/missions";
+import { usePackProfile } from "../api/profile";
 import type { Mission } from "../api/types";
 import { MissionCard } from "../components/MissionCard";
 import { QUIET_MARKET } from "../copy";
-import { useDecisions } from "../decisions/localDecisions";
 import { telegramBridge } from "../telegram/TelegramBridge";
 
 const FILTERS = ["OPEN", "RESOLVED", "MINE"] as const;
@@ -13,7 +13,8 @@ export function MissionsScreen() {
   const [filter, setFilter] = useState<MissionFilter>("OPEN");
   const [missions, setMissions] = useState<Mission[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const decisions = useDecisions();
+  const profile = usePackProfile();
+  const decisions = profile?.decisions ?? {};
 
   useEffect(() => {
     let cancelled = false;
@@ -34,7 +35,7 @@ export function MissionsScreen() {
   const visible = (missions ?? []).filter((mission) => {
     if (filter === "OPEN") return !mission.resolved;
     if (filter === "RESOLVED") return mission.resolved;
-    return Boolean(decisions[mission.cci_setup_id]);
+    return profile !== null && Boolean(decisions[mission.cci_setup_id]);
   });
 
   return (
@@ -68,7 +69,9 @@ export function MissionsScreen() {
             {filter === "OPEN"
               ? QUIET_MARKET
               : filter === "MINE"
-                ? "No calls sealed on this device yet."
+                ? profile
+                  ? "No calls sealed yet."
+                  : "N/A"
                 : "No closed fixtures in this preview."}
           </p>
         </section>

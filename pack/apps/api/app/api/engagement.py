@@ -34,6 +34,7 @@ def _sync(request: Request, db: Session) -> None:
 @router.get("/api/quests")
 def quests(request: Request, user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
     _sync(request, db)
+    limit(f"quest:{user.id}", 60, 60)
     board = settle_progression(db, user, now_utc())
     return {"daily": board["daily"], "weekly": board["weekly"]}
 

@@ -9,6 +9,7 @@ from app.api.engagement import router as engagement_router
 from app.api.health import router as health_router
 from app.api.missions import router as missions_router
 from app.api.progression import router as progression_router
+from app.api.webhook import router as webhook_router
 from app.bot.runtime import ensure_bot_optional
 from app.db.session import session_scope
 from app.integrations.cci.mock_fixture_source import MockFixtureSource
@@ -63,6 +64,7 @@ def create_app(source: CciMissionSource | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(progression_router)
     app.include_router(engagement_router)
+    app.include_router(webhook_router)
     return app
 
 

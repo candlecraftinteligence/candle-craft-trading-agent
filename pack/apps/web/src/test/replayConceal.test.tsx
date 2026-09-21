@@ -59,7 +59,7 @@ describe("replay conceal and reveal", () => {
     await user.click(screen.getByRole("button", { name: "TRACK" }));
     await user.click(screen.getByRole("button", { name: "Reveal" }));
 
-    expect(screen.getByRole("heading", { name: "AVAXUSDT" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "AVAXUSDT" })).toBeInTheDocument();
     expect(screen.getByTestId("replay-outcome")).toHaveTextContent("TP_HIT");
     expect(screen.getByText(/aligned training decision is TRACK/i)).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Training score" })).toHaveTextContent("100");

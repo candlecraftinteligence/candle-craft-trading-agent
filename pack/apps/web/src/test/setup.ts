@@ -118,8 +118,31 @@ beforeEach(() => {
         journals.set(id, body);
         return json({ journal: body, created: true, xp_awarded: 30 });
       }
+      if (path === "/api/replay" && method === "GET") {
+        return json({ disclaimer: "", tapes: [] });
+      }
       if (path.endsWith("/replay") && method === "POST") {
-        return json({ score: 0, created: true, xp_awarded: 0 });
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          chosen_tier?: string;
+          chosen_decision?: string;
+          evidence_reviewed?: boolean;
+        };
+        const perfect = body.chosen_tier === "HUNT" && body.chosen_decision === "TRACK" && body.evidence_reviewed === true;
+        return json({
+          score: perfect ? 100 : 0,
+          quality: perfect ? 40 : 0,
+          decision_points: perfect ? 40 : 0,
+          attention: body.evidence_reviewed ? 20 : 0,
+          created: true,
+          xp_awarded: 0,
+          symbol: perfect ? "AVAXUSDT" : undefined,
+          outcome_code: perfect ? "TP_HIT" : null,
+          teaching_note: perfect
+            ? "This file resolved TP_HIT. The aligned training decision is TRACK."
+            : "",
+          quality_tier: perfect ? "HUNT" : "STANDARD",
+          concealed: false,
+        });
       }
       return json({ detail: "not mocked" }, 404);
     }),

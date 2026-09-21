@@ -4,8 +4,23 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import Journal, Mission, ProcessMark, ReplayAttempt, ReplayChallenge, User, UserMissionDecision
-from app.domain.progression import DECISION_XP, JOURNAL_XP, replay_base_xp, score_replay
+from app.db.models import (
+    Journal,
+    Mission,
+    MissionLifecycleEvent,
+    ProcessMark,
+    ReplayAttempt,
+    ReplayChallenge,
+    User,
+    UserMissionDecision,
+)
+from app.domain.progression import DECISION_XP, JOURNAL_XP, replay_base_xp
+
+REPLAY_DISCLAIMER = (
+    "Replay scores measure pattern recognition practice on closed historical setups. "
+    "They do not predict future results. Past CCI setups do not guarantee future performance. "
+    "The Pack never executes trades."
+)
 from app.services.ledger import award, touch_streak, used_today
 
 
@@ -153,6 +168,59 @@ def _journal_payload(row: Journal) -> dict:
     }
 
 
+def concealed_replay(mission: Mission, challenge: ReplayChallenge, attempted: bool) -> dict:
+    """Study payload. Outcome, symbol, and the teaching note stay out until reveal."""
+    fixture = challenge.fixture_json or {}
+    return {
+        "cci_setup_id": mission.cci_setup_id,
+        "timeframe": mission.timeframe,
+        "direction": mission.direction,
+        "masked_title": fixture.get("masked_title") or "",
+        "masked_thesis": fixture.get("masked_thesis") or "",
+        "evidence": fixture.get("evidence") or [],
+        "attempted": attempted,
+        "disclaimer": REPLAY_DISCLAIMER,
+        "concealed": True,
+    }
+
+
+def _score_parts(*, actual_tier: str, chosen_tier: str, preferred: str, chosen: str, evidence_reviewed: bool) -> dict:
+    quality = 40 if actual_tier == chosen_tier else 0
+    decision = 40 if preferred == chosen else 0
+    attention = 20 if evidence_reviewed else 0
+    return {"quality": quality, "decision_points": decision, "attention": attention, "score": quality + decision + attention}
+
+
+def _reveal_payload(mission: Mission, challenge: ReplayChallenge, session: Session, score: int, parts: dict) -> dict:
+    events = session.scalars(
+        select(MissionLifecycleEvent)
+        .where(MissionLifecycleEvent.mission_id == mission.id)
+        .order_by(MissionLifecycleEvent.occurred_at)
+    ).all()
+    return {
+        "concealed": False,
+        "disclaimer": REPLAY_DISCLAIMER,
+        "symbol": mission.symbol,
+        "outcome_code": mission.outcome_code,
+        "teaching_note": challenge.teaching_note,
+        "quality_tier": mission.quality_tier,
+        "score": score,
+        "quality": parts["quality"],
+        "decision_points": parts["decision_points"],
+        "attention": parts["attention"],
+        "lifecycle": [
+            {
+                "cci_event_id": event.cci_event_id,
+                "event_type": event.event_type,
+                "state": event.state,
+                "occurred_at": event.occurred_at.isoformat(),
+                "outcome_code": None if not event.payload_json else event.payload_json.get("outcome_code"),
+            }
+            for event in events
+        ],
+    }
+
+
 def record_replay(
     session: Session,
     user: User,
@@ -175,7 +243,23 @@ def record_replay(
     key = f"replay:{user.id}:{idempotency_key}"
     existing = session.scalar(select(ReplayAttempt).where(ReplayAttempt.idempotency_key == key))
     if existing is not None:
-        return {"score": existing.score, "created": False, "xp_awarded": 0, "decision": existing.decision}
+        rubric = challenge.rubric_json or {}
+        detail = existing.detail_json or {}
+        parts = _score_parts(
+            actual_tier=str(rubric.get("quality_tier") or ""),
+            chosen_tier=str(detail.get("chosen_tier") or ""),
+            preferred=str(rubric.get("preferred_decision") or ""),
+            chosen=existing.decision,
+            evidence_reviewed=bool(detail.get("evidence_reviewed")),
+        )
+        parts["score"] = existing.score
+        return {
+            "score": existing.score,
+            "created": False,
+            "xp_awarded": 0,
+            "decision": existing.decision,
+            **_reveal_payload(mission, challenge, session, existing.score, parts),
+        }
 
     start = datetime.combine(now.astimezone(timezone.utc).date(), time.min, tzinfo=timezone.utc)
     attempts_before = int(
@@ -189,13 +273,14 @@ def record_replay(
         or 0
     )
     rubric = challenge.rubric_json or {}
-    score = score_replay(
+    parts = _score_parts(
         actual_tier=str(rubric.get("quality_tier") or ""),
         chosen_tier=chosen_tier,
         preferred=str(rubric.get("preferred_decision") or ""),
         chosen=chosen_decision,
         evidence_reviewed=evidence_reviewed,
     )
+    score = parts["score"]
     raw = replay_base_xp(attempts_before, score)
     attempt = ReplayAttempt(
         user_id=user.id,
@@ -220,7 +305,13 @@ def record_replay(
         ref_id=str(attempt.id),
     )
     touch_streak(session, user, now)
-    return {"score": score, "created": True, "xp_awarded": granted, "decision": chosen_decision}
+    return {
+        "score": score,
+        "created": True,
+        "xp_awarded": granted,
+        "decision": chosen_decision,
+        **_reveal_payload(mission, challenge, session, score, parts),
+    }
 
 
 def category_used(session: Session, user: User, category: str, now: datetime) -> int:

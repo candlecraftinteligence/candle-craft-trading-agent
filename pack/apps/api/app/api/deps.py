@@ -40,6 +40,12 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def client_host(request: Request) -> str:
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
 def limit(key: str, max_hits: int, window_seconds: float) -> None:
     now = monotonic()
     recent = [stamp for stamp in _hits[key] if now - stamp < window_seconds]

@@ -1,6 +1,8 @@
 # CCI The Pack
 
-Telegram-native discipline layer beside CCI. Phase 0 is the visual baseline. Phase 1 Slice A adds Postgres, Telegram initData auth, immutable decision locks, and a server Pack XP ledger. Missions still come from mock fixtures. The app does not connect to CCI Runtime, does not execute orders, and does not implement Stars or wallets. `LIVE_CCI` stays false. `CCI_SOURCE` stays `mock`.
+Telegram-native discipline layer beside CCI. Phase 0 is the visual baseline. Phase 1 persists decisions, journals, Replay attempts, quests, and achievements in Postgres. Missions still come from mock fixtures. The app does not connect to CCI Runtime, does not execute orders, and does not implement Stars or wallets. `LIVE_CCI` stays false. `CCI_SOURCE` stays `mock`.
+
+Status: **NEAR_COMPLETE_AWAITING_TELEGRAM_SECRETS**. The closeout is [docs/MVP_IMPLEMENTATION_REPORT.md](docs/MVP_IMPLEMENTATION_REPORT.md). Staging steps that do not need a bot token are in [docs/STAGING.md](docs/STAGING.md).
 
 Product decisions live in [docs/PRODUCT_ARCHITECTURE.md](docs/PRODUCT_ARCHITECTURE.md).
 
@@ -38,6 +40,11 @@ uvicorn app.main:app --reload --port 8000
 - `GET /api/me` reads Pack XP, Wolf Rank, and notification prefs from the server
 - `GET /api/quests` returns today's drills and this week's drills, then awards quest XP once
 - `GET /api/achievements` returns unlocked discipline marks
+- `GET /api/replay` and `GET /api/missions/{cci_setup_id}/replay` return a concealed tape and the Replay disclaimer
+- `POST /api/missions/{cci_setup_id}/replay` reveals the symbol, outcome, teaching note, and server score
+- `POST /api/telegram/webhook` checks `X-Telegram-Bot-Api-Secret-Token` when `PACK_WEBHOOK_SECRET` is set, and returns 503 when it is empty
+
+Missions → MINE lists setups the signed-in user has locked. It does not read a device-only decision list.
 
 `CCI_SOURCE` must stay `mock`. Any other value refuses to start. `LIVE_CCI=true` refuses to start. Fixtures load from `pack/fixtures/missions` (override with `PACK_FIXTURES_DIR`).
 
@@ -90,6 +97,13 @@ python main.py
 ```
 
 `/start` sends a short welcome and an Open The Pack button. A mission id on the command, or `https://t.me/<pack_bot>/app?startapp=<mission_id>`, opens Mission Detail. Unknown ids land on the not-found state. Compose can start the same process with `docker compose --profile bot up`. Without a public HTTPS Mini App URL and a Pack BotFather token, the bot stays scaffolding.
+
+`EXTERNAL_BLOCKER` for live Telegram staging is only:
+
+- `PACK_TELEGRAM_BOT_TOKEN`
+- `PACK_MINI_APP_URL` on HTTPS
+
+The webhook route is a verifier. It does not deliver updates until those values exist. See [docs/STAGING.md](docs/STAGING.md).
 
 Notification types live on the user: new mission and resolution start on; quest, streak, and Replay nudges start off. Profile → Den signals toggles them. The sender does not invent urgency and does not paste the whole Mini App into chat.
 

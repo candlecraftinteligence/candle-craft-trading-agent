@@ -1,6 +1,6 @@
-# Anti-overtrading audit — Phase 1 Slice B
+# Anti-overtrading audit — Phase 1
 
-Date: 2026-09-21. Scope: `pack/` quests, achievements, XP, and bot copy.
+Date: 2026-09-21. Slice B covered quests, achievements, XP, and bot copy. Slice C re-checked Replay reveal copy, the webhook stub, and the missions MINE filter.
 
 ## Result
 
@@ -31,3 +31,7 @@ Achievements A01–A18 are the architecture discipline list (First Lock, Clean P
 ## Not a violation
 
 The word "profit" appears in the locked tagline and in "not a profit record" / "not proof of PnL" disclaimers. Those sentences do not award XP.
+
+## Slice C re-check
+
+Replay lobby copy still says a drill score is not a profit record. The reveal path returns the same locked Replay disclaimer and does not add a profit, leverage, or win-rate reward. A repeated replay idempotency key awards 0 XP. The replay daily cap still clamps a new attempt to 0 once 90 replay XP is already on the ledger for that UTC day. MINE lists server locks only. No new quest or achievement template was added.

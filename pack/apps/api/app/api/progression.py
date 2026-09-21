@@ -1,14 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_user, db_session, limit, now_utc, prepare, raise_action
-from app.db.models import Journal, Mission, ReplayAttempt, User, UserMissionDecision, XpLedger
+from app.db.models import Journal, Mission, ReplayAttempt, ReplayChallenge, User, UserMissionDecision, XpLedger
 from app.domain.board import normalize_prefs
 from app.domain.progression import rank_name
-from app.services.actions import ActionError, lock_decision, record_replay, submit_journal
+from app.services.actions import REPLAY_DISCLAIMER, ActionError, concealed_replay, lock_decision, record_replay, submit_journal
 
 router = APIRouter()
 
@@ -16,27 +16,27 @@ router = APIRouter()
 class LockBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    decision: str
+    decision: str = Field(pattern="^(TRACK|I_TOOK_THIS|WATCH_ONLY|NO_TRADE)$")
 
 
 class JournalBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    process_notes: str = ""
-    emotional_state: str = ""
-    followed_plan: str = ""
-    self_reported_result: str | None = None
-    reason: str | None = None
-    lesson: str | None = None
+    process_notes: str = Field(default="", max_length=4000)
+    emotional_state: str = Field(default="", max_length=64)
+    followed_plan: str = Field(default="", max_length=4000)
+    self_reported_result: str | None = Field(default=None, max_length=32)
+    reason: str | None = Field(default=None, max_length=4000)
+    lesson: str | None = Field(default=None, max_length=4000)
 
 
 class ReplayBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    chosen_tier: str
-    chosen_decision: str
+    chosen_tier: str = Field(pattern="^(HUNT|STANDARD)$")
+    chosen_decision: str = Field(pattern="^(TRACK|TAKE|WATCH|NO_TRADE)$")
     evidence_reviewed: bool = False
-    idempotency_key: str
+    idempotency_key: str = Field(min_length=1, max_length=120)
 
 
 def _sync(request: Request, db: Session) -> None:
@@ -148,6 +148,52 @@ def post_journal(
         return submit_journal(db, user, cci_setup_id, body.model_dump(), now_utc())
     except ActionError as exc:
         raise_action(exc)
+
+
+def _attempted(db: Session, user: User, challenge_id) -> bool:
+    return (
+        db.scalar(
+            select(ReplayAttempt.id).where(
+                ReplayAttempt.user_id == user.id,
+                ReplayAttempt.challenge_id == challenge_id,
+            )
+        )
+        is not None
+    )
+
+
+@router.get("/api/replay")
+def list_replay(request: Request, user: User = Depends(current_user), db: Session = Depends(db_session)) -> dict:
+    _sync(request, db)
+    limit(f"replay-read:{user.id}", 120, 60)
+    rows = db.execute(
+        select(Mission, ReplayChallenge).join(ReplayChallenge, ReplayChallenge.source_mission_id == Mission.id).where(
+            ReplayChallenge.active.is_(True)
+        )
+    ).all()
+    tapes = [
+        concealed_replay(mission, challenge, _attempted(db, user, challenge.id))
+        for mission, challenge in rows
+    ]
+    return {"disclaimer": REPLAY_DISCLAIMER, "tapes": tapes}
+
+
+@router.get("/api/missions/{cci_setup_id}/replay")
+def read_replay(
+    cci_setup_id: str,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(db_session),
+) -> dict:
+    _sync(request, db)
+    limit(f"replay-read:{user.id}", 120, 60)
+    mission = db.scalar(select(Mission).where(Mission.cci_setup_id == cci_setup_id))
+    if mission is None:
+        raise HTTPException(status_code=404, detail="This mission is not in the fixture set.")
+    challenge = db.scalar(select(ReplayChallenge).where(ReplayChallenge.source_mission_id == mission.id))
+    if challenge is None or not challenge.active:
+        raise HTTPException(status_code=404, detail="This fixture has no replay brief.")
+    return concealed_replay(mission, challenge, _attempted(db, user, challenge.id))
 
 
 @router.post("/api/missions/{cci_setup_id}/replay")

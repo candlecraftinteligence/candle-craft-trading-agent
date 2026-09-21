@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import db_session, prepare, settings_dep
+from app.api.deps import client_host, db_session, limit, prepare, settings_dep
 from app.db.models import User
 from app.security.sessions import issue_session
 from app.security.telegram_auth import AuthError, validate_init_data
@@ -18,7 +18,7 @@ DEV_TELEGRAM_ID = 900000001
 
 class InitBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    init_data: str = ""
+    init_data: str = Field(default="", max_length=8192)
 
 
 def _touch_user(db: Session, telegram_id: int, username: str | None, display_name: str, now: datetime) -> User:
@@ -65,6 +65,7 @@ def auth_telegram(
     db: Session = Depends(db_session),
     settings: Settings = Depends(settings_dep),
 ) -> dict:
+    limit(f"auth:{client_host(request)}", 30, 60)
     try:
         tg_user = validate_init_data(
             body.init_data,
@@ -95,6 +96,7 @@ def auth_dev(
     db: Session = Depends(db_session),
     settings: Settings = Depends(settings_dep),
 ) -> dict:
+    limit(f"auth:{client_host(request)}", 30, 60)
     if not settings.dev_browser_mode:
         raise HTTPException(status_code=404, detail="Not found.")
     prepare(request, db)

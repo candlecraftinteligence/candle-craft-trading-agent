@@ -29,6 +29,7 @@ export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
   const [decision, setDecision] = useState<TrainingDecision | null>(stored?.chosenDecision ?? null);
   const [reviewed, setReviewed] = useState(Boolean(stored));
   const [revealed, setRevealed] = useState(Boolean(stored));
+  const [server, setServer] = useState<ServerReveal | null>(null);
 
   if (!brief) {
     return <p className="status-line">This fixture has no replay brief.</p>;
@@ -36,7 +37,7 @@ export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
 
   const preferred = brief.preferred_decision;
   const ready = Boolean(tier && decision && reviewed);
-  const score = revealed && tier && decision
+  const localScore = revealed && tier && decision && isTrainingDecision(preferred)
     ? scoreReplay({
         actualTier: mission.quality_tier,
         chosenTier: tier,
@@ -45,25 +46,24 @@ export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
         evidenceReviewed: true,
       })
     : null;
+  const score = server
+    ? {
+        total: server.score,
+        quality: server.quality,
+        decision: server.decision_points,
+        attention: server.attention,
+      }
+    : localScore;
   const xp = score ? replayPreview(score.total) : null;
+  const shownSymbol = server?.symbol || mission.symbol;
+  const shownOutcome = server?.outcome_code ?? mission.outcome_code;
+  const shownTeaching = server?.teaching_note || brief.teaching_note;
+  const shownTier = server?.quality_tier || mission.quality_tier;
+  const shownLifecycle = server?.lifecycle ?? mission.lifecycle;
 
-  function reveal() {
-    if (!tier || !decision || !reviewed || !isTrainingDecision(preferred)) return;
-    const next = scoreReplay({
-      actualTier: mission.quality_tier,
-      chosenTier: tier,
-      preferred,
-      chosen: decision,
-      evidenceReviewed: reviewed,
-    });
-    saveReplay({
-      missionId: mission.cci_setup_id,
-      chosenTier: tier,
-      chosenDecision: decision,
-      score: next.total,
-    });
-    setRevealed(true);
-    void apiFetch(`/api/missions/${encodeURIComponent(mission.cci_setup_id)}/replay`, {
+  async function reveal() {
+    if (!tier || !decision || !reviewed) return;
+    const response = await apiFetch(`/api/missions/${encodeURIComponent(mission.cci_setup_id)}/replay`, {
       method: "POST",
       body: JSON.stringify({
         chosen_tier: tier,
@@ -71,14 +71,28 @@ export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
         evidence_reviewed: reviewed,
         idempotency_key: mission.cci_setup_id,
       }),
-    })
-      .then((response) => {
-        if (response.ok) {
-          invalidatePackProfile();
-          invalidateQuests();
-        }
-      })
-      .catch(() => undefined);
+    });
+    if (!response.ok) return;
+    const body = (await response.json()) as ServerReveal;
+    const fallback = isTrainingDecision(preferred)
+      ? scoreReplay({
+          actualTier: mission.quality_tier,
+          chosenTier: tier,
+          preferred,
+          chosen: decision,
+          evidenceReviewed: reviewed,
+        }).total
+      : 0;
+    saveReplay({
+      missionId: mission.cci_setup_id,
+      chosenTier: tier,
+      chosenDecision: decision,
+      score: typeof body.score === "number" ? body.score : fallback,
+    });
+    setServer(body);
+    setRevealed(true);
+    invalidatePackProfile();
+    invalidateQuests();
   }
 
   return (
@@ -88,11 +102,11 @@ export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
       </button>
       <header>
         <p className="kicker">Training ground · not a live hunt</p>
-        <h1 className="display">{revealed ? mission.symbol : "Concealed perp"}</h1>
+        <h1 className="display">{revealed ? shownSymbol : "Concealed perp"}</h1>
         <div className="meta-row">
           <span>{mission.timeframe}</span>
           <span>{mission.direction}</span>
-          {revealed ? <span className="tier-standard">{mission.quality_tier}</span> : <span>Quality hidden</span>}
+          {revealed ? <span className="tier-standard">{shownTier}</span> : <span>Quality hidden</span>}
         </div>
       </header>
 
@@ -174,15 +188,15 @@ export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
         >
           <section className="panel">
             <p className="kicker">The tape, after</p>
-            <LifecycleTimeline events={mission.lifecycle} />
+            <LifecycleTimeline events={shownLifecycle} />
           </section>
           <section className="panel outcome-block" data-testid="replay-outcome">
             <p className="kicker">CCI Outcome</p>
-            <p className="outcome-code">{mission.outcome_code ?? "No outcome code in this fixture."}</p>
+            <p className="outcome-code">{shownOutcome ?? "No outcome code in this fixture."}</p>
           </section>
           <section className="panel">
             <p className="kicker">What the tape taught</p>
-            <p className="body-copy">{brief.teaching_note}</p>
+            <p className="body-copy">{shownTeaching}</p>
           </section>
           {score ? (
             <section className="panel" aria-label="Training score">
@@ -212,6 +226,19 @@ export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
     </div>
   );
 }
+
+type ServerReveal = {
+  score: number;
+  quality: number;
+  decision_points: number;
+  attention: number;
+  symbol?: string;
+  outcome_code?: string | null;
+  teaching_note?: string;
+  quality_tier?: string;
+  lifecycle?: Mission["lifecycle"];
+  disclaimer?: string;
+};
 
 function isTrainingDecision(value: string): value is TrainingDecision {
   return TRAINING_DECISIONS.some((item) => item.id === value);
