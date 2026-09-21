@@ -607,4 +607,4 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 - Architecture-reviewed PR HEAD before the fourth repair: `fa2c8b99436db2bc48368fc42d4470797a29db58`
 - Fourth bounded repair commit: `56d5f087bd10d939c71a04a1c66ce32a02212fa2`
 - Fourth repair PR HEAD pin: `64db64349760c4b8906b204821c10cf440aaed1b`
-- Fifth bounded repair commit: recorded in the follow-up pin commit after this change lands.
+- Fifth bounded repair commit: `1e7dff512f0defc2194951303114593f9f6bdcbf`
