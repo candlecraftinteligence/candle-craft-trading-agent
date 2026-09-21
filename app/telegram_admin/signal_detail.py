@@ -8,6 +8,7 @@ from typing import Any
 
 from app.data.dtos import NA
 from app.formatters.telegram_signal_detail import TelegramSignalDetail, lifecycle_chain_text
+from app.lifecycle.economic_identity import stored_plan_invalidation
 from app.formatters.telegram_signal_formatter import PUBLIC_STATUS_BY_ALERT_TYPE, TelegramAlertType, safe_invalidation_text
 from app.runtime_epoch.ownership import (
     canonical_operational_direction,
@@ -439,12 +440,18 @@ def _invalid_if(
 ) -> str:
     explicit = _first_public_text(
         trade_idea.get("invalidation"),
+        trade_idea.get("invalidation_logic"),
+        trade_idea.get("invalidation_reason"),
         raw_result.get("invalidation"),
+        raw_result.get("invalidation_logic"),
+        raw_result.get("invalidation_reason"),
         candidate.get("invalidation"),
+        candidate.get("invalidation_logic"),
+        candidate.get("invalidation_reason"),
         candidate_raw.get("invalidation"),
-        trade_idea.get("cancel_condition"),
-        candidate_raw.get("cancel_condition"),
-        lifecycle_row.get("invalidation_reason"),
+        candidate_raw.get("invalidation_logic"),
+        candidate_raw.get("invalidation_reason"),
+        stored_plan_invalidation(lifecycle_row),
     )
     if explicit != NA:
         return explicit

@@ -14,6 +14,12 @@ from app.runtime_epoch.errors import (
     RuntimeEpochOwnershipError,
 )
 from app.runtime_epoch.models import ORIGIN_STATUS_GRANTED, PublicOwnershipDecision, RuntimeEpochRecord
+from app.lifecycle.economic_identity import (
+    IdentityFieldKind,
+    classify_plan_invalidation,
+    mint_plan_version_id,
+    stored_plan_invalidation,
+)
 from app.lifecycle.outcome_policy import canonical_stored_price
 from app.runtime_epoch.origin import load_granted_origin
 from app.runtime_epoch.time_contract import parse_utc
@@ -935,6 +941,20 @@ _ENRICHMENT_TP_FIELDS = (
     ("tp2", ("tp2",)),
     ("tp3", ("tp3",)),
 )
+_ENRICHMENT_PLAN_INVALIDATION_FIELDS = (
+    "invalidation",
+    "invalidation_logic",
+    "invalidation_reason",
+)
+_PLAN_REMINIT_PRICE_FIELDS = (
+    ("entry_low", _ENRICHMENT_ENTRY_LOW_FIELDS),
+    ("entry_high", _ENRICHMENT_ENTRY_HIGH_FIELDS),
+    ("stop_loss", ("stop_loss", "raw_stop_loss")),
+    ("tp1", ("tp1",)),
+    ("tp2", ("tp2",)),
+    ("tp3", ("tp3",)),
+)
+_PLAN_FIELD_CONFLICT = object()
 
 
 def active_enrichment_belongs_to_owned_chain(
@@ -980,6 +1000,8 @@ def active_enrichment_belongs_to_owned_chain(
     if owned_plan is not None and present_plans and any(value != owned_plan for value in present_plans):
         return False
     if _enrichment_economics_conflict(sources, lifecycle, attempt):
+        return False
+    if not _active_enrichment_invalidation_matches_owned_plan(sources, lifecycle):
         return False
     return _enrichment_has_exact_owned_association(
         sources,
@@ -1212,6 +1234,104 @@ def _enrichment_economics_conflict(
         if present and chain_value and _price_tuples_conflict(present, chain_value):
             return True
     return False
+
+
+def _active_enrichment_invalidation_matches_owned_plan(
+    sources: tuple[Mapping[str, Any], ...],
+    lifecycle: Mapping[str, Any],
+) -> bool:
+    """Require present economic invalidation to reproduce the owned plan.
+
+    ``cancel_condition`` and ``watchlist_cancel_condition`` are watchlist cancel
+    text, not plan economics, so they do not mint or match ``plan_version_id``.
+    A copied plan-version string cannot override a remint from the present
+    setup, prices, and invalidation.
+    """
+
+    canonicals: list[str] = []
+    for source in sources:
+        for field_name in _ENRICHMENT_PLAN_INVALIDATION_FIELDS:
+            if field_name not in source:
+                continue
+            field = classify_plan_invalidation(source.get(field_name))
+            if field.kind is IdentityFieldKind.REQUIRED_MISSING:
+                continue
+            if field.kind is not IdentityFieldKind.VALUE or field.canonical is None:
+                return False
+            canonicals.append(field.canonical)
+    unique = set(canonicals)
+    if len(unique) > 1:
+        return False
+    present = next(iter(unique), None)
+    geometry = _present_plan_remint_geometry(sources)
+    if geometry is _PLAN_FIELD_CONFLICT:
+        return False
+    claimed_plan = _agreed_enrichment_value(sources, _ENRICHMENT_PLAN_VERSION_FIELDS, price=False)
+    if claimed_plan is _PLAN_FIELD_CONFLICT:
+        return False
+    if present is None:
+        if geometry is not None or claimed_plan is not None:
+            return False
+        return True
+    owned = stored_plan_invalidation(lifecycle)
+    if owned is None or present != owned:
+        return False
+    if geometry is None:
+        return True
+    reminted = mint_plan_version_id(invalidation=present, **geometry)
+    if not reminted.available or reminted.identity is None:
+        return False
+    owned_plan = _optional_text(lifecycle.get("plan_version_id"))
+    return owned_plan is not None and reminted.identity == owned_plan
+
+
+def _present_plan_remint_geometry(
+    sources: tuple[Mapping[str, Any], ...],
+) -> dict[str, Any] | None | object:
+    setup_id = _agreed_enrichment_value(sources, _ENRICHMENT_SETUP_FIELDS, price=False)
+    if setup_id is _PLAN_FIELD_CONFLICT:
+        return _PLAN_FIELD_CONFLICT
+    prices: dict[str, Any] = {}
+    missing = setup_id is None
+    for mint_name, field_names in _PLAN_REMINIT_PRICE_FIELDS:
+        value = _agreed_enrichment_value(sources, field_names, price=True)
+        if value is _PLAN_FIELD_CONFLICT:
+            return _PLAN_FIELD_CONFLICT
+        if value is None:
+            missing = True
+            continue
+        prices[mint_name] = value
+    if missing:
+        return None
+    return {"setup_id": setup_id, **prices}
+
+
+def _agreed_enrichment_value(
+    sources: tuple[Mapping[str, Any], ...],
+    field_names: tuple[str, ...],
+    *,
+    price: bool,
+) -> Any:
+    found: list[Any] = []
+    for source in sources:
+        for field_name in field_names:
+            if field_name not in source:
+                continue
+            value = source.get(field_name)
+            if _optional_text(value) is None:
+                continue
+            found.append(value)
+    if not found:
+        return None
+    if price:
+        canonical = tuple(canonical_stored_price(value) for value in found)
+        if any(item == NA for item in canonical) or len(set(canonical)) != 1:
+            return _PLAN_FIELD_CONFLICT
+        return found[0]
+    texts = tuple(_optional_text(value) for value in found)
+    if any(text is None for text in texts) or len(set(texts)) != 1:
+        return _PLAN_FIELD_CONFLICT
+    return texts[0]
 
 
 def _enrichment_has_exact_owned_association(

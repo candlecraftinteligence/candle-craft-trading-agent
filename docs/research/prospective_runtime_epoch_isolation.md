@@ -6,7 +6,12 @@ This document is the architecture handoff. It is not a Runtime runbook and does 
 
 ## Disposition
 
-- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_5`
+- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_6`
+- `ACTIVE_INVALIDATION_BOUND_TO_ECONOMIC_PLAN` = **TRUE**
+- `COPIED_PLAN_ID_CANNOT_HIDE_INVALIDATION_MISMATCH` = **TRUE**
+- `FOREIGN_INVALIDATION_ENRICHMENT_REJECTED` = **TRUE**
+- `OWNED_INVALIDATION_POSITIVE_PATH_PRESERVED` = **TRUE**
+- `SEND_BOUNDARY_REMAINS_CLOSED` = **TRUE**
 - `ACTIVE_FIELD_PROVENANCE_STRICT` = **TRUE**
 - `NESTED_CONTRADICTION_REJECTED` = **TRUE**
 - `CANDIDATE_EXACT_ASSOCIATION` = **TRUE**
@@ -54,7 +59,9 @@ Cohort labels remain only `LEGACY_OR_UNATTRIBUTED` and `CURRENT_EPOCH_OPERATIONA
 ## Baseline and reviewed heads
 
 - Baseline main SHA: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
-- Architecture-reviewed PR HEAD before this fifth repair: `64db64349760c4b8906b204821c10cf440aaed1b`
+- Architecture-reviewed PR HEAD before this sixth repair: `9360b1054119875a6f376271c4e02312a018e72d`
+- Latest architecture remaining blocker on that HEAD: `ACTIVE_INVALIDATION_PROVENANCE_NOT_BOUND_TO_PLAN_VERSION`
+- Architecture-reviewed PR HEAD before the fifth repair: `64db64349760c4b8906b204821c10cf440aaed1b`
 - Verdict on that HEAD: `CHANGES_REQUIRED_ACTIVE_PROVENANCE_AND_SEND_BOUNDARY`
 - Architecture-reviewed PR HEAD before the fourth repair: `fa2c8b99436db2bc48368fc42d4470797a29db58`
 - Verdict on that HEAD: `CHANGES_REQUIRED_PUBLIC_AUTHORITY_AND_V25_MIGRATION`
@@ -63,7 +70,93 @@ Cohort labels remain only `LEGACY_OR_UNATTRIBUTED` and `CURRENT_EPOCH_OPERATIONA
 - Prior architecture-reviewed PR HEAD (second review): `01cd99f146ea607cdc60650bbddc724af19e5155`
 - Verdict on that earlier HEAD: `CHANGES_REQUIRED_CROSS_RECORD_OWNERSHIP_AND_OPERATIONAL_OPEN_BYPASSES`
 
-Previous repairs (kept, not regressed): origin unspecified default, pre-cutoff cache rejection, BTC origin cannot insert ETH lifecycle, missing lifecycle cannot auto-create a public event, legacy watch payload adoption blocked, genuine-v25 fixture, unchanged strategy/economic gates, run registration before acquisition, canonical reservation pointer, audit non-claimable, public side bound to lifecycle, legacy audit freeze, genuine v25→v26 rebuild parity, production `run_scan.main` orchestration, public LONG/SHORT root direction binding.
+Previous repairs (kept, not regressed): origin unspecified default, pre-cutoff cache rejection, BTC origin cannot insert ETH lifecycle, missing lifecycle cannot auto-create a public event, legacy watch payload adoption blocked, genuine-v25 fixture, unchanged strategy/economic gates, run registration before acquisition, canonical reservation pointer, audit non-claimable, public side bound to lifecycle, legacy audit freeze, genuine v25→v26 rebuild parity, production `run_scan.main` orchestration, public LONG/SHORT root direction binding, ACTIVE field provenance, pre-send canonical reservation revalidation.
+
+## Sixth bounded repair (ACTIVE invalidation bound to economic plan)
+
+This is not a new architecture phase and not a new PR. It closes the remaining blocker on reviewed HEAD `9360b1054119875a6f376271c4e02312a018e72d`. The fifth-repair send boundary stays closed. Migration parity, legacy audit freeze, production orchestration, and strategy/economic identity algorithms are unchanged.
+
+### Root cause
+
+`plan_version_id` is minted by `mint_plan_version_id` from `setup_id`, entry, stop, TP1/TP2/TP3, **and invalidation**. `active_enrichment_belongs_to_owned_chain` checked copied lifecycle, setup, and plan-version strings plus price geometry, and did not bind present invalidation to that owned plan. A later raw or candidate row could copy those ids and the same prices, change the nested or raw invalidation, and still enrich ACTIVE detail. The foreign invalidation, rationale, facts, and gate text were then rendered from that row.
+
+The same economic-identity contract reads the owned plan invalidation as `invalidation_logic`, then `invalidation_reason`. Operational ACTIVE detail fell back to `invalidation_reason` only, so a later terminal lifecycle reason could replace the plan invalidation when no raw enrichment was present.
+
+Reproduced on temp DBs against starting HEAD `9360b105` before the production edit (`pytest tests/test_prospective_runtime_epoch_isolation_repair6.py`):
+
+| Test | Before fix |
+| --- | --- |
+| `mint_plan_version_id` with only invalidation changed | already distinct ids (passed) |
+| R141 copied ids + same prices + foreign nested invalidation | foreign invalidation/rationale/facts/gates leaked; **failed** |
+| R142 copied `plan_version_id` string | `active_enrichment_belongs_to_owned_chain` returned True; **failed** |
+| R143 raw vs nested invalidation contradiction | foreign narrative leaked; **failed** |
+| R144 / R145 / R148 owned invalidation positive paths | passed |
+| R146 review attack | operational narrative fields changed; **failed** |
+| R147 foreign candidate invalidation | foreign fact leaked; **failed** |
+| R149 full geometry without invalidation | foreign rationale leaked; **failed** |
+| R150 lifecycle fallback with no raw/candidate | `invalid_if` showed the terminal reason, not plan `invalidation_logic`; **failed** |
+
+Result on that HEAD: **4 passed, 7 failed**, exit 1.
+
+### Repair
+
+One authority: `active_enrichment_belongs_to_owned_chain`.
+
+It now requires every present economic invalidation representation to agree, using `classify_plan_invalidation` / `stored_plan_invalidation` from `app/lifecycle/economic_identity.py`. Those helpers call the existing mint text rule and the existing `invalidation_logic` then `invalidation_reason` preference. They do not add a second canonicalization.
+
+Fields that are plan invalidation: `invalidation`, `invalidation_logic`, `invalidation_reason`, including nested `trade_idea` copies of those names.
+
+`cancel_condition` and `watchlist_cancel_condition` stay watchlist-cancel text. They do not mint `plan_version_id` and are not compared as plan invalidation. `_invalid_if` no longer treats them as the economic invalidation.
+
+When the enrichment actually contains `setup_id`, `entry_low`, `entry_high`, `stop_loss`, `tp1`, `tp2`, `tp3`, and one agreed invalidation, the authority remints with `mint_plan_version_id` and requires that identity to equal the owned lifecycle `plan_version_id`. A copied plan-version string does not override a remint mismatch. A copied lifecycle id does not override it either. Incomplete evidence does not demand a remint; a present invalidation is compared to the owned plan text instead. Complete price/setup evidence, or a claimed `plan_version_id`, without a provable invalidation omits the row.
+
+A contradiction or an unproven invalidation rejects the **entire** enrichment row, so its rationale, facts, gates, and quality text are omitted with the invalidation. Owned lifecycle and canonical reservation fields remain.
+
+`_invalid_if` reads only raw/candidate sources that already passed this authority, then `stored_plan_invalidation` for the owned lifecycle. Historical watchlist stage screens still use the broader symbol/candidate lookup.
+
+The phase50b ACTIVE detail fixture no longer replaces an already stored lifecycle invalidation when a later `SIGNAL_CONFIRMED` insert omits `invalidation_reason`. That kept the explicit plan sentence aligned with the candidate the test meant to own.
+
+### Adversarial result after repair
+
+Owned LONG, copied outer lifecycle/setup/plan ids, identical prices, foreign nested invalidation, foreign rationale/facts/gates:
+
+- detail remains the owned ACTIVE signal
+- `FOREIGN_INVALIDATION` absent
+- `FOREIGN_RATIONALE` absent
+- `FOREIGN_FACT` absent
+- `FOREIGN_GATE` absent
+- owned baseline quality, why-it-matters, invalid-if, facts, and gates unchanged
+
+### Regression map
+
+| Test | Proof |
+| --- | --- |
+| R141 | Copied ids + same prices + contradictory nested invalidation: entire enrichment rejected |
+| R142 | Copied `plan_version_id` string cannot override an invalidation-derived plan mismatch |
+| R143 | Raw invalidation and nested `trade_idea.invalidation` contradiction: enrichment rejected |
+| R144 | Same prices and the owned invalidation: legitimate raw enrichment accepted |
+| R145 | Exact owned plan plus later rationale/facts: positive ACTIVE enrichment still works |
+| R146 | Foreign invalidation row cannot change invalid-if, why-it-matters, facts, gates, or quality |
+| R147 | Candidate with the same prices and a foreign economic invalidation cannot enrich |
+| R148 | Candidate with the owned invalidation and economics can enrich |
+| R149 | Unproven invalidation omits optional enrichment; ACTIVE detail stays on the owned lifecycle/reservation |
+| R150 | With no raw/candidate enrichment, `invalid_if` uses plan `invalidation_logic` rather than a later terminal reason |
+
+`mint_plan_version_id` with the same setup and prices and a different invalidation produces a different `plan_version_id`. Expected hashes are not hardcoded.
+
+R131–R140 send-boundary regressions remain green. R91–R140, migration parity, audit freeze, and `scripts/run_scan` orchestration remain green. Strategy RR floors, confirmation, quality, and the economic-identity algorithm are unchanged.
+
+### Call-site audit
+
+| Symbol | Operational ACTIVE use |
+| --- | --- |
+| `active_enrichment_belongs_to_owned_chain` | sole ACTIVE enrichment authority; invalidation/plan remint lives here |
+| `_raw_result_belongs_to_owned_chain` / `_candidate_belongs_to_owned_chain` | delegates to that authority |
+| `_owned_symbol_result_for_chain` / `_owned_candidate_for_chain` | ACTIVE list/detail and `signal_detail` |
+| `_invalid_if` | owned raw/candidate economic invalidation, then `stored_plan_invalidation` |
+| `_symbol_result_for_attempt` / `_candidate_metadata` | historical watchlist stage screens only |
+
+No operational ACTIVE source bypasses the invalidation check.
 
 ## Fifth bounded repair (ACTIVE field provenance and pre-send canonical semantics)
 
@@ -585,6 +678,8 @@ python -m pytest tests/test_prospective_runtime_epoch_isolation_repair2.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_repair3.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_repair4.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_repair5.py
+python -m pytest tests/test_prospective_runtime_epoch_isolation_repair6.py
+python -m pytest tests/test_economic_identity.py tests/test_telegram_signal_detail_phase46e.py tests/test_telegram_active_watchlists_phase50b.py
 python -m pytest
 git diff --check
 ```
@@ -597,6 +692,15 @@ Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21, fifth bounded repair):
 - `git diff --check`: **clean** (exit 0)
 - GitHub CI `Python 3.11 tests` on `8dbe5358f2f0a21c2e1c894448c48278b5a2622e`: **success** (3m20s) https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/35624703594/job/106416089476
 
+Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21, sixth bounded repair):
+
+- Before production edit, repair6 on `9360b1054119875a6f376271c4e02312a018e72d`: **4 passed, 7 failed**, exit 1
+- After repair, `tests/test_prospective_runtime_epoch_isolation_repair6.py` plus economic identity, signal detail, and active watchlists: passed
+- Epoch-isolation modules including R91–R150: passed
+- `python -m pytest`: **2699 passed**, 0 failed, 1 warning (`StarletteDeprecationWarning` from FastAPI/Starlette `TestClient`), **429.98s** (0:07:09), **exit 0**
+- `git diff --check`: **clean** (exit 0)
+- GitHub CI: recorded after the sixth-repair push
+
 Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=false` / `LOCAL_MANUAL_MODE=true` / `ORDER_EXECUTION_ENABLED=false`. No Runtime filesystem, live exchange, listener, or scanner watch loop. Synthetic/temp DBs only.
 
 ## Git record
@@ -608,4 +712,7 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 - Fourth bounded repair commit: `56d5f087bd10d939c71a04a1c66ce32a02212fa2`
 - Fourth repair PR HEAD pin: `64db64349760c4b8906b204821c10cf440aaed1b`
 - Fifth bounded repair commit: `1e7dff512f0defc2194951303114593f9f6bdcbf`
-- Final PR #123 HEAD: `8dbe5358f2f0a21c2e1c894448c48278b5a2622e`
+- Fifth-repair PR HEAD pin: `8dbe5358f2f0a21c2e1c894448c48278b5a2622e`
+- Architecture-reviewed PR HEAD before the sixth repair: `9360b1054119875a6f376271c4e02312a018e72d`
+- Sixth bounded repair commit: pinned in the follow-up handoff commit
+- Final PR #123 HEAD: pinned after the sixth-repair push

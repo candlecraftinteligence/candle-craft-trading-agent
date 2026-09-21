@@ -270,11 +270,11 @@ def _insert_lifecycle_record(
     last_transition_at: str = "2026-06-04T12:00:00Z",
     update_state: bool = True,
 ) -> None:
-    if invalidation_reason == NA and stop_loss != NA:
+    def _default_invalidation() -> str:
         if str(direction).strip().lower() == "short":
-            invalidation_reason = f"Invalid if price accepts above {stop_loss}."
-        else:
-            invalidation_reason = f"Invalid if price accepts below {stop_loss}."
+            return f"Invalid if price accepts above {stop_loss}."
+        return f"Invalid if price accepts below {stop_loss}."
+
     connection = open_initialized_database(db_path)
     try:
         existing = connection.execute(
@@ -299,6 +299,10 @@ def _insert_lifecycle_record(
             stored_state = current["current_state"] if current is not None else current_state
             if not update_state and stored_state not in (None, "", NA):
                 current_state = stored_state
+            if invalidation_reason == NA:
+                invalidation_reason = _keep(NA, "invalidation_reason")
+            if invalidation_reason == NA and stop_loss != NA:
+                invalidation_reason = _default_invalidation()
 
             connection.execute(
                 """
@@ -356,7 +360,11 @@ def _insert_lifecycle_record(
                     NA,
                     "mixed",
                     "watchlist",
-                    invalidation_reason,
+                    (
+                        _default_invalidation()
+                        if invalidation_reason == NA and stop_loss != NA
+                        else invalidation_reason
+                    ),
                     entry_low,
                     entry_high,
                     stop_loss,
