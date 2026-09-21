@@ -714,5 +714,5 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 - Fifth bounded repair commit: `1e7dff512f0defc2194951303114593f9f6bdcbf`
 - Fifth-repair PR HEAD pin: `8dbe5358f2f0a21c2e1c894448c48278b5a2622e`
 - Architecture-reviewed PR HEAD before the sixth repair: `9360b1054119875a6f376271c4e02312a018e72d`
-- Sixth bounded repair commit: pinned in the follow-up handoff commit
-- Final PR #123 HEAD: pinned after the sixth-repair push
+- Sixth bounded repair commit: `cd703106af5c7af7c0ca276bfaabf0c5bcb2762f`
+- Final PR #123 HEAD: `cd703106af5c7af7c0ca276bfaabf0c5bcb2762f`
