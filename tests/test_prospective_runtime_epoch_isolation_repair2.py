@@ -1189,6 +1189,12 @@ def _producer_lifecycle_then_deliver(
         confirmation_cycles=2,
     )
     sender = FakeSender()
+    register_operational_scan_run(
+        db_path,
+        run_id=f"{run_prefix}-deliver",
+        registered_at="2026-03-01T14:05:02Z",
+        expected_identity=SYNTHETIC_IDENTITY,
+    )
     summary = run(
         TelegramLifecycleDeliveryService(
             database_path=db_path,

@@ -13,6 +13,7 @@ from app.data.dtos import NA
 from app.runtime_epoch.errors import RuntimeEpochOwnershipError
 from app.runtime_epoch.ownership import (
     decide_public_effect,
+    require_canonical_reservation_for_public_effect,
     require_event_part_association,
     require_event_reservation_association,
     require_part_claim_association,
@@ -179,6 +180,13 @@ class SQLitePublicTelegramOutbox:
                 return False
             if canonical_reservation_attempt_id(row) is None:
                 return False
+            try:
+                require_canonical_reservation_for_public_effect(
+                    self.connection,
+                    event_id=int(event_id),
+                )
+            except RuntimeEpochOwnershipError:
+                return False
             return self._recover_stale_locked(event_id=event_id, now=now or _now_iso())
 
     def claim(
@@ -294,10 +302,19 @@ class SQLitePublicTelegramOutbox:
         timestamp = now or _now_iso()
         with self._transaction():
             try:
-                require_part_claim_association(
+                event = require_part_claim_association(
                     self.connection,
                     part_id=int(part_id),
                     attempt_id=str(attempt_id),
+                )
+                require_event_part_association(
+                    self.connection,
+                    event_id=int(event["id"]),
+                    part_id=int(part_id),
+                )
+                require_canonical_reservation_for_public_effect(
+                    self.connection,
+                    event_id=int(event["id"]),
                 )
             except RuntimeEpochOwnershipError:
                 return False
@@ -502,6 +519,13 @@ class SQLitePublicTelegramOutbox:
             (int(event_id),),
         ).fetchone()
         if event is None:
+            return False
+        try:
+            require_canonical_reservation_for_public_effect(
+                self.connection,
+                event_id=int(event_id),
+            )
+        except RuntimeEpochOwnershipError:
             return False
         canonical = canonical_reservation_attempt_id(event)
         if canonical is None:

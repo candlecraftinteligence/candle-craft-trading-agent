@@ -84,6 +84,7 @@ from tests.runtime_epoch_support import (
     assert_legacy_sent_consumption_frozen,
     bootstrap_operational_test_database,
     grant_synthetic_origin,
+    register_synthetic_scan_run,
     seed_legacy_attempt,
     seed_legacy_lifecycle,
     seed_legacy_public_event,
@@ -440,6 +441,7 @@ def test_t10_fresh_valid_setup_reaches_fake_sender(tmp_path: Path) -> None:
     assert stored is not None
     assert stored.runtime_epoch_id == SYNTHETIC_EPOCH_ID
     assert stored.current_state == SetupLifecycleState.MANAGING
+    register_synthetic_scan_run(db_path, "t10", registered_at=NOW)
     summary = run(_service(db_path, sender).deliver_for_run(_run_result(batch), scan_run_id="t10"))
     assert summary.sent == 1
     assert sender.messages

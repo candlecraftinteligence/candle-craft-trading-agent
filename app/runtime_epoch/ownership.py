@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping
 from typing import Any
 
 from app.data.dtos import NA
@@ -630,6 +631,31 @@ def require_event_reservation_association(
     return event, reservation
 
 
+def require_canonical_reservation_for_public_effect(
+    connection: sqlite3.Connection,
+    *,
+    event_id: int,
+    epoch: RuntimeEpochRecord | None = None,
+) -> tuple[sqlite3.Row, sqlite3.Row]:
+    """Resolve the persisted canonical pointer and require identity plus semantics."""
+
+    event = connection.execute(
+        "SELECT * FROM public_alert_events WHERE id = ?",
+        (int(event_id),),
+    ).fetchone()
+    if event is None:
+        raise RuntimeEpochOwnershipError("public_event_missing")
+    canonical = canonical_reservation_attempt_id(event)
+    if canonical is None:
+        raise RuntimeEpochOwnershipError("public_canonical_reservation_missing")
+    return require_event_reservation_association(
+        connection,
+        event_id=int(event_id),
+        reservation_id=int(canonical),
+        epoch=epoch,
+    )
+
+
 def require_event_part_association(
     connection: sqlite3.Connection,
     *,
@@ -760,6 +786,9 @@ def public_reservation_record_mismatch_reason(
     economic_reason = _reservation_economic_mismatch_reason(record, event, lifecycle)
     if economic_reason is not None:
         return economic_reason
+    scan_run_reason = _reservation_scan_run_mismatch_reason(connection, record, epoch=loaded)
+    if scan_run_reason is not None:
+        return scan_run_reason
     return None
 
 
@@ -845,6 +874,20 @@ def _reservation_economic_mismatch_reason(
     return None
 
 
+def _reservation_scan_run_mismatch_reason(
+    connection: sqlite3.Connection,
+    record: sqlite3.Row | Any,
+    *,
+    epoch: RuntimeEpochRecord | None = None,
+) -> str | None:
+    scan_run_id = _optional_text(_field(record, "scan_run_id"))
+    if scan_run_id is None:
+        return None
+    if not operational_run_belongs_to_active_epoch(connection, scan_run_id, epoch=epoch):
+        return "public_reservation_scan_run_unregistered"
+    return None
+
+
 def _economic_values_conflict(left: Any, right: Any) -> bool:
     left_price = canonical_stored_price(left)
     right_price = canonical_stored_price(right)
@@ -870,6 +913,380 @@ def operational_run_belongs_to_active_epoch(
         (normalized,),
     ).fetchone()
     return row is not None and str(row["runtime_epoch_id"]) == loaded.epoch_id
+
+
+_ENRICHMENT_RANGE_SEPARATORS = ("–", "—", "-", "/")
+_ENRICHMENT_DIRECTION_FIELDS = ("direction", "side", "bias")
+_ENRICHMENT_MODE_FIELDS = ("mode", "strategy_mode", "source_mode")
+_ENRICHMENT_SETUP_FIELDS = ("setup_id",)
+_ENRICHMENT_PLAN_VERSION_FIELDS = ("plan_version_id",)
+_ENRICHMENT_PLAN_ID_FIELDS = (
+    "public_watchlist_plan_id",
+    "canonical_plan_id",
+    "plan_id",
+)
+_ENRICHMENT_LIFECYCLE_FIELDS = ("lifecycle_id",)
+_ENRICHMENT_ENTRY_LOW_FIELDS = ("entry_low", "raw_entry_low", "normalized_entry_zone_low")
+_ENRICHMENT_ENTRY_HIGH_FIELDS = ("entry_high", "raw_entry_high", "normalized_entry_zone_high")
+_ENRICHMENT_ENTRY_ZONE_FIELDS = ("entry", "entry_zone")
+_ENRICHMENT_STOP_FIELDS = ("stop_loss", "stop", "raw_stop_loss")
+_ENRICHMENT_TP_FIELDS = (
+    ("tp1", ("tp1",)),
+    ("tp2", ("tp2",)),
+    ("tp3", ("tp3",)),
+)
+
+
+def active_enrichment_belongs_to_owned_chain(
+    connection: sqlite3.Connection,
+    *,
+    enrichment: Mapping[str, Any] | sqlite3.Row | None,
+    raw: Mapping[str, Any] | None,
+    lifecycle_row: Mapping[str, Any] | sqlite3.Row | None,
+    attempt_row: Mapping[str, Any] | sqlite3.Row | None,
+    epoch: RuntimeEpochRecord | None = None,
+) -> bool:
+    """Exact ACTIVE provenance: every present identity/economic representation must agree.
+
+    ``connection`` and ``epoch`` remain part of the authority signature so callers
+    pass the same owned-chain context used by reservation validation. A present
+    raw/candidate ``run_id`` is never sufficient to grant enrichment, and an
+    unregistered diagnostic run_id is not by itself a reject.
+    """
+
+    _ = (connection, epoch)
+    row = _as_mapping(enrichment)
+    payload = _as_mapping(raw)
+    lifecycle = _as_mapping(lifecycle_row)
+    attempt = _as_mapping(attempt_row)
+    trade_idea = _as_mapping(payload.get("trade_idea"))
+    sources = (row, payload, trade_idea)
+    if _enrichment_symbols_conflict(sources, lifecycle, attempt):
+        return False
+    if _enrichment_directions_conflict(sources, lifecycle, attempt):
+        return False
+    if _enrichment_modes_conflict(sources, lifecycle):
+        return False
+    if _enrichment_identity_values_conflict(sources, lifecycle, _ENRICHMENT_LIFECYCLE_FIELDS, "lifecycle_id"):
+        return False
+    if _enrichment_identity_values_conflict(sources, lifecycle, _ENRICHMENT_SETUP_FIELDS, "setup_id"):
+        return False
+    if _enrichment_identity_values_conflict(sources, lifecycle, _ENRICHMENT_PLAN_VERSION_FIELDS, "plan_version_id"):
+        return False
+    owned_plan = _optional_text(attempt.get("public_watchlist_plan_id"))
+    present_plans = _present_texts(sources, _ENRICHMENT_PLAN_ID_FIELDS)
+    if len(set(present_plans)) > 1:
+        return False
+    if owned_plan is not None and present_plans and any(value != owned_plan for value in present_plans):
+        return False
+    if _enrichment_economics_conflict(sources, lifecycle, attempt):
+        return False
+    return _enrichment_has_exact_owned_association(
+        sources,
+        lifecycle=lifecycle,
+        owned_plan=owned_plan,
+        attempt=attempt,
+    )
+
+
+def _as_mapping(value: Mapping[str, Any] | sqlite3.Row | None) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        return dict(value)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _present_texts(
+    sources: tuple[Mapping[str, Any], ...],
+    field_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    values: list[str] = []
+    for source in sources:
+        for field_name in field_names:
+            text = _optional_text(source.get(field_name))
+            if text is not None:
+                values.append(text)
+    return tuple(values)
+
+
+def _enrichment_symbols_conflict(
+    sources: tuple[Mapping[str, Any], ...],
+    lifecycle: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+) -> bool:
+    present = tuple(
+        symbol
+        for source in sources
+        for field_name in ("symbol",)
+        if (symbol := canonical_operational_symbol(source.get(field_name)))
+    )
+    if len(set(present)) > 1:
+        return True
+    chain = canonical_operational_symbol(lifecycle.get("symbol")) or canonical_operational_symbol(
+        attempt.get("symbol")
+    )
+    return bool(chain and present and any(value != chain for value in present))
+
+
+def _enrichment_directions_conflict(
+    sources: tuple[Mapping[str, Any], ...],
+    lifecycle: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+) -> bool:
+    present = tuple(
+        direction
+        for source in sources
+        for field_name in _ENRICHMENT_DIRECTION_FIELDS
+        if (direction := canonical_operational_direction(source.get(field_name)))
+    )
+    if len(set(present)) > 1:
+        return True
+    chain = canonical_operational_direction(lifecycle.get("direction")) or canonical_operational_direction(
+        attempt.get("direction")
+    )
+    return bool(chain and present and any(value != chain for value in present))
+
+
+def _enrichment_modes_conflict(
+    sources: tuple[Mapping[str, Any], ...],
+    lifecycle: Mapping[str, Any],
+) -> bool:
+    present = tuple(value.lower() for value in _present_texts(sources, _ENRICHMENT_MODE_FIELDS))
+    if len(set(present)) > 1:
+        return True
+    owned = _optional_text(lifecycle.get("mode"))
+    if owned is None:
+        return False
+    owned_key = owned.lower()
+    return bool(present and any(value != owned_key for value in present))
+
+
+def _enrichment_identity_values_conflict(
+    sources: tuple[Mapping[str, Any], ...],
+    lifecycle: Mapping[str, Any],
+    field_names: tuple[str, ...],
+    owned_field: str,
+) -> bool:
+    present = _present_texts(sources, field_names)
+    if len(set(present)) > 1:
+        return True
+    owned = _optional_text(lifecycle.get(owned_field))
+    return bool(owned is not None and present and any(value != owned for value in present))
+
+
+def _canonical_price_tuple(value: Any) -> tuple[str, ...]:
+    text = _optional_text(value)
+    if text is None:
+        return ()
+    for separator in _ENRICHMENT_RANGE_SEPARATORS:
+        if separator in text:
+            left, right = text.split(separator, 1)
+            prices: list[str] = []
+            for part in (left, right):
+                price = canonical_stored_price(part)
+                if price != NA:
+                    prices.append(price)
+            return tuple(prices)
+    price = canonical_stored_price(text)
+    return (price,) if price != NA else ()
+
+
+def _merge_price_tuples(values: tuple[tuple[str, ...], ...]) -> tuple[str, ...] | None:
+    merged: tuple[str, ...] = ()
+    for prices in values:
+        if not prices:
+            continue
+        if not merged:
+            merged = prices
+            continue
+        if _price_tuples_conflict(merged, prices):
+            return None
+        if len(prices) > len(merged):
+            merged = prices
+    return merged
+
+
+def _price_tuples_conflict(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return False
+    if len(left) == 2 and len(right) == 2:
+        return tuple(sorted(left)) != tuple(sorted(right))
+    if len(left) == 1 and len(right) == 1:
+        return left[0] != right[0]
+    if len(left) == 1:
+        return left[0] not in right
+    if len(right) == 1:
+        return right[0] not in left
+    return True
+
+
+def _collect_source_prices(
+    sources: tuple[Mapping[str, Any], ...],
+    field_names: tuple[str, ...],
+) -> tuple[str, ...] | None:
+    collected = tuple(
+        _canonical_price_tuple(source.get(field_name))
+        for source in sources
+        for field_name in field_names
+    )
+    if any(
+        prices and other and _price_tuples_conflict(prices, other)
+        for index, prices in enumerate(collected)
+        for other in collected[index + 1 :]
+    ):
+        return None
+    merged = _merge_price_tuples(collected)
+    if merged is None:
+        return None
+    return merged
+
+
+def _enrichment_economics_conflict(
+    sources: tuple[Mapping[str, Any], ...],
+    lifecycle: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+) -> bool:
+    chain_low = _merge_price_tuples(
+        (_canonical_price_tuple(lifecycle.get("entry_low")), _canonical_price_tuple(attempt.get("entry_low")))
+    )
+    chain_high = _merge_price_tuples(
+        (_canonical_price_tuple(lifecycle.get("entry_high")), _canonical_price_tuple(attempt.get("entry_high")))
+    )
+    if chain_low is None or chain_high is None:
+        return True
+    present_low = _collect_source_prices(sources, _ENRICHMENT_ENTRY_LOW_FIELDS)
+    present_high = _collect_source_prices(sources, _ENRICHMENT_ENTRY_HIGH_FIELDS)
+    present_zone = _collect_source_prices(sources, _ENRICHMENT_ENTRY_ZONE_FIELDS)
+    if present_low is None or present_high is None or present_zone is None:
+        return True
+    if present_zone:
+        if len(present_zone) >= 2:
+            zone_low = (present_zone[0],)
+            zone_high = (present_zone[-1],)
+            if present_low and _price_tuples_conflict(present_low, zone_low):
+                return True
+            if present_high and _price_tuples_conflict(present_high, zone_high):
+                return True
+            if chain_low and _price_tuples_conflict(zone_low, chain_low):
+                return True
+            if chain_high and _price_tuples_conflict(zone_high, chain_high):
+                return True
+        else:
+            if present_low and _price_tuples_conflict(present_low, present_zone):
+                return True
+            chain_entries = tuple(dict.fromkeys((*chain_low, *chain_high)))
+            if chain_entries and present_zone[0] not in chain_entries:
+                return True
+    if present_low and chain_low and _price_tuples_conflict(present_low, chain_low):
+        return True
+    if present_high and chain_high and _price_tuples_conflict(present_high, chain_high):
+        return True
+    present_stop = _collect_source_prices(sources, _ENRICHMENT_STOP_FIELDS)
+    if present_stop is None:
+        return True
+    chain_stop = _merge_price_tuples(
+        (_canonical_price_tuple(lifecycle.get("stop_loss")), _canonical_price_tuple(attempt.get("stop_loss")))
+    )
+    if chain_stop is None:
+        return True
+    if present_stop and chain_stop and _price_tuples_conflict(present_stop, chain_stop):
+        return True
+    for chain_field, source_fields in _ENRICHMENT_TP_FIELDS:
+        present = _collect_source_prices(sources, source_fields)
+        if present is None:
+            return True
+        chain_value = _merge_price_tuples(
+            (
+                _canonical_price_tuple(lifecycle.get(chain_field)),
+                _canonical_price_tuple(attempt.get(chain_field)),
+            )
+        )
+        if chain_value is None:
+            return True
+        if present and chain_value and _price_tuples_conflict(present, chain_value):
+            return True
+    return False
+
+
+def _enrichment_has_exact_owned_association(
+    sources: tuple[Mapping[str, Any], ...],
+    *,
+    lifecycle: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+    owned_plan: str | None,
+) -> bool:
+    owned_lifecycle = _optional_text(lifecycle.get("lifecycle_id"))
+    present_lifecycle = _present_texts(sources, _ENRICHMENT_LIFECYCLE_FIELDS)
+    if owned_lifecycle is not None and owned_lifecycle in present_lifecycle:
+        return True
+    owned_setup = _optional_text(lifecycle.get("setup_id"))
+    present_setup = _present_texts(sources, _ENRICHMENT_SETUP_FIELDS)
+    if owned_setup is not None and owned_setup in present_setup:
+        return True
+    owned_plan_version = _optional_text(lifecycle.get("plan_version_id"))
+    present_plan_version = _present_texts(sources, _ENRICHMENT_PLAN_VERSION_FIELDS)
+    if owned_plan_version is not None and owned_plan_version in present_plan_version:
+        return True
+    if owned_plan is not None and owned_plan in _present_texts(sources, _ENRICHMENT_PLAN_ID_FIELDS):
+        return True
+    return _enrichment_matches_owned_economic_identity(sources, lifecycle, attempt)
+
+
+def _enrichment_matches_owned_economic_identity(
+    sources: tuple[Mapping[str, Any], ...],
+    lifecycle: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+) -> bool:
+    owned_mode = _optional_text(lifecycle.get("mode"))
+    present_modes = tuple(value.lower() for value in _present_texts(sources, _ENRICHMENT_MODE_FIELDS))
+    if owned_mode is None or not present_modes:
+        return False
+    chain_low = _merge_price_tuples(
+        (_canonical_price_tuple(lifecycle.get("entry_low")), _canonical_price_tuple(attempt.get("entry_low")))
+    ) or ()
+    chain_high = _merge_price_tuples(
+        (_canonical_price_tuple(lifecycle.get("entry_high")), _canonical_price_tuple(attempt.get("entry_high")))
+    ) or ()
+    chain_stop = _merge_price_tuples(
+        (_canonical_price_tuple(lifecycle.get("stop_loss")), _canonical_price_tuple(attempt.get("stop_loss")))
+    ) or ()
+    chain_tp1 = _merge_price_tuples(
+        (_canonical_price_tuple(lifecycle.get("tp1")), _canonical_price_tuple(attempt.get("tp1")))
+    ) or ()
+    chain_tp2 = _merge_price_tuples(
+        (_canonical_price_tuple(lifecycle.get("tp2")), _canonical_price_tuple(attempt.get("tp2")))
+    ) or ()
+    chain_tp3 = _merge_price_tuples(
+        (_canonical_price_tuple(lifecycle.get("tp3")), _canonical_price_tuple(attempt.get("tp3")))
+    ) or ()
+    if not (chain_low and chain_high and chain_stop and chain_tp1 and chain_tp2 and chain_tp3):
+        return False
+    present_low = _collect_source_prices(sources, _ENRICHMENT_ENTRY_LOW_FIELDS) or ()
+    present_high = _collect_source_prices(sources, _ENRICHMENT_ENTRY_HIGH_FIELDS) or ()
+    present_zone = _collect_source_prices(sources, _ENRICHMENT_ENTRY_ZONE_FIELDS) or ()
+    present_stop = _collect_source_prices(sources, _ENRICHMENT_STOP_FIELDS) or ()
+    present_tp1 = _collect_source_prices(sources, ("tp1",)) or ()
+    present_tp2 = _collect_source_prices(sources, ("tp2",)) or ()
+    present_tp3 = _collect_source_prices(sources, ("tp3",)) or ()
+    if present_zone and len(present_zone) >= 2:
+        present_low = present_low or (present_zone[0],)
+        present_high = present_high or (present_zone[-1],)
+    if not (present_low and present_high and present_stop and present_tp1 and present_tp2 and present_tp3):
+        return False
+    return not (
+        _price_tuples_conflict(present_low, chain_low)
+        or _price_tuples_conflict(present_high, chain_high)
+        or _price_tuples_conflict(present_stop, chain_stop)
+        or _price_tuples_conflict(present_tp1, chain_tp1)
+        or _price_tuples_conflict(present_tp2, chain_tp2)
+        or _price_tuples_conflict(present_tp3, chain_tp3)
+    )
 
 
 def attempt_has_current_epoch_run_lineage(

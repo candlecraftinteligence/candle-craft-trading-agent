@@ -6,7 +6,20 @@ This document is the architecture handoff. It is not a Runtime runbook and does 
 
 ## Disposition
 
-- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_4`
+- Status: `READY_FOR_ARCHITECTURE_RE_REVIEW_5`
+- `ACTIVE_FIELD_PROVENANCE_STRICT` = **TRUE**
+- `NESTED_CONTRADICTION_REJECTED` = **TRUE**
+- `CANDIDATE_EXACT_ASSOCIATION` = **TRUE**
+- `FOREIGN_RUN_NOT_AUTHORITY` = **TRUE**
+- `PRE_SEND_CANONICAL_SEMANTICS_REVALIDATED` = **TRUE**
+- `MALFORMED_PART_TRANSITION_BLOCKED` = **TRUE**
+- `MALFORMED_STALE_RECOVERY_BLOCKED` = **TRUE**
+- `VALID_SEND_PATH_PRESERVED` = **TRUE**
+- `VALID_STALE_QUARANTINE_PRESERVED` = **TRUE**
+- `MIGRATION_PARITY_PRESERVED` = **TRUE**
+- `LEGACY_AUDIT_FREEZE_PRESERVED` = **TRUE**
+- `PRODUCTION_ORCHESTRATION_PRESERVED` = **TRUE**
+- `STRATEGY_GATES_UNCHANGED` = **TRUE**
 - `ACTIVE_DETAIL_EXACT_PROVENANCE` = **TRUE**
 - `LEGACY_AUDIT_EVIDENCE_FROZEN` = **TRUE**
 - `PROSPECTIVE_AUDIT_COMPACTION_ONLY` = **TRUE**
@@ -21,7 +34,6 @@ This document is the architecture handoff. It is not a Runtime runbook and does 
 - `ADMIN_ROUTE_FAIL_CLOSED` = **TRUE**
 - `ACTIVE_DETAIL_OWNERSHIP_BOUND` = **TRUE**
 - `REAL_DELAYED_POSITIVE_PATH_PROVEN` = **TRUE**
-- `STRATEGY_GATES_UNCHANGED` = **TRUE**
 - PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/123
 - Feature branch: `feature/prospective-runtime-epoch-isolation`
 - Runtime restart authorized: **false**
@@ -42,14 +54,101 @@ Cohort labels remain only `LEGACY_OR_UNATTRIBUTED` and `CURRENT_EPOCH_OPERATIONA
 ## Baseline and reviewed heads
 
 - Baseline main SHA: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
-- Architecture-reviewed PR HEAD before this fourth repair: `fa2c8b99436db2bc48368fc42d4470797a29db58`
+- Architecture-reviewed PR HEAD before this fifth repair: `64db64349760c4b8906b204821c10cf440aaed1b`
+- Verdict on that HEAD: `CHANGES_REQUIRED_ACTIVE_PROVENANCE_AND_SEND_BOUNDARY`
+- Architecture-reviewed PR HEAD before the fourth repair: `fa2c8b99436db2bc48368fc42d4470797a29db58`
 - Verdict on that HEAD: `CHANGES_REQUIRED_PUBLIC_AUTHORITY_AND_V25_MIGRATION`
 - Prior architecture-reviewed PR HEAD (third review): `3cdb78e0489d7dda298ec841f4559e0778a68637`
 - Verdict on that earlier HEAD: `CHANGES_REQUIRED_RUN_TIMING_AND_PUBLIC_AUTHORITY_BYPASSES`
 - Prior architecture-reviewed PR HEAD (second review): `01cd99f146ea607cdc60650bbddc724af19e5155`
 - Verdict on that earlier HEAD: `CHANGES_REQUIRED_CROSS_RECORD_OWNERSHIP_AND_OPERATIONAL_OPEN_BYPASSES`
 
-Previous repairs (kept, not regressed): origin unspecified default, pre-cutoff cache rejection, BTC origin cannot insert ETH lifecycle, missing lifecycle cannot auto-create a public event, legacy watch payload adoption blocked, genuine-v25 fixture, unchanged strategy/economic gates, run registration before acquisition, canonical reservation pointer, audit non-claimable, public side bound to lifecycle.
+Previous repairs (kept, not regressed): origin unspecified default, pre-cutoff cache rejection, BTC origin cannot insert ETH lifecycle, missing lifecycle cannot auto-create a public event, legacy watch payload adoption blocked, genuine-v25 fixture, unchanged strategy/economic gates, run registration before acquisition, canonical reservation pointer, audit non-claimable, public side bound to lifecycle, legacy audit freeze, genuine v25→v26 rebuild parity, production `run_scan.main` orchestration, public LONG/SHORT root direction binding.
+
+## Fifth bounded repair (ACTIVE field provenance and pre-send canonical semantics)
+
+This is not a new architecture phase. It closes two remaining P1 invariants on reviewed HEAD `64db64349760c4b8906b204821c10cf440aaed1b`.
+
+This repair does **not** reopen migration, audit freeze, orchestration, direction binding, or strategy/RR/confirmation gates. R91–R96 remain necessary but are no longer claimed to prove field-level provenance. Claim-time validation is no longer claimed to close the send boundary by itself.
+
+### Root causes on reviewed HEAD `64db643`
+
+**P1-A.** Operational ACTIVE detail treated copied outer `lifecycle_id`, `run_id`, or `symbol+direction` as enough to enrich quality/rationale/invalidation/confirmation/gate text. Reproduced before edit on temp DBs:
+
+- A1: owned LONG ACTIVE detail remained LONG while a later raw result copied the outer lifecycle/direction and nested a SHORT trade idea with foreign plan/economics/rationale. Foreign narrative appeared.
+- A2: a later candidate in the same owned run, same symbol and direction, but different mode/plan/900-range economics, contributed confirmation facts.
+- A3: `replace_attempt_with_reservation` accepted `scan_run_id = UNREGISTERED-FOREIGN-RUN`.
+
+**P1-B.** Shared `public_reservation_record_mismatch_reason` correctly flagged a corrupted canonical reservation, but public-effect mutations still trusted the canonical pointer. Reproduced before edit:
+
+- B1: valid claim → corrupt stored `alert_type` → semantic validator mismatch → `mark_part_in_flight` still moved PENDING → IN_FLIGHT.
+- B2: the same malformed expired reservation was mutated by direct `recover_stale_in_flight`.
+
+### ACTIVE enrichment authority
+
+One function: `active_enrichment_belongs_to_owned_chain` in `app/runtime_epoch/ownership.py`.
+
+Callers: `_raw_result_belongs_to_owned_chain`, `_candidate_belongs_to_owned_chain`, `_owned_symbol_result_for_chain`, `_owned_candidate_for_chain`. Operational ACTIVE list/detail (`active_watchlists` + `signal_detail`) use those owned selectors. Historical watchlist stage screens may still use broader `_symbol_result_for_attempt` / `_candidate_metadata`. `_latest_symbol_result_for_attempt` is unused.
+
+Contract for a present raw/candidate row:
+
+1. Inspect every present representation: row, raw payload, nested `trade_idea`.
+2. If any present symbol, outer/nested direction, mode, `lifecycle_id`, `setup_id`, `plan_version_id`, plan id, entry/stop/TP values contradict each other or the owned lifecycle/reservation: **reject enrichment**.
+3. Matching copied `lifecycle_id` does not override those contradictions.
+4. Grant only when exact association is proven by owned `lifecycle_id`, `setup_id`, `plan_version_id`, canonical plan id, or complete matching economic identity (mode + entry/stop/TP1/TP2/TP3).
+5. `run_id` is one provenance component, never sufficient to grant. An unregistered diagnostic `run_id` is not by itself a reject, so legitimate phase fixtures and same-setup follow-ups are not blocked for missing operational-run stamps.
+6. If exact association cannot be proven: **omit** quality, why-it-matters, invalidation, confirmation facts, confirmed gates, setup labels, and economic narrative from that row. Owned lifecycle/reservation data remain.
+
+### Canonical reservation pre-effect authority
+
+One function: `require_canonical_reservation_for_public_effect`.
+
+It resolves `event.canonical_reservation_attempt_id` and calls `require_event_reservation_association`, which runs the full `public_reservation_record_mismatch_reason` (identity + family + economics + present `scan_run_id` must be a current-epoch `runtime_operational_runs` row).
+
+Used inside the mutation transaction before:
+
+- `mark_part_in_flight` (also `require_part_claim_association` + `require_event_part_association`)
+- `recover_stale_in_flight` and `_recover_stale_locked`
+
+`claim`, `record_part_result`, `mark_terminal_without_send`, `mark_uncertain_after_persistence_failure`, and `mark_public_watchlist_reservation_result` already call `require_event_reservation_association` (canonical pointer + full semantics). `replace_attempt_with_reservation` calls `public_reservation_record_mismatch_reason` and therefore rejects an unregistered `scan_run_id`.
+
+`insert_attempt` omits an unregistered `scan_run_id` / `last_scan_run_id` instead of inventing a value. Later mutation of a present unregistered run reference still fails closed.
+
+Delivery order remains: validate exact canonical authority → `PENDING`/`RETRYABLE` part to `IN_FLIGHT` → sender → persist result. R136 instruments a fake sender after post-claim `alert_type` corruption and asserts `sender.calls == []`.
+
+Malformed recovery does not write UNCERTAIN, retry, or fake recovery history. Valid stale canonical reservations still enter the existing UNCERTAIN quarantine; UNCERTAIN remains non-auto-retryable.
+
+### Adversarial reproductions after repair
+
+Exact architecture-review shapes, exercised through ACTIVE detail loader, replacement repository, outbox mutation, `_deliver_committed_public_alert_intent`, and stale recovery on temp DBs (`pytest.mark.no_auto_epoch`):
+
+| Attack | After repair |
+| --- | --- |
+| A1 nested SHORT / foreign plan/economics with copied outer LONG lifecycle | detail is not None, bias LONG, no foreign operational fields |
+| A2 same-run foreign mode/plan/900-range candidate | no foreign confirmation facts |
+| A3 unregistered `scan_run_id` replacement | `replace_attempt_with_reservation` False; attempt/event snapshots unchanged |
+| B1 post-claim corrupt `alert_type` then `mark_part_in_flight` | False; part remains PENDING; event claim unchanged |
+| B2 malformed expired canonical reservation then `recover_stale_in_flight` | False; attempt/event/parts unchanged |
+| Post-claim corrupt reservation then delivery | fake sender not invoked |
+
+Positive controls: valid `mark_part_in_flight`, valid fake send + SENT, valid stale UNCERTAIN quarantine, UNCERTAIN non-auto-retry. R91–R96, R97–R102, R108–R114, R115–R118, R57 ≥3R, R119 ~2.66R rerun green.
+
+### Call-site audit
+
+| Symbol | Operational use |
+| --- | --- |
+| `active_enrichment_belongs_to_owned_chain` | sole ACTIVE field-enrichment authority |
+| `_owned_symbol_result_for_chain` / `_owned_candidate_for_chain` | ACTIVE list/detail + signal_detail |
+| `_latest_symbol_result_for_attempt` | unused |
+| `_symbol_result_for_attempt` / `_candidate_metadata` | historical watchlist stage screens only |
+| `public_reservation_record_mismatch_reason` | insert (after omit), replace, association, public-effect |
+| `require_canonical_reservation_for_public_effect` | `mark_part_in_flight`, `recover_stale_in_flight`, `_recover_stale_locked` |
+| `require_event_reservation_association` | claim, record_part_result, mark_terminal_without_send, mark_uncertain_after_persistence_failure, mark_public_watchlist_reservation_result |
+| `require_part_claim_association` | `mark_part_in_flight` |
+
+No weaker operational ACTIVE enrichment path remains. No public-effect mutation trusts canonical id without the semantic contract.
+
+Regression: R123–R140.
 
 ## Fourth bounded repair (public authority and v25 migration)
 
@@ -63,16 +162,11 @@ Operational ACTIVE list/detail starts from the already-owned public event:
 
 ACTIVE grouping is by `origin_lifecycle_id`, not by `event_key` or `signal_id`. Follow-up rows (`limit_hit`, `tp1_hit`, …) stay on the same owned chain as `signal_confirmed`.
 
-Operational enrichment for quality, rationale, invalidation, confirmation facts, gate text, and plan/setup fields is allowed only from records demonstrably on that chain:
-
-- canonical SENT reservation attempt for the owned event
-- `attempt.scan_run_id` and the lifecycle creation-origin run
-- later `symbol_results` only when `raw_result.lifecycle_id` matches the owned lifecycle, or the result `run_id` is one of those owned runs
-- `setup_candidates` only when `run_id` is in the owned-run set
+Operational enrichment for quality, rationale, invalidation, confirmation facts, gate text, and plan/setup fields is allowed only from records demonstrably on that chain. The fourth-repair run-id / copied-lifecycle rule is **superseded** by the fifth-repair field-level contract: every present identity and economic representation must agree, and exact association is required. Run_id alone is not authority.
 
 Latest same-symbol result, opposite-direction result, different-setup result, legacy/unattributed result, and foreign candidate/plan are omitted rather than borrowed. Historical/diagnostic watchlist screens retain broader lookup. Missing enrichment is omitted; it is not invented.
 
-Regression: R91–R96.
+Regression: R91–R96; field-level nested/candidate/run attacks: R123–R130.
 
 ### Legacy audit freeze / prospective compaction authority
 
@@ -99,9 +193,9 @@ Regression: R97–R102.
 - economic geometry against event + lifecycle using `canonical_stored_price` / existing `_identity_price` (entry zone, stop, TP1/TP2/TP3, planned RR where persisted)
 - setup_id / plan_version_id when both sides persist them
 
-N/A on either side is not treated as a conflict. Rejected replacement/insert leaves event, canonical pointer, parts, and attempt state unchanged. A malformed persisted canonical row cannot be claimed merely because its id is canonical.
+N/A on either side is not treated as a conflict. Rejected replacement/insert leaves event, canonical pointer, parts, and attempt state unchanged. A malformed persisted canonical row cannot be claimed merely because its id is canonical. The fifth repair additionally revalidates the same semantic contract inside `mark_part_in_flight` and stale recovery after a later successful claim.
 
-Regression: R103–R107.
+Regression: R103–R107; post-claim mutation: R131–R140.
 
 ### Genuine v25 → v26 attempt-table schema parity
 
@@ -192,9 +286,9 @@ Operational ACTIVE list/detail:
 3. require current-epoch owned lifecycle
 4. require the attempt to be the event's canonical reservation (not a random same-key audit/foreign attempt)
 5. require attempt symbol/direction/plan to agree with that chain
-6. source candidate/detail fields only from that chain (owned runs / matching `lifecycle_id`)
+6. source candidate/detail fields only from `active_enrichment_belongs_to_owned_chain` (exact identity/economic association; omit if unproved)
 
-No latest-same-symbol, fuzzy symbol/direction/geometry, or foreign-candidate fallback for ACTIVE operational output. See the fourth-repair provenance contract above.
+No latest-same-symbol, fuzzy symbol/direction/geometry, run-id-only, or foreign-candidate fallback for ACTIVE operational output. See the fifth-repair provenance contract above.
 
 ### Delayed positive path and multi-symbol timing
 
@@ -456,6 +550,24 @@ Original T01–T22 remain in `tests/test_prospective_runtime_epoch_isolation.py`
 | R120 | Legacy SENT global event-key consumption remains intact |
 | R121 | Legacy UNCERTAIN remains frozen/non-auto-retryable |
 | R122 | Full strategy/economic regression remains unchanged |
+| R123 | Copied outer lifecycle + nested SHORT/foreign plan/economics raw result cannot enrich ACTIVE fields |
+| R124 | Owned plan A + raw `plan_version` B omits raw enrichment |
+| R125 | Owned economics + contradictory nested raw economics omits raw enrichment |
+| R126 | Same owned run + same symbol/direction but different mode/plan/economics candidate cannot contribute confirmation facts |
+| R127 | Unregistered foreign `attempt.scan_run_id` replacement is rejected |
+| R128 | Registered but unrelated run cannot authorize foreign enrichment |
+| R129 | Legitimate later raw result for the same owned setup/plan may still enrich when identities/economics agree |
+| R130 | Legitimate exact candidate enrichment still works; detail is not None |
+| R131 | After valid claim, corrupt `alert_type`: `mark_part_in_flight` rejects; part unchanged |
+| R132 | After valid claim, corrupt entry/stop: `mark_part_in_flight` rejects |
+| R133 | After valid claim, corrupt direction/plan: `mark_part_in_flight` rejects |
+| R134 | After valid claim, corrupt `scan_run_id` to unregistered foreign run: `mark_part_in_flight` rejects |
+| R135 | Malformed expired canonical reservation: direct `recover_stale_in_flight` rejects and changes nothing |
+| R136 | Malformed reservation cannot reach fake sender (`sender.calls == []`) |
+| R137 | Valid canonical reservation: `mark_part_in_flight` succeeds |
+| R138 | Valid canonical reservation: fake sender invoked once and `record_part_result` persists SENT |
+| R139 | Valid stale canonical reservation still enters UNCERTAIN quarantine |
+| R140 | UNCERTAIN remains non-auto-retryable |
 
 ## Remaining gaps (intentionally not this phase)
 
@@ -472,22 +584,27 @@ python -m pytest tests/test_prospective_runtime_epoch_isolation_boundaries.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_repair2.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_repair3.py
 python -m pytest tests/test_prospective_runtime_epoch_isolation_repair4.py
+python -m pytest tests/test_prospective_runtime_epoch_isolation_repair5.py
 python -m pytest
 git diff --check
 ```
 
-Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21, fourth bounded repair):
+Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21, fifth bounded repair):
 
-- `python -m pytest`: **2670 passed**, 0 failed, 1 warning (`StarletteDeprecationWarning` from FastAPI/Starlette `TestClient`), **488.34s** (0:08:08), **exit 0**
+- Focused isolation modules (including repair5 R123–R140): passed
+- Focused telegram outbox / active watchlists / signal detail / lifecycle delivery / admin routing: passed
+- `python -m pytest`: **2688 passed**, 0 failed, 1 warning (`StarletteDeprecationWarning` from FastAPI/Starlette `TestClient`), **1090.96s** (0:18:10), **exit 0**
 - `git diff --check`: **clean** (exit 0)
 - GitHub CI: recorded after push of this repair, if the run has completed.
 
-Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=false` / `LOCAL_MANUAL_MODE=true` / `ORDER_EXECUTION_ENABLED=false`. No Runtime filesystem, live exchange, listener, or scanner watch loop.
+Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=false` / `LOCAL_MANUAL_MODE=true` / `ORDER_EXECUTION_ENABLED=false`. No Runtime filesystem, live exchange, listener, or scanner watch loop. Synthetic/temp DBs only.
 
 ## Git record
 
 - Baseline main: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
-- Architecture-reviewed PR HEAD before this fourth repair: `fa2c8b99436db2bc48368fc42d4470797a29db58`
-- Verdict on that HEAD: `CHANGES_REQUIRED_PUBLIC_AUTHORITY_AND_V25_MIGRATION`
+- Architecture-reviewed PR HEAD before this fifth repair: `64db64349760c4b8906b204821c10cf440aaed1b`
+- Verdict on that HEAD: `CHANGES_REQUIRED_ACTIVE_PROVENANCE_AND_SEND_BOUNDARY`
+- Architecture-reviewed PR HEAD before the fourth repair: `fa2c8b99436db2bc48368fc42d4470797a29db58`
 - Fourth bounded repair commit: `56d5f087bd10d939c71a04a1c66ce32a02212fa2`
-- Final PR #123 HEAD: `bbdae19ece43b64e7943d6abd72d8597b0bc8cd4`
+- Fourth repair PR HEAD pin: `64db64349760c4b8906b204821c10cf440aaed1b`
+- Fifth bounded repair commit: recorded in the follow-up pin commit after this change lands.

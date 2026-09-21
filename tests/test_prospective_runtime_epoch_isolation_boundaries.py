@@ -1136,6 +1136,7 @@ def test_r27_owned_fresh_path_can_claim_outbox_and_fake_send(tmp_path: Path) -> 
         if last_transition is not None and last_transition.record is not None:
             last_transition = last_transition.model_copy(update={"record": _owned(last_transition.record)})
         _seed_owned_root_event(repository.connection, lifecycle_id="fresh-progress")
+    _register_run(db_path, "r27")
     batch = _symbol(
         SetupLifecycleState.MANAGING,
         previous=SetupLifecycleState.EXECUTING,

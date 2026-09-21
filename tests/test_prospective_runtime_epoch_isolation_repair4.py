@@ -755,6 +755,7 @@ def test_r106_valid_semantically_equivalent_replacement_succeeds(tmp_path: Path)
     event_id, reservation_id, _part = _owned_event_reservation(
         db_path, lifecycle_id="life-r106", event_key="r106:owned", signal_id="r106-owned", run_id="r106"
     )
+    _register_current_run(db_path, "r106-next")
     replacement = _replacement_base(
         "r106-owned",
         "r106:owned",

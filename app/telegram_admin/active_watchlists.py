@@ -17,6 +17,7 @@ from app.lifecycle.eligibility import active_signal_eligible, public_watchlist_e
 from app.runtime_epoch.authority import load_active_runtime_epoch
 from app.runtime_epoch.errors import RuntimeEpochError
 from app.runtime_epoch.ownership import (
+    active_enrichment_belongs_to_owned_chain,
     canonical_operational_direction,
     canonical_operational_symbol,
     decide_public_effect,
@@ -832,28 +833,20 @@ def _canonical_attempt_row_for_event(
 
 
 def _raw_result_belongs_to_owned_chain(
+    connection: sqlite3.Connection,
     raw_result: Mapping[str, Any],
     *,
     lifecycle_row: Mapping[str, Any],
     attempt_row: Mapping[str, Any],
+    enrichment: Mapping[str, Any] | None = None,
 ) -> bool:
-    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
-    setup_id = _clean(lifecycle_row.get("setup_id"))
-    raw_lifecycle = _clean(raw_result.get("lifecycle_id"))
-    if raw_lifecycle != NA and lifecycle_id != NA and raw_lifecycle != lifecycle_id:
-        return False
-    raw_setup = _clean(raw_result.get("setup_id"))
-    if raw_setup != NA and setup_id != NA and raw_setup != setup_id:
-        return False
-    raw_direction = canonical_operational_direction(
-        raw_result.get("direction") or _mapping_or_empty(raw_result.get("trade_idea")).get("direction")
+    return active_enrichment_belongs_to_owned_chain(
+        connection,
+        enrichment=enrichment or {},
+        raw=raw_result,
+        lifecycle_row=lifecycle_row,
+        attempt_row=attempt_row,
     )
-    chain_direction = canonical_operational_direction(
-        lifecycle_row.get("direction") or attempt_row.get("direction")
-    )
-    if raw_direction and chain_direction and raw_direction != chain_direction:
-        return False
-    return True
 
 
 def _owned_chain_run_ids(
@@ -911,28 +904,18 @@ def _owned_symbol_result_for_chain(
         """,
         (symbol,),
     ).fetchall()
-    owned_runs = set(_owned_chain_run_ids(connection, attempt_row, lifecycle_row))
-    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
-    lifecycle_match: Mapping[str, Any] = {}
-    run_match: Mapping[str, Any] = {}
     for row in rows:
         mapping = dict(row)
         raw_result = _json_mapping(mapping.get("raw_result_json"))
-        if not _raw_result_belongs_to_owned_chain(
+        if _raw_result_belongs_to_owned_chain(
+            connection,
             raw_result,
             lifecycle_row=lifecycle_row,
             attempt_row=attempt_row,
+            enrichment=mapping,
         ):
-            continue
-        raw_lifecycle = _clean(raw_result.get("lifecycle_id"))
-        run_id = _clean(mapping.get("run_id"))
-        if not lifecycle_match and lifecycle_id != NA and raw_lifecycle == lifecycle_id:
-            lifecycle_match = mapping
-        if not run_match and run_id in owned_runs:
-            run_match = mapping
-        if lifecycle_match and run_match:
-            break
-    return lifecycle_match or run_match
+            return mapping
+    return {}
 
 
 def _owned_candidate_for_chain(
@@ -943,70 +926,46 @@ def _owned_candidate_for_chain(
     if not _table_exists(connection, "setup_candidates"):
         return {}
     columns = _table_columns(connection, "setup_candidates")
-    owned_runs = _owned_chain_run_ids(connection, attempt_row, lifecycle_row)
-    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
-    if "lifecycle_id" in columns and lifecycle_id != NA:
-        candidate = connection.execute(
-            """
-            SELECT * FROM setup_candidates
-            WHERE lifecycle_id = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (lifecycle_id,),
-        ).fetchone()
-        if candidate is not None:
-            mapping = dict(candidate)
-            if _candidate_belongs_to_owned_chain(mapping, lifecycle_row=lifecycle_row, attempt_row=attempt_row):
-                return mapping
-            return {}
-    if not owned_runs or not {"symbol", "direction", "run_id"} <= columns:
+    if "symbol" not in columns:
         return {}
-    symbol = canonical_operational_symbol(lifecycle_row.get("symbol"))
-    direction = canonical_operational_direction(lifecycle_row.get("direction"))
-    if not symbol or not direction:
+    symbol = canonical_operational_symbol(lifecycle_row.get("symbol")) or canonical_operational_symbol(
+        attempt_row.get("symbol")
+    )
+    if not symbol:
         return {}
-    placeholders = ",".join("?" for _ in owned_runs)
-    candidate = connection.execute(
-        f"""
+    candidates = connection.execute(
+        """
         SELECT * FROM setup_candidates
-        WHERE run_id IN ({placeholders})
-          AND UPPER(symbol) = UPPER(?)
-          AND LOWER(direction) = LOWER(?)
+        WHERE UPPER(symbol) = UPPER(?)
         ORDER BY id DESC
-        LIMIT 1
+        LIMIT 50
         """,
-        (*owned_runs, symbol, direction),
-    ).fetchone()
-    if candidate is None:
-        return {}
-    mapping = dict(candidate)
-    if not _candidate_belongs_to_owned_chain(mapping, lifecycle_row=lifecycle_row, attempt_row=attempt_row):
-        return {}
-    return mapping
+        (symbol,),
+    ).fetchall()
+    for candidate in candidates:
+        mapping = dict(candidate)
+        if _candidate_belongs_to_owned_chain(
+            connection,
+            mapping,
+            lifecycle_row=lifecycle_row,
+            attempt_row=attempt_row,
+        ):
+            return mapping
+    return {}
 
 
 def _candidate_belongs_to_owned_chain(
+    connection: sqlite3.Connection,
     candidate: Mapping[str, Any],
     *,
     lifecycle_row: Mapping[str, Any],
     attempt_row: Mapping[str, Any],
 ) -> bool:
-    lifecycle_id = _clean(lifecycle_row.get("lifecycle_id"))
-    candidate_lifecycle = _clean(candidate.get("lifecycle_id"))
-    if candidate_lifecycle != NA and lifecycle_id != NA and candidate_lifecycle != lifecycle_id:
-        return False
-    symbol = canonical_operational_symbol(candidate.get("symbol"))
-    chain_symbol = canonical_operational_symbol(lifecycle_row.get("symbol"))
-    direction = canonical_operational_direction(candidate.get("direction"))
-    chain_direction = canonical_operational_direction(lifecycle_row.get("direction"))
-    if symbol and chain_symbol and symbol != chain_symbol:
-        return False
-    if direction and chain_direction and direction != chain_direction:
-        return False
     raw = _json_mapping(candidate.get("raw_candidate_json"))
-    return _raw_result_belongs_to_owned_chain(
-        raw,
+    return active_enrichment_belongs_to_owned_chain(
+        connection,
+        enrichment=candidate,
+        raw=raw,
         lifecycle_row=lifecycle_row,
         attempt_row=attempt_row,
     )

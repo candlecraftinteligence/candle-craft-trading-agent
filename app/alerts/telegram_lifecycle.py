@@ -95,6 +95,7 @@ from app.runtime_epoch.ownership import (
     attempt_is_audit_only,
     bind_canonical_reservation_attempt,
     canonical_reservation_attempt_id,
+    operational_run_belongs_to_active_epoch,
     public_reservation_record_mismatch_reason,
     OPERATIONAL_ATTEMPT_STATUSES,
     OPERATIONAL_DELIVERY_STATES,
@@ -1975,6 +1976,7 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
                     return False
                 parent_event = None
             else:
+                record = _attempt_record_without_unregistered_runs(self._connection, record)
                 parent_event = self._connection.execute(
                     "SELECT * FROM public_alert_events WHERE event_key = ?",
                     (event_key,),
@@ -2285,6 +2287,32 @@ class SQLiteTelegramAlertAttemptRepository(AbstractContextManager["SQLiteTelegra
         if self.connection is None:
             raise StorageError("Telegram alert attempt repository is not open.")
         return self.connection
+
+def _attempt_record_without_unregistered_runs(
+    connection: sqlite3.Connection,
+    record: TelegramAlertAttemptRecord,
+) -> TelegramAlertAttemptRecord:
+    """Omit dummy/unregistered run IDs on first insert; do not invent a replacement.
+
+    Replacement and later public-effect mutations still fail closed when a present
+    scan_run_id is unregistered. Insert only stores a run reference when it is a
+    real current-epoch operational run.
+    """
+
+    changes: dict[str, str | None] = {}
+    scan_run_id = _text(record.scan_run_id)
+    if scan_run_id != NA and not operational_run_belongs_to_active_epoch(connection, scan_run_id):
+        changes["scan_run_id"] = None
+    last_scan_run_id = _text(record.last_scan_run_id)
+    if last_scan_run_id != NA and not operational_run_belongs_to_active_epoch(
+        connection,
+        last_scan_run_id,
+    ):
+        changes["last_scan_run_id"] = None
+    if not changes:
+        return record
+    return replace(record, **changes)
+
 
 def _public_alert_event_from_row(row: sqlite3.Row | None) -> PublicAlertEventRecord | None:
     if row is None:
