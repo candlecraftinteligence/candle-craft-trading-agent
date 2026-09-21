@@ -27,6 +27,8 @@ from app.lifecycle.models import SetupLifecycleState
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.pipeline.scanner_runner import ScannerPipelineStatus
 
+from tests.runtime_epoch_support import register_synthetic_scan_run
+
 from test_telegram_lifecycle_delivery_phase42 import (
     FakeSender,
     _diagnostics,
@@ -344,6 +346,8 @@ def test_triggered_is_internal_only_and_audited_once_per_observation(tmp_path) -
         previous=SetupLifecycleState.STALKING,
         signal_id="triggered-once",
     )
+    register_synthetic_scan_run(db_path, "triggered-1")
+    register_synthetic_scan_run(db_path, "triggered-2")
 
     first = run(service.deliver_for_run(_run_result(symbol), scan_run_id="triggered-1"))
     repeated = run(service.deliver_for_run(_run_result(symbol), scan_run_id="triggered-2"))
@@ -1356,6 +1360,8 @@ def test_restart_after_full_batch_does_not_resend_successful_events(tmp_path) ->
     symbol = _generated_entry_batch(db_path)
     first_sender = FakeSender()
     second_sender = FakeSender()
+    register_synthetic_scan_run(db_path, "before")
+    register_synthetic_scan_run(db_path, "after")
 
     first = run(_service(db_path, first_sender).deliver_for_run(_run_result(symbol), scan_run_id="before"))
     repeated = run(_service(db_path, second_sender).deliver_for_run(_run_result(symbol), scan_run_id="after"))
@@ -1406,6 +1412,7 @@ def test_duplicate_public_transition_in_same_batch_sends_once(tmp_path) -> None:
         }
     )
     sender = FakeSender()
+    register_synthetic_scan_run(db_path, "duplicate")
 
     summary = run(_service(db_path, sender).deliver_for_run(_run_result(duplicate_batch), scan_run_id="duplicate"))
 

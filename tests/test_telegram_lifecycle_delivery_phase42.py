@@ -15,6 +15,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.runtime_epoch_support import register_synthetic_scan_run, seed_legacy_public_event
+from app.storage.database import open_initialized_database
 from app.agents.trade_idea import create_trade_idea
 from app.analytics.setup_quality import SetupQualityGrade, SetupQualityResult, SetupQualityState
 from app.alerts.telegram_lifecycle import (
@@ -106,6 +108,55 @@ class LegacyResearchWatchDeliveryService(TelegramLifecycleDeliveryService):
     @property
     def setup_only_public_delivery(self) -> bool:
         return False
+
+
+def _legacy_research_watch_service(db_path, settings, sender) -> LegacyResearchWatchDeliveryService:
+    from tests.runtime_epoch_support import SYNTHETIC_IDENTITY, bootstrap_operational_test_database
+
+    path = Path(db_path)
+    bootstrap_operational_test_database(path)
+    return LegacyResearchWatchDeliveryService(
+        database_path=path,
+        settings=settings,
+        sender=sender,
+        expected_identity=SYNTHETIC_IDENTITY,
+    )
+
+
+def _seed_owned_research_lifecycle(db_path: Path, *, symbol: str, direction: str = "long") -> SetupLifecycleRecord:
+    from tests.runtime_epoch_support import (
+        SYNTHETIC_EPOCH_ID,
+        SYNTHETIC_IDENTITY,
+        bootstrap_operational_test_database,
+        grant_synthetic_origin,
+    )
+
+    bootstrap_operational_test_database(db_path)
+    lifecycle_id = f"research-life-{symbol.lower()}"
+    with SQLiteSetupLifecycleRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+        origin = grant_synthetic_origin(
+            repository.connection,
+            symbol=symbol,
+            run_id=f"research-run-{symbol}",
+            now="2026-06-07T00:00:00+00:00",
+        )
+        record = _record(SetupLifecycleState.WATCHLISTED, signal_id=lifecycle_id).model_copy(
+            update={
+                "symbol": symbol,
+                "direction": direction,
+                "runtime_epoch_id": SYNTHETIC_EPOCH_ID,
+                "creation_origin_id": origin.origin_id,
+                "setup_identity": f"{symbol}|swing|{direction}|research",
+            }
+        )
+        repository.upsert_record(record)
+        return record
+
+
+def _owned_research_symbol(db_path: Path, **kwargs) -> ScannerSymbolResult:
+    symbol = str(kwargs.get("symbol") or "FILUSDT")
+    record = _seed_owned_research_lifecycle(db_path, symbol=symbol)
+    return _research_symbol(**kwargs).model_copy(update={"lifecycle_state": record})
 
 
 
@@ -820,31 +871,54 @@ def _seed_prior_active_alert(
         else f"{stored_entry_low}-{stored_entry_high}"
     )
     stored_sent_at = sent_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
-        repository.insert_attempt(
-            TelegramAlertAttemptRecord(
-                signal_id=signal_id,
-                symbol=symbol,
-                direction=direction,
-                previous_state=NA,
-                new_state="WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
-                alert_type=alert_type.value,
-                lifecycle_state="WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
-                sent_at=stored_sent_at,
-                telegram_status=status,
-                message_hash=f"{signal_id}-active",
-                attempted_alert_type=alert_type.value,
-                setup_quality_score="B+",
-                price_level=stored_price_level,
-                entry_low=stored_entry_low,
-                entry_high=stored_entry_high,
-                stop_loss=stored_stop_loss,
-                tp1=stored_tp1,
-                tp2=stored_tp2,
-                tp3=stored_tp3,
-                first_seen_at=stored_sent_at,
-            )
+    event_key = f"{signal_id}|{alert_type.value}"
+    with open_initialized_database(db_path) as connection:
+        seed_legacy_public_event(
+            connection,
+            event_key=event_key,
+            symbol=symbol,
+            status="SENT" if status == "sent" else status,
+            delivery_state="SENT" if status == "sent" else "FAILED_FINAL",
+            created_at=stored_sent_at,
         )
+        connection.execute(
+            """
+            INSERT INTO telegram_alert_attempts (
+                signal_id, symbol, direction, new_state, alert_type, lifecycle_state,
+                sent_at, attempted_at, telegram_status, message_hash, attempted_alert_type,
+                setup_quality_score, price_level, entry_low, entry_high, stop_loss,
+                tp1, tp2, tp3, first_seen_at, public_watchlist_event_key,
+                public_watchlist_plan_id, public_alert_event_type, delivery_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                signal_id,
+                symbol,
+                direction,
+                "WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
+                alert_type.value,
+                "WATCHLISTED" if alert_type == TelegramAlertType.WATCHLIST else "CONFIRMED",
+                stored_sent_at if status == "sent" else None,
+                stored_sent_at,
+                status,
+                f"{signal_id}-active",
+                alert_type.value,
+                "B+",
+                stored_price_level,
+                str(stored_entry_low),
+                str(stored_entry_high),
+                str(stored_stop_loss),
+                str(stored_tp1),
+                str(stored_tp2),
+                str(stored_tp3),
+                stored_sent_at,
+                event_key,
+                event_key,
+                alert_type.value,
+                "SENT" if status == "sent" else NA,
+            ),
+        )
+        connection.commit()
 
 
 def _sent_at_ago(*, hours: int = 0, minutes: int = 0) -> str:
@@ -962,7 +1036,10 @@ def _insert_research_attempt_record(
     sent_at: str | None = "2026-06-07T00:00:00+00:00",
     signal_id: str = "research-link",
 ) -> None:
-    with SQLiteTelegramAlertAttemptRepository(db_path) as repository:
+    from tests.runtime_epoch_support import SYNTHETIC_IDENTITY, bootstrap_operational_test_database
+
+    bootstrap_operational_test_database(db_path)
+    with SQLiteTelegramAlertAttemptRepository(db_path, expected_identity=SYNTHETIC_IDENTITY) as repository:
         repository.insert_attempt(
             TelegramAlertAttemptRecord(
                 signal_id=signal_id,
@@ -1080,17 +1157,14 @@ def test_research_watch_respects_quality_and_readiness_thresholds(tmp_path: Path
         assert _research_attempt_rows(db_path) == []
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "research-cooldown.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
     times = iter(
         (
             "2026-06-07T00:00:00+00:00",
@@ -1100,7 +1174,9 @@ def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldo
         )
     )
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
-    result = _run_result(_research_symbol(symbol="LINKUSDT"))
+    result = _run_result(_owned_research_symbol(db_path, symbol="LINKUSDT"))
+    for run_id in ("research-1", "research-2", "research-3", "research-4"):
+        register_synthetic_scan_run(db_path, run_id, registered_at="2026-06-07T00:00:00Z")
 
     first = run(service.deliver_for_run(result, scan_run_id="research-1"))
     second = run(service.deliver_for_run(result, scan_run_id="research-2"))
@@ -1118,17 +1194,14 @@ def test_research_watch_duplicate_skips_inside_cooldown_and_resends_after_cooldo
     assert rows[1][4] == "research_watch_cooldown_active"
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_uses_config_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "research-cooldown-override.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(cooldown_minutes=10),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(cooldown_minutes=10), sender)
     times = iter(
         (
             "2026-06-07T00:00:00+00:00",
@@ -1137,7 +1210,7 @@ def test_research_watch_cooldown_uses_config_override(
         )
     )
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
-    result = _run_result(_research_symbol(symbol="LINKUSDT"))
+    result = _run_result(_owned_research_symbol(db_path, symbol="LINKUSDT"))
 
     first = run(service.deliver_for_run(result, scan_run_id="research-override-1"))
     second = run(service.deliver_for_run(result, scan_run_id="research-override-2"))
@@ -1149,24 +1222,21 @@ def test_research_watch_cooldown_uses_config_override(
     assert len(sender.messages) == 2
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_normalizes_perp_suffix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "research-cooldown-symbol-normalized.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
     times = iter(("2026-06-07T00:00:00+00:00", "2026-06-07T00:05:00+00:00"))
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
 
-    first = run(service.deliver_for_run(_run_result(_research_symbol(symbol="LINKUSDT")), scan_run_id="research-link"))
+    first = run(service.deliver_for_run(_run_result(_owned_research_symbol(db_path, symbol="LINKUSDT")), scan_run_id="research-link"))
     second = run(
         service.deliver_for_run(
-            _run_result(_research_symbol(symbol="LINKUSDT.P")),
+            _run_result(_owned_research_symbol(db_path, symbol="LINKUSDT.P")),
             scan_run_id="research-link-perp",
         )
     )
@@ -1181,6 +1251,7 @@ def test_research_watch_cooldown_normalizes_perp_suffix(
 
 
 @pytest.mark.parametrize("status", ("blocked", "skipped", "failed"))
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_ignores_unsent_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1195,19 +1266,16 @@ def test_research_watch_cooldown_ignores_unsent_rows(
         signal_id=f"research-link-{status}",
     )
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: "2026-06-07T00:05:00+00:00")
 
-    summary = run(service.deliver_for_run(_run_result(_research_symbol(symbol="LINKUSDT")), scan_run_id="research-after-unsent"))
+    summary = run(service.deliver_for_run(_run_result(_owned_research_symbol(db_path, symbol="LINKUSDT")), scan_run_id="research-after-unsent"))
 
     assert summary.sent == 1
     assert len(sender.messages) == 1
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_only_sent_rows_suppress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1215,14 +1283,10 @@ def test_research_watch_cooldown_only_sent_rows_suppress(
     db_path = tmp_path / "research-cooldown-sent-only.db"
     _insert_research_attempt_record(db_path, symbol="LINKUSDT", status="sent", signal_id="research-link-sent")
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: "2026-06-07T00:05:00+00:00")
 
-    summary = run(service.deliver_for_run(_run_result(_research_symbol(symbol="LINKUSDT")), scan_run_id="research-after-sent"))
+    summary = run(service.deliver_for_run(_run_result(_owned_research_symbol(db_path, symbol="LINKUSDT")), scan_run_id="research-after-sent"))
 
     assert summary.skipped == 1
     assert sender.messages == []
@@ -1232,6 +1296,7 @@ def test_research_watch_cooldown_only_sent_rows_suppress(
     assert rows[-1][4] == "research_watch_cooldown_active"
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_cooldown_skips_do_not_consume_send_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1239,18 +1304,14 @@ def test_research_watch_cooldown_skips_do_not_consume_send_cap(
     db_path = tmp_path / "research-cooldown-cap.db"
     _insert_research_attempt_record(db_path, symbol="LINKUSDT", status="sent", signal_id="research-link-sent")
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(max_per_scan=1),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(max_per_scan=1), sender)
     times = iter(("2026-06-07T00:05:00+00:00", "2026-06-07T00:05:01+00:00"))
     monkeypatch.setattr("app.alerts.telegram_lifecycle.now_utc_iso", lambda: next(times))
     result = ScannerRunResult(
         config=_config(),
         results=(
-            _research_symbol(symbol="LINKUSDT", quality_score=90, signal_id="research-link"),
-            _research_symbol(symbol="ETHUSDT", quality_score=80, signal_id="research-eth"),
+            _owned_research_symbol(db_path, symbol="LINKUSDT", quality_score=90, signal_id="research-link"),
+            _owned_research_symbol(db_path, symbol="ETHUSDT", quality_score=80, signal_id="research-eth"),
         ),
         scanned_symbols=2,
         failed_symbols=0,
@@ -1268,25 +1329,18 @@ def test_research_watch_cooldown_skips_do_not_consume_send_cap(
     assert "LINKUSDT" not in sender.messages[0]
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path: Path) -> None:
     sent_db = tmp_path / "research-sent-at.db"
     sent_sender = FakeSender(status="sent")
-    sent_service = LegacyResearchWatchDeliveryService(
-        database_path=sent_db,
-        settings=_research_settings(),
-        sender=sent_sender,
-    )
-    run(sent_service.deliver_for_run(_run_result(_research_symbol()), scan_run_id="sent"))
+    sent_service = _legacy_research_watch_service(sent_db, _research_settings(), sent_sender)
+    run(sent_service.deliver_for_run(_run_result(_owned_research_symbol(sent_db)), scan_run_id="sent"))
     sent_row = _research_attempt_rows(sent_db)[0]
 
     failed_db = tmp_path / "research-failed-at.db"
     failed_sender = FakeSender(status="failed")
-    failed_service = LegacyResearchWatchDeliveryService(
-        database_path=failed_db,
-        settings=_research_settings(),
-        sender=failed_sender,
-    )
-    run(failed_service.deliver_for_run(_run_result(_research_symbol()), scan_run_id="failed"))
+    failed_service = _legacy_research_watch_service(failed_db, _research_settings(), failed_sender)
+    run(failed_service.deliver_for_run(_run_result(_owned_research_symbol(failed_db)), scan_run_id="failed"))
     failed_row = _research_attempt_rows(failed_db)[0]
 
     assert sent_row[1] == "sent"
@@ -1295,20 +1349,17 @@ def test_research_watch_sent_at_is_populated_only_for_delivery_success(tmp_path:
     assert failed_row[2] is None
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_respects_per_scan_cap_and_quality_sort(tmp_path: Path) -> None:
     db_path = tmp_path / "research-cap.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(max_per_scan=2),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(max_per_scan=2), sender)
     result = ScannerRunResult(
         config=_config(),
         results=(
-            _research_symbol(symbol="LOWUSDT", quality_score=61, signal_id="research-low"),
-            _research_symbol(symbol="HIGHUSDT", quality_score=80, signal_id="research-high"),
-            _research_symbol(symbol="MIDUSDT", quality_score=70, signal_id="research-mid"),
+            _owned_research_symbol(db_path, symbol="LOWUSDT", quality_score=61, signal_id="research-low"),
+            _owned_research_symbol(db_path, symbol="HIGHUSDT", quality_score=80, signal_id="research-high"),
+            _owned_research_symbol(db_path, symbol="MIDUSDT", quality_score=70, signal_id="research-mid"),
         ),
         scanned_symbols=3,
         failed_symbols=0,
@@ -1325,18 +1376,15 @@ def test_research_watch_respects_per_scan_cap_and_quality_sort(tmp_path: Path) -
     assert all("LOWUSDT" not in message for message in sender.messages)
 
 
+@pytest.mark.no_auto_epoch
 def test_research_watch_valid_trade_map_renders_but_remains_research_watch(tmp_path: Path) -> None:
     db_path = tmp_path / "research-valid-map.db"
     sender = FakeSender()
-    service = LegacyResearchWatchDeliveryService(
-        database_path=db_path,
-        settings=_research_settings(),
-        sender=sender,
-    )
+    service = _legacy_research_watch_service(db_path, _research_settings(), sender)
 
     summary = run(
         service.deliver_for_run(
-            _run_result(_research_symbol(missing_trade_map=False)),
+            _run_result(_owned_research_symbol(db_path, missing_trade_map=False)),
             scan_run_id="research-map",
         )
     )
@@ -2773,6 +2821,23 @@ def test_concurrent_public_watchlist_reservations_allow_one_sender(tmp_path: Pat
     symbol_result = _syn_watchlist_snapshot(signal_id="concurrent-watchlist")
     message = telegram_signal_message_from_symbol(symbol_result)
     plan = _public_watchlist_canonical_plan(symbol_result, message)
+    _store_lifecycle_record(
+        db_path,
+        SetupLifecycleRecord(
+            lifecycle_id="concurrent-watchlist",
+            symbol=symbol_result.symbol,
+            mode="swing",
+            direction=str(message.direction).lower(),
+            current_state=SetupLifecycleState.WATCHLISTED,
+            first_seen_at="2026-06-25T18:50:00+00:00",
+            last_seen_at="2026-06-25T18:50:00+00:00",
+            last_transition_at="2026-06-25T18:50:00+00:00",
+            is_current=True,
+            entry_low=plan.raw_entry_low,
+            entry_high=plan.raw_entry_high,
+            stop_loss=plan.raw_invalidation,
+        ),
+    )
 
     def reserve_once(index: int):
         attempted_at = f"2026-06-25T18:5{index}:00+00:00"
@@ -5036,6 +5101,10 @@ def test_missing_entry_blocks_watchlist_outcome_tracking_and_compacts(tmp_path: 
         entry_low=NA,
         entry_high=NA,
     )
+    from tests.runtime_epoch_support import register_synthetic_scan_run
+
+    register_synthetic_scan_run(db_path, "missing-entry-1")
+    register_synthetic_scan_run(db_path, "missing-entry-2")
     sender = FakeSender()
     service = TelegramLifecycleDeliveryService(
         database_path=db_path,

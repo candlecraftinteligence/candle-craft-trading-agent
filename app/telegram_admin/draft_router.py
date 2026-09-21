@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -101,6 +102,8 @@ async def route_admin_scan_report(
     drafts_dir: Path = DEFAULT_ADMIN_DRAFTS_DIR,
     client: TelegramAdminClient | None = None,
     transport: TelegramAdminTransport | None = None,
+    database_path: Path | str | None = None,
+    expected_identity: Any | None = None,
 ) -> AdminDraftRoutingResult:
     telegram_config = config or TelegramAdminConfig.from_settings(settings)
     admin_client = client or TelegramAdminClient(telegram_config, transport=transport)
@@ -112,6 +115,8 @@ async def route_admin_scan_report(
         ranked_results=ranked,
         manifest_row=manifest_row,
         draft_artifact_path=draft_path,
+        database_path=database_path,
+        expected_identity=expected_identity,
     )
     delivery = _duplicate_sent_admin_delivery(
         draft_path,
@@ -132,6 +137,8 @@ async def route_admin_scan_report(
         telegram_metadata=telegram_metadata,
         error_message=delivery.error_message,
         report=report,
+        database_path=database_path,
+        expected_identity=expected_identity,
     )
 
     try:
@@ -170,6 +177,8 @@ def build_admin_drafts(
     error_message: str = NA,
     report: str | None = None,
     created_at: str | None = None,
+    database_path: Path | str | None = None,
+    expected_identity: Any | None = None,
 ) -> tuple[AdminDraftRecord, ...]:
     timestamp = created_at or _now_utc_iso()
     run_id = _run_id(result, manifest_row)
@@ -181,7 +190,16 @@ def build_admin_drafts(
             draft_type="scan_health",
             symbol=NA,
             summary=_scan_health_summary(result, manifest_row=manifest_row, timestamp=manifest_timestamp),
-            message_preview=_preview(report or format_admin_scan_report(result, ranked_results=ranked_results, manifest_row=manifest_row)),
+            message_preview=_preview(
+                report
+                or format_admin_scan_report(
+                    result,
+                    ranked_results=ranked_results,
+                    manifest_row=manifest_row,
+                    database_path=database_path,
+                    expected_identity=expected_identity,
+                )
+            ),
             delivery_status=delivery_status,
             telegram_metadata=telegram_metadata,
             error_message=error_message,
@@ -191,7 +209,9 @@ def build_admin_drafts(
     for ranked in _ranked(result, ranked_results):
         symbol_result = ranked.symbol_result
         summary = _source_row_summary(symbol_result, run_id=run_id, timestamp=manifest_timestamp)
-        for draft_type in _symbol_draft_types(summary):
+        for draft_type in _symbol_draft_types(
+            summary, database_path=database_path, expected_identity=expected_identity
+        ):
             records.append(
                 _draft_record(
                     run_id=run_id,
@@ -249,10 +269,21 @@ def format_admin_scan_report(
     manifest_row: Mapping[str, Any] | None = None,
     draft_artifact_path: Path | str | None = None,
     max_rows_per_section: int = 6,
+    database_path: Path | str | None = None,
+    expected_identity: Any | None = None,
 ) -> str:
     ranked = _ranked(result, ranked_results)
     summaries = [_source_row_summary(item.symbol_result, run_id=_run_id(result, manifest_row), timestamp=_timestamp(manifest_row)) for item in ranked]
-    valid = [summary for summary in summaries if summary["display_status"] == "valid_setup"]
+    valid = [
+        summary
+        for summary in summaries
+        if summary["display_status"] == "valid_setup"
+        and _operational_setup_recommendation_allowed(
+            summary,
+            database_path,
+            expected_identity=expected_identity,
+        )
+    ]
     near = [
         summary
         for summary in summaries
@@ -271,7 +302,7 @@ def format_admin_scan_report(
         f"Universe: {_universe_label(result, manifest_row)}",
         f"Regime: {_market_regime(result, manifest_row)} / confidence {_regime_confidence(result, manifest_row)}",
         f"Symbols scanned: {counts['symbols_scanned']}",
-        f"Valid setups: {counts['valid_setups']}",
+        f"Valid setups: {len(valid)}",
         f"Near misses: {counts['near_misses']}",
         f"Rejected: {counts['rejected']}",
         f"Target blocked: {len(target_blocked)}",
@@ -421,6 +452,10 @@ def _source_row_summary(symbol_result: ScannerSymbolResult, *, run_id: str, time
         "short_reason": display.short_reason,
         "next_trigger_needed": display.next_trigger_needed,
         "lifecycle_current_state": fields.get("lifecycle_current_state", NA),
+        "lifecycle_id": _display(getattr(getattr(symbol_result, "lifecycle_state", None), "lifecycle_id", NA)),
+        "setup_id": _display(getattr(getattr(symbol_result, "lifecycle_state", None), "setup_id", NA)),
+        "plan_version_id": _display(getattr(getattr(symbol_result, "lifecycle_state", None), "plan_version_id", NA)),
+        "setup_identity": _display(getattr(getattr(symbol_result, "lifecycle_state", None), "setup_identity", NA)),
         "lifecycle_integrity_status": fields.get("lifecycle_integrity_status", NA),
         "lifecycle_integrity_warning": fields.get("lifecycle_integrity_warning", NA),
         "target_integrity_failure_type": target_failure_type,
@@ -464,10 +499,18 @@ def _scan_health_summary(
     }
 
 
-def _symbol_draft_types(summary: Mapping[str, Any]) -> tuple[AdminDraftType, ...]:
+def _symbol_draft_types(
+    summary: Mapping[str, Any],
+    *,
+    database_path: Path | str | None = None,
+    expected_identity: Any | None = None,
+) -> tuple[AdminDraftType, ...]:
     draft_types: list[AdminDraftType] = []
     if summary.get("display_status") == "valid_setup":
-        draft_types.append("valid_setup")
+        if _operational_setup_recommendation_allowed(
+            summary, database_path, expected_identity=expected_identity
+        ):
+            draft_types.append("valid_setup")
     if summary.get("display_status") == "near_miss" and summary.get("failed_stage") != "target_integrity":
         draft_types.append("near_miss")
     if _is_target_blocked_summary(summary):
@@ -835,6 +878,90 @@ def _first_non_na(*values: Any) -> str:
         if text != NA:
             return text
     return NA
+
+
+def _operational_setup_recommendation_allowed(
+    summary: Mapping[str, Any] | str,
+    database_path: Path | str | None,
+    *,
+    expected_identity: Any | None = None,
+) -> bool:
+    if isinstance(summary, str):
+        payload = {"symbol": summary}
+    else:
+        payload = summary
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    if not symbol or symbol == NA:
+        return False
+    if database_path is None:
+        return False
+    from app.runtime_epoch.errors import RuntimeEpochError
+    from app.runtime_epoch.models import RuntimeEpochIdentity
+    from app.runtime_epoch.ownership import (
+        canonical_operational_direction,
+        canonical_operational_symbol,
+        require_lifecycle_public_intent,
+    )
+    from app.runtime_epoch.startup import open_operational_service_database
+
+    identity = expected_identity
+    if not isinstance(identity, RuntimeEpochIdentity):
+        return False
+    try:
+        connection, epoch = open_operational_service_database(
+            database_path,
+            expected_identity=identity,
+        )
+    except Exception:
+        return False
+    try:
+        direction = str(payload.get("direction") or payload.get("side") or "").strip().lower()
+        lifecycle_id = str(payload.get("lifecycle_id") or "").strip()
+        setup_id = str(payload.get("setup_id") or "").strip()
+        setup_identity = str(payload.get("setup_identity") or "").strip()
+        if lifecycle_id.upper() == NA:
+            lifecycle_id = ""
+        if setup_id.upper() == NA:
+            setup_id = ""
+        if setup_identity.upper() == NA:
+            setup_identity = ""
+        if not lifecycle_id and not setup_id and not setup_identity:
+            return False
+        rows = connection.execute(
+            """
+            SELECT lifecycle_id, symbol, direction, setup_id, setup_identity
+            FROM setup_lifecycle_records
+            WHERE symbol = ? AND runtime_epoch_id = ? AND is_current = 1
+            """,
+            (canonical_operational_symbol(symbol), epoch.epoch_id),
+        ).fetchall()
+        for row in rows:
+            try:
+                require_lifecycle_public_intent(
+                    connection,
+                    origin_lifecycle_id=str(row["lifecycle_id"]),
+                    epoch=epoch,
+                    expected_symbol=symbol,
+                    expected_direction=direction or None,
+                )
+            except RuntimeEpochError:
+                continue
+            row_direction = canonical_operational_direction(row["direction"])
+            payload_direction = canonical_operational_direction(direction)
+            if payload_direction and row_direction and payload_direction != row_direction:
+                continue
+            if lifecycle_id and str(row["lifecycle_id"]) != lifecycle_id:
+                continue
+            row_setup_id = str(row["setup_id"] or "").strip()
+            if setup_id and row_setup_id and setup_id != row_setup_id:
+                continue
+            row_setup_identity = str(row["setup_identity"] or "").strip()
+            if setup_identity and row_setup_identity and setup_identity != row_setup_identity:
+                continue
+            return True
+        return False
+    finally:
+        connection.close()
 
 
 def _display(value: Any) -> str:

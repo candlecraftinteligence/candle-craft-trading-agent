@@ -158,6 +158,8 @@ class SetupLifecycleRecord(BaseModel):
     setup_id: str | None = None
     plan_version_id: str | None = None
     economic_identity_reason: str | None = None
+    runtime_epoch_id: str | None = None
+    creation_origin_id: str | None = None
 
     model_config = ConfigDict(frozen=True)
 
@@ -211,7 +213,14 @@ class SetupLifecycleRecord(BaseModel):
         text = str(value).strip()
         return text if text else NA
 
-    @field_validator("setup_id", "plan_version_id", "economic_identity_reason", mode="before")
+    @field_validator(
+        "setup_id",
+        "plan_version_id",
+        "economic_identity_reason",
+        "runtime_epoch_id",
+        "creation_origin_id",
+        mode="before",
+    )
     @classmethod
     def _normalize_optional_identity(cls, value: str | None) -> str | None:
         if value is None:

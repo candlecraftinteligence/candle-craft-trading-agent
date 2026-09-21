@@ -39,6 +39,8 @@ from app.watch_mode import (
     update_watch_state_for_result,
 )
 from scripts import run_scan
+from app.runtime_epoch.watch_state import operational_watch_state_path
+from tests.runtime_epoch_support import SYNTHETIC_EPOCH_ID, SYNTHETIC_IDENTITY, bootstrap_operational_test_database
 
 
 class SequenceWatchRunner:
@@ -128,7 +130,7 @@ def _trade_idea(symbol: str = "BTCUSDT"):
             "entry_low": Decimal("100"),
             "entry_high": Decimal("102"),
             "stop_loss": Decimal("95"),
-            "take_profit_targets": (Decimal("112"), Decimal("120")),
+            "take_profit_targets": (Decimal("110"), Decimal("115"), Decimal("120")),
             "invalidation": "Invalid below 95.",
             "opportunity_score": Decimal("88"),
             "opportunity_grade": "A",
@@ -162,11 +164,30 @@ def _valid_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
                 "execution_sweep_status": "passed",
                 "confirmation_structure_shift_status": "passed",
                 "pullback_zone_status": "valid",
+                "target_integrity_status": "passed",
                 "rr_to_tp2": Decimal("3.2"),
-                "gates_passed": ("sweep", "bos_choch", "pullback_zone", "rr", "trust_meter"),
+                "entry_low": Decimal("100"),
+                "entry_high": Decimal("102"),
+                "stop": Decimal("95"),
+                "tp1": Decimal("110"),
+                "tp2": Decimal("115"),
+                "tp3": Decimal("120"),
+                "technical_score": Decimal("70"),
+                "opportunity_score": Decimal("88"),
+                "quality_grade": "A+",
+                "gates_passed": (
+                    "sweep",
+                    "bos_choch",
+                    "pullback_zone",
+                    "rr",
+                    "trust_meter",
+                    "target_integrity",
+                ),
+                "gates_failed": (),
                 "derivatives_supports_trade": True,
             }
         },
+        technical_score=70,
         setup_quality=validate_setup_quality(
             {
                 "symbol": symbol,
@@ -254,6 +275,9 @@ def _patch_watch_runtime(
     db_path=None,
 ):
     db = db_path or tmp_path / "queue.sqlite"
+    from tests.runtime_epoch_support import bootstrap_operational_test_database
+
+    bootstrap_operational_test_database(db)
     monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", tmp_path / "watch_state.json")
     monkeypatch.setattr(run_scan, "LATEST_RUN_PATH", tmp_path / "latest_scan.json")
     monkeypatch.setattr(run_scan, "SCAN_RUN_MANIFEST_PATH", tmp_path / "manifest.jsonl")
@@ -357,6 +381,7 @@ def _rejected_symbol(symbol: str = "BTCUSDT") -> ScannerSymbolResult:
 
 def _prior_state(symbol: str = "BTCUSDT", *, status: str = "near_miss", readiness: str = "WATCH") -> WatchState:
     return WatchState(
+        runtime_epoch_id=SYNTHETIC_EPOCH_ID,
         symbols={
             symbol: WatchSymbolState(
                 symbol=symbol,
@@ -368,6 +393,21 @@ def _prior_state(symbol: str = "BTCUSDT", *, status: str = "near_miss", readines
             )
         }
     )
+
+
+def _operational_watch_state_path(tmp_path):
+    return operational_watch_state_path(SYNTHETIC_EPOCH_ID, base_dir=tmp_path)
+
+
+def _bootstrap_watch_main(tmp_path, monkeypatch, *, db_path=None, prior_state=True):
+    db = db_path or tmp_path / "queue.sqlite"
+    bootstrap_operational_test_database(db)
+    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", tmp_path / "watch_state.json")
+    epoch_path = _operational_watch_state_path(tmp_path)
+    if prior_state:
+        epoch_path.parent.mkdir(parents=True, exist_ok=True)
+        save_watch_state(epoch_path, _prior_state())
+    return db, epoch_path
 
 
 def test_near_miss_symbols_loaded_from_prior_run(tmp_path) -> None:
@@ -456,9 +496,7 @@ def test_telegram_dry_run_overrides_legacy_live_alert_flag(tmp_path, monkeypatch
     monkeypatch.setenv("TELEGRAM_DRY_RUN", "true")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "valid-looking-test-token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "valid-looking-test-chat")
-    state_path = tmp_path / "watch_state.json"
-    save_watch_state(state_path, _prior_state())
-    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    db_path, _epoch_path = _bootstrap_watch_main(tmp_path, monkeypatch)
     monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
     SequenceWatchRunner.configs = []
     SequenceWatchRunner.results_by_call = [(_valid_symbol(),)]
@@ -478,6 +516,8 @@ def test_telegram_dry_run_overrides_legacy_live_alert_flag(tmp_path, monkeypatch
                 "1",
                 "--watch-interval-sec",
                 "0.01",
+                "--database-path",
+                str(db_path),
                 "--telegram-live-alerts",
                 "true",
             ]
@@ -506,9 +546,9 @@ def test_public_telegram_flags_use_one_lifecycle_route_per_watch_iteration(
     capsys,
     telegram_args: tuple[str, ...],
 ) -> None:
-    state_path = tmp_path / "watch_state.json"
-    save_watch_state(state_path, _prior_state())
-    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    db_path, epoch_path = _bootstrap_watch_main(
+        tmp_path, monkeypatch, db_path=tmp_path / "scanner.sqlite"
+    )
     monkeypatch.setattr(run_scan, "SCAN_RUN_MANIFEST_PATH", tmp_path / "manifest.jsonl")
     monkeypatch.setattr(run_scan, "NIGHTLY_SCAN_HISTORY_PATH", tmp_path / "nightly_history.json")
     monkeypatch.setattr(run_scan, "_route_admin_report", _noop_admin_report)
@@ -553,14 +593,14 @@ def test_public_telegram_flags_use_one_lifecycle_route_per_watch_iteration(
                 "--watch-interval-sec",
                 "0.01",
                 "--database-path",
-                str(tmp_path / "scanner.sqlite"),
+                str(db_path),
                 *telegram_args,
             ]
         )
     )
 
     assert len(lifecycle_calls) == 1
-    state_payload = json.loads(state_path.read_text(encoding="utf-8"))
+    state_payload = json.loads(epoch_path.read_text(encoding="utf-8"))
     assert state_payload["symbols"]["BTCUSDT"]["alert_sent"] is False
     assert state_payload["symbols"]["BTCUSDT"]["activation_count"] == 0
     captured = capsys.readouterr()
@@ -568,10 +608,8 @@ def test_public_telegram_flags_use_one_lifecycle_route_per_watch_iteration(
 
 
 def test_watch_mode_single_iteration_updates_state_and_jsonl(tmp_path, monkeypatch, capsys) -> None:
-    state_path = tmp_path / "watch_state.json"
+    db_path, state_path = _bootstrap_watch_main(tmp_path, monkeypatch)
     output_path = tmp_path / "watch.jsonl"
-    save_watch_state(state_path, _prior_state())
-    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
     monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
     SequenceWatchRunner.configs = []
     SequenceWatchRunner.results_by_call = [(_valid_symbol(),)]
@@ -586,6 +624,8 @@ def test_watch_mode_single_iteration_updates_state_and_jsonl(tmp_path, monkeypat
                 "1",
                 "--watch-interval-sec",
                 "0.01",
+                "--database-path",
+                str(db_path),
                 "--watch-output-file",
                 str(output_path),
             ]
@@ -611,10 +651,9 @@ def test_watch_mode_single_iteration_updates_state_and_jsonl(tmp_path, monkeypat
 
 
 def test_watch_iteration_stored_as_scan_run_when_store_scan_enabled(tmp_path, monkeypatch, capsys) -> None:
-    state_path = tmp_path / "watch_state.json"
-    db_path = tmp_path / "candle_craft.db"
-    save_watch_state(state_path, _prior_state())
-    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    db_path, _epoch_path = _bootstrap_watch_main(
+        tmp_path, monkeypatch, db_path=tmp_path / "candle_craft.db"
+    )
     monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
     SequenceWatchRunner.configs = []
     SequenceWatchRunner.results_by_call = [(_valid_symbol(),)]
@@ -850,6 +889,7 @@ def test_active_lifecycle_outside_universe_gets_capacity_and_cooldown_exemption(
         adaptive_symbol_priority=True,
         watch=True,
         universe_size=3,
+        runtime_identity=SYNTHETIC_IDENTITY,
     )
     base_symbols = ("AAAUSDT", "BBBUSDT", "CCCUSDT")
     watchlist = run_scan.WatchlistResolution(
@@ -968,6 +1008,7 @@ def test_active_timeout_history_is_preserved_and_symbol_retries_next_iteration(t
         adaptive_symbol_priority=True,
         watch=True,
         universe_size=2,
+        runtime_identity=SYNTHETIC_IDENTITY,
     )
     discovery = ("OTHERUSDT",)
 
@@ -1191,10 +1232,9 @@ def test_soft_symbol_health_penalty_does_not_exclude_when_no_adaptive(tmp_path, 
 
 
 def test_watch_mode_cancelled_sleep_shuts_down_cleanly(tmp_path, monkeypatch, capsys) -> None:
-    state_path = tmp_path / "watch_state.json"
-    db_path = tmp_path / "candle_craft.db"
-    save_watch_state(state_path, _prior_state())
-    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    db_path, _epoch_path = _bootstrap_watch_main(
+        tmp_path, monkeypatch, db_path=tmp_path / "candle_craft.db"
+    )
     monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
     SequenceWatchRunner.configs = []
     SequenceWatchRunner.results_by_call = [(_near_miss_symbol(),)]
@@ -1229,10 +1269,9 @@ def test_watch_mode_cancelled_sleep_shuts_down_cleanly(tmp_path, monkeypatch, ca
 
 
 def test_watch_mode_does_not_store_scan_without_store_scan(tmp_path, monkeypatch) -> None:
-    state_path = tmp_path / "watch_state.json"
-    db_path = tmp_path / "candle_craft.db"
-    save_watch_state(state_path, _prior_state())
-    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    db_path, _epoch_path = _bootstrap_watch_main(
+        tmp_path, monkeypatch, db_path=tmp_path / "candle_craft.db"
+    )
     monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
     SequenceWatchRunner.configs = []
     SequenceWatchRunner.results_by_call = [(_near_miss_symbol(),)]
@@ -1255,13 +1294,13 @@ def test_watch_mode_does_not_store_scan_without_store_scan(tmp_path, monkeypatch
         )
     )
 
-    assert not db_path.exists()
+    with sqlite3.connect(db_path) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0]
+    assert count == 0
 
 
 def test_watch_mode_max_iterations_stop(tmp_path, monkeypatch) -> None:
-    state_path = tmp_path / "watch_state.json"
-    save_watch_state(state_path, _prior_state())
-    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", state_path)
+    db_path, _epoch_path = _bootstrap_watch_main(tmp_path, monkeypatch)
     monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
     SequenceWatchRunner.configs = []
     SequenceWatchRunner.results_by_call = [(_near_miss_symbol(),), (_near_miss_symbol(),)]
@@ -1281,6 +1320,8 @@ def test_watch_mode_max_iterations_stop(tmp_path, monkeypatch) -> None:
                 "2",
                 "--watch-interval-sec",
                 "0.01",
+                "--database-path",
+                str(db_path),
             ]
         )
     )

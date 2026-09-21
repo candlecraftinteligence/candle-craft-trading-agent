@@ -110,7 +110,7 @@ def test_schema_remains_v25_without_policy_admission_or_source_binding(tmp_path:
         }
         replay_cols = {row[1] for row in connection.execute("PRAGMA table_info(replay_results)")}
         table_names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert user_version == SCHEMA_VERSION == 25
+    assert user_version == SCHEMA_VERSION == 26
     assert sqlite_schema_version != user_version
     for forbidden in (
         "admission_id",

@@ -181,6 +181,12 @@ def _required_decimal(value: Any, name: str) -> Decimal:
     return number
 
 
+def canonical_stored_price(value: Any) -> str:
+    """Normalize a persisted price using the immutable-plan identity contract."""
+
+    return _identity_price(value)
+
+
 def _identity_price(value: Any) -> str:
     text = _text(value)
     if text == NA:
@@ -207,6 +213,7 @@ __all__ = [
     "StoredPlanGeometry",
     "candle_range",
     "canonical_plan_identity",
+    "canonical_stored_price",
     "compatible_plan_identities",
     "entry_touched",
     "has_valid_stored_plan_geometry",

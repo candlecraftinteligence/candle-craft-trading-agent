@@ -19,6 +19,7 @@ from app.formatters.scanner_display import build_symbol_display
 from app.formatters.telegram_signal_formatter import TelegramSignalMessage, format_watchlist_upgraded_message
 from app.lifecycle.eligibility import has_valid_trade_map, public_watchlist_eligible
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
+from app.runtime_epoch.watch_state import is_canonical_legacy_watch_state_path
 
 DEFAULT_WATCH_STATE_PATH = Path("scan_runs/watch_state.json")
 DEFAULT_LATEST_RUN_PATH = Path("scan_runs/latest_scan.json")
@@ -94,6 +95,7 @@ class WatchState(BaseModel):
     symbols: dict[str, WatchSymbolState] = Field(default_factory=dict)
     deprecated: bool = True
     source_of_truth: str = "db_lifecycle_state"
+    runtime_epoch_id: str | None = None
     deprecation_note: str = (
         "watch_state.json is retained for compatibility only; DB-backed lifecycle state and scan run manifests are "
         "the source of truth for audits."
@@ -180,6 +182,10 @@ def save_watch_state(
     *,
     expected_updated_at: str | None = None,
 ) -> None:
+    if is_canonical_legacy_watch_state_path(path):
+        raise WatchModeError(
+            f"refusing to overwrite canonical legacy watch state: {path}"
+        )
     temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -273,6 +279,16 @@ def seed_watch_state_from_run_payload(
     target_symbols = {symbol.upper() for symbol in symbols}
     if not target_symbols:
         return state
+    payload_epoch = str(payload.get("runtime_epoch_id") or "").strip() or None
+    if state.runtime_epoch_id:
+        if payload_epoch != state.runtime_epoch_id:
+            raise WatchModeError(
+                "Refusing to seed operational watch state from a pre-epoch or mismatched run payload."
+            )
+    elif payload_epoch:
+        raise WatchModeError(
+            "Refusing to seed unattributed watch state from an epoch-bound run payload."
+        )
 
     updated_symbols = dict(state.symbols)
     timestamp = seen_at or now_utc_iso()
@@ -307,7 +323,11 @@ def seed_watch_state_from_run_payload(
             ),
         )
 
-    return WatchState(updated_at=timestamp, symbols=updated_symbols)
+    return WatchState(
+        updated_at=timestamp,
+        symbols=updated_symbols,
+        runtime_epoch_id=state.runtime_epoch_id,
+    )
 
 
 def state_watch_symbols(state: WatchState, symbols: Sequence[str]) -> tuple[str, ...]:
@@ -405,7 +425,11 @@ def update_watch_state_for_result(
     )
     updated_symbols = dict(state.symbols)
     updated_symbols[symbol_result.symbol] = updated_symbol
-    return WatchState(updated_at=timestamp, symbols=updated_symbols)
+    return WatchState(
+        updated_at=timestamp,
+        symbols=updated_symbols,
+        runtime_epoch_id=state.runtime_epoch_id,
+    )
 
 
 def format_watch_activation_alert(symbol_result: ScannerSymbolResult) -> str:
@@ -461,26 +485,12 @@ async def deliver_watch_activation_alert(
     telegram_bot_token: str | None = None,
     telegram_chat_id: str | None = None,
 ) -> WatchAlertDelivery:
-    if not live:
-        return WatchAlertDelivery(status="dry_run", detail="Dry run: no Telegram alert was sent.")
-    if not dry_run and (not telegram_bot_token or not telegram_chat_id):
+    del message, dry_run, telegram_bot_token, telegram_chat_id
+    if live:
         raise WatchModeError(
-            "Live Telegram watch alerts require TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env."
+            "Live watch-activation send is blocked; setup-derived public delivery must use current-epoch outbox ownership."
         )
-
-    send_result = await TelegramSender(
-        bot_token=telegram_bot_token,
-        chat_id=telegram_chat_id,
-        signals_enabled=True,
-        dry_run=dry_run,
-    ).send_text(message)
-    if send_result.error_message == "telegram_dry_run_enabled":
-        return WatchAlertDelivery(status="dry_run", detail="Dry run: no Telegram alert was sent.")
-    return WatchAlertDelivery(
-        status="sent" if send_result.sent else "failed",
-        detail="Telegram alert sent." if send_result.sent else "Telegram alert failed.",
-        telegram_results=send_result.telegram_results,
-    )
+    return WatchAlertDelivery(status="dry_run", detail="Dry run: no Telegram alert was sent.")
 
 
 def build_watch_iteration_summary(

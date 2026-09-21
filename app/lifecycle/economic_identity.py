@@ -482,6 +482,29 @@ def _is_required_missing(value: Any) -> bool:
     return not text or text.upper() == NA
 
 
+def classify_plan_invalidation(value: Any) -> CanonicalField:
+    """Classify one invalidation value with the exact ``mint_plan_version_id`` rule."""
+
+    return _required_identity_text("invalidation", value, case=None)
+
+
+def stored_plan_invalidation(record: Any) -> str | None:
+    """Return the owned plan invalidation ``mint_plan_version_id`` would hash.
+
+    Preference is ``invalidation_logic`` then ``invalidation_reason``. A later
+    terminal lifecycle reason does not replace a present plan ``invalidation_logic``.
+    Absent and rejected values return ``None``.
+    """
+
+    raw = _stored_invalidation(record)
+    if raw is None:
+        return None
+    field = classify_plan_invalidation(raw)
+    if field.kind is not IdentityFieldKind.VALUE or field.canonical is None:
+        return None
+    return field.canonical
+
+
 def _stored_invalidation(record: Any) -> Any:
     for name in ("invalidation_logic", "invalidation_reason"):
         value = _field(record, name)
@@ -531,8 +554,10 @@ __all__ = [
     "SETUP_ID_FIELD_ORDER",
     "SETUP_ID_PREFIX",
     "SETUP_ID_SCHEMA_VERSION",
+    "classify_plan_invalidation",
     "latch_economic_identities",
     "mint_plan_version_id",
     "mint_setup_id",
     "proven_progress_plan_version_id",
+    "stored_plan_invalidation",
 ]

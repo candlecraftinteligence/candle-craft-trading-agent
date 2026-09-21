@@ -43,9 +43,28 @@ from app.lifecycle.state_machine import (
     evaluate_lifecycle_transition,
     now_utc_iso,
 )
+from app.runtime_epoch.authority import require_active_runtime_epoch
+from app.runtime_epoch.errors import (
+    RuntimeEpochConfigurationError,
+    RuntimeEpochError,
+    RuntimeEpochIdentityCollisionError,
+    RuntimeEpochOriginError,
+    RuntimeEpochOwnershipError,
+)
+from app.runtime_epoch.origin import (
+    decision_cutoff_from_symbol_result,
+    evaluate_symbol_origin,
+    evaluation_completed_at_from_symbol_result,
+    origin_kind_from_symbol_result,
+    persist_blocked_symbol_origin,
+    producer_acquisition_from_symbol_result,
+    require_registered_operational_run,
+)
+from app.runtime_epoch.models import RuntimeEpochIdentity
+from app.runtime_epoch.ownership import legacy_cooldown_veto
 from app.pipeline.scanner_runner import ScannerRunResult, ScannerSymbolResult
 from app.storage.database import DEFAULT_DATABASE_PATH
-from app.storage.symbol_health import load_symbol_health_records
+from app.storage.symbol_health import load_symbol_health_records_from_connection
 
 logger = logging.getLogger(__name__)
 
@@ -160,10 +179,12 @@ class SetupLifecycleService:
         *,
         confirmation_cycles: int | None = None,
         setup_tolerance_pct: Decimal | str | None = None,
+        expected_identity: RuntimeEpochIdentity | None = None,
     ) -> None:
         self.database_path = Path(database_path)
         self.confirmation_cycles = _confirmation_cycles(confirmation_cycles)
         self.setup_tolerance_pct = _setup_tolerance_pct(setup_tolerance_pct)
+        self.expected_identity = expected_identity
 
     def apply_to_run_result(
         self,
@@ -196,11 +217,25 @@ class SetupLifecycleService:
                 continue
             prepared.append((symbol_result, observation))
 
-        health_records = _load_health_records(self.database_path, tuple(item.symbol for item in result.results))
-        with SQLiteSetupLifecycleRepository(self.database_path) as repository:
+        effective_run_id = str(scan_run_id or "").strip()
+        if not effective_run_id:
+            raise RuntimeEpochOriginError(
+                "Lifecycle consumption requires a persisted operational run_id."
+            )
+        with SQLiteSetupLifecycleRepository(
+            self.database_path,
+            expected_identity=self.expected_identity,
+        ) as repository:
             connection = repository.connection
             assert connection is not None
+            health_records = _load_health_records(connection, tuple(item.symbol for item in result.results))
             connection.execute("BEGIN IMMEDIATE")
+            epoch = require_active_runtime_epoch(connection)
+            require_registered_operational_run(
+                connection,
+                run_id=effective_run_id,
+                epoch=epoch,
+            )
             for symbol_result, observation in prepared:
                 if observation is None:
                     updated_results.append(symbol_result)
@@ -209,10 +244,11 @@ class SetupLifecycleService:
                     symbol_result,
                     observation=observation,
                     repository=repository,
-                    scan_run_id=scan_run_id,
+                    scan_run_id=effective_run_id,
                     now=timestamp,
                     symbol_health_record=health_records.get(symbol_result.symbol),
                     min_score_for_idea=result.config.min_score_for_idea,
+                    runtime_epoch_id=epoch.epoch_id,
                 )
                 if error is not None:
                     _record_lifecycle_symbol_error(process_summary, symbol_result.symbol, error)
@@ -241,6 +277,7 @@ class SetupLifecycleService:
         now: str,
         symbol_health_record: Any | None,
         min_score_for_idea: Any,
+        runtime_epoch_id: str,
     ) -> tuple[
         ScannerSymbolResult | None,
         dict[str, Any],
@@ -258,11 +295,16 @@ class SetupLifecycleService:
                 now=now,
                 symbol_health_record=symbol_health_record,
                 min_score_for_idea=min_score_for_idea,
+                runtime_epoch_id=runtime_epoch_id,
             )
         except (InvalidOperation, TypeError, ValueError) as exc:
             connection.execute("ROLLBACK TO lifecycle_symbol")
             connection.execute("RELEASE lifecycle_symbol")
             return None, {}, exc
+        except (RuntimeEpochOriginError, RuntimeEpochIdentityCollisionError, RuntimeEpochOwnershipError) as exc:
+            connection.execute("ROLLBACK TO lifecycle_symbol")
+            connection.execute("RELEASE lifecycle_symbol")
+            return None, {"origin_blocked_reason": str(exc)}, exc
         except sqlite3.Error:
             connection.execute("ROLLBACK TO lifecycle_symbol")
             connection.execute("RELEASE lifecycle_symbol")
@@ -279,13 +321,27 @@ class SetupLifecycleService:
         scan_run_id: str | None,
         now: str,
     ) -> ScannerSymbolResult:
+        connection = repository.connection
+        assert connection is not None
+        epoch = require_active_runtime_epoch(connection)
+        effective_run_id = str(scan_run_id or "").strip()
+        if not effective_run_id:
+            raise RuntimeEpochOriginError(
+                "Lifecycle consumption requires a persisted operational run_id."
+            )
+        require_registered_operational_run(
+            connection,
+            run_id=effective_run_id,
+            epoch=epoch,
+        )
         updated, _meta = self._apply_to_symbol_result_with_meta(
             symbol_result,
             repository=repository,
-            scan_run_id=scan_run_id,
+            scan_run_id=effective_run_id,
             now=now,
             symbol_health_record=None,
             min_score_for_idea=Decimal("80"),
+            runtime_epoch_id=epoch.epoch_id,
         )
         return updated
 
@@ -299,9 +355,33 @@ class SetupLifecycleService:
         now: str,
         symbol_health_record: Any | None,
         min_score_for_idea: Any,
+        runtime_epoch_id: str,
     ) -> tuple[ScannerSymbolResult, dict[str, Any]]:
         if observation is None:
             observation = observation_from_symbol_result(symbol_result, min_score_for_idea=min_score_for_idea)
+        connection = repository.connection
+        assert connection is not None
+        origin = evaluate_symbol_origin(
+            connection,
+            run_id=str(scan_run_id or ""),
+            symbol=observation.symbol,
+            evaluation_kind=origin_kind_from_symbol_result(symbol_result),
+            evaluation_completed_at=evaluation_completed_at_from_symbol_result(symbol_result),
+            decision_cutoff_at=decision_cutoff_from_symbol_result(symbol_result),
+            producer_observed_at=producer_acquisition_from_symbol_result(symbol_result),
+        )
+        if not origin.granted:
+            persist_blocked_symbol_origin(connection, origin)
+            return symbol_result, {"origin_blocked_reason": origin.reason, "origin_granted": False}
+        cooldown_veto = legacy_cooldown_veto(
+            connection,
+            symbol=observation.symbol,
+            mode=observation.mode,
+            direction=observation.direction,
+            now=now,
+        )
+        if cooldown_veto is not None:
+            return symbol_result, {"origin_blocked_reason": cooldown_veto, "origin_granted": False}
         existing = repository.get_record(
             symbol=observation.symbol,
             mode=observation.mode,
@@ -327,6 +407,18 @@ class SetupLifecycleService:
                 structural_anchor=observation.structural_anchor,
             )
         )
+        if existing is None:
+            collision = repository.get_record_by_lifecycle_id(lifecycle_id)
+            if collision is not None and collision.runtime_epoch_id is None:
+                return symbol_result, {
+                    "origin_blocked_reason": "legacy_lifecycle_identity_collision",
+                    "origin_granted": False,
+                }
+        creation_origin_id = (
+            existing.creation_origin_id
+            if existing is not None and existing.creation_origin_id
+            else origin.origin_id
+        )
         health_penalty_cycles = _symbol_health_penalty_cycles(symbol_health_record)
         health_score = getattr(symbol_health_record, "current_health_score", NA) if symbol_health_record is not None else NA
         transition = evaluate_lifecycle_transition(
@@ -350,6 +442,15 @@ class SetupLifecycleService:
             not transition.allowed
             and transition.notes.startswith("invalid_stored_plan_geometry:")
         )
+        if final_record is not None:
+            final_record = final_record.model_copy(
+                update={
+                    "runtime_epoch_id": runtime_epoch_id,
+                    "creation_origin_id": creation_origin_id,
+                }
+            )
+            transition = transition.model_copy(update={"record": final_record})
+            effective_transition = transition
         if final_record is not None and not persistence_blocked:
             if rotation_reason is not None and prior_generation is not None:
                 repository.supersede_record(prior_generation.lifecycle_id)
@@ -438,7 +539,10 @@ class SetupLifecycleService:
         return updated, meta
 
     def reset(self) -> None:
-        with SQLiteSetupLifecycleRepository(self.database_path) as repository:
+        with SQLiteSetupLifecycleRepository(
+            self.database_path,
+            expected_identity=self.expected_identity,
+        ) as repository:
             repository.reset()
 
 
@@ -450,11 +554,13 @@ def apply_lifecycle_to_run_result(
     now: str | None = None,
     confirmation_cycles: int | None = None,
     setup_tolerance_pct: Decimal | str | None = None,
+    expected_identity: RuntimeEpochIdentity | None = None,
 ) -> ScannerRunResult:
     return SetupLifecycleService(
         database_path,
         confirmation_cycles=confirmation_cycles,
         setup_tolerance_pct=setup_tolerance_pct,
+        expected_identity=expected_identity,
     ).apply_to_run_result(result, scan_run_id=scan_run_id, now=now)
 
 
@@ -639,9 +745,15 @@ def prioritize_watch_symbols(
     *,
     database_path: Path | str = DEFAULT_DATABASE_PATH,
     now: str | None = None,
+    expected_identity: RuntimeEpochIdentity | None = None,
 ) -> tuple[str, ...]:
     ordered = tuple(dict.fromkeys(_display(symbol).upper() for symbol in symbols if _display(symbol) != NA))
-    active_symbols = active_lifecycle_symbols(ordered, database_path=database_path, now=now)
+    active_symbols = active_lifecycle_symbols(
+        ordered,
+        database_path=database_path,
+        now=now,
+        expected_identity=expected_identity,
+    )
     active_set = set(active_symbols)
     return (*active_symbols, *(symbol for symbol in ordered if symbol not in active_set))
 
@@ -651,11 +763,12 @@ def active_lifecycle_symbols(
     *,
     database_path: Path | str = DEFAULT_DATABASE_PATH,
     now: str | None = None,
+    expected_identity: RuntimeEpochIdentity | None = None,
 ) -> tuple[str, ...]:
     del now  # Active monitoring is reconstructed solely from persisted lifecycle state.
     ordered = tuple(dict.fromkeys(_display(symbol).upper() for symbol in symbols if _display(symbol) != NA))
     original_index = {symbol: index for index, symbol in enumerate(ordered)}
-    with SQLiteSetupLifecycleRepository(database_path) as repository:
+    with SQLiteSetupLifecycleRepository(database_path, expected_identity=expected_identity) as repository:
         records = repository.get_records_for_states(ACTIVE_LIFECYCLE_MONITORING_STATES)
 
     best_priority_by_symbol: dict[str, int] = {}
@@ -777,10 +890,10 @@ def _index_or_none(value: Any) -> int | None:
         return None
 
 
-def _load_health_records(database_path: Path | str, symbols: Sequence[str]) -> dict[str, Any]:
+def _load_health_records(connection: sqlite3.Connection, symbols: Sequence[str]) -> dict[str, Any]:
     if not symbols:
         return {}
-    return load_symbol_health_records(database_path, symbols)
+    return load_symbol_health_records_from_connection(connection, symbols)
 
 
 def _symbol_health_penalty_cycles(record: Any | None) -> int:

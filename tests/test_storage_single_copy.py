@@ -249,7 +249,7 @@ def _write_v24_fixture(path: Path, *, run_id: str, payload: dict, children: dict
 
 def test_current_application_schema_is_v25_after_storage_single_copy() -> None:
     # Deliberate additive STORAGE_SINGLE_COPY migration; historical v24 fixtures stay readable.
-    assert SCHEMA_VERSION == 25
+    assert SCHEMA_VERSION == 26
 
 
 def test_ordinary_default_cli_and_watch_use_symbol_refs_with_exact_reconstruction(tmp_path: Path) -> None:
@@ -538,7 +538,7 @@ def test_v24_to_v25_migration_is_additive_and_preserves_payload_bytes(tmp_path: 
         after_children = _child_map(connection, "legacy")
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         loaded = load_logical_scan_payload(connection, "legacy")
-    assert version == SCHEMA_VERSION == 25
+    assert version == SCHEMA_VERSION == 26
     assert after_payload[0] == before_payload
     assert after_payload[1] == INLINE_V1
     assert after_children == before_children
@@ -568,7 +568,7 @@ def test_injected_v25_migration_failure_rolls_back_and_retries(tmp_path: Path, m
     assert payload == _json_dump(oracle)
     monkeypatch.undo()
     with open_initialized_database(db_path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 25
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert _physical(connection, "legacy")["raw_payload_format"] == INLINE_V1
 
 

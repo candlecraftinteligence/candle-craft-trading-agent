@@ -270,7 +270,7 @@ def test_initialized_v25_metadata_does_not_count_or_migrate(tmp_path: Path, monk
     report = readiness.collect_runtime_checkpoint_preflight(path)
     sqlite_section = report["sqlite"]
     assert sqlite_section["status"] == "measured"
-    assert sqlite_section["schema_version"] == SCHEMA_VERSION == 25
+    assert sqlite_section["schema_version"] == SCHEMA_VERSION == 26
     assert sqlite_section["connection"]["sqlite_uri_mode"] == "ro"
     assert sqlite_section["connection"]["query_only_readback"] == 1
     assert sqlite_section["connection"]["immutable_requested"] is False
@@ -367,7 +367,7 @@ def test_live_wal_with_sidecars_is_opened_without_immutable(tmp_path: Path) -> N
     assert report["sqlite"]["status"] == "measured"
     assert report["sqlite"]["connection"]["immutable_requested"] is False
     assert report["sqlite"]["connection"]["live_mutable_source"] is True
-    assert report["sqlite"]["schema_version"] == 25
+    assert report["sqlite"]["schema_version"] == 26
     assert report["sqlite"]["recent_runs"]["status"] == "measured"
 
 
@@ -926,7 +926,7 @@ def test_inspect_database_still_uses_historic_immutable_default() -> None:
 
 
 def test_schema_version_and_decoder_inventory_remain_v25() -> None:
-    assert SCHEMA_VERSION == 25
+    assert SCHEMA_VERSION == 26
     assert set(readiness.DECODER_COMPATIBILITY_INVENTORY["supported_formats"]) == set(SUPPORTED_FORMATS)
     assert readiness.FUNCTIONAL_ANCHOR_SHA == ANCHOR
     wolf = next(item for item in readiness.CONSUMER_INVENTORY if item["id"] == "wolf_briefing")
@@ -968,7 +968,7 @@ def test_concurrent_writer_changes_are_not_diagnostic_writes(
         count = reader.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0]
         version = identify_schema_version(reader)
     assert count == 2
-    assert version == 25
+    assert version == SCHEMA_VERSION
 
 
 def test_no_cli_default_database_path() -> None:

@@ -243,6 +243,9 @@ class PublicAlertEventRecord:
     uncertain_at: str | None = None
     created_at: str = "N/A"
     updated_at: str = "N/A"
+    runtime_epoch_id: str | None = None
+    origin_lifecycle_id: str | None = None
+    origin_root_event_id: int | None = None
     id: int | None = None
 
 

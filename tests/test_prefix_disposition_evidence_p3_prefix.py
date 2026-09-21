@@ -16,6 +16,7 @@ from app.analytics.outcome_ownership import (
 from app.data.candle_integrity import normalize_utc_timestamp
 from app.data.dtos import NA
 from app.lifecycle.economic_identity import latch_economic_identities, proven_progress_plan_version_id
+from app.runtime_epoch.errors import RuntimeEpochOwnershipError
 from app.lifecycle.models import SetupLifecycleOutcomeProgress, SetupLifecycleRecord, SetupLifecycleState
 from app.lifecycle.outcome_policy import canonical_plan_identity
 from app.lifecycle.outcomes import evaluate_closed_candle_outcomes
@@ -744,7 +745,7 @@ def test_p3a_diagnostics_and_stronger_claims_remain_false(tmp_path: Path) -> Non
         schema = repository._connection.execute("PRAGMA user_version").fetchone()[0]
     context = known["evaluations"][0]["evaluation_context"]
     assert before == after
-    assert schema == SCHEMA_VERSION == 25
+    assert schema == SCHEMA_VERSION == 26
     assert context["last_eligibility_prefix_evidence_status"] == PREFIX_EVIDENCE_STATUS_KNOWN
     assert context["prefix_disposition"] == DISPOSITION_PENDING_SUFFIX_EXHAUSTED
     assert context["pending_suffix_exhausted"] is True
@@ -849,7 +850,7 @@ def test_ordinary_dumps_and_runtime_consumers_do_not_take_prefix_envelope() -> N
     assert evidence_contract_payload()["outcome_ownership"]["feeds_operational_decisions"] is False
     assert evidence_contract_payload()["unique_trade_count"]["status"] == UNAVAILABLE
     assert evidence_contract_payload()["outcome_ownership"]["schema_version_unchanged"] is True
-    assert SCHEMA_VERSION == 25
+    assert SCHEMA_VERSION == 26
 
 
 def test_exchange_close_convention_and_bounded_envelope_size(tmp_path: Path) -> None:
@@ -912,14 +913,15 @@ def test_v23_to_v24_migration_adds_nullable_envelope_without_backfill(tmp_path: 
         )
         assert loaded is not None
         assert loaded.last_eligibility_prefix_evidence_json is None
-        repository.upsert_outcome_progress(loaded)
+        with pytest.raises(RuntimeEpochOwnershipError):
+            repository.upsert_outcome_progress(loaded)
         after = repository._connection.execute(
             """
             SELECT last_eligibility_decision_at, last_eligibility_prefix_evidence_json
             FROM setup_lifecycle_outcome_progress WHERE lifecycle_id = 'v23-active-cutoff'
             """
         ).fetchone()
-    assert version == SCHEMA_VERSION == 25
+    assert version == SCHEMA_VERSION == 26
     assert {row[2] for row in rows} == {None}
     assert {row[1] for row in rows if row[0] == "v23-active-cutoff"} == {"2026-09-01T10:00:00+00:00"}
     assert after[0] == "2026-09-01T10:00:00+00:00"

@@ -57,6 +57,7 @@ def store_scan_result(
     run_id: str | None = None,
     watch_iteration: WatchIterationMetadata | None = None,
     inline_raw_payload: bool = False,
+    expected_identity: Any | None = None,
 ) -> str:
     run_id = run_id or uuid4().hex
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -101,7 +102,17 @@ def store_scan_result(
     replay_records = tuple(_replay_result_records(run_id, replay_summary, result.market_regime.state.value))
 
     try:
-        with closing(open_initialized_database(database_path)) as connection:
+        if expected_identity is not None:
+            from app.runtime_epoch.startup import open_operational_database
+
+            connection, _epoch = open_operational_database(
+                database_path,
+                expected_identity=expected_identity,
+            )
+            closer = connection
+        else:
+            closer = open_initialized_database(database_path)
+        with closing(closer) as connection:
             _insert_scan_run(connection, scan_record)
             _insert_symbol_results(connection, symbol_records)
             _insert_setup_candidates(connection, setup_records)

@@ -21,6 +21,12 @@ from app.alerts.telegram_outbox import (
     persist_intent_parts,
 )
 from app.storage.database import connect_database, open_initialized_database
+from app.runtime_epoch.ownership import bind_canonical_reservation_attempt
+from tests.runtime_epoch_support import (
+    SYNTHETIC_EPOCH_ID,
+    grant_synthetic_origin,
+    seed_legacy_lifecycle,
+)
 
 NOW = "2026-07-16T10:00:00Z"
 EVENT_KEY = "plan-1|initial_watchlist"
@@ -38,16 +44,44 @@ def _seed_intent(
     max_message_length: int = 4096,
 ) -> tuple[int, int]:
     with open_initialized_database(db_path) as connection:
+        origin = grant_synthetic_origin(connection, symbol="BTCUSDT", run_id="outbox-seed-run", now=NOW)
+        seed_legacy_lifecycle(
+            connection,
+            lifecycle_id="signal-1",
+            symbol="BTCUSDT",
+            current_state="WATCHLISTED",
+            last_seen_at=NOW,
+        )
+        connection.execute(
+            """
+            UPDATE setup_lifecycle_records
+            SET runtime_epoch_id = ?, creation_origin_id = ?
+            WHERE lifecycle_id = 'signal-1'
+            """,
+            (SYNTHETIC_EPOCH_ID, origin.origin_id),
+        )
         cursor = connection.execute(
             """
             INSERT INTO public_alert_events (
                 canonical_plan_id, event_type, event_key, symbol, side, status,
                 reserved_at, delivery_state, payload_text, message_hash,
-                destination_chat_id, destination_kind, max_attempts, created_at, updated_at
+                destination_chat_id, destination_kind, max_attempts, created_at, updated_at,
+                runtime_epoch_id, origin_lifecycle_id
             ) VALUES (?, 'initial_watchlist', ?, 'BTCUSDT', 'long', 'RESERVED',
-                      ?, ?, ?, 'hash-1', 'test-chat', 'public_chat', ?, ?, ?)
+                      ?, ?, ?, 'hash-1', 'test-chat', 'public_chat', ?, ?, ?, ?, ?)
             """,
-            ("plan-1", EVENT_KEY, NOW, PENDING, message, max_attempts, NOW, NOW),
+            (
+                "plan-1",
+                EVENT_KEY,
+                NOW,
+                PENDING,
+                message,
+                max_attempts,
+                NOW,
+                NOW,
+                SYNTHETIC_EPOCH_ID,
+                "signal-1",
+            ),
         )
         event_id = int(cursor.lastrowid)
         cursor = connection.execute(
@@ -81,6 +115,11 @@ def _seed_intent(
         connection.execute(
             "UPDATE telegram_alert_attempts SET delivery_part_count = ? WHERE id = ?",
             (len(parts), attempt_id),
+        )
+        bind_canonical_reservation_attempt(
+            connection,
+            event_id=event_id,
+            attempt_id=attempt_id,
         )
         connection.commit()
     return event_id, attempt_id

@@ -629,6 +629,16 @@ class ScannerSymbolResult(BaseModel):
         repr=False,
     )
     lifecycle_outcome_progress: SetupLifecycleOutcomeProgress | None = None
+    evaluation_origin_kind: Literal[
+        "live_scan",
+        "resumed_payload",
+        "watch_seed",
+        "cached_pre_epoch",
+        "replay",
+        "imported",
+        "unspecified",
+    ] = Field(default="unspecified", exclude=True)
+    evaluation_completed_at: datetime | None = Field(default=None, exclude=True)
     lifecycle_execution_candles: tuple[Any, ...] | None = Field(default=None, exclude=True, repr=False)
     lifecycle_execution_timeframe: str = Field(default=NA, exclude=True)
     lifecycle_decision_timestamp: datetime | None = Field(default=None, exclude=True)
@@ -2628,6 +2638,11 @@ class ScannerRunner:
             lifecycle_execution_timeframe=strategy_execution.execution_timeframe,
             lifecycle_decision_timestamp=strategy_execution.decision_timestamp,
             lifecycle_execution_batch_delivery=strategy_execution.execution_batch_delivery,
+            evaluation_origin_kind="live_scan",
+            evaluation_completed_at=normalize_utc_timestamp(
+                self.clock(),
+                field_name="evaluation_completed_at",
+            ),
             strategy_name=strategy_execution.strategy_name,
             strategy_results=strategy_execution.strategy_results,
             formatted_strategy_output=strategy_execution.formatted_strategy_output,

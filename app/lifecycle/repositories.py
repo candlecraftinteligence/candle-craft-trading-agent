@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -15,16 +16,36 @@ from app.lifecycle.models import (
     SetupOutcomeAnalyticsRecord,
     SetupTransitionReason,
 )
-from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_initialized_database
+from app.runtime_epoch.authority import load_active_runtime_epoch, require_active_runtime_epoch
+from app.runtime_epoch.errors import RuntimeEpochOwnershipError
+from app.runtime_epoch.ownership import (
+    require_current_epoch_lifecycle_id,
+    require_current_epoch_lifecycle_write,
+)
+from app.runtime_epoch.models import RuntimeEpochIdentity
+from app.runtime_epoch.startup import open_repository_database
+from app.storage.database import DEFAULT_DATABASE_PATH, StorageError
 
 
 class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycleRepository"]):
-    def __init__(self, database_path: Path | str = DEFAULT_DATABASE_PATH) -> None:
+    def __init__(
+        self,
+        database_path: Path | str = DEFAULT_DATABASE_PATH,
+        *,
+        expected_epoch_id: str | None = None,
+        expected_identity: RuntimeEpochIdentity | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
+        self.expected_epoch_id = expected_epoch_id
+        self.expected_identity = expected_identity
         self.connection: sqlite3.Connection | None = None
 
     def __enter__(self) -> SQLiteSetupLifecycleRepository:
-        self.connection = open_initialized_database(self.database_path)
+        self.connection = open_repository_database(
+            self.database_path,
+            expected_identity=self.expected_identity,
+            expected_epoch_id=self.expected_epoch_id,
+        )
         return self
 
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
@@ -36,14 +57,28 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         self.connection = None
 
     def get_record(self, *, symbol: str, mode: str, direction: str) -> SetupLifecycleRecord | None:
+        epoch = load_active_runtime_epoch(self._connection)
+        if epoch is None:
+            row = self._connection.execute(
+                """
+                SELECT * FROM setup_lifecycle_records
+                WHERE symbol = ? AND mode = ? AND direction = ?
+                  AND is_current = 1
+                  AND runtime_epoch_id IS NULL
+                LIMIT 1
+                """,
+                (_symbol(symbol), _identity_text(mode), _identity_text(direction)),
+            ).fetchone()
+            return _record_from_row(row) if row is not None else None
         row = self._connection.execute(
             """
             SELECT * FROM setup_lifecycle_records
             WHERE symbol = ? AND mode = ? AND direction = ?
               AND is_current = 1
+              AND runtime_epoch_id = ?
             LIMIT 1
             """,
-            (_symbol(symbol), _identity_text(mode), _identity_text(direction)),
+            (_symbol(symbol), _identity_text(mode), _identity_text(direction), epoch.epoch_id),
         ).fetchone()
         return _record_from_row(row) if row is not None else None
 
@@ -114,6 +149,9 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
             SELECT * FROM setup_lifecycle_records
             WHERE is_current = 1
               AND current_state IN ({placeholders})
+              AND runtime_epoch_id = (
+                  SELECT epoch_id FROM runtime_epoch_control WHERE control_key = 'active'
+              )
             ORDER BY symbol ASC, last_seen_at DESC, lifecycle_id ASC
             """,
             normalized,
@@ -121,6 +159,7 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         return tuple(_record_from_row(row) for row in rows)
 
     def supersede_record(self, lifecycle_id: str) -> None:
+        require_current_epoch_lifecycle_id(self._connection, lifecycle_id)
         self._connection.execute(
             """
             UPDATE setup_lifecycle_records
@@ -131,6 +170,15 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         )
 
     def upsert_record(self, record: SetupLifecycleRecord) -> None:
+        existing = self.get_record_by_lifecycle_id(record.lifecycle_id)
+        require_current_epoch_lifecycle_write(
+            self._connection,
+            lifecycle_id=record.lifecycle_id,
+            record_epoch_id=record.runtime_epoch_id,
+            creation_origin_id=record.creation_origin_id,
+            inserting=existing is None,
+            symbol=record.symbol,
+        )
         params = _record_params(record)
         placeholders = ", ".join("?" for _ in params)
         self._connection.execute(
@@ -147,7 +195,7 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 quality_grade_confirmed, confirmed_at, decay_count, decay_reason,
                 symbol_health_score_at_detection, symbol_health_penalty_cycles,                 setup_identity,
                 structural_anchor, is_current, setup_id, plan_version_id,
-                economic_identity_reason
+                economic_identity_reason, runtime_epoch_id, creation_origin_id
             ) VALUES ({placeholders})
             ON CONFLICT(lifecycle_id) DO UPDATE SET
                 symbol = excluded.symbol,
@@ -201,12 +249,15 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 is_current = excluded.is_current,
                 setup_id = excluded.setup_id,
                 plan_version_id = excluded.plan_version_id,
-                economic_identity_reason = excluded.economic_identity_reason
+                economic_identity_reason = excluded.economic_identity_reason,
+                runtime_epoch_id = setup_lifecycle_records.runtime_epoch_id,
+                creation_origin_id = setup_lifecycle_records.creation_origin_id
             """,
             params,
         )
 
     def insert_event(self, event: SetupLifecycleEvent) -> None:
+        require_current_epoch_lifecycle_id(self._connection, event.lifecycle_id)
         self._connection.execute(
             """
             INSERT INTO setup_lifecycle_events (
@@ -285,6 +336,7 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         return tuple(_outcome_progress_from_row(row) for row in rows)
 
     def upsert_outcome_progress(self, progress: SetupLifecycleOutcomeProgress) -> None:
+        require_current_epoch_lifecycle_id(self._connection, progress.lifecycle_id)
         self._connection.execute(
             """
             INSERT INTO setup_lifecycle_outcome_progress (
@@ -332,6 +384,7 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         )
 
     def upsert_outcome_analytics(self, record: SetupOutcomeAnalyticsRecord) -> None:
+        require_current_epoch_lifecycle_id(self._connection, record.lifecycle_id)
         self._connection.execute(
             """
             INSERT INTO setup_outcome_analytics (
@@ -382,9 +435,9 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         return tuple(_outcome_from_row(row) for row in rows)
 
     def reset(self) -> None:
-        self._connection.execute("DELETE FROM setup_lifecycle_outcome_progress")
-        self._connection.execute("DELETE FROM setup_lifecycle_events")
-        self._connection.execute("DELETE FROM setup_lifecycle_records")
+        raise RuntimeEpochOwnershipError(
+            "Destructive lifecycle reset is rejected under runtime epoch isolation."
+        )
 
     @property
     def _connection(self) -> sqlite3.Connection:
@@ -500,13 +553,13 @@ def _record_params(record: SetupLifecycleRecord) -> tuple[Any, ...]:
         record.invalidation_reason,
         record.cooldown_until,
         record.archived_at,
-        record.entry_low,
-        record.entry_high,
-        record.stop_loss,
-        record.tp1,
-        record.tp2,
-        record.tp3,
-        record.rr,
+        _bind_text(record.entry_low),
+        _bind_text(record.entry_high),
+        _bind_text(record.stop_loss),
+        _bind_text(record.tp1),
+        _bind_text(record.tp2),
+        _bind_text(record.tp3),
+        _bind_text(record.rr),
         record.invalidation_logic,
         record.confirmation_count,
         record.required_confirmation_cycles,
@@ -524,6 +577,8 @@ def _record_params(record: SetupLifecycleRecord) -> tuple[Any, ...]:
         record.setup_id,
         record.plan_version_id,
         record.economic_identity_reason,
+        record.runtime_epoch_id,
+        record.creation_origin_id,
     )
 
 
@@ -599,6 +654,8 @@ def _record_from_row(row: sqlite3.Row) -> SetupLifecycleRecord:
         setup_id=_optional_identity_value(row, "setup_id"),
         plan_version_id=_optional_identity_value(row, "plan_version_id"),
         economic_identity_reason=_optional_identity_value(row, "economic_identity_reason"),
+        runtime_epoch_id=_optional_identity_value(row, "runtime_epoch_id"),
+        creation_origin_id=_optional_identity_value(row, "creation_origin_id"),
     )
 
 
@@ -694,6 +751,12 @@ def _reason_from_value(value: Any) -> SetupTransitionReason:
         if reason.value == text or reason.name == text:
             return reason
     return SetupTransitionReason.NO_CHANGE
+
+
+def _bind_text(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    return value
 
 
 def _symbol(value: str) -> str:

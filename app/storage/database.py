@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 25  # STORAGE_SINGLE_COPY: additive raw_payload_format on scan_runs
+SCHEMA_VERSION = 26  # PROSPECTIVE_RUNTIME_EPOCH_ISOLATION: epoch/origin/currentness indexes
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -714,8 +715,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
                 normalized_entry_zone_high TEXT NOT NULL DEFAULT 'N/A',
                 normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
                 dedupe_status TEXT NOT NULL DEFAULT 'N/A',
-                dedupe_reason TEXT NOT NULL DEFAULT 'N/A',
-                UNIQUE(signal_id, alert_type)
+                dedupe_reason TEXT NOT NULL DEFAULT 'N/A'
             );
 
             CREATE INDEX IF NOT EXISTS ix_telegram_alert_attempts_signal
@@ -1056,6 +1056,7 @@ def initialize_database(connection: sqlite3.Connection) -> None:
             _migrate_outcome_progress_prefix_evidence_v24(connection)
         if existing_version < 25:
             _migrate_scan_raw_payload_format_v25(connection)
+        _migrate_runtime_epoch_isolation_v26(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
@@ -1315,6 +1316,14 @@ def _has_legacy_lifecycle_tuple_unique(connection: sqlite3.Connection) -> bool:
     return False
 
 
+def _lifecycle_has_runtime_epoch_column(connection: sqlite3.Connection) -> bool:
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
+    }
+    return "runtime_epoch_id" in columns
+
+
 def _ensure_lifecycle_generation_indexes(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -1324,15 +1333,277 @@ def _ensure_lifecycle_generation_indexes(connection: sqlite3.Connection) -> None
     )
     connection.execute(
         """
+        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_generation_lookup
+            ON setup_lifecycle_records(symbol, mode, direction, is_current, last_seen_at)
+        """
+    )
+    if _lifecycle_has_runtime_epoch_column(connection):
+        _ensure_lifecycle_epoch_current_indexes(connection)
+        return
+    connection.execute(
+        """
         CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_records_current_symbol_mode_direction
             ON setup_lifecycle_records(symbol, mode, direction)
             WHERE is_current = 1
         """
     )
+
+
+def _ensure_lifecycle_epoch_current_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute("DROP INDEX IF EXISTS ux_lifecycle_records_current_symbol_mode_direction")
     connection.execute(
         """
-        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_generation_lookup
-            ON setup_lifecycle_records(symbol, mode, direction, is_current, last_seen_at)
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_records_legacy_current_symbol_mode_direction
+            ON setup_lifecycle_records(symbol, mode, direction)
+            WHERE is_current = 1 AND runtime_epoch_id IS NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_records_epoch_current_symbol_mode_direction
+            ON setup_lifecycle_records(runtime_epoch_id, symbol, mode, direction)
+            WHERE is_current = 1 AND runtime_epoch_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_runtime_epoch
+            ON setup_lifecycle_records(runtime_epoch_id, symbol)
+        """
+    )
+
+
+def _migrate_runtime_epoch_isolation_v26(connection: sqlite3.Connection) -> None:
+    """Add epoch/origin tables and split current-row uniqueness. Do not create an epoch."""
+
+    if connection.in_transaction:
+        connection.commit()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_epochs (
+                epoch_id TEXT PRIMARY KEY,
+                contract_version TEXT NOT NULL,
+                activated_at TEXT NOT NULL,
+                cutoff_at TEXT NOT NULL,
+                reviewed_release_sha TEXT NOT NULL,
+                generation_binding TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_epoch_control (
+                control_key TEXT PRIMARY KEY CHECK (control_key = 'active'),
+                epoch_id TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_operational_runs (
+                run_id TEXT PRIMARY KEY,
+                runtime_epoch_id TEXT NOT NULL,
+                registered_at TEXT NOT NULL,
+                status TEXT NOT NULL,
+                producer_started_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_operational_origins (
+                origin_id TEXT PRIMARY KEY,
+                runtime_epoch_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                evaluation_completed_at TEXT,
+                decision_cutoff_at TEXT,
+                producer_observed_at TEXT,
+                origin_kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                block_reason TEXT,
+                created_at TEXT,
+                UNIQUE(run_id, symbol)
+            )
+            """
+        )
+        _ensure_column(connection, "setup_lifecycle_records", "runtime_epoch_id", "TEXT")
+        _ensure_column(connection, "setup_lifecycle_records", "creation_origin_id", "TEXT")
+        _ensure_column(connection, "public_alert_events", "runtime_epoch_id", "TEXT")
+        _ensure_column(connection, "public_alert_events", "origin_lifecycle_id", "TEXT")
+        _ensure_column(connection, "public_alert_events", "origin_root_event_id", "INTEGER")
+        _ensure_column(connection, "public_alert_events", "canonical_reservation_attempt_id", "INTEGER")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_public_alert_events_canonical_reservation
+                ON public_alert_events(canonical_reservation_attempt_id)
+                WHERE canonical_reservation_attempt_id IS NOT NULL
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS ix_runtime_operational_origins_run_symbol
+                ON runtime_operational_origins(run_id, symbol)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS ix_public_alert_events_runtime_epoch
+                ON public_alert_events(runtime_epoch_id)
+            """
+        )
+        _ensure_lifecycle_epoch_current_indexes(connection)
+        _rebuild_telegram_alert_attempts_without_unconditional_signal_alert_unique(connection)
+        _ensure_telegram_alert_attempt_indexes(connection)
+        connection.commit()
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+
+
+_TELEGRAM_ALERT_ATTEMPTS_PRE_V26_UNIQUE = "telegram_alert_attempts_pre_v26_unique"
+_UNCONDITIONAL_SIGNAL_ALERT_UNIQUE = re.compile(
+    r",\s*UNIQUE\s*\(\s*signal_id\s*,\s*alert_type\s*\)",
+    re.IGNORECASE,
+)
+_UNCONDITIONAL_SIGNAL_ALERT_UNIQUE_LEADING = re.compile(
+    r"UNIQUE\s*\(\s*signal_id\s*,\s*alert_type\s*\)\s*,",
+    re.IGNORECASE,
+)
+
+
+def _telegram_alert_attempts_has_unconditional_signal_alert_unique(
+    connection: sqlite3.Connection,
+) -> bool:
+    try:
+        indexes = connection.execute("PRAGMA index_list('telegram_alert_attempts')").fetchall()
+    except sqlite3.Error:
+        return False
+    for index in indexes:
+        unique = int(index[2]) if len(index) > 2 else 0
+        origin = str(index[3]).lower() if len(index) > 3 and index[3] is not None else ""
+        if unique != 1 or origin != "u":
+            continue
+        columns = [
+            str(row[2])
+            for row in connection.execute(f"PRAGMA index_info({_sql_ident(index[1])})").fetchall()
+        ]
+        if columns == ["signal_id", "alert_type"]:
+            return True
+    sql = _telegram_alert_attempts_create_sql(connection)
+    if not sql:
+        return False
+    return (
+        _UNCONDITIONAL_SIGNAL_ALERT_UNIQUE.search(sql) is not None
+        or _UNCONDITIONAL_SIGNAL_ALERT_UNIQUE_LEADING.search(sql) is not None
+    )
+
+
+def _telegram_alert_attempts_create_sql(connection: sqlite3.Connection) -> str:
+    row = connection.execute(
+        """
+        SELECT sql FROM sqlite_master
+        WHERE type = 'table' AND name = 'telegram_alert_attempts'
+        """
+    ).fetchone()
+    if row is None or row[0] is None:
+        return ""
+    return str(row[0])
+
+
+def _sql_ident(value: object) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def _rebuild_telegram_alert_attempts_without_unconditional_signal_alert_unique(
+    connection: sqlite3.Connection,
+) -> None:
+    """Rebuild telegram_alert_attempts only to drop table-level UNIQUE(signal_id, alert_type).
+
+    Transaction boundary: this runs inside `_migrate_runtime_epoch_isolation_v26`'s
+    BEGIN IMMEDIATE. Failure rolls back that v26 transaction. It does not claim
+    that the entire `initialize_database` routine is globally atomic.
+    """
+
+    if not _telegram_alert_attempts_has_unconditional_signal_alert_unique(connection):
+        return
+    create_sql = _telegram_alert_attempts_create_sql(connection)
+    rebuilt_sql = _UNCONDITIONAL_SIGNAL_ALERT_UNIQUE.sub("", create_sql, count=1)
+    if rebuilt_sql == create_sql:
+        rebuilt_sql = _UNCONDITIONAL_SIGNAL_ALERT_UNIQUE_LEADING.sub("", create_sql, count=1)
+    if rebuilt_sql == create_sql:
+        raise StorageError(
+            "Unable to remove obsolete UNIQUE(signal_id, alert_type) from telegram_alert_attempts."
+        )
+    sequence_row = connection.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'telegram_alert_attempts'"
+    ).fetchone()
+    preserved_seq = int(sequence_row[0]) if sequence_row is not None else None
+    triggers = tuple(
+        str(row[0])
+        for row in connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'trigger'
+              AND tbl_name = 'telegram_alert_attempts'
+              AND sql IS NOT NULL
+            """
+        ).fetchall()
+        if row[0]
+    )
+    connection.execute(
+        "ALTER TABLE telegram_alert_attempts RENAME TO telegram_alert_attempts_pre_v26_unique"
+    )
+    connection.execute(rebuilt_sql)
+    _copy_telegram_alert_attempts_pre_v26_unique_rows(connection)
+    max_id_row = connection.execute("SELECT MAX(id) FROM telegram_alert_attempts").fetchone()
+    max_id = int(max_id_row[0]) if max_id_row is not None and max_id_row[0] is not None else 0
+    restored_seq = max(preserved_seq or 0, max_id)
+    if restored_seq > 0:
+        existing_seq = connection.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'telegram_alert_attempts'"
+        ).fetchone()
+        if existing_seq is None:
+            connection.execute(
+                "INSERT INTO sqlite_sequence(name, seq) VALUES ('telegram_alert_attempts', ?)",
+                (restored_seq,),
+            )
+        elif int(existing_seq[0]) < restored_seq:
+            connection.execute(
+                "UPDATE sqlite_sequence SET seq = ? WHERE name = 'telegram_alert_attempts'",
+                (restored_seq,),
+            )
+    connection.execute("DROP TABLE telegram_alert_attempts_pre_v26_unique")
+    for trigger_sql in triggers:
+        connection.execute(trigger_sql)
+
+
+def _copy_telegram_alert_attempts_pre_v26_unique_rows(connection: sqlite3.Connection) -> None:
+    """Copy every attempt row with original IDs. Tests may inject failure here."""
+
+    legacy_columns = [
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(telegram_alert_attempts_pre_v26_unique)"
+        ).fetchall()
+    ]
+    target_columns = [
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(telegram_alert_attempts)").fetchall()
+    ]
+    common_columns = [column for column in target_columns if column in legacy_columns]
+    if "id" not in common_columns:
+        raise StorageError("telegram_alert_attempts rebuild refused to proceed without preserving id.")
+    column_list = ", ".join(common_columns)
+    connection.execute(
+        f"""
+        INSERT INTO telegram_alert_attempts ({column_list})
+        SELECT {column_list}
+        FROM telegram_alert_attempts_pre_v26_unique
         """
     )
 
@@ -1373,6 +1644,14 @@ def _ensure_telegram_alert_attempt_indexes(connection: sqlite3.Connection) -> No
             WHERE telegram_status IN ('reserved', 'pending', 'in_flight', 'retryable', 'uncertain', 'sent')
               AND public_watchlist_event_key IS NOT NULL
               AND public_watchlist_event_key NOT IN ('', 'N/A')
+        """
+    )
+    connection.execute("DROP INDEX IF EXISTS ux_telegram_alert_attempts_signal_alert_operational")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_telegram_alert_attempts_signal_alert_operational
+            ON telegram_alert_attempts(signal_id, alert_type)
+            WHERE lower(telegram_status) NOT IN ('blocked', 'skipped', 'failed')
         """
     )
 
@@ -1506,8 +1785,7 @@ def _ensure_nullable_telegram_sent_at(connection: sqlite3.Connection) -> None:
             normalized_entry_zone_high TEXT NOT NULL DEFAULT 'N/A',
             normalized_invalidation TEXT NOT NULL DEFAULT 'N/A',
             dedupe_status TEXT NOT NULL DEFAULT 'N/A',
-            dedupe_reason TEXT NOT NULL DEFAULT 'N/A',
-            UNIQUE(signal_id, alert_type)
+            dedupe_reason TEXT NOT NULL DEFAULT 'N/A'
         )
         """
     )

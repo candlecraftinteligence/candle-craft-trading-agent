@@ -8,6 +8,7 @@ from enum import Enum
 from pydantic import ValidationError
 
 from app.storage.database import StorageError, UnsupportedSchemaVersionError
+from app.runtime_epoch.errors import RuntimeEpochError
 from app.universe.symbol_universe import UniverseResolutionError
 
 
@@ -114,7 +115,7 @@ def classify_watch_exception(exc: Exception | SystemExit) -> WatchFailureDisposi
         if exc.__cause__ is not None and isinstance(exc.__cause__, Exception):
             return classify_watch_exception(exc.__cause__)
         return WatchFailureDisposition.FATAL
-    if isinstance(exc, (FatalWatchIterationError, UnsupportedSchemaVersionError)):
+    if isinstance(exc, (FatalWatchIterationError, UnsupportedSchemaVersionError, RuntimeEpochError)):
         return WatchFailureDisposition.FATAL
     if isinstance(exc, RecoverableWatchIterationError):
         return WatchFailureDisposition.RECOVERABLE

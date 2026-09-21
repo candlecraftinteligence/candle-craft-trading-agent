@@ -382,7 +382,8 @@ def test_dry_run_mode_persists_local_drafts_without_network(tmp_path) -> None:
     assert routed.delivery_status == "dry_run"
     assert transport.calls == []
     records = _read_jsonl(routed.draft_path)
-    assert "valid_setup" in {record["draft_type"] for record in records}
+    assert "valid_setup" not in {record["draft_type"] for record in records}
+    assert "scan_health" in {record["draft_type"] for record in records}
 
 
 def test_enabled_admin_mode_sends_one_admin_report_and_ignores_public_vip(tmp_path) -> None:
@@ -578,7 +579,8 @@ def test_admin_report_includes_target_blocked_lifecycle_and_no_trade_footer() ->
     report = format_admin_scan_report(result, manifest_row=_manifest())
 
     assert "Valid Setups" in report
-    assert "VALIDUSDT | long" in report
+    valid_section = report.split("Near Misses")[0]
+    assert "VALIDUSDT | long" not in valid_section
     assert "Near Misses" in report
     assert "NEARUSDT | final" in report
     assert "Target Blocked" in report

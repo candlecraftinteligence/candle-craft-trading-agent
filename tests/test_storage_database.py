@@ -423,7 +423,7 @@ def test_schema_v19_backfills_existing_cursor_without_rewind_or_milestone_loss(
         progress.entry_at,
         progress.tp1_at,
     )
-    assert version == SCHEMA_VERSION == 25
+    assert version == SCHEMA_VERSION == 26
 
 
 def _create_schema_v19_public_truth_fixture(db_path: Path) -> None:
@@ -572,7 +572,7 @@ def test_schema_v19_to_v20_adds_public_truth_audit_columns_idempotently(
             """
         ).fetchone()
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 25
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 26
 
     assert expected_columns <= columns
     assert audit_defaults == ("N/A", "N/A", "N/A", "N/A", "N/A")
@@ -1667,7 +1667,7 @@ def test_schema_v14_to_v17_preserves_lifecycle_and_telegram_data(
 
     assert _representative_v14_rows(db_path) == before
     version, tables, attempt_columns, public_columns = _schema_contract(db_path)
-    assert version == SCHEMA_VERSION == 25
+    assert version == SCHEMA_VERSION == 26
     assert "setup_lifecycle_outcome_progress" in tables
     assert "public_alert_delivery_parts" in tables
     assert "delivery_state" in attempt_columns
@@ -1927,7 +1927,7 @@ def test_schema_v15_delivery_data_survives_v16_migration(tmp_path) -> None:
         "v15-plan", "SENT", "2026-07-01T10:00:01Z", "SENT"
     )
     assert "public_alert_delivery_parts" in tables
-    assert version == SCHEMA_VERSION == 25
+    assert version == SCHEMA_VERSION == 26
 
 
 def test_schema_v16_migration_is_idempotent_for_v15_delivery_data(tmp_path) -> None:
@@ -2021,11 +2021,28 @@ def test_schema_v14_lifecycle_row_migrates_to_current_legacy_generation(
               AND name = 'ux_lifecycle_records_current_symbol_mode_direction'
             """
         ).fetchone()
+        legacy_index = connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'index'
+              AND name = 'ux_lifecycle_records_legacy_current_symbol_mode_direction'
+            """
+        ).fetchone()
+        epoch_index = connection.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'index'
+              AND name = 'ux_lifecycle_records_epoch_current_symbol_mode_direction'
+            """
+        ).fetchone()
         assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
     assert {"structural_anchor", "is_current"} <= columns
-    assert index_sql is not None
-    assert "WHERE is_current = 1" in str(index_sql[0])
+    assert index_sql is None
+    assert legacy_index is not None
+    assert epoch_index is not None
+    assert "runtime_epoch_id IS NULL" in str(legacy_index[0])
+    assert "runtime_epoch_id IS NOT NULL" in str(epoch_index[0])
 
     new_generation = legacy.model_copy(
         update={
@@ -2038,9 +2055,6 @@ def test_schema_v14_lifecycle_row_migrates_to_current_legacy_generation(
         }
     )
     with SQLiteSetupLifecycleRepository(db_path) as repository:
-        with pytest.raises(sqlite3.IntegrityError):
-            repository.upsert_record(new_generation)
-        repository.supersede_record(legacy.lifecycle_id)
         repository.upsert_record(new_generation)
 
     with SQLiteSetupLifecycleRepository(db_path) as repository:
@@ -2055,7 +2069,8 @@ def test_schema_v14_lifecycle_row_migrates_to_current_legacy_generation(
     assert current is not None
     assert current.lifecycle_id == "v17-generation"
     assert historical is not None
-    assert historical.is_current is False
+    assert historical.is_current is True
+    assert historical.runtime_epoch_id is None
     assert len(generations) == 2
 
 
@@ -2194,7 +2209,7 @@ def test_schema_v20_to_v21_adds_economic_identity_columns_without_backfill(
             ).fetchall()
         }
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 25
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 26
 
     assert {"setup_id", "plan_version_id", "economic_identity_reason"} <= columns
     assert after is not None
@@ -2236,7 +2251,7 @@ def test_fresh_database_contains_economic_identity_schema(tmp_path: Path) -> Non
             str(row[1])
             for row in connection.execute("PRAGMA table_info(setup_lifecycle_records)").fetchall()
         }
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 25
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 26
         assert {"setup_id", "plan_version_id", "economic_identity_reason"} <= columns
         nullability = {
             str(row[1]): int(row[3])
@@ -2426,7 +2441,7 @@ def test_schema_v21_to_v22_adds_progress_plan_version_without_backfill(
             WHERE type = 'table' AND name = 'setup_lifecycle_outcome_progress'
             """
         ).fetchone()[0]
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 25
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 26
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert "plan_version_id" in after_columns
@@ -2476,7 +2491,7 @@ def test_fresh_database_contains_progress_plan_version_schema(tmp_path: Path) ->
             str(row[1])
             for row in connection.execute("PRAGMA table_info(setup_outcome_analytics)").fetchall()
         }
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 25
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 26
         assert columns["plan_version_id"] == 0
         assert columns["last_eligibility_decision_at"] == 0
         assert columns["last_eligibility_prefix_evidence_json"] == 0
@@ -2772,7 +2787,7 @@ def test_schema_v22_to_v23_adds_eligibility_cutoff_without_backfill(
             WHERE type = 'table' AND name = 'setup_lifecycle_outcome_progress'
             """
         ).fetchone()[0]
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 25
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 26
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert "last_eligibility_decision_at" in after_columns
@@ -2838,7 +2853,7 @@ def test_schema_v23_to_v24_adds_prefix_evidence_without_backfill(
             WHERE type = 'table' AND name = 'setup_lifecycle_outcome_progress'
             """
         ).fetchone()[0]
-        assert identify_schema_version(connection) == SCHEMA_VERSION == 25
+        assert identify_schema_version(connection) == SCHEMA_VERSION == 26
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
     assert "last_eligibility_prefix_evidence_json" in after_columns

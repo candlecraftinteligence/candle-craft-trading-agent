@@ -12,7 +12,11 @@ This phase prepares bounded read-only preflight diagnostics, synthetic compatibi
 
 Functional cutoff: the entire merged forensic foundation through PR #120, plus the readiness-only PR that added this collector and runbook.
 
-Expected application schema: **v25**.
+Expected application schema at the forensic-foundation checkpoint: **v25**.
+
+`PROSPECTIVE_RUNTIME_EPOCH_ISOLATION` introduces application schema **v26** as a new code/schema prerequisite. The reviewed `eef92b89` release does not acquire epoch isolation merely because a later PR exists. Runtime cutover/restart remains unauthorized until a future release is pinned to its reviewed merged SHA and a separate runbook authorizes epoch initialization.
+
+Expected application schema: **v25** (checkpoint foundation). v26 is DEV-implemented and not authorized for Runtime.
 
 Known functional anchor (must remain an ancestor of the eventual release):
 

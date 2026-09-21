@@ -54,6 +54,8 @@ from app.lifecycle.outcome_policy import (
     stored_plan_geometry_failure,
 )
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
+from app.runtime_epoch.errors import RuntimeEpochError
+from app.runtime_epoch.ownership import require_current_epoch_lifecycle_id
 
 OUTCOME_ELIGIBLE_STATES = frozenset(
     {
@@ -103,6 +105,25 @@ def evaluate_closed_candle_outcomes(
     repository: SQLiteSetupLifecycleRepository,
     scan_run_id: str | None = None,
 ) -> LifecycleOutcomeEvaluation:
+    try:
+        require_current_epoch_lifecycle_id(repository._connection, record.lifecycle_id)
+    except RuntimeEpochError:
+        plan_identities = compatible_plan_identities(record)
+        progress = next(
+            (
+                candidate
+                for identity in plan_identities
+                if (
+                    candidate := repository.get_outcome_progress(
+                        lifecycle_id=record.lifecycle_id,
+                        plan_identity=identity,
+                    )
+                )
+                is not None
+            ),
+            None,
+        )
+        return LifecycleOutcomeEvaluation(record=record, progress=progress)
     plan_identities = compatible_plan_identities(record)
     progress = next(
         (
