@@ -699,7 +699,7 @@ Results (DEV PC, `C:\CandleCraftDev`, 2026-09-21, sixth bounded repair):
 - Epoch-isolation modules including R91–R150: passed
 - `python -m pytest`: **2699 passed**, 0 failed, 1 warning (`StarletteDeprecationWarning` from FastAPI/Starlette `TestClient`), **429.98s** (0:07:09), **exit 0**
 - `git diff --check`: **clean** (exit 0)
-- GitHub CI: recorded after the sixth-repair push
+- GitHub CI `Python 3.11 tests` on `96af21e4744c0ba2ae05bcc6d7ad83e169768d4d`: **success** (3m28s) https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/35633869373/job/106446375476
 
 Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=false` / `LOCAL_MANUAL_MODE=true` / `ORDER_EXECUTION_ENABLED=false`. No Runtime filesystem, live exchange, listener, or scanner watch loop. Synthetic/temp DBs only.
 
@@ -716,4 +716,5 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 - Architecture-reviewed PR HEAD before the sixth repair: `9360b1054119875a6f376271c4e02312a018e72d`
 - Sixth bounded repair commit: `cd703106af5c7af7c0ca276bfaabf0c5bcb2762f`
 - Sixth-repair handoff record: `d7ee768c9910ffb80849bd9ef7455552f255a18e`
-- Final PR #123 HEAD: recorded after this handoff pin is pushed and CI is known
+- CI-tested PR HEAD: `96af21e4744c0ba2ae05bcc6d7ad83e169768d4d`
+- Final PR #123 HEAD: `96af21e4744c0ba2ae05bcc6d7ad83e169768d4d` plus the handoff commit that records this CI result. That commit does not change the repair.
