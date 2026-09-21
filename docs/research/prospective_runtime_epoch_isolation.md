@@ -362,5 +362,5 @@ Environment: Windows 10, `TELEGRAM_DRY_RUN=true` / `TELEGRAM_SIGNALS_ENABLED=fal
 
 - Baseline main: `eef92b89f168bbb016715f3486b9f6bf2824f53f`
 - Architecture-reviewed PR HEAD before this repair: `3cdb78e0489d7dda298ec841f4559e0778a68637`
-- Third bounded repair commit: recorded after commit
-- Final PR #123 HEAD: recorded after commit/push
+- Third bounded repair commit: `f2170d2847404cdaed61988c91a56aeeed554e37`
+- Final PR #123 HEAD: `f2170d2847404cdaed61988c91a56aeeed554e37`
