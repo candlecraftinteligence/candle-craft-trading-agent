@@ -1,5 +1,7 @@
 import { motion, useReducedMotion } from "framer-motion";
 import { useState } from "react";
+import { invalidatePackProfile } from "../api/profile";
+import { apiFetch } from "../api/server";
 import type { Mission } from "../api/types";
 import { REPLAY_DISCLAIMER } from "../copy";
 import { replayPreview } from "../domain/xp";
@@ -60,6 +62,19 @@ export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
       score: next.total,
     });
     setRevealed(true);
+    void apiFetch(`/api/missions/${encodeURIComponent(mission.cci_setup_id)}/replay`, {
+      method: "POST",
+      body: JSON.stringify({
+        chosen_tier: tier,
+        chosen_decision: decision,
+        evidence_reviewed: reviewed,
+        idempotency_key: mission.cci_setup_id,
+      }),
+    })
+      .then((response) => {
+        if (response.ok) invalidatePackProfile();
+      })
+      .catch(() => undefined);
   }
 
   return (

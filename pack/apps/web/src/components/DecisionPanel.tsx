@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invalidatePackProfile } from "../api/profile";
+import { apiFetch } from "../api/server";
 import {
   DECISIONS,
   decisionLabel,
-  lockDecision,
+  rememberDecision,
   useDecisions,
   type DecisionId,
 } from "../decisions/localDecisions";
@@ -24,15 +26,37 @@ export function DecisionPanel({ missionId }: DecisionPanelProps) {
   const locked = decisions[missionId] ?? null;
   const [note, setNote] = useState<string | null>(null);
 
-  function choose(decision: DecisionId) {
+  useEffect(() => {
+    let cancel = false;
+    apiFetch(`/api/missions/${encodeURIComponent(missionId)}/decision`)
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((body: { decision?: DecisionId | null } | null) => {
+        if (cancel || !body?.decision) return;
+        rememberDecision(missionId, body.decision);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancel = true;
+    };
+  }, [missionId]);
+
+  async function choose(decision: DecisionId) {
     if (locked) return;
-    const stored = lockDecision(missionId, decision);
+    const response = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/decision`, {
+      method: "POST",
+      body: JSON.stringify({ decision }),
+    });
+    if (!response.ok && response.status !== 409) {
+      setNote("The seal did not land. Nothing was stored.");
+      return;
+    }
+    const body = (await response.json()) as { decision?: DecisionId };
+    const stored = body.decision ? rememberDecision(missionId, body.decision) : decision;
     telegramBridge.impact("medium");
     setNote(
-      stored === decision
-        ? `${SEAL_LINE[stored]} Sealed on this device.`
-        : `Already sealed · ${decisionLabel(stored)}`,
+      stored === decision ? `${SEAL_LINE[stored]} Sealed.` : `Already sealed · ${decisionLabel(stored)}`,
     );
+    invalidatePackProfile();
   }
 
   return (
@@ -43,7 +67,7 @@ export function DecisionPanel({ missionId }: DecisionPanelProps) {
       </div>
       {locked ? (
         <div className="lock-seal" data-testid="decision-lock">
-          <p className="kicker">Sealed on this device</p>
+          <p className="kicker">Sealed</p>
           <p className="lock-choice">{decisionLabel(locked)}</p>
         </div>
       ) : null}
@@ -79,8 +103,8 @@ export function DecisionPanel({ missionId }: DecisionPanelProps) {
           Passing is Pack strength.
         </li>
       </ul>
-      <p className="fine">{note ?? "The seal stays on this device. It is not an order."}</p>
-      <p className="fine">Pack XP here is a cosmetic preview, not a ledger entry.</p>
+      <p className="fine">{note ?? "The seal stays. It is not an order."}</p>
+      <p className="fine">Pack XP lands in the server ledger. A retry cannot add more.</p>
     </section>
   );
 }

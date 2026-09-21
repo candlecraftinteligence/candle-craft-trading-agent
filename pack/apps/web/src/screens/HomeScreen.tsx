@@ -1,13 +1,13 @@
 import { motion, useReducedMotion } from "framer-motion";
 import { Link } from "react-router-dom";
+import { usePackProfile } from "../api/profile";
 import { useMissionList } from "../api/useMissionList";
 import { MissionCard } from "../components/MissionCard";
 import { RankCard } from "../components/RankCard";
 import { TodaysQuests } from "../components/TodaysQuests";
 import { PRODUCT_NAME, QUIET_MARKET, TAGLINE } from "../copy";
 import { useDecisions } from "../decisions/localDecisions";
-import { lockXp, replayPreview } from "../domain/xp";
-import { useJournals, type JournalRecord } from "../storage/journals";
+import { useJournals } from "../storage/journals";
 import { useMarks } from "../storage/marks";
 import { useReplays } from "../storage/replays";
 
@@ -18,9 +18,9 @@ export function HomeScreen() {
   const journals = useJournals();
   const replays = useReplays();
   const marks = useMarks();
+  const profile = usePackProfile();
   const open = missions?.filter((mission) => !mission.resolved) ?? [];
   const quiet = missions !== null && open.length === 0;
-  const xp = previewTotal(decisions, journals, replays, marks.evidenceRead, marks.reviews, missions);
 
   return (
     <div className="stack">
@@ -30,7 +30,7 @@ export function HomeScreen() {
         <p className="tagline">{TAGLINE}</p>
       </header>
 
-      <RankCard xp={xp} />
+      <RankCard xp={profile ? profile.pack_xp : null} />
 
       {quiet ? (
         <section className="panel quiet-hero">
@@ -90,24 +90,4 @@ export function HomeScreen() {
       />
     </div>
   );
-}
-
-function previewTotal(
-  decisions: Record<string, import("../decisions/localDecisions").DecisionId>,
-  journals: Record<string, JournalRecord>,
-  replays: Record<string, { score: number }>,
-  evidenceReads: string[],
-  reviews: string[],
-  missions: { cci_setup_id: string; resolved: boolean }[] | null,
-): number {
-  let total = evidenceReads.length * 5 + reviews.length * 20;
-  for (const decision of Object.values(decisions)) total += lockXp(decision);
-  if (missions) {
-    const resolvedIds = new Set(missions.filter((mission) => mission.resolved).map((mission) => mission.cci_setup_id));
-    for (const missionId of Object.keys(journals)) {
-      if (resolvedIds.has(missionId)) total += 30;
-    }
-  }
-  for (const attempt of Object.values(replays)) total += replayPreview(attempt.score).total;
-  return total;
 }

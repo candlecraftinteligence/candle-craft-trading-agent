@@ -61,6 +61,7 @@ describe("CCI outcome and journal", () => {
     await user.type(screen.getByLabelText("Lesson"), "The pass would also have been valid.");
     await user.click(screen.getByRole("button", { name: "Save journal" }));
 
+    expect(await within(screen.getByTestId("user-journal")).findByText("WIN")).toBeInTheDocument();
     expect(within(screen.getByTestId("cci-outcome")).getByText("TP_HIT")).toBeInTheDocument();
     expect(within(screen.getByTestId("cci-outcome")).queryByText("WIN")).not.toBeInTheDocument();
     expect(within(screen.getByTestId("user-journal")).getByText("WIN")).toBeInTheDocument();

@@ -14,6 +14,7 @@ describe("decision lock", () => {
     render(<DecisionPanel missionId="mock_setup_btc_h1_active" />);
 
     await user.click(screen.getByRole("button", { name: "NO TRADE" }));
+    expect(await screen.findByTestId("decision-lock")).toHaveTextContent("NO TRADE");
 
     expect(screen.getByRole("button", { name: "NO TRADE" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByTestId("decision-lock")).toHaveTextContent("NO TRADE");

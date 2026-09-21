@@ -1,48 +1,36 @@
+import { usePackProfile } from "../api/profile";
 import { useMissionList } from "../api/useMissionList";
 import { Crest } from "../components/Crest";
 import { RankCard } from "../components/RankCard";
-import { useDecisions } from "../decisions/localDecisions";
 import { ACHIEVEMENTS, unlockedAchievementIds } from "../domain/achievements";
-import { lockXp, replayPreview } from "../domain/xp";
 import { WOLF_RANKS, rankProgress } from "../profile/ranks";
-import { useJournals } from "../storage/journals";
-import { useMarks } from "../storage/marks";
-import { useReplays } from "../storage/replays";
-
-const DEV_NAME = "Dev Operator";
 
 export function ProfileScreen() {
-  const decisions = useDecisions();
-  const journals = useJournals();
-  const replays = useReplays();
-  const marks = useMarks();
+  const profile = usePackProfile();
   const { missions } = useMissionList();
+  const decisions = profile?.decisions ?? {};
   const locked = Object.entries(decisions);
-  const noTrade = locked.filter(([, decision]) => decision === "NO_TRADE");
   const huntIds = new Set((missions ?? []).filter((mission) => mission.quality_tier === "HUNT").map((mission) => mission.cci_setup_id));
   const resolvedIds = new Set((missions ?? []).filter((mission) => mission.resolved).map((mission) => mission.cci_setup_id));
-  const noTradeOnHunt = noTrade.filter(([missionId]) => huntIds.has(missionId)).length;
-  const outcomeJournals = Object.keys(journals).filter((missionId) => resolvedIds.has(missionId)).length;
-  const highScores = Object.values(replays).filter((attempt) => attempt.score >= 80).length;
-  let xp = marks.evidenceRead.length * 5 + marks.reviews.length * 20;
-  for (const [, decision] of locked) xp += lockXp(decision);
-  for (const missionId of Object.keys(journals)) {
-    if (resolvedIds.has(missionId)) xp += 30;
-  }
-  for (const attempt of Object.values(replays)) xp += replayPreview(attempt.score).total;
-  const unlocked = unlockedAchievementIds({
-    locks: locked.length,
-    evidenceReads: marks.evidenceRead.length,
-    journals: Object.keys(journals).length,
-    noTrade: noTrade.length,
-    noTradeOnHunt,
-    reviews: marks.reviews.length,
-    replays: Object.keys(replays).length,
-    highScores,
-    outcomeJournals,
-  });
-  const progress = rankProgress(xp);
-  const ratio = locked.length === 0 ? "N/A" : `${noTrade.length}/${locked.length}`;
+  const noTradeOnHunt = locked.filter(([missionId, decision]) => decision === "NO_TRADE" && huntIds.has(missionId)).length;
+  const journalIds = profile?.journal_ids ?? [];
+  const outcomeJournals = journalIds.filter((missionId) => resolvedIds.has(missionId)).length;
+  const xp = profile ? profile.pack_xp : null;
+  const unlocked = profile
+    ? unlockedAchievementIds({
+        locks: locked.length,
+        evidenceReads: 0,
+        journals: journalIds.length,
+        noTrade: profile.no_trade_count,
+        noTradeOnHunt,
+        reviews: 0,
+        replays: profile.replay_count,
+        highScores: 0,
+        outcomeJournals,
+      })
+    : new Set<string>();
+  const progress = xp === null ? null : rankProgress(xp);
+  const ratio = !profile || locked.length === 0 ? "N/A" : `${profile.no_trade_count}/${locked.length}`;
 
   return (
     <div className="stack">
@@ -54,7 +42,7 @@ export function ProfileScreen() {
             <h1 className="display">Profile</h1>
           </div>
         </div>
-        <p className="fine">{DEV_NAME} · dev preview name</p>
+        <p className="fine">{profile?.display_name ?? "N/A"}</p>
       </header>
 
       <RankCard xp={xp} />
@@ -64,7 +52,7 @@ export function ProfileScreen() {
         <ul className="rank-list">
           <li className="rank-item">
             <span>Calls sealed</span>
-            <span>{locked.length} on this device</span>
+            <span>{profile ? locked.length : "N/A"}</span>
           </li>
           <li className="rank-item">
             <span>NO TRADE ratio</span>
@@ -72,15 +60,15 @@ export function ProfileScreen() {
           </li>
           <li className="rank-item">
             <span>Journals</span>
-            <span>{Object.keys(journals).length}</span>
+            <span>{profile ? journalIds.length : "N/A"}</span>
           </li>
           <li className="rank-item">
             <span>Tapes run</span>
-            <span>{Object.keys(replays).length}</span>
+            <span>{profile ? profile.replay_count : "N/A"}</span>
           </li>
           <li className="rank-item">
             <span>Discipline streak</span>
-            <span>N/A · placeholder</span>
+            <span>{profile ? profile.discipline_streak : "N/A"}</span>
           </li>
         </ul>
         <p className="fine">Discipline record only. No money on this shelf.</p>
@@ -111,7 +99,7 @@ export function ProfileScreen() {
         <p className="kicker">The climb</p>
         <ul className="rank-list">
           {WOLF_RANKS.map((rank) => (
-            <li key={rank.name} className="rank-item" data-current={rank.name === progress.name ? "true" : "false"}>
+            <li key={rank.name} className="rank-item" data-current={progress && rank.name === progress.name ? "true" : "false"}>
               <span>{rank.name}</span>
               <span>{rank.xp} XP</span>
             </li>

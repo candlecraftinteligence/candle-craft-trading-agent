@@ -81,7 +81,6 @@ a { text-decoration: none; }
   box-shadow: 0 0 0 1px rgba(42, 48, 56, 0.9);
   padding-left: var(--safe-left);
   padding-right: var(--safe-right);
-  overflow: clip;
 }
 
 .shell::before,
@@ -509,6 +508,9 @@ a { text-decoration: none; }
 .event-id { word-break: break-all; }
 
 .decision-panel {
+  position: sticky;
+  bottom: calc(var(--nav-h) + var(--safe-bottom) + 8px);
+  z-index: 4;
   display: grid;
   gap: 10px;
   padding: 12px;
@@ -633,7 +635,7 @@ a { text-decoration: none; }
   color: #f3e6cf;
 }
 
-.detail-stack { display: grid; gap: 16px; }
+.detail-stack { display: grid; gap: 16px; padding-bottom: 200px; }
 
 .status-hero { padding: 4px 0; }
 

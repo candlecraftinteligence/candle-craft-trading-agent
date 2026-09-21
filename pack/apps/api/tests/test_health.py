@@ -8,4 +8,5 @@ def test_health_reports_mock_source(client: TestClient) -> None:
         "status": "ok",
         "service": "cci-the-pack",
         "source": "mock",
+        "live_cci": "false",
     }

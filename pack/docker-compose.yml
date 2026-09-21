@@ -1,4 +1,18 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pack
+      POSTGRES_PASSWORD: pack
+      POSTGRES_DB: pack
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pack -d pack"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build:
       context: .
@@ -7,8 +21,19 @@ services:
       - "8000:8000"
     environment:
       CCI_SOURCE: mock
-      PACK_ENV: staging
+      LIVE_CCI: "false"
+      PACK_ENV: dev
+      APP_ENV: dev
+      DEV_BROWSER_MODE: "true"
+      DATABASE_URL: postgresql+psycopg://pack:pack@postgres:5432/pack
+      PACK_SESSION_SECRET: local-dev-only-not-a-secret
+      PACK_BOT_TOKEN: ""
+      AUTH_MAX_AGE_SECONDS: "86400"
       PACK_FIXTURES_DIR: /srv/pack/fixtures/missions
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -30,7 +55,7 @@ services:
       - "5173:5173"
     environment:
       VITE_PROXY_TARGET: http://api:8000
-      VITE_PACK_ENV: staging
+      VITE_PACK_ENV: dev
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
     depends_on:
       - api

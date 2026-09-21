@@ -129,6 +129,10 @@ export class TelegramBridge {
     return () => this.listeners.delete(listener);
   }
 
+  initData(): string {
+    return this.webApp?.initData?.trim() ?? "";
+  }
+
   impact(style: "light" | "medium" | "heavy" = "light"): void {
     this.webApp?.HapticFeedback?.impactOccurred?.(style);
   }

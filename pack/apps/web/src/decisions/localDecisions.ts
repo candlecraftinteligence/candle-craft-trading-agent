@@ -38,6 +38,10 @@ export function decisionLabel(id: DecisionId): string {
   return DECISIONS.find((item) => item.id === id)?.label ?? id;
 }
 
+export function rememberDecision(missionId: string, decision: DecisionId): DecisionId {
+  return lockDecision(missionId, decision);
+}
+
 export function lockDecision(missionId: string, decision: DecisionId): DecisionId {
   const store = readStore();
   const existing = store[missionId];

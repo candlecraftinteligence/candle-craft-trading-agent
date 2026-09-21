@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invalidatePackProfile } from "../api/profile";
+import { apiFetch } from "../api/server";
 import type { DecisionId } from "../decisions/localDecisions";
 import {
   CONFIDENCE_LEVELS,
@@ -6,6 +8,7 @@ import {
   saveJournal,
   useJournals,
   type ConfidenceLevel,
+  type JournalRecord,
   type JournalResult,
 } from "../storage/journals";
 
@@ -26,7 +29,22 @@ export function JournalPanel({ missionId, resolved, decision }: JournalPanelProp
   const [error, setError] = useState<string | null>(null);
   const needsReason = decision === "I_TOOK_THIS";
 
-  function submit() {
+  useEffect(() => {
+    let cancel = false;
+    apiFetch(`/api/missions/${encodeURIComponent(missionId)}/journal`)
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((body: { journal?: Record<string, unknown> | null } | null) => {
+        if (cancel || !body?.journal) return;
+        const record = journalFromServer(missionId, body.journal);
+        if (record) saveJournal(record);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancel = true;
+    };
+  }, [missionId]);
+
+  async function submit() {
     if (saved) return;
     if (!note.trim() || !confidence || !riskPlanNote.trim()) {
       setError("Note, confidence, and risk-plan note are required.");
@@ -40,7 +58,7 @@ export function JournalPanel({ missionId, resolved, decision }: JournalPanelProp
       setError("After resolution, add a self-reported result and a lesson.");
       return;
     }
-    saveJournal({
+    const record: JournalRecord = {
       missionId,
       note: note.trim(),
       confidence,
@@ -48,8 +66,25 @@ export function JournalPanel({ missionId, resolved, decision }: JournalPanelProp
       reason: needsReason ? reason.trim() : null,
       result: resolved ? result : null,
       lesson: resolved ? lesson.trim() : null,
+    };
+    const response = await apiFetch(`/api/missions/${encodeURIComponent(missionId)}/journal`, {
+      method: "POST",
+      body: JSON.stringify({
+        process_notes: record.note,
+        emotional_state: record.confidence,
+        followed_plan: record.riskPlanNote,
+        self_reported_result: record.result,
+        reason: record.reason,
+        lesson: record.lesson,
+      }),
     });
+    if (!response.ok) {
+      setError("The journal did not land. Nothing was stored.");
+      return;
+    }
+    saveJournal(record);
     setError(null);
+    invalidatePackProfile();
   }
 
   return (
@@ -99,7 +134,7 @@ export function JournalPanel({ missionId, resolved, decision }: JournalPanelProp
           className="journal-form"
           onSubmit={(event) => {
             event.preventDefault();
-            submit();
+            void submit();
           }}
         >
           <label className="field">
@@ -162,4 +197,24 @@ export function JournalPanel({ missionId, resolved, decision }: JournalPanelProp
       )}
     </section>
   );
+}
+
+function journalFromServer(missionId: string, journal: Record<string, unknown>): JournalRecord | null {
+  const note = journal.process_notes;
+  const confidence = journal.emotional_state;
+  const riskPlanNote = journal.followed_plan;
+  if (typeof note !== "string" || typeof riskPlanNote !== "string") return null;
+  if (typeof confidence !== "string" || !CONFIDENCE_LEVELS.includes(confidence as ConfidenceLevel)) return null;
+  const result = journal.self_reported_result;
+  const lesson = journal.lesson;
+  const reason = journal.reason;
+  return {
+    missionId,
+    note,
+    confidence: confidence as ConfidenceLevel,
+    riskPlanNote,
+    reason: typeof reason === "string" ? reason : null,
+    result: JOURNAL_RESULTS.includes(result as JournalResult) ? (result as JournalResult) : null,
+    lesson: typeof lesson === "string" ? lesson : null,
+  };
 }

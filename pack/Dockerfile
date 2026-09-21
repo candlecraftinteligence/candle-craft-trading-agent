@@ -11,6 +11,7 @@ COPY fixtures /srv/pack/fixtures
 ENV PACK_FIXTURES_DIR=/srv/pack/fixtures/missions
 ENV PYTHONPATH=/srv/pack/apps/api
 ENV CCI_SOURCE=mock
+ENV LIVE_CCI=false
 ENV PACK_ENV=staging
 ENV PYTHONDONTWRITEBYTECODE=1
 
