@@ -7,6 +7,7 @@ import { MissionsScreen } from "./screens/MissionsScreen";
 import { ProfileScreen } from "./screens/ProfileScreen";
 import { ReplayScreen } from "./screens/ReplayScreen";
 import { telegramBridge } from "./telegram/TelegramBridge";
+import { missionPathFromStartParam } from "./telegram/startParam";
 
 export function App() {
   return (
@@ -30,10 +31,10 @@ function StartParamRedirect() {
 
   useEffect(() => {
     if (handled.current) return;
-    const startParam = telegramBridge.snapshot.startParam;
-    if (!startParam || !/^mock_setup_[a-z0-9_]+$/.test(startParam)) return;
+    const path = missionPathFromStartParam(telegramBridge.snapshot.startParam);
+    if (!path) return;
     handled.current = true;
-    navigate(`/missions/${startParam}`, { replace: true });
+    navigate(path, { replace: true });
   }, [navigate]);
 
   return null;

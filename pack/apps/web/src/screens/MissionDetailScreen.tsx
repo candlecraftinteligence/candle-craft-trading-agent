@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { fetchMission, MissionNotFoundError } from "../api/missions";
+import { invalidateQuests } from "../api/quests";
+import { apiFetch } from "../api/server";
 import type { Mission } from "../api/types";
 import { DecisionPanel } from "../components/DecisionPanel";
 import { JournalPanel } from "../components/JournalPanel";
@@ -34,7 +36,11 @@ export function MissionDetailScreen() {
         The board
       </Link>
       {load.status === "loading" ? <p className="status-line">Reading fixture…</p> : null}
-      {load.status === "missing" ? <p className="status-line">This mission is not in the fixture set.</p> : null}
+      {load.status === "missing" ? (
+        <p className="status-line" data-testid="mission-missing">
+          This mission is not in the fixture set.
+        </p>
+      ) : null}
       {load.status === "error" ? (
         <p className="status-line">{load.message} Nothing was invented in its place.</p>
       ) : null}
@@ -113,7 +119,16 @@ export function MissionDetailBody({ mission }: { mission: Mission }) {
           type="button"
           className="btn"
           disabled={evidenceRead}
-          onClick={() => markEvidenceRead(mission.cci_setup_id)}
+          onClick={() => {
+            void apiFetch(`/api/missions/${encodeURIComponent(mission.cci_setup_id)}/mark`, {
+              method: "POST",
+              body: JSON.stringify({ kind: "evidence" }),
+            }).then((response) => {
+              if (!response.ok) return;
+              markEvidenceRead(mission.cci_setup_id);
+              invalidateQuests();
+            });
+          }}
         >
           {evidenceRead ? "Evidence read" : "I've read the tape"}
         </button>

@@ -1,4 +1,6 @@
 import { Link } from "react-router-dom";
+import { invalidateQuests } from "../api/quests";
+import { apiFetch } from "../api/server";
 import type { DecisionId } from "../decisions/localDecisions";
 import { markReview } from "../storage/marks";
 
@@ -26,7 +28,20 @@ export function QuestChip({
       <p className="section-title">{step.title}</p>
       <p className="fine">{step.detail}</p>
       {step.kind === "review" ? (
-        <button type="button" className="btn primary" onClick={() => markReview(missionId)}>
+        <button
+          type="button"
+          className="btn primary"
+          onClick={() => {
+            void apiFetch(`/api/missions/${encodeURIComponent(missionId)}/mark`, {
+              method: "POST",
+              body: JSON.stringify({ kind: "review" }),
+            }).then((response) => {
+              if (!response.ok) return;
+              markReview(missionId);
+              invalidateQuests();
+            });
+          }}
+        >
           Mark the review done
         </button>
       ) : null}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invalidatePackProfile } from "../api/profile";
+import { invalidateQuests } from "../api/quests";
 import { apiFetch } from "../api/server";
 import {
   DECISIONS,
@@ -57,6 +58,7 @@ export function DecisionPanel({ missionId }: DecisionPanelProps) {
       stored === decision ? `${SEAL_LINE[stored]} Sealed.` : `Already sealed · ${decisionLabel(stored)}`,
     );
     invalidatePackProfile();
+    invalidateQuests();
   }
 
   return (

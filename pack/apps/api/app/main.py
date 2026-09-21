@@ -5,9 +5,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
+from app.api.engagement import router as engagement_router
 from app.api.health import router as health_router
 from app.api.missions import router as missions_router
 from app.api.progression import router as progression_router
+from app.bot.runtime import ensure_bot_optional
 from app.db.session import session_scope
 from app.integrations.cci.mock_fixture_source import MockFixtureSource
 from app.integrations.cci.protocol import CciMissionSource
@@ -24,6 +26,7 @@ _DEV_ORIGINS = [
 
 def create_app(source: CciMissionSource | None = None) -> FastAPI:
     settings = load_settings()
+    ensure_bot_optional()
     if settings.live_cci:
         raise RuntimeError("LIVE_CCI must stay false. Live CCI is not connected in this build.")
     if source is None:
@@ -59,6 +62,7 @@ def create_app(source: CciMissionSource | None = None) -> FastAPI:
     app.include_router(missions_router)
     app.include_router(auth_router)
     app.include_router(progression_router)
+    app.include_router(engagement_router)
     return app
 
 

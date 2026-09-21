@@ -13,6 +13,16 @@ export type PackProfile = {
   journal_ids: string[];
   replay_count: number;
   no_trade_count: number;
+  notification_prefs?: NotificationPrefs;
+  oath_accepted?: boolean;
+};
+
+export type NotificationPrefs = {
+  new_mission: boolean;
+  lifecycle_resolution: boolean;
+  quest_complete: boolean;
+  streak: boolean;
+  replay_nudge: boolean;
 };
 
 const EVENT = "pack-profile";

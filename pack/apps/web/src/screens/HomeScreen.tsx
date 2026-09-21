@@ -6,18 +6,10 @@ import { MissionCard } from "../components/MissionCard";
 import { RankCard } from "../components/RankCard";
 import { TodaysQuests } from "../components/TodaysQuests";
 import { PRODUCT_NAME, QUIET_MARKET, TAGLINE } from "../copy";
-import { useDecisions } from "../decisions/localDecisions";
-import { useJournals } from "../storage/journals";
-import { useMarks } from "../storage/marks";
-import { useReplays } from "../storage/replays";
 
 export function HomeScreen() {
   const reduced = useReducedMotion();
   const { missions, error } = useMissionList();
-  const decisions = useDecisions();
-  const journals = useJournals();
-  const replays = useReplays();
-  const marks = useMarks();
   const profile = usePackProfile();
   const open = missions?.filter((mission) => !mission.resolved) ?? [];
   const quiet = missions !== null && open.length === 0;
@@ -82,12 +74,7 @@ export function HomeScreen() {
         </section>
       ) : null}
 
-      <TodaysQuests
-        decisions={decisions}
-        journals={journals}
-        replays={replays}
-        evidenceReads={marks.evidenceRead}
-      />
+      <TodaysQuests />
     </div>
   );
 }

@@ -39,7 +39,61 @@ beforeEach(() => {
           journal_ids: [...journals.keys()],
           replay_count: 0,
           no_trade_count: locked.filter((decision) => decision === "NO_TRADE").length,
+          notification_prefs: {
+            new_mission: true,
+            lifecycle_resolution: true,
+            quest_complete: false,
+            streak: false,
+            replay_nudge: false,
+          },
+          oath_accepted: false,
         });
+      }
+      if (path === "/api/quests") {
+        return json({
+          daily: [
+            {
+              code: "no-trade",
+              title: "Pass on purpose",
+              detail: "Seal NO TRADE. Passing is Pack strength.",
+              xp: 40,
+              period_key: "2026-09-21",
+              progress: 0,
+              target: 1,
+              completed: false,
+              href: "/missions",
+              cadence: "daily",
+            },
+            {
+              code: "read-lock",
+              title: "Read a mission and seal a call",
+              detail: "Any of the four decisions counts. A pass counts too.",
+              xp: 40,
+              period_key: "2026-09-21",
+              progress: 0,
+              target: 1,
+              completed: false,
+              href: "/missions",
+              cadence: "daily",
+            },
+            {
+              code: "replay",
+              title: "Run one closed tape",
+              detail: "Train on a closed setup. The outcome stays masked until you reveal.",
+              xp: 40,
+              period_key: "2026-09-21",
+              progress: 0,
+              target: 1,
+              completed: false,
+              href: "/replay",
+              cadence: "daily",
+            },
+          ],
+          weekly: [],
+        });
+      }
+      if (path === "/api/achievements") {
+        return json({ unlocked: [] });
       }
       const decisionMatch = path.match(/^\/api\/missions\/([^/]+)\/decision$/);
       if (decisionMatch) {

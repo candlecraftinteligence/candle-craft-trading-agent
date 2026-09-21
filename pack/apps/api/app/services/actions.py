@@ -4,7 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import Journal, Mission, ReplayAttempt, ReplayChallenge, User, UserMissionDecision
+from app.db.models import Journal, Mission, ProcessMark, ReplayAttempt, ReplayChallenge, User, UserMissionDecision
 from app.domain.progression import DECISION_XP, JOURNAL_XP, replay_base_xp, score_replay
 from app.services.ledger import award, touch_streak, used_today
 
@@ -225,3 +225,42 @@ def record_replay(
 
 def category_used(session: Session, user: User, category: str, now: datetime) -> int:
     return used_today(session, user.id, category, now)
+
+
+def record_mark(session: Session, user: User, cci_setup_id: str, kind: str, now: datetime) -> dict:
+    if kind not in {"evidence", "review"}:
+        raise ActionError(422, "Mark evidence or a review. Nothing else counts.")
+    mission = _mission(session, cci_setup_id)
+    if kind == "review" and mission.resolved_at is None and mission.outcome_code is None:
+        raise ActionError(422, "A review opens after the fixture resolves.")
+    existing = session.scalar(
+        select(ProcessMark).where(
+            ProcessMark.user_id == user.id,
+            ProcessMark.mission_id == mission.id,
+            ProcessMark.kind == kind,
+        )
+    )
+    if existing is not None:
+        return {"kind": kind, "created": False, "xp_awarded": 0}
+    row = ProcessMark(user_id=user.id, mission_id=mission.id, kind=kind, created_at=now)
+    try:
+        with session.begin_nested():
+            session.add(row)
+            session.flush()
+    except IntegrityError:
+        return {"kind": kind, "created": False, "xp_awarded": 0}
+    raw = 5 if kind == "evidence" else 20
+    category = "process" if kind == "evidence" else "journal_review"
+    granted = award(
+        session,
+        user,
+        raw_amount=raw,
+        category=category,
+        reason_code=kind,
+        idempotency_key=f"{kind}:{user.id}:{mission.id}",
+        now=now,
+        ref_type="process_mark",
+        ref_id=str(row.id),
+    )
+    touch_streak(session, user, now)
+    return {"kind": kind, "created": True, "xp_awarded": granted}

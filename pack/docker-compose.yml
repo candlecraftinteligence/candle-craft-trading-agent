@@ -28,6 +28,9 @@ services:
       DATABASE_URL: postgresql+psycopg://pack:pack@postgres:5432/pack
       PACK_SESSION_SECRET: local-dev-only-not-a-secret
       PACK_BOT_TOKEN: ""
+      PACK_TELEGRAM_BOT_TOKEN: ""
+      PACK_MINI_APP_URL: http://localhost:5173
+      BOT_REQUIRED: "false"
       AUTH_MAX_AGE_SECONDS: "86400"
       PACK_FIXTURES_DIR: /srv/pack/fixtures/missions
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
@@ -59,3 +62,15 @@ services:
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
     depends_on:
       - api
+
+  bot:
+    profiles: ["bot"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python /srv/pack/apps/bot/main.py
+    environment:
+      PYTHONPATH: /srv/pack/apps/api
+      PACK_TELEGRAM_BOT_TOKEN: ${PACK_TELEGRAM_BOT_TOKEN:-}
+      PACK_MINI_APP_URL: ${PACK_MINI_APP_URL:-http://localhost:5173}
+      BOT_REQUIRED: "false"

@@ -1,6 +1,7 @@
 import { motion, useReducedMotion } from "framer-motion";
 import { useState } from "react";
 import { invalidatePackProfile } from "../api/profile";
+import { invalidateQuests } from "../api/quests";
 import { apiFetch } from "../api/server";
 import type { Mission } from "../api/types";
 import { REPLAY_DISCLAIMER } from "../copy";
@@ -72,7 +73,10 @@ export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
       }),
     })
       .then((response) => {
-        if (response.ok) invalidatePackProfile();
+        if (response.ok) {
+          invalidatePackProfile();
+          invalidateQuests();
+        }
       })
       .catch(() => undefined);
   }

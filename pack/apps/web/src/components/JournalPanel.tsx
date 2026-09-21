@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invalidatePackProfile } from "../api/profile";
+import { invalidateQuests } from "../api/quests";
 import { apiFetch } from "../api/server";
 import type { DecisionId } from "../decisions/localDecisions";
 import {
@@ -85,6 +86,7 @@ export function JournalPanel({ missionId, resolved, decision }: JournalPanelProp
     saveJournal(record);
     setError(null);
     invalidatePackProfile();
+    invalidateQuests();
   }
 
   return (

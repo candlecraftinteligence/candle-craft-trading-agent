@@ -36,6 +36,7 @@ QUESTS = (
     ("journals-week", "weekly", "Three journals this week", 100),
     ("passes-week", "weekly", "Two NO TRADE locks", 100),
     ("replay-week", "weekly", "Five replay attempts", 100),
+    ("streak-week", "weekly", "Keep a discipline streak of 5 days", 100),
 )
 
 

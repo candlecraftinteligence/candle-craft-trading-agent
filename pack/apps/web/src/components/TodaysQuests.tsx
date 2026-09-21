@@ -1,59 +1,51 @@
 import { Link } from "react-router-dom";
-import type { DecisionId } from "../decisions/localDecisions";
-import { todayKey, todaysQuests, type QuestTemplate } from "../domain/quests";
-import type { JournalRecord } from "../storage/journals";
-import type { ReplayAttempt } from "../storage/replays";
+import { useServerQuests, type ServerQuest } from "../api/quests";
 
-type TodaysQuestsProps = {
-  decisions: Record<string, DecisionId>;
-  journals: Record<string, JournalRecord>;
-  replays: Record<string, ReplayAttempt>;
-  evidenceReads: string[];
-};
-
-export function TodaysQuests({ decisions, journals, replays, evidenceReads }: TodaysQuestsProps) {
-  const quests = todaysQuests(todayKey());
+export function TodaysQuests() {
+  const board = useServerQuests();
+  const daily = board?.daily ?? [];
+  const weekly = board?.weekly ?? [];
   return (
     <section className="panel" aria-label="Today's drills">
       <div className="panel-head">
         <p className="kicker">Today's drills</p>
-        <p className="fine">3 on the board</p>
+        <p className="fine">{board ? String(daily.length) : "N/A"}</p>
       </div>
-      <ul className="quest-list">
-        {quests.map((quest) => {
-          const done = isQuestDone(quest, { decisions, journals, replays, evidenceReads });
-          return (
-            <li key={quest.id} className="quest-row" data-done={done ? "true" : "false"}>
-              <div>
-                <p className="section-title">{quest.title}</p>
-                <p className="fine">{quest.detail}</p>
-              </div>
-              <Link className="btn" to={quest.href}>
-                {done ? "Logged" : "Go"}
-              </Link>
-            </li>
-          );
-        })}
-      </ul>
+      {board ? (
+        <ul className="quest-list">
+          {daily.map((quest) => (
+            <QuestRow key={quest.code} quest={quest} />
+          ))}
+        </ul>
+      ) : (
+        <p className="fine">Drills N/A until the den answers.</p>
+      )}
+      {weekly.length > 0 ? (
+        <>
+          <p className="kicker">This week</p>
+          <ul className="quest-list">
+            {weekly.map((quest) => (
+              <QuestRow key={quest.code} quest={quest} />
+            ))}
+          </ul>
+        </>
+      ) : null}
     </section>
   );
 }
 
-function isQuestDone(
-  quest: QuestTemplate,
-  input: TodaysQuestsProps,
-): boolean {
-  const decisions = Object.values(input.decisions);
-  switch (quest.id) {
-    case "read-lock":
-      return decisions.length > 0;
-    case "no-trade":
-      return decisions.includes("NO_TRADE");
-    case "journal":
-      return Object.keys(input.journals).length > 0;
-    case "replay":
-      return Object.keys(input.replays).length > 0;
-    case "evidence":
-      return input.evidenceReads.length > 0;
-  }
+function QuestRow({ quest }: { quest: ServerQuest }) {
+  return (
+    <li className="quest-row" data-done={quest.completed ? "true" : "false"}>
+      <div>
+        <p className="section-title">{quest.title}</p>
+        <p className="fine">
+          {quest.detail} {quest.progress}/{quest.target}
+        </p>
+      </div>
+      <Link className="btn" to={quest.href}>
+        {quest.completed ? "Logged" : "Go"}
+      </Link>
+    </li>
+  );
 }

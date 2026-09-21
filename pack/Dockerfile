@@ -6,6 +6,7 @@ COPY apps/api/requirements.txt /srv/pack/apps/api/requirements.txt
 RUN pip install --no-cache-dir -r /srv/pack/apps/api/requirements.txt
 
 COPY apps/api /srv/pack/apps/api
+COPY apps/bot /srv/pack/apps/bot
 COPY fixtures /srv/pack/fixtures
 
 ENV PACK_FIXTURES_DIR=/srv/pack/fixtures/missions

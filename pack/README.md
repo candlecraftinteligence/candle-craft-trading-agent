@@ -35,7 +35,9 @@ uvicorn app.main:app --reload --port 8000
 - `GET /api/missions/{cci_setup_id}`
 - `POST /api/auth/telegram` verifies Telegram `initData`
 - `POST /api/missions/{cci_setup_id}/decision` locks one call
-- `GET /api/me` reads Pack XP and Wolf Rank from the ledger
+- `GET /api/me` reads Pack XP, Wolf Rank, and notification prefs from the server
+- `GET /api/quests` returns today's drills and this week's drills, then awards quest XP once
+- `GET /api/achievements` returns unlocked discipline marks
 
 `CCI_SOURCE` must stay `mock`. Any other value refuses to start. `LIVE_CCI=true` refuses to start. Fixtures load from `pack/fixtures/missions` (override with `PACK_FIXTURES_DIR`).
 
@@ -71,6 +73,25 @@ From `pack/apps/web`:
 ```bash
 npm run test
 ```
+
+## Pack bot
+
+The Pack bot is separate from the CCI production bot. It reads `PACK_TELEGRAM_BOT_TOKEN` only. Leave that empty and the process exits without taking the API down. Set `BOT_REQUIRED=true` when a missing token should stop boot.
+
+```bash
+cd pack/apps/bot
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export PYTHONPATH=../api
+export PACK_MINI_APP_URL=https://your-pack-host
+export PACK_TELEGRAM_BOT_TOKEN=   # Pack BotFather token, not the CCI bot
+python main.py
+```
+
+`/start` sends a short welcome and an Open The Pack button. A mission id on the command, or `https://t.me/<pack_bot>/app?startapp=<mission_id>`, opens Mission Detail. Unknown ids land on the not-found state. Compose can start the same process with `docker compose --profile bot up`. Without a public HTTPS Mini App URL and a Pack BotFather token, the bot stays scaffolding.
+
+Notification types live on the user: new mission and resolution start on; quest, streak, and Replay nudges start off. Profile → Den signals toggles them. The sender does not invent urgency and does not paste the whole Mini App into chat.
 
 ## Safety
 

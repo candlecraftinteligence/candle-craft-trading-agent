@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_user, db_session, limit, now_utc, prepare, raise_action
 from app.db.models import Journal, Mission, ReplayAttempt, User, UserMissionDecision, XpLedger
+from app.domain.board import normalize_prefs
 from app.domain.progression import rank_name
 from app.services.actions import ActionError, lock_decision, record_replay, submit_journal
 
@@ -74,6 +75,8 @@ def me(request: Request, user: User = Depends(current_user), db: Session = Depen
         "journal_ids": list(journals),
         "replay_count": replay_count,
         "no_trade_count": sum(1 for decision in decisions.values() if decision == "NO_TRADE"),
+        "notification_prefs": normalize_prefs(user.notification_prefs),
+        "oath_accepted": user.oath_accepted_at is not None,
     }
 
 

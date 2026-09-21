@@ -1,36 +1,29 @@
-import { usePackProfile } from "../api/profile";
-import { useMissionList } from "../api/useMissionList";
+import { invalidatePackProfile, usePackProfile, type NotificationPrefs } from "../api/profile";
+import { invalidateQuests, useUnlockedAchievements } from "../api/quests";
+import { apiFetch } from "../api/server";
 import { Crest } from "../components/Crest";
 import { RankCard } from "../components/RankCard";
-import { ACHIEVEMENTS, unlockedAchievementIds } from "../domain/achievements";
+import { ACHIEVEMENTS } from "../domain/achievements";
 import { WOLF_RANKS, rankProgress } from "../profile/ranks";
+
+const PREF_ROWS: { key: keyof NotificationPrefs; label: string; hint: string }[] = [
+  { key: "new_mission", label: "New mission", hint: "On unless you turn it off" },
+  { key: "lifecycle_resolution", label: "Resolution", hint: "On unless you turn it off" },
+  { key: "quest_complete", label: "Drill logged", hint: "Quiet until you ask" },
+  { key: "streak", label: "Discipline streak", hint: "Quiet until you ask" },
+  { key: "replay_nudge", label: "Replay nudge", hint: "Quiet until you ask" },
+];
 
 export function ProfileScreen() {
   const profile = usePackProfile();
-  const { missions } = useMissionList();
+  const unlocked = new Set(useUnlockedAchievements() ?? []);
   const decisions = profile?.decisions ?? {};
   const locked = Object.entries(decisions);
-  const huntIds = new Set((missions ?? []).filter((mission) => mission.quality_tier === "HUNT").map((mission) => mission.cci_setup_id));
-  const resolvedIds = new Set((missions ?? []).filter((mission) => mission.resolved).map((mission) => mission.cci_setup_id));
-  const noTradeOnHunt = locked.filter(([missionId, decision]) => decision === "NO_TRADE" && huntIds.has(missionId)).length;
   const journalIds = profile?.journal_ids ?? [];
-  const outcomeJournals = journalIds.filter((missionId) => resolvedIds.has(missionId)).length;
   const xp = profile ? profile.pack_xp : null;
-  const unlocked = profile
-    ? unlockedAchievementIds({
-        locks: locked.length,
-        evidenceReads: 0,
-        journals: journalIds.length,
-        noTrade: profile.no_trade_count,
-        noTradeOnHunt,
-        reviews: 0,
-        replays: profile.replay_count,
-        highScores: 0,
-        outcomeJournals,
-      })
-    : new Set<string>();
   const progress = xp === null ? null : rankProgress(xp);
   const ratio = !profile || locked.length === 0 ? "N/A" : `${profile.no_trade_count}/${locked.length}`;
+  const prefs = profile?.notification_prefs ?? null;
 
   return (
     <div className="stack">
@@ -93,6 +86,56 @@ export function ProfileScreen() {
             );
           })}
         </ul>
+        {profile?.oath_accepted ? null : (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              void apiFetch("/api/me/oath", { method: "POST", body: "{}" }).then((response) => {
+                if (!response.ok) return;
+                invalidateQuests();
+                invalidatePackProfile();
+              });
+            }}
+          >
+            Take the Pack oath
+          </button>
+        )}
+      </section>
+
+      <section className="panel" aria-label="Notification preferences">
+        <p className="kicker">Den signals</p>
+        <p className="fine">Mission alerts start on. Drill, streak, and Replay nudges start off.</p>
+        {prefs ? (
+          <ul className="rank-list">
+            {PREF_ROWS.map((row) => (
+              <li key={row.key} className="rank-item">
+                <span>
+                  {row.label}
+                  <span className="fine"> {row.hint}</span>
+                </span>
+                <button
+                  type="button"
+                  className="btn"
+                  aria-pressed={prefs[row.key]}
+                  onClick={() => {
+                    const next = { ...prefs, [row.key]: !prefs[row.key] };
+                    void apiFetch("/api/me/notification-prefs", {
+                      method: "POST",
+                      body: JSON.stringify(next),
+                    }).then((response) => {
+                      if (response.ok) invalidatePackProfile();
+                    });
+                  }}
+                >
+                  {prefs[row.key] ? "On" : "Off"}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="fine">N/A</p>
+        )}
       </section>
 
       <section className="panel">
