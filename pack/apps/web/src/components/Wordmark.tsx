@@ -1,14 +1,18 @@
 import { useId } from "react";
 
 type WordmarkProps = {
-  size?: "md" | "lg";
+  size?: "md" | "lg" | "xl";
+  tone?: "glow" | "paper";
 };
 
-export function Wordmark({ size = "md" }: WordmarkProps) {
+export function Wordmark({ size = "md", tone = "glow" }: WordmarkProps) {
   const metal = `cci-metal-${useId().replace(/:/g, "")}`;
   const glow = `cci-glow-${useId().replace(/:/g, "")}`;
+  const cls = ["wordmark", size !== "md" ? `wordmark-${size}` : "", tone === "paper" ? "wordmark-paper" : ""]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <div className={size === "lg" ? "wordmark wordmark-lg" : "wordmark"}>
+    <div className={cls}>
       <svg className="wordmark-svg" viewBox="0 0 118 36" aria-hidden="true">
         <defs>
           <linearGradient id={metal} x1="0" y1="0" x2="0" y2="1">
@@ -20,7 +24,7 @@ export function Wordmark({ size = "md" }: WordmarkProps) {
             <feDropShadow dx="0" dy="0" stdDeviation="1.5" floodColor="#e08a2c" floodOpacity="0.95" />
           </filter>
         </defs>
-        <g filter={`url(#${glow})`} fill={`url(#${metal})`}>
+        <g filter={tone === "glow" ? `url(#${glow})` : undefined} fill={`url(#${metal})`}>
           <text x="0" y="28" fontFamily="Manrope, sans-serif" fontSize="30" fontWeight="800">
             C
           </text>

@@ -18,10 +18,13 @@ export function AppShell({ children }: AppShellProps) {
   const reducedPref = useReducedMotion();
   const snapshot = useTelegramSnapshot();
   const reduced = Boolean(reducedPref) || snapshot.performanceClass === "LOW";
+  const home = location.pathname === "/";
+  const shot = new URLSearchParams(location.search).get("shot") === "1";
+  const shellClass = ["shell", home ? "shell-home" : "", shot ? "is-shot" : ""].filter(Boolean).join(" ");
 
   return (
     <div className="stage">
-      <div className="shell">
+      <div className={shellClass}>
         <header className="topbar">
           <div className="brand">
             <Wordmark />
