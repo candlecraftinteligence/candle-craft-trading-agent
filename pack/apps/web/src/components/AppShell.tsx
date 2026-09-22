@@ -2,7 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useEffect, useState, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { BottomNav } from "./BottomNav";
-import { Crest } from "./Crest";
+import { Wordmark } from "./Wordmark";
 import {
   showTrainingBadge,
   telegramBridge,
@@ -24,11 +24,7 @@ export function AppShell({ children }: AppShellProps) {
       <div className="shell">
         <header className="topbar">
           <div className="brand">
-            <Crest />
-            <div className="brand-copy">
-              <p className="brand-kicker">CCI</p>
-              <p className="brand-name">The Pack</p>
-            </div>
+            <Wordmark />
           </div>
           {showTrainingBadge() ? (
             <span className="training-badge">MOCK / TRAINING</span>

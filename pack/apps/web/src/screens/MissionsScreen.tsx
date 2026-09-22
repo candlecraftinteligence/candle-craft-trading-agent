@@ -40,10 +40,13 @@ export function MissionsScreen() {
 
   return (
     <div className="stack">
-      <header>
-        <p className="kicker">The board</p>
-        <h1 className="display">Missions</h1>
-        <p className="tagline">Open missions on the board. No invented urgency.</p>
+      <header className="page-hero">
+        <img src="/brand/wolf-detail.webp" alt="" />
+        <div>
+          <p className="kicker">The board</p>
+          <h1 className="display">Missions</h1>
+          <p className="tagline">Open missions on the board. No invented urgency.</p>
+        </div>
       </header>
       <div className="filter-row" role="group" aria-label="Mission filters">
         {FILTERS.map((item) => (

@@ -26,10 +26,13 @@ export function ReplayScreen() {
 
   return (
     <div className="stack">
-      <header>
-        <p className="kicker">Training ground</p>
-        <h1 className="display">Run the tape</h1>
-        <p className="fine">{tapes ? `${tapes.length} closed tapes on the shelf` : "Reading fixtures…"}</p>
+      <header className="page-hero">
+        <img src="/brand/wolf-detail.webp" alt="" />
+        <div>
+          <p className="kicker">Training ground</p>
+          <h1 className="display">Run the tape</h1>
+          <p className="fine">{tapes ? `${tapes.length} closed tapes on the shelf` : "Reading fixtures…"}</p>
+        </div>
       </header>
 
       <section className="panel">

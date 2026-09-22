@@ -1,10 +1,9 @@
 import { invalidatePackProfile, usePackProfile, type NotificationPrefs } from "../api/profile";
 import { invalidateQuests, useUnlockedAchievements } from "../api/quests";
 import { apiFetch } from "../api/server";
-import { Crest } from "../components/Crest";
 import { RankCard } from "../components/RankCard";
+import { QUIET_MARKET, TAGLINE } from "../copy";
 import { ACHIEVEMENTS } from "../domain/achievements";
-import { WOLF_RANKS, rankProgress } from "../profile/ranks";
 
 const PREF_ROWS: { key: keyof NotificationPrefs; label: string; hint: string }[] = [
   { key: "new_mission", label: "New mission", hint: "On unless you turn it off" },
@@ -21,47 +20,53 @@ export function ProfileScreen() {
   const locked = Object.entries(decisions);
   const journalIds = profile?.journal_ids ?? [];
   const xp = profile ? profile.pack_xp : null;
-  const progress = xp === null ? null : rankProgress(xp);
   const ratio = !profile || locked.length === 0 ? "N/A" : `${profile.no_trade_count}/${locked.length}`;
   const prefs = profile?.notification_prefs ?? null;
 
   return (
     <div className="stack">
-      <header>
-        <div className="rank-card-top">
-          <Crest size={40} />
-          <div>
-            <p className="kicker">Your place in the Pack</p>
-            <h1 className="display">Profile</h1>
-          </div>
+      <header className="hero-band profile-hero">
+        <img className="hero-wolf" src="/brand/wolf-profile.webp" alt="" />
+        <div className="hero-copy">
+          <p className="kicker">Your place in the Pack</p>
+          <h1 className="display">{profile?.display_name ?? "N/A"}</h1>
+          <p className="fine">Trader / builder / Pack member</p>
+          <p className="tagline">{TAGLINE}</p>
         </div>
-        <p className="fine">{profile?.display_name ?? "N/A"}</p>
       </header>
 
-      <RankCard xp={xp} />
+      <RankCard xp={xp} ladder />
 
       <section className="panel">
-        <p className="kicker">Pack record</p>
-        <ul className="rank-list">
-          <li className="rank-item">
+        <div className="panel-head">
+          <p className="kicker">Pack record</p>
+          <p className="fine">Discipline wins</p>
+        </div>
+        <ul className="record-row">
+          <li>
+            <RecordIcon kind="calls" />
+            <strong>{profile ? locked.length : "N/A"}</strong>
             <span>Calls sealed</span>
-            <span>{profile ? locked.length : "N/A"}</span>
           </li>
-          <li className="rank-item">
+          <li>
+            <RecordIcon kind="pass" />
+            <strong>{ratio}</strong>
             <span>NO TRADE ratio</span>
-            <span>{ratio}</span>
           </li>
-          <li className="rank-item">
+          <li>
+            <RecordIcon kind="journal" />
+            <strong>{profile ? journalIds.length : "N/A"}</strong>
             <span>Journals</span>
-            <span>{profile ? journalIds.length : "N/A"}</span>
           </li>
-          <li className="rank-item">
+          <li>
+            <RecordIcon kind="tape" />
+            <strong>{profile ? profile.replay_count : "N/A"}</strong>
             <span>Tapes run</span>
-            <span>{profile ? profile.replay_count : "N/A"}</span>
           </li>
-          <li className="rank-item">
+          <li>
+            <RecordIcon kind="streak" />
+            <strong>{profile ? profile.discipline_streak : "N/A"}</strong>
             <span>Discipline streak</span>
-            <span>{profile ? profile.discipline_streak : "N/A"}</span>
           </li>
         </ul>
         <p className="fine">Discipline record only. No money on this shelf.</p>
@@ -74,14 +79,12 @@ export function ProfileScreen() {
             {unlocked.size}/{ACHIEVEMENTS.length}
           </p>
         </div>
-        <ul className="achievement-grid">
+        <ul className="hex-grid">
           {ACHIEVEMENTS.map((card) => {
             const open = unlocked.has(card.id);
             return (
-              <li key={card.id} className="achievement-card" data-unlocked={open ? "true" : "false"}>
-                <p className="fine">{card.rarity}</p>
-                <p className="section-title">{card.name}</p>
-                <p className="fine">{open ? card.rule : "Locked"}</p>
+              <li key={card.id} className="hex-tile" data-unlocked={open ? "true" : "false"} title={open ? card.rule : "Locked"}>
+                <span className="hex-name">{card.name}</span>
               </li>
             );
           })}
@@ -138,17 +141,22 @@ export function ProfileScreen() {
         )}
       </section>
 
-      <section className="panel">
-        <p className="kicker">The climb</p>
-        <ul className="rank-list">
-          {WOLF_RANKS.map((rank) => (
-            <li key={rank.name} className="rank-item" data-current={progress && rank.name === progress.name ? "true" : "false"}>
-              <span>{rank.name}</span>
-              <span>{rank.xp} XP</span>
-            </li>
-          ))}
-        </ul>
+      <section className="mountain-footer">
+        <p className="kicker">The Pack waits</p>
+        <p className="quiet-copy">{QUIET_MARKET}</p>
       </section>
     </div>
+  );
+}
+
+function RecordIcon({ kind }: { kind: "calls" | "pass" | "journal" | "tape" | "streak" }) {
+  return (
+    <svg className="record-icon" viewBox="0 0 24 24" aria-hidden="true">
+      {kind === "calls" ? <circle cx="12" cy="12" r="7" /> : null}
+      {kind === "pass" ? <path d="M6 12h12M12 6v12" /> : null}
+      {kind === "journal" ? <path d="M7 4h8l3 3v13H7zM15 4v4h4" /> : null}
+      {kind === "tape" ? <path d="M8 7v10l9-5-9-5Z" /> : null}
+      {kind === "streak" ? <path d="M12 4c2 4 4 5 4 8a4 4 0 1 1-8 0c0-3 2-4 4-8Z" /> : null}
+    </svg>
   );
 }

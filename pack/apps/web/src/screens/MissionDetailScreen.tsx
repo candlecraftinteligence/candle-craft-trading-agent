@@ -5,6 +5,7 @@ import { invalidateQuests } from "../api/quests";
 import { apiFetch } from "../api/server";
 import type { Mission } from "../api/types";
 import { DecisionPanel } from "../components/DecisionPanel";
+import { IllustrativeChart } from "../components/IllustrativeChart";
 import { JournalPanel } from "../components/JournalPanel";
 import { LifecycleTimeline } from "../components/LifecycleTimeline";
 import { QuestChip } from "../components/QuestChip";
@@ -70,29 +71,41 @@ export function MissionDetailBody({ mission }: { mission: Mission }) {
   });
   const tone = toneForState(mission.lifecycle_state);
 
+  const invalidation = mission.evidence.find((block) => block.type === "invalidation");
+  const target = mission.evidence.find(
+    (block) => /target/i.test(block.type) || /target/i.test(block.label),
+  );
+
   return (
     <>
-      <header>
-        <div className="detail-symbol-row">
-          <span className="symbol">{mission.symbol}</span>
-          {mission.quality_tier === "HUNT" ? (
-            <span className="hunt-badge">Hunt</span>
-          ) : (
-            <span className="tier-standard">{mission.quality_tier}</span>
-          )}
+      <header className="detail-hero">
+        <img src="/brand/wolf-detail.webp" alt="" />
+        <div>
+          <p className="kicker">Candle Craft Intelligence</p>
+          <div className="detail-symbol-row">
+            <span className="symbol">{mission.symbol}</span>
+          </div>
+          <div className="meta-row">
+            <span>{mission.timeframe}</span>
+            <span>{mission.direction}</span>
+            <span className="state-chip" data-tone={tone}>
+              {mission.lifecycle_state}
+            </span>
+            {mission.quality_tier === "HUNT" ? (
+              <span className="hunt-badge">Hunt</span>
+            ) : (
+              <span className="tier-standard">{mission.quality_tier}</span>
+            )}
+          </div>
         </div>
-        <div className="meta-row">
-          <span>{mission.timeframe}</span>
-          <span>{mission.direction}</span>
-        </div>
-        <h1 className="detail-title">{mission.title}</h1>
       </header>
 
-      <section className="status-hero" aria-label="Lifecycle status" data-tone={tone}>
-        <p className="kicker">Where the tape stands</p>
-        <p className="status-readout">{mission.lifecycle_state}</p>
-        <p className="fine">Last mark on the fixture. The Pack does not move this.</p>
-      </section>
+      <h1 className="detail-title">{mission.title}</h1>
+      <p className="fine">
+        Synthetic {mission.timeframe} {mission.direction.toLowerCase()} setup
+      </p>
+
+      <IllustrativeChart mission={mission} />
 
       <section className="panel">
         <p className="kicker">The idea</p>
@@ -135,6 +148,32 @@ export function MissionDetailBody({ mission }: { mission: Mission }) {
       </section>
 
       <DecisionPanel missionId={mission.cci_setup_id} />
+
+      <section className="panel intel-row" aria-label="Pack intel">
+        <div className="panel-head">
+          <p className="kicker">Pack intel</p>
+          <p className="fine">Fixture fields only</p>
+        </div>
+        <ul className="intel-grid">
+          <li>
+            <span>Key level</span>
+            <strong>—</strong>
+          </li>
+          <li>
+            <span>Bias</span>
+            <strong>{mission.direction}</strong>
+          </li>
+          <li>
+            <span>Invalidation</span>
+            <strong>{invalidation?.label ?? "—"}</strong>
+          </li>
+          <li>
+            <span>Targets</span>
+            <strong>{target?.label ?? "—"}</strong>
+          </li>
+        </ul>
+        <p className="fine">A dash means the fixture did not record that number.</p>
+      </section>
 
       <section className="panel">
         <p className="kicker">The tape</p>
