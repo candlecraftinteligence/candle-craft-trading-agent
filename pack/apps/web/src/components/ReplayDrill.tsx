@@ -1,0 +1,245 @@
+import { motion, useReducedMotion } from "framer-motion";
+import { useState } from "react";
+import { invalidatePackProfile } from "../api/profile";
+import { invalidateQuests } from "../api/quests";
+import { apiFetch } from "../api/server";
+import type { Mission } from "../api/types";
+import { REPLAY_DISCLAIMER } from "../copy";
+import { replayPreview } from "../domain/xp";
+import {
+  TRAINING_DECISIONS,
+  scoreReplay,
+  type QualityChoice,
+  type TrainingDecision,
+} from "../domain/replayScore";
+import { saveReplay, useReplays } from "../storage/replays";
+import { LifecycleTimeline } from "./LifecycleTimeline";
+import { XpPreview } from "./XpPreview";
+
+type ReplayDrillProps = {
+  mission: Mission;
+  onExit: () => void;
+};
+
+export function ReplayDrill({ mission, onExit }: ReplayDrillProps) {
+  const brief = mission.replay;
+  const stored = useReplays()[mission.cci_setup_id];
+  const reduced = useReducedMotion();
+  const [tier, setTier] = useState<QualityChoice | null>(stored?.chosenTier ?? null);
+  const [decision, setDecision] = useState<TrainingDecision | null>(stored?.chosenDecision ?? null);
+  const [reviewed, setReviewed] = useState(Boolean(stored));
+  const [revealed, setRevealed] = useState(Boolean(stored));
+  const [server, setServer] = useState<ServerReveal | null>(null);
+
+  if (!brief) {
+    return <p className="status-line">This fixture has no replay brief.</p>;
+  }
+
+  const preferred = brief.preferred_decision;
+  const ready = Boolean(tier && decision && reviewed);
+  const localScore = revealed && tier && decision && isTrainingDecision(preferred)
+    ? scoreReplay({
+        actualTier: mission.quality_tier,
+        chosenTier: tier,
+        preferred,
+        chosen: decision,
+        evidenceReviewed: true,
+      })
+    : null;
+  const score = server
+    ? {
+        total: server.score,
+        quality: server.quality,
+        decision: server.decision_points,
+        attention: server.attention,
+      }
+    : localScore;
+  const xp = score ? replayPreview(score.total) : null;
+  const shownSymbol = server?.symbol || mission.symbol;
+  const shownOutcome = server?.outcome_code ?? mission.outcome_code;
+  const shownTeaching = server?.teaching_note || brief.teaching_note;
+  const shownTier = server?.quality_tier || mission.quality_tier;
+  const shownLifecycle = server?.lifecycle ?? mission.lifecycle;
+
+  async function reveal() {
+    if (!tier || !decision || !reviewed) return;
+    const response = await apiFetch(`/api/missions/${encodeURIComponent(mission.cci_setup_id)}/replay`, {
+      method: "POST",
+      body: JSON.stringify({
+        chosen_tier: tier,
+        chosen_decision: decision,
+        evidence_reviewed: reviewed,
+        idempotency_key: mission.cci_setup_id,
+      }),
+    });
+    if (!response.ok) return;
+    const body = (await response.json()) as ServerReveal;
+    const fallback = isTrainingDecision(preferred)
+      ? scoreReplay({
+          actualTier: mission.quality_tier,
+          chosenTier: tier,
+          preferred,
+          chosen: decision,
+          evidenceReviewed: reviewed,
+        }).total
+      : 0;
+    saveReplay({
+      missionId: mission.cci_setup_id,
+      chosenTier: tier,
+      chosenDecision: decision,
+      score: typeof body.score === "number" ? body.score : fallback,
+    });
+    setServer(body);
+    setRevealed(true);
+    invalidatePackProfile();
+    invalidateQuests();
+  }
+
+  return (
+    <div className="stack">
+      <button type="button" className="back-link" onClick={onExit}>
+        Back to the tapes
+      </button>
+      <header>
+        <p className="kicker">Training ground · not a live hunt</p>
+        <h1 className="display">{revealed ? shownSymbol : "Concealed perp"}</h1>
+        <div className="meta-row">
+          <span>{mission.timeframe}</span>
+          <span>{mission.direction}</span>
+          {revealed ? <span className="tier-standard">{shownTier}</span> : <span>Quality hidden</span>}
+        </div>
+      </header>
+
+      <p className="disclaimer" data-testid="replay-disclaimer">
+        {REPLAY_DISCLAIMER}
+      </p>
+
+      {!revealed ? (
+        <>
+          <section className="panel">
+            <p className="kicker">The tape, masked</p>
+            <h2 className="section-title">{brief.masked_title}</h2>
+            <p className="body-copy">{brief.masked_thesis}</p>
+          </section>
+          <section className="panel">
+            <p className="kicker">Study the evidence</p>
+            <ul className="evidence-list">
+              {brief.evidence.map((block) => (
+                <li key={`${block.type}-${block.label}`} className="evidence-item">
+                  <div className="evidence-type">{block.type}</div>
+                  <p className="section-title">{block.label}</p>
+                  {block.detail ? <p className="body-copy">{block.detail}</p> : null}
+                </li>
+              ))}
+            </ul>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={reviewed}
+                onChange={(event) => setReviewed(event.target.checked)}
+              />
+              Evidence reviewed
+            </label>
+          </section>
+          <section className="panel">
+            <p className="kicker">Name the tier</p>
+            <div className="decision-grid">
+              {(["HUNT", "STANDARD"] as const).map((choice) => (
+                <button
+                  key={choice}
+                  type="button"
+                  className="decision-btn"
+                  aria-pressed={tier === choice}
+                  onClick={() => setTier(choice)}
+                >
+                  {choice}
+                </button>
+              ))}
+            </div>
+          </section>
+          <section className="panel">
+            <p className="kicker">Your drill call</p>
+            <p className="fine">A drill call. It does not seal a live mission.</p>
+            <div className="decision-grid">
+              {TRAINING_DECISIONS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className="decision-btn"
+                  aria-pressed={decision === item.id}
+                  onClick={() => setDecision(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            <button type="button" className="btn primary reveal-btn" disabled={!ready} onClick={reveal}>
+              Reveal
+            </button>
+          </section>
+        </>
+      ) : (
+        <motion.div
+          className="stack"
+          data-testid="replay-reveal"
+          initial={reduced ? false : { opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: reduced ? 0 : 0.24 }}
+        >
+          <section className="panel">
+            <p className="kicker">The tape, after</p>
+            <LifecycleTimeline events={shownLifecycle} />
+          </section>
+          <section className="panel outcome-block" data-testid="replay-outcome">
+            <p className="kicker">CCI Outcome</p>
+            <p className="outcome-code">{shownOutcome ?? "No outcome code in this fixture."}</p>
+          </section>
+          <section className="panel">
+            <p className="kicker">What the tape taught</p>
+            <p className="body-copy">{shownTeaching}</p>
+          </section>
+          {score ? (
+            <section className="panel" aria-label="Training score">
+              <p className="kicker">Drill score</p>
+              <p className="readout">{score.total}</p>
+              <ul className="rank-list">
+                <li className="rank-item">
+                  <span>Quality recognition</span>
+                  <span>{score.quality}/40</span>
+                </li>
+                <li className="rank-item">
+                  <span>Decision alignment</span>
+                  <span>{score.decision}/40</span>
+                </li>
+                <li className="rank-item">
+                  <span>Evidence attention</span>
+                  <span>{score.attention}/20</span>
+                </li>
+              </ul>
+              <p className="fine">A drill score is not evidence of profitability.</p>
+            </section>
+          ) : null}
+          {xp ? <XpPreview lines={xp.lines} total={xp.total} /> : null}
+        </motion.div>
+      )}
+
+    </div>
+  );
+}
+
+type ServerReveal = {
+  score: number;
+  quality: number;
+  decision_points: number;
+  attention: number;
+  symbol?: string;
+  outcome_code?: string | null;
+  teaching_note?: string;
+  quality_tier?: string;
+  lifecycle?: Mission["lifecycle"];
+  disclaimer?: string;
+};
+
+function isTrainingDecision(value: string): value is TrainingDecision {
+  return TRAINING_DECISIONS.some((item) => item.id === value);
+}
