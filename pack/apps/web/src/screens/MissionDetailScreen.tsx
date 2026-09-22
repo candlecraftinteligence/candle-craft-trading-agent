@@ -113,7 +113,7 @@ export function MissionDetailBody({ mission }: { mission: Mission }) {
         <p className="fine">{RISK_WARNING}</p>
       </section>
 
-      <section className="panel">
+      <section className="panel" id="evidence">
         <p className="kicker">What the tape shows</p>
         {mission.evidence.length === 0 ? (
           <p className="status-line">No evidence blocks were included in this fixture.</p>

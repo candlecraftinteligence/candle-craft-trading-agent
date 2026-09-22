@@ -10,7 +10,7 @@ export function RankCard({ xp, ladder = false }: RankCardProps) {
   const progress = xp === null ? null : rankProgress(xp);
   const currentIndex = progress ? WOLF_RANKS.findIndex((rank) => rank.name === progress.name) : -1;
   return (
-    <section className={ladder ? "panel rank-card with-ladder" : "panel rank-card"} aria-label="Wolf rank">
+    <section className={ladder ? "panel rank-card with-ladder" : "panel rank-card rank-compact"} aria-label="Wolf rank">
       <div className="rank-card-main">
         <div className="rank-card-top">
           <Crest size={40} />

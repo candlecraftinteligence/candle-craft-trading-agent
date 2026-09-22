@@ -24,7 +24,7 @@ export function ProfileScreen() {
   const prefs = profile?.notification_prefs ?? null;
 
   return (
-    <div className="stack">
+    <div className="stack profile-screen">
       <header className="hero-band profile-hero">
         <img className="hero-wolf" src="/brand/wolf-profile.webp" alt="" />
         <div className="hero-copy">
@@ -141,7 +141,7 @@ export function ProfileScreen() {
         )}
       </section>
 
-      <section className="mountain-footer">
+      <section className="mountain-footer is-docked">
         <p className="kicker">The Pack waits</p>
         <p className="quiet-copy">{QUIET_MARKET}</p>
       </section>

@@ -15,17 +15,15 @@ export function HomeScreen() {
   const featured = open[0];
 
   return (
-    <div className="stack">
+    <div className="stack home-stack">
       <header className="hero-band">
         <img className="hero-wolf" src="/brand/wolf-home.webp" alt="" />
         <div className="hero-copy">
-          <Wordmark />
           <p className="hero-kicker">Discipline creates clarity</p>
           <h1 className="hero-title">
             Markets move.
             <span>The Pack prepares.</span>
           </h1>
-          <p className="hero-sub">Higher standards. A brighter tomorrow.</p>
           <p className="tagline">{TAGLINE}</p>
         </div>
       </header>
@@ -37,7 +35,6 @@ export function HomeScreen() {
           <p className="kicker">The quiet tape</p>
           <p className="fine">Den&apos;s read</p>
         </div>
-        <p className="fine">Den&apos;s quiet. Ears stay up.</p>
         <p className="quiet-copy">{QUIET_MARKET}</p>
         <div className="actions">
           <Link className="btn primary" to="/replay">
@@ -58,28 +55,39 @@ export function HomeScreen() {
         <section className="stack" aria-label="Open missions">
           <article className="featured-mission">
             <div className="featured-copy">
-              <div className="panel-head">
-                <p className="kicker">On the board</p>
-                <span className="state-chip" data-tone="active">
-                  {featured.lifecycle_state}
-                </span>
-              </div>
-              <p className="fine">The Pack has eyes on these.</p>
-              <div className="meta-row">
+              <div className="meta-row featured-kicker">
+                <p className="kicker">Featured mission</p>
                 <span>
                   {featured.timeframe} {featured.direction}
                 </span>
-                {featured.quality_tier === "HUNT" ? <span className="hunt-badge">Hunt</span> : <span className="tier-standard">{featured.quality_tier}</span>}
+                <span className="state-chip" data-tone="active">
+                  {featured.lifecycle_state}
+                </span>
+                {featured.quality_tier === "HUNT" ? (
+                  <span className="hunt-badge">Hunt</span>
+                ) : (
+                  <span className="tier-standard">{featured.quality_tier}</span>
+                )}
               </div>
               <h2 className="featured-symbol">{featured.symbol}</h2>
               <p className="card-title">{featured.title}</p>
-              <Link className="btn primary" to={`/missions/${encodeURIComponent(featured.cci_setup_id)}`}>
-                View mission
-              </Link>
               <p className="card-thesis">{featured.thesis_summary}</p>
+              <div className="actions">
+                <Link className="btn primary" to={`/missions/${encodeURIComponent(featured.cci_setup_id)}`}>
+                  <Crosshair />
+                  View mission
+                </Link>
+                <Link className="btn" to={`/missions/${encodeURIComponent(featured.cci_setup_id)}#evidence`}>
+                  Open evidence
+                </Link>
+              </div>
             </div>
             <IllustrativeChart mission={featured} compact />
           </article>
+          <p className="board-note">
+            <span className="kicker">On the board</span>
+            <span className="fine">The Pack has eyes on these.</span>
+          </p>
         </section>
       ) : null}
 
@@ -91,5 +99,15 @@ export function HomeScreen() {
         <p className="fine">Information infrastructure for a higher standard</p>
       </section>
     </div>
+  );
+}
+
+function Crosshair() {
+  return (
+    <svg className="btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="6" />
+      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <path d="M12 3v3M12 18v3M3 12h3M18 12h3" />
+    </svg>
   );
 }
