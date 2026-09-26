@@ -30,6 +30,10 @@ from app.lifecycle.outcome_events import (
     target_reason as _target_reason,
 )
 from app.lifecycle.economic_identity import proven_progress_plan_version_id
+from app.lifecycle.plan_version_binding import (
+    bind_progress_to_proven_plan_version,
+    initial_plan_version_binding,
+)
 from app.lifecycle.prefix_disposition_evidence import (
     DISPOSITION_NO_ELIGIBLE_CLOSED_CANDLES,
     DISPOSITION_NO_NEW_PENDING_CANDLES,
@@ -139,6 +143,11 @@ def evaluate_closed_candle_outcomes(
         ),
         None,
     )
+    loaded_plan_version_id = progress.plan_version_id if progress is not None else None
+    if progress is not None:
+        progress = bind_progress_to_proven_plan_version(progress, record).progress
+        if progress.plan_version_id != loaded_plan_version_id:
+            repository.upsert_outcome_progress(progress)
     plan_identity = progress.plan_identity if progress is not None else plan_identities[0]
 
     # Malformed legacy plans are preserved as evidence, but never create or
@@ -760,6 +769,7 @@ def _new_progress(
                 "ambiguity_policy": "conservative_stop_wins",
                 "entry_causality_contract": ENTRY_CAUSALITY_CONTRACT,
                 "plan_identity": plan_identity,
+                "plan_version_binding": initial_plan_version_binding(record),
                 "processed_candle_count": 0,
                 "source": "canonical_lifecycle_closed_execution_candles",
             },
@@ -1089,6 +1099,72 @@ def _integrity_failure(
     )
 
 
+def record_closed_candle_evidence_gap(
+    record: SetupLifecycleRecord,
+    *,
+    diagnostic: str,
+    execution_timeframe: str,
+    evaluated_at: str,
+    repository: SQLiteSetupLifecycleRepository,
+    scan_run_id: str | None = None,
+) -> LifecycleOutcomeEvaluation:
+    """Persist a truthful evidence gap without moving the cursor or inventing an outcome."""
+
+    del scan_run_id
+    try:
+        require_current_epoch_lifecycle_id(repository._connection, record.lifecycle_id)
+    except RuntimeEpochError:
+        return LifecycleOutcomeEvaluation(record=record, progress=None)
+    plan_identities = compatible_plan_identities(record)
+    progress = next(
+        (
+            candidate
+            for identity in plan_identities
+            if (
+                candidate := repository.get_outcome_progress(
+                    lifecycle_id=record.lifecycle_id,
+                    plan_identity=identity,
+                )
+            )
+            is not None
+        ),
+        None,
+    )
+    if progress is not None:
+        progress = bind_progress_to_proven_plan_version(progress, record).progress
+    if progress is not None and progress.terminal_outcome != NA:
+        return LifecycleOutcomeEvaluation(record=record, progress=progress)
+    if record.current_state in TERMINAL_OUTCOME_STATES:
+        return LifecycleOutcomeEvaluation(record=record, progress=progress)
+    if stored_plan_geometry_failure(record) is not None:
+        return LifecycleOutcomeEvaluation(record=record, progress=progress)
+    if record.current_state not in OUTCOME_ELIGIBLE_STATES:
+        return LifecycleOutcomeEvaluation(record=record, progress=progress)
+    plan_identity = progress.plan_identity if progress is not None else plan_identities[0]
+    progress = progress or _new_progress(
+        record,
+        plan_identity=plan_identity,
+        execution_timeframe=execution_timeframe,
+        evaluated_at=evaluated_at,
+    )
+    cursor_open = progress.evaluation_cursor_open_at
+    cursor_close = progress.evaluation_cursor_close_at
+    progress = _integrity_failure(
+        progress,
+        status=INTEGRITY_UNVERIFIED,
+        diagnostic=diagnostic,
+        evaluated_at=evaluated_at,
+    )
+    progress = progress.model_copy(
+        update={
+            "evaluation_cursor_open_at": cursor_open,
+            "evaluation_cursor_close_at": cursor_close,
+        }
+    )
+    progress = _write_progress(repository, progress)
+    return LifecycleOutcomeEvaluation(record=record, progress=progress)
+
+
 def _metadata(progress: SetupLifecycleOutcomeProgress) -> dict[str, Any]:
     try:
         value = json.loads(progress.metadata_json)
@@ -1105,4 +1181,5 @@ __all__ = [
     "LifecycleOutcomeEvaluation",
     "canonical_plan_identity",
     "evaluate_closed_candle_outcomes",
+    "record_closed_candle_evidence_gap",
 ]
