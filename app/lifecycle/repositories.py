@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.data.dtos import NA
+from app.lifecycle.plan_version_binding import resolve_persisted_plan_version
 from app.lifecycle.models import (
     SetupLifecycleEvent,
     SetupLifecycleOutcomeProgress,
@@ -157,6 +158,75 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
             normalized,
         ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
+
+    def list_economic_tracking_candidates(
+        self,
+        states: Sequence[SetupLifecycleState],
+    ) -> tuple[SetupLifecycleRecord, ...]:
+        """Locked plans, plus unlocked rows that already have non-terminal progress.
+
+        ``is_current`` is intentionally not a predicate. The partial locked-plan
+        index keeps this off the historical rejection population.
+        """
+
+        epoch = load_active_runtime_epoch(self._connection)
+        if epoch is None:
+            return ()
+        state_values = tuple(dict.fromkeys(state.value for state in states))
+        if not state_values:
+            return ()
+        placeholders = ",".join("?" for _ in state_values)
+        rows = self._connection.execute(
+            f"""
+            SELECT * FROM (
+                SELECT r.*
+                FROM setup_lifecycle_records r
+                WHERE r.runtime_epoch_id = ?
+                  AND r.plan_version_id IS NOT NULL
+                  AND r.current_state IN ({placeholders})
+                UNION
+                SELECT r.*
+                FROM setup_lifecycle_outcome_progress p
+                INNER JOIN setup_lifecycle_records r
+                    ON r.lifecycle_id = p.lifecycle_id
+                WHERE r.runtime_epoch_id = ?
+                  AND r.plan_version_id IS NULL
+                  AND r.current_state IN ({placeholders})
+                  AND (
+                        p.terminal_outcome IS NULL
+                        OR p.terminal_outcome = ''
+                        OR UPPER(p.terminal_outcome) = 'N/A'
+                      )
+            )
+            ORDER BY symbol ASC, lifecycle_id ASC
+            """,
+            (epoch.epoch_id, *state_values, epoch.epoch_id, *state_values),
+        ).fetchall()
+        return tuple(_record_from_row(row) for row in rows)
+
+    def list_outcome_progress_for_lifecycles(
+        self,
+        lifecycle_ids: Sequence[str],
+    ) -> tuple[SetupLifecycleOutcomeProgress, ...]:
+        normalized = tuple(
+            dict.fromkeys(
+                _lifecycle_id_text(lifecycle_id)
+                for lifecycle_id in lifecycle_ids
+                if _lifecycle_id_text(lifecycle_id) != NA
+            )
+        )
+        if not normalized:
+            return ()
+        placeholders = ",".join("?" for _ in normalized)
+        rows = self._connection.execute(
+            f"""
+            SELECT * FROM setup_lifecycle_outcome_progress
+            WHERE lifecycle_id IN ({placeholders})
+            ORDER BY lifecycle_id ASC, id ASC
+            """,
+            normalized,
+        ).fetchall()
+        return tuple(_outcome_progress_from_row(row) for row in rows)
 
     def supersede_record(self, lifecycle_id: str) -> None:
         require_current_epoch_lifecycle_id(self._connection, lifecycle_id)
@@ -337,6 +407,13 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
 
     def upsert_outcome_progress(self, progress: SetupLifecycleOutcomeProgress) -> None:
         require_current_epoch_lifecycle_id(self._connection, progress.lifecycle_id)
+        existing = self.get_outcome_progress(
+            lifecycle_id=progress.lifecycle_id,
+            plan_identity=progress.plan_identity,
+        )
+        record = self.get_record_by_lifecycle_id(progress.lifecycle_id)
+        if record is not None:
+            progress = resolve_persisted_plan_version(progress, record, existing)
         self._connection.execute(
             """
             INSERT INTO setup_lifecycle_outcome_progress (
@@ -347,6 +424,12 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 last_eligibility_decision_at, last_eligibility_prefix_evidence_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lifecycle_id, plan_identity) DO UPDATE SET
+                plan_version_id = CASE
+                    WHEN setup_lifecycle_outcome_progress.plan_version_id IS NOT NULL
+                         AND TRIM(setup_lifecycle_outcome_progress.plan_version_id) != ''
+                        THEN setup_lifecycle_outcome_progress.plan_version_id
+                    ELSE excluded.plan_version_id
+                END,
                 symbol = excluded.symbol,
                 mode = excluded.mode,
                 direction = excluded.direction,

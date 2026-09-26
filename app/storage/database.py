@@ -1371,6 +1371,13 @@ def _ensure_lifecycle_epoch_current_indexes(connection: sqlite3.Connection) -> N
             ON setup_lifecycle_records(runtime_epoch_id, symbol)
         """
     )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_epoch_locked_plan_state
+            ON setup_lifecycle_records(runtime_epoch_id, current_state, lifecycle_id)
+            WHERE plan_version_id IS NOT NULL
+        """
+    )
 
 
 def _migrate_runtime_epoch_isolation_v26(connection: sqlite3.Connection) -> None:

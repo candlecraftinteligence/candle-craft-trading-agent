@@ -367,8 +367,12 @@ def test_changed_anchor_through_service_supersedes_without_resolving_prior_progr
     assert historical.plan_version_id == generation_a.plan_version_id
     assert historical.current_state == generation_a.current_state
     assert len(prior_after) == 1
-    assert prior_after[0]["last_evaluated_at"] == prior_snapshot["last_evaluated_at"]
+    # Supersession does not resolve the prior plan. A noncurrent unresolved
+    # owner still receives the later closed-candle evaluation.
+    assert prior_after[0]["last_evaluated_at"] == _now(4)
+    assert prior_after[0]["plan_version_id"] == prior_snapshot["plan_version_id"]
     assert prior_after[0]["terminal_outcome"] == prior_snapshot["terminal_outcome"]
+    assert prior_after[0]["evaluation_cursor_close_at"] != prior_snapshot["evaluation_cursor_close_at"]
     assert len(all_rows) == 1 + len(new_rows)
     assert proven_progress_plan_version_id(historical) == generation_a.plan_version_id
 
@@ -703,7 +707,12 @@ def test_omitted_symbol_and_missing_candles_do_not_advance_progress(tmp_path: Pa
         text = path.read_text(encoding="utf-8")
         if "evaluate_closed_candle_outcomes(" in text and path.name != "outcomes.py":
             production_hits.append(path.as_posix())
-    assert production_hits == ["app/lifecycle/service.py"]
+    # Discovery still evaluates only the selected owner in service.py.
+    # Owned-plan continuity evaluates every tracking obligation in owner_monitoring.py.
+    assert sorted(production_hits) == [
+        "app/lifecycle/owner_monitoring.py",
+        "app/lifecycle/service.py",
+    ]
 
 
 def test_existing_keys_cannot_recover_admission_or_source_context(tmp_path: Path) -> None:

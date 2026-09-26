@@ -1340,8 +1340,10 @@ def _outcome_ownership_contract() -> dict[str, Any]:
             "plan_version_id_at_outcome_write_boundary": "prospective_progress_nullable",
             "reason": (
                 "evaluate_closed_candle_outcomes may persist a proven P1 plan_version_id on "
-                "new setup_lifecycle_outcome_progress rows. Legacy, unproven, reconstructed, "
-                "and invariant-conflicting rows remain SQL NULL. Physical uniqueness remains "
+                "new setup_lifecycle_outcome_progress rows. A prospective row marked while "
+                "its own plan was unlocked may bind forward once that same lifecycle remints "
+                "the locked id. Legacy, unproven, reconstructed, and invariant-conflicting "
+                "rows remain SQL NULL. Physical uniqueness remains "
                 "UNIQUE(lifecycle_id, plan_identity). last_eligibility_decision_at is optional "
                 "eligibility-input evidence on the same row and does not establish a canonical "
                 "plan-outcome owner. last_eligibility_prefix_evidence_json is optional same-pass "
