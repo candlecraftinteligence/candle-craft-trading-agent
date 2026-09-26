@@ -12,7 +12,7 @@ This phase repairs F01 owner starvation and F02 prospective `plan_version_id` bi
 
 - Branch: `fix/p5a-active-owner-monitoring-continuity`
 - Base SHA: `637e1208d830b3886317b8fd5df6eb7aaa571bee`
-- Final SHA: recorded after the delivery commit (see branch HEAD)
+- Implementation commit: `a0d45ec6d2787faa337a115f6b32c04696da8769`
 - Schema version: remains 26
 
 ## Root cause
