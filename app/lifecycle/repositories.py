@@ -165,8 +165,10 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
     ) -> tuple[SetupLifecycleRecord, ...]:
         """Locked plans, plus unlocked rows that already have non-terminal progress.
 
-        ``is_current`` is intentionally not a predicate. The partial locked-plan
-        index keeps this off the historical rejection population.
+        ``is_current`` is intentionally not a predicate. The locked branch uses
+        the partial plan index. The unlocked branch is a ``CROSS JOIN`` from
+        open progress rows so SQLite cannot reorder it onto the epoch-wide
+        lifecycle index and walk historical rejections.
         """
 
         epoch = load_active_runtime_epoch(self._connection)
@@ -180,23 +182,24 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
             f"""
             SELECT * FROM (
                 SELECT r.*
-                FROM setup_lifecycle_records r
+                FROM setup_lifecycle_records r INDEXED BY ix_lifecycle_records_epoch_locked_plan_state
                 WHERE r.runtime_epoch_id = ?
                   AND r.plan_version_id IS NOT NULL
                   AND r.current_state IN ({placeholders})
                 UNION
                 SELECT r.*
-                FROM setup_lifecycle_outcome_progress p
-                INNER JOIN setup_lifecycle_records r
-                    ON r.lifecycle_id = p.lifecycle_id
-                WHERE r.runtime_epoch_id = ?
+                FROM (
+                    SELECT DISTINCT p.lifecycle_id
+                    FROM setup_lifecycle_outcome_progress p
+                    WHERE p.terminal_outcome IS NULL
+                       OR p.terminal_outcome = ''
+                       OR UPPER(p.terminal_outcome) = 'N/A'
+                ) AS open_progress
+                CROSS JOIN setup_lifecycle_records AS r
+                WHERE r.lifecycle_id = open_progress.lifecycle_id
+                  AND r.runtime_epoch_id = ?
                   AND r.plan_version_id IS NULL
                   AND r.current_state IN ({placeholders})
-                  AND (
-                        p.terminal_outcome IS NULL
-                        OR p.terminal_outcome = ''
-                        OR UPPER(p.terminal_outcome) = 'N/A'
-                      )
             )
             ORDER BY symbol ASC, lifecycle_id ASC
             """,

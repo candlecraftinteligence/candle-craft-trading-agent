@@ -21,9 +21,10 @@ Commits, in order:
 - `c891efa016b334a8eceea8059cd91dd903ee5fa0` — documentation only. Pins the implementation SHA above. No production or test code.
 - `6046970aecb97deb241d7cf23735801c59e116bf` — implementation repair. Unexpected owner-monitoring failures are reported instead of discarded.
 - `9cc9c647efa7182d8beb4d3ff72769e44b939541` — documentation only. Records the repair SHA and an older CI link. No production or test code.
-- The evidence-repair commit that contains this wording. It changes only this handoff. It does not name its own hash. The acceptance-review HEAD is that commit, and the PR description records the hash after push.
+- `69e46d431f4439a6ee4e44e6b1f4558cace01dc4` — documentation only. Separates acceptance evidence from older SHAs. No production or test code.
+- The monitoring, binding, and query-scope repair that contains this wording. It does not name its own hash. The acceptance-review SHA is published in the PR description after that commit is pushed.
 
-This document is not an acceptance verdict. An earlier review stopped at `STOP_HEAD_MISMATCH` before semantic acceptance. P5A is not independently approved and is not approved for merge or Runtime rollout.
+This document is not an acceptance verdict. Review of `69e46d431f4439a6ee4e44e6b1f4558cace01dc4` returned `CHANGES_REQUIRED_MONITORING_BINDING_AND_QUERY_SCOPE`. P5A is not independently approved and is not approved for merge or Runtime rollout.
 
 ## Root cause
 
@@ -61,10 +62,10 @@ An owner has a tracking obligation when all of the following hold:
 ## Schedule and path
 
 1. `SetupLifecycleService.apply_to_run_result` evaluates discovery, then `monitor_tracking_obligations` inside the same `BEGIN IMMEDIATE` transaction. Missing symbols are left uncovered so the caller can fetch them. A gap is not written for a symbol the scan simply did not include.
-2. `scripts/run_scan.py` calls `_continue_owned_plan_monitoring` after lifecycle on one-shot scans and watch iterations. The exchange client is created only if a symbol still needs candles.
-3. Universe or ranking failure (`UniverseResolutionError` in the exception cause chain) runs that same continuation, then re-raises the discovery failure.
+2. `scripts/run_scan.py` calls `_continue_owned_plan_monitoring` after lifecycle on one-shot scans and watch iterations. Discovery candles stay available for every owner of that symbol and timeframe. A successful sibling does not mark the key consumed for an owner whose evaluation failed. The exchange client is created only if a symbol still needs candles.
+3. Universe or ranking failure (`UniverseResolutionError` in the exception cause chain) runs that same continuation, then re-raises the discovery failure. A monitoring failure is attached beside the discovery failure.
 
-Empty discovery candle payloads are not treated as coverage. The continuation fetches them before recording a gap.
+Empty discovery candle payloads are not treated as coverage. The continuation fetches them before recording a gap. An evaluator exception is not rewritten as `required_closed_candle_unavailable`. First-pass monitoring errors stay on the operational result when the continuation later succeeds or returns no new error.
 
 ## Universe independence
 
@@ -95,7 +96,9 @@ The cursor is the persisted `evaluation_cursor_open_at` / `evaluation_cursor_clo
 - A row created while the plan is unlocked is marked `plan_version_binding=awaiting_proven_plan_version`.
 - When that same lifecycle later remints the locked id and the plan identity still matches, the row binds forward.
 - A stored id is immutable. A different id, a different lifecycle, changed economics, geometry that does not remint, or missing provenance is rejected.
-- Reconstructed NULL rows have no marker and stay NULL. There is no historical backfill and no guess from symbol, direction, or price.
+- Reconstructed NULL rows have no marker and stay NULL. A later write that supplies the lifecycle's proven id, or that adds the awaiting marker, does not create provenance. There is no historical backfill and no guess from symbol, direction, or price.
+- A new row may keep the proven id only when its plan identity matches the lifecycle economics. A progress identity that describes different economics cannot accept that id.
+- An unlocked row that already has the awaiting marker keeps that marker across later pre-lock updates. It binds only after the same lifecycle remints a matching plan version.
 
 ## Gap behavior
 
@@ -110,6 +113,8 @@ Gap diagnostics:
 
 No new gap table.
 
+Expected market-data failures are exchange-client errors, timeouts, connection failures, and messages that identify an invalid, unknown, or delisted symbol. Those stay on the gap contract. A client-construction `ValueError`, an adapter `RuntimeError`, or any other programming error is an owner-monitoring subsystem failure. It is not stored as an exchange gap and it does not invent a terminal outcome.
+
 ## Stale-owner diagnostic
 
 `diagnose_tracking_cursor_lag` reports owner, plan version, last processed close, latest available close, lag seconds, and a gap reason when one is already known. It does not write progress and does not change eligibility. Each monitoring pass includes the same fields in `owner_monitoring.lags`.
@@ -120,7 +125,9 @@ No new gap table.
 
 `ix_lifecycle_records_epoch_locked_plan_state` on `(runtime_epoch_id, current_state, lifecycle_id) WHERE plan_version_id IS NOT NULL`.
 
-The monitoring query reads latched plans through that index, plus progress rows joined to unlocked lifecycles that already have non-terminal progress. It does not scan historical rejections.
+The locked candidate branch reads that index with `INDEXED BY`. The unlocked branch starts at non-terminal `setup_lifecycle_outcome_progress` rows and `CROSS JOIN`s the lifecycle primary key, so SQLite cannot reorder the join onto `ix_lifecycle_records_runtime_epoch` and walk historical rejections.
+
+`open_operational_database` does not create indexes. Installing this additive index on an existing schema-26 runtime database is a separate controlled step: `migrate_existing_database` (or another explicit `initialize_database`). That call uses `CREATE INDEX IF NOT EXISTS` and does not rewrite historical rows. Schema version stays 26. Until that step runs, the locked branch cannot execute because it names the index.
 
 ## Tests
 
@@ -148,6 +155,20 @@ Adversarial coverage is `tests/test_p5a_active_owner_monitoring.py`:
 
 `tests/test_outcome_plan_attribution_p3b1.py` now expects same-lifecycle bind-forward. Reconstructed unbound progress stays NULL.
 
+`tests/test_p5a_monitoring_binding_query_repair.py` covers the review counterexamples against the real monitoring layer:
+
+- shared symbol and timeframe, one owner succeeds and another raises, without a false candle gap
+- a first-pass failure remains visible when the continuation succeeds
+- real `run_scan.main` one-shot and watch paths for that shared-owner failure
+- unexpected client construction and fetch/adapter exceptions
+- ranking failure together with monitoring success, an expected gap, and an unexpected failure
+- an owned symbol excluded from strict discovery membership is still monitored
+- legacy NULL rejects a supplied proven id and a rewritten marker
+- mismatched economics cannot take the record's proven id
+- valid creation, pre-lock bind-forward, immutable retry, and foreign-lifecycle rejection
+- candidate query plan and work with 5,000 historical rejections
+- concurrent discovery/monitor, bind retry, and terminal retry under `BEGIN IMMEDIATE`
+
 `tests/test_p5a_monitoring_failure_visibility.py` covers the silent-exception repair:
 
 - ranking failure with successful monitoring keeps only the discovery error
@@ -166,8 +187,9 @@ These runs belong only to the SHA named on each line. They are not evidence for 
 - Sources of `a0d45ec6d2787faa337a115f6b32c04696da8769` / `c891efa016b334a8eceea8059cd91dd903ee5fa0`: `python -m pytest`, exit 0, 475.7 seconds, 2724 passed, 0 failed, 0 skipped, the same warning. `c891efa` changes only this handoff's implementation-SHA line relative to `a0d45ec`. CI for `c891efa`: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36268114059
 - Sources of `6046970aecb97deb241d7cf23735801c59e116bf`: `python -m pytest`, exit 0, 465.4 seconds, 2731 passed, 0 failed, 0 skipped, the same warning. CI for that exact commit: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36300087110
 - `9cc9c647efa7182d8beb4d3ff72769e44b939541`: documentation-only child of `6046970`. CI succeeded: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36300673563. Pytest was not re-executed on this SHA. Do not treat the 2731 count as a run of `9cc9c64`.
+- `69e46d431f4439a6ee4e44e6b1f4558cace01dc4`: documentation-only child of `9cc9c64`. CI succeeded: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36302011988. Independent review of that SHA reproduced the four blockers. Its green tests did not cover those failures. Do not treat the 2731 count as evidence that the blockers were absent.
 
-Pytest, `compileall`, and `git diff --check` for the acceptance-review HEAD are recorded in the PR description after that commit is pushed. This file does not copy those results forward.
+Pytest, `compileall`, and `git diff --check` for the repair HEAD are recorded in the PR description after that commit is pushed. This file does not copy those results forward and does not name that commit.
 
 No separate lint, typecheck, or formatter is configured. CI runs `compileall` and `pytest`.
 
@@ -185,11 +207,13 @@ Unexpected monitoring failures are not discarded. Expected per-symbol market-dat
 
 - Normal watch iteration: `owner_monitoring=PARTIAL` plus a `recoverable_errors` line `owner_monitoring:<type>:<detail>`. A clean pass, including persisted candle gaps, stays `SUCCESS`.
 - Ranking or universe failure: discovery still fails closed and remains the iteration error. Monitoring is still attempted. If it also fails, the failed-iteration summary keeps the discovery error and adds `phase_statuses.owner_monitoring=PARTIAL` plus the monitoring error. Startup `SystemExit` text keeps the original discovery message and appends the monitoring line.
-- One-shot: an unexpected monitoring failure raises `SystemExit` with the `owner_monitoring:` diagnostic. The command does not return a successful scan report over that failure.
+- One-shot: an unexpected monitoring failure raises `SystemExit` with the `owner_monitoring:` diagnostic. The command does not return a successful scan report over that failure. The diagnostic includes a first-pass failure even when the continuation itself succeeds.
+- Watch: the same aggregated failure sets `owner_monitoring=PARTIAL` and keeps the original iteration error when discovery also failed.
 
 ## Known limitations
 
-- Independent architecture acceptance has not happened. `STOP_HEAD_MISMATCH` ended the previous review before that review.
+- Independent architecture acceptance has not happened. Review of `69e46d4` required repairs to shared-owner failure handling, exception classification, persistence binding, and candidate-query scope. This change is the repair, not an approval.
+- The locked candidate query names `ix_lifecycle_records_epoch_locked_plan_state`. A schema-26 runtime file does not gain that index until an explicit `migrate_existing_database` / `initialize_database` step. The operational opener does not run it.
 - `last_seen_at` stays a discovery timestamp. Freshness for an owned plan is the outcome cursor and the lag diagnostic.
 - Historical production NULL progress is not backfilled.
 - Gap state lives on the existing progress integrity fields. There is no separate gap table.

@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from app.data.candle_integrity import closed_candles_as_of, normalize_utc_timestamp
+from app.data.exceptions import ExchangeClientError
 from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleRecord
 from app.lifecycle.outcome_policy import compatible_plan_identities
@@ -32,6 +33,14 @@ GAP_REQUIRED_CLOSED_CANDLE = "required_closed_candle_unavailable"
 GAP_EXCHANGE_MARKET_DATA = "exchange_market_data_unavailable"
 GAP_MARKET_UNSUPPORTED = "market_unsupported_or_delisted"
 GAP_CURSOR_INTERVAL = "irrecoverable_cursor_interval"
+
+# Ordinary acquisition failures. Programming errors are not in this set.
+EXPECTED_MARKET_DATA_ERRORS = (
+    ExchangeClientError,
+    TimeoutError,
+    ConnectionError,
+    OSError,
+)
 
 CandleFetcher = Callable[[str, str, int], Awaitable[Sequence[Any]]]
 
@@ -346,8 +355,10 @@ async def monitor_obligations_with_market_data(
 ) -> OwnerMonitoringResult:
     """Fetch exchange candles for obligations discovery did not already cover.
 
-    Network reads happen before the write transaction. A fetch failure becomes
-    an explicit gap. It does not synthesize candles or a terminal outcome.
+    Network reads happen before the write transaction. An expected market-data
+    failure becomes an explicit gap. An unexpected factory, adapter, or
+    programming error is reported on the result and is not stored as a gap.
+    Neither path synthesizes candles or a terminal outcome.
     """
 
     with SQLiteSetupLifecycleRepository(
@@ -373,6 +384,7 @@ async def monitor_obligations_with_market_data(
         needed[key] = (record.symbol, timeframe)
 
     merged = dict(evidence_by_key)
+    subsystem_failures: dict[str, str] = {}
     for key, (symbol, timeframe) in needed.items():
         if fetch_candles is None:
             merged[key] = SymbolMonitoringEvidence(
@@ -385,12 +397,15 @@ async def monitor_obligations_with_market_data(
         try:
             candles = await fetch_candles(symbol, timeframe, candle_limit)
         except Exception as exc:
-            merged[key] = SymbolMonitoringEvidence(
-                candles=(),
-                execution_timeframe=timeframe,
-                decision_timestamp=evaluated_at,
-                gap_reason=classify_market_data_failure(exc),
-            )
+            if isinstance(exc, EXPECTED_MARKET_DATA_ERRORS) or _is_unsupported_market(exc):
+                merged[key] = SymbolMonitoringEvidence(
+                    candles=(),
+                    execution_timeframe=timeframe,
+                    decision_timestamp=evaluated_at,
+                    gap_reason=classify_market_data_failure(exc),
+                )
+                continue
+            subsystem_failures[key] = f"{type(exc).__name__}:{exc}"
             continue
         candle_tuple = tuple(candles or ())
         if not candle_tuple:
@@ -416,6 +431,24 @@ async def monitor_obligations_with_market_data(
         started = not connection.in_transaction
         if started:
             connection.execute("BEGIN IMMEDIATE")
+        blocked_ids = set(skip_lifecycle_ids)
+        subsystem_errors: list[dict[str, str]] = []
+        for record in obligations:
+            if record.lifecycle_id in blocked_ids:
+                continue
+            rows = tuple(grouped.get(record.lifecycle_id, ()))
+            timeframe = _obligation_timeframe(rows, execution_timeframe)
+            detail = subsystem_failures.get(evidence_key(record.symbol, timeframe))
+            if detail is None:
+                continue
+            blocked_ids.add(record.lifecycle_id)
+            subsystem_errors.append(
+                {
+                    "lifecycle_id": record.lifecycle_id,
+                    "symbol": record.symbol,
+                    "detail": detail,
+                }
+            )
         try:
             result = monitor_tracking_obligations(
                 repository,
@@ -424,8 +457,10 @@ async def monitor_obligations_with_market_data(
                 scan_run_id=scan_run_id,
                 default_timeframe=execution_timeframe,
                 record_missing_evidence=record_missing_evidence,
-                skip_lifecycle_ids=skip_lifecycle_ids,
+                skip_lifecycle_ids=blocked_ids,
             )
+            if subsystem_errors:
+                result = replace(result, errors=result.errors + tuple(subsystem_errors))
         except Exception:
             if started and connection.in_transaction:
                 connection.rollback()
@@ -454,10 +489,14 @@ def discovery_failure_continues_owner_monitoring(exc: BaseException) -> bool:
 
 
 def classify_market_data_failure(exc: BaseException) -> str:
-    text = str(exc).lower()
-    if any(token in text for token in ("invalid symbol", "unknown symbol", "delist", "not listed")):
+    if _is_unsupported_market(exc):
         return GAP_MARKET_UNSUPPORTED
     return f"{GAP_EXCHANGE_MARKET_DATA}:{type(exc).__name__}"
+
+
+def _is_unsupported_market(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(token in text for token in ("invalid symbol", "unknown symbol", "delist", "not listed"))
 
 
 def _evidence_covers(evidence: SymbolMonitoringEvidence | None) -> bool:

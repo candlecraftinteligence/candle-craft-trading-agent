@@ -96,9 +96,11 @@ def resolve_persisted_plan_version(
 ) -> SetupLifecycleOutcomeProgress:
     """Return the progress row that may be written.
 
-    A stored plan_version_id is immutable. A new id is kept only when it is the
-    proven id for this lifecycle. NULL rows bind forward only through
-    ``bind_progress_to_proven_plan_version``.
+    A stored plan_version_id is immutable. An existing NULL row binds only when
+    that persisted row already carries the awaiting marker and its plan identity
+    matches the lifecycle's economics. A caller-supplied id or a rewritten
+    marker is not provenance. A brand-new row may keep the proven id only when
+    its plan identity matches those economics.
     """
 
     if progress.lifecycle_id != record.lifecycle_id:
@@ -108,17 +110,66 @@ def resolve_persisted_plan_version(
     if existing_id is not None:
         return _with_plan_version(progress, existing_id)
 
-    decision = bind_progress_to_proven_plan_version(progress, record)
-    if decision.bound:
-        return decision.progress
+    if existing is not None:
+        return _bind_existing_null_row(progress, record, existing)
 
     proven = proven_progress_plan_version_id(record)
+    identity_matches = progress.plan_identity == canonical_plan_identity(record)
     incoming = progress.plan_version_id
-    if incoming is not None and incoming == proven:
+    if incoming is not None and incoming == proven and identity_matches:
         return progress
+    if not identity_matches:
+        return _without_binding_provenance(progress)
     if incoming is not None:
         return _with_plan_version(progress, None)
     return progress
+
+
+def _bind_existing_null_row(
+    progress: SetupLifecycleOutcomeProgress,
+    record: SetupLifecycleRecord,
+    existing: SetupLifecycleOutcomeProgress,
+) -> SetupLifecycleOutcomeProgress:
+    """Bind from the persisted row. Incoming metadata cannot create provenance."""
+
+    decision = bind_progress_to_proven_plan_version(existing, record)
+    identity_matches = (
+        progress.plan_identity == existing.plan_identity
+        and existing.plan_identity == canonical_plan_identity(record)
+    )
+    if decision.bound and identity_matches and decision.progress.plan_version_id is not None:
+        metadata = _metadata(progress)
+        metadata[PLAN_VERSION_BINDING_KEY] = PLAN_VERSION_BINDING_BOUND_FORWARD
+        return progress.model_copy(
+            update={
+                "plan_version_id": decision.progress.plan_version_id,
+                "metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+            }
+        )
+    existing_marker = _metadata(existing).get(PLAN_VERSION_BINDING_KEY)
+    if identity_matches and existing_marker == PLAN_VERSION_BINDING_AWAITING:
+        metadata = _metadata(progress)
+        metadata[PLAN_VERSION_BINDING_KEY] = PLAN_VERSION_BINDING_AWAITING
+        return progress.model_copy(
+            update={
+                "plan_version_id": None,
+                "metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+            }
+        )
+    return _without_binding_provenance(progress)
+
+
+def _without_binding_provenance(
+    progress: SetupLifecycleOutcomeProgress,
+) -> SetupLifecycleOutcomeProgress:
+    metadata = _metadata(progress)
+    metadata.pop(PLAN_VERSION_BINDING_KEY, None)
+    return progress.model_copy(
+        update={
+            "plan_version_id": None,
+            "metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        }
+    )
 
 
 def _with_plan_version(
