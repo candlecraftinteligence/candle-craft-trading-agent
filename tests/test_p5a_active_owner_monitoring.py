@@ -408,7 +408,7 @@ def test_exchange_candle_failure_is_explicit_and_not_terminal(tmp_path: Path) ->
 
     import asyncio
 
-    asyncio.run(
+    monitoring = asyncio.run(
         monitor_obligations_with_market_data(
             db_path,
             evidence_by_key={},
@@ -419,6 +419,7 @@ def test_exchange_candle_failure_is_explicit_and_not_terminal(tmp_path: Path) ->
             scan_run_id="owner-monitor-gap",
         )
     )
+    assert monitoring.errors == ()
     with SQLiteSetupLifecycleRepository(db_path) as repository:
         progressed = _progress(repository, entered.lifecycle_id)
         stored = repository.get_record_by_lifecycle_id(entered.lifecycle_id)
@@ -454,6 +455,7 @@ def test_unsupported_market_gap_does_not_invent_outcome(tmp_path: Path) -> None:
             scan_run_id="owner-monitor-delist",
         )
     )
+    assert result.errors == ()
     assert result.lags[0].gap_reason == GAP_MARKET_UNSUPPORTED
     with SQLiteSetupLifecycleRepository(db_path) as repository:
         stored = repository.get_record_by_lifecycle_id(entered.lifecycle_id)

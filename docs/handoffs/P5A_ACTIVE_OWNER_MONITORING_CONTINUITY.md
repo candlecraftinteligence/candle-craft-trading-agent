@@ -13,6 +13,7 @@ This phase repairs F01 owner starvation and F02 prospective `plan_version_id` bi
 - Branch: `fix/p5a-active-owner-monitoring-continuity`
 - Base SHA: `637e1208d830b3886317b8fd5df6eb7aaa571bee`
 - Implementation commit: `a0d45ec6d2787faa337a115f6b32c04696da8769`
+- Reviewed HEAD before the silent-exception repair: `c891efa016b334a8eceea8059cd91dd903ee5fa0`
 - Schema version: remains 26
 
 ## Root cause
@@ -141,7 +142,8 @@ Adversarial coverage is `tests/test_p5a_active_owner_monitoring.py`:
 ## Full regression
 
 - Baseline on unmodified `637e1208`: `python -m pytest`, exit 0, about 1221 seconds, Python 3.11.9, one pre-existing Starlette deprecation warning.
-- This branch: `python -m pytest`, exit 0, 475.7 seconds, 2724 passed, 0 failed, 0 skipped, the same Starlette warning.
+- This branch before the silent-exception repair: `python -m pytest`, exit 0, 475.7 seconds, 2724 passed, 0 failed, 0 skipped, the same Starlette warning.
+- After the silent-exception repair: `python -m pytest`, exit 0, 465.4 seconds, 2731 passed, 0 failed, 0 skipped, the same Starlette warning. `compileall` exit 0. `git diff --check` clean.
 - `python -m compileall -q app scripts src tests`: exit 0.
 - `git diff --check`: clean.
 - No separate lint, typecheck, or formatter is configured. CI runs `compileall` and `pytest`.
@@ -154,9 +156,16 @@ Discovery classification, rejection, confirmation, quality, and RR gates were no
 
 No Telegram formatter, risk-warning, or delivery-rule change. A confirmed public owner continues closed-candle evaluation because it is an outcome-eligible latched plan.
 
+## Failure observability
+
+Unexpected monitoring failures are not discarded. Expected per-symbol market-data problems stay on the existing gap contract and do not use this path.
+
+- Normal watch iteration: `owner_monitoring=PARTIAL` plus a `recoverable_errors` line `owner_monitoring:<type>:<detail>`. A clean pass, including persisted candle gaps, stays `SUCCESS`.
+- Ranking or universe failure: discovery still fails closed and remains the iteration error. Monitoring is still attempted. If it also fails, the failed-iteration summary keeps the discovery error and adds `phase_statuses.owner_monitoring=PARTIAL` plus the monitoring error. Startup `SystemExit` text keeps the original discovery message and appends the monitoring line.
+- One-shot: an unexpected monitoring failure raises `SystemExit` with the `owner_monitoring:` diagnostic. The command does not return a successful scan report over that failure.
+
 ## Known limitations
 
-- One-shot continuation swallows an unexpected monitoring exception so the scan report still returns. Watch mode records `owner_monitoring=PARTIAL`. Evidence gaps themselves are persisted.
 - `last_seen_at` stays a discovery timestamp. Freshness for an owned plan is the outcome cursor and the lag diagnostic.
 - Historical production NULL progress is not backfilled.
 - Gap state lives on the existing progress integrity fields. There is no separate gap table.

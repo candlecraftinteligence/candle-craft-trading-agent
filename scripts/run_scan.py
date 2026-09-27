@@ -778,10 +778,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         watchlist = await _resolve_watchlist_for_args(args)
     except (Exception, SystemExit) as exc:
         if discovery_failure_continues_owner_monitoring(exc):
-            try:
-                await _continue_owned_plan_monitoring(args, evidence_by_key={}, scan_run_id=None)
-            except Exception:
-                pass
+            await _surface_monitoring_during_discovery_failure(args, exc)
         raise
     watchlist = _watchlist_with_lifecycle_priority(args, watchlist)
     diagnostics_level = args.diagnostics_level
@@ -1015,15 +1012,17 @@ async def main(argv: Sequence[str] | None = None) -> None:
     if _lifecycle_enabled(args):
         covered_keys, evaluated_ids = _owner_monitoring_skip(result)
         try:
-            await _continue_owned_plan_monitoring(
+            monitoring_result = await _continue_owned_plan_monitoring(
                 args,
                 evidence_by_key={},
                 scan_run_id=lifecycle_scan_run_id,
                 skip_keys=covered_keys,
                 skip_lifecycle_ids=evaluated_ids,
             )
-        except Exception:
-            pass
+        except (Exception, SystemExit) as exc:
+            _raise_one_shot_owner_monitoring_failure(exc)
+        else:
+            _raise_one_shot_owner_monitoring_failure(result=monitoring_result)
     await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
 
@@ -2468,6 +2467,85 @@ def _owner_monitoring_client(args: argparse.Namespace) -> Any:
     return BinanceFuturesClient(timeout=timeout)
 
 
+def _owner_monitoring_failure_lines(
+    *,
+    exc: BaseException | None = None,
+    result: Any | None = None,
+) -> tuple[str, ...]:
+    """Unexpected monitoring failures only. Persisted market-data gaps are not failures."""
+
+    lines: list[str] = []
+    if isinstance(exc, (Exception, SystemExit)):
+        lines.append(_watch_phase_error("owner_monitoring", exc))
+    for item in getattr(result, "errors", ()) or ():
+        if isinstance(item, Mapping):
+            lines.append(f"owner_monitoring:{item.get('symbol', NA)}:{item.get('detail', NA)}")
+    return tuple(lines)
+
+
+def _record_owner_monitoring_phase(
+    phase_statuses: dict[str, str],
+    recoverable_errors: list[str],
+    *,
+    exc: BaseException | None = None,
+    result: Any | None = None,
+) -> None:
+    lines = _owner_monitoring_failure_lines(exc=exc, result=result)
+    if not lines:
+        phase_statuses["owner_monitoring"] = "SUCCESS"
+        return
+    phase_statuses["owner_monitoring"] = "PARTIAL"
+    recoverable_errors.extend(lines)
+
+
+def _raise_one_shot_owner_monitoring_failure(
+    exc: BaseException | None = None,
+    *,
+    result: Any | None = None,
+) -> None:
+    """One-shot scans fail closed on an unexpected monitoring failure."""
+
+    lines = _owner_monitoring_failure_lines(exc=exc, result=result)
+    if lines:
+        raise SystemExit("\n".join(lines))
+
+
+async def _surface_monitoring_during_discovery_failure(
+    args: argparse.Namespace,
+    discovery: BaseException,
+    *,
+    publish_on_system_exit: bool = True,
+) -> None:
+    """Attempt owned-plan monitoring without hiding the discovery failure.
+
+    A monitoring failure is attached for the watch-iteration summary. On the
+    startup path it is also appended to a string ``SystemExit`` so the process
+    exit text keeps both facts.
+    """
+
+    monitor_exc: BaseException | None = None
+    result: Any | None = None
+    try:
+        result = await _continue_owned_plan_monitoring(args, evidence_by_key={}, scan_run_id=None)
+    except (Exception, SystemExit) as caught:
+        monitor_exc = caught
+    lines = _owner_monitoring_failure_lines(exc=monitor_exc, result=result)
+    if monitor_exc is not None:
+        setattr(discovery, "owner_monitoring_error", monitor_exc)
+    if not lines:
+        return
+    setattr(discovery, "owner_monitoring_failure_lines", lines)
+    for line in lines:
+        print(line)
+    if (
+        publish_on_system_exit
+        and isinstance(discovery, SystemExit)
+        and isinstance(discovery.code, str)
+        and "\n".join(lines) not in discovery.code
+    ):
+        discovery.code = f"{discovery.code}\n" + "\n".join(lines)
+
+
 async def _continue_owned_plan_monitoring(
     args: argparse.Namespace,
     *,
@@ -3596,10 +3674,11 @@ async def _attempt_watch_scan_iteration(
         )
     except (Exception, SystemExit) as exc:
         if discovery_failure_continues_owner_monitoring(exc):
-            try:
-                await _continue_owned_plan_monitoring(args, evidence_by_key={}, scan_run_id=None)
-            except Exception:
-                pass
+            await _surface_monitoring_during_discovery_failure(
+                args,
+                exc,
+                publish_on_system_exit=False,
+            )
         return None, None, exc
     return watchlist, execution, None
 
@@ -3731,6 +3810,10 @@ def _failed_watch_iteration_summary(
 ) -> WatchIterationSummary:
     finished_at = _watch_iteration_timestamp()
     error_text = _watch_phase_error("iteration", iteration_error)
+    monitoring_lines = tuple(getattr(iteration_error, "owner_monitoring_failure_lines", ()) or ())
+    phase_statuses = {"iteration": status}
+    if monitoring_lines:
+        phase_statuses["owner_monitoring"] = "PARTIAL"
     return WatchIterationSummary(
         iteration=iteration,
         scanned_at=finished_at,
@@ -3760,8 +3843,8 @@ def _failed_watch_iteration_summary(
             "timed_out": 0,
             "not_run": 0,
         },
-        phase_statuses={"iteration": status},
-        errors=(error_text,),
+        phase_statuses=phase_statuses,
+        errors=(error_text, *monitoring_lines),
         active_lifecycle_count=len(watchlist.active_lifecycle_symbols),
         database_storage_status="NOT_ATTEMPTED",
         next_scan_seconds=schedule.sleep_seconds,
@@ -3779,7 +3862,8 @@ def _record_failed_watch_iteration(
         console_presenter.emit(console_presenter.format_watch_iteration(summary))
     else:
         print(format_watch_iteration_summary(summary))
-        print(f"Iteration error: {summary.errors[0]}")
+        for error in summary.errors:
+            print(f"Iteration error: {error}")
     if args.watch_output_file is not None:
         try:
             append_watch_output(args.watch_output_file, summary)
@@ -4032,18 +4116,21 @@ async def _run_watch_scan_iteration(
                     decision_fallback=_watch_iteration_timestamp(),
                 )
             )
-            await _continue_owned_plan_monitoring(
+            monitoring_result = await _continue_owned_plan_monitoring(
                 args,
                 evidence_by_key=discovery_evidence,
                 scan_run_id=storage_run_id,
                 skip_keys=monitoring_skip_keys,
                 skip_lifecycle_ids=monitoring_skip_ids,
             )
-        except Exception as exc:
-            phase_statuses["owner_monitoring"] = "PARTIAL"
-            recoverable_errors.append(_watch_phase_error("owner_monitoring", exc))
+        except (Exception, SystemExit) as exc:
+            _record_owner_monitoring_phase(phase_statuses, recoverable_errors, exc=exc)
         else:
-            phase_statuses["owner_monitoring"] = "SUCCESS"
+            _record_owner_monitoring_phase(
+                phase_statuses,
+                recoverable_errors,
+                result=monitoring_result,
+            )
     else:
         phase_statuses["lifecycle"] = "SKIPPED"
     if _telegram_lifecycle_public_delivery_enabled(args):
