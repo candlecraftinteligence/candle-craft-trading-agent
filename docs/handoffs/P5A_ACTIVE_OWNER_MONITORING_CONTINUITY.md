@@ -12,11 +12,18 @@ This phase repairs F01 owner starvation and F02 prospective `plan_version_id` bi
 
 - Branch: `fix/p5a-active-owner-monitoring-continuity`
 - Base SHA: `637e1208d830b3886317b8fd5df6eb7aaa571bee`
-- Implementation commit: `a0d45ec6d2787faa337a115f6b32c04696da8769`
-- Reviewed HEAD before the silent-exception repair: `c891efa016b334a8eceea8059cd91dd903ee5fa0`
-- Silent-exception repair commit: `6046970aecb97deb241d7cf23735801c59e116bf`
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/126
 - Schema version: remains 26
+
+Commits, in order:
+
+- `a0d45ec6d2787faa337a115f6b32c04696da8769` — implementation. Owner monitoring continuity and prospective `plan_version_id` binding.
+- `c891efa016b334a8eceea8059cd91dd903ee5fa0` — documentation only. Pins the implementation SHA above. No production or test code.
+- `6046970aecb97deb241d7cf23735801c59e116bf` — implementation repair. Unexpected owner-monitoring failures are reported instead of discarded.
+- `9cc9c647efa7182d8beb4d3ff72769e44b939541` — documentation only. Records the repair SHA and an older CI link. No production or test code.
+- The evidence-repair commit that contains this wording. It changes only this handoff. It does not name its own hash. The acceptance-review HEAD is that commit, and the PR description records the hash after push.
+
+This document is not an acceptance verdict. An earlier review stopped at `STOP_HEAD_MISMATCH` before semantic acceptance. P5A is not independently approved and is not approved for merge or Runtime rollout.
 
 ## Root cause
 
@@ -151,15 +158,18 @@ Adversarial coverage is `tests/test_p5a_active_owner_monitoring.py`:
 - one-shot monitoring failure raises `SystemExit` and is not discarded
 - `scripts/run_scan.py` no longer contains `except Exception: pass` around owner monitoring
 
-## Full regression
+## Evidence by SHA
 
-- Baseline on unmodified `637e1208`: `python -m pytest`, exit 0, about 1221 seconds, Python 3.11.9, one pre-existing Starlette deprecation warning.
-- This branch before the silent-exception repair: `python -m pytest`, exit 0, 475.7 seconds, 2724 passed, 0 failed, 0 skipped, the same Starlette warning.
-- After the silent-exception repair, on `6046970aecb97deb241d7cf23735801c59e116bf`: `python -m pytest`, exit 0, 465.4 seconds, 2731 passed, 0 failed, 0 skipped, the same Starlette warning. `compileall` exit 0. `git diff --check` clean.
-- GitHub CI on that commit: Python 3.11 tests passed in 3m29s. https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36300087110/job/108566011179
-- `python -m compileall -q app scripts src tests`: exit 0.
-- `git diff --check`: clean.
-- No separate lint, typecheck, or formatter is configured. CI runs `compileall` and `pytest`.
+These runs belong only to the SHA named on each line. They are not evidence for a later HEAD.
+
+- Base `637e1208d830b3886317b8fd5df6eb7aaa571bee`: `python -m pytest`, exit 0, about 1221 seconds, Python 3.11.9, one pre-existing Starlette deprecation warning. This was the unmodified main baseline.
+- Sources of `a0d45ec6d2787faa337a115f6b32c04696da8769` / `c891efa016b334a8eceea8059cd91dd903ee5fa0`: `python -m pytest`, exit 0, 475.7 seconds, 2724 passed, 0 failed, 0 skipped, the same warning. `c891efa` changes only this handoff's implementation-SHA line relative to `a0d45ec`. CI for `c891efa`: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36268114059
+- Sources of `6046970aecb97deb241d7cf23735801c59e116bf`: `python -m pytest`, exit 0, 465.4 seconds, 2731 passed, 0 failed, 0 skipped, the same warning. CI for that exact commit: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36300087110
+- `9cc9c647efa7182d8beb4d3ff72769e44b939541`: documentation-only child of `6046970`. CI succeeded: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36300673563. Pytest was not re-executed on this SHA. Do not treat the 2731 count as a run of `9cc9c64`.
+
+Pytest, `compileall`, and `git diff --check` for the acceptance-review HEAD are recorded in the PR description after that commit is pushed. This file does not copy those results forward.
+
+No separate lint, typecheck, or formatter is configured. CI runs `compileall` and `pytest`.
 
 ## Strategy non-regression
 
@@ -179,9 +189,11 @@ Unexpected monitoring failures are not discarded. Expected per-symbol market-dat
 
 ## Known limitations
 
+- Independent architecture acceptance has not happened. `STOP_HEAD_MISMATCH` ended the previous review before that review.
 - `last_seen_at` stays a discovery timestamp. Freshness for an owned plan is the outcome cursor and the lag diagnostic.
 - Historical production NULL progress is not backfilled.
 - Gap state lives on the existing progress integrity fields. There is no separate gap table.
+- Unexpected one-shot monitoring failures raise `SystemExit` with an `owner_monitoring:` diagnostic. They are not swallowed. Exchange timeouts and unsupported or delisted markets stay on the progress gap contract and do not use that exit.
 
 ## Deferred
 
