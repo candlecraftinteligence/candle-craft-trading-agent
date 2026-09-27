@@ -108,6 +108,7 @@ from app.formatters.telegram_formatter import format_telegram_strategy_output  #
 from app.telegram_admin import TelegramAdminConfig, route_admin_scan_report  # noqa: E402
 from app.lifecycle.models import lifecycle_monitoring_priority  # noqa: E402
 from app.lifecycle.owner_monitoring import (  # noqa: E402
+    OwnerMonitoringSetupError,
     discovery_failure_continues_owner_monitoring,
     evidence_from_symbol_results,
     monitor_obligations_with_market_data,
@@ -2587,19 +2588,28 @@ async def _continue_owned_plan_monitoring(
 ) -> Any:
     """Keep owned-plan evaluation running when discovery did not cover those symbols.
 
-    The exchange client is created only if a symbol still needs candles. Ranking
-    failure and universe removal do not synthesize prices.
+    The exchange client is created only if a symbol still needs candles. Construction
+    failures stay on the subsystem channel. Acquisition failures are classified
+    separately. Ranking failure and universe removal do not synthesize prices.
     """
 
     if not _lifecycle_enabled(args):
         return None
     client_box: dict[str, Any] = {}
+    setup_error: OwnerMonitoringSetupError | None = None
     limit = min(_effective_candle_limit(args), BINANCE_KLINE_LIMIT_MAX)
 
     async def fetch(symbol: str, timeframe: str, requested_limit: int) -> Sequence[Any]:
+        nonlocal setup_error
+        if setup_error is not None:
+            raise setup_error
         client = client_box.get("client")
         if client is None:
-            client = _owner_monitoring_client(args)
+            try:
+                client = _owner_monitoring_client(args)
+            except Exception as exc:
+                setup_error = OwnerMonitoringSetupError(f"{type(exc).__name__}:{exc}")
+                raise setup_error from exc
             client_box["client"] = client
         return await client.get_klines(symbol, timeframe, min(int(requested_limit), limit))
 

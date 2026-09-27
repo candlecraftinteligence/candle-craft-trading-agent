@@ -22,9 +22,10 @@ Commits, in order:
 - `6046970aecb97deb241d7cf23735801c59e116bf` — implementation repair. Unexpected owner-monitoring failures are reported instead of discarded.
 - `9cc9c647efa7182d8beb4d3ff72769e44b939541` — documentation only. Records the repair SHA and an older CI link. No production or test code.
 - `69e46d431f4439a6ee4e44e6b1f4558cace01dc4` — documentation only. Separates acceptance evidence from older SHAs. No production or test code.
-- The monitoring, binding, and query-scope repair that contains this wording. It does not name its own hash. The acceptance-review SHA is published in the PR description after that commit is pushed.
+- `84bc91a6fb7816ae8554fa50d4000792f78165f0` — repairs shared-owner evidence, persistence binding, and candidate-query scope.
+- The local-setup failure-visibility repair that contains this wording. It does not name its own hash. The acceptance-review SHA is published in the PR description after that commit is pushed.
 
-This document is not an acceptance verdict. Review of `69e46d431f4439a6ee4e44e6b1f4558cace01dc4` returned `CHANGES_REQUIRED_MONITORING_BINDING_AND_QUERY_SCOPE`. P5A is not independently approved and is not approved for merge or Runtime rollout.
+This document is not an acceptance verdict. Review of `84bc91a6fb7816ae8554fa50d4000792f78165f0` returned `CHANGES_REQUIRED_LOCAL_SETUP_FAILURE_VISIBILITY`. P5A is not independently approved and is not approved for merge or Runtime rollout.
 
 ## Root cause
 
@@ -113,7 +114,7 @@ Gap diagnostics:
 
 No new gap table.
 
-Expected market-data failures are exchange-client errors, timeouts, connection failures, and messages that identify an invalid, unknown, or delisted symbol. Those stay on the gap contract. A client-construction `ValueError`, an adapter `RuntimeError`, or any other programming error is an owner-monitoring subsystem failure. It is not stored as an exchange gap and it does not invent a terminal outcome.
+Expected market-data failures are exchange-client errors, `TimeoutError`, `ConnectionError`, and messages that identify an invalid, unknown, or delisted symbol. Those stay on the gap contract and do not advance the cursor. `OSError` is not an expected exchange outage: `FileNotFoundError`, `PermissionError`, and other local filesystem or configuration errors are subsystem failures. Client construction is classified separately from candle acquisition. A missing `SSL_CERT_FILE` is reported with `FileNotFoundError` and its message. It is not stored as `exchange_market_data_unavailable`.
 
 ## Stale-owner diagnostic
 
@@ -169,6 +170,13 @@ Adversarial coverage is `tests/test_p5a_active_owner_monitoring.py`:
 - candidate query plan and work with 5,000 historical rejections
 - concurrent discovery/monitor, bind retry, and terminal retry under `BEGIN IMMEDIATE`
 
+`tests/test_p5a_local_setup_failure_visibility.py` uses the real exchange-client constructor with a nonexistent temporary `SSL_CERT_FILE`:
+
+- continuation reports `owner_monitoring=PARTIAL` and does not persist an exchange gap
+- one-shot `run_scan.main` exits with an `owner_monitoring` diagnostic that includes `FileNotFoundError`
+- watch reports `owner_monitoring=PARTIAL` and keeps that setup error
+- ranking failure plus the same setup failure keeps both diagnostics
+
 `tests/test_p5a_monitoring_failure_visibility.py` covers the silent-exception repair:
 
 - ranking failure with successful monitoring keeps only the discovery error
@@ -188,8 +196,9 @@ These runs belong only to the SHA named on each line. They are not evidence for 
 - Sources of `6046970aecb97deb241d7cf23735801c59e116bf`: `python -m pytest`, exit 0, 465.4 seconds, 2731 passed, 0 failed, 0 skipped, the same warning. CI for that exact commit: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36300087110
 - `9cc9c647efa7182d8beb4d3ff72769e44b939541`: documentation-only child of `6046970`. CI succeeded: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36300673563. Pytest was not re-executed on this SHA. Do not treat the 2731 count as a run of `9cc9c64`.
 - `69e46d431f4439a6ee4e44e6b1f4558cace01dc4`: documentation-only child of `9cc9c64`. CI succeeded: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36302011988. Independent review of that SHA reproduced the four blockers. Its green tests did not cover those failures. Do not treat the 2731 count as evidence that the blockers were absent.
+- `84bc91a6fb7816ae8554fa50d4000792f78165f0`: shared-owner, binding, and query-scope repair. Local pytest on that tree: exit 0, 2750 passed, 0 failed, 0 skipped, 438.5 seconds, one Starlette warning. CI: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36304676453. Re-review of that SHA returned `CHANGES_REQUIRED_LOCAL_SETUP_FAILURE_VISIBILITY` because `OSError` classified a missing local CA file as an exchange gap. Do not treat the 2750 count as evidence that this setup failure was visible.
 
-Pytest, `compileall`, and `git diff --check` for the repair HEAD are recorded in the PR description after that commit is pushed. This file does not copy those results forward and does not name that commit.
+Pytest, `compileall`, and `git diff --check` for the local-setup repair HEAD are recorded in the PR description after that commit is pushed. This file does not copy those results forward and does not name that commit.
 
 No separate lint, typecheck, or formatter is configured. CI runs `compileall` and `pytest`.
 
@@ -212,7 +221,7 @@ Unexpected monitoring failures are not discarded. Expected per-symbol market-dat
 
 ## Known limitations
 
-- Independent architecture acceptance has not happened. Review of `69e46d4` required repairs to shared-owner failure handling, exception classification, persistence binding, and candidate-query scope. This change is the repair, not an approval.
+- Independent architecture acceptance has not happened. Review of `84bc91a` required local client-setup failures to stay visible. This change is that repair, not an approval.
 - The locked candidate query names `ix_lifecycle_records_epoch_locked_plan_state`. A schema-26 runtime file does not gain that index until an explicit `migrate_existing_database` / `initialize_database` step. The operational opener does not run it.
 - `last_seen_at` stays a discovery timestamp. Freshness for an owned plan is the outcome cursor and the lag diagnostic.
 - Historical production NULL progress is not backfilled.

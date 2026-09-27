@@ -34,13 +34,27 @@ GAP_EXCHANGE_MARKET_DATA = "exchange_market_data_unavailable"
 GAP_MARKET_UNSUPPORTED = "market_unsupported_or_delisted"
 GAP_CURSOR_INTERVAL = "irrecoverable_cursor_interval"
 
-# Ordinary acquisition failures. Programming errors are not in this set.
+# Acquisition failures only. OSError is intentionally absent: FileNotFoundError,
+# PermissionError, and other local setup errors subclass it, while ConnectionError
+# and TimeoutError remain named here.
 EXPECTED_MARKET_DATA_ERRORS = (
     ExchangeClientError,
     TimeoutError,
     ConnectionError,
-    OSError,
 )
+
+LOCAL_SETUP_ERRORS = (
+    FileNotFoundError,
+    PermissionError,
+    IsADirectoryError,
+    NotADirectoryError,
+    FileExistsError,
+)
+
+
+class OwnerMonitoringSetupError(Exception):
+    """Local client construction failed before any exchange read."""
+
 
 CandleFetcher = Callable[[str, str, int], Awaitable[Sequence[Any]]]
 
@@ -397,6 +411,9 @@ async def monitor_obligations_with_market_data(
         try:
             candles = await fetch_candles(symbol, timeframe, candle_limit)
         except Exception as exc:
+            if _is_local_setup_failure(exc):
+                subsystem_failures[key] = _failure_detail(exc)
+                continue
             if isinstance(exc, EXPECTED_MARKET_DATA_ERRORS) or _is_unsupported_market(exc):
                 merged[key] = SymbolMonitoringEvidence(
                     candles=(),
@@ -405,7 +422,7 @@ async def monitor_obligations_with_market_data(
                     gap_reason=classify_market_data_failure(exc),
                 )
                 continue
-            subsystem_failures[key] = f"{type(exc).__name__}:{exc}"
+            subsystem_failures[key] = _failure_detail(exc)
             continue
         candle_tuple = tuple(candles or ())
         if not candle_tuple:
@@ -497,6 +514,22 @@ def classify_market_data_failure(exc: BaseException) -> str:
 def _is_unsupported_market(exc: BaseException) -> bool:
     text = str(exc).lower()
     return any(token in text for token in ("invalid symbol", "unknown symbol", "delist", "not listed"))
+
+
+def _is_local_setup_failure(exc: BaseException) -> bool:
+    """Filesystem and client-construction failures are not exchange outages."""
+
+    if isinstance(exc, (OwnerMonitoringSetupError, *LOCAL_SETUP_ERRORS)):
+        return True
+    cause = exc.__cause__
+    return isinstance(cause, LOCAL_SETUP_ERRORS)
+
+
+def _failure_detail(exc: BaseException) -> str:
+    cause = exc.__cause__
+    if isinstance(exc, OwnerMonitoringSetupError) and isinstance(cause, BaseException):
+        return f"{type(cause).__name__}:{cause}"
+    return f"{type(exc).__name__}:{exc}"
 
 
 def _evidence_covers(evidence: SymbolMonitoringEvidence | None) -> bool:
