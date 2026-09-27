@@ -14,6 +14,8 @@ This phase repairs F01 owner starvation and F02 prospective `plan_version_id` bi
 - Base SHA: `637e1208d830b3886317b8fd5df6eb7aaa571bee`
 - Implementation commit: `a0d45ec6d2787faa337a115f6b32c04696da8769`
 - Reviewed HEAD before the silent-exception repair: `c891efa016b334a8eceea8059cd91dd903ee5fa0`
+- Silent-exception repair commit: `6046970aecb97deb241d7cf23735801c59e116bf`
+- Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/126
 - Schema version: remains 26
 
 ## Root cause
@@ -139,11 +141,22 @@ Adversarial coverage is `tests/test_p5a_active_owner_monitoring.py`:
 
 `tests/test_outcome_plan_attribution_p3b1.py` now expects same-lifecycle bind-forward. Reconstructed unbound progress stays NULL.
 
+`tests/test_p5a_monitoring_failure_visibility.py` covers the silent-exception repair:
+
+- ranking failure with successful monitoring keeps only the discovery error
+- ranking failure plus an unexpected monitoring exception keeps both
+- startup `SystemExit` keeps the discovery text and appends the monitoring line
+- a normal watch iteration records `owner_monitoring=PARTIAL` and a recoverable error
+- a successful monitoring pass does not create an error
+- one-shot monitoring failure raises `SystemExit` and is not discarded
+- `scripts/run_scan.py` no longer contains `except Exception: pass` around owner monitoring
+
 ## Full regression
 
 - Baseline on unmodified `637e1208`: `python -m pytest`, exit 0, about 1221 seconds, Python 3.11.9, one pre-existing Starlette deprecation warning.
 - This branch before the silent-exception repair: `python -m pytest`, exit 0, 475.7 seconds, 2724 passed, 0 failed, 0 skipped, the same Starlette warning.
-- After the silent-exception repair: `python -m pytest`, exit 0, 465.4 seconds, 2731 passed, 0 failed, 0 skipped, the same Starlette warning. `compileall` exit 0. `git diff --check` clean.
+- After the silent-exception repair, on `6046970aecb97deb241d7cf23735801c59e116bf`: `python -m pytest`, exit 0, 465.4 seconds, 2731 passed, 0 failed, 0 skipped, the same Starlette warning. `compileall` exit 0. `git diff --check` clean.
+- GitHub CI on that commit: Python 3.11 tests passed in 3m29s. https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36300087110/job/108566011179
 - `python -m compileall -q app scripts src tests`: exit 0.
 - `git diff --check`: clean.
 - No separate lint, typecheck, or formatter is configured. CI runs `compileall` and `pytest`.
