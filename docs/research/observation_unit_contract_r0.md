@@ -125,7 +125,7 @@ New: `test_same_known_anchor_repeated_scan_and_reopen_keep_one_progress_owner`.
 
 ### Changed known anchor (ordinary producer)
 
-A later observation with a different known `setup_generation_anchor` rotates. New `lifecycle_id`, new `setup_id`, new `plan_version_id` (plan version includes setup_id). Prior row `is_current=0`. Prior progress is **not** further evaluated on that pass. Supersession does not economically resolve the prior plan.
+A later observation with a different known `setup_generation_anchor` rotates. New `lifecycle_id`, new `setup_id`, new `plan_version_id` (plan version includes setup_id). Prior row `is_current=0`. Supersession does not economically resolve the prior plan. If that prior plan still has an outcome-tracking obligation, closed-candle monitoring continues on the later pass.
 
 New: `test_changed_anchor_through_service_supersedes_without_resolving_prior_progress`.
 
@@ -153,7 +153,7 @@ Existing: `test_legacy_active_generation_is_reused_and_backfilled_conservatively
 
 `TRIGGERED` is not in `PLAN_LOCK_STATES`. Observed geometry can be adopted before lock. After `CONFIRMED`, `_plan_or_observed_value` keeps stored non-`N/A` economics; a later observation with a different TP does not rewrite the latched `plan_version_id`.
 
-Direct mutation after latch preserves the latched id and records `plan_version_invariant_violation`. `proven_progress_plan_version_id` then returns `None` (P3B1 will not attribute a new row to the old owner). ON CONFLICT does not update progress `plan_version_id`.
+Direct mutation after latch preserves the latched id and records `plan_version_invariant_violation`. `proven_progress_plan_version_id` then returns `None` (P3B1 will not attribute a new row to the old owner). ON CONFLICT preserves a stored progress `plan_version_id`. A NULL row receives an id only through the P5A prospective bind-forward contract.
 
 Material-plan `first_evaluated_at` (P3B2A `test_material_plan_boundary_uses_first_evaluated_at_without_changing_policy`) is the current boundary source when another `plan_identity` already exists on the lifecycle. Ordinary locked observation does not create that second identity. Do not replace that boundary with `confirmed_at` or a fabricated decision clock.
 
@@ -264,7 +264,7 @@ RESOLVED always has the stated scope; it never means historical runtime repair.
 | D | Lifecycle ownership | RESOLVED | P2B ownership boundary (`tests/test_lifecycle_ownership_repair_p2b.py`). Not an independent tracker. |
 | E | CONFIRMED/ACTIONABLE oscillation | RESOLVED | Prospective protected transitions. No historical rewrite. |
 | F | Outcome ownership | PARTIALLY RESOLVED | Physical owner + P3A diagnostics (`app/analytics/outcome_ownership.py`). Authoritative research ownership is not. |
-| G | plan_version_id outcome attribution | PARTIALLY RESOLVED | First-INSERT only; ON CONFLICT does not update (`tests/test_p3b1_insert_only_attribution_and_progress_conflict_sql`). No legacy recovery. |
+| G | plan_version_id outcome attribution | PARTIALLY RESOLVED | Proven id on new rows; ON CONFLICT keeps a stored id and does not guess legacy NULL (`tests/test_p3b1_insert_only_attribution_and_progress_conflict_sql`, P5A bind-forward). |
 | H | Causal evaluation context | PARTIALLY RESOLVED | P3B2A/B + P3_PREFIX. Admission/source/policy binding and full interval history remain incomplete. |
 | I | Exact eligibility cutoff durability | RESOLVED | Last accepted committed qualifying application only (`tests/test_durable_eligibility_cutoff_p3b2b.py`). |
 | J | Supplied-prefix disposition | PARTIALLY RESOLVED | Truthful last-pass W/P/C (`tests/test_prefix_disposition_evidence_p3_prefix.py`). Not whole-interval coverage. |

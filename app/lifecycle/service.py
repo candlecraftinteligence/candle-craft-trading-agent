@@ -32,6 +32,10 @@ from app.lifecycle.models import (
     lifecycle_monitoring_priority,
 )
 from app.lifecycle.outcomes import evaluate_closed_candle_outcomes
+from app.lifecycle.owner_monitoring import (
+    evidence_from_symbol_results,
+    monitor_tracking_obligations,
+)
 from app.lifecycle.outcome_policy import stored_plan_geometry_failure
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import (
@@ -257,6 +261,18 @@ class SetupLifecycleService:
                 assert updated is not None
                 updated_results.append(updated)
                 _add_process_meta(process_summary, meta)
+            owner_monitoring = monitor_tracking_obligations(
+                repository,
+                evidence_by_key=evidence_from_symbol_results(
+                    updated_results,
+                    decision_fallback=timestamp,
+                ),
+                evaluated_at=timestamp,
+                scan_run_id=effective_run_id,
+                default_timeframe=str(result.config.execution_timeframe or "15m"),
+                record_missing_evidence=False,
+            )
+            process_summary["owner_monitoring"] = owner_monitoring.as_dict()
         process_summary["processed_symbols"] = (
             len(updated_results)
             - process_summary["failed_symbols"]

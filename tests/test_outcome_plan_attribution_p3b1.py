@@ -225,11 +225,11 @@ def test_repeat_upsert_preserves_attribution_and_physical_key(tmp_path: Path) ->
     assert first_rows[0]["plan_version_id"] == second_rows[0]["plan_version_id"] == record.plan_version_id
 
 
-def test_existing_null_is_not_backfilled_when_later_caller_supplies_id(tmp_path: Path) -> None:
+def test_prelock_progress_binds_forward_for_the_same_proven_lifecycle(tmp_path: Path) -> None:
     unlatched = _record()
     latched = _latched()
     assert canonical_plan_identity(unlatched) == canonical_plan_identity(latched)
-    with SQLiteSetupLifecycleRepository(tmp_path / "nobackfill.db") as repository:
+    with SQLiteSetupLifecycleRepository(tmp_path / "bind-forward.db") as repository:
         repository.upsert_record(unlatched)
         _evaluate(repository, unlatched, [_candle(0, high="99", low="95")])
         assert _sql_progress(repository, unlatched.lifecycle_id)[0]["plan_version_id"] is None
@@ -241,7 +241,7 @@ def test_existing_null_is_not_backfilled_when_later_caller_supplies_id(tmp_path:
         )
         rows = _sql_progress(repository, unlatched.lifecycle_id)
     assert len(rows) == 1
-    assert rows[0]["plan_version_id"] is None
+    assert rows[0]["plan_version_id"] == latched.plan_version_id
     assert rows[0]["entry_at"] is not None
 
 

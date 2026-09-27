@@ -107,6 +107,12 @@ from app.formatters.scanner_display import (  # noqa: E402
 from app.formatters.telegram_formatter import format_telegram_strategy_output  # noqa: E402
 from app.telegram_admin import TelegramAdminConfig, route_admin_scan_report  # noqa: E402
 from app.lifecycle.models import lifecycle_monitoring_priority  # noqa: E402
+from app.lifecycle.owner_monitoring import (  # noqa: E402
+    OwnerMonitoringSetupError,
+    discovery_failure_continues_owner_monitoring,
+    evidence_from_symbol_results,
+    monitor_obligations_with_market_data,
+)
 from app.lifecycle.service import (  # noqa: E402
     SetupLifecycleService,
     apply_lifecycle_to_run_result,
@@ -769,7 +775,12 @@ async def main(argv: Sequence[str] | None = None) -> None:
 
     runtime_settings = Settings()
     _prepare_operational_runtime_if_needed(args, runtime_settings)
-    watchlist = await _resolve_watchlist_for_args(args)
+    try:
+        watchlist = await _resolve_watchlist_for_args(args)
+    except (Exception, SystemExit) as exc:
+        if discovery_failure_continues_owner_monitoring(exc):
+            await _surface_monitoring_during_discovery_failure(args, exc)
+        raise
     watchlist = _watchlist_with_lifecycle_priority(args, watchlist)
     diagnostics_level = args.diagnostics_level
     if args.verbose and not args.diagnostics_level_explicit:
@@ -999,6 +1010,28 @@ async def main(argv: Sequence[str] | None = None) -> None:
 
     lifecycle_scan_run_id = scan_run_id if _lifecycle_enabled(args) else None
     result = _apply_lifecycle_if_enabled(args, result, scan_run_id=lifecycle_scan_run_id)
+    if _lifecycle_enabled(args):
+        covered_keys, evaluated_ids = _owner_monitoring_skip(result)
+        prior_monitoring_errors = _prior_owner_monitoring_errors(result)
+        discovery_evidence = evidence_from_symbol_results(
+            result.results,
+            decision_fallback=_watch_iteration_timestamp(),
+        )
+        try:
+            monitoring_result = await _continue_owned_plan_monitoring(
+                args,
+                evidence_by_key=discovery_evidence,
+                scan_run_id=lifecycle_scan_run_id,
+                skip_keys=covered_keys,
+                skip_lifecycle_ids=evaluated_ids,
+            )
+        except (Exception, SystemExit) as exc:
+            _raise_one_shot_owner_monitoring_failure(exc, prior_errors=prior_monitoring_errors)
+        else:
+            _raise_one_shot_owner_monitoring_failure(
+                result=monitoring_result,
+                prior_errors=prior_monitoring_errors,
+            )
     await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
 
@@ -2432,6 +2465,181 @@ def _apply_lifecycle_if_enabled(
         raise SystemExit(str(exc)) from exc
 
 
+def _owner_monitoring_client(args: argparse.Namespace) -> Any:
+    timeout = float(getattr(args, "request_timeout_sec", DEFAULT_REQUEST_TIMEOUT_SEC) or DEFAULT_REQUEST_TIMEOUT_SEC)
+    if getattr(args, "exchange", "binance") == "bybit":
+        from app.data.exchange_clients.bybit_linear import BybitLinearClient
+
+        return BybitLinearClient(timeout=timeout)
+    from app.data.exchange_clients.binance_futures import BinanceFuturesClient
+
+    return BinanceFuturesClient(timeout=timeout)
+
+
+def _prior_owner_monitoring_errors(result: Any) -> tuple[Any, ...]:
+    """Errors from the in-transaction monitoring pass, if that pass ran."""
+
+    summary = getattr(result, "scanner_process_summary", None)
+    if not isinstance(summary, Mapping):
+        return ()
+    monitoring = summary.get("owner_monitoring")
+    if not isinstance(monitoring, Mapping):
+        return ()
+    errors = monitoring.get("errors") or ()
+    return tuple(errors)
+
+
+def _owner_monitoring_failure_lines(
+    *,
+    exc: BaseException | None = None,
+    result: Any | None = None,
+    prior_errors: Sequence[Any] = (),
+) -> tuple[str, ...]:
+    """Unexpected monitoring failures only. Persisted market-data gaps are not failures."""
+
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    def add(line: str) -> None:
+        if line not in seen:
+            seen.add(line)
+            lines.append(line)
+
+    if isinstance(exc, (Exception, SystemExit)):
+        add(_watch_phase_error("owner_monitoring", exc))
+    for item in (*(getattr(result, "errors", ()) or ()), *prior_errors):
+        if isinstance(item, Mapping):
+            add(f"owner_monitoring:{item.get('symbol', NA)}:{item.get('detail', NA)}")
+    return tuple(lines)
+
+
+def _record_owner_monitoring_phase(
+    phase_statuses: dict[str, str],
+    recoverable_errors: list[str],
+    *,
+    exc: BaseException | None = None,
+    result: Any | None = None,
+    prior_errors: Sequence[Any] = (),
+) -> None:
+    lines = _owner_monitoring_failure_lines(exc=exc, result=result, prior_errors=prior_errors)
+    if not lines:
+        phase_statuses["owner_monitoring"] = "SUCCESS"
+        return
+    phase_statuses["owner_monitoring"] = "PARTIAL"
+    recoverable_errors.extend(lines)
+
+
+def _raise_one_shot_owner_monitoring_failure(
+    exc: BaseException | None = None,
+    *,
+    result: Any | None = None,
+    prior_errors: Sequence[Any] = (),
+) -> None:
+    """One-shot scans fail closed on an unexpected monitoring failure."""
+
+    lines = _owner_monitoring_failure_lines(exc=exc, result=result, prior_errors=prior_errors)
+    if lines:
+        raise SystemExit("\n".join(lines))
+
+
+async def _surface_monitoring_during_discovery_failure(
+    args: argparse.Namespace,
+    discovery: BaseException,
+    *,
+    publish_on_system_exit: bool = True,
+) -> None:
+    """Attempt owned-plan monitoring without hiding the discovery failure.
+
+    A monitoring failure is attached for the watch-iteration summary. On the
+    startup path it is also appended to a string ``SystemExit`` so the process
+    exit text keeps both facts.
+    """
+
+    monitor_exc: BaseException | None = None
+    result: Any | None = None
+    try:
+        result = await _continue_owned_plan_monitoring(args, evidence_by_key={}, scan_run_id=None)
+    except (Exception, SystemExit) as caught:
+        monitor_exc = caught
+    lines = _owner_monitoring_failure_lines(exc=monitor_exc, result=result)
+    if monitor_exc is not None:
+        setattr(discovery, "owner_monitoring_error", monitor_exc)
+    if not lines:
+        return
+    setattr(discovery, "owner_monitoring_failure_lines", lines)
+    for line in lines:
+        print(line)
+    if (
+        publish_on_system_exit
+        and isinstance(discovery, SystemExit)
+        and isinstance(discovery.code, str)
+        and "\n".join(lines) not in discovery.code
+    ):
+        discovery.code = f"{discovery.code}\n" + "\n".join(lines)
+
+
+async def _continue_owned_plan_monitoring(
+    args: argparse.Namespace,
+    *,
+    evidence_by_key: Mapping[str, Any] | None = None,
+    scan_run_id: str | None = None,
+    skip_keys: Sequence[str] = (),
+    skip_lifecycle_ids: Sequence[str] = (),
+) -> Any:
+    """Keep owned-plan evaluation running when discovery did not cover those symbols.
+
+    The exchange client is created only if a symbol still needs candles. Construction
+    failures stay on the subsystem channel. Acquisition failures are classified
+    separately. Ranking failure and universe removal do not synthesize prices.
+    """
+
+    if not _lifecycle_enabled(args):
+        return None
+    client_box: dict[str, Any] = {}
+    setup_error: OwnerMonitoringSetupError | None = None
+    limit = min(_effective_candle_limit(args), BINANCE_KLINE_LIMIT_MAX)
+
+    async def fetch(symbol: str, timeframe: str, requested_limit: int) -> Sequence[Any]:
+        nonlocal setup_error
+        if setup_error is not None:
+            raise setup_error
+        client = client_box.get("client")
+        if client is None:
+            try:
+                client = _owner_monitoring_client(args)
+            except Exception as exc:
+                setup_error = OwnerMonitoringSetupError(f"{type(exc).__name__}:{exc}")
+                raise setup_error from exc
+            client_box["client"] = client
+        return await client.get_klines(symbol, timeframe, min(int(requested_limit), limit))
+
+    try:
+        return await monitor_obligations_with_market_data(
+            args.database_path,
+            evidence_by_key=dict(evidence_by_key or {}),
+            fetch_candles=fetch,
+            execution_timeframe=str(getattr(args, "execution_timeframe", "15m") or "15m"),
+            candle_limit=limit,
+            evaluated_at=_watch_iteration_timestamp(),
+            scan_run_id=scan_run_id or f"owner-monitor-{uuid4().hex}",
+            expected_identity=getattr(args, "runtime_identity", None),
+            skip_keys=tuple(skip_keys),
+            skip_lifecycle_ids=tuple(skip_lifecycle_ids),
+            record_missing_evidence=True,
+        )
+    finally:
+        client = client_box.get("client")
+        if client is not None:
+            await client.aclose()
+
+
+def _owner_monitoring_skip(result: ScannerRunResult) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    summary = result.scanner_process_summary.get("owner_monitoring") or {}
+    covered = tuple(str(item) for item in summary.get("covered_keys", ()))
+    evaluated = tuple(str(item) for item in summary.get("evaluated_lifecycle_ids", ()))
+    return covered, evaluated
+
+
 def _telegram_manual_signal_settings() -> Settings:
     try:
         return Settings()
@@ -3506,6 +3714,12 @@ async def _attempt_watch_scan_iteration(
             liquidation_flow_service=liquidation_flow_service,
         )
     except (Exception, SystemExit) as exc:
+        if discovery_failure_continues_owner_monitoring(exc):
+            await _surface_monitoring_during_discovery_failure(
+                args,
+                exc,
+                publish_on_system_exit=False,
+            )
         return None, None, exc
     return watchlist, execution, None
 
@@ -3637,6 +3851,10 @@ def _failed_watch_iteration_summary(
 ) -> WatchIterationSummary:
     finished_at = _watch_iteration_timestamp()
     error_text = _watch_phase_error("iteration", iteration_error)
+    monitoring_lines = tuple(getattr(iteration_error, "owner_monitoring_failure_lines", ()) or ())
+    phase_statuses = {"iteration": status}
+    if monitoring_lines:
+        phase_statuses["owner_monitoring"] = "PARTIAL"
     return WatchIterationSummary(
         iteration=iteration,
         scanned_at=finished_at,
@@ -3666,8 +3884,8 @@ def _failed_watch_iteration_summary(
             "timed_out": 0,
             "not_run": 0,
         },
-        phase_statuses={"iteration": status},
-        errors=(error_text,),
+        phase_statuses=phase_statuses,
+        errors=(error_text, *monitoring_lines),
         active_lifecycle_count=len(watchlist.active_lifecycle_symbols),
         database_storage_status="NOT_ATTEMPTED",
         next_scan_seconds=schedule.sleep_seconds,
@@ -3685,7 +3903,8 @@ def _record_failed_watch_iteration(
         console_presenter.emit(console_presenter.format_watch_iteration(summary))
     else:
         print(format_watch_iteration_summary(summary))
-        print(f"Iteration error: {summary.errors[0]}")
+        for error in summary.errors:
+            print(f"Iteration error: {error}")
     if args.watch_output_file is not None:
         try:
             append_watch_output(args.watch_output_file, summary)
@@ -3911,6 +4130,9 @@ async def _run_watch_scan_iteration(
     storage_run_id = scan_run_id
     phase_statuses["scanner"] = _scanner_phase_status(result, queued_symbols)
     if _lifecycle_enabled(args):
+        monitoring_skip_keys: tuple[str, ...] = ()
+        monitoring_skip_ids: tuple[str, ...] = ()
+        prior_monitoring_errors: tuple[Any, ...] = ()
         try:
             result = _apply_lifecycle_if_enabled(args, result, scan_run_id=storage_run_id)
         except (Exception, SystemExit) as exc:
@@ -3921,11 +4143,39 @@ async def _run_watch_scan_iteration(
         else:
             lifecycle_summary = result.scanner_process_summary
             phase_statuses["lifecycle"] = str(lifecycle_summary.get("status", "SUCCESS"))
+            monitoring_skip_keys, monitoring_skip_ids = _owner_monitoring_skip(result)
+            prior_monitoring_errors = _prior_owner_monitoring_errors(result)
             for item in lifecycle_summary.get("errors", ()):
                 if isinstance(item, Mapping):
                     recoverable_errors.append(
                         f"lifecycle:{item.get('symbol', NA)}:{item.get('detail', NA)}"
                     )
+        try:
+            discovery_evidence = evidence_from_symbol_results(
+                result.results,
+                decision_fallback=_watch_iteration_timestamp(),
+            )
+            monitoring_result = await _continue_owned_plan_monitoring(
+                args,
+                evidence_by_key=discovery_evidence,
+                scan_run_id=storage_run_id,
+                skip_keys=monitoring_skip_keys,
+                skip_lifecycle_ids=monitoring_skip_ids,
+            )
+        except (Exception, SystemExit) as exc:
+            _record_owner_monitoring_phase(
+                phase_statuses,
+                recoverable_errors,
+                exc=exc,
+                prior_errors=prior_monitoring_errors,
+            )
+        else:
+            _record_owner_monitoring_phase(
+                phase_statuses,
+                recoverable_errors,
+                result=monitoring_result,
+                prior_errors=prior_monitoring_errors,
+            )
     else:
         phase_statuses["lifecycle"] = "SKIPPED"
     if _telegram_lifecycle_public_delivery_enabled(args):

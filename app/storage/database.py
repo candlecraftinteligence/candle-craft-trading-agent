@@ -1350,6 +1350,13 @@ def _ensure_lifecycle_generation_indexes(connection: sqlite3.Connection) -> None
 
 
 def _ensure_lifecycle_epoch_current_indexes(connection: sqlite3.Connection) -> None:
+    """Install additive lifecycle indexes. Schema version stays unchanged.
+
+    ``open_operational_database`` does not call this. A rollout that needs the
+    indexes on an existing schema-26 file must run ``migrate_existing_database``
+    (or another explicit ``initialize_database``) as a separate controlled step.
+    ``CREATE INDEX IF NOT EXISTS`` does not rewrite historical rows.
+    """
     connection.execute("DROP INDEX IF EXISTS ux_lifecycle_records_current_symbol_mode_direction")
     connection.execute(
         """
@@ -1369,6 +1376,13 @@ def _ensure_lifecycle_epoch_current_indexes(connection: sqlite3.Connection) -> N
         """
         CREATE INDEX IF NOT EXISTS ix_lifecycle_records_runtime_epoch
             ON setup_lifecycle_records(runtime_epoch_id, symbol)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_lifecycle_records_epoch_locked_plan_state
+            ON setup_lifecycle_records(runtime_epoch_id, current_state, lifecycle_id)
+            WHERE plan_version_id IS NOT NULL
         """
     )
 
