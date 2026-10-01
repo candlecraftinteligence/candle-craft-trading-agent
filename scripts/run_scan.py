@@ -145,6 +145,10 @@ from app.research import (  # noqa: E402
     build_research_report,
     format_research_report,
 )
+from app.research.population import (  # noqa: E402
+    HISTORICAL_MIXED_NON_PROSPECTIVE,
+    PROSPECTIVE_EPOCH_SCOPED_RESEARCH,
+)
 from app.storage import (  # noqa: E402
     DEFAULT_DATABASE_PATH,
     StorageError,
@@ -475,6 +479,8 @@ def _explicit_cli_options(tokens: Sequence[str]) -> set[str]:
         "--research-symbol": "research_symbol",
         "--research-mode": "research_mode",
         "--research-regime": "research_regime",
+        "--research-population": "research_population",
+        "--research-epoch": "research_epoch",
         "--research-output-json": "research_output_json",
         "--lifecycle-stale-hours": "lifecycle_stale_hours",
         "--adaptive-symbol-priority": "adaptive_symbol_priority",
@@ -666,6 +672,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--research-symbol")
     parser.add_argument("--research-mode", choices=["challenge", "swing", "scalp"])
     parser.add_argument("--research-regime")
+    parser.add_argument(
+        "--research-population",
+        choices=("historical", "prospective"),
+        default="historical",
+    )
+    parser.add_argument("--research-epoch")
     parser.add_argument("--lifecycle-stale-hours", type=_positive_float_arg, default=24.0)
     parser.add_argument(
         "--research-output-json",
@@ -691,6 +703,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--backtest-max-setups must be at least 1.")
     if args.research_limit < 1:
         parser.error("--research-limit must be at least 1.")
+    research_epoch = str(args.research_epoch).strip() if args.research_epoch else ""
+    if research_epoch and args.research_population != "prospective":
+        parser.error("--research-epoch requires --research-population prospective.")
     if args.edge_min_sample < 1:
         parser.error("--edge-min-sample must be at least 1.")
     if args.max_selected_setups < 1:
@@ -2290,12 +2305,19 @@ def _handle_history_command(args: argparse.Namespace) -> None:
 
 
 def _handle_research_command(args: argparse.Namespace) -> None:
+    research_epoch = str(args.research_epoch).strip() if args.research_epoch else ""
+    prospective = args.research_population == "prospective"
     filters = ResearchFilters(
         symbol=args.research_symbol,
         mode=args.research_mode,
         regime=args.research_regime,
         limit=args.research_limit,
         lifecycle_stale_hours=args.lifecycle_stale_hours,
+        population_scope=(
+            PROSPECTIVE_EPOCH_SCOPED_RESEARCH if prospective else HISTORICAL_MIXED_NON_PROSPECTIVE
+        ),
+        runtime_epoch_id=research_epoch or None,
+        resolve_active_runtime_epoch=prospective and not research_epoch,
     )
     try:
         report = build_research_report(

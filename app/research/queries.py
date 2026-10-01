@@ -12,6 +12,20 @@ from statistics import median
 from typing import Any
 from app.analytics.evidence_contract import UNAVAILABLE
 from app.data.dtos import NA
+from app.research.population import (
+    HISTORICAL_MIXED_NON_PROSPECTIVE,
+    ResearchPopulationError,
+    population_public_dict,
+    epoch_run_ids,
+    lifecycle_event_membership_sql,
+    lifecycle_membership_sql,
+    replay_results_membership_sql,
+    resolve_research_population,
+    scan_runs_membership_sql,
+    setup_candidates_membership_sql,
+    symbol_lifecycle_lineage_census,
+    symbol_results_membership_sql,
+)
 from app.storage.database import DEFAULT_DATABASE_PATH, StorageError, open_read_only_database
 
 MISSING_SCAN_DATABASE_MESSAGE = "No scan database found. Run scans with --store-scan first."
@@ -117,6 +131,9 @@ class ResearchFilters:
     regime: str | None = None
     limit: int = 10
     lifecycle_stale_hours: float = DEFAULT_LIFECYCLE_STALE_HOURS
+    population_scope: str = HISTORICAL_MIXED_NON_PROSPECTIVE
+    runtime_epoch_id: str | None = None
+    resolve_active_runtime_epoch: bool = False
 
     @property
     def normalized_symbol(self) -> str | None:
@@ -150,6 +167,9 @@ class ResearchFilters:
             "regime": self.normalized_regime or NA,
             "limit": self.normalized_limit,
             "lifecycle_stale_hours": int(stale_hours) if stale_hours.is_integer() else stale_hours,
+            "population_scope": self.population_scope,
+            "runtime_epoch_id": self.runtime_epoch_id or NA,
+            "resolve_active_runtime_epoch": bool(self.resolve_active_runtime_epoch),
         }
 
 
@@ -162,6 +182,7 @@ class ResearchData:
     lifecycle_records: tuple[dict[str, Any], ...] = ()
     lifecycle_events: tuple[dict[str, Any], ...] = ()
     symbol_health: tuple[dict[str, Any], ...] = ()
+    population: dict[str, Any] | None = None
 
 
 def build_research_report(
@@ -180,7 +201,24 @@ def build_research_report(
     report.setdefault("query", normalized_query)
     report.setdefault("filters", active_filters.to_json())
     report.setdefault("warnings", [])
+    report["population"] = dict(data.population or {})
+    report["fallback_to_all_history"] = False
     return report
+
+
+_RUN_ID_CHUNK = 400
+
+
+@dataclass(frozen=True)
+class _FetchedResearchRows:
+    runs: tuple[dict[str, Any], ...]
+    symbols: tuple[dict[str, Any], ...]
+    setups: tuple[dict[str, Any], ...]
+    replays: tuple[dict[str, Any], ...]
+    lifecycle_records: tuple[dict[str, Any], ...]
+    lifecycle_events: tuple[dict[str, Any], ...]
+    symbol_health: tuple[dict[str, Any], ...]
+    unresolved_within_epoch: int = 0
 
 
 def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> ResearchData:
@@ -192,93 +230,329 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
         with _connect_read_only(path) as connection:
             connection.row_factory = sqlite3.Row
             _require_schema(connection)
-            runs = tuple(_normalize_run_row(row) for row in connection.execute("SELECT * FROM scan_runs").fetchall())
-            symbol_rows = tuple(
-                _normalize_symbol_row(row)
-                for row in connection.execute(
-                    """
-                    SELECT sr.*, r.timestamp, r.market_regime AS run_market_regime,
-                           r.command_preset, r.exchange, r.universe
-                    FROM symbol_results sr
-                    JOIN scan_runs r ON r.run_id = sr.run_id
-                    ORDER BY r.timestamp ASC, sr.id ASC
-                    """
-                ).fetchall()
+            resolved = resolve_research_population(
+                connection,
+                population_scope=filters.population_scope,
+                runtime_epoch_id=filters.runtime_epoch_id,
+                resolve_active_runtime_epoch=filters.resolve_active_runtime_epoch,
             )
-            setup_rows = tuple(
-                _normalize_setup_row(row)
-                for row in connection.execute(
-                    """
-                    SELECT sc.*, r.timestamp, r.market_regime AS run_market_regime,
-                           sr.setup_quality_score, sr.readiness_score,
-                           sr.display_bucket, sr.raw_result_json AS symbol_raw_result_json
-                    FROM setup_candidates sc
-                    JOIN scan_runs r ON r.run_id = sc.run_id
-                    LEFT JOIN symbol_results sr ON sr.run_id = sc.run_id AND sr.symbol = sc.symbol
-                    ORDER BY r.timestamp ASC, sc.id ASC
-                    """
-                ).fetchall()
-            )
-            replay_rows = tuple(
-                _normalize_replay_row(row)
-                for row in connection.execute(
-                    """
-                    SELECT rr.*, r.timestamp, r.market_regime AS run_market_regime
-                    FROM replay_results rr
-                    JOIN scan_runs r ON r.run_id = rr.run_id
-                    ORDER BY r.timestamp ASC, rr.id ASC
-                    """
-                ).fetchall()
-            )
-            lifecycle_record_rows: tuple[dict[str, Any], ...] = ()
-            lifecycle_event_rows: tuple[dict[str, Any], ...] = ()
-            if _table_exists(connection, "setup_lifecycle_records"):
-                lifecycle_record_rows = tuple(
-                    _normalize_lifecycle_record(row)
-                    for row in connection.execute(
-                        """
-                        SELECT * FROM setup_lifecycle_records
-                        ORDER BY last_seen_at ASC
-                        """
-                    ).fetchall()
-                )
-            if _table_exists(connection, "setup_lifecycle_events"):
-                lifecycle_event_rows = tuple(
-                    _normalize_lifecycle_event(row)
-                    for row in connection.execute(
-                        """
-                        SELECT e.*, r.mode, r.direction, r.regime_state
-                        FROM setup_lifecycle_events e
-                        LEFT JOIN setup_lifecycle_records r ON r.lifecycle_id = e.lifecycle_id
-                        ORDER BY e.timestamp ASC, e.event_id ASC
-                        """
-                    ).fetchall()
-                )
-            symbol_health_rows: tuple[dict[str, Any], ...] = ()
-            if _table_exists(connection, "symbol_health"):
-                symbol_health_rows = tuple(
-                    _normalize_symbol_health(row)
-                    for row in connection.execute(
-                        """
-                        SELECT * FROM symbol_health
-                        ORDER BY current_health_score DESC, symbol ASC
-                        """
-                    ).fetchall()
-                )
+            if resolved.prospective:
+                epoch_id = resolved.resolved_runtime_epoch_id
+                if not epoch_id:
+                    raise ResearchPopulationError(
+                        "Prospective research resolved without a Runtime epoch. "
+                        "Refusing to fall back to historical rows."
+                    )
+                fetched = _fetch_prospective_rows(connection, filters, epoch_id)
+                census = _prospective_symbol_census(connection, filters, epoch_id)
+                symbol_health_disposition = "excluded_no_durable_epoch_lineage"
+            else:
+                fetched = _fetch_historical_rows(connection)
+                census = None
+                symbol_health_disposition = "included_as_historical_operational_aggregate"
     except sqlite3.Error as exc:
         raise StorageError(f"Unable to read research database: {database_path}") from exc
 
-    filtered_runs = _filter_runs(runs, filters)
-    filtered_symbols = tuple(row for row in symbol_rows if _include_symbol_row(row, filters))
-    filtered_setups = tuple(row for row in setup_rows if _include_mode_row(row, filters))
-    filtered_replays = tuple(row for row in replay_rows if _include_mode_row(row, filters))
-    filtered_lifecycle_records = tuple(row for row in lifecycle_record_rows if _include_lifecycle_row(row, filters))
-    filtered_lifecycle_events = tuple(row for row in lifecycle_event_rows if _include_lifecycle_row(row, filters))
-    filtered_symbol_health = tuple(row for row in symbol_health_rows if _include_symbol_health_row(row, filters))
+    filtered = _apply_descriptive_filters(fetched, filters)
+    included = {
+        "scan_runs": len(filtered.runs),
+        "symbol_results": len(filtered.symbols),
+        "setup_candidates": len(filtered.setups),
+        "replay_results": len(filtered.replays),
+        "lifecycle_records": len(filtered.lifecycle_records),
+        "lifecycle_events": len(filtered.lifecycle_events),
+        "symbol_health": len(filtered.symbol_health),
+    }
+    if resolved.prospective:
+        exclusions: dict[str, Any] = {
+            "census": "symbol_bounded" if census is not None else "not_enumerated",
+            "legacy_excluded": True,
+            "different_epoch_excluded": True,
+            "unresolved_lineage_excluded": True,
+            "unresolved_within_requested_epoch": fetched.unresolved_within_epoch,
+            "symbol_health": symbol_health_disposition,
+            "symbol_health_census": "not_enumerated",
+            "scan_entity_exclusion_census": "not_enumerated",
+        }
+        if census is not None:
+            exclusions["legacy_or_null_epoch"] = census["legacy_or_null_epoch"]
+            exclusions["different_epoch"] = census["different_epoch"]
+    else:
+        exclusions = {
+            "census": "not_applicable",
+            "legacy_excluded": False,
+            "different_epoch_excluded": False,
+            "unresolved_lineage_excluded": False,
+            "symbol_health": symbol_health_disposition,
+        }
+    return ResearchData(
+        runs=filtered.runs,
+        symbols=filtered.symbols,
+        setups=filtered.setups,
+        replays=filtered.replays,
+        lifecycle_records=filtered.lifecycle_records,
+        lifecycle_events=filtered.lifecycle_events,
+        symbol_health=filtered.symbol_health,
+        population=population_public_dict(resolved, included=included, exclusions=exclusions),
+    )
+
+
+def _fetch_historical_rows(connection: sqlite3.Connection) -> _FetchedResearchRows:
+    runs = tuple(_normalize_run_row(row) for row in connection.execute("SELECT * FROM scan_runs").fetchall())
+    symbol_rows = tuple(
+        _normalize_symbol_row(row)
+        for row in connection.execute(
+            """
+            SELECT sr.*, r.timestamp, r.market_regime AS run_market_regime,
+                   r.command_preset, r.exchange, r.universe
+            FROM symbol_results sr
+            JOIN scan_runs r ON r.run_id = sr.run_id
+            ORDER BY r.timestamp ASC, sr.id ASC
+            """
+        ).fetchall()
+    )
+    setup_rows = tuple(
+        _normalize_setup_row(row)
+        for row in connection.execute(
+            """
+            SELECT sc.*, r.timestamp, r.market_regime AS run_market_regime,
+                   sr.setup_quality_score, sr.readiness_score,
+                   sr.display_bucket, sr.raw_result_json AS symbol_raw_result_json
+            FROM setup_candidates sc
+            JOIN scan_runs r ON r.run_id = sc.run_id
+            LEFT JOIN symbol_results sr ON sr.run_id = sc.run_id AND sr.symbol = sc.symbol
+            ORDER BY r.timestamp ASC, sc.id ASC
+            """
+        ).fetchall()
+    )
+    replay_rows = tuple(
+        _normalize_replay_row(row)
+        for row in connection.execute(
+            """
+            SELECT rr.*, r.timestamp, r.market_regime AS run_market_regime
+            FROM replay_results rr
+            JOIN scan_runs r ON r.run_id = rr.run_id
+            ORDER BY r.timestamp ASC, rr.id ASC
+            """
+        ).fetchall()
+    )
+    lifecycle_record_rows: tuple[dict[str, Any], ...] = ()
+    lifecycle_event_rows: tuple[dict[str, Any], ...] = ()
+    if _table_exists(connection, "setup_lifecycle_records"):
+        lifecycle_record_rows = tuple(
+            _normalize_lifecycle_record(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM setup_lifecycle_records
+                ORDER BY last_seen_at ASC
+                """
+            ).fetchall()
+        )
+    if _table_exists(connection, "setup_lifecycle_events"):
+        lifecycle_event_rows = tuple(
+            _normalize_lifecycle_event(row)
+            for row in connection.execute(
+                """
+                SELECT e.*, r.mode, r.direction, r.regime_state
+                FROM setup_lifecycle_events e
+                LEFT JOIN setup_lifecycle_records r ON r.lifecycle_id = e.lifecycle_id
+                ORDER BY e.timestamp ASC, e.event_id ASC
+                """
+            ).fetchall()
+        )
+    symbol_health_rows: tuple[dict[str, Any], ...] = ()
+    if _table_exists(connection, "symbol_health"):
+        symbol_health_rows = tuple(
+            _normalize_symbol_health(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM symbol_health
+                ORDER BY current_health_score DESC, symbol ASC
+                """
+            ).fetchall()
+        )
+    return _FetchedResearchRows(
+        runs=runs,
+        symbols=symbol_rows,
+        setups=setup_rows,
+        replays=replay_rows,
+        lifecycle_records=lifecycle_record_rows,
+        lifecycle_events=lifecycle_event_rows,
+        symbol_health=symbol_health_rows,
+    )
+
+
+def _fetch_prospective_rows(
+    connection: sqlite3.Connection,
+    filters: ResearchFilters,
+    epoch_id: str,
+) -> _FetchedResearchRows:
+    run_ids = epoch_run_ids(connection, epoch_id)
+    runs = _sort_research_rows(
+        tuple(_normalize_run_row(row) for row in _fetch_for_run_ids(connection, scan_runs_membership_sql, run_ids)),
+        "run_id",
+    )
+    symbols = _sort_research_rows(
+        tuple(
+            _normalize_symbol_row(row)
+            for row in _fetch_for_run_ids(connection, symbol_results_membership_sql, run_ids)
+        ),
+        "id",
+    )
+    setups = _sort_research_rows(
+        tuple(
+            _normalize_setup_row(row)
+            for row in _fetch_for_run_ids(connection, setup_candidates_membership_sql, run_ids)
+        ),
+        "id",
+    )
+    replays = _sort_research_rows(
+        tuple(
+            _normalize_replay_row(row)
+            for row in _fetch_for_run_ids(connection, replay_results_membership_sql, run_ids)
+        ),
+        "id",
+    )
+    lifecycle_records: tuple[dict[str, Any], ...] = ()
+    lifecycle_events: tuple[dict[str, Any], ...] = ()
+    unresolved_within_epoch = 0
+    if _table_exists(connection, "setup_lifecycle_records"):
+        lifecycle_raw = connection.execute(lifecycle_membership_sql(), (epoch_id,)).fetchall()
+        admitted_raw, unresolved_raw = _split_lifecycle_lineage(connection, lifecycle_raw, epoch_id)
+        admitted = tuple(_normalize_lifecycle_record(row) for row in admitted_raw)
+        unresolved_normalized = tuple(_normalize_lifecycle_record(row) for row in unresolved_raw)
+        unresolved_within_epoch = sum(
+            1 for row in unresolved_normalized if _include_lifecycle_row(row, filters)
+        )
+        admitted_ids = {str(row["lifecycle_id"]) for row in admitted_raw}
+        lifecycle_records = admitted
+        if _table_exists(connection, "setup_lifecycle_events"):
+            lifecycle_events = tuple(
+                _normalize_lifecycle_event(row)
+                for row in connection.execute(lifecycle_event_membership_sql(), (epoch_id,)).fetchall()
+                if str(row["lifecycle_id"]) in admitted_ids
+            )
+    return _FetchedResearchRows(
+        runs=runs,
+        symbols=symbols,
+        setups=setups,
+        replays=replays,
+        lifecycle_records=lifecycle_records,
+        lifecycle_events=lifecycle_events,
+        symbol_health=(),
+        unresolved_within_epoch=unresolved_within_epoch,
+    )
+
+
+def _split_lifecycle_lineage(
+    connection: sqlite3.Connection,
+    rows: Sequence[sqlite3.Row],
+    epoch_id: str,
+) -> tuple[tuple[sqlite3.Row, ...], tuple[sqlite3.Row, ...]]:
+    origin_ids = tuple(
+        text
+        for text in (_origin_text(row["creation_origin_id"]) for row in rows)
+        if text is not None
+    )
+    origin_epochs = _origin_epochs(connection, origin_ids)
+    admitted: list[sqlite3.Row] = []
+    unresolved: list[sqlite3.Row] = []
+    for row in rows:
+        origin = _origin_text(row["creation_origin_id"])
+        if origin is None or origin_epochs.get(origin) == epoch_id:
+            admitted.append(row)
+        else:
+            unresolved.append(row)
+    return tuple(admitted), tuple(unresolved)
+
+
+def _origin_text(value: Any) -> str | None:
+    """Origin id to validate, or None when the stored origin is blank.
+
+    The direct-epoch exception is SQL NULL or whitespace-empty text only.
+    ``N/A`` and its case or surrounding-whitespace forms are claimed origin
+    ids and must match ``runtime_operational_origins`` for the requested epoch.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text
+
+
+def _origin_epochs(connection: sqlite3.Connection, origin_ids: Sequence[str]) -> dict[str, str]:
+    found: dict[str, str] = {}
+    unique = tuple(dict.fromkeys(origin_ids))
+    for start in range(0, len(unique), _RUN_ID_CHUNK):
+        chunk = unique[start : start + _RUN_ID_CHUNK]
+        placeholders = ",".join("?" for _ in chunk)
+        for row in connection.execute(
+            f"""
+            SELECT origin_id, runtime_epoch_id
+            FROM runtime_operational_origins
+            WHERE origin_id IN ({placeholders})
+            """,
+            chunk,
+        ):
+            found[str(row["origin_id"])] = str(row["runtime_epoch_id"])
+    return found
+
+
+def _prospective_symbol_census(
+    connection: sqlite3.Connection,
+    filters: ResearchFilters,
+    epoch_id: str,
+) -> dict[str, int] | None:
+    symbol = filters.normalized_symbol
+    if symbol is None or not _table_exists(connection, "setup_lifecycle_records"):
+        return None
+    return symbol_lifecycle_lineage_census(connection, symbol=symbol, epoch_id=epoch_id)
+
+
+def _fetch_for_run_ids(
+    connection: sqlite3.Connection,
+    sql_builder: Any,
+    run_ids: Sequence[str],
+) -> list[sqlite3.Row]:
+    rows: list[sqlite3.Row] = []
+    if not run_ids:
+        return rows
+    for start in range(0, len(run_ids), _RUN_ID_CHUNK):
+        chunk = tuple(run_ids[start : start + _RUN_ID_CHUNK])
+        rows.extend(connection.execute(sql_builder(len(chunk)), chunk).fetchall())
+    return rows
+
+
+def _sort_research_rows(rows: Sequence[dict[str, Any]], id_key: str) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        sorted(
+            rows,
+            key=lambda row: (
+                str(row.get("timestamp") or ""),
+                int(row.get(id_key) or 0) if id_key != "run_id" else 0,
+                str(row.get("run_id") or row.get(id_key) or ""),
+            ),
+        )
+    )
+
+
+def _apply_descriptive_filters(fetched: _FetchedResearchRows, filters: ResearchFilters) -> _FetchedResearchRows:
+    filtered_runs = _filter_runs(fetched.runs, filters)
+    filtered_symbols = tuple(row for row in fetched.symbols if _include_symbol_row(row, filters))
+    filtered_setups = tuple(row for row in fetched.setups if _include_mode_row(row, filters))
+    filtered_replays = tuple(row for row in fetched.replays if _include_mode_row(row, filters))
+    filtered_lifecycle_records = tuple(
+        row for row in fetched.lifecycle_records if _include_lifecycle_row(row, filters)
+    )
+    filtered_lifecycle_events = tuple(
+        row for row in fetched.lifecycle_events if _include_lifecycle_row(row, filters)
+    )
+    filtered_symbol_health = tuple(row for row in fetched.symbol_health if _include_symbol_health_row(row, filters))
     run_ids = {row["run_id"] for row in (*filtered_symbols, *filtered_setups, *filtered_replays)}
     if run_ids:
         filtered_runs = tuple(row for row in filtered_runs if row["run_id"] in run_ids)
-    return ResearchData(
+    return _FetchedResearchRows(
         runs=filtered_runs,
         symbols=filtered_symbols,
         setups=filtered_setups,
@@ -286,6 +560,7 @@ def _load_research_data(database_path: Path | str, filters: ResearchFilters) -> 
         lifecycle_records=filtered_lifecycle_records,
         lifecycle_events=filtered_lifecycle_events,
         symbol_health=filtered_symbol_health,
+        unresolved_within_epoch=fetched.unresolved_within_epoch,
     )
 
 
@@ -1227,7 +1502,7 @@ def _symbol_health_report(data: ResearchData, filters: ResearchFilters) -> dict[
         "filters": filters.to_json(),
         "title": "Symbol Health",
         "symbols": rows[: filters.normalized_limit],
-        "warnings": _symbol_health_warnings(rows),
+        "warnings": _symbol_health_warnings(rows, prospective=_population_is_prospective(data)),
     }
 
 
@@ -1242,7 +1517,7 @@ def _slow_symbols_report(data: ResearchData, filters: ResearchFilters) -> dict[s
         "filters": filters.to_json(),
         "title": "Slow Symbols",
         "symbols": rows[: filters.normalized_limit],
-        "warnings": _symbol_health_warnings(rows),
+        "warnings": _symbol_health_warnings(rows, prospective=_population_is_prospective(data)),
     }
 
 
@@ -1261,7 +1536,7 @@ def _timeout_symbols_report(data: ResearchData, filters: ResearchFilters) -> dic
         "filters": filters.to_json(),
         "title": "Timeout Symbols",
         "symbols": rows[: filters.normalized_limit],
-        "warnings": _symbol_health_warnings(rows),
+        "warnings": _symbol_health_warnings(rows, prospective=_population_is_prospective(data)),
     }
 
 
@@ -1279,7 +1554,7 @@ def _priority_symbols_report(data: ResearchData, filters: ResearchFilters) -> di
         "filters": filters.to_json(),
         "title": "Priority Symbols",
         "symbols": rows[: filters.normalized_limit],
-        "warnings": _symbol_health_warnings(rows),
+        "warnings": _symbol_health_warnings(rows, prospective=_population_is_prospective(data)),
     }
 
 
@@ -2530,7 +2805,16 @@ def _replay_sample_warnings(replays: Sequence[Mapping[str, Any]]) -> list[str]:
     return []
 
 
-def _symbol_health_warnings(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+def _population_is_prospective(data: ResearchData) -> bool:
+    population = data.population or {}
+    return bool(population.get("prospective"))
+
+
+def _symbol_health_warnings(rows: Sequence[Mapping[str, Any]], *, prospective: bool = False) -> list[str]:
+    if prospective and not rows:
+        return [
+            "Symbol health has no Runtime epoch lineage and is excluded from prospective research."
+        ]
     if not rows:
         return ["No symbol health data found. Run an adaptive or stored scan first."]
     return []
