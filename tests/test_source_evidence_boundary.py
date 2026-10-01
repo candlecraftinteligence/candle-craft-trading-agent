@@ -881,10 +881,16 @@ def test_stored_scan_payload_cannot_recreate_omitted_evaluator_inputs(tmp_path: 
 
 
 def test_production_modules_do_not_consume_source_or_policy_contracts() -> None:
+    # F04 reads the existing policy manifest to persist and verify canonical
+    # bytes. It does not import source evidence and does not feed the evaluator.
+    allowed = {
+        REPO_ROOT / "app" / "research" / "durable_source_replay" / "capture.py",
+        REPO_ROOT / "app" / "research" / "durable_source_replay" / "replay.py",
+    }
     hits: list[str] = []
     for folder in (REPO_ROOT / "app", REPO_ROOT / "scripts"):
         for path in folder.rglob("*.py"):
-            if path.name in {"source_evidence.py", "evaluation_policy.py"}:
+            if path.name in {"source_evidence.py", "evaluation_policy.py"} or path in allowed:
                 continue
             text = path.read_text(encoding="utf-8")
             if "research.source_evidence" in text or "from app.research import source_evidence" in text:
@@ -892,6 +898,19 @@ def test_production_modules_do_not_consume_source_or_policy_contracts() -> None:
             if "research.evaluation_policy" in text or "from app.research import evaluation_policy" in text:
                 hits.append(str(path.relative_to(REPO_ROOT)))
     assert hits == []
+    for path in allowed:
+        text = path.read_text(encoding="utf-8")
+        assert "research.evaluation_policy" in text
+        assert "research.source_evidence" not in text
+    for relative in (
+        "app/lifecycle/outcomes.py",
+        "app/lifecycle/service.py",
+        "app/lifecycle/owner_monitoring.py",
+        "app/pipeline/scanner_runner.py",
+    ):
+        text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        assert "research.evaluation_policy" not in text
+        assert "research.source_evidence" not in text
     init_text = (REPO_ROOT / "app/research/__init__.py").read_text(encoding="utf-8")
     assert "source_evidence" not in init_text
     assert "evaluation_policy" not in init_text

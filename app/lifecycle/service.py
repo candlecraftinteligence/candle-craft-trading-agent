@@ -32,6 +32,15 @@ from app.lifecycle.models import (
     lifecycle_monitoring_priority,
 )
 from app.lifecycle.outcomes import evaluate_closed_candle_outcomes
+from app.research.durable_source_replay.capture import (
+    invoke_closed_candle_outcomes,
+    note_enclosing_transaction_opened,
+    note_non_invocation,
+    note_savepoint_opened,
+    note_savepoint_released,
+    note_savepoint_rolled_back,
+)
+from app.research.durable_source_replay.constants import CALLER_LIFECYCLE_SERVICE
 from app.lifecycle.owner_monitoring import (
     evidence_from_symbol_results,
     monitor_tracking_obligations,
@@ -206,6 +215,11 @@ class SetupLifecycleService:
             if status == "not_run":
                 prepared.append((symbol_result, None))
                 process_summary["skipped_not_run_symbols"] += 1
+                note_non_invocation(
+                    kind="skipped_not_run",
+                    detail=str(symbol_result.symbol),
+                    lifecycle_id=None,
+                )
                 continue
             try:
                 observation = observation_from_symbol_result(
@@ -234,6 +248,7 @@ class SetupLifecycleService:
             assert connection is not None
             health_records = _load_health_records(connection, tuple(item.symbol for item in result.results))
             connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
             epoch = require_active_runtime_epoch(connection)
             require_registered_operational_run(
                 connection,
@@ -302,6 +317,7 @@ class SetupLifecycleService:
         connection = repository.connection
         assert connection is not None
         connection.execute("SAVEPOINT lifecycle_symbol")
+        note_savepoint_opened(connection, "lifecycle_symbol")
         try:
             updated, meta = self._apply_to_symbol_result_with_meta(
                 symbol_result,
@@ -316,17 +332,21 @@ class SetupLifecycleService:
         except (InvalidOperation, TypeError, ValueError) as exc:
             connection.execute("ROLLBACK TO lifecycle_symbol")
             connection.execute("RELEASE lifecycle_symbol")
+            note_savepoint_rolled_back(connection, "lifecycle_symbol")
             return None, {}, exc
         except (RuntimeEpochOriginError, RuntimeEpochIdentityCollisionError, RuntimeEpochOwnershipError) as exc:
             connection.execute("ROLLBACK TO lifecycle_symbol")
             connection.execute("RELEASE lifecycle_symbol")
+            note_savepoint_rolled_back(connection, "lifecycle_symbol")
             return None, {"origin_blocked_reason": str(exc)}, exc
         except sqlite3.Error:
             connection.execute("ROLLBACK TO lifecycle_symbol")
             connection.execute("RELEASE lifecycle_symbol")
+            note_savepoint_rolled_back(connection, "lifecycle_symbol")
             raise
         else:
             connection.execute("RELEASE lifecycle_symbol")
+            note_savepoint_released(connection, "lifecycle_symbol")
             return updated, meta, None
 
     def apply_to_symbol_result(
@@ -495,14 +515,19 @@ class SetupLifecycleService:
                 observed_at=None,
             )
         if final_record is not None and execution_candles is not None:
-            outcome_evaluation = evaluate_closed_candle_outcomes(
-                final_record,
+            outcome_evaluation = invoke_closed_candle_outcomes(
+                evaluate_closed_candle_outcomes,
+                caller_path=CALLER_LIFECYCLE_SERVICE,
+                record=final_record,
                 execution_candles=execution_candles,
                 execution_timeframe=symbol_result.lifecycle_execution_timeframe,
                 decision_timestamp=symbol_result.lifecycle_decision_timestamp or now,
                 evaluated_at=now,
                 repository=repository,
                 scan_run_id=scan_run_id,
+                delivery=symbol_result.lifecycle_execution_batch_delivery,
+                handoff=batch_handoff,
+                evidence_lineage="lifecycle_service_symbol_result",
             )
             final_record = outcome_evaluation.record
             outcome_progress = outcome_evaluation.progress

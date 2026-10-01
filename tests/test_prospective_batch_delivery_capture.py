@@ -961,10 +961,14 @@ def test_source_descriptor_and_policy_remain_unbound_and_unused() -> None:
     first = build_runtime_evaluation_policy(execution_timeframe="15m")
     second = build_runtime_evaluation_policy(execution_timeframe="15m")
     assert first.policy_id == second.policy_id
+    allowed = {
+        REPO_ROOT / "app" / "research" / "durable_source_replay" / "capture.py",
+        REPO_ROOT / "app" / "research" / "durable_source_replay" / "replay.py",
+    }
     production_hits: list[str] = []
     for folder in (REPO_ROOT / "app", REPO_ROOT / "scripts"):
         for path in folder.rglob("*.py"):
-            if path.name in {"source_evidence.py", "evaluation_policy.py"}:
+            if path.name in {"source_evidence.py", "evaluation_policy.py"} or path in allowed:
                 continue
             text = path.read_text(encoding="utf-8")
             if "research.source_evidence" in text or "from app.research import source_evidence" in text:
@@ -972,6 +976,10 @@ def test_source_descriptor_and_policy_remain_unbound_and_unused() -> None:
             if "research.evaluation_policy" in text or "from app.research import evaluation_policy" in text:
                 production_hits.append(str(path.relative_to(REPO_ROOT)))
     assert production_hits == []
+    for path in allowed:
+        text = path.read_text(encoding="utf-8")
+        assert "research.evaluation_policy" in text
+        assert "research.source_evidence" not in text
     assert "source_evidence" not in (REPO_ROOT / "app/research/__init__.py").read_text(encoding="utf-8")
     assert EVIDENCE_SOURCE_ONLY
 
