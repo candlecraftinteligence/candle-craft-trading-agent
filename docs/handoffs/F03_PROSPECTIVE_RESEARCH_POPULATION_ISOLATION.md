@@ -11,9 +11,10 @@ This phase repairs the research-query denominator. It does not change scanner di
 - Branch: `fix/f03-prospective-research-isolation`
 - Base SHA: `44777a3b4f53919875b66940f231ea542ca38bd4` (merged P5A, `origin/main` at the start of this phase)
 - Implementation SHA: `557e992c25e3e11d9d209fc61cd04971ccecb35b`
+- Handoff SHA that CI already passed: `cae19080a96c3fefeb08a9176922f1b940c11c1d`
+- Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/127
 - Schema version: remains 26
 - Runtime database: not opened, copied, or modified
-- Pull request and CI: recorded in a follow-up documentation commit after GitHub reports them
 
 Verified: local `main` was fast-forwarded from `637e1208d830b3886317b8fd5df6eb7aaa571bee` to the expected P5A SHA before the branch was created. The eight commits in between were the already-merged P5A owner-monitoring release. They were not rewritten.
 
@@ -112,7 +113,7 @@ The added 16 tests are the F03 module. No assertion was weakened and no test was
 
 ## CI result
 
-Not yet recorded. This document is committed before the pull request exists.
+Verified: GitHub Actions run [36851959852](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36851959852) passed `Python 3.11 tests` on `cae19080a96c3fefeb08a9176922f1b940c11c1d` (compileall and pytest). This paragraph is a documentation-only update after that run. The pull request check on the commit that introduces this paragraph is the CI result for the branch head.
 
 ## Strategy non-regression
 
