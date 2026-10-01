@@ -102,41 +102,87 @@ def write_bundle(
     resolved = resolve_evidence_path(path, operational_paths=operational_paths)
     state = inspect_existing_store_file(resolved)
     estimated = _estimate_bundle_bytes(captures, diagnostics, limits=limits, new_store=(state == "new"))
-    current = footprint_bytes(resolved) if state == "readable" else 0
-    if current + estimated > limits.max_store_bytes:
+    pre_tx_footprint = footprint_bytes(resolved) if state == "readable" else 0
+    if pre_tx_footprint + estimated > limits.max_store_bytes:
         raise BoundExceeded("store_byte_limit")
     if state == "new":
         resolved.parent.mkdir(parents=True, exist_ok=True)
     connection = _connect_writer(resolved, limits)
-    accepted = False
     try:
         connection.execute("BEGIN IMMEDIATE")
         _ensure_schema(connection)
-        if connection_footprint_bytes(connection, resolved) > limits.max_store_bytes:
+        baseline = connection_footprint_bytes(connection, resolved)
+        if baseline > limits.max_store_bytes:
             raise BoundExceeded("store_byte_limit")
+        # Schema bytes are already in baseline; do not reserve them again.
+        content_estimated = _estimate_bundle_bytes(
+            captures,
+            diagnostics,
+            limits=limits,
+            new_store=False,
+        )
         for capture in captures:
             _insert_capture(connection, capture, limits=limits)
-            if connection_footprint_bytes(connection, resolved) > limits.max_store_bytes:
-                raise BoundExceeded("store_byte_limit")
+            _reject_if_over_budget(
+                connection,
+                resolved,
+                limits,
+                baseline=baseline,
+                estimated=content_estimated,
+            )
         for diagnostic in diagnostics:
             _insert_diagnostic(connection, diagnostic)
-            if connection_footprint_bytes(connection, resolved) > limits.max_store_bytes:
-                raise BoundExceeded("store_byte_limit")
+            _reject_if_over_budget(
+                connection,
+                resolved,
+                limits,
+                baseline=baseline,
+                estimated=content_estimated,
+            )
+        # Commit-time WAL frames and pinned readers can retain both old and new
+        # pages. On-disk WAL size can lag the writer's dirty pages, so admission
+        # reserves estimated content growth before the bundle commits.
+        _reject_if_over_budget(
+            connection,
+            resolved,
+            limits,
+            baseline=baseline,
+            estimated=content_estimated,
+            commit_reserve=True,
+        )
         connection.commit()
-        accepted = True
     except Exception:
         if connection.in_transaction:
             connection.rollback()
         raise
     finally:
         connection.close()
-    if accepted and footprint_bytes(resolved) > limits.max_store_bytes:
-        if state == "new":
-            for candidate in (resolved, Path(str(resolved) + "-wal"), Path(str(resolved) + "-shm")):
-                try:
-                    candidate.unlink(missing_ok=True)
-                except OSError:
-                    pass
+
+
+def _reject_if_over_budget(
+    connection: sqlite3.Connection,
+    path: Path,
+    limits: BoundLimits,
+    *,
+    baseline: int,
+    estimated: int = 0,
+    commit_reserve: bool = False,
+) -> None:
+    current = connection_footprint_bytes(connection, path)
+    if current > limits.max_store_bytes:
+        raise BoundExceeded("store_byte_limit")
+    page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+    measured_delta = max(0, current - baseline)
+    # Prefer the larger of measured and estimated growth. Measured WAL bytes can
+    # under-report uncommitted frames that appear only after COMMIT.
+    content_delta = max(measured_delta, max(0, estimated))
+    logical = max(current, baseline + content_delta)
+    if commit_reserve:
+        # Pinned readers retain prior frames alongside the newly committed delta.
+        projected = logical + content_delta + (2 * page_size)
+    else:
+        projected = logical + page_size
+    if projected > limits.max_store_bytes:
         raise BoundExceeded("store_byte_limit")
 
 
@@ -155,7 +201,12 @@ def open_reader(path: Path | str, *, operational_paths: Sequence[Path | str] = (
     return connection
 
 
-def load_capture(connection: sqlite3.Connection, capture_id: str) -> dict[str, Any] | None:
+def load_capture(
+    connection: sqlite3.Connection,
+    capture_id: str,
+    *,
+    max_references: int = DEFAULT_BOUNDS.max_reference_count,
+) -> dict[str, Any] | None:
     row = connection.execute(
         "SELECT * FROM captures WHERE capture_id = ?",
         (capture_id,),
@@ -168,9 +219,12 @@ def load_capture(connection: sqlite3.Connection, capture_id: str) -> dict[str, A
         FROM capture_payloads
         WHERE capture_id = ?
         ORDER BY role ASC, ordinal ASC
+        LIMIT ?
         """,
-        (capture_id,),
+        (capture_id, max_references + 1),
     ).fetchall()
+    if len(payloads) > max_references:
+        raise EvidenceStoreError("reference_count_limit")
     return {
         "row": {key: row[key] for key in row.keys()},
         "refs": [
@@ -180,25 +234,59 @@ def load_capture(connection: sqlite3.Connection, capture_id: str) -> dict[str, A
     }
 
 
-def read_payload(connection: sqlite3.Connection, digest: str) -> dict[str, Any] | None:
-    row = connection.execute(
+def read_payload(
+    connection: sqlite3.Connection,
+    digest: str,
+    *,
+    max_bytes: int | None = None,
+) -> dict[str, Any] | None:
+    meta = connection.execute(
         """
-        SELECT canonical_bytes, byte_length, content_hash, codec_version
+        SELECT content_hash, byte_length, codec_version,
+               length(canonical_bytes) AS actual_length
         FROM payloads WHERE content_hash = ?
         """,
+        (digest,),
+    ).fetchone()
+    if meta is None:
+        return None
+    try:
+        declared = _require_int(meta["byte_length"], "byte_length")
+        actual = _require_int(meta["actual_length"], "actual_length")
+    except EvidenceStoreError:
+        raise
+    if declared <= 0 or actual <= 0:
+        raise EvidenceStoreError("payload_length_invalid")
+    if max_bytes is not None and (actual > max_bytes or declared > max_bytes):
+        raise EvidenceStoreError("payload_byte_limit")
+    row = connection.execute(
+        "SELECT canonical_bytes FROM payloads WHERE content_hash = ?",
         (digest,),
     ).fetchone()
     if row is None:
         return None
     blob = bytes(row["canonical_bytes"])
-    if len(blob) != int(row["byte_length"]) or content_hash(blob) != str(row["content_hash"]):
+    if len(blob) != declared or len(blob) != actual or content_hash(blob) != str(meta["content_hash"]):
         raise EvidenceStoreError("payload_bytes_do_not_match_record")
     return {
         "bytes": blob,
-        "codec_version": str(row["codec_version"]),
-        "byte_length": int(row["byte_length"]),
-        "content_hash": str(row["content_hash"]),
+        "codec_version": str(meta["codec_version"]),
+        "byte_length": declared,
+        "content_hash": str(meta["content_hash"]),
     }
+
+
+def _require_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        if isinstance(value, str):
+            text = value.strip()
+            if text.lstrip("-").isdigit():
+                try:
+                    return int(text)
+                except ValueError as exc:
+                    raise EvidenceStoreError(f"malformed_{field}") from exc
+        raise EvidenceStoreError(f"malformed_{field}")
+    return int(value)
 
 
 def _estimate_bundle_bytes(

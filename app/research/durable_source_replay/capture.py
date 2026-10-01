@@ -88,6 +88,8 @@ class _Pending:
     capture_id: str
     savepoint_name: str | None
     savepoint_disposition: str
+    savepoint_ancestry: tuple[str, ...]
+    transaction_generation: int
     fields: dict[str, Any]
     payloads: dict[str, bytes]
     effects_discarded: bool = False
@@ -103,6 +105,8 @@ class _Session:
     retaining_commit_observed: bool = False
     rollback_observed: bool = False
     instrumented: bool = False
+    transaction_generation: int = 0
+    generation_fate: dict[int, str] = field(default_factory=dict)
 
 
 def active_config() -> CaptureConfig | None:
@@ -191,8 +195,13 @@ def note_enclosing_transaction_opened(connection: Any) -> None:
         return
     try:
         session = _ensure_session(connection)
-        session.enclosing_open = True
         _instrument_connection(connection, session)
+        # A new observed BEGIN starts a new transaction generation. Pending
+        # captures from a prior rolled-back generation cannot be retained by it.
+        session.transaction_generation += 1
+        session.enclosing_open = True
+        session.stack.clear()
+        session.rollback_observed = False
     except Exception as exc:
         _remember_failure("enclosing_note_failed", exc)
 
@@ -206,10 +215,7 @@ def note_enclosing_transaction_committed(connection: Any) -> None:
         session = _sessions.get(id(connection))
         if session is None:
             return
-        for item in session.pending:
-            if not item.effects_discarded:
-                item.effects_retained = True
-        session.retaining_commit_observed = True
+        _retain_generation(session, session.transaction_generation)
     except Exception as exc:
         _remember_failure("enclosing_commit_note_failed", exc)
 
@@ -472,11 +478,18 @@ def _buffer_outcome(
         identity = prepared["identity"]
         session = _ensure_session(connection)
         savepoint_name = session.stack[-1] if session.stack else None
+        ancestry = tuple(session.stack)
+        generation = session.transaction_generation
+        if generation <= 0 and session.enclosing_open:
+            generation = 1
+            session.transaction_generation = 1
         session.pending.append(
             _Pending(
                 capture_id="cap_" + secrets.token_hex(16),
                 savepoint_name=savepoint_name,
                 savepoint_disposition=SAVEPOINT_OPEN if savepoint_name else SAVEPOINT_NONE,
+                savepoint_ancestry=ancestry,
+                transaction_generation=generation,
                 payloads=payloads,
                 fields={
                     "caller_path": prepared["caller_path"],
@@ -537,28 +550,42 @@ def _assign_disposition(
     commit_failed: bool,
     exit_rolled_back: bool,
 ) -> None:
-    enclosing = _enclosing_status(
+    current_enclosing = _enclosing_status(
         session,
         committed=committed,
         commit_failed=commit_failed,
         exit_rolled_back=exit_rolled_back,
     )
+    if session.transaction_generation > 0 and session.transaction_generation not in session.generation_fate:
+        session.generation_fate[session.transaction_generation] = current_enclosing
     for item in session.pending:
+        # Unobserved enclosing transactions stay unknown even if SQLite autocommit
+        # retained rows; F04 requires explicit enclosing observation for persistence.
+        if not session.enclosing_open and item.transaction_generation <= 0:
+            item.fields["transaction_status"] = TX_COMMIT_UNKNOWN
+            item.fields["enclosing_disposition"] = TX_COMMIT_UNKNOWN
+            item.fields["savepoint_disposition"] = item.savepoint_disposition
+            continue
+        fate = session.generation_fate.get(item.transaction_generation)
+        if fate is None:
+            if item.transaction_generation == session.transaction_generation:
+                fate = current_enclosing
+            elif item.effects_retained:
+                fate = TX_ENCLOSING_COMMITTED
+            elif item.effects_discarded:
+                fate = TX_ENCLOSING_ROLLED_BACK
+            else:
+                fate = TX_COMMIT_UNKNOWN
         if item.savepoint_disposition == SAVEPOINT_ROLLED_BACK:
             status = TX_SAVEPOINT_ROLLED_BACK
         elif item.effects_discarded:
-            status = TX_ENCLOSING_ROLLED_BACK if session.enclosing_open else TX_COMMIT_UNKNOWN
-        elif session.enclosing_open and (
-            item.effects_retained or (committed and not item.effects_discarded and not session.rollback_observed)
-        ):
+            status = TX_ENCLOSING_ROLLED_BACK if fate != TX_COMMIT_UNKNOWN else TX_COMMIT_UNKNOWN
+        elif item.effects_retained or fate == TX_ENCLOSING_COMMITTED:
             status = TX_ENCLOSING_COMMITTED
-        elif not session.enclosing_open:
-            # A commit happened, but no enclosing BEGIN was observed for this call.
-            status = TX_COMMIT_UNKNOWN
         else:
-            status = enclosing
+            status = fate
         item.fields["transaction_status"] = status
-        item.fields["enclosing_disposition"] = enclosing
+        item.fields["enclosing_disposition"] = fate
         item.fields["savepoint_disposition"] = item.savepoint_disposition
 
 
@@ -573,10 +600,13 @@ def _enclosing_status(
         return TX_COMMIT_INTERRUPTED
     if not session.enclosing_open:
         return TX_COMMIT_UNKNOWN
-    if session.rollback_observed and not any(item.effects_retained for item in session.pending):
-        # A later empty commit after rollback does not retain discarded effects.
+    retained_current = any(
+        item.effects_retained and item.transaction_generation == session.transaction_generation
+        for item in session.pending
+    )
+    if session.rollback_observed and not retained_current:
         return TX_ENCLOSING_ROLLED_BACK
-    if any(item.effects_retained for item in session.pending):
+    if retained_current:
         return TX_ENCLOSING_COMMITTED
     if committed and not session.rollback_observed:
         return TX_ENCLOSING_COMMITTED
@@ -594,21 +624,57 @@ def _finish_savepoint(connection: Any, name: str, disposition: str) -> None:
     try:
         if disposition == SAVEPOINT_ROLLED_BACK:
             while session.stack and session.stack[-1] != name:
-                inner = session.stack.pop()
-                _mark_savepoint(session, inner, SAVEPOINT_ROLLED_BACK)
-        if session.stack and session.stack[-1] == name:
-            session.stack.pop()
-        _mark_savepoint(session, name, disposition)
+                session.stack.pop()
+            if session.stack and session.stack[-1] == name:
+                session.stack.pop()
+            _discard_savepoint_ancestry(session, name)
+        else:
+            if session.stack and session.stack[-1] == name:
+                session.stack.pop()
+            _mark_savepoint_release(session, name)
     except Exception as exc:
         _remember_failure("savepoint_note_failed", exc)
 
 
-def _mark_savepoint(session: _Session, name: str, disposition: str) -> None:
+def _mark_savepoint_release(session: _Session, name: str) -> None:
     for item in session.pending:
         if item.savepoint_name == name and item.savepoint_disposition == SAVEPOINT_OPEN:
-            item.savepoint_disposition = disposition
-            if disposition == SAVEPOINT_ROLLED_BACK:
-                item.effects_discarded = True
+            item.savepoint_disposition = SAVEPOINT_RELEASED
+
+
+def _discard_savepoint_ancestry(session: _Session, name: str) -> None:
+    """Discard every pending capture whose ancestry includes the rolled-back savepoint."""
+
+    for item in session.pending:
+        if name in item.savepoint_ancestry:
+            item.effects_discarded = True
+            item.effects_retained = False
+            item.savepoint_disposition = SAVEPOINT_ROLLED_BACK
+
+
+def _retain_generation(session: _Session, generation: int) -> None:
+    for item in session.pending:
+        if item.transaction_generation != generation:
+            continue
+        if item.effects_discarded:
+            continue
+        item.effects_retained = True
+    session.retaining_commit_observed = True
+    if generation > 0:
+        session.generation_fate[generation] = TX_ENCLOSING_COMMITTED
+
+
+def _discard_generation(session: _Session, generation: int) -> None:
+    for item in session.pending:
+        if item.transaction_generation != generation:
+            continue
+        if item.effects_retained:
+            continue
+        item.effects_discarded = True
+    session.rollback_observed = True
+    session.stack.clear()
+    if generation > 0:
+        session.generation_fate[generation] = TX_ENCLOSING_ROLLED_BACK
 
 
 def _ensure_session(connection: Any) -> _Session:
@@ -628,31 +694,70 @@ def _instrument_connection(connection: Any, session: _Session) -> None:
         return
     original_commit = connection.commit
     original_rollback = connection.rollback
+    original_execute = connection.execute
 
     def commit_wrapper(*args: Any, **kwargs: Any) -> Any:
         was_in_transaction = bool(getattr(connection, "in_transaction", False))
         result = original_commit(*args, **kwargs)
         live = _sessions.get(id(connection))
         if live is not None and was_in_transaction:
-            for item in live.pending:
-                if not item.effects_discarded:
-                    item.effects_retained = True
-            live.retaining_commit_observed = True
+            _retain_generation(live, live.transaction_generation)
         return result
 
     def rollback_wrapper(*args: Any, **kwargs: Any) -> Any:
         live = _sessions.get(id(connection))
         if live is not None:
-            live.rollback_observed = True
-            for item in live.pending:
-                if not item.effects_retained:
-                    item.effects_discarded = True
+            _discard_generation(live, live.transaction_generation)
         return original_rollback(*args, **kwargs)
+
+    def execute_wrapper(sql: Any, parameters: Any = ()) -> Any:
+        _observe_sql(connection, sql)
+        return original_execute(sql, parameters)
 
     connection.commit = commit_wrapper  # type: ignore[method-assign]
     connection.rollback = rollback_wrapper  # type: ignore[method-assign]
+    connection.execute = execute_wrapper  # type: ignore[method-assign]
     connection._dsr_instrumented = True  # type: ignore[attr-defined]
     session.instrumented = True
+
+
+def _observe_sql(connection: Any, sql: Any) -> None:
+    """Observe COMMIT/ROLLBACK issued as SQL text, not only via Python helpers."""
+
+    live = _sessions.get(id(connection))
+    if live is None or sql is None:
+        return
+    text = " ".join(str(sql).strip().split())
+    if not text:
+        return
+    upper = text.upper()
+    if upper.startswith("ROLLBACK TO"):
+        name = _savepoint_name_from_sql(text)
+        if name:
+            while live.stack and live.stack[-1] != name:
+                live.stack.pop()
+            if live.stack and live.stack[-1] == name:
+                live.stack.pop()
+            _discard_savepoint_ancestry(live, name)
+        return
+    if upper == "ROLLBACK" or upper.startswith("ROLLBACK;"):
+        _discard_generation(live, live.transaction_generation)
+        return
+    if upper.startswith("COMMIT"):
+        if bool(getattr(connection, "in_transaction", False)):
+            _retain_generation(live, live.transaction_generation)
+
+
+def _savepoint_name_from_sql(sql: str) -> str | None:
+    parts = sql.replace(";", " ").split()
+    upper_parts = [part.upper() for part in parts]
+    if len(parts) >= 3 and upper_parts[0] == "ROLLBACK" and upper_parts[1] == "TO":
+        index = 2
+        if index < len(parts) and upper_parts[index] == "SAVEPOINT":
+            index += 1
+        if index < len(parts):
+            return parts[index].strip("`\"[]")
+    return None
 
 
 def _delivery_payload(delivery: Any, handoff: Any, limits: BoundLimits) -> tuple[dict[str, Any], str | None]:

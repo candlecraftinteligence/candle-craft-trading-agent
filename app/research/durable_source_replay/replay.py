@@ -275,10 +275,31 @@ def _compatibility(loaded: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
+def _guarded_int(value: Any, field: str) -> int:
+    """Convert SQLite integer-affinity values without raising ValueError."""
+
+    if isinstance(value, bool) or value is None:
+        raise EvidenceStoreError(f"malformed_{field}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lstrip("-").isdigit():
+            try:
+                return int(text)
+            except ValueError as exc:
+                raise EvidenceStoreError(f"malformed_{field}") from exc
+    raise EvidenceStoreError(f"malformed_{field}")
+
+
 def _validate_envelope(row: Mapping[str, Any], refs: Sequence[Mapping[str, Any]], payloads: Mapping[str, Any]) -> str | None:
     """Return a corrupt/unsupported reason, or None when the occurrence envelope is consistent."""
 
-    if int(row.get("store_schema_version") or -1) != STORE_SCHEMA_VERSION:
+    try:
+        store_schema = _guarded_int(row.get("store_schema_version"), "store_schema_version")
+    except EvidenceStoreError as exc:
+        return exc.reason
+    if store_schema != STORE_SCHEMA_VERSION:
         return f"store_schema_version_mismatch:{row.get('store_schema_version')}"
     if str(row.get("codec_version") or "") != CODEC_VERSION:
         return f"capture_codec_version_mismatch:{row.get('codec_version')}"
@@ -294,20 +315,55 @@ def _validate_envelope(row: Mapping[str, Any], refs: Sequence[Mapping[str, Any]]
     savepoint = str(row.get("savepoint_disposition") or "")
     if savepoint not in SAVEPOINT_DISPOSITION_VALUES:
         return f"unknown_savepoint_disposition:{savepoint}"
+    # Full supported consistency matrix for occurrence transaction fields.
     if tx_status == TX_ENCLOSING_COMMITTED and enclosing != TX_ENCLOSING_COMMITTED:
         return "transaction_enclosing_inconsistent"
     if enclosing == TX_ENCLOSING_ROLLED_BACK and tx_status == TX_ENCLOSING_COMMITTED:
         return "transaction_enclosing_inconsistent"
     if enclosing == TX_COMMIT_INTERRUPTED and tx_status == TX_ENCLOSING_COMMITTED:
         return "transaction_enclosing_inconsistent"
+    if enclosing == TX_COMMIT_UNKNOWN and tx_status == TX_ENCLOSING_COMMITTED:
+        return "transaction_enclosing_inconsistent"
     if tx_status == TX_SAVEPOINT_ROLLED_BACK and savepoint != SAVEPOINT_ROLLED_BACK:
         return "savepoint_transaction_inconsistent"
-    if int(row.get("reference_count") or -1) != len(refs):
+    # Reverse: rolled-back savepoint effects cannot be claimed retained.
+    if savepoint == SAVEPOINT_ROLLED_BACK and tx_status == TX_ENCLOSING_COMMITTED:
+        return "savepoint_transaction_inconsistent"
+    if savepoint == SAVEPOINT_ROLLED_BACK and tx_status not in {
+        TX_SAVEPOINT_ROLLED_BACK,
+        TX_ENCLOSING_ROLLED_BACK,
+        TX_COMMIT_UNKNOWN,
+        TX_COMMIT_INTERRUPTED,
+    }:
+        return "savepoint_transaction_inconsistent"
+    if savepoint == SAVEPOINT_NONE and tx_status == TX_SAVEPOINT_ROLLED_BACK:
+        return "savepoint_transaction_inconsistent"
+    if savepoint in {SAVEPOINT_OPEN, SAVEPOINT_RELEASED} and tx_status == TX_SAVEPOINT_ROLLED_BACK:
+        return "savepoint_transaction_inconsistent"
+    try:
+        reference_count = _guarded_int(row.get("reference_count"), "reference_count")
+        parent_depth = _guarded_int(row.get("parent_depth"), "parent_depth")
+        application_schema = _guarded_int(row.get("application_schema_version"), "application_schema_version")
+        policy_supported = _guarded_int(row.get("policy_supported"), "policy_supported")
+    except EvidenceStoreError as exc:
+        return exc.reason
+    if reference_count != len(refs):
         return "reference_count_mismatch"
-    roles = [str(item["role"]) for item in refs]
+    if reference_count < 0 or parent_depth < 0 or application_schema < 0:
+        return "malformed_non_negative_metadata"
+    if parent_depth > DEFAULT_BOUNDS.max_parent_depth:
+        return "parent_depth_limit"
+    roles = [str(item.get("role") or "") for item in refs]
+    if any(not role for role in roles):
+        return "payload_role_missing"
     if len(roles) != len(set(roles)):
         return "duplicate_payload_role"
-    ordinals = [int(item["ordinal"]) for item in refs]
+    if len(roles) > DEFAULT_BOUNDS.max_reference_count:
+        return "reference_count_limit"
+    try:
+        ordinals = [_guarded_int(item.get("ordinal"), "payload_ordinal") for item in refs]
+    except EvidenceStoreError as exc:
+        return exc.reason
     if ordinals != list(range(len(ordinals))):
         return "payload_ordinal_mismatch"
     missing = [role for role in _REQUIRED_ROLES if role not in payloads]
@@ -319,6 +375,9 @@ def _validate_envelope(row: Mapping[str, Any], refs: Sequence[Mapping[str, Any]]
         return "call_payload_shape_invalid"
     if not isinstance(policy, dict):
         return "policy_payload_shape_invalid"
+    for role in (PAYLOAD_PRESTATE, PAYLOAD_DELIVERY, PAYLOAD_RESULT, PAYLOAD_EFFECTS):
+        if not isinstance(payloads.get(role), dict):
+            return f"{role}_payload_shape_invalid"
     if str(call.get("caller_path") or "") != str(row.get("caller_path") or ""):
         return "caller_path_binding_mismatch"
     if str(call.get("evidence_lineage") or "") != str(row.get("evidence_lineage") or ""):
@@ -327,9 +386,18 @@ def _validate_envelope(row: Mapping[str, Any], refs: Sequence[Mapping[str, Any]]
         return "policy_id_header_mismatch"
     if str(policy.get("family") or "") != str(row.get("policy_family") or ""):
         return "policy_family_header_mismatch"
-    supported_flag = bool(int(row.get("policy_supported") or 0))
+    supported_flag = bool(policy_supported)
     if bool(policy.get("supported")) != supported_flag:
         return "policy_supported_header_mismatch"
+    deps = row.get("dependency_versions_json")
+    if not isinstance(deps, str):
+        return "dependency_versions_invalid"
+    try:
+        parsed_deps = json.loads(deps or "{}")
+    except json.JSONDecodeError:
+        return "dependency_versions_invalid"
+    if not isinstance(parsed_deps, dict):
+        return "dependency_versions_invalid"
     return None
 
 
@@ -386,8 +454,11 @@ def _load(
         base["caller_path"] = row["caller_path"]
         base["evidence_lineage"] = row["evidence_lineage"]
         try:
-            base["dependency_versions"] = json.loads(row["dependency_versions_json"] or "{}")
-        except json.JSONDecodeError:
+            deps = json.loads(row["dependency_versions_json"] or "{}")
+            if not isinstance(deps, dict):
+                raise TypeError("dependency_versions_not_object")
+            base["dependency_versions"] = deps
+        except (json.JSONDecodeError, TypeError, ValueError):
             base["status"] = EVIDENCE_CORRUPT
             base["reason"] = "dependency_versions_invalid"
             return base
@@ -395,8 +466,17 @@ def _load(
         decode_budget = DEFAULT_BOUNDS.max_decode_bytes
         decoded_bytes = 0
         for ref in loaded["refs"]:
+            remaining = decode_budget - decoded_bytes
+            if remaining <= 0:
+                base["status"] = EVIDENCE_CORRUPT
+                base["reason"] = "decode_byte_limit"
+                return base
             try:
-                payload = read_payload(connection, ref["content_hash"])
+                payload = read_payload(
+                    connection,
+                    ref["content_hash"],
+                    max_bytes=remaining,
+                )
             except EvidenceStoreError as exc:
                 base["status"] = EVIDENCE_CORRUPT
                 base["reason"] = exc.reason
@@ -441,6 +521,14 @@ def _load(
         base["payloads"] = decoded
         base["status"] = "ready"
         base["reason"] = None
+        return base
+    except EvidenceStoreError as exc:
+        reason = exc.reason
+        if reason.startswith("unsupported_store_version"):
+            base["status"] = UNSUPPORTED_FORMAT
+        else:
+            base["status"] = EVIDENCE_CORRUPT
+        base["reason"] = reason
         return base
     except sqlite3.Error as exc:
         base["status"] = EVIDENCE_CORRUPT

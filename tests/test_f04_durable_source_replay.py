@@ -58,7 +58,7 @@ from app.pipeline.scanner_runner import (
     ScannerRunResult,
     ScannerSymbolResult,
 )
-from app.research.durable_source_replay.bounds import BoundLimits
+from app.research.durable_source_replay.bounds import BoundExceeded, BoundLimits, DEFAULT_BOUNDS
 from app.research.durable_source_replay.capture import (
     CaptureConfig,
     capture_counters,
@@ -67,12 +67,13 @@ from app.research.durable_source_replay.capture import (
     invoke_closed_candle_outcomes,
     note_enclosing_transaction_opened,
     note_savepoint_opened,
+    note_savepoint_released,
     note_savepoint_rolled_back,
     reset_capture_process_state,
     use_capture,
 )
 from app.research.durable_source_replay.cli import main
-from app.research.durable_source_replay.codec import decode_canonical, encode_canonical
+from app.research.durable_source_replay.codec import content_hash, decode_canonical, encode_canonical
 from app.research.durable_source_replay.constants import (
     CALLER_LIFECYCLE_SERVICE,
     CALLER_OWNER_MONITORING,
@@ -84,8 +85,9 @@ from app.research.durable_source_replay.constants import (
     TX_ENCLOSING_ROLLED_BACK,
     TX_SAVEPOINT_ROLLED_BACK,
 )
-from app.research.durable_source_replay.paths import EvidencePathError, resolve_evidence_path
-from app.research.durable_source_replay.replay import replay_capture
+from app.research.durable_source_replay.paths import EvidencePathError, footprint_bytes, resolve_evidence_path
+from app.research.durable_source_replay.replay import inspect_capture, replay_capture
+from app.research.durable_source_replay.store import write_bundle
 from app.research.queries import _origin_text
 from app.storage.database import DEFAULT_DATABASE_PATH, SCHEMA_VERSION, open_initialized_database
 from app.runtime_epoch.origin import register_operational_run
@@ -1784,3 +1786,331 @@ def _restore_from_copy(tmp_path: Path, evidence: Path) -> None:
         sidecar = Path(str(evidence) + suffix)
         if sidecar.exists():
             sidecar.unlink()
+
+
+def _progress_count(path: Path) -> int:
+    with sqlite3.connect(path) as connection:
+        return int(
+            connection.execute("SELECT count(*) FROM setup_lifecycle_outcome_progress").fetchone()[0]
+        )
+
+
+def test_f04_r1_released_descendant_outer_rollback_is_not_persistence(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            for name in ("outer", "inner"):
+                connection.execute(f"SAVEPOINT {name}")
+                note_savepoint_opened(connection, name)
+            invoke_closed_candle_outcomes(
+                evaluate_closed_candle_outcomes,
+                caller_path=CALLER_OWNER_MONITORING,
+                record=record,
+                execution_candles=[_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+                execution_timeframe=TIMEFRAME,
+                decision_timestamp=_decision(1),
+                evaluated_at=_decision(1),
+                repository=repository,
+                scan_run_id=f"run-{record.lifecycle_id}",
+            )
+            connection.execute("RELEASE inner")
+            note_savepoint_released(connection, "inner")
+            connection.execute("ROLLBACK TO outer")
+            note_savepoint_rolled_back(connection, "outer")
+            connection.execute("RELEASE outer")
+            note_savepoint_released(connection, "outer")
+    assert _progress_count(path) == 0
+    report = _replay(evidence, _capture_ids(evidence)[0], tmp_path / "scratch-nested")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["transaction_status"] == TX_SAVEPOINT_ROLLED_BACK
+    assert report["claims"]["computation_replay"] is True
+    assert report["claims"]["operational_persistence"] is False
+
+
+def test_f04_r1_sql_rollback_then_new_transaction_is_not_persistence(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            invoke_closed_candle_outcomes(
+                evaluate_closed_candle_outcomes,
+                caller_path=CALLER_OWNER_MONITORING,
+                record=record,
+                execution_candles=[_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+                execution_timeframe=TIMEFRAME,
+                decision_timestamp=_decision(1),
+                evaluated_at=_decision(1),
+                repository=repository,
+                scan_run_id=f"run-{record.lifecycle_id}",
+            )
+            connection.execute("ROLLBACK")
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            connection.execute("UPDATE setup_lifecycle_records SET last_seen_at = last_seen_at")
+    assert _progress_count(path) == 0
+    report = _replay(evidence, _capture_ids(evidence)[0], tmp_path / "scratch-sql-rb")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["transaction_status"] in {TX_ENCLOSING_ROLLED_BACK, TX_COMMIT_UNKNOWN}
+    assert report["claims"]["operational_persistence"] is False
+
+
+def test_f04_r1_generation_preserves_earlier_commit_across_later_rollback(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    first = _own(path, _latched(lifecycle_id="life-gen-1", symbol="SOLUSDT"))
+    second = _own(path, _latched(lifecycle_id="life-gen-2", symbol="ADAUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            invoke_closed_candle_outcomes(
+                evaluate_closed_candle_outcomes,
+                caller_path=CALLER_OWNER_MONITORING,
+                record=first,
+                execution_candles=[_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+                execution_timeframe=TIMEFRAME,
+                decision_timestamp=_decision(1),
+                evaluated_at=_decision(1),
+                repository=repository,
+                scan_run_id=f"run-{first.lifecycle_id}",
+            )
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            invoke_closed_candle_outcomes(
+                evaluate_closed_candle_outcomes,
+                caller_path=CALLER_OWNER_MONITORING,
+                record=second,
+                execution_candles=[_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+                execution_timeframe=TIMEFRAME,
+                decision_timestamp=_decision(1),
+                evaluated_at=_decision(1),
+                repository=repository,
+                scan_run_id=f"run-{second.lifecycle_id}",
+            )
+            connection.execute("ROLLBACK")
+    assert _progress_count(path) == 1
+    captures = _capture_ids(evidence)
+    assert len(captures) == 2
+    reports = {
+        capture_id: _replay(evidence, capture_id, tmp_path / f"scratch-{capture_id}")
+        for capture_id in captures
+    }
+    statuses = {report["transaction_status"] for report in reports.values()}
+    assert TX_ENCLOSING_COMMITTED in statuses
+    assert TX_ENCLOSING_ROLLED_BACK in statuses or TX_COMMIT_UNKNOWN in statuses
+    persisted = [report for report in reports.values() if report["claims"]["operational_persistence"]]
+    discarded = [report for report in reports.values() if not report["claims"]["operational_persistence"]]
+    assert len(persisted) == 1
+    assert len(discarded) == 1
+    assert all(report["status"] == REPLAY_MATCH for report in reports.values())
+
+
+def test_f04_r3_pinned_reader_rejects_before_commit_and_preserves_prior(tmp_path: Path) -> None:
+    path = tmp_path / "evidence.sqlite"
+    write_bundle(path, captures=[])
+    before = footprint_bytes(path)
+    assert before > 0
+    reader = sqlite3.connect(path)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM evidence_meta").fetchall()
+        for count in (10, 20):
+            with pytest.raises(BoundExceeded) as excinfo:
+                write_bundle(
+                    path,
+                    captures=[],
+                    diagnostics=[
+                        {
+                            "diagnostic_id": f"diag-{count}-{index}",
+                            "recorded_at": "2026-04-01T00:00:00+00:00",
+                            "kind": "synthetic",
+                            "lifecycle_id": None,
+                            "detail": "x" * 500,
+                            "transaction_status": "commit_unknown",
+                        }
+                        for index in range(count)
+                    ],
+                    limits=BoundLimits(max_store_bytes=96 * 1024),
+                )
+            assert excinfo.value.reason == "store_byte_limit"
+            with sqlite3.connect(path) as probe:
+                rows = probe.execute("SELECT count(*) FROM capture_diagnostics").fetchone()[0]
+            assert rows == 0
+            assert footprint_bytes(path) <= 96 * 1024
+        # Boundary that previously fit still preserves an empty prior store.
+        write_bundle(
+            path,
+            captures=[],
+            diagnostics=[
+                {
+                    "diagnostic_id": f"diag-ok-{index}",
+                    "recorded_at": "2026-04-01T00:00:00+00:00",
+                    "kind": "synthetic",
+                    "lifecycle_id": None,
+                    "detail": "x" * 500,
+                    "transaction_status": "commit_unknown",
+                }
+                for index in range(5)
+            ],
+            limits=BoundLimits(max_store_bytes=160 * 1024),
+        )
+        with sqlite3.connect(path) as probe:
+            accepted = probe.execute("SELECT count(*) FROM capture_diagnostics").fetchone()[0]
+        assert accepted == 5
+        assert footprint_bytes(path) <= 160 * 1024
+    finally:
+        reader.rollback()
+        reader.close()
+    assert footprint_bytes(path) <= 160 * 1024
+
+
+def test_f04_r4_savepoint_rolled_back_cannot_claim_enclosing_committed(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            connection.execute("SAVEPOINT inner")
+            note_savepoint_opened(connection, "inner")
+            invoke_closed_candle_outcomes(
+                evaluate_closed_candle_outcomes,
+                caller_path=CALLER_OWNER_MONITORING,
+                record=record,
+                execution_candles=[_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+                execution_timeframe=TIMEFRAME,
+                decision_timestamp=_decision(1),
+                evaluated_at=_decision(1),
+                repository=repository,
+                scan_run_id=f"run-{record.lifecycle_id}",
+            )
+            connection.execute("ROLLBACK TO inner")
+            note_savepoint_rolled_back(connection, "inner")
+            connection.execute("RELEASE inner")
+            note_savepoint_released(connection, "inner")
+    assert _progress_count(path) == 0
+    capture_id = _capture_ids(evidence)[0]
+    before = _replay(evidence, capture_id, tmp_path / "scratch-before")
+    assert before["status"] == REPLAY_MATCH
+    assert before["transaction_status"] == TX_SAVEPOINT_ROLLED_BACK
+    assert before["claims"]["operational_persistence"] is False
+    with sqlite3.connect(evidence) as connection:
+        connection.execute("UPDATE captures SET transaction_status = 'enclosing_committed'")
+        connection.commit()
+    after = _replay(evidence, capture_id, tmp_path / "scratch-after")
+    assert after["status"] == EVIDENCE_CORRUPT
+    assert after["reason"] == "savepoint_transaction_inconsistent"
+    assert after["claims"]["operational_persistence"] is False
+    assert after["claims"]["computation_replay"] is False
+    inspection = inspect_capture(evidence_path=evidence, capture_id=capture_id)
+    assert inspection["status"] != "INSPECTION_OK"
+    assert inspection["exit_code"] != 0
+
+
+def test_f04_r4_malformed_reference_count_is_structured_corrupt(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        _monitor(path, record, [_candle(0, high="103", low="100")], when=_decision(0))
+    capture_id = _capture_ids(evidence)[0]
+    with sqlite3.connect(evidence) as connection:
+        connection.execute("UPDATE captures SET reference_count = ?", ("malformed",))
+        connection.commit()
+    inspection = inspect_capture(evidence_path=evidence, capture_id=capture_id)
+    assert "uncaught_exception" not in inspection
+    assert inspection["status"] == EVIDENCE_CORRUPT
+    assert inspection["reason"] == "malformed_reference_count"
+    assert inspection["claims"]["operational_persistence"] is False
+    assert inspection["claims"]["computation_replay"] is False
+    report = _replay(evidence, capture_id, tmp_path / "scratch-malformed")
+    assert report["status"] == EVIDENCE_CORRUPT
+    assert report["claims"]["operational_persistence"] is False
+
+
+def test_f04_r7_payload_and_reference_bounds_before_materialization(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    import app.research.durable_source_replay.replay as replay_module
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        _monitor(
+            path,
+            record,
+            [_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+            when=_decision(1),
+        )
+    capture_id = _capture_ids(evidence)[0]
+
+    oversize = encode_canonical("x" * (DEFAULT_BOUNDS.max_decode_bytes + 19))
+    digest = content_hash(oversize)
+    with sqlite3.connect(evidence) as connection:
+        connection.execute(
+            "INSERT INTO payloads VALUES (?, ?, ?, ?)",
+            (digest, "cci-durable-source-replay-codec-v1", len(oversize), oversize),
+        )
+        connection.execute(
+            "UPDATE capture_payloads SET content_hash = ? WHERE role = 'call_inputs'",
+            (digest,),
+        )
+        connection.commit()
+    read_lengths: list[int] = []
+    original_read = replay_module.read_payload
+
+    def spy_read(*args: object, **kwargs: object):
+        payload = original_read(*args, **kwargs)
+        if payload:
+            read_lengths.append(len(payload["bytes"]))
+        return payload
+
+    with patch.object(replay_module, "read_payload", spy_read):
+        oversized = inspect_capture(evidence_path=evidence, capture_id=capture_id)
+    assert oversized["status"] == EVIDENCE_CORRUPT
+    assert oversized["reason"] in {"payload_byte_limit", "decode_byte_limit"}
+    assert not any(length > DEFAULT_BOUNDS.max_decode_bytes for length in read_lengths)
+
+    clean = tmp_path / "clean.sqlite"
+    clean_path = _operational(tmp_path / "clean-op")
+    clean_record = _own(clean_path, _latched(lifecycle_id="life-refs", symbol="DOTUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=clean, operational_paths=(clean_path,))):
+        _monitor(clean_path, clean_record, [_candle(0, high="103", low="100")], when=_decision(0))
+    capture_id = _capture_ids(clean)[0]
+    with sqlite3.connect(clean) as connection:
+        refs = connection.execute(
+            "SELECT role, ordinal, content_hash FROM capture_payloads ORDER BY role, ordinal"
+        ).fetchall()
+        digest = min(
+            connection.execute("SELECT content_hash, byte_length FROM payloads").fetchall(),
+            key=lambda row: row[1],
+        )[0]
+        for index in range(DEFAULT_BOUNDS.max_reference_count + 1 - len(refs)):
+            connection.execute(
+                "INSERT INTO capture_payloads VALUES (?, ?, ?, ?)",
+                (capture_id, f"z_extra_{index:03}", digest, len(refs) + index),
+            )
+        connection.execute(
+            "UPDATE captures SET reference_count = ?",
+            (DEFAULT_BOUNDS.max_reference_count + 1,),
+        )
+        connection.commit()
+    inspection = inspect_capture(evidence_path=clean, capture_id=capture_id)
+    assert inspection["status"] == EVIDENCE_CORRUPT
+    assert inspection["reason"] == "reference_count_limit"
+    assert inspection["exit_code"] != 0
+    assert inspection["claims"]["computation_replay"] is False
