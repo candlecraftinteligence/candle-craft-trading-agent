@@ -205,7 +205,7 @@ No strategy gate, RR, or lifecycle-semantics change. F03 research denominators a
 
 Prior reviewed head `255c03600fc9224c66d9c2113481137007062016`: run [36904095734](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36904095734) succeeded (2802 passed) but did not cover the independent R1/R3/R4/R7 failures above.
 
-Second corrective exact-head CI: recorded in Final head after push.
+Second corrective code tip `aa6f1c2923c73934dbf25ee82e6f5b43e89bc55c`: GitHub Actions run [36910492306](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36910492306) — `Python 3.11 tests` success, attempt 1, no retry.
 
 ## Rollout and rollback
 
@@ -220,10 +220,11 @@ Full scanner discovery/confirmation decision replay and HTF/context inputs; auth
 ## Final head
 
 - Prior reviewed tip (still REQUEST_CHANGES): `255c03600fc9224c66d9c2113481137007062016`
-- Second corrective code and docs tip: see git HEAD after this delivery
-- Exact-head CI for the final tip: recorded after GitHub Actions completes
+- Second corrective code tip: `aa6f1c2923c73934dbf25ee82e6f5b43e89bc55c`
+- Exact-head CI for that code tip: [36910492306](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36910492306) — success, attempt 1
+- Documentation tip that records this paragraph is the branch tip after this commit; its PR check is the CI result for the final head
 - Local focused F04: 37 passed
-- Related suites: passed
+- Related suites (source/delivery/policy/semantics/P5A/F03/lifecycle/observation-unit including F04): 241 passed
 - Full pytest: exit 0, 2809 collected, ~492s, one Starlette warning
 - `python -m compileall -q app tests`: exit 0
 - Independent acceptance: **not claimed**; awaiting re-review of the exact final head
