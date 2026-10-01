@@ -18,6 +18,12 @@ This phase repairs the research-query denominator. It does not change scanner di
 
 Verified: local `main` was fast-forwarded from `637e1208d830b3886317b8fd5df6eb7aaa571bee` to the expected P5A SHA before the branch was created. The eight commits in between were the already-merged P5A owner-monitoring release. They were not rewritten.
 
+## Origin-text repair
+
+Reviewed head `776da0f9c0715853a19909d2183bc6bcd36870d0` treated stored `N/A` as a blank origin. `app/research/queries.py::_origin_text` returned None when the stripped text was empty or `text.upper() == "N/A"`. `_split_lifecycle_lineage` then admitted the row on the epoch column alone. Case and surrounding-whitespace variants took the same path, so a missing `N/A` origin and an `N/A` origin owned by another epoch both entered the prospective denominator.
+
+The direct-epoch exception is now SQL NULL or whitespace-empty text only. Surrounding whitespace is stripped before lookup, and the remaining text is compared to `runtime_operational_origins.origin_id` exactly. A missing id and an id owned by another epoch are unresolved. Their events stay out of conversion numerators and denominators. `unresolved_within_requested_epoch` counts those filtered rows. Schema 26, historical default, public quality 88, grade A, and RR 3 are unchanged. No live database was opened. Runtime behavior, order execution, and F04 were not changed.
+
 ## Root cause
 
 Verified from `app/research/queries.py` on the base SHA: `_load_research_data` selected `scan_runs`, `symbol_results`, `setup_candidates`, `replay_results`, `setup_lifecycle_records`, `setup_lifecycle_events`, and `symbol_health` without a Runtime epoch predicate. Symbol, mode, and regime filters ran afterward in Python. Those filters do not identify an epoch.
@@ -57,7 +63,7 @@ Membership is not timestamp, symbol, mode, direction, `is_current`, or price geo
 | `symbol_results` | Same run registration. Loaded with `run_id IN (...)` against `ix_symbol_results_run_id`. |
 | `setup_candidates` | Same run registration. The symbol join is `run_id` plus `symbol` on that run, not symbol alone. |
 | `replay_results` | Same run registration. |
-| `setup_lifecycle_records` | `runtime_epoch_id` equals the resolved epoch. A blank `creation_origin_id` does not remove that direct membership. A non-blank origin must exist in `runtime_operational_origins` for the same epoch; a conflicting or missing origin is excluded as unresolved. A NULL `runtime_epoch_id` is not admitted through an origin id. |
+| `setup_lifecycle_records` | `runtime_epoch_id` equals the resolved epoch. SQL NULL and whitespace-empty `creation_origin_id` keep that direct membership. Every other stored origin, including `N/A` and case or surrounding-whitespace variants, must exist in `runtime_operational_origins` for the same epoch. A missing or other-epoch origin is excluded, and its events are excluded. A NULL `runtime_epoch_id` is not admitted through an origin id. |
 | `setup_lifecycle_events` | Joined only through an admitted lifecycle id. `scan_run_id` does not move an event into another epoch. |
 | `symbol_health` | No epoch or run lineage. Excluded from prospective research. Still returned for explicit historical research. Operational symbol-health writes were not changed. |
 
@@ -80,7 +86,7 @@ Resolved metadata includes scope type, requested id (`ACTIVE` when active resolu
 
 ## Unresolved-lineage behavior
 
-Rows that carry the requested epoch id but whose `creation_origin_id` points at a missing origin, or at another epoch, are omitted. The omission count is `unresolved_within_requested_epoch`, limited to those candidate rows rather than a full-database census.
+Rows that carry the requested epoch id but whose `creation_origin_id` points at a missing origin, or at another epoch, are omitted. The omission count is `unresolved_within_requested_epoch`, limited to those candidate rows rather than a full-database census. Stored text is an origin id after surrounding whitespace is removed. Only SQL NULL and whitespace-empty text skip that lookup. `N/A`, `n/a`, and ` N/A ` do not.
 
 A symbol-bounded lifecycle census, when `--research-symbol` is set, also reports `legacy_or_null_epoch` and `different_epoch` for that symbol. Without a symbol, those two counts are not enumerated. Scan-entity exclusion totals are not enumerated, because `symbol_results` has no symbol index and a census would scan history. The prospective read itself still starts from registered run ids.
 
@@ -100,20 +106,25 @@ No schema version bump and no new index. Existing lineage indexes were sufficien
 
 Covers mixed legacy plus two prospective epochs with shared symbol, mode, direction, regime, timestamp, and geometry; epoch A versus epoch B; NULL epoch and stolen-origin exclusion; timestamp-after-cutoff without registration; conflicting and missing origins; cross-wired `scan_run_id`; non-current epoch rows kept; historical labelling; empty epoch; unknown epoch; missing active epoch; explicit epoch without an active control row; symbol-health exclusion; run-id chunking; every `RESEARCH_QUERIES` entry; CLI default versus explicit prospective; query plan; legacy growth; strategy constants 88 / A / 3; schema 26.
 
+The origin-text repair adds two tests. `test_na_origin_text_cannot_bypass_lineage` injects epoch A `TP_HIT` lifecycles whose origins are missing `N/A`, surrounding whitespace around `N/A`, and `n/a` / ` n/a ` while `n/a` is owned by epoch B. After `N/A` itself is registered to epoch B, those rows stay out. `build_research_report` and `scripts/run_scan.py --research --research-population prospective --research-epoch` both keep epoch A at 3 lifecycles, watchlisted 2, confirmed 1, TP rate 0, and 4 events. Unresolved within the epoch rises from 2 to 6. Epoch B stays at 1 lifecycle and a 100 TP rate. The historical summary sees all 14 lifecycle rows, so the injections were stored. `test_blank_and_matching_origins_still_admit` keeps SQL NULL, `""`, and whitespace-only origins, and admits `N/A` only when that origin id belongs to the requested epoch. A case-different `n/a` with no matching origin stays out and does not change the TP rate or the watchlisted-to-valid denominator.
+
 ## Focused test results
 
-Verified: `python -m pytest tests/test_f03_prospective_research_population.py tests/test_research_queries.py tests/test_symbol_health.py` — 59 passed.
+Verified before the origin-text repair: `python -m pytest tests/test_f03_prospective_research_population.py tests/test_research_queries.py tests/test_symbol_health.py` — 59 passed.
+
+Verified after the origin-text repair: the same command — 61 passed in 8.99s.
 
 ## Full test results
 
 - Baseline, before edits, at `44777a3b4f53919875b66940f231ea542ca38bd4`: `python -m pytest` — 2754 passed, 1 existing Starlette deprecation warning, 766.16s. `python -m compileall -q app scripts src tests` — exit 0.
-- After implementation: `python -m pytest` — 2770 passed, the same warning, 556.45s. `compileall` — exit 0. `git diff --check` — clean.
+- After the first implementation: `python -m pytest` — 2770 passed, the same warning, 556.45s. `compileall` — exit 0. `git diff --check` — clean.
+- After the origin-text repair: `python -m pytest` — 2772 passed, the same warning, 557.20s. Collection count was 2772. `compileall` — exit 0. `git diff --check` — clean.
 
-The added 16 tests are the F03 module. No assertion was weakened and no test was marked xfail.
+The F03 module now has 18 tests. No assertion was weakened and no test was marked xfail.
 
 ## CI result
 
-Verified: GitHub Actions run [36851959852](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36851959852) passed `Python 3.11 tests` on `cae19080a96c3fefeb08a9176922f1b940c11c1d` (compileall and pytest). This paragraph is a documentation-only update after that run. The pull request check on the commit that introduces this paragraph is the CI result for the branch head.
+Verified before this repair: GitHub Actions run [36852376342](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36852376342) passed `Python 3.11 tests` on reviewed head `776da0f9c0715853a19909d2183bc6bcd36870d0`. Earlier run [36851959852](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36851959852) passed on `cae19080a96c3fefeb08a9176922f1b940c11c1d`. The pull request check on the commit that introduces the origin-text repair is the CI result for the branch head.
 
 ## Strategy non-regression
 
@@ -127,7 +138,7 @@ No edits to scanner discovery, lifecycle transition rules, owner monitoring, Tel
 
 - `symbol_health` is an operational aggregate with one row per symbol. Prospective research excludes it instead of guessing an epoch. Historical symbol-health reports still work and are labelled non-prospective.
 - Scan-table exclusion totals are not counted for the whole history. Inclusion is proven by the registered-run predicate.
-- A lifecycle row with the requested `runtime_epoch_id` and a blank origin is included. The epoch column is the direct membership evidence. A non-blank origin that disagrees is not included.
+- A lifecycle row with the requested `runtime_epoch_id` and a SQL NULL or whitespace-empty origin is included. The epoch column is the direct membership evidence. Any other stored origin is validated against `runtime_operational_origins`. `N/A` is not a blank origin.
 - Timestamp is not used to admit or reject a row when an epoch lineage chain exists.
 - Explicit historical mode still reads the full research tables. That is the labelled mixed contract, not a prospective fallback.
 - Replay expectancy remains subject to the existing small-sample warning. A prospective label is not a claim of edge.

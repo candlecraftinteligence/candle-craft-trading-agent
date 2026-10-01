@@ -844,6 +844,222 @@ def test_query_plan_is_bounded_and_legacy_growth_does_not_change_results(tmp_pat
     assert SCHEMA_VERSION == 26
 
 
+def _epoch_a_denominator(report: dict[str, object]) -> None:
+    assert report["total_lifecycles"] == 3
+    assert report["funnel_counts"]["WATCHLISTED"] == 2
+    assert report["funnel_counts"]["CONFIRMED"] == 1
+    assert report["funnel_counts"]["TP_HIT"] == 0
+    assert report["funnel_counts"]["SL_HIT"] == 0
+    assert report["confirmed_outcomes"]["confirmed_count"] == 1
+    assert report["confirmed_outcomes"]["tp_hit_count"] == 0
+    assert report["confirmed_outcomes"]["tp_hit_rate_pct"] == 0
+    assert report["watchlisted_to_valid"]["watchlisted_count"] == 2
+    assert report["watchlisted_to_valid"]["valid_count"] == 1
+    assert report["watchlisted_to_valid"]["conversion_rate_pct"] == 50
+    assert report["population"]["included"]["lifecycle_records"] == 3
+    assert report["population"]["included"]["lifecycle_events"] == 4
+
+
+def _insert_origin(
+    connection: sqlite3.Connection,
+    *,
+    origin_id: str,
+    epoch_id: str,
+    run_id: str,
+    symbol: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO runtime_operational_origins (
+            origin_id, runtime_epoch_id, run_id, symbol,
+            evaluation_completed_at, decision_cutoff_at, producer_observed_at,
+            origin_kind, status, block_reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'live_fresh', 'granted', NULL, ?)
+        """,
+        (origin_id, epoch_id, run_id, symbol, SHARED_TS, SHARED_TS, SHARED_TS, SHARED_TS),
+    )
+
+
+def _inject_na_origin_attacks(connection: sqlite3.Connection) -> None:
+    attacks = (
+        ("life-na-missing", "N/A", "na-missing-tp"),
+        ("life-na-ws", " N/A ", "na-ws-tp"),
+        ("life-na-case", "n/a", "na-case-tp"),
+        ("life-na-case-ws", " n/a ", "na-case-ws-tp"),
+    )
+    for lifecycle_id, origin_id, reason in attacks:
+        _insert_lifecycle(
+            connection,
+            lifecycle_id=lifecycle_id,
+            symbol="BTCUSDT",
+            state="TP_HIT",
+            epoch_id=EPOCH_A,
+            origin_id=origin_id,
+            is_current=0,
+        )
+        _insert_event(connection, lifecycle_id, "BTCUSDT", "CONFIRMED", "TP_HIT", reason, "run-a-btc")
+
+
+def test_na_origin_text_cannot_bypass_lineage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "mixed.db"
+    output_path = tmp_path / "research.json"
+    _seed(db_path)
+    filters = _prospective(EPOCH_A)
+    baseline = build_research_report(db_path, query="lifecycle_conversion", filters=filters)
+    _epoch_a_denominator(baseline)
+    assert baseline["population"]["exclusions"]["unresolved_within_requested_epoch"] == 2
+
+    with open_initialized_database(db_path) as connection:
+        _insert_origin(
+            connection,
+            origin_id="n/a",
+            epoch_id=EPOCH_B,
+            run_id="run-na-case-b",
+            symbol="BTCUSDT",
+        )
+        _inject_na_origin_attacks(connection)
+
+    btc = _prospective(EPOCH_A, symbol="BTCUSDT")
+    missing = build_research_report(db_path, query="lifecycle_conversion", filters=filters)
+    missing_detail = build_research_report(db_path, query="lifecycle_symbol_detail", filters=btc)
+    missing_transitions = build_research_report(db_path, query="lifecycle_transitions", filters=btc)
+    _epoch_a_denominator(missing)
+    assert missing["population"]["exclusions"]["unresolved_within_requested_epoch"] == 6
+    missing_ids = {row["lifecycle_id"] for row in missing_detail["lifecycles"]}
+    assert missing_ids == {"life-a-confirmed", "life-a-watch", "life-a-blank-origin"}
+    missing_reasons = {row["reason"] for row in missing_transitions["transitions"]}
+    assert "na-missing-tp" not in missing_reasons
+    assert "na-ws-tp" not in missing_reasons
+    assert "na-case-tp" not in missing_reasons
+    assert "na-case-ws-tp" not in missing_reasons
+    assert "epoch-a-direct" in missing_reasons
+
+    with open_initialized_database(db_path) as connection:
+        _insert_origin(
+            connection,
+            origin_id="N/A",
+            epoch_id=EPOCH_B,
+            run_id="run-na-b",
+            symbol="BTCUSDT",
+        )
+
+    conflict = build_research_report(db_path, query="lifecycle_conversion", filters=filters)
+    conflict_detail = build_research_report(db_path, query="lifecycle_symbol_detail", filters=btc)
+    epoch_b = build_research_report(db_path, query="lifecycle_conversion", filters=_prospective(EPOCH_B))
+    historical = build_research_report(db_path, query="lifecycle_summary")
+    symbol_census = build_research_report(
+        db_path,
+        query="lifecycle_summary",
+        filters=_prospective(EPOCH_A, symbol="BTCUSDT"),
+    )
+    _epoch_a_denominator(conflict)
+    assert conflict["population"]["exclusions"]["unresolved_within_requested_epoch"] == 6
+    assert {row["lifecycle_id"] for row in conflict_detail["lifecycles"]} == missing_ids
+    assert epoch_b["total_lifecycles"] == 1
+    assert epoch_b["confirmed_outcomes"]["tp_hit_count"] == 1
+    assert epoch_b["confirmed_outcomes"]["tp_hit_rate_pct"] == 100
+    assert historical["total_lifecycles"] == 14
+    assert symbol_census["total_lifecycles"] == 3
+    assert symbol_census["population"]["exclusions"]["legacy_or_null_epoch"] == 3
+    assert symbol_census["population"]["exclusions"]["different_epoch"] == 1
+    assert symbol_census["population"]["exclusions"]["unresolved_within_requested_epoch"] == 6
+
+    def fail_scanner(*args: object, **kwargs: object) -> None:
+        raise AssertionError("research command should not run scanner")
+
+    monkeypatch.setattr(run_scan, "ScannerRunner", fail_scanner)
+    asyncio.run(
+        run_scan.main(
+            [
+                "--research",
+                "--research-population",
+                "prospective",
+                "--research-epoch",
+                EPOCH_A,
+                "--research-query",
+                "lifecycle_conversion",
+                "--database-path",
+                str(db_path),
+                "--research-output-json",
+                str(output_path),
+            ]
+        )
+    )
+    cli_report = json.loads(output_path.read_text(encoding="utf-8"))
+    _epoch_a_denominator(cli_report)
+    assert cli_report["population"]["exclusions"]["unresolved_within_requested_epoch"] == 6
+    assert cli_report["population"]["resolved_runtime_epoch_id"] == EPOCH_A
+    assert cli_report["fallback_to_all_history"] is False
+
+
+def test_blank_and_matching_origins_still_admit(tmp_path: Path) -> None:
+    db_path = tmp_path / "mixed.db"
+    _seed(db_path)
+    with open_initialized_database(db_path) as connection:
+        _insert_origin(
+            connection,
+            origin_id="N/A",
+            epoch_id=EPOCH_A,
+            run_id="run-na-a",
+            symbol="BTCUSDT",
+        )
+        for lifecycle_id, origin_id, state in (
+            ("life-ws-blank", "   ", "DISCOVERED"),
+            ("life-empty-origin", "", "DISCOVERED"),
+            ("life-na-match", "N/A", "DISCOVERED"),
+            ("life-na-match-ws", " N/A ", "DISCOVERED"),
+            ("life-na-case-miss", "n/a", "TP_HIT"),
+        ):
+            _insert_lifecycle(
+                connection,
+                lifecycle_id=lifecycle_id,
+                symbol="BTCUSDT",
+                state=state,
+                epoch_id=EPOCH_A,
+                origin_id=origin_id,
+                is_current=0,
+            )
+            _insert_event(connection, lifecycle_id, "BTCUSDT", "N/A", state, lifecycle_id, "run-a-btc")
+
+    report = build_research_report(db_path, query="lifecycle_conversion", filters=_prospective(EPOCH_A))
+    detail = build_research_report(
+        db_path,
+        query="lifecycle_symbol_detail",
+        filters=_prospective(EPOCH_A, symbol="BTCUSDT"),
+    )
+    transitions = build_research_report(
+        db_path,
+        query="lifecycle_transitions",
+        filters=_prospective(EPOCH_A, symbol="BTCUSDT"),
+    )
+    lifecycle_ids = {row["lifecycle_id"] for row in detail["lifecycles"]}
+    reasons = {row["reason"] for row in transitions["transitions"]}
+
+    assert lifecycle_ids == {
+        "life-a-confirmed",
+        "life-a-watch",
+        "life-a-blank-origin",
+        "life-ws-blank",
+        "life-empty-origin",
+        "life-na-match",
+        "life-na-match-ws",
+    }
+    assert "life-na-case-miss" not in lifecycle_ids
+    assert "life-na-case-miss" not in reasons
+    assert report["total_lifecycles"] == 7
+    assert report["funnel_counts"]["WATCHLISTED"] == 2
+    assert report["funnel_counts"]["CONFIRMED"] == 1
+    assert report["funnel_counts"]["TP_HIT"] == 0
+    assert report["confirmed_outcomes"]["tp_hit_count"] == 0
+    assert report["confirmed_outcomes"]["tp_hit_rate_pct"] == 0
+    assert report["watchlisted_to_valid"]["watchlisted_count"] == 2
+    assert report["watchlisted_to_valid"]["valid_count"] == 1
+    assert report["watchlisted_to_valid"]["conversion_rate_pct"] == 50
+    assert report["population"]["included"]["lifecycle_records"] == 7
+    assert report["population"]["included"]["lifecycle_events"] == 8
+    assert report["population"]["exclusions"]["unresolved_within_requested_epoch"] == 3
+
+
 def test_strategy_gates_and_schema_are_unchanged(tmp_path: Path) -> None:
     db_path = tmp_path / "mixed.db"
     _seed(db_path)

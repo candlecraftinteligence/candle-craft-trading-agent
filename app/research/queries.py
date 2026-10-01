@@ -467,8 +467,16 @@ def _split_lifecycle_lineage(
 
 
 def _origin_text(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if not text or text.upper() == NA:
+    """Origin id to validate, or None when the stored origin is blank.
+
+    The direct-epoch exception is SQL NULL or whitespace-empty text only.
+    ``N/A`` and its case or surrounding-whitespace forms are claimed origin
+    ids and must match ``runtime_operational_origins`` for the requested epoch.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
         return None
     return text
 
