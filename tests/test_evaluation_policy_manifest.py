@@ -808,15 +808,30 @@ def test_hold_loop_includes_fill_through_fill_plus_hold() -> None:
 
 
 def test_production_modules_do_not_consume_the_manifest() -> None:
+    # F04 persists and verifies the existing canonical manifest. The evaluator,
+    # lifecycle service, owner monitor, and scanner still do not consume it.
+    allowed = {
+        REPO_ROOT / "app" / "research" / "durable_source_replay" / "capture.py",
+        REPO_ROOT / "app" / "research" / "durable_source_replay" / "replay.py",
+    }
     hits: list[str] = []
     for folder in (REPO_ROOT / "app", REPO_ROOT / "scripts"):
         for path in folder.rglob("*.py"):
-            if path.name == "evaluation_policy.py":
+            if path.name == "evaluation_policy.py" or path in allowed:
                 continue
             text = path.read_text(encoding="utf-8")
             if "research.evaluation_policy" in text or "from app.research import evaluation_policy" in text:
                 hits.append(str(path.relative_to(REPO_ROOT)))
     assert hits == []
+    for path in allowed:
+        assert "research.evaluation_policy" in path.read_text(encoding="utf-8")
+    for relative in (
+        "app/lifecycle/outcomes.py",
+        "app/lifecycle/service.py",
+        "app/lifecycle/owner_monitoring.py",
+        "app/pipeline/scanner_runner.py",
+    ):
+        assert "research.evaluation_policy" not in (REPO_ROOT / relative).read_text(encoding="utf-8")
     init_text = (REPO_ROOT / "app/research/__init__.py").read_text(encoding="utf-8")
     assert "evaluation_policy" not in init_text
     assert "build_runtime_evaluation_policy" not in inspect.getsource(evaluate_closed_candle_outcomes)

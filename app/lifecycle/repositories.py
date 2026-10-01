@@ -52,10 +52,31 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         if self.connection is None:
             return
+        connection = self.connection
+        committed = False
+        commit_error: BaseException | None = None
         if exc_type is None:
-            self.connection.commit()
-        self.connection.close()
-        self.connection = None
+            try:
+                connection.commit()
+                committed = True
+            except BaseException as exc:
+                commit_error = exc
+        try:
+            from app.research.durable_source_replay.capture import observe_repository_exit
+
+            observe_repository_exit(
+                connection,
+                committed=committed,
+                commit_failed=commit_error is not None,
+            )
+        except Exception:
+            # Capture flush must not replace an operational commit or exception.
+            pass
+        finally:
+            connection.close()
+            self.connection = None
+        if commit_error is not None:
+            raise commit_error
 
     def get_record(self, *, symbol: str, mode: str, direction: str) -> SetupLifecycleRecord | None:
         epoch = load_active_runtime_epoch(self._connection)

@@ -25,6 +25,19 @@ from app.lifecycle.outcomes import (
     evaluate_closed_candle_outcomes,
     record_closed_candle_evidence_gap,
 )
+from app.research.durable_source_replay.capture import (
+    invoke_closed_candle_outcomes,
+    note_enclosing_transaction_opened,
+    note_non_invocation,
+    note_savepoint_opened,
+    note_savepoint_released,
+    note_savepoint_rolled_back,
+)
+from app.research.durable_source_replay.constants import (
+    CALLER_OWNER_MONITORING,
+    LINEAGE_FETCHED,
+    LINEAGE_SCANNER_SUPPLIED,
+)
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.runtime_epoch.models import RuntimeEpochIdentity
 from app.universe.symbol_universe import UniverseResolutionError
@@ -65,6 +78,7 @@ class SymbolMonitoringEvidence:
     execution_timeframe: str = "15m"
     decision_timestamp: str = ""
     gap_reason: str | None = None
+    lineage: str = "supplied_without_delivery_envelope"
 
 
 @dataclass(frozen=True)
@@ -194,6 +208,7 @@ def evidence_from_symbol_results(
             candles=tuple(candles),
             execution_timeframe=timeframe.lower(),
             decision_timestamp=decision_text,
+            lineage=LINEAGE_SCANNER_SUPPLIED,
         )
     return evidence
 
@@ -243,6 +258,12 @@ def monitor_tracking_obligations(
         if evidence is None or (not evidence.candles and evidence.gap_reason is None):
             if record_missing_evidence:
                 gap_reason = GAP_REQUIRED_CLOSED_CANDLE if evidence is None else GAP_REQUIRED_CLOSED_CANDLE
+                note_non_invocation(
+                    kind="missing_evidence",
+                    detail=gap_reason,
+                    lifecycle_id=record.lifecycle_id,
+                    connection=connection,
+                )
                 _persist_gap(
                     repository,
                     record,
@@ -277,6 +298,12 @@ def monitor_tracking_obligations(
             diagnostic = evidence.gap_reason
             if diagnostic.startswith("expected open") or "continuity" in diagnostic:
                 diagnostic = f"{GAP_CURSOR_INTERVAL}:{diagnostic}"
+            note_non_invocation(
+                kind="classified_gap",
+                detail=diagnostic,
+                lifecycle_id=record.lifecycle_id,
+                connection=connection,
+            )
             _persist_gap(
                 repository,
                 record,
@@ -298,19 +325,26 @@ def monitor_tracking_obligations(
             continue
 
         connection.execute("SAVEPOINT owner_monitor")
+        note_savepoint_opened(connection, "owner_monitor")
         try:
-            evaluation = evaluate_closed_candle_outcomes(
-                record,
+            evaluation = invoke_closed_candle_outcomes(
+                evaluate_closed_candle_outcomes,
+                caller_path=CALLER_OWNER_MONITORING,
+                record=record,
                 execution_candles=evidence.candles,
                 execution_timeframe=evidence.execution_timeframe or timeframe,
                 decision_timestamp=evidence.decision_timestamp or evaluated_at,
                 evaluated_at=evaluated_at,
                 repository=repository,
                 scan_run_id=scan_run_id,
+                delivery=None,
+                handoff=None,
+                evidence_lineage=evidence.lineage,
             )
         except Exception as exc:
             connection.execute("ROLLBACK TO owner_monitor")
             connection.execute("RELEASE owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
             errors.append(
                 {
                     "lifecycle_id": record.lifecycle_id,
@@ -321,6 +355,7 @@ def monitor_tracking_obligations(
             continue
         else:
             connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
 
         evaluated.append(record.lifecycle_id)
         covered.append(key)
@@ -406,6 +441,12 @@ async def monitor_obligations_with_market_data(
                 execution_timeframe=timeframe,
                 decision_timestamp=evaluated_at,
                 gap_reason=GAP_REQUIRED_CLOSED_CANDLE,
+                lineage=LINEAGE_FETCHED,
+            )
+            note_non_invocation(
+                kind="fetch_unavailable",
+                detail=GAP_REQUIRED_CLOSED_CANDLE,
+                lifecycle_id=None,
             )
             continue
         try:
@@ -413,16 +454,29 @@ async def monitor_obligations_with_market_data(
         except Exception as exc:
             if _is_local_setup_failure(exc):
                 subsystem_failures[key] = _failure_detail(exc)
+                note_non_invocation(
+                    kind="fetch_setup_failure",
+                    detail=_failure_detail(exc),
+                    lifecycle_id=None,
+                )
                 continue
             if isinstance(exc, EXPECTED_MARKET_DATA_ERRORS) or _is_unsupported_market(exc):
+                detail = classify_market_data_failure(exc)
                 merged[key] = SymbolMonitoringEvidence(
                     candles=(),
                     execution_timeframe=timeframe,
                     decision_timestamp=evaluated_at,
-                    gap_reason=classify_market_data_failure(exc),
+                    gap_reason=detail,
+                    lineage=LINEAGE_FETCHED,
                 )
+                note_non_invocation(kind="fetch_failure", detail=detail, lifecycle_id=None)
                 continue
             subsystem_failures[key] = _failure_detail(exc)
+            note_non_invocation(
+                kind="fetch_failure",
+                detail=_failure_detail(exc),
+                lifecycle_id=None,
+            )
             continue
         candle_tuple = tuple(candles or ())
         if not candle_tuple:
@@ -431,12 +485,14 @@ async def monitor_obligations_with_market_data(
                 execution_timeframe=timeframe,
                 decision_timestamp=evaluated_at,
                 gap_reason=GAP_REQUIRED_CLOSED_CANDLE,
+                lineage=LINEAGE_FETCHED,
             )
             continue
         merged[key] = SymbolMonitoringEvidence(
             candles=candle_tuple,
             execution_timeframe=timeframe,
             decision_timestamp=evaluated_at,
+            lineage=LINEAGE_FETCHED,
         )
 
     with SQLiteSetupLifecycleRepository(
@@ -448,6 +504,7 @@ async def monitor_obligations_with_market_data(
         started = not connection.in_transaction
         if started:
             connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
         blocked_ids = set(skip_lifecycle_ids)
         subsystem_errors: list[dict[str, str]] = []
         for record in obligations:
