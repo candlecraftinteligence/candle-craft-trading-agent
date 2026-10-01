@@ -216,8 +216,7 @@ No strategy gate, RR, or lifecycle-semantics change. F03 research denominators a
 
 Prior reviewed head `6bbffb2a60f07c26d88d9ef7f9016344bfba30bf`: run [36911029663](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36911029663) succeeded (2809 passed) but did not cover the remaining R1 instance-identity and R4/R7 storage-type cases.
 
-Third corrective exact-head CI: recorded in Final head after push.
-
+Third corrective code tip `d4779a2f56fc773dbe5eef380abfa350c09a993a`: GitHub Actions run [36917041145](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36917041145) — success, attempt 1, **2815 passed**, 1 warning.
 ## Rollout and rollback
 
 Default capture stays off. Enabling a writer on Runtime requires Adam's later approval of readers/writers, evidence path, database/WAL/archive footprint, free-space trend, the finite budget above, retention/restore, and rollback. DEV synthetic measurements are not that approval.
@@ -231,8 +230,8 @@ Full scanner discovery/confirmation decision replay and HTF/context inputs; auth
 ## Final head
 
 - Prior reviewed tip (still REQUEST_CHANGES): `6bbffb2a60f07c26d88d9ef7f9016344bfba30bf`
-- Third corrective code and docs tip: see git HEAD after this delivery
-- Exact-final-head CI: recorded after GitHub Actions completes
+- Third corrective code tip: `d4779a2f56fc773dbe5eef380abfa350c09a993a` — CI [36917041145](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36917041145) success, attempt 1, 2815 passed
+- Documentation tip that records this paragraph is the branch tip after this commit; its PR check is the CI result for the exact final head
 - Local focused F04: 43 passed
 - Related suites: 247 passed
 - Full pytest: exit 0, 2815 collected, one Starlette warning
