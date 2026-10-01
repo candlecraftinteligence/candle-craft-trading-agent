@@ -4,6 +4,10 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app.data.dtos import NA
+from app.research.population import (
+    HISTORICAL_MIXED_NON_PROSPECTIVE,
+    PROSPECTIVE_EPOCH_SCOPED_RESEARCH,
+)
 from app.research.queries import SAMPLE_SIZE_WARNING
 
 LIFECYCLE_FUNNEL_DISPLAY_STATES = (
@@ -21,6 +25,36 @@ LIFECYCLE_FUNNEL_DISPLAY_STATES = (
 
 
 def format_research_report(report: Mapping[str, Any]) -> str:
+    text = _format_research_body(report)
+    banner = _population_banner(report)
+    if not banner:
+        return text
+    return f"{banner}\n{text}"
+
+
+def _population_banner(report: Mapping[str, Any]) -> str:
+    population = report.get("population")
+    if not isinstance(population, Mapping):
+        return ""
+    scope = str(population.get("scope_type") or "")
+    fallback = str(bool(population.get("fallback_to_all_history"))).lower()
+    if scope == HISTORICAL_MIXED_NON_PROSPECTIVE:
+        return (
+            "Population: HISTORICAL_MIXED_NON_PROSPECTIVE"
+            " | prospective_claim=false"
+            f" | fallback_to_all_history={fallback}"
+        )
+    if scope == PROSPECTIVE_EPOCH_SCOPED_RESEARCH:
+        return (
+            "Population: PROSPECTIVE_EPOCH_SCOPED_RESEARCH"
+            f" | runtime_epoch_id={population.get('resolved_runtime_epoch_id')}"
+            " | prospective_claim=true"
+            f" | fallback_to_all_history={fallback}"
+        )
+    return f"Population: {scope or 'UNLABELLED'} | fallback_to_all_history={fallback}"
+
+
+def _format_research_body(report: Mapping[str, Any]) -> str:
     query = str(report.get("query", NA))
     if report.get("error"):
         return "\n".join(("Candle Craft Research", str(report["error"])))
