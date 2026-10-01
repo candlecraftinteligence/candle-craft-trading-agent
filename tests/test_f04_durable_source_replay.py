@@ -2374,6 +2374,124 @@ def test_f04_r1_nested_same_name_release_note_does_not_pop_outer(tmp_path: Path)
         assert report["transaction_status"] == TX_SAVEPOINT_ROLLED_BACK
 
 
+def test_f04_r1_production_nested_rollback_release_then_delayed_note(tmp_path: Path) -> None:
+    """Production owner_monitoring order: ROLLBACK TO → RELEASE → delayed rollback note."""
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record_a = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    record_b = _own(path, _latched(lifecycle_id="life-b", symbol="ETHUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record_a)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record_b)
+            connection.execute("ROLLBACK TO owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+    assert _lifecycle_progress(path) == {"life-a": 1}
+    report_a = _replay(evidence, _capture_for_lifecycle(evidence, "life-a"), tmp_path / "scratch-a")
+    report_b = _replay(evidence, _capture_for_lifecycle(evidence, "life-b"), tmp_path / "scratch-b")
+    assert report_a["status"] == REPLAY_MATCH, report_a
+    assert report_a["claims"]["operational_persistence"] is True
+    assert report_a["transaction_status"] == TX_ENCLOSING_COMMITTED
+    assert report_b["status"] == REPLAY_MATCH, report_b
+    assert report_b["claims"]["operational_persistence"] is False
+    assert report_b["transaction_status"] == TX_SAVEPOINT_ROLLED_BACK
+
+
+def test_f04_r1_nested_immediate_rollback_note_before_release(tmp_path: Path) -> None:
+    """Immediate rollback note before RELEASE must also leave outer same-name intact."""
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record_a = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    record_b = _own(path, _latched(lifecycle_id="life-b", symbol="ETHUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record_a)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record_b)
+            connection.execute("ROLLBACK TO owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+    assert _lifecycle_progress(path) == {"life-a": 1}
+    report_a = _replay(evidence, _capture_for_lifecycle(evidence, "life-a"), tmp_path / "scratch-a")
+    report_b = _replay(evidence, _capture_for_lifecycle(evidence, "life-b"), tmp_path / "scratch-b")
+    assert report_a["claims"]["operational_persistence"] is True
+    assert report_a["transaction_status"] == TX_ENCLOSING_COMMITTED
+    assert report_b["claims"]["operational_persistence"] is False
+    assert report_b["transaction_status"] == TX_SAVEPOINT_ROLLED_BACK
+
+
+def test_f04_r1_commented_full_rollback_disqualifies_stale_generation(tmp_path: Path) -> None:
+    """Comment-masked ROLLBACK must end the generation; later commits must not retain it."""
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            _invoke_owner(repository, record)
+            connection.execute("/* boundary */ ROLLBACK")
+            assert not connection.in_transaction
+            connection.execute("UPDATE setup_lifecycle_records SET last_seen_at = last_seen_at")
+            assert connection.in_transaction
+    assert _lifecycle_progress(path) == {}
+    report = _replay(evidence, _capture_for_lifecycle(evidence, "life-a"), tmp_path / "scratch-commented-rb")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["claims"]["operational_persistence"] is False
+    assert report["transaction_status"] in {TX_ENCLOSING_ROLLED_BACK, TX_COMMIT_UNKNOWN}
+
+
+def test_f04_r1_unclassified_txn_end_fallback_blocks_later_retain(tmp_path: Path) -> None:
+    """Pre/post in_transaction ends generations when SQL classification misses the boundary."""
+
+    from unittest.mock import patch
+
+    import app.research.durable_source_replay.capture as capture_module
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            _invoke_owner(repository, record)
+            with patch.object(capture_module, "_observe_successful_sql", return_value=False):
+                connection.execute("ROLLBACK")
+            assert not connection.in_transaction
+            connection.execute("UPDATE setup_lifecycle_records SET last_seen_at = last_seen_at")
+            assert connection.in_transaction
+    assert _lifecycle_progress(path) == {}
+    report = _replay(evidence, _capture_for_lifecycle(evidence, "life-a"), tmp_path / "scratch-unclassified")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["claims"]["operational_persistence"] is False
+    assert report["transaction_status"] == TX_COMMIT_UNKNOWN
+
+
 def test_f04_r1_committed_then_noop_rollback_preserves_commit(tmp_path: Path) -> None:
     evidence = tmp_path / "evidence.sqlite"
     path = _operational(tmp_path)
