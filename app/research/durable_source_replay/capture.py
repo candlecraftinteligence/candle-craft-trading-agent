@@ -116,6 +116,9 @@ class _Session:
     transaction_generation: int = 0
     next_savepoint_id: int = 1
     generation_fate: dict[int, str] = field(default_factory=dict)
+    # Last SQL savepoint event awaiting the matching public note (kind, instance_id, name).
+    pending_note_ack: tuple[str, int, str] | None = None
+    observation_untrusted: bool = False
 
 
 def active_config() -> CaptureConfig | None:
@@ -488,10 +491,14 @@ def _buffer_outcome(
         session = _ensure_session(connection)
         savepoint_name = session.stack[-1].name if session.stack else None
         ancestry = tuple(frame.instance_id for frame in session.stack)
-        generation = session.transaction_generation
-        if generation <= 0 and session.enclosing_open:
-            generation = 1
-            session.transaction_generation = 1
+        if session.enclosing_open:
+            generation = session.transaction_generation
+            if generation <= 0:
+                generation = 1
+                session.transaction_generation = 1
+        else:
+            # Work outside an observed enclosing BEGIN stays unknown.
+            generation = 0
         session.pending.append(
             _Pending(
                 capture_id="cap_" + secrets.token_hex(16),
@@ -577,7 +584,7 @@ def _assign_disposition(
             continue
         fate = session.generation_fate.get(item.transaction_generation)
         if fate is None:
-            if item.transaction_generation == session.transaction_generation:
+            if item.transaction_generation == session.transaction_generation and session.enclosing_open:
                 fate = current_enclosing
             elif item.effects_retained:
                 fate = TX_ENCLOSING_COMMITTED
@@ -593,6 +600,10 @@ def _assign_disposition(
             status = TX_ENCLOSING_COMMITTED
         else:
             status = fate
+        if session.observation_untrusted and status == TX_ENCLOSING_COMMITTED:
+            # Damaged observation must never manufacture a persistence claim.
+            status = TX_COMMIT_UNKNOWN
+            fate = TX_COMMIT_UNKNOWN
         item.fields["transaction_status"] = status
         item.fields["enclosing_disposition"] = fate
         item.fields["savepoint_disposition"] = item.savepoint_disposition
@@ -634,9 +645,9 @@ def _finish_savepoint(connection: Any, name: str, disposition: str) -> None:
         if disposition == SAVEPOINT_ROLLED_BACK:
             # Explicit note for ROLLBACK TO: discard work while retaining the named
             # savepoint instance until RELEASE, matching SQLite semantics.
-            _rollback_to_savepoint_instance(session, name, release=False)
+            _rollback_to_savepoint_instance(session, name, release=False, from_note=True)
         else:
-            _release_savepoint_instance(session, name)
+            _release_savepoint_instance(session, name, from_note=True)
     except Exception as exc:
         _remember_failure("savepoint_note_failed", exc)
 
@@ -645,6 +656,7 @@ def _push_savepoint(session: _Session, name: str) -> _SavepointFrame:
     frame = _SavepointFrame(name=name, instance_id=session.next_savepoint_id)
     session.next_savepoint_id += 1
     session.stack.append(frame)
+    session.pending_note_ack = None
     return frame
 
 
@@ -655,10 +667,25 @@ def _find_savepoint_index(session: _Session, name: str) -> int | None:
     return None
 
 
-def _release_savepoint_instance(session: _Session, name: str) -> None:
+def _consume_note_ack(session: _Session, kind: str, name: str) -> bool:
+    """Return True when this note acknowledges an already-applied SQL event."""
+
+    ack = session.pending_note_ack
+    if ack is None:
+        return False
+    ack_kind, _instance_id, ack_name = ack
+    if ack_kind == kind and ack_name == name:
+        session.pending_note_ack = None
+        return True
+    return False
+
+
+def _release_savepoint_instance(session: _Session, name: str, *, from_note: bool = False) -> None:
+    if from_note and _consume_note_ack(session, "release", name):
+        # SQL RELEASE already applied this physical event for the inner instance.
+        return
     index = _find_savepoint_index(session, name)
     if index is None:
-        # Idempotent with a prior SQL RELEASE observation or note.
         return
     frame = session.stack[index]
     released_ids = {item.instance_id for item in session.stack[index:]}
@@ -671,9 +698,19 @@ def _release_savepoint_instance(session: _Session, name: str) -> None:
             continue
         if any(instance_id in released_ids for instance_id in item.savepoint_ancestry):
             item.savepoint_disposition = SAVEPOINT_RELEASED
+    if from_note:
+        session.pending_note_ack = None
+    else:
+        session.pending_note_ack = ("release", frame.instance_id, name)
 
 
-def _rollback_to_savepoint_instance(session: _Session, name: str, *, release: bool) -> None:
+def _rollback_to_savepoint_instance(
+    session: _Session,
+    name: str,
+    *,
+    release: bool,
+    from_note: bool = False,
+) -> None:
     """Discard work under a named savepoint instance.
 
     SQLite keeps the named savepoint after ``ROLLBACK TO`` until ``RELEASE``.
@@ -681,6 +718,8 @@ def _rollback_to_savepoint_instance(session: _Session, name: str, *, release: bo
     never rewritten by a later sibling or generation reusing the same name.
     """
 
+    if from_note and not release and _consume_note_ack(session, "rollback_to", name):
+        return
     index = _find_savepoint_index(session, name)
     if index is None:
         return
@@ -696,14 +735,25 @@ def _rollback_to_savepoint_instance(session: _Session, name: str, *, release: bo
         item.savepoint_disposition = SAVEPOINT_ROLLED_BACK
     if release:
         del session.stack[index:]
+        session.pending_note_ack = None
     else:
         # Keep the named savepoint; drop only nested descendants.
         del session.stack[index + 1 :]
+        if from_note:
+            session.pending_note_ack = None
+        else:
+            session.pending_note_ack = ("rollback_to", target.instance_id, name)
 
 
 def _retain_generation(session: _Session, generation: int) -> None:
-    if session.generation_fate.get(generation) == TX_ENCLOSING_ROLLED_BACK:
+    existing = session.generation_fate.get(generation)
+    if existing == TX_ENCLOSING_ROLLED_BACK:
         # A later implicit commit must not resurrect a generation already rolled back.
+        return
+    if existing == TX_ENCLOSING_COMMITTED:
+        # Idempotent retain of an already completed generation.
+        session.enclosing_open = False
+        session.pending_note_ack = None
         return
     for item in session.pending:
         if item.transaction_generation != generation:
@@ -714,9 +764,22 @@ def _retain_generation(session: _Session, generation: int) -> None:
     session.retaining_commit_observed = True
     if generation > 0:
         session.generation_fate[generation] = TX_ENCLOSING_COMMITTED
+    # Observed enclosing commit completed; later work needs a new enclosing note.
+    session.enclosing_open = False
+    session.pending_note_ack = None
 
 
 def _discard_generation(session: _Session, generation: int) -> None:
+    existing = session.generation_fate.get(generation)
+    if existing == TX_ENCLOSING_COMMITTED:
+        # Empty cleanup rollback must not rewrite a completed committed generation.
+        return
+    if existing == TX_ENCLOSING_ROLLED_BACK:
+        # Idempotent discard of an already ended generation.
+        session.enclosing_open = False
+        session.stack.clear()
+        session.pending_note_ack = None
+        return
     for item in session.pending:
         if item.transaction_generation != generation:
             continue
@@ -725,6 +788,9 @@ def _discard_generation(session: _Session, generation: int) -> None:
         item.effects_discarded = True
     session.rollback_observed = True
     session.stack.clear()
+    session.pending_note_ack = None
+    # The observed enclosing transaction has ended; later implicit work is unobserved.
+    session.enclosing_open = False
     if generation > 0:
         session.generation_fate[generation] = TX_ENCLOSING_ROLLED_BACK
 
@@ -736,6 +802,12 @@ def _ensure_session(connection: Any) -> _Session:
         session = _Session()
         _sessions[key] = session
     return session
+
+
+def _mark_observation_untrusted(session: _Session | None, kind: str, exc: BaseException) -> None:
+    _remember_failure(kind, exc)
+    if session is not None:
+        session.observation_untrusted = True
 
 
 def _instrument_connection(connection: Any, session: _Session) -> None:
@@ -753,22 +825,33 @@ def _instrument_connection(connection: Any, session: _Session) -> None:
         result = original_commit(*args, **kwargs)
         live = _sessions.get(id(connection))
         if live is not None and was_in_transaction:
-            _retain_generation(live, live.transaction_generation)
+            try:
+                _retain_generation(live, live.transaction_generation)
+            except Exception as exc:
+                _mark_observation_untrusted(live, "commit_observe_failed", exc)
         return result
 
     def rollback_wrapper(*args: Any, **kwargs: Any) -> Any:
-        # Observe only after SQLite accepts the rollback.
+        was_in_transaction = bool(getattr(connection, "in_transaction", False))
+        # Genuine database rollback errors remain authoritative.
         result = original_rollback(*args, **kwargs)
         live = _sessions.get(id(connection))
-        if live is not None:
-            _discard_generation(live, live.transaction_generation)
+        if live is not None and was_in_transaction:
+            try:
+                _discard_generation(live, live.transaction_generation)
+            except Exception as exc:
+                # Preserve any original operational exception pending in the caller.
+                _mark_observation_untrusted(live, "rollback_observe_failed", exc)
         return result
 
     def execute_wrapper(sql: Any, parameters: Any = ()) -> Any:
-        # Record fate only after SQLite successfully executes the statement.
-        # A syntax/runtime failure must not rewrite capture disposition.
+        # Genuine database errors propagate unchanged.
         result = original_execute(sql, parameters)
-        _observe_successful_sql(connection, sql)
+        try:
+            _observe_successful_sql(connection, sql)
+        except Exception as exc:
+            live = _sessions.get(id(connection))
+            _mark_observation_untrusted(live, "sql_observe_failed", exc)
         return result
 
     connection.commit = commit_wrapper  # type: ignore[method-assign]
@@ -792,7 +875,7 @@ def _observe_successful_sql(connection: Any, sql: Any) -> None:
         # Reject trailing junk: ROLLBACK TO name EXTRA is not a successful form.
         name = _savepoint_name_from_successful_rollback_to(text)
         if name:
-            _rollback_to_savepoint_instance(live, name, release=False)
+            _rollback_to_savepoint_instance(live, name, release=False, from_note=False)
         return
     if _is_full_rollback_sql(upper):
         _discard_generation(live, live.transaction_generation)
@@ -803,7 +886,7 @@ def _observe_successful_sql(connection: Any, sql: Any) -> None:
     if upper.startswith("RELEASE"):
         name = _savepoint_name_from_release_sql(text)
         if name:
-            _release_savepoint_instance(live, name)
+            _release_savepoint_instance(live, name, from_note=False)
 
 
 def _is_full_rollback_sql(upper: str) -> bool:
