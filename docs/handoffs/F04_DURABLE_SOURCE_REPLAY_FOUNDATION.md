@@ -221,7 +221,8 @@ Full scanner discovery/confirmation decision replay and HTF/context inputs; auth
 
 ## Final head
 
-- Final head SHA: pending documentation commit
-- Exact-head CI run: pending
-- Local full pytest: pending
-- `python -m compileall -q app tests`: pending
+- Final head SHA: `7c9dd95a81da469d7a41fecc416159db9fa98221` (this handoff documentation commit)
+- Implementation SHA: `0b44dc41e9dea72495d4f387ca338171731f7936`
+- Exact-head CI run: pending push of this tip; prior implementation-head CI is [36894151811](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36894151811)
+- Local full pytest: exit 0, 2795 collected, ~509s, one Starlette warning
+- `python -m compileall -q app tests`: exit 0
