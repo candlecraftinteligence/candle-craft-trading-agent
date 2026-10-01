@@ -14,7 +14,7 @@ Capture is off by default. Application schema remains 26. Public quality 88 / gr
 - Base SHA: `b7c6422e3d1e2596115b7cd9cf5b1caea15072ef` (merged F03 on `origin/main`; incorporates reviewed F03 head `438624dc5f291d271b4c85be5f83262ea0f40d85`)
 - Implementation SHA: `0b44dc41e9dea72495d4f387ca338171731f7936`
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/128
-- Final head: recorded at the end of this handoff after the documentation commit and exact-head CI
+- Final head: see Final head section (branch tip after the CI-record documentation commit)
 - Schema version: remains 26
 - Evidence store schema: `cci-durable-source-replay-store-v1` / `STORE_SCHEMA_VERSION = 1`
 - Codec: `cci-durable-source-replay-codec-v1`
@@ -207,7 +207,7 @@ No strategy gate, RR, or lifecycle-semantics change. F03 research denominators a
 
 Implementation head `0b44dc41e9dea72495d4f387ca338171731f7936`: GitHub Actions run [36894151811](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36894151811) — `Python 3.11 tests` success, no retry.
 
-Exact final-head CI after this handoff commit is recorded in the final-head section below. The known F03 Telegram TP retry pattern did not recur on the implementation-head run.
+Handoff tip `2a049a3d8a1102c2acd7c9097980c8e5d7e3f1d9`: GitHub Actions run [36895981642](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36895981642) — `Python 3.11 tests` success in 3m21s, no retry. The known F03 Telegram TP retry pattern did not recur.
 
 ## Rollout and rollback
 
@@ -221,8 +221,10 @@ Full scanner discovery/confirmation decision replay and HTF/context inputs; auth
 
 ## Final head
 
-- Final head SHA: `7c9dd95a81da469d7a41fecc416159db9fa98221` (this handoff documentation commit)
-- Implementation SHA: `0b44dc41e9dea72495d4f387ca338171731f7936`
-- Exact-head CI run: pending push of this tip; prior implementation-head CI is [36894151811](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36894151811)
+- Final head SHA before this CI-record paragraph: `2a049a3d8a1102c2acd7c9097980c8e5d7e3f1d9`
+- Exact-head CI for that tip: GitHub Actions run [36895981642](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36895981642) — `Python 3.11 tests` success in 3m21s, no retry
+- Implementation SHA: `0b44dc41e9dea72495d4f387ca338171731f7936` (prior CI [36894151811](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36894151811))
+- Handoff body SHA: `7c9dd95a81da469d7a41fecc416159db9fa98221`
+- The pull request check on the commit that introduces this paragraph is the CI result for the branch tip
 - Local full pytest: exit 0, 2795 collected, ~509s, one Starlette warning
 - `python -m compileall -q app tests`: exit 0
