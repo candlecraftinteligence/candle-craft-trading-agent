@@ -125,15 +125,26 @@ Same branch and draft PR #128. No merge, deploy, or Runtime capture enablement.
 | F04-R4 | Full tx/savepoint/enclosing consistency matrix including reverse contradictions; guarded integer/metadata/payload-shape validation before positive claims | `replay._validate_envelope`, `_guarded_int`, `_load` | `test_f04_r4_savepoint_rolled_back_cannot_claim_enclosing_committed`, `test_f04_r4_malformed_reference_count_is_structured_corrupt` (plus existing compound conflict test) |
 | F04-R7 | `LIMIT max_references+1` before ref materialization; SQL `length(canonical_bytes)` and remaining decode budget before BLOB fetch | `store.load_capture`, `store.read_payload`, `replay._load` | `test_f04_r7_payload_and_reference_bounds_before_materialization` (plus existing header/failure-retention test) |
 
-Remaining limitations unchanged: no venue authentication, no possession-before-cutoff, no expectancy/admission, no Runtime capture activation, no historical backfill. Unsupported pre-v2 attestations fail closed on replay. **Independent re-review acceptance is not claimed by this handoff.**
+Independent re-review of exact head `6bbffb2` remained **REQUEST_CHANGES**: R3 and the prior concrete R1/R4/R7 cases passed, but savepoint instance identity / successful observation and unsupported payload storage types remained open.
+
+## Third corrective repair (REQUEST_CHANGES on `6bbffb2`)
+
+Same branch and draft PR #128. No merge, deploy, or Runtime capture enablement.
+
+| ID | Repair | Primary modules | Independent regression tests |
+| --- | --- | --- | --- |
+| F04-R1 | Per-generation savepoint instance IDs; `ROLLBACK TO` keeps the named instance; observe SQL only after SQLite accepts it; recognize `ROLLBACK TRANSACTION`; do not retain a rolled-back generation on a later implicit commit | `capture._SavepointFrame`, `_push_savepoint`, `_rollback_to_savepoint_instance`, `_release_savepoint_instance`, `_observe_successful_sql` | `test_f04_r1_reused_savepoint_name_preserves_released_sibling`, `test_f04_r1_reused_savepoint_name_across_generations`, `test_f04_r1_rollback_to_keeps_savepoint_for_second_capture`, `test_f04_r1_rollback_transaction_then_implicit_write_is_not_persistence`, `test_f04_r1_failed_rollback_to_statement_does_not_discard` |
+| F04-R4 / F04-R7 | Require SQLite `typeof(canonical_bytes)='blob'` and a real buffer driver value before any conversion; never coerce TEXT/INTEGER via `bytes(...)` | `store.read_payload`, `store._require_blob` | `test_f04_r4_r7_unsupported_payload_storage_types_fail_closed` |
+
+Preserved: R2/R5/R6, second-corrective R3 and prior R1/R4/R7 counterexamples, attestation v2, close-before-sidecar, failure-history bounds, default-off capture. Remaining limitations unchanged. **Independent acceptance is not claimed.**
 
 ## Transaction and crash protocol
 
 The sidecar and the operational database do not share a commit.
 
 1. Inside the operational transaction, capture copies bounded inputs, prestate, delivery, policy, result, and effects into memory.
-2. Savepoint notes record whether `lifecycle_symbol` or `owner_monitor` was released or rolled back. Nested rollbacks mark ancestry of released descendants. A released savepoint is not an enclosing commit.
-3. Instrumented `connection.commit` / `rollback` / SQL text observe retaining commits and discarded effects per transaction generation. An empty commit after rollback, or a later transaction's commit, cannot claim persistence for discarded captures.
+2. Savepoint notes record whether `lifecycle_symbol` or `owner_monitor` was released or rolled back. Each opened savepoint is an instance identity within its transaction generation; name reuse does not rewrite siblings or earlier generations. `ROLLBACK TO` discards nested work while retaining the named instance until `RELEASE`.
+3. Instrumented `connection.commit` / `rollback` / SQL text observe retaining commits and discarded effects only after SQLite accepts the statement, including `ROLLBACK TRANSACTION`. An empty commit after rollback, or a later implicit commit, cannot claim persistence for discarded captures.
 4. `SQLiteSetupLifecycleRepository.__exit__` finishes operational commit/rollback and closes before sidecar flush.
 5. One evidence-store transaction then writes the bundle only after conservative footprint admission. A crash between operational commit and evidence commit loses coverage without a false complete row.
 6. Evidence write failures preserve operational results/exceptions/gates/cursors and are counted; they are never a replay pass.
@@ -175,17 +186,17 @@ Three claims remain separate: computation replay, local delivery provenance, ope
 
 ## Adversarial evidence (tests)
 
-`tests/test_f04_durable_source_replay.py` (**37 tests**) covers the original foundation matrix, the first corrective counterexamples, and the second-corrective independent cases for R1/R3/R4/R7.
+`tests/test_f04_durable_source_replay.py` (**43 tests**) covers the original foundation matrix, the first and second corrective counterexamples, and the third-corrective R1 / R4/R7 cases.
 
 Related suites kept green: source evidence, delivery capture, evaluation policy, evaluation semantics, lifecycle outcomes, F03 population isolation, P5A owner monitoring, observation-unit caller inventory.
 
-## Local verification (second corrective)
+## Local verification (third corrective)
 
-Focused F04: `python -m pytest tests/test_f04_durable_source_replay.py` — **37 passed**.
+Focused F04: `python -m pytest tests/test_f04_durable_source_replay.py` — **43 passed**.
 
-Related (source-evidence, delivery-capture, policy, semantics, P5A, F03, lifecycle outcomes, observation-unit): all passed.
+Related (source-evidence, delivery-capture, policy, semantics, P5A, F03, lifecycle outcomes, observation-unit): **247 passed**.
 
-Full suite: `python -m pytest` — exit 0, **2809 collected**, no failure lines, one Starlette warning, ~492s. `python -m compileall -q app tests` — exit 0.
+Full suite: `python -m pytest` — exit 0, **2815 collected**, one Starlette warning. One unrelated Telegram TP coalesce flake (`test_restart_and_retryable_tp1_reconcile_exactly_once`) failed once then passed on immediate rerun and on a clean full rerun; not part of the F04 diff. `python -m compileall -q app tests` — exit 0.
 
 `LOCAL_MANUAL_MODE=true`, `ORDER_EXECUTION_ENABLED=false`, `TELEGRAM_DRY_RUN=true`, `TELEGRAM_SIGNALS_ENABLED=false`. Synthetic temporary databases only. No listener, watch loop, live Runtime DB access, secrets, weakened assertions, or xfails.
 
@@ -203,9 +214,9 @@ No strategy gate, RR, or lifecycle-semantics change. F03 research denominators a
 
 ## CI
 
-Prior reviewed head `255c03600fc9224c66d9c2113481137007062016`: run [36904095734](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36904095734) succeeded (2802 passed) but did not cover the independent R1/R3/R4/R7 failures above.
+Prior reviewed head `6bbffb2a60f07c26d88d9ef7f9016344bfba30bf`: run [36911029663](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36911029663) succeeded (2809 passed) but did not cover the remaining R1 instance-identity and R4/R7 storage-type cases.
 
-Second corrective code tip `aa6f1c2923c73934dbf25ee82e6f5b43e89bc55c`: GitHub Actions run [36910492306](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36910492306) — `Python 3.11 tests` success, attempt 1, no retry.
+Third corrective exact-head CI: recorded in Final head after push.
 
 ## Rollout and rollback
 
@@ -219,12 +230,11 @@ Full scanner discovery/confirmation decision replay and HTF/context inputs; auth
 
 ## Final head
 
-- Prior reviewed tip (still REQUEST_CHANGES): `255c03600fc9224c66d9c2113481137007062016`
-- Second corrective code tip: `aa6f1c2923c73934dbf25ee82e6f5b43e89bc55c`
-- Exact-head CI for that code tip: [36910492306](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36910492306) — success, attempt 1
-- Documentation tip that records this paragraph is the branch tip after this commit; its PR check is the CI result for the final head
-- Local focused F04: 37 passed
-- Related suites (source/delivery/policy/semantics/P5A/F03/lifecycle/observation-unit including F04): 241 passed
-- Full pytest: exit 0, 2809 collected, ~492s, one Starlette warning
+- Prior reviewed tip (still REQUEST_CHANGES): `6bbffb2a60f07c26d88d9ef7f9016344bfba30bf`
+- Third corrective code and docs tip: see git HEAD after this delivery
+- Exact-final-head CI: recorded after GitHub Actions completes
+- Local focused F04: 43 passed
+- Related suites: 247 passed
+- Full pytest: exit 0, 2815 collected, one Starlette warning
 - `python -m compileall -q app tests`: exit 0
 - Independent acceptance: **not claimed**; awaiting re-review of the exact final head

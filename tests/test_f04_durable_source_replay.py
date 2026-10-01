@@ -2114,3 +2114,231 @@ def test_f04_r7_payload_and_reference_bounds_before_materialization(tmp_path: Pa
     assert inspection["reason"] == "reference_count_limit"
     assert inspection["exit_code"] != 0
     assert inspection["claims"]["computation_replay"] is False
+
+
+def _lifecycle_progress(path: Path) -> dict[str, int]:
+    with sqlite3.connect(path) as connection:
+        return {
+            str(lifecycle_id): int(count)
+            for lifecycle_id, count in connection.execute(
+                "SELECT lifecycle_id, count(*) FROM setup_lifecycle_outcome_progress GROUP BY lifecycle_id"
+            )
+        }
+
+
+def _invoke_owner(repository: SQLiteSetupLifecycleRepository, record: SetupLifecycleRecord) -> object:
+    return invoke_closed_candle_outcomes(
+        evaluate_closed_candle_outcomes,
+        caller_path=CALLER_OWNER_MONITORING,
+        record=record,
+        execution_candles=[_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+        execution_timeframe=TIMEFRAME,
+        decision_timestamp=_decision(1),
+        evaluated_at=_decision(1),
+        repository=repository,
+        scan_run_id=f"run-{record.lifecycle_id}",
+        evidence_lineage="supplied_without_delivery_envelope",
+    )
+
+
+def test_f04_r1_reused_savepoint_name_preserves_released_sibling(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record_a = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    record_b = _own(path, _latched(lifecycle_id="life-b", symbol="ETHUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record_a)
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record_b)
+            connection.execute("ROLLBACK TO owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+    assert _lifecycle_progress(path) == {"life-a": 1}
+    reports = {
+        _capture_for_lifecycle(evidence, lifecycle_id): _replay(
+            evidence,
+            _capture_for_lifecycle(evidence, lifecycle_id),
+            tmp_path / f"scratch-{lifecycle_id}",
+        )
+        for lifecycle_id in ("life-a", "life-b")
+    }
+    assert reports[_capture_for_lifecycle(evidence, "life-a")]["claims"]["operational_persistence"] is True
+    assert reports[_capture_for_lifecycle(evidence, "life-a")]["transaction_status"] == TX_ENCLOSING_COMMITTED
+    assert reports[_capture_for_lifecycle(evidence, "life-b")]["claims"]["operational_persistence"] is False
+    assert reports[_capture_for_lifecycle(evidence, "life-b")]["transaction_status"] == TX_SAVEPOINT_ROLLED_BACK
+
+
+def test_f04_r1_reused_savepoint_name_across_generations(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record_a = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    record_b = _own(path, _latched(lifecycle_id="life-b", symbol="ETHUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record_a)
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record_b)
+            connection.execute("ROLLBACK TO owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+            connection.rollback()
+    assert _lifecycle_progress(path) == {"life-a": 1}
+    report_a = _replay(evidence, _capture_for_lifecycle(evidence, "life-a"), tmp_path / "scratch-a")
+    report_b = _replay(evidence, _capture_for_lifecycle(evidence, "life-b"), tmp_path / "scratch-b")
+    assert report_a["claims"]["operational_persistence"] is True
+    assert report_a["transaction_status"] == TX_ENCLOSING_COMMITTED
+    assert report_b["claims"]["operational_persistence"] is False
+
+
+def test_f04_r1_rollback_to_keeps_savepoint_for_second_capture(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record_a = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    record_b = _own(path, _latched(lifecycle_id="life-b", symbol="ETHUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record_a)
+            connection.execute("ROLLBACK TO owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+            _invoke_owner(repository, record_b)
+            connection.execute("ROLLBACK TO owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+    assert _lifecycle_progress(path) == {}
+    for lifecycle_id in ("life-a", "life-b"):
+        report = _replay(evidence, _capture_for_lifecycle(evidence, lifecycle_id), tmp_path / f"scratch-{lifecycle_id}")
+        assert report["status"] == REPLAY_MATCH, report
+        assert report["transaction_status"] == TX_SAVEPOINT_ROLLED_BACK
+        assert report["claims"]["operational_persistence"] is False
+
+
+def test_f04_r1_rollback_transaction_then_implicit_write_is_not_persistence(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            _invoke_owner(repository, record)
+            connection.execute("ROLLBACK TRANSACTION")
+            connection.execute("UPDATE setup_lifecycle_records SET last_seen_at = last_seen_at")
+    assert _lifecycle_progress(path) == {}
+    report = _replay(evidence, _capture_ids(evidence)[0], tmp_path / "scratch-rb-tx")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["claims"]["operational_persistence"] is False
+    assert report["transaction_status"] in {TX_ENCLOSING_ROLLED_BACK, TX_COMMIT_UNKNOWN}
+
+
+def test_f04_r1_failed_rollback_to_statement_does_not_discard(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    statement_error: str | None = None
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            _invoke_owner(repository, record)
+            try:
+                connection.execute("ROLLBACK TO owner_monitor EXTRA")
+            except sqlite3.Error as exc:
+                statement_error = f"{type(exc).__name__}:{exc}"
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+    assert statement_error is not None
+    assert _lifecycle_progress(path) == {"life-a": 1}
+    report = _replay(evidence, _capture_ids(evidence)[0], tmp_path / "scratch-failed-rb")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["claims"]["operational_persistence"] is True
+    assert report["transaction_status"] == TX_ENCLOSING_COMMITTED
+
+
+def test_f04_r4_r7_unsupported_payload_storage_types_fail_closed(tmp_path: Path) -> None:
+    import builtins
+    from unittest.mock import patch
+
+    import app.research.durable_source_replay.store as store_module
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        _monitor(
+            path,
+            record,
+            [_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+            when=_decision(1),
+        )
+    capture_id = _capture_ids(evidence)[0]
+
+    for name, value in (
+        ("text_in_blob_column", "x"),
+        ("integer_in_blob_column", DEFAULT_BOUNDS.max_decode_bytes + 1),
+    ):
+        case = tmp_path / name
+        case.mkdir()
+        clone = case / "evidence.sqlite"
+        clone.write_bytes(evidence.read_bytes())
+        digest = content_hash(b"x")
+        declared = len(str(value))
+        with sqlite3.connect(clone) as connection:
+            connection.execute(
+                "INSERT INTO payloads VALUES (?, ?, ?, ?)",
+                (digest, "cci-durable-source-replay-codec-v1", declared, value),
+            )
+            connection.execute(
+                "UPDATE capture_payloads SET content_hash = ? WHERE role = 'call_inputs'",
+                (digest,),
+            )
+            connection.commit()
+        allocated: list[int] = []
+
+        def traced_bytes(candidate: object, *args: object, **kwargs: object) -> bytes:
+            blob = builtins.bytes(candidate, *args, **kwargs)
+            allocated.append(len(blob))
+            return blob
+
+        with patch.object(store_module, "bytes", traced_bytes, create=True):
+            try:
+                inspection = inspect_capture(evidence_path=clone, capture_id=capture_id)
+            except Exception as exc:  # pragma: no cover - must stay structured
+                inspection = {"uncaught_exception": f"{type(exc).__name__}:{exc}"}
+        assert "uncaught_exception" not in inspection, (name, inspection)
+        assert inspection["status"] == EVIDENCE_CORRUPT, (name, inspection)
+        assert str(inspection.get("reason") or "").startswith("unsupported_payload_storage_type")
+        assert inspection["claims"]["operational_persistence"] is False
+        assert inspection["claims"]["computation_replay"] is False
+        assert not any(length > DEFAULT_BOUNDS.max_decode_bytes for length in allocated)
+        report = _replay(clone, capture_id, case / "scratch")
+        assert report["status"] == EVIDENCE_CORRUPT
+        assert report["claims"]["operational_persistence"] is False

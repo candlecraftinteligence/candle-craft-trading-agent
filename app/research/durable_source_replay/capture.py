@@ -83,12 +83,20 @@ class CaptureConfig:
     disabled_reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _SavepointFrame:
+    """One observed SAVEPOINT instance within a transaction generation."""
+
+    name: str
+    instance_id: int
+
+
 @dataclass
 class _Pending:
     capture_id: str
     savepoint_name: str | None
     savepoint_disposition: str
-    savepoint_ancestry: tuple[str, ...]
+    savepoint_ancestry: tuple[int, ...]
     transaction_generation: int
     fields: dict[str, Any]
     payloads: dict[str, bytes]
@@ -98,7 +106,7 @@ class _Pending:
 
 @dataclass
 class _Session:
-    stack: list[str] = field(default_factory=list)
+    stack: list[_SavepointFrame] = field(default_factory=list)
     pending: list[_Pending] = field(default_factory=list)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)
     enclosing_open: bool = False
@@ -106,6 +114,7 @@ class _Session:
     rollback_observed: bool = False
     instrumented: bool = False
     transaction_generation: int = 0
+    next_savepoint_id: int = 1
     generation_fate: dict[int, str] = field(default_factory=dict)
 
 
@@ -226,7 +235,7 @@ def note_savepoint_opened(connection: Any, name: str) -> None:
     try:
         session = _ensure_session(connection)
         _instrument_connection(connection, session)
-        session.stack.append(name)
+        _push_savepoint(session, name)
     except Exception as exc:
         _remember_failure("savepoint_note_failed", exc)
 
@@ -477,8 +486,8 @@ def _buffer_outcome(
         status = CAPTURE_INCOMPLETE if incomplete_reason else CAPTURE_COMPLETE
         identity = prepared["identity"]
         session = _ensure_session(connection)
-        savepoint_name = session.stack[-1] if session.stack else None
-        ancestry = tuple(session.stack)
+        savepoint_name = session.stack[-1].name if session.stack else None
+        ancestry = tuple(frame.instance_id for frame in session.stack)
         generation = session.transaction_generation
         if generation <= 0 and session.enclosing_open:
             generation = 1
@@ -623,36 +632,79 @@ def _finish_savepoint(connection: Any, name: str, disposition: str) -> None:
         return
     try:
         if disposition == SAVEPOINT_ROLLED_BACK:
-            while session.stack and session.stack[-1] != name:
-                session.stack.pop()
-            if session.stack and session.stack[-1] == name:
-                session.stack.pop()
-            _discard_savepoint_ancestry(session, name)
+            # Explicit note for ROLLBACK TO: discard work while retaining the named
+            # savepoint instance until RELEASE, matching SQLite semantics.
+            _rollback_to_savepoint_instance(session, name, release=False)
         else:
-            if session.stack and session.stack[-1] == name:
-                session.stack.pop()
-            _mark_savepoint_release(session, name)
+            _release_savepoint_instance(session, name)
     except Exception as exc:
         _remember_failure("savepoint_note_failed", exc)
 
 
-def _mark_savepoint_release(session: _Session, name: str) -> None:
+def _push_savepoint(session: _Session, name: str) -> _SavepointFrame:
+    frame = _SavepointFrame(name=name, instance_id=session.next_savepoint_id)
+    session.next_savepoint_id += 1
+    session.stack.append(frame)
+    return frame
+
+
+def _find_savepoint_index(session: _Session, name: str) -> int | None:
+    for index in range(len(session.stack) - 1, -1, -1):
+        if session.stack[index].name == name:
+            return index
+    return None
+
+
+def _release_savepoint_instance(session: _Session, name: str) -> None:
+    index = _find_savepoint_index(session, name)
+    if index is None:
+        # Idempotent with a prior SQL RELEASE observation or note.
+        return
+    frame = session.stack[index]
+    released_ids = {item.instance_id for item in session.stack[index:]}
+    # RELEASE removes this frame and any nested frames above it.
+    del session.stack[index:]
     for item in session.pending:
-        if item.savepoint_name == name and item.savepoint_disposition == SAVEPOINT_OPEN:
+        if item.effects_retained or item.effects_discarded:
+            continue
+        if item.savepoint_disposition != SAVEPOINT_OPEN:
+            continue
+        if any(instance_id in released_ids for instance_id in item.savepoint_ancestry):
             item.savepoint_disposition = SAVEPOINT_RELEASED
 
 
-def _discard_savepoint_ancestry(session: _Session, name: str) -> None:
-    """Discard every pending capture whose ancestry includes the rolled-back savepoint."""
+def _rollback_to_savepoint_instance(session: _Session, name: str, *, release: bool) -> None:
+    """Discard work under a named savepoint instance.
 
+    SQLite keeps the named savepoint after ``ROLLBACK TO`` until ``RELEASE``.
+    Descendant savepoints are destroyed. Already-retained earlier occurrences are
+    never rewritten by a later sibling or generation reusing the same name.
+    """
+
+    index = _find_savepoint_index(session, name)
+    if index is None:
+        return
+    target = session.stack[index]
+    affected_ids = {frame.instance_id for frame in session.stack[index:]}
     for item in session.pending:
-        if name in item.savepoint_ancestry:
-            item.effects_discarded = True
-            item.effects_retained = False
-            item.savepoint_disposition = SAVEPOINT_ROLLED_BACK
+        if item.effects_retained:
+            continue
+        if not any(instance_id in affected_ids for instance_id in item.savepoint_ancestry):
+            continue
+        item.effects_discarded = True
+        item.effects_retained = False
+        item.savepoint_disposition = SAVEPOINT_ROLLED_BACK
+    if release:
+        del session.stack[index:]
+    else:
+        # Keep the named savepoint; drop only nested descendants.
+        del session.stack[index + 1 :]
 
 
 def _retain_generation(session: _Session, generation: int) -> None:
+    if session.generation_fate.get(generation) == TX_ENCLOSING_ROLLED_BACK:
+        # A later implicit commit must not resurrect a generation already rolled back.
+        return
     for item in session.pending:
         if item.transaction_generation != generation:
             continue
@@ -705,14 +757,19 @@ def _instrument_connection(connection: Any, session: _Session) -> None:
         return result
 
     def rollback_wrapper(*args: Any, **kwargs: Any) -> Any:
+        # Observe only after SQLite accepts the rollback.
+        result = original_rollback(*args, **kwargs)
         live = _sessions.get(id(connection))
         if live is not None:
             _discard_generation(live, live.transaction_generation)
-        return original_rollback(*args, **kwargs)
+        return result
 
     def execute_wrapper(sql: Any, parameters: Any = ()) -> Any:
-        _observe_sql(connection, sql)
-        return original_execute(sql, parameters)
+        # Record fate only after SQLite successfully executes the statement.
+        # A syntax/runtime failure must not rewrite capture disposition.
+        result = original_execute(sql, parameters)
+        _observe_successful_sql(connection, sql)
+        return result
 
     connection.commit = commit_wrapper  # type: ignore[method-assign]
     connection.rollback = rollback_wrapper  # type: ignore[method-assign]
@@ -721,8 +778,8 @@ def _instrument_connection(connection: Any, session: _Session) -> None:
     session.instrumented = True
 
 
-def _observe_sql(connection: Any, sql: Any) -> None:
-    """Observe COMMIT/ROLLBACK issued as SQL text, not only via Python helpers."""
+def _observe_successful_sql(connection: Any, sql: Any) -> None:
+    """Observe COMMIT/ROLLBACK SQL after SQLite has accepted the statement."""
 
     live = _sessions.get(id(connection))
     if live is None or sql is None:
@@ -732,32 +789,60 @@ def _observe_sql(connection: Any, sql: Any) -> None:
         return
     upper = text.upper()
     if upper.startswith("ROLLBACK TO"):
-        name = _savepoint_name_from_sql(text)
+        # Reject trailing junk: ROLLBACK TO name EXTRA is not a successful form.
+        name = _savepoint_name_from_successful_rollback_to(text)
         if name:
-            while live.stack and live.stack[-1] != name:
-                live.stack.pop()
-            if live.stack and live.stack[-1] == name:
-                live.stack.pop()
-            _discard_savepoint_ancestry(live, name)
+            _rollback_to_savepoint_instance(live, name, release=False)
         return
-    if upper == "ROLLBACK" or upper.startswith("ROLLBACK;"):
+    if _is_full_rollback_sql(upper):
         _discard_generation(live, live.transaction_generation)
         return
     if upper.startswith("COMMIT"):
-        if bool(getattr(connection, "in_transaction", False)):
-            _retain_generation(live, live.transaction_generation)
+        _retain_generation(live, live.transaction_generation)
+        return
+    if upper.startswith("RELEASE"):
+        name = _savepoint_name_from_release_sql(text)
+        if name:
+            _release_savepoint_instance(live, name)
 
 
-def _savepoint_name_from_sql(sql: str) -> str | None:
+def _is_full_rollback_sql(upper: str) -> bool:
+    if upper.startswith("ROLLBACK TO"):
+        return False
+    if upper == "ROLLBACK" or upper.startswith("ROLLBACK;"):
+        return True
+    if upper.startswith("ROLLBACK TRANSACTION"):
+        return True
+    return False
+
+
+def _savepoint_name_from_successful_rollback_to(sql: str) -> str | None:
     parts = sql.replace(";", " ").split()
     upper_parts = [part.upper() for part in parts]
-    if len(parts) >= 3 and upper_parts[0] == "ROLLBACK" and upper_parts[1] == "TO":
-        index = 2
-        if index < len(parts) and upper_parts[index] == "SAVEPOINT":
-            index += 1
-        if index < len(parts):
-            return parts[index].strip("`\"[]")
-    return None
+    if len(parts) < 3 or upper_parts[0] != "ROLLBACK" or upper_parts[1] != "TO":
+        return None
+    index = 2
+    if index < len(parts) and upper_parts[index] == "SAVEPOINT":
+        index += 1
+    if index >= len(parts):
+        return None
+    # Any trailing tokens mean SQLite rejected the statement; do not observe.
+    if index + 1 != len(parts):
+        return None
+    return parts[index].strip("`\"[]")
+
+
+def _savepoint_name_from_release_sql(sql: str) -> str | None:
+    parts = sql.replace(";", " ").split()
+    upper_parts = [part.upper() for part in parts]
+    if not parts or upper_parts[0] != "RELEASE":
+        return None
+    index = 1
+    if index < len(parts) and upper_parts[index] == "SAVEPOINT":
+        index += 1
+    if index >= len(parts) or index + 1 != len(parts):
+        return None
+    return parts[index].strip("`\"[]")
 
 
 def _delivery_payload(delivery: Any, handoff: Any, limits: BoundLimits) -> tuple[dict[str, Any], str | None]:

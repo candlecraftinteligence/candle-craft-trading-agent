@@ -243,6 +243,7 @@ def read_payload(
     meta = connection.execute(
         """
         SELECT content_hash, byte_length, codec_version,
+               typeof(canonical_bytes) AS storage_type,
                length(canonical_bytes) AS actual_length
         FROM payloads WHERE content_hash = ?
         """,
@@ -250,6 +251,9 @@ def read_payload(
     ).fetchone()
     if meta is None:
         return None
+    storage_type = str(meta["storage_type"] or "").lower()
+    if storage_type != "blob":
+        raise EvidenceStoreError(f"unsupported_payload_storage_type:{storage_type or 'unknown'}")
     try:
         declared = _require_int(meta["byte_length"], "byte_length")
         actual = _require_int(meta["actual_length"], "actual_length")
@@ -265,7 +269,7 @@ def read_payload(
     ).fetchone()
     if row is None:
         return None
-    blob = bytes(row["canonical_bytes"])
+    blob = _require_blob(row["canonical_bytes"])
     if len(blob) != declared or len(blob) != actual or content_hash(blob) != str(meta["content_hash"]):
         raise EvidenceStoreError("payload_bytes_do_not_match_record")
     return {
@@ -274,6 +278,20 @@ def read_payload(
         "byte_length": declared,
         "content_hash": str(meta["content_hash"]),
     }
+
+
+def _require_blob(value: Any) -> bytes:
+    """Accept only real BLOB driver values. Never coerce int/str into bytes."""
+
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, memoryview):
+        return value.tobytes()
+    raise EvidenceStoreError(
+        f"unsupported_payload_python_type:{type(value).__name__}"
+    )
 
 
 def _require_int(value: Any, field: str) -> int:
