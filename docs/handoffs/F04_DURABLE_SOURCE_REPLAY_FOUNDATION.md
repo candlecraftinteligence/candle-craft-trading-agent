@@ -197,7 +197,7 @@ No strategy gate, RR, or lifecycle-semantics change. F03 research denominators a
 
 Prior reviewed head `4c26ac18f0917cc2236dfc83b1a8ea971e125583`: run [36896489390](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36896489390) succeeded but did not catch the seven independent failures.
 
-Corrective exact-head CI is recorded in Final head below after push.
+Corrective code tip `78e4c4d8f3906c8c52feb81b611bc1468affe0e3`: GitHub Actions run [36903558559](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36903558559) — `Python 3.11 tests` success in 3m39s, no retry. The known F03 Telegram TP retry pattern did not recur.
 
 ## Rollout and rollback
 
@@ -211,9 +211,11 @@ Full scanner discovery/confirmation decision replay and HTF/context inputs; auth
 
 ## Final head
 
-- Final head SHA: pending corrective push
-- Exact-head CI run: pending
+- Corrective code tip: `78e4c4d8f3906c8c52feb81b611bc1468affe0e3`
+- Exact-head CI for that tip: [36903558559](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36903558559) — success, attempt 1, no retry
+- The pull request check on the commit that introduces this paragraph is the CI result for the branch tip
 - Reviewed-against head: `4c26ac18f0917cc2236dfc83b1a8ea971e125583`
 - Local focused F04: 30 passed
 - Related suites: passed
-- Full pytest / compileall: pending
+- Full pytest: exit 0, ~2802 collected, ~495s, one Starlette warning
+- `python -m compileall -q app tests`: exit 0
