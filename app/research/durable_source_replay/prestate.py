@@ -38,8 +38,9 @@ def snapshot_dependency_closure(
         SELECT * FROM setup_lifecycle_outcome_progress
         WHERE lifecycle_id = ?
         ORDER BY id ASC
+        LIMIT ?
         """,
-        (lifecycle_id,),
+        (lifecycle_id, limits.max_progress_rows + 1),
     )
     events = _all(
         connection,
@@ -47,8 +48,9 @@ def snapshot_dependency_closure(
         SELECT * FROM setup_lifecycle_events
         WHERE lifecycle_id = ?
         ORDER BY timestamp ASC, event_id ASC
+        LIMIT ?
         """,
-        (lifecycle_id,),
+        (lifecycle_id, limits.max_events + 1),
     )
     if len(progress) > limits.max_progress_rows:
         raise BoundExceeded("progress_row_limit")
@@ -66,24 +68,32 @@ def snapshot_dependency_closure(
             "SELECT * FROM runtime_epochs WHERE epoch_id = ?",
             (str(control["epoch_id"]),),
         )
-    origin_id = None
+    # Preserve the raw stored origin text on the lifecycle row. Lookup keys use
+    # the same strip() normalization Runtime ownership applies.
+    origin_id_raw = None
+    origin_id_lookup = None
     if lifecycle is not None:
         raw_origin = lifecycle.get("creation_origin_id")
-        if raw_origin is not None and str(raw_origin).strip():
-            origin_id = str(raw_origin)
+        if raw_origin is not None:
+            origin_id_raw = str(raw_origin)
+            stripped = origin_id_raw.strip()
+            if stripped:
+                origin_id_lookup = stripped
     origin = None
-    if origin_id is not None:
+    if origin_id_lookup is not None:
         origin = _one(
             connection,
             "SELECT * FROM runtime_operational_origins WHERE origin_id = ?",
-            (origin_id,),
+            (origin_id_lookup,),
         )
     run_ids: list[str] = []
-    if origin is not None and origin.get("run_id"):
-        run_ids.append(str(origin["run_id"]))
-    if scan_run_id is not None and str(scan_run_id).strip():
+    if origin is not None:
+        origin_run = str(origin.get("run_id") or "").strip()
+        if origin_run:
+            run_ids.append(origin_run)
+    if scan_run_id is not None:
         text = str(scan_run_id).strip()
-        if text not in run_ids:
+        if text and text not in run_ids:
             run_ids.append(text)
     runs = [
         {
@@ -103,13 +113,44 @@ def snapshot_dependency_closure(
         "event_rows": events,
         "runtime_epoch_control": control,
         "runtime_epoch": epoch,
-        "origin_id_observed": origin_id,
+        "origin_id_observed": origin_id_raw,
+        "origin_id_lookup": origin_id_lookup,
         "origin_row": origin,
         "run_rows": runs,
     }
 
 
-def snapshot_effects(connection: sqlite3.Connection, *, lifecycle_id: str) -> dict[str, Any]:
+def snapshot_effects(
+    connection: sqlite3.Connection,
+    *,
+    lifecycle_id: str,
+    limits: BoundLimits | None = None,
+) -> dict[str, Any]:
+    bounds = limits if limits is not None else BoundLimits()
+    progress = _all(
+        connection,
+        """
+        SELECT * FROM setup_lifecycle_outcome_progress
+        WHERE lifecycle_id = ?
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (lifecycle_id, bounds.max_progress_rows + 1),
+    )
+    events = _all(
+        connection,
+        """
+        SELECT * FROM setup_lifecycle_events
+        WHERE lifecycle_id = ?
+        ORDER BY timestamp ASC, event_id ASC
+        LIMIT ?
+        """,
+        (lifecycle_id, bounds.max_events + 1),
+    )
+    if len(progress) > bounds.max_progress_rows:
+        raise BoundExceeded("progress_row_limit")
+    if len(events) > bounds.max_events:
+        raise BoundExceeded("event_row_limit")
     return {
         "lifecycle_id": lifecycle_id,
         "lifecycle_row": _one(
@@ -117,24 +158,8 @@ def snapshot_effects(connection: sqlite3.Connection, *, lifecycle_id: str) -> di
             "SELECT * FROM setup_lifecycle_records WHERE lifecycle_id = ?",
             (lifecycle_id,),
         ),
-        "progress_rows": _all(
-            connection,
-            """
-            SELECT * FROM setup_lifecycle_outcome_progress
-            WHERE lifecycle_id = ?
-            ORDER BY id ASC
-            """,
-            (lifecycle_id,),
-        ),
-        "event_rows": _all(
-            connection,
-            """
-            SELECT * FROM setup_lifecycle_events
-            WHERE lifecycle_id = ?
-            ORDER BY timestamp ASC, event_id ASC
-            """,
-            (lifecycle_id,),
-        ),
+        "progress_rows": progress,
+        "event_rows": events,
     }
 
 
@@ -210,8 +235,24 @@ def seed_prestate(connection: sqlite3.Connection, prestate: dict[str, Any]) -> N
         _insert_row(connection, "setup_lifecycle_events", row)
 
 
+_RAW_LINEAGE_FIELDS = (
+    "creation_origin_id",
+    "runtime_epoch_id",
+    "setup_id",
+    "plan_version_id",
+    "economic_identity_reason",
+)
+
+
 def reconstruct_record(payload: dict[str, Any]) -> SetupLifecycleRecord:
-    return SetupLifecycleRecord(**_restore_model_fields(SetupLifecycleRecord, payload))
+    fields = _restore_model_fields(SetupLifecycleRecord, payload)
+    # Validate/coerce enums and ordinary fields, then restore exact captured lineage
+    # text. Runtime strips only for authority lookups; immutability compares raw text.
+    raw_lineage = {key: fields[key] for key in _RAW_LINEAGE_FIELDS if key in fields}
+    record = SetupLifecycleRecord(**fields)
+    for key, value in raw_lineage.items():
+        object.__setattr__(record, key, value)
+    return record
 
 
 def _model_dict(model: Any) -> dict[str, Any]:

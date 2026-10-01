@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +18,15 @@ from app.lifecycle.outcomes import evaluate_closed_candle_outcomes
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.research.durable_source_replay.capture import replay_guard
 from app.research.durable_source_replay.codec import CodecError, content_hash, decode_canonical
+from app.research.durable_source_replay.bounds import DEFAULT_BOUNDS
 from app.research.durable_source_replay.constants import (
     CAPTURE_COMPLETE,
+    CAPTURE_STATUS_VALUES,
     CODEC_VERSION,
     EVIDENCE_CORRUPT,
     EVIDENCE_INCOMPLETE,
     EXIT_BY_STATUS,
+    IMPLEMENTATION_ATTESTATION_VERSION,
     NONSEMANTIC_EVENT_COLUMNS,
     NONSEMANTIC_PROGRESS_COLUMNS,
     PAYLOAD_CALL,
@@ -33,8 +37,18 @@ from app.research.durable_source_replay.constants import (
     PAYLOAD_RESULT,
     REPLAY_MATCH,
     REPLAY_MISMATCH,
+    SAVEPOINT_DISPOSITION_VALUES,
+    SAVEPOINT_NONE,
+    SAVEPOINT_OPEN,
+    SAVEPOINT_RELEASED,
+    SAVEPOINT_ROLLED_BACK,
     STORE_SCHEMA_VERSION,
+    TX_COMMIT_INTERRUPTED,
+    TX_COMMIT_UNKNOWN,
     TX_ENCLOSING_COMMITTED,
+    TX_ENCLOSING_ROLLED_BACK,
+    TX_SAVEPOINT_ROLLED_BACK,
+    TX_STATUS_VALUES,
     UNSUPPORTED_FORMAT,
     UNSUPPORTED_IMPLEMENTATION_OR_POLICY,
 )
@@ -173,7 +187,11 @@ def _run(loaded: dict[str, Any], scratch: Path) -> dict[str, Any]:
             except Exception as exc:
                 result = None
                 replay_exception = exc
-        effects = snapshot_effects(connection, lifecycle_id=str(prestate["lifecycle_id"]))
+        effects = snapshot_effects(
+            connection,
+            lifecycle_id=str(prestate["lifecycle_id"]),
+            limits=DEFAULT_BOUNDS,
+        )
         connection.commit()
     finally:
         connection.close()
@@ -217,6 +235,13 @@ def _compatibility(loaded: dict[str, Any]) -> tuple[str, str] | None:
         return UNSUPPORTED_IMPLEMENTATION_OR_POLICY, "application_schema_mismatch"
     if str(row["codec_version"]) != CODEC_VERSION:
         return UNSUPPORTED_FORMAT, "codec_version_mismatch"
+    deps = loaded.get("dependency_versions") or {}
+    attestation = deps.get("implementation_attestation_version")
+    if attestation != IMPLEMENTATION_ATTESTATION_VERSION:
+        return (
+            UNSUPPORTED_IMPLEMENTATION_OR_POLICY,
+            f"unsupported_implementation_attestation:{attestation!s}",
+        )
     if str(row["implementation_fingerprint"]) != implementation_fingerprint():
         return UNSUPPORTED_IMPLEMENTATION_OR_POLICY, "implementation_fingerprint_mismatch"
     try:
@@ -250,6 +275,64 @@ def _compatibility(loaded: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
+def _validate_envelope(row: Mapping[str, Any], refs: Sequence[Mapping[str, Any]], payloads: Mapping[str, Any]) -> str | None:
+    """Return a corrupt/unsupported reason, or None when the occurrence envelope is consistent."""
+
+    if int(row.get("store_schema_version") or -1) != STORE_SCHEMA_VERSION:
+        return f"store_schema_version_mismatch:{row.get('store_schema_version')}"
+    if str(row.get("codec_version") or "") != CODEC_VERSION:
+        return f"capture_codec_version_mismatch:{row.get('codec_version')}"
+    capture_status = str(row.get("capture_status") or "")
+    if capture_status not in CAPTURE_STATUS_VALUES:
+        return f"unknown_capture_status:{capture_status}"
+    tx_status = str(row.get("transaction_status") or "")
+    if tx_status not in TX_STATUS_VALUES:
+        return f"unknown_transaction_status:{tx_status}"
+    enclosing = str(row.get("enclosing_disposition") or "")
+    if enclosing not in TX_STATUS_VALUES:
+        return f"unknown_enclosing_disposition:{enclosing}"
+    savepoint = str(row.get("savepoint_disposition") or "")
+    if savepoint not in SAVEPOINT_DISPOSITION_VALUES:
+        return f"unknown_savepoint_disposition:{savepoint}"
+    if tx_status == TX_ENCLOSING_COMMITTED and enclosing != TX_ENCLOSING_COMMITTED:
+        return "transaction_enclosing_inconsistent"
+    if enclosing == TX_ENCLOSING_ROLLED_BACK and tx_status == TX_ENCLOSING_COMMITTED:
+        return "transaction_enclosing_inconsistent"
+    if enclosing == TX_COMMIT_INTERRUPTED and tx_status == TX_ENCLOSING_COMMITTED:
+        return "transaction_enclosing_inconsistent"
+    if tx_status == TX_SAVEPOINT_ROLLED_BACK and savepoint != SAVEPOINT_ROLLED_BACK:
+        return "savepoint_transaction_inconsistent"
+    if int(row.get("reference_count") or -1) != len(refs):
+        return "reference_count_mismatch"
+    roles = [str(item["role"]) for item in refs]
+    if len(roles) != len(set(roles)):
+        return "duplicate_payload_role"
+    ordinals = [int(item["ordinal"]) for item in refs]
+    if ordinals != list(range(len(ordinals))):
+        return "payload_ordinal_mismatch"
+    missing = [role for role in _REQUIRED_ROLES if role not in payloads]
+    if missing:
+        return "missing_reference:" + ",".join(missing)
+    call = payloads.get(PAYLOAD_CALL)
+    policy = payloads.get(PAYLOAD_POLICY)
+    if not isinstance(call, dict):
+        return "call_payload_shape_invalid"
+    if not isinstance(policy, dict):
+        return "policy_payload_shape_invalid"
+    if str(call.get("caller_path") or "") != str(row.get("caller_path") or ""):
+        return "caller_path_binding_mismatch"
+    if str(call.get("evidence_lineage") or "") != str(row.get("evidence_lineage") or ""):
+        return "evidence_lineage_binding_mismatch"
+    if str(policy.get("policy_id") or "") != str(row.get("policy_id") or ""):
+        return "policy_id_header_mismatch"
+    if str(policy.get("family") or "") != str(row.get("policy_family") or ""):
+        return "policy_family_header_mismatch"
+    supported_flag = bool(int(row.get("policy_supported") or 0))
+    if bool(policy.get("supported")) != supported_flag:
+        return "policy_supported_header_mismatch"
+    return None
+
+
 def _load(
     evidence_path: Path | str,
     capture_id: str,
@@ -265,6 +348,7 @@ def _load(
         "evidence_lineage": None,
         "row": None,
         "payloads": {},
+        "dependency_versions": {},
         "mismatches": [],
     }
     try:
@@ -301,26 +385,39 @@ def _load(
         base["capture_status"] = row["capture_status"]
         base["caller_path"] = row["caller_path"]
         base["evidence_lineage"] = row["evidence_lineage"]
-        roles = [item["role"] for item in loaded["refs"]]
-        if len(roles) != len(set(roles)):
+        try:
+            base["dependency_versions"] = json.loads(row["dependency_versions_json"] or "{}")
+        except json.JSONDecodeError:
             base["status"] = EVIDENCE_CORRUPT
-            base["reason"] = "duplicate_payload_role"
+            base["reason"] = "dependency_versions_invalid"
             return base
         decoded: dict[str, Any] = {}
+        decode_budget = DEFAULT_BOUNDS.max_decode_bytes
+        decoded_bytes = 0
         for ref in loaded["refs"]:
             try:
-                blob = read_payload(connection, ref["content_hash"])
+                payload = read_payload(connection, ref["content_hash"])
             except EvidenceStoreError as exc:
                 base["status"] = EVIDENCE_CORRUPT
                 base["reason"] = exc.reason
                 return base
-            if blob is None:
+            if payload is None:
                 base["status"] = EVIDENCE_CORRUPT
                 base["reason"] = f"missing_payload:{ref['role']}"
+                return base
+            blob = payload["bytes"]
+            if payload["codec_version"] != CODEC_VERSION:
+                base["status"] = UNSUPPORTED_FORMAT
+                base["reason"] = f"payload_codec_version_mismatch:{ref['role']}"
                 return base
             if content_hash(blob) != ref["content_hash"] or len(blob) == 0:
                 base["status"] = EVIDENCE_CORRUPT
                 base["reason"] = f"payload_integrity:{ref['role']}"
+                return base
+            decoded_bytes += len(blob)
+            if decoded_bytes > decode_budget:
+                base["status"] = EVIDENCE_CORRUPT
+                base["reason"] = "decode_byte_limit"
                 return base
             try:
                 decoded[ref["role"]] = decode_canonical(blob)
@@ -328,10 +425,18 @@ def _load(
                 base["status"] = EVIDENCE_CORRUPT
                 base["reason"] = f"payload_decode:{ref['role']}:{exc.reason}"
                 return base
-        missing = [role for role in _REQUIRED_ROLES if role not in decoded]
-        if missing:
-            base["status"] = EVIDENCE_CORRUPT
-            base["reason"] = "missing_reference:" + ",".join(missing)
+        envelope_error = _validate_envelope(row, loaded["refs"], decoded)
+        if envelope_error is not None:
+            if envelope_error.startswith("unsupported") or "codec_version" in envelope_error:
+                base["status"] = UNSUPPORTED_FORMAT
+            elif envelope_error.startswith("store_schema"):
+                base["status"] = UNSUPPORTED_FORMAT
+            else:
+                base["status"] = EVIDENCE_CORRUPT
+            base["reason"] = envelope_error
+            # Do not expose mutated conflicting metadata as a positive claim.
+            base["transaction_status"] = row["transaction_status"]
+            base["payloads"] = {}
             return base
         base["payloads"] = decoded
         base["status"] = "ready"

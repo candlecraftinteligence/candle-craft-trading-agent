@@ -1414,6 +1414,326 @@ def test_successful_evaluator_savepoint_rollback_is_not_persisted(tmp_path: Path
     assert not progress
 
 
+def test_f04_r1_explicit_rollback_then_empty_commit_is_not_persistence(tmp_path: Path) -> None:
+    import app.research.durable_source_replay.capture as capture_module
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    flush_in_transaction: list[bool] = []
+    original_writer = capture_module.write_bundle
+    live_connection = {"value": None}
+
+    def spy_writer(*args: object, **kwargs: object) -> None:
+        connection = live_connection["value"]
+        try:
+            in_tx = bool(connection is not None and connection.in_transaction)
+        except Exception:
+            # Closed connections must not count as an open operational transaction.
+            in_tx = False
+        flush_in_transaction.append(in_tx)
+        return original_writer(*args, **kwargs)
+
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            live_connection["value"] = connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            invoke_closed_candle_outcomes(
+                evaluate_closed_candle_outcomes,
+                caller_path=CALLER_OWNER_MONITORING,
+                record=record,
+                execution_candles=[_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+                execution_timeframe=TIMEFRAME,
+                decision_timestamp=_decision(1),
+                evaluated_at=_decision(1),
+                repository=repository,
+                scan_run_id=f"run-{record.lifecycle_id}",
+            )
+            inside = connection.execute(
+                "SELECT count(*) FROM setup_lifecycle_outcome_progress"
+            ).fetchone()[0]
+            assert inside == 1
+            connection.rollback()
+    with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+        assert not repository.list_outcome_progress(lifecycle_id=record.lifecycle_id)
+    report = _replay(evidence, _capture_ids(evidence)[0], tmp_path / "scratch-r1")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["transaction_status"] == TX_ENCLOSING_ROLLED_BACK
+    assert report["claims"]["operational_persistence"] is False
+
+    evidence_exc = tmp_path / "exc.sqlite"
+    path_exc = _operational(tmp_path / "exc-op")
+    record_exc = _own(path_exc, _latched(lifecycle_id="life-exc", symbol="ETHUSDT"))
+    capture_module.write_bundle = spy_writer
+    try:
+        with use_capture(CaptureConfig(enabled=True, evidence_path=evidence_exc, operational_paths=(path_exc,))):
+            with pytest.raises(RuntimeError, match="abort"):
+                with SQLiteSetupLifecycleRepository(path_exc, expected_identity=SYNTHETIC_IDENTITY) as repository:
+                    live_connection["value"] = repository.connection
+                    repository.connection.execute("BEGIN IMMEDIATE")
+                    note_enclosing_transaction_opened(repository.connection)
+                    invoke_closed_candle_outcomes(
+                        evaluate_closed_candle_outcomes,
+                        caller_path=CALLER_OWNER_MONITORING,
+                        record=record_exc,
+                        execution_candles=[_candle(0, high="101", low="99")],
+                        execution_timeframe=TIMEFRAME,
+                        decision_timestamp=_decision(0),
+                        evaluated_at=_decision(0),
+                        repository=repository,
+                        scan_run_id=f"run-{record_exc.lifecycle_id}",
+                    )
+                    raise RuntimeError("abort")
+    finally:
+        capture_module.write_bundle = original_writer
+    assert flush_in_transaction == [False]
+
+
+def test_f04_r2_identity_init_failure_preserves_operational_evaluation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.research.durable_source_replay.capture as capture_module
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    candles = [_candle(0, high="101", low="99"), _candle(1, high="103", low="100")]
+    monkeypatch.setenv("SOURCE_REPLAY_CAPTURE_ENABLED", "true")
+    monkeypatch.setenv("SOURCE_REPLAY_EVIDENCE_PATH", str(evidence))
+    monkeypatch.setattr(
+        capture_module,
+        "implementation_fingerprint",
+        lambda: (_ for _ in ()).throw(OSError("synthetic source identity read failure")),
+    )
+    reset_capture_process_state()
+    _monitor(path, record, candles, when=_decision(1))
+    with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+        progress = repository.list_outcome_progress(lifecycle_id=record.lifecycle_id)
+    assert progress and progress[0].entry_at is not None
+    counters = capture_counters()
+    assert counters.get("identity_init_failed") or counters.get("capture_failures_total")
+    assert not evidence.exists() or _capture_ids(evidence) == []
+
+
+def test_f04_r3_store_footprint_budget_rejects_first_write_and_diagnostics(tmp_path: Path) -> None:
+    from app.research.durable_source_replay.paths import footprint_bytes
+    from app.research.durable_source_replay.store import write_bundle
+
+    evidence = tmp_path / "tiny.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    limits = BoundLimits(max_store_bytes=64 * 1024)
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,)), bounds=limits):
+        _monitor(
+            path,
+            record,
+            [_candle(i, high="103", low="100") for i in range(20)],
+            when=_decision(19),
+        )
+    assert capture_failures()
+    assert any("store" in item["reason"] or "BoundExceeded" in item["reason"] for item in capture_failures())
+    assert not evidence.exists() or footprint_bytes(evidence) <= limits.max_store_bytes
+    assert _capture_ids(evidence) == [] if evidence.exists() else True
+
+    with pytest.raises(Exception) as excinfo:
+        write_bundle(tmp_path / "too-small.sqlite", captures=[], limits=BoundLimits(max_store_bytes=1024))
+    assert "store_budget_too_small" in str(excinfo.value)
+
+    diag_evidence = tmp_path / "diag.sqlite"
+    write_bundle(diag_evidence, captures=[], limits=BoundLimits(max_store_bytes=128 * 1024))
+    path2 = _operational(tmp_path / "diag-op")
+    record2 = _own(path2, _latched(lifecycle_id="life-diag", symbol="ETHUSDT"))
+    reset_capture_process_state()
+    with use_capture(
+        CaptureConfig(enabled=True, evidence_path=diag_evidence, operational_paths=(path2,)),
+        bounds=BoundLimits(max_store_bytes=128 * 1024),
+    ):
+        with SQLiteSetupLifecycleRepository(path2, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            for _ in range(300):
+                from app.research.durable_source_replay.capture import note_non_invocation
+
+                note_non_invocation(
+                    kind="synthetic_gap",
+                    detail="x" * 500,
+                    lifecycle_id=record2.lifecycle_id,
+                    connection=repository.connection,
+                )
+    assert capture_failures()
+    assert footprint_bytes(diag_evidence) <= 128 * 1024
+
+
+def test_f04_r4_conflicting_occurrence_metadata_fails_closed(tmp_path: Path) -> None:
+    from app.research.durable_source_replay.replay import inspect_capture
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with pytest.raises(RuntimeError, match="rollback_after_evaluation"):
+            with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+                repository.connection.execute("BEGIN IMMEDIATE")
+                note_enclosing_transaction_opened(repository.connection)
+                invoke_closed_candle_outcomes(
+                    evaluate_closed_candle_outcomes,
+                    caller_path=CALLER_OWNER_MONITORING,
+                    record=record,
+                    execution_candles=[_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+                    execution_timeframe=TIMEFRAME,
+                    decision_timestamp=_decision(1),
+                    evaluated_at=_decision(1),
+                    repository=repository,
+                    scan_run_id=f"run-{record.lifecycle_id}",
+                )
+                raise RuntimeError("rollback_after_evaluation")
+    capture_id = _capture_ids(evidence)[0]
+    before = _replay(evidence, capture_id, tmp_path / "scratch-before")
+    assert before["status"] == REPLAY_MATCH
+    assert before["transaction_status"] == TX_ENCLOSING_ROLLED_BACK
+    assert before["claims"]["operational_persistence"] is False
+    connection = sqlite3.connect(evidence)
+    try:
+        connection.execute(
+            """
+            UPDATE captures
+            SET transaction_status = 'enclosing_committed',
+                policy_id = 'conflicting-policy',
+                reference_count = 99,
+                store_schema_version = 99
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    after = _replay(evidence, capture_id, tmp_path / "scratch-after")
+    assert after["status"] in {"EVIDENCE_CORRUPT", "UNSUPPORTED_FORMAT"}
+    assert after["claims"]["operational_persistence"] is False
+    assert after["claims"]["computation_replay"] is False
+    inspection = inspect_capture(evidence_path=evidence, capture_id=capture_id)
+    assert inspection["status"] != "INSPECTION_OK"
+    assert inspection["exit_code"] != 0
+
+
+def test_f04_r5_padded_authority_lookups_replay(tmp_path: Path) -> None:
+    for column in ("creation_origin_id", "origin_run_id"):
+        root = tmp_path / column
+        root.mkdir()
+        evidence = root / "evidence.sqlite"
+        path = _operational(root)
+        record = _own(path, _latched(lifecycle_id=f"life-{column}", symbol="BNBUSDT" if column == "creation_origin_id" else "XRPUSDT"))
+        with sqlite3.connect(path) as connection:
+            if column == "creation_origin_id":
+                padded = f"  {record.creation_origin_id}  "
+                connection.execute(
+                    "UPDATE setup_lifecycle_records SET creation_origin_id = ?",
+                    (padded,),
+                )
+                connection.commit()
+                record = record.model_copy(update={"creation_origin_id": padded})
+            else:
+                connection.execute(
+                    "UPDATE runtime_operational_origins SET run_id = ?",
+                    ("  run-" + record.lifecycle_id + "  ",),
+                )
+                connection.commit()
+        with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+            with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+                repository.connection.execute("BEGIN IMMEDIATE")
+                note_enclosing_transaction_opened(repository.connection)
+                invoke_closed_candle_outcomes(
+                    evaluate_closed_candle_outcomes,
+                    caller_path=CALLER_OWNER_MONITORING,
+                    record=record,
+                    execution_candles=[_candle(0, high="101", low="99"), _candle(1, high="103", low="100")],
+                    execution_timeframe=TIMEFRAME,
+                    decision_timestamp=_decision(1),
+                    evaluated_at=_decision(1),
+                    repository=repository,
+                    scan_run_id=None,
+                )
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            progress = repository.list_outcome_progress(lifecycle_id=record.lifecycle_id)
+        assert len(progress) == 1
+        report = _replay(evidence, _capture_ids(evidence)[0], root / "scratch")
+        assert report["status"] == REPLAY_MATCH, (column, report)
+
+
+def test_f04_r6_implementation_fingerprint_covers_state_machine(tmp_path: Path) -> None:
+    import shutil
+
+    import app.research.durable_source_replay.identity as identity
+
+    clone = tmp_path / "fingerprint_clone"
+    for relative in identity.IMPLEMENTATION_FILES:
+        target = clone / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(relative), target)
+    assert "app/lifecycle/state_machine.py" in identity.IMPLEMENTATION_FILES
+    assert "app/lifecycle/models.py" in identity.IMPLEMENTATION_FILES
+    assert "app/core/trade_plan_integrity.py" in identity.IMPLEMENTATION_FILES
+    assert "app/runtime_epoch/time_contract.py" in identity.IMPLEMENTATION_FILES
+    original_root = identity.REPO_ROOT
+    try:
+        identity.REPO_ROOT = clone
+        before = identity.implementation_fingerprint()
+        target = clone / "app/lifecycle/state_machine.py"
+        old = target.read_text(encoding="utf-8")
+        new = old.replace(
+            "return to_state in ALLOWED_TRANSITIONS.get(from_state, set())",
+            "return False",
+        )
+        assert old != new
+        target.write_text(new, encoding="utf-8")
+        after = identity.implementation_fingerprint()
+        assert before != after
+    finally:
+        identity.REPO_ROOT = original_root
+
+
+def test_f04_r7_bounded_header_reads_and_failure_retention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import patch
+
+    import app.research.durable_source_replay.capture as capture_module
+    from app.research.durable_source_replay.paths import inspect_existing_store_file, read_sqlite_header
+
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched())
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        _monitor(path, record, [_candle(0, high="103", low="100")], when=_decision(0))
+    assert evidence.exists()
+    header = read_sqlite_header(evidence)
+    assert len(header) == 16
+    reads: list[int] = []
+    original_open = Path.open
+
+    def tracking_open(self: Path, *args: object, **kwargs: object):
+        handle = original_open(self, *args, **kwargs)
+        if self.resolve() == evidence.resolve() and "b" in str(args[0] if args else kwargs.get("mode", "r")):
+            original_read = handle.read
+
+            def tracked_read(n: int = -1) -> bytes:
+                data = original_read(n)
+                reads.append(len(data))
+                return data
+
+            handle.read = tracked_read  # type: ignore[method-assign]
+        return handle
+
+    with patch.object(Path, "open", tracking_open):
+        inspect_existing_store_file(evidence)
+    assert reads
+    assert max(reads) <= 16
+
+    reset_capture_process_state()
+    for _ in range(10_001):
+        capture_module._remember_failure("synthetic_recurring_failure", ValueError("synthetic"))
+    assert len(capture_failures()) <= BoundLimits().max_failure_details
+    assert capture_counters().get("failure_details_truncated") == 1
+    assert capture_counters().get("synthetic_recurring_failure") == 10_001
+
+
 def _capture_for_lifecycle(evidence: Path, lifecycle_id: str) -> str:
     for capture_id in _capture_ids(evidence):
         decoded = decode_canonical(_payload(evidence, capture_id, "prestate").encode("utf-8"))

@@ -27,6 +27,7 @@ from app.lifecycle.outcomes import (
 )
 from app.research.durable_source_replay.capture import (
     invoke_closed_candle_outcomes,
+    note_enclosing_transaction_committed,
     note_enclosing_transaction_opened,
     note_non_invocation,
     note_savepoint_opened,
@@ -542,6 +543,7 @@ async def monitor_obligations_with_market_data(
         else:
             if started and connection.in_transaction:
                 connection.commit()
+                note_enclosing_transaction_committed(connection)
         return result
 
 

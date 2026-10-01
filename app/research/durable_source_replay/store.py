@@ -14,16 +14,18 @@ from typing import Any
 
 from app.research.durable_source_replay.bounds import BoundExceeded, BoundLimits, DEFAULT_BOUNDS
 from app.research.durable_source_replay.codec import content_hash
-from app.research.durable_source_replay.constants import (
-    CODEC_VERSION,
-    STORE_FORMAT,
-    STORE_SCHEMA_VERSION,
-)
 from app.research.durable_source_replay.paths import (
     EvidencePathError,
+    connection_footprint_bytes,
     footprint_bytes,
     inspect_existing_store_file,
     resolve_evidence_path,
+)
+from app.research.durable_source_replay.constants import (
+    CODEC_VERSION,
+    MIN_USABLE_STORE_BYTES,
+    STORE_FORMAT,
+    STORE_SCHEMA_VERSION,
 )
 
 _SCHEMA = """
@@ -95,35 +97,47 @@ def write_bundle(
     operational_paths: Sequence[Path | str] = (),
     limits: BoundLimits = DEFAULT_BOUNDS,
 ) -> None:
+    if limits.max_store_bytes < MIN_USABLE_STORE_BYTES:
+        raise BoundExceeded("store_budget_too_small")
     resolved = resolve_evidence_path(path, operational_paths=operational_paths)
     state = inspect_existing_store_file(resolved)
-    incoming = 0
-    for capture in captures:
-        for blob in capture["payloads"].values():
-            if len(blob) > limits.max_payload_bytes:
-                raise BoundExceeded("payload_byte_limit")
-            incoming += len(blob)
-    if state == "readable" and footprint_bytes(resolved) + incoming > limits.max_store_bytes:
+    estimated = _estimate_bundle_bytes(captures, diagnostics, limits=limits, new_store=(state == "new"))
+    current = footprint_bytes(resolved) if state == "readable" else 0
+    if current + estimated > limits.max_store_bytes:
         raise BoundExceeded("store_byte_limit")
     if state == "new":
         resolved.parent.mkdir(parents=True, exist_ok=True)
     connection = _connect_writer(resolved, limits)
+    accepted = False
     try:
         connection.execute("BEGIN IMMEDIATE")
         _ensure_schema(connection)
-        if footprint_bytes(resolved) > limits.max_store_bytes:
+        if connection_footprint_bytes(connection, resolved) > limits.max_store_bytes:
             raise BoundExceeded("store_byte_limit")
         for capture in captures:
-            _insert_capture(connection, capture)
+            _insert_capture(connection, capture, limits=limits)
+            if connection_footprint_bytes(connection, resolved) > limits.max_store_bytes:
+                raise BoundExceeded("store_byte_limit")
         for diagnostic in diagnostics:
             _insert_diagnostic(connection, diagnostic)
+            if connection_footprint_bytes(connection, resolved) > limits.max_store_bytes:
+                raise BoundExceeded("store_byte_limit")
         connection.commit()
+        accepted = True
     except Exception:
         if connection.in_transaction:
             connection.rollback()
         raise
     finally:
         connection.close()
+    if accepted and footprint_bytes(resolved) > limits.max_store_bytes:
+        if state == "new":
+            for candidate in (resolved, Path(str(resolved) + "-wal"), Path(str(resolved) + "-shm")):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        raise BoundExceeded("store_byte_limit")
 
 
 def open_reader(path: Path | str, *, operational_paths: Sequence[Path | str] = ()) -> sqlite3.Connection:
@@ -166,9 +180,12 @@ def load_capture(connection: sqlite3.Connection, capture_id: str) -> dict[str, A
     }
 
 
-def read_payload(connection: sqlite3.Connection, digest: str) -> bytes | None:
+def read_payload(connection: sqlite3.Connection, digest: str) -> dict[str, Any] | None:
     row = connection.execute(
-        "SELECT canonical_bytes, byte_length, content_hash FROM payloads WHERE content_hash = ?",
+        """
+        SELECT canonical_bytes, byte_length, content_hash, codec_version
+        FROM payloads WHERE content_hash = ?
+        """,
         (digest,),
     ).fetchone()
     if row is None:
@@ -176,7 +193,36 @@ def read_payload(connection: sqlite3.Connection, digest: str) -> bytes | None:
     blob = bytes(row["canonical_bytes"])
     if len(blob) != int(row["byte_length"]) or content_hash(blob) != str(row["content_hash"]):
         raise EvidenceStoreError("payload_bytes_do_not_match_record")
-    return blob
+    return {
+        "bytes": blob,
+        "codec_version": str(row["codec_version"]),
+        "byte_length": int(row["byte_length"]),
+        "content_hash": str(row["content_hash"]),
+    }
+
+
+def _estimate_bundle_bytes(
+    captures: Sequence[Mapping[str, Any]],
+    diagnostics: Sequence[Mapping[str, Any]],
+    *,
+    limits: BoundLimits,
+    new_store: bool,
+) -> int:
+    total = limits.store_schema_reserve_bytes if new_store else 0
+    for capture in captures:
+        payloads = capture.get("payloads") or {}
+        for blob in payloads.values():
+            if not isinstance(blob, (bytes, bytearray)):
+                raise EvidenceStoreError("payload_must_be_bytes")
+            if len(blob) > limits.max_payload_bytes:
+                raise BoundExceeded("payload_byte_limit")
+            total += len(blob) + limits.store_row_overhead_bytes
+        total += limits.store_row_overhead_bytes  # capture row + refs
+        total += len(payloads) * limits.store_row_overhead_bytes
+    for diagnostic in diagnostics:
+        detail = str(diagnostic.get("detail") or "")
+        total += len(detail.encode("utf-8")) + limits.store_row_overhead_bytes
+    return total
 
 
 def _connect_writer(path: Path, limits: BoundLimits) -> sqlite3.Connection:
@@ -226,12 +272,21 @@ def _ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute(f"PRAGMA user_version = {STORE_SCHEMA_VERSION}")
 
 
-def _insert_capture(connection: sqlite3.Connection, capture: Mapping[str, Any]) -> None:
+def _insert_capture(
+    connection: sqlite3.Connection,
+    capture: Mapping[str, Any],
+    *,
+    limits: BoundLimits = DEFAULT_BOUNDS,
+) -> None:
     payloads: Mapping[str, bytes] = capture["payloads"]
+    if len(payloads) > limits.max_reference_count:
+        raise BoundExceeded("reference_count_limit")
     hashes: dict[str, str] = {}
     for role, blob in payloads.items():
         if not isinstance(blob, (bytes, bytearray)):
             raise EvidenceStoreError("payload_must_be_bytes")
+        if len(blob) > limits.max_payload_bytes:
+            raise BoundExceeded("payload_byte_limit")
         digest = content_hash(bytes(blob))
         hashes[str(role)] = digest
         existing = connection.execute(

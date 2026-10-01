@@ -17,7 +17,7 @@ Production callers on this base:
 
 `record_closed_candle_evidence_gap`, `not_run`, `None`, an empty batch, and a fetch failure are diagnostics. They are not manufactured invocations.
 
-The dependency snapshot, taken inside the operational transaction immediately before the evaluator, includes the lifecycle row, outcome progress ordered by `id`, events ordered by timestamp then `event_id`, the active runtime-epoch control row and that epoch, the origin row for the stored `creation_origin_id` without a granted filter, and the origin run plus the call's scan run. Absence is stored as absence. Replay inserts only those rows. It does not grant an origin or activate an epoch.
+The dependency snapshot, taken inside the operational transaction immediately before the evaluator, includes the lifecycle row, outcome progress ordered by `id`, events ordered by timestamp then `event_id`, the active runtime-epoch control row and that epoch, the origin row for the stored `creation_origin_id` without a granted filter, and the origin run plus the call's scan run. Raw lineage strings are preserved. Lookup keys are stripped exactly as Runtime ownership strips them. Absence is stored as absence. Replay inserts only those rows. It does not grant an origin or activate an epoch.
 
 ## 2. Three claims
 
@@ -34,12 +34,15 @@ The dependency snapshot, taken inside the operational transaction immediately be
 The sidecar and the operational database do not share a commit.
 
 1. Inside the operational transaction, capture copies bounded call inputs, prestate, delivery, policy, result, and effects into memory.
-2. Savepoint notes record whether `lifecycle_symbol` or `owner_monitor` was released or rolled back. A released savepoint is not an enclosing commit.
-3. After `SQLiteSetupLifecycleRepository.__exit__` commits or rolls back, one evidence-store `BEGIN IMMEDIATE` writes the bundle and commits it.
-4. A crash after the operational commit and before that evidence commit loses coverage. It does not leave a complete capture row.
-5. An evidence write that raises rolls back the evidence transaction. The operational result, exception, and cursor stay as they were. The failure is counted. It is not a replay pass.
+2. Savepoint notes record whether `lifecycle_symbol` or `owner_monitor` was released or rolled back. Nested savepoint rollbacks mark ancestry. A released savepoint is not an enclosing commit.
+3. Commit and rollback on the instrumented operational connection are observed. An explicit rollback discards pending effects. A later empty commit cannot upgrade those discarded effects to `enclosing_committed`.
+4. `SQLiteSetupLifecycleRepository.__exit__` finishes operational commit/rollback and closes the connection before any evidence-store write. Sidecar I/O never runs while `connection.in_transaction` is true.
+5. One evidence-store `BEGIN IMMEDIATE` then writes the bundle. A crash after the operational commit and before that evidence commit loses coverage. It does not leave a complete capture row.
+6. An evidence write that raises rolls back the evidence transaction. The operational result, exception, and cursor stay as they were. The failure is counted. It is not a replay pass.
 
-If no enclosing `BEGIN` was observed, the disposition is `commit_unknown`, including when a later repository `commit()` succeeds. `commit_interrupted` is a failed operational commit. `savepoint_rolled_back` wins over a later enclosing commit.
+If no enclosing `BEGIN` was observed, the disposition is `commit_unknown`, including when a later repository `commit()` succeeds. P5A's explicit `connection.commit()` is observed as a retaining commit when an enclosing BEGIN was noted. `commit_interrupted` is a failed operational commit. `savepoint_rolled_back` wins over a later enclosing commit.
+
+Capture initialization, environment loading, identity/fingerprint setup, notes, and invocation wrappers contain their own failures. An optional capture init error never aborts the original evaluation.
 
 ## 4. Commands
 
@@ -60,7 +63,9 @@ The scratch directory must already exist. Replay creates `replay_operational.sql
 | `UNSUPPORTED_IMPLEMENTATION_OR_POLICY` | 5 |
 | `REPLAY_MISMATCH` | 6 |
 
-Exact replay requires the captured implementation fingerprint of the listed evaluator sources, the captured Python/SQLite/Pydantic versions, application schema 26, codec v1, and canonical runtime policy bytes from `build_runtime_evaluation_policy`. Git SHA and a dirty tree are recorded. They are not the compatibility proof. Trade-simulation policy is a different family.
+Exact replay requires implementation attestation `cci-durable-source-replay-impl-v2` (expanded semantic closure including `state_machine`, models, trade-plan integrity, Runtime time-contract, and reconstruction modules), the captured implementation fingerprint of that file set, captured Python/SQLite/Pydantic versions, application schema 26, codec v1, and canonical runtime policy bytes from `build_runtime_evaluation_policy`. Unsupported older attestations fail closed. Git SHA and a dirty tree are recorded. They are not the compatibility proof. Trade-simulation policy is a different family.
+
+Inspection and replay validate the occurrence envelope before success: store/codec versions, status vocabulary, transaction/savepoint consistency, reference count/roles/ordinals, policy header versus canonical policy payload, and caller/lineage bindings. Conflicting metadata cannot manufacture `operational_persistence`.
 
 `app/research/durable_source_replay/capture.py` and `replay.py` are the only production-tree readers of that existing manifest. The outcome evaluator, lifecycle service, owner monitor, and scanner do not import it, and the captured policy does not change the evaluator's decision.
 
@@ -77,11 +82,16 @@ Progress comparison drops `id`, `created_at`, and `updated_at`, then sorts by `p
 | Delivery nodes / payload references | 64 |
 | Pending captures | 2,000 |
 | Store plus WAL | 512 MiB |
+| Minimum usable store budget | 48 KiB |
 | Lock wait | 2,000 ms |
 | Candles / events / diagnostics | 5,000 |
 | Progress rows | 128 |
+| Failure detail rows retained | 256 |
+| Decode bytes per load | 8 MiB |
 
-Exhaustion is a visible failure. There is no unbounded queue, silent drop, or automatic deletion. Paths that resolve to `main_live_runtime.sqlite`, `scan_runs/candle_craft.db`, an operational database, a `-wal`/`-shm` suffix, or an unrelated SQLite file are rejected. Enabled capture without a valid path is a misconfiguration counter, not a fallback.
+Store writes estimate schema/row/index overhead and check page-count plus WAL footprint before accepting a bundle, including first writes and diagnostic-only appends. Budgets below the minimum usable size are rejected. Exhaustion is a visible failure. There is no unbounded queue, silent drop, or automatic deletion of ordinary retained evidence. Header probes read sixteen bytes only. Event/progress queries use `LIMIT` before materialization. Failure counters stay aggregate; detail retention is truncated.
+
+Paths that resolve to `main_live_runtime.sqlite`, `scan_runs/candle_craft.db`, an operational database, a `-wal`/`-shm` suffix, or an unrelated SQLite file are rejected. Enabled capture without a valid path is a misconfiguration counter, not a fallback.
 
 Environment opt-in, read once per process unless tests install an override: `SOURCE_REPLAY_CAPTURE_ENABLED=true` and `SOURCE_REPLAY_EVIDENCE_PATH`. Any other enabled value stays off.
 

@@ -7,7 +7,12 @@ import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
 
-from app.research.durable_source_replay.constants import LIVE_RUNTIME_DB_NAME, STORE_FORMAT, STORE_SCHEMA_VERSION
+from app.research.durable_source_replay.constants import (
+    LIVE_RUNTIME_DB_NAME,
+    SQLITE_HEADER_BYTES,
+    STORE_FORMAT,
+    STORE_SCHEMA_VERSION,
+)
 from app.storage.database import DEFAULT_DATABASE_PATH
 
 
@@ -55,6 +60,16 @@ def _same_path(left: Path, right: Path) -> bool:
     return os.path.normcase(str(left_resolved)) == os.path.normcase(str(right_resolved))
 
 
+def read_sqlite_header(path: Path, *, nbytes: int = SQLITE_HEADER_BYTES) -> bytes:
+    """Read only the leading SQLite header bytes. Never materialize the whole file."""
+
+    try:
+        with path.open("rb") as handle:
+            return handle.read(nbytes)
+    except OSError as exc:
+        raise EvidencePathError(f"evidence_path_unreadable:{type(exc).__name__}") from exc
+
+
 def inspect_existing_store_file(path: Path) -> str:
     """Return ``new``, ``readable``, or raise when the file must not be used."""
 
@@ -68,10 +83,7 @@ def inspect_existing_store_file(path: Path) -> str:
         raise EvidencePathError(f"evidence_path_unreadable:{type(exc).__name__}") from exc
     if size == 0:
         raise EvidencePathError("empty_file_rejected")
-    try:
-        header = path.read_bytes()[:16]
-    except OSError as exc:
-        raise EvidencePathError(f"evidence_path_unreadable:{type(exc).__name__}") from exc
+    header = read_sqlite_header(path)
     if not header.startswith(b"SQLite format 3\x00"):
         raise EvidencePathError("unrelated_file_rejected")
     connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
@@ -103,3 +115,25 @@ def footprint_bytes(path: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def connection_footprint_bytes(connection: sqlite3.Connection, path: Path) -> int:
+    """Estimate committed-plus-WAL footprint including uncommitted pages."""
+
+    page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+    page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+    wal = 0
+    shm = 0
+    try:
+        wal_path = Path(str(path) + "-wal")
+        if wal_path.exists():
+            wal = wal_path.stat().st_size
+    except OSError:
+        wal = 0
+    try:
+        shm_path = Path(str(path) + "-shm")
+        if shm_path.exists():
+            shm = shm_path.stat().st_size
+    except OSError:
+        shm = 0
+    return max(page_count * page_size + wal + shm, footprint_bytes(path))

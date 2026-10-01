@@ -55,12 +55,28 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
         connection = self.connection
         committed = False
         commit_error: BaseException | None = None
-        if exc_type is None:
+        exit_rolled_back = False
+        # Finish the operational transaction and close before any sidecar I/O.
+        try:
+            if exc_type is not None:
+                if connection.in_transaction:
+                    connection.rollback()
+                    exit_rolled_back = True
+            else:
+                if connection.in_transaction:
+                    try:
+                        connection.commit()
+                        committed = True
+                    except BaseException as exc:
+                        commit_error = exc
+                        if connection.in_transaction:
+                            connection.rollback()
+                            exit_rolled_back = True
+        finally:
             try:
-                connection.commit()
-                committed = True
-            except BaseException as exc:
-                commit_error = exc
+                connection.close()
+            finally:
+                self.connection = None
         try:
             from app.research.durable_source_replay.capture import observe_repository_exit
 
@@ -68,13 +84,11 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                 connection,
                 committed=committed,
                 commit_failed=commit_error is not None,
+                exit_rolled_back=exit_rolled_back,
             )
         except Exception:
             # Capture flush must not replace an operational commit or exception.
             pass
-        finally:
-            connection.close()
-            self.connection = None
         if commit_error is not None:
             raise commit_error
 

@@ -8,8 +8,13 @@ from __future__ import annotations
 CODEC_VERSION = "cci-durable-source-replay-codec-v1"
 STORE_SCHEMA_VERSION = 1
 STORE_FORMAT = "cci-durable-source-replay-store-v1"
+# Breaking attestation change: expanded semantic implementation closure.
+IMPLEMENTATION_ATTESTATION_VERSION = "cci-durable-source-replay-impl-v2"
 LIVE_RUNTIME_DB_NAME = "main_live_runtime.sqlite"
 MAX_PARENT_DEPTH = 8
+SQLITE_HEADER_BYTES = 16
+# Empty evidence schema plus indexes already exceeds a few dozen KiB.
+MIN_USABLE_STORE_BYTES = 48 * 1024
 
 CALLER_LIFECYCLE_SERVICE = "app.lifecycle.service._apply_to_symbol_result_with_meta"
 CALLER_OWNER_MONITORING = "app.lifecycle.owner_monitoring.monitor_tracking_obligations"
@@ -28,10 +33,31 @@ TX_SAVEPOINT_ROLLED_BACK = "savepoint_rolled_back"
 TX_COMMIT_INTERRUPTED = "commit_interrupted"
 TX_COMMIT_UNKNOWN = "commit_unknown"
 
+TX_STATUS_VALUES = frozenset(
+    {
+        TX_ENCLOSING_COMMITTED,
+        TX_ENCLOSING_ROLLED_BACK,
+        TX_SAVEPOINT_ROLLED_BACK,
+        TX_COMMIT_INTERRUPTED,
+        TX_COMMIT_UNKNOWN,
+    }
+)
+
 SAVEPOINT_OPEN = "open"
 SAVEPOINT_RELEASED = "released"
 SAVEPOINT_ROLLED_BACK = "rolled_back"
 SAVEPOINT_NONE = "none"
+
+SAVEPOINT_DISPOSITION_VALUES = frozenset(
+    {
+        SAVEPOINT_OPEN,
+        SAVEPOINT_RELEASED,
+        SAVEPOINT_ROLLED_BACK,
+        SAVEPOINT_NONE,
+    }
+)
+
+CAPTURE_STATUS_VALUES = frozenset({CAPTURE_COMPLETE, CAPTURE_INCOMPLETE})
 
 REPLAY_MATCH = "REPLAY_MATCH"
 REPLAY_MISMATCH = "REPLAY_MISMATCH"

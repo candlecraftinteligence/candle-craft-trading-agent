@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.research.durable_source_replay.constants import MAX_PARENT_DEPTH
+from app.research.durable_source_replay.constants import (
+    MAX_PARENT_DEPTH,
+    MIN_USABLE_STORE_BYTES,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +27,11 @@ class BoundLimits:
     max_progress_rows: int = 128
     max_diagnostics: int = 5_000
     max_delivery_nodes: int = 64
+    max_failure_details: int = 256
+    max_decode_bytes: int = 8 * 1024 * 1024
+    # Conservative per-row SQLite/page/index overhead used before accepting a write.
+    store_row_overhead_bytes: int = 512
+    store_schema_reserve_bytes: int = MIN_USABLE_STORE_BYTES
 
 
 DEFAULT_BOUNDS = BoundLimits()

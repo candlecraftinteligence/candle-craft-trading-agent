@@ -13,11 +13,13 @@ Capture is off by default. Application schema remains 26. Public quality 88 / gr
 - Branch: `feature/f04-durable-source-replay-foundation`
 - Base SHA: `b7c6422e3d1e2596115b7cd9cf5b1caea15072ef` (merged F03 on `origin/main`; incorporates reviewed F03 head `438624dc5f291d271b4c85be5f83262ea0f40d85`)
 - Implementation SHA: `0b44dc41e9dea72495d4f387ca338171731f7936`
+- PR #128 corrective repair: see Corrective repair (REQUEST_CHANGES) section
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/128
-- Final head: see Final head section (branch tip after the CI-record documentation commit)
+- Final head: see Final head section
 - Schema version: remains 26
 - Evidence store schema: `cci-durable-source-replay-store-v1` / `STORE_SCHEMA_VERSION = 1`
 - Codec: `cci-durable-source-replay-codec-v1`
+- Implementation attestation: `cci-durable-source-replay-impl-v2`
 - Runtime database: not opened, copied, or modified
 
 Verified: local `main` and `origin/main` both resolve to `b7c6422e3d1e2596115b7cd9cf5b1caea15072ef`, which is an ancestor of this branch. Capture stays off unless `SOURCE_REPLAY_CAPTURE_ENABLED=true` and `SOURCE_REPLAY_EVIDENCE_PATH` are both set.
@@ -101,17 +103,34 @@ One atomic evidence-store `BEGIN IMMEDIATE` writes a bundle. Payload bytes are c
 
 Paths resolving to `main_live_runtime.sqlite`, `scan_runs/candle_craft.db`, an operational database, a `-wal`/`-shm` suffix, or an unrelated SQLite file are rejected. Enabled capture without a valid path is a misconfiguration counter, not a fallback to the live database.
 
+## Corrective repair (REQUEST_CHANGES on `4c26ac1`)
+
+Independent review disposition REQUEST_CHANGES identified seven acceptance failures that green CI missed. All seven are repaired on the same branch and draft PR #128.
+
+| ID | Repair | Primary functions / modules | Regression test |
+| --- | --- | --- | --- |
+| F04-R1 | Instrument commit/rollback; discard effects on rollback; close operational connection before sidecar flush | `capture._instrument_connection`, `_assign_disposition`, `repositories.__exit__`, `owner_monitoring` explicit commit note | `test_f04_r1_explicit_rollback_then_empty_commit_is_not_persistence` |
+| F04-R2 | Contain identity/env/init failures at every capture entry point | `capture_enabled`, `_load_env_once`, `_remember_identity`, notes, `invoke_closed_candle_outcomes` | `test_f04_r2_identity_init_failure_preserves_operational_evaluation` |
+| F04-R3 | Estimate + page/WAL footprint budget for first writes and diagnostics; reject budgets below 48 KiB | `store.write_bundle`, `_estimate_bundle_bytes`, `connection_footprint_bytes` | `test_f04_r3_store_footprint_budget_rejects_first_write_and_diagnostics` |
+| F04-R4 | Validate occurrence envelope before inspection/replay success | `replay._validate_envelope`, `_load`, `read_payload` codec check | `test_f04_r4_conflicting_occurrence_metadata_fails_closed` |
+| F04-R5 | Strip authority lookup keys like Runtime; preserve raw text; reconstruct without stripping lineage | `prestate.snapshot_dependency_closure`, `reconstruct_record` | `test_f04_r5_padded_authority_lookups_replay` |
+| F04-R6 | Expand fingerprint to state_machine/models/trade_plan_integrity/time_contract/reconstruction; attestation v2 | `identity.IMPLEMENTATION_FILES`, `IMPLEMENTATION_ATTESTATION_VERSION` | `test_f04_r6_implementation_fingerprint_covers_state_machine` |
+| F04-R7 | Bounded 16-byte header read; LIMIT before fetchall; bounded decode and failure-detail retention | `paths.read_sqlite_header`, `prestate._all` LIMIT, `capture._remember_failure` | `test_f04_r7_bounded_header_reads_and_failure_retention` |
+
+Remaining limitations unchanged: no venue authentication, no possession-before-cutoff, no expectancy/admission, no Runtime capture activation, no historical backfill. Unsupported pre-v2 attestations fail closed on replay.
+
 ## Transaction and crash protocol
 
 The sidecar and the operational database do not share a commit.
 
 1. Inside the operational transaction, capture copies bounded inputs, prestate, delivery, policy, result, and effects into memory.
-2. Savepoint notes record whether `lifecycle_symbol` or `owner_monitor` was released or rolled back. A released savepoint is not an enclosing commit.
-3. After `SQLiteSetupLifecycleRepository.__exit__` commits or rolls back, one evidence-store transaction writes the bundle.
-4. A crash after the operational commit and before that evidence commit loses coverage. It does not leave a complete capture row.
-5. An evidence write that raises rolls back the evidence transaction. The operational result, exception, gates, and cursors stay as they were. The failure is counted. It is not a replay pass.
+2. Savepoint notes record whether `lifecycle_symbol` or `owner_monitor` was released or rolled back. Nested rollbacks mark ancestry. A released savepoint is not an enclosing commit.
+3. Instrumented `connection.commit` / `rollback` observe retaining commits and discarded effects. An empty commit after rollback cannot claim persistence for discarded captures.
+4. `SQLiteSetupLifecycleRepository.__exit__` finishes operational commit/rollback and closes before sidecar flush.
+5. One evidence-store transaction then writes the bundle. A crash between operational commit and evidence commit loses coverage without a false complete row.
+6. Evidence write failures preserve operational results/exceptions/gates/cursors and are counted; they are never a replay pass.
 
-Dispositions: `enclosing_committed`, `enclosing_rolled_back`, `savepoint_rolled_back`, `commit_interrupted`, `commit_unknown`. `savepoint_rolled_back` wins over a later enclosing commit. Standalone caller-owned transactions without an observed enclosing `BEGIN` stay `commit_unknown`.
+Dispositions: `enclosing_committed`, `enclosing_rolled_back`, `savepoint_rolled_back`, `commit_interrupted`, `commit_unknown`. Standalone calls without an observed enclosing BEGIN stay `commit_unknown`. P5A's explicit commit is observed when an enclosing BEGIN was noted.
 
 ## Replay commands and comparison
 
@@ -148,48 +167,19 @@ Three claims remain separate: computation replay, local delivery provenance, ope
 
 ## Adversarial evidence (tests)
 
-`tests/test_f04_durable_source_replay.py` (23 tests) covers:
-
-- Codec Decimal / absence / null / empty / timestamp fidelity
-- Capture-off default, schema 26 unchanged, no evidence I/O
-- Owner-monitoring and lifecycle-service restart round trips
-- Same plan, second cursor, distinct occurrences with shared payloads
-- Entry / TP / SL / same-candle / gap / future / terminal / no-op / invalid / confirmation-event / historical progress
-- Service delivery + fetched owner evidence; mutated handoff stays a separate claim
-- Cache / selection / both 2d routes stored without authority promotion
-- Epoch A/B, missing/conflicting/`N/A` lineage; corrupt/truncated/missing references; unsupported policy/build/version
-- Savepoint rollback after evaluator success; enclosing rollback; interrupted flush; capture failure preserves operational result
-- Path alias / unrelated DB rejection; network/Telegram/StrategyReplay disabled on replay; bounds and lock wait
-- Missing evidence is a diagnostic, not an invocation
-- Synthetic storage / dedup / latency / footprint measurement
+`tests/test_f04_durable_source_replay.py` (30 tests) covers the original foundation matrix plus the seven independent counterexamples above.
 
 Related suites kept green: source evidence, delivery capture, evaluation policy, evaluation semantics, lifecycle outcomes, F03 population isolation, P5A owner monitoring, observation-unit caller inventory.
 
-## Measured overhead (synthetic DEV)
+## Local verification (corrective repair)
 
-Four 20-candle owner-monitoring invocations on one temporary plan, capture enabled, one process:
+Focused F04: `python -m pytest tests/test_f04_durable_source_replay.py` — 30 passed.
 
-| Measure | Observed |
-| --- | --- |
-| Captures | 4 |
-| Payload rows | 18 of 24 role slots (deduplicated) |
-| Payload bytes | 180,341 |
-| Store file after close | 237,568 |
-| WAL after the writer closed | 0 |
-| Elapsed | 0.4748 s |
-| Peak traced memory during the burst | 465,090 bytes |
+Related: source-evidence, delivery-capture, policy, semantics, P5A, F03, lifecycle outcomes, observation-unit — all passed.
 
-These numbers are not live Runtime disk runway. WAL can grow during writes and was checkpointed by close time.
+Full suite: `python -m pytest` — exit 0, ~2802 collected, no failure lines, one Starlette warning, ~495s. `python -m compileall -q app tests` — exit 0.
 
-## Local verification
-
-Focused F04: `python -m pytest tests/test_f04_durable_source_replay.py` — 23 passed (~19.7s).
-
-Related: `python -m pytest tests/test_source_evidence_boundary.py tests/test_prospective_batch_delivery_capture.py tests/test_evaluation_policy_manifest.py tests/test_evaluation_semantics_contract.py tests/test_p5a_active_owner_monitoring.py tests/test_f03_prospective_research_population.py tests/test_lifecycle_outcomes.py tests/test_observation_unit_contract_r0.py` — all passed (~39.3s).
-
-Full suite at documentation commit preparation: `python -m pytest` — exit 0, 2795 collected, no failure lines, one existing Starlette deprecation warning, ~509s. `python -m compileall -q app tests` — exit 0. `git diff --check` — clean on tracked changes.
-
-`LOCAL_MANUAL_MODE=true`, `ORDER_EXECUTION_ENABLED=false`, `TELEGRAM_DRY_RUN=true`, `TELEGRAM_SIGNALS_ENABLED=false`. Synthetic temporary databases only. No listener, watch loop, live Runtime DB access, secrets, weakened assertions, or xfails. No test was marked xfail.
+`LOCAL_MANUAL_MODE=true`, `ORDER_EXECUTION_ENABLED=false`, `TELEGRAM_DRY_RUN=true`, `TELEGRAM_SIGNALS_ENABLED=false`. Synthetic temporary databases only. No listener, watch loop, live Runtime DB access, secrets, weakened assertions, or xfails.
 
 ## Strategy and schema non-regression
 
@@ -205,15 +195,15 @@ No strategy gate, RR, or lifecycle-semantics change. F03 research denominators a
 
 ## CI
 
-Implementation head `0b44dc41e9dea72495d4f387ca338171731f7936`: GitHub Actions run [36894151811](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36894151811) — `Python 3.11 tests` success, no retry.
+Prior reviewed head `4c26ac18f0917cc2236dfc83b1a8ea971e125583`: run [36896489390](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36896489390) succeeded but did not catch the seven independent failures.
 
-Handoff tip `2a049a3d8a1102c2acd7c9097980c8e5d7e3f1d9`: GitHub Actions run [36895981642](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36895981642) — `Python 3.11 tests` success in 3m21s, no retry. The known F03 Telegram TP retry pattern did not recur.
+Corrective exact-head CI is recorded in Final head below after push.
 
 ## Rollout and rollback
 
 Default capture stays off. Enabling a writer on Runtime requires Adam's later approval of readers/writers, evidence path, database/WAL/archive footprint, free-space trend, the finite budget above, retention/restore, and rollback. DEV synthetic measurements are not that approval.
 
-Rollback is to stop optional capture. That does not change application schema 26 and does not delete the evidence store. Readers refuse unknown store/codec versions and do not migrate them. No historical provenance backfill. No old-reader/new-writer compatibility assumption.
+Rollback is to stop optional capture. That does not change application schema 26 and does not delete the evidence store. Readers refuse unknown store/codec/attestation versions and do not migrate them. No historical provenance backfill. No old-reader/new-writer compatibility assumption.
 
 ## Deferred
 
@@ -221,10 +211,9 @@ Full scanner discovery/confirmation decision replay and HTF/context inputs; auth
 
 ## Final head
 
-- Final head SHA before this CI-record paragraph: `2a049a3d8a1102c2acd7c9097980c8e5d7e3f1d9`
-- Exact-head CI for that tip: GitHub Actions run [36895981642](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36895981642) — `Python 3.11 tests` success in 3m21s, no retry
-- Implementation SHA: `0b44dc41e9dea72495d4f387ca338171731f7936` (prior CI [36894151811](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36894151811))
-- Handoff body SHA: `7c9dd95a81da469d7a41fecc416159db9fa98221`
-- The pull request check on the commit that introduces this paragraph is the CI result for the branch tip
-- Local full pytest: exit 0, 2795 collected, ~509s, one Starlette warning
-- `python -m compileall -q app tests`: exit 0
+- Final head SHA: pending corrective push
+- Exact-head CI run: pending
+- Reviewed-against head: `4c26ac18f0917cc2236dfc83b1a8ea971e125583`
+- Local focused F04: 30 passed
+- Related suites: passed
+- Full pytest / compileall: pending
