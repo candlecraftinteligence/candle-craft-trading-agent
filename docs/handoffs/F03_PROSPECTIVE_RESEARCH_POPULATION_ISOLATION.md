@@ -11,6 +11,7 @@ This phase repairs the research-query denominator. It does not change scanner di
 - Branch: `fix/f03-prospective-research-isolation`
 - Base SHA: `44777a3b4f53919875b66940f231ea542ca38bd4` (merged P5A, `origin/main` at the start of this phase)
 - Implementation SHA: `557e992c25e3e11d9d209fc61cd04971ccecb35b`
+- Origin-text repair SHA: `14460a4f69274e1aff9cff2b67e35e71032c6fda`
 - Handoff SHA that CI already passed: `cae19080a96c3fefeb08a9176922f1b940c11c1d`
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/127
 - Schema version: remains 26
@@ -124,7 +125,9 @@ The F03 module now has 18 tests. No assertion was weakened and no test was marke
 
 ## CI result
 
-Verified before this repair: GitHub Actions run [36852376342](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36852376342) passed `Python 3.11 tests` on reviewed head `776da0f9c0715853a19909d2183bc6bcd36870d0`. Earlier run [36851959852](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36851959852) passed on `cae19080a96c3fefeb08a9176922f1b940c11c1d`. The pull request check on the commit that introduces the origin-text repair is the CI result for the branch head.
+Verified before this repair: GitHub Actions run [36852376342](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36852376342) passed `Python 3.11 tests` on reviewed head `776da0f9c0715853a19909d2183bc6bcd36870d0`. Earlier run [36851959852](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36851959852) passed on `cae19080a96c3fefeb08a9176922f1b940c11c1d`.
+
+Verified for the origin-text repair: GitHub Actions run [36876845053](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36876845053) passed `Python 3.11 tests` on `14460a4f69274e1aff9cff2b67e35e71032c6fda`. This paragraph records that run. The pull request check on the commit that introduces this paragraph is the CI result for the branch head.
 
 ## Strategy non-regression
 
