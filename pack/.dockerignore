@@ -1,0 +1,8 @@
+**/node_modules
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.pytest_tmp
+**/*.py[cod]
+apps/web/dist
+.git
