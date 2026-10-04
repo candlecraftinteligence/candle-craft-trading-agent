@@ -106,6 +106,17 @@ def test_universe_size_limits_resolved_symbols_after_sorting() -> None:
     assert universe.resolved_symbols == ("BTCUSDT", "ETHUSDT")
 
 
+def _usdt_perpetual_contract(base_symbol: str) -> dict[str, str]:
+    return {
+        "symbol": f"{base_symbol}USDT",
+        "baseAsset": base_symbol,
+        "quoteAsset": "USDT",
+        "contractType": "PERPETUAL",
+        "status": "TRADING",
+        "underlyingType": "COIN",
+    }
+
+
 def test_market_cap_universe_intersects_public_rankings_with_binance_usdt_perps() -> None:
     universe = build_symbol_universe_from_market_caps(
         [
@@ -122,6 +133,12 @@ def test_market_cap_universe_intersects_public_rankings_with_binance_usdt_perps(
             {"symbol": "SOL", "rank": 5, "quotes": {"USD": {"market_cap": "500"}}},
             {"symbol": "USDC", "rank": 4, "quotes": {"USD": {"market_cap": "700"}}},
         ],
+        exchange_info={
+            "symbols": [
+                _usdt_perpetual_contract(base)
+                for base in ("BTC", "ETH", "SOL", "USDC", "XRP")
+            ]
+        },
         universe_size=3,
         generated_at=GENERATED_AT,
     )
@@ -130,6 +147,7 @@ def test_market_cap_universe_intersects_public_rankings_with_binance_usdt_perps(
     assert universe.source == COINPAPRIKA_MARKET_CAP_SOURCE
     assert universe.resolved_symbols == ("BTCUSDT", "ETHUSDT")
     assert universe.market_cap_rank_by_symbol == {"BTCUSDT": 1, "ETHUSDT": 2}
+    assert universe.diagnostics["contract_metadata_used"] is True
     assert "USDCUSDT" in universe.excluded_symbols
 
 

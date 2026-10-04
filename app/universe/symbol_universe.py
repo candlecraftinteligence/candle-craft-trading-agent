@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -170,6 +171,8 @@ async def resolve_symbol_universe(
                 market_caps = await raw_market_caps if inspect.isawaitable(raw_market_caps) else raw_market_caps
             else:
                 market_caps = await fetch_coinpaprika_market_cap_rankings()
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
         except UniverseResolutionError:
             raise
         except Exception as exc:
@@ -192,6 +195,8 @@ async def resolve_symbol_universe(
             else:
                 client = client or BinanceFuturesClient()
                 exchange_info = await client.get_exchange_info()
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
         except Exception as exc:
             raise UniverseResolutionError(
                 f"universe_error: Binance USDT perpetual source failed: {exc}"
@@ -310,17 +315,19 @@ def build_symbol_universe_from_market_caps(
     if not provider_assets:
         raise UniverseResolutionError("universe_error: CoinPaprika market-cap source returned empty response")
 
+    _require_market_cap_ticker_payload(tickers)
     minimum_volume = _non_negative_decimal(min_quote_volume, "min_quote_volume")
     binance_tickers, excluded = _binance_usdt_symbols_from_tickers(
         tickers,
         min_quote_volume=minimum_volume,
         tradable_only=True,
     )
+    if not binance_tickers:
+        raise UniverseResolutionError(
+            "universe_error: Binance USDT perpetual ticker source contained no usable USDT tickers"
+        )
     quote_volume_by_symbol = {item.symbol: item.quote_volume for item in binance_tickers}
-    binance_perpetuals, contract_diagnostics = _binance_crypto_usdt_perpetual_symbols(
-        exchange_info,
-        fallback_symbols=tuple(quote_volume_by_symbol),
-    )
+    binance_perpetuals, contract_diagnostics = _binance_crypto_usdt_perpetual_symbols(exchange_info)
     available_binance_symbols = binance_perpetuals.intersection(quote_volume_by_symbol)
 
     identities_by_base: dict[str, set[str]] = {}
@@ -398,6 +405,10 @@ def build_symbol_universe_from_market_caps(
             ranked_candidates[symbol] = candidate
 
     selected = tuple(sorted(ranked_candidates.values(), key=lambda item: (item.rank, item.symbol)))
+    if not selected:
+        raise UniverseResolutionError(
+            "universe_error: strict market-cap discovery intersection is empty"
+        )
     diagnostics = {
         "provider": COINPAPRIKA_MARKET_CAP_SOURCE,
         "exchange_availability_source": BINANCE_USDM_EXCHANGE_INFO_SOURCE,
@@ -518,25 +529,44 @@ def _binance_usdt_symbols_from_tickers(
     return candidates, excluded
 
 
+def _require_market_cap_ticker_payload(tickers: object) -> None:
+    """Reject a missing or unusable top-level ticker payload before row iteration."""
+
+    if not isinstance(tickers, Sequence) or isinstance(tickers, (str, bytes)):
+        raise UniverseResolutionError(
+            "universe_error: Binance USDT perpetual ticker source returned malformed response"
+        )
+    if len(tickers) == 0:
+        raise UniverseResolutionError(
+            "universe_error: Binance USDT perpetual ticker source returned empty response"
+        )
+    if not any(isinstance(item, Mapping) for item in tickers):
+        raise UniverseResolutionError(
+            "universe_error: Binance USDT perpetual ticker source returned malformed response"
+        )
+
+
 def _binance_crypto_usdt_perpetual_symbols(
     exchange_info: Mapping[str, Any] | None,
-    *,
-    fallback_symbols: Sequence[str],
 ) -> tuple[set[str], dict[str, Any]]:
-    if exchange_info is None:
-        symbols = set(fallback_symbols)
-        return symbols, {
-            "contract_metadata_used": False,
-            "binance_perpetual_contract_count": len(symbols),
-            "non_crypto_contract_excluded_count": 0,
-            "non_perpetual_contract_excluded_count": 0,
-            "non_trading_contract_excluded_count": 0,
-        }
+    # Ticker presence is not contract membership. Strict discovery requires the payload.
     if not isinstance(exchange_info, Mapping):
-        raise UniverseResolutionError("universe_error: Binance exchange-info source returned malformed response")
+        raise UniverseResolutionError(
+            "universe_error: Binance exchange-info source returned malformed response"
+        )
     raw_symbols = exchange_info.get("symbols")
     if not isinstance(raw_symbols, Sequence) or isinstance(raw_symbols, (str, bytes)):
-        raise UniverseResolutionError("universe_error: Binance exchange-info source returned malformed response")
+        raise UniverseResolutionError(
+            "universe_error: Binance exchange-info source returned malformed response"
+        )
+    if len(raw_symbols) == 0:
+        raise UniverseResolutionError(
+            "universe_error: Binance exchange-info source returned empty response"
+        )
+    if not any(isinstance(item, Mapping) for item in raw_symbols):
+        raise UniverseResolutionError(
+            "universe_error: Binance exchange-info source returned malformed response"
+        )
 
     symbols: set[str] = set()
     non_crypto_count = 0
@@ -572,6 +602,11 @@ def _binance_crypto_usdt_perpetual_symbols(
             policy_excluded_count += 1
             continue
         symbols.add(symbol)
+
+    if not symbols:
+        raise UniverseResolutionError(
+            "universe_error: Binance exchange-info source contained no admissible USDT perpetual contracts"
+        )
 
     return symbols, {
         "contract_metadata_used": True,
