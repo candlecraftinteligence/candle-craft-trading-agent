@@ -16,8 +16,8 @@ Capture stays off unless `SOURCE_REPLAY_CAPTURE_ENABLED=true` and `SOURCE_REPLAY
 - Base SHA: `44efa90daff8476c480eb21ed8ba43654ee8e5de` (`origin/main` at start; merge of PR #128)
 - F04 accepted head `54bd2385dcf3b6265b3cdff8e68ecb484f9cc3a8` is an ancestor of that base, with no file changes in the merge commit
 - Implementation SHA: `fcaccf2080f27c4a5cd151c437717aa497d6f8a7`
-- Documentation SHA: the commit that adds this file. It does not name its own hash. The PR check on the branch tip after that commit is the CI result for the exact final head
-- Draft PR: recorded in the PR body after push
+- Handoff SHA whose CI already passed: `476274188d3fb7836de8387f405e08b661c19222`
+- Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/129
 - Schema version: remains 26
 - Runtime database: not opened, copied, or modified
 
@@ -146,6 +146,13 @@ No assertion was weakened and no test was marked xfail. Orchestration tests use 
 - Watch classifies the wrapped universe error as recoverable. One failed refresh does not hide the discovery text.
 - Fetch wrappers still attach the original acquisition exception. Cancellation is not converted into `UniverseResolutionError`.
 - A programming error inside later ranking arithmetic is not caught by a blanket builder `except Exception`.
+
+## CI
+
+- Handoff head `476274188d3fb7836de8387f405e08b661c19222` contains implementation `fcaccf2080f27c4a5cd151c437717aa497d6f8a7`.
+- CI run [37194439433](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37194439433), attempt 1, success, on that exact head. Job: Python 3.11 tests.
+- The documentation commit that records this paragraph is the branch tip after this commit. Its PR check is the CI result for the exact final head.
+- Independent acceptance is not claimed.
 
 ## Deferred
 
