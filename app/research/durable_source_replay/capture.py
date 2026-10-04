@@ -131,11 +131,13 @@ class _Session:
     transaction_generation: int = 0
     next_savepoint_id: int = 1
     generation_fate: dict[int, str] = field(default_factory=dict)
-    # Bounded history of SQL savepoint events awaiting public notes. A later
-    # RELEASE must not erase a prior ROLLBACK TO acknowledgement.
-    pending_note_events: deque[_PendingNoteEvent] = field(
-        default_factory=lambda: deque(maxlen=_MAX_PENDING_NOTE_EVENTS)
-    )
+    # Outstanding SQL savepoint events awaiting a public note. Acknowledged
+    # events are removed so they cannot evict an older unacknowledged event.
+    # Capacity is still bounded; dropping an unacknowledged event qualifies
+    # that generation instead of guessing a later note's target.
+    pending_note_events: deque[_PendingNoteEvent] = field(default_factory=deque)
+    attribution_lost_generations: set[int] = field(default_factory=set)
+    noted_savepoint_names: set[str] = field(default_factory=set)
     observation_untrusted: bool = False
 
 
@@ -232,6 +234,7 @@ def note_enclosing_transaction_opened(connection: Any) -> None:
         session.enclosing_open = True
         session.stack.clear()
         session.pending_note_events.clear()
+        session.noted_savepoint_names.clear()
         session.rollback_observed = False
     except Exception as exc:
         _remember_failure("enclosing_note_failed", exc)
@@ -623,6 +626,13 @@ def _assign_disposition(
             # Damaged observation must never manufacture a persistence claim.
             status = TX_COMMIT_UNKNOWN
             fate = TX_COMMIT_UNKNOWN
+        if (
+            item.transaction_generation in session.attribution_lost_generations
+            and status == TX_ENCLOSING_COMMITTED
+        ):
+            # Lost note attribution may be unknown. It must not become a commit.
+            status = TX_COMMIT_UNKNOWN
+            fate = TX_COMMIT_UNKNOWN
         item.fields["transaction_status"] = status
         item.fields["enclosing_disposition"] = fate
         item.fields["savepoint_disposition"] = item.savepoint_disposition
@@ -661,21 +671,11 @@ def _finish_savepoint(connection: Any, name: str, disposition: str) -> None:
     if session is None:
         return
     try:
-        if disposition == SAVEPOINT_ROLLED_BACK:
-            # Public note may arrive after SQL ROLLBACK TO and even after the
-            # paired RELEASE (production owner_monitoring / service order).
-            if _acknowledge_note_event(session, "rollback_to", name):
-                return
-            # Note-only path: apply only against the innermost open frame. Never
-            # resolve a delayed inner note against a remaining outer same name.
-            if session.stack and session.stack[-1].name == name:
-                _rollback_to_savepoint_instance(session, name, release=False, from_note=True)
-            # else: attribution insufficient; leave SQL-applied fate as recorded
-        else:
-            if _acknowledge_note_event(session, "release", name):
-                return
-            if session.stack and session.stack[-1].name == name:
-                _release_savepoint_instance(session, name, from_note=True)
+        kind = "rollback_to" if disposition == SAVEPOINT_ROLLED_BACK else "release"
+        # Public notes acknowledge a physical SQL event. A duplicate, or a note
+        # whose event is no longer provable, must not mutate a remaining
+        # same-named frame.
+        _acknowledge_note_event(session, kind, name)
     except Exception as exc:
         _remember_failure("savepoint_note_failed", exc)
 
@@ -684,6 +684,7 @@ def _push_savepoint(session: _Session, name: str) -> _SavepointFrame:
     frame = _SavepointFrame(name=name, instance_id=session.next_savepoint_id)
     session.next_savepoint_id += 1
     session.stack.append(frame)
+    session.noted_savepoint_names.add(name)
     return frame
 
 
@@ -695,6 +696,9 @@ def _find_savepoint_index(session: _Session, name: str) -> int | None:
 
 
 def _record_note_event(session: _Session, kind: str, instance_id: int, name: str) -> None:
+    if len(session.pending_note_events) >= _MAX_PENDING_NOTE_EVENTS:
+        dropped = session.pending_note_events.popleft()
+        _qualify_note_history_exhaustion(session, dropped)
     session.pending_note_events.append(
         _PendingNoteEvent(
             kind=kind,
@@ -705,22 +709,89 @@ def _record_note_event(session: _Session, kind: str, instance_id: int, name: str
     )
 
 
-def _acknowledge_note_event(session: _Session, kind: str, name: str) -> bool:
-    """Acknowledge the newest matching unacked SQL event for this note."""
+def _qualify_note_history_exhaustion(session: _Session, dropped: _PendingNoteEvent) -> None:
+    """An evicted unacknowledged event is visible and cannot support a commit."""
 
-    for event in reversed(session.pending_note_events):
-        if event.acknowledged:
-            continue
+    if dropped.generation > 0:
+        session.attribution_lost_generations.add(dropped.generation)
+    if session.transaction_generation > 0:
+        session.attribution_lost_generations.add(session.transaction_generation)
+    detail = (
+        f"unacknowledged {dropped.kind} {dropped.name} instance {dropped.instance_id}"
+    )
+    _remember_failure("note_event_history_exhausted", RuntimeError(detail))
+    _append_attribution_diagnostic(session, "note_event_history_exhausted", detail)
+
+
+def _qualify_unmatched_noted_savepoint(session: _Session, name: str) -> None:
+    """A noted savepoint is absent while SQLite still accepted its boundary."""
+
+    if name not in session.noted_savepoint_names:
+        return
+    if any(frame.name == name for frame in session.stack):
+        return
+    detail = f"unmatched savepoint boundary {name}"
+    _qualify_lost_generation(
+        session,
+        session.transaction_generation,
+        "unmatched_savepoint_boundary",
+        detail,
+    )
+
+
+def _qualify_lost_generation(session: _Session, generation: int, kind: str, detail: str) -> None:
+    if generation > 0:
+        session.attribution_lost_generations.add(generation)
+    _remember_failure(kind, RuntimeError(detail))
+    _append_attribution_diagnostic(session, kind, detail)
+
+
+def _append_attribution_diagnostic(session: _Session, kind: str, detail: str) -> None:
+    limits = active_bounds()
+    if len(session.diagnostics) >= limits.max_diagnostics:
+        return
+    session.diagnostics.append(
+        {
+            "diagnostic_id": "diag_" + secrets.token_hex(16),
+            "recorded_at": datetime.now(UTC).isoformat(),
+            "kind": kind,
+            "lifecycle_id": None,
+            "detail": detail[:500],
+            "transaction_status": TX_COMMIT_UNKNOWN,
+        }
+    )
+
+
+def _acknowledge_note_event(session: _Session, kind: str, name: str) -> bool:
+    """Consume the newest outstanding SQL event matching this note.
+
+    Already-consumed events are absent, so a duplicate note does not match a
+    different same-named instance. A rollback note also retires the cleanup
+    RELEASE of that same instance, which production does not note separately.
+    """
+
+    for index in range(len(session.pending_note_events) - 1, -1, -1):
+        event = session.pending_note_events[index]
         if event.kind == kind and event.name == name:
-            event.acknowledged = True
+            del session.pending_note_events[index]
+            if kind == "rollback_to":
+                _retire_instance_release(session, event.instance_id)
             return True
     return False
 
 
-def _release_savepoint_instance(session: _Session, name: str, *, from_note: bool = False) -> None:
+def _retire_instance_release(session: _Session, instance_id: int) -> None:
+    session.pending_note_events = deque(
+        event
+        for event in session.pending_note_events
+        if not (event.kind == "release" and event.instance_id == instance_id)
+    )
+
+
+def _release_savepoint_instance(session: _Session, name: str, *, from_note: bool = False) -> bool:
     index = _find_savepoint_index(session, name)
     if index is None:
-        return
+        return False
     frame = session.stack[index]
     released_ids = {item.instance_id for item in session.stack[index:]}
     # RELEASE removes this frame and any nested frames above it.
@@ -734,6 +805,7 @@ def _release_savepoint_instance(session: _Session, name: str, *, from_note: bool
             item.savepoint_disposition = SAVEPOINT_RELEASED
     if not from_note:
         _record_note_event(session, "release", frame.instance_id, name)
+    return True
 
 
 def _rollback_to_savepoint_instance(
@@ -742,7 +814,7 @@ def _rollback_to_savepoint_instance(
     *,
     release: bool,
     from_note: bool = False,
-) -> None:
+) -> bool:
     """Discard work under a named savepoint instance.
 
     SQLite keeps the named savepoint after ``ROLLBACK TO`` until ``RELEASE``.
@@ -752,7 +824,7 @@ def _rollback_to_savepoint_instance(
 
     index = _find_savepoint_index(session, name)
     if index is None:
-        return
+        return False
     target = session.stack[index]
     affected_ids = {frame.instance_id for frame in session.stack[index:]}
     for item in session.pending:
@@ -770,6 +842,7 @@ def _rollback_to_savepoint_instance(
         del session.stack[index + 1 :]
         if not from_note:
             _record_note_event(session, "rollback_to", target.instance_id, name)
+    return True
 
 
 def _retain_generation(session: _Session, generation: int) -> None:
@@ -953,7 +1026,8 @@ def _observe_successful_sql(connection: Any, sql: Any) -> bool:
         # Reject trailing junk: ROLLBACK TO name EXTRA is not a successful form.
         name = _savepoint_name_from_successful_rollback_to(text)
         if name:
-            _rollback_to_savepoint_instance(live, name, release=False, from_note=False)
+            if not _rollback_to_savepoint_instance(live, name, release=False, from_note=False):
+                _qualify_unmatched_noted_savepoint(live, name)
             return True
         return False
     if _is_full_rollback_sql(upper):
@@ -965,7 +1039,8 @@ def _observe_successful_sql(connection: Any, sql: Any) -> bool:
     if upper.startswith("RELEASE"):
         name = _savepoint_name_from_release_sql(text)
         if name:
-            _release_savepoint_instance(live, name, from_note=False)
+            if not _release_savepoint_instance(live, name, from_note=False):
+                _qualify_unmatched_noted_savepoint(live, name)
             return True
         return False
     return False

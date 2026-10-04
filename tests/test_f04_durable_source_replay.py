@@ -2141,6 +2141,36 @@ def _invoke_owner(repository: SQLiteSetupLifecycleRepository, record: SetupLifec
     )
 
 
+def _open_nested_owner_monitors(
+    repository: SQLiteSetupLifecycleRepository,
+    record_a: SetupLifecycleRecord,
+    record_b: SetupLifecycleRecord,
+):
+    connection = repository.connection
+    connection.execute("BEGIN IMMEDIATE")
+    note_enclosing_transaction_opened(connection)
+    connection.execute("SAVEPOINT owner_monitor")
+    note_savepoint_opened(connection, "owner_monitor")
+    _invoke_owner(repository, record_a)
+    connection.execute("SAVEPOINT owner_monitor")
+    note_savepoint_opened(connection, "owner_monitor")
+    _invoke_owner(repository, record_b)
+    return connection
+
+
+def _assert_rolled_back_pair(path: Path, evidence: Path, tmp_path: Path) -> None:
+    assert _lifecycle_progress(path) == {}
+    for lifecycle_id in ("life-a", "life-b"):
+        report = _replay(
+            evidence,
+            _capture_for_lifecycle(evidence, lifecycle_id),
+            tmp_path / f"scratch-{lifecycle_id}",
+        )
+        assert report["status"] == REPLAY_MATCH, report
+        assert report["claims"]["operational_persistence"] is False
+        assert report["transaction_status"] == TX_SAVEPOINT_ROLLED_BACK
+
+
 def test_f04_r1_reused_savepoint_name_preserves_released_sibling(tmp_path: Path) -> None:
     evidence = tmp_path / "evidence.sqlite"
     path = _operational(tmp_path)
@@ -2490,6 +2520,186 @@ def test_f04_r1_unclassified_txn_end_fallback_blocks_later_retain(tmp_path: Path
     assert report["status"] == REPLAY_MATCH, report
     assert report["claims"]["operational_persistence"] is False
     assert report["transaction_status"] == TX_COMMIT_UNKNOWN
+
+
+def test_f04_r1_single_release_note_then_outer_rollback(tmp_path: Path) -> None:
+    """One immediate release note leaves the outer instance for the real rollback."""
+
+    reset_capture_process_state()
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record_a = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    record_b = _own(path, _latched(lifecycle_id="life-b", symbol="ETHUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = _open_nested_owner_monitors(repository, record_a, record_b)
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+            connection.execute("ROLLBACK TO owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+    _assert_rolled_back_pair(path, evidence, tmp_path)
+
+
+def test_f04_r1_duplicate_release_note_does_not_release_outer(tmp_path: Path) -> None:
+    """A second release note for one physical event must not pop the outer instance."""
+
+    reset_capture_process_state()
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record_a = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    record_b = _own(path, _latched(lifecycle_id="life-b", symbol="ETHUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = _open_nested_owner_monitors(repository, record_a, record_b)
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+            connection.execute("ROLLBACK TO owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+    _assert_rolled_back_pair(path, evidence, tmp_path)
+    assert not any(item["kind"] == "note_event_history_exhausted" for item in capture_failures())
+
+
+def test_f04_r1_duplicate_rollback_note_does_not_discard_outer(tmp_path: Path) -> None:
+    reset_capture_process_state()
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record_a = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    record_b = _own(path, _latched(lifecycle_id="life-b", symbol="ETHUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = _open_nested_owner_monitors(repository, record_a, record_b)
+            connection.execute("ROLLBACK TO owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+    assert _lifecycle_progress(path) == {"life-a": 1}
+    report_a = _replay(evidence, _capture_for_lifecycle(evidence, "life-a"), tmp_path / "scratch-a")
+    report_b = _replay(evidence, _capture_for_lifecycle(evidence, "life-b"), tmp_path / "scratch-b")
+    assert report_a["status"] == REPLAY_MATCH, report_a
+    assert report_a["claims"]["operational_persistence"] is True
+    assert report_a["transaction_status"] == TX_ENCLOSING_COMMITTED
+    assert report_b["claims"]["operational_persistence"] is False
+    assert report_b["transaction_status"] == TX_SAVEPOINT_ROLLED_BACK
+
+
+def test_f04_r1_delayed_release_note_within_history_keeps_outer(tmp_path: Path) -> None:
+    """63 acknowledged releases plus the outstanding inner event stay within capacity."""
+
+    _assert_delayed_inner_release_after_probes(tmp_path, probe_count=63)
+
+
+def test_f04_r1_delayed_release_note_after_full_acked_history_keeps_outer(tmp_path: Path) -> None:
+    """Acknowledged probe releases must not evict the outstanding inner release."""
+
+    _assert_delayed_inner_release_after_probes(tmp_path, probe_count=64)
+
+
+def _assert_delayed_inner_release_after_probes(tmp_path: Path, *, probe_count: int) -> None:
+    reset_capture_process_state()
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record_a = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    record_b = _own(path, _latched(lifecycle_id="life-b", symbol="ETHUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = _open_nested_owner_monitors(repository, record_a, record_b)
+            connection.execute("RELEASE owner_monitor")
+            for index in range(probe_count):
+                scope = f"probe_{index}"
+                connection.execute(f"SAVEPOINT {scope}")
+                note_savepoint_opened(connection, scope)
+                connection.execute(f"RELEASE {scope}")
+                note_savepoint_released(connection, scope)
+            note_savepoint_released(connection, "owner_monitor")
+            connection.execute("ROLLBACK TO owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_rolled_back(connection, "owner_monitor")
+    _assert_rolled_back_pair(path, evidence, tmp_path)
+    assert not any(item["kind"] == "note_event_history_exhausted" for item in capture_failures())
+
+
+def test_f04_r1_exact_note_history_capacity_still_commits(tmp_path: Path) -> None:
+    reset_capture_process_state()
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            _invoke_owner(repository, record)
+            for index in range(64):
+                scope = f"probe_{index}"
+                connection.execute(f"SAVEPOINT {scope}")
+                note_savepoint_opened(connection, scope)
+                connection.execute(f"RELEASE {scope}")
+    assert _lifecycle_progress(path) == {"life-a": 1}
+    report = _replay(evidence, _capture_for_lifecycle(evidence, "life-a"), tmp_path / "scratch-capacity")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["claims"]["operational_persistence"] is True
+    assert report["transaction_status"] == TX_ENCLOSING_COMMITTED
+    assert not any(item["kind"] == "note_event_history_exhausted" for item in capture_failures())
+
+
+def test_f04_r1_note_history_exhaustion_does_not_claim_persistence(tmp_path: Path) -> None:
+    reset_capture_process_state()
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            _invoke_owner(repository, record)
+            for index in range(65):
+                scope = f"probe_{index}"
+                connection.execute(f"SAVEPOINT {scope}")
+                note_savepoint_opened(connection, scope)
+                connection.execute(f"RELEASE {scope}")
+    assert _lifecycle_progress(path) == {"life-a": 1}
+    report = _replay(evidence, _capture_for_lifecycle(evidence, "life-a"), tmp_path / "scratch-exhausted")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["claims"]["operational_persistence"] is False
+    assert report["transaction_status"] == TX_COMMIT_UNKNOWN
+    assert any(item["kind"] == "note_event_history_exhausted" for item in capture_failures())
+    with sqlite3.connect(evidence) as connection:
+        kinds = {row[0] for row in connection.execute("SELECT kind FROM capture_diagnostics")}
+    assert "note_event_history_exhausted" in kinds
+
+
+def test_f04_r1_unmatched_noted_savepoint_boundary_is_not_persistence(tmp_path: Path) -> None:
+    """SQLite still has a noted name the observer already lost; do not claim a commit."""
+
+    reset_capture_process_state()
+    evidence = tmp_path / "evidence.sqlite"
+    path = _operational(tmp_path)
+    record = _own(path, _latched(lifecycle_id="life-a", symbol="BTCUSDT"))
+    with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
+        with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repository:
+            connection = repository.connection
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+            _invoke_owner(repository, record)
+            connection.execute("SAVEPOINT owner_monitor")
+            note_savepoint_opened(connection, "owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+            note_savepoint_released(connection, "owner_monitor")
+            connection.execute("SAVEPOINT owner_monitor")
+            connection.execute("RELEASE owner_monitor")
+    assert _lifecycle_progress(path) == {"life-a": 1}
+    report = _replay(evidence, _capture_for_lifecycle(evidence, "life-a"), tmp_path / "scratch-unmatched")
+    assert report["status"] == REPLAY_MATCH, report
+    assert report["claims"]["operational_persistence"] is False
+    assert report["transaction_status"] == TX_COMMIT_UNKNOWN
+    assert any(item["kind"] == "unmatched_savepoint_boundary" for item in capture_failures())
 
 
 def test_f04_r1_committed_then_noop_rollback_preserves_commit(tmp_path: Path) -> None:
