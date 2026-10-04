@@ -149,6 +149,46 @@ class UniverseResolutionError(RuntimeError):
     """Raised when a public universe source cannot be resolved cleanly."""
 
 
+def _attach_source_cleanup_error(primary: BaseException, cleanup: BaseException) -> None:
+    """Keep source-client cleanup visible beside the primary failure.
+
+    Control exceptions stay the same object and are not rewritten as provider
+    outages. Payload and acquisition errors keep their text and cause.
+    """
+
+    setattr(primary, "source_cleanup_error", cleanup)
+    if not isinstance(primary, UniverseResolutionError):
+        return
+    suffix = f"source_cleanup_error:{type(cleanup).__name__}:{cleanup}"
+    message = str(primary)
+    if suffix not in message:
+        primary.args = (f"{message}; {suffix}",)
+
+
+def _cleanup_failure(source_label: str, cleanup: BaseException) -> UniverseResolutionError:
+    failure = UniverseResolutionError(f"universe_error: {source_label} cleanup failed: {cleanup}")
+    failure.__cause__ = cleanup
+    failure.__suppress_context__ = True
+    setattr(failure, "source_cleanup_error", cleanup)
+    return failure
+
+
+async def _close_owned_source_client(client: Any) -> tuple[BaseException | None, BaseException | None]:
+    """Close an owned source client without masking the caller's primary error.
+
+    Returns ``(cleanup_error, control_exception)``. A requested stop from close
+    is returned to the caller instead of being converted into a provider outage.
+    """
+
+    try:
+        await client.aclose()
+    except (asyncio.CancelledError, KeyboardInterrupt) as exc:
+        return None, exc
+    except Exception as exc:
+        return exc, None
+    return None, None
+
+
 async def resolve_symbol_universe(
     mode: str,
     *,
@@ -179,6 +219,10 @@ async def resolve_symbol_universe(
             raise UniverseResolutionError(f"universe_error: market-cap source failed: {exc}") from exc
 
         client: BinanceFuturesClient | None = None
+        control_error: BaseException | None = None
+        acquisition_error: BaseException | None = None
+        tickers: Any = None
+        exchange_info: Any = None
         try:
             if ticker_fetcher is not None:
                 raw_tickers = ticker_fetcher()
@@ -195,24 +239,55 @@ async def resolve_symbol_universe(
             else:
                 client = client or BinanceFuturesClient()
                 exchange_info = await client.get_exchange_info()
+        except (asyncio.CancelledError, KeyboardInterrupt) as exc:
+            control_error = exc
+        except Exception as exc:
+            acquisition_error = exc
+
+        cleanup_error: BaseException | None = None
+        close_control: BaseException | None = None
+        if client is not None:
+            cleanup_error, close_control = await _close_owned_source_client(client)
+
+        if control_error is not None:
+            secondary = cleanup_error if cleanup_error is not None else close_control
+            if secondary is not None:
+                _attach_source_cleanup_error(control_error, secondary)
+            raise control_error
+        if close_control is not None:
+            raise close_control
+        if acquisition_error is not None:
+            failure = UniverseResolutionError(
+                f"universe_error: Binance USDT perpetual source failed: {acquisition_error}"
+            )
+            failure.__cause__ = acquisition_error
+            failure.__suppress_context__ = True
+            if cleanup_error is not None:
+                _attach_source_cleanup_error(failure, cleanup_error)
+            raise failure
+
+        try:
+            universe = build_symbol_universe_from_market_caps(
+                tickers,
+                market_caps,
+                exchange_info=exchange_info,
+                universe_size=universe_size,
+                min_quote_volume=min_quote_volume,
+                generated_at=generated_at,
+            )
+        except UniverseResolutionError as exc:
+            if cleanup_error is not None:
+                _attach_source_cleanup_error(exc, cleanup_error)
+            raise
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except Exception as exc:
-            raise UniverseResolutionError(
-                f"universe_error: Binance USDT perpetual source failed: {exc}"
-            ) from exc
-        finally:
-            if client is not None:
-                await client.aclose()
-
-        return build_symbol_universe_from_market_caps(
-            tickers,
-            market_caps,
-            exchange_info=exchange_info,
-            universe_size=universe_size,
-            min_quote_volume=min_quote_volume,
-            generated_at=generated_at,
-        )
+            if cleanup_error is not None:
+                _attach_source_cleanup_error(exc, cleanup_error)
+            raise
+        if cleanup_error is not None:
+            raise _cleanup_failure("Binance USDT perpetual source", cleanup_error)
+        return universe
 
     if ticker_fetcher is not None:
         raw_tickers = ticker_fetcher()
@@ -457,19 +532,54 @@ async def fetch_coinpaprika_market_cap_rankings(
 ) -> Sequence[Mapping[str, Any]]:
     owns_client = http_client is None
     client = http_client or httpx.AsyncClient(base_url=COINPAPRIKA_BASE_URL, timeout=timeout)
+    control_error: BaseException | None = None
+    fetch_error: BaseException | None = None
+    response: httpx.Response | None = None
     try:
-        try:
-            response = await client.get("/tickers", params={"quotes": "USD"})
-        except httpx.TimeoutException as exc:
-            raise UniverseResolutionError("universe_error: CoinPaprika market-cap source timed out") from exc
-        except httpx.TransportError as exc:
-            raise UniverseResolutionError(
-                f"universe_error: CoinPaprika market-cap source unavailable: {exc}"
-            ) from exc
-    finally:
-        if owns_client:
-            await client.aclose()
+        response = await client.get("/tickers", params={"quotes": "USD"})
+    except (asyncio.CancelledError, KeyboardInterrupt) as exc:
+        control_error = exc
+    except httpx.TimeoutException as exc:
+        fetch_error = UniverseResolutionError("universe_error: CoinPaprika market-cap source timed out")
+        fetch_error.__cause__ = exc
+        fetch_error.__suppress_context__ = True
+    except httpx.TransportError as exc:
+        fetch_error = UniverseResolutionError(
+            f"universe_error: CoinPaprika market-cap source unavailable: {exc}"
+        )
+        fetch_error.__cause__ = exc
+        fetch_error.__suppress_context__ = True
+    except Exception as exc:
+        fetch_error = exc
 
+    cleanup_error: BaseException | None = None
+    close_control: BaseException | None = None
+    if owns_client:
+        cleanup_error, close_control = await _close_owned_source_client(client)
+    if control_error is not None:
+        secondary = cleanup_error if cleanup_error is not None else close_control
+        if secondary is not None:
+            _attach_source_cleanup_error(control_error, secondary)
+        raise control_error
+    if close_control is not None:
+        raise close_control
+    if fetch_error is not None:
+        if cleanup_error is not None:
+            _attach_source_cleanup_error(fetch_error, cleanup_error)
+        raise fetch_error
+    assert response is not None
+    try:
+        assets = _coinpaprika_assets_from_response(response)
+    except UniverseResolutionError as exc:
+        if cleanup_error is not None:
+            _attach_source_cleanup_error(exc, cleanup_error)
+        raise
+    if cleanup_error is not None:
+        raise _cleanup_failure("CoinPaprika market-cap source", cleanup_error)
+    return assets
+
+
+def _coinpaprika_assets_from_response(response: httpx.Response) -> tuple[Mapping[str, Any], ...]:
     if response.status_code == 429:
         raise UniverseResolutionError("universe_error: CoinPaprika market-cap source rate limited")
     if not 200 <= response.status_code < 300:
