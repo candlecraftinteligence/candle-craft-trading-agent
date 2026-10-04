@@ -52,10 +52,45 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
     def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None:
         if self.connection is None:
             return
-        if exc_type is None:
-            self.connection.commit()
-        self.connection.close()
-        self.connection = None
+        connection = self.connection
+        committed = False
+        commit_error: BaseException | None = None
+        exit_rolled_back = False
+        # Finish the operational transaction and close before any sidecar I/O.
+        try:
+            if exc_type is not None:
+                if connection.in_transaction:
+                    connection.rollback()
+                    exit_rolled_back = True
+            else:
+                if connection.in_transaction:
+                    try:
+                        connection.commit()
+                        committed = True
+                    except BaseException as exc:
+                        commit_error = exc
+                        if connection.in_transaction:
+                            connection.rollback()
+                            exit_rolled_back = True
+        finally:
+            try:
+                connection.close()
+            finally:
+                self.connection = None
+        try:
+            from app.research.durable_source_replay.capture import observe_repository_exit
+
+            observe_repository_exit(
+                connection,
+                committed=committed,
+                commit_failed=commit_error is not None,
+                exit_rolled_back=exit_rolled_back,
+            )
+        except Exception:
+            # Capture flush must not replace an operational commit or exception.
+            pass
+        if commit_error is not None:
+            raise commit_error
 
     def get_record(self, *, symbol: str, mode: str, direction: str) -> SetupLifecycleRecord | None:
         epoch = load_active_runtime_epoch(self._connection)

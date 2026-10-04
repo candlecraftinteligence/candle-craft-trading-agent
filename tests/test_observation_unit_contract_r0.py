@@ -703,13 +703,19 @@ def test_omitted_symbol_and_missing_candles_do_not_advance_progress(tmp_path: Pa
     assert "if final_record is not None and execution_candles is not None:" in service_text
     assert 'if status == "not_run"' in service_text
     production_hits = []
+    wrapper_hits = []
     for path in (*Path("app").rglob("*.py"), *Path("scripts").rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         if "evaluate_closed_candle_outcomes(" in text and path.name != "outcomes.py":
             production_hits.append(path.as_posix())
-    # Discovery still evaluates only the selected owner in service.py.
-    # Owned-plan continuity evaluates every tracking obligation in owner_monitoring.py.
+        if "invoke_closed_candle_outcomes(" in text and path.name != "capture.py":
+            wrapper_hits.append(path.as_posix())
+    # Offline replay is the only direct call. Production seams pass the live
+    # function into the capture wrapper so a local monkeypatch still applies.
     assert sorted(production_hits) == [
+        "app/research/durable_source_replay/replay.py",
+    ]
+    assert sorted(wrapper_hits) == [
         "app/lifecycle/owner_monitoring.py",
         "app/lifecycle/service.py",
     ]
