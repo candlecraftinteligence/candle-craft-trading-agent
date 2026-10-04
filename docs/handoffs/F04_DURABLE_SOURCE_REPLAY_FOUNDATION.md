@@ -162,12 +162,25 @@ Same branch and draft PR #128. No merge, deploy, or Runtime capture enablement. 
 
 Preserved: R2 observer-fault containment, R3–R7, attestation v2, close-before-sidecar, failure-history bounds, default-off capture, schema 26, F03/P5A/gates 88/A/RR3. **Independent acceptance is not claimed.**
 
+Independent re-review of exact head `9a3ec6a132c7e72ef027117a4c0e76da5487a706` remained **REQUEST_CHANGES — F04-R1 FALSE PERSISTENCE**. The fifth repair's delayed rollback note and commented/unclassified transaction end stayed accepted. Duplicate public notes and silent eviction of an unacknowledged event could still drop the outer savepoint and claim a commit.
+
+## Sixth corrective repair (REQUEST_CHANGES on `9a3ec6a`)
+
+Same branch and draft PR #128. No merge, deploy, or Runtime capture enablement. Remaining open original finding ID: **F04-R1 only**.
+
+| ID | Repair | Primary modules | Independent regression tests |
+| --- | --- | --- | --- |
+| F04-R1-A | Notes only consume an outstanding physical SQL event. A duplicate note is a no-op and cannot release or roll back a remaining same-named frame. A successful SQL boundary for a noted name whose instance is already absent qualifies that generation `commit_unknown` | `capture._finish_savepoint`, `_acknowledge_note_event`, `_qualify_unmatched_noted_savepoint` | `test_f04_r1_duplicate_release_note_does_not_release_outer`, `test_f04_r1_duplicate_rollback_note_does_not_discard_outer`, `test_f04_r1_single_release_note_then_outer_rollback`, `test_f04_r1_unmatched_noted_savepoint_boundary_is_not_persistence` |
+| F04-R1-B | History stores only outstanding events, so acknowledged probe releases cannot evict a delayed note. Evicting an unacknowledged event records a bounded diagnostic and blocks a persistence claim for that generation | `capture._record_note_event`, `_qualify_note_history_exhaustion`, `attribution_lost_generations` | `test_f04_r1_delayed_release_note_within_history_keeps_outer`, `test_f04_r1_delayed_release_note_after_full_acked_history_keeps_outer`, `test_f04_r1_exact_note_history_capacity_still_commits`, `test_f04_r1_note_history_exhaustion_does_not_claim_persistence` |
+
+Preserved: fifth-repair outer-commit/inner-rollback, commented and unclassified transaction ends, R2–R7, schema 26, F03/P5A, gates 88/A/RR 3. **Independent acceptance is not claimed.**
+
 ## Transaction and crash protocol
 
 The sidecar and the operational database do not share a commit.
 
 1. Inside the operational transaction, capture copies bounded inputs, prestate, delivery, policy, result, and effects into memory.
-2. Savepoint notes record whether `lifecycle_symbol` or `owner_monitor` was released or rolled back. Each opened savepoint is an instance identity within its transaction generation; name reuse does not rewrite siblings or earlier generations. `ROLLBACK TO` discards nested work while retaining the named instance until `RELEASE`. A bounded history of SQL savepoint events awaits public notes so a later `RELEASE` does not erase a prior `ROLLBACK TO` acknowledgement; delayed notes never resolve against a remaining outer same-named frame.
+2. Savepoint notes record whether `lifecycle_symbol` or `owner_monitor` was released or rolled back. Each opened savepoint is an instance identity within its transaction generation; name reuse does not rewrite siblings or earlier generations. `ROLLBACK TO` discards nested work while retaining the named instance until `RELEASE`. Outstanding SQL events wait for one matching public note. A duplicate note does not mutate another same-named frame. Acknowledged events leave the bounded history so they cannot evict an older unacknowledged event. Dropping an unacknowledged event records `note_event_history_exhausted` and qualifies that generation unknown instead of guessing a commit or rollback.
 3. Instrumented `connection.commit` / `rollback` / SQL text observe retaining commits and discarded effects only after SQLite accepts the statement, including `ROLLBACK TRANSACTION`. SQL comments are stripped before classification. A successful statement that ends the SQLite transaction without a recognized boundary ends/disqualifies the generation (`commit_unknown`) so a later unrelated commit cannot retain it. Optional observer callback faults are contained, recorded, and never replace SQLite results or original operational exceptions. An empty cleanup rollback cannot rewrite a completed committed generation. Later implicit work after an observed enclosing ends is unqualified (`commit_unknown`).
 4. `SQLiteSetupLifecycleRepository.__exit__` finishes operational commit/rollback and closes before sidecar flush.
 5. One evidence-store transaction then writes the bundle only after conservative footprint admission. A crash between operational commit and evidence commit loses coverage without a false complete row.
@@ -210,17 +223,17 @@ Three claims remain separate: computation replay, local delivery provenance, ope
 
 ## Adversarial evidence (tests)
 
-`tests/test_f04_durable_source_replay.py` (**51 tests**) covers the foundation matrix and all five corrective counterexample sets for R1–R7.
+`tests/test_f04_durable_source_replay.py` (**59 tests**) covers the foundation matrix and all six corrective counterexample sets for R1–R7.
 
 Related suites kept green: source evidence, delivery capture, evaluation policy, evaluation semantics, lifecycle outcomes, F03 population isolation, P5A owner monitoring, observation-unit caller inventory.
 
-## Local verification (fifth corrective)
+## Local verification (sixth corrective)
 
-Focused F04: `python -m pytest tests/test_f04_durable_source_replay.py` — **51 passed**.
+Focused F04: `python -m pytest tests/test_f04_durable_source_replay.py` — **59 passed**.
 
-Related (source-evidence, delivery-capture, policy, semantics, P5A, F03, lifecycle outcomes, observation-unit): **262 passed**.
+Related (source-evidence, delivery-capture, policy, semantics, P5A, F03, lifecycle outcomes, observation-unit): **270 passed**.
 
-Full suite: `python -m pytest` — exit 0, **2823 collected**, one Starlette warning. `python -m compileall -q app tests` — exit 0.
+Full suite: `python -m pytest` — exit 0, **2831 collected**, one Starlette warning. `python -m compileall -q app tests` — exit 0.
 
 `LOCAL_MANUAL_MODE=true`, `ORDER_EXECUTION_ENABLED=false`, `TELEGRAM_DRY_RUN=true`, `TELEGRAM_SIGNALS_ENABLED=false`. Synthetic temporary databases only. No listener, watch loop, live Runtime DB access, secrets, weakened assertions, or xfails.
 
@@ -238,9 +251,9 @@ No strategy gate, RR, or lifecycle-semantics change. F03 research denominators a
 
 ## CI
 
-Prior reviewed head `0b9be1ad8bf70bdfcfabf73791771fd5d40540e5`: run [36923741084](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36923741084) succeeded (2819 passed) but did not cover the remaining R1 delayed-note and unclassified-boundary cases.
+Prior reviewed head `9a3ec6a132c7e72ef027117a4c0e76da5487a706`: run [36929756793](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36929756793) succeeded (2823 passed) but did not cover duplicate notes or outstanding-history exhaustion.
 
-Fifth corrective code tip `2f2675605efc887642b3e92791908884354c6545`: GitHub Actions run [36929291024](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36929291024) — success, attempt 1, **2823 passed**, 1 warning.
+Sixth corrective code tip `59623a50afdfa3ab4f563d706f94d60e1a66b2d8`: GitHub Actions run [37190882992](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37190882992) — success, attempt 1, **2831 passed**, 1 warning.
 
 ## Rollout and rollback
 
@@ -254,11 +267,11 @@ Full scanner discovery/confirmation decision replay and HTF/context inputs; auth
 
 ## Final head
 
-- Prior reviewed tip (still REQUEST_CHANGES): `0b9be1ad8bf70bdfcfabf73791771fd5d40540e5`
-- Fifth corrective code tip: `2f2675605efc887642b3e92791908884354c6545` — CI [36929291024](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/36929291024) success, attempt 1, 2823 passed
+- Prior reviewed tip (still REQUEST_CHANGES): `9a3ec6a132c7e72ef027117a4c0e76da5487a706`
+- Sixth corrective code tip: `59623a50afdfa3ab4f563d706f94d60e1a66b2d8` — CI [37190882992](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37190882992) success, attempt 1, 2831 passed
 - Documentation tip that records this paragraph is the branch tip after this commit; its PR check is the CI result for the exact final head
-- Local focused F04: 51 passed
-- Related suites: 262 passed
-- Full pytest: exit 0, 2823 collected, one Starlette warning
+- Local focused F04: 59 passed
+- Related suites: 270 passed
+- Full pytest: exit 0, 2831 collected, one Starlette warning
 - `python -m compileall -q app tests`: exit 0
 - Independent acceptance: **not claimed**; awaiting re-review of the exact final head
