@@ -17,7 +17,8 @@ Capture stays off unless `SOURCE_REPLAY_CAPTURE_ENABLED=true` and `SOURCE_REPLAY
 - F04 accepted head `54bd2385dcf3b6265b3cdff8e68ecb484f9cc3a8` is an ancestor of that base, with no file changes in the merge commit
 - Initial strict-boundary implementation SHA: `fcaccf2080f27c4a5cd151c437717aa497d6f8a7`
 - Rejected review head: `fb5839f89956dc7bf3582975350abee609dbc436` (disposition REQUEST_CHANGES_PR_129). Its green suite did not cover the source-cleanup matrix
-- Cleanup repair: the commit that introduces owned-client cleanup capture and `tests/test_f05_source_cleanup.py`. The commit that records this handoff is the branch tip. Its PR check is the CI result for the exact final head
+- Cleanup repair SHA: `cb4389a2d96f75718ae732f3cf9291a32c7aa7cb` (owned-client cleanup capture, regressions, and this handoff)
+- The documentation commit that records the verified repair CI below is the branch tip. Its pull-request check is the CI result for the exact final head
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/129
 - Schema version: remains 26
 - Runtime database: not opened, copied, or modified
@@ -192,7 +193,9 @@ Historical, not this repair:
 - Handoff head `476274188d3fb7836de8387f405e08b661c19222`: CI run [37194439433](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37194439433), attempt 1, success. Job: Python 3.11 tests.
 - Rejected review head `fb5839f89956dc7bf3582975350abee609dbc436`: CI run [37194685853](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37194685853), attempt 1, success, 2,858 tests. Disposition remained REQUEST_CHANGES_PR_129 because the source-cleanup matrix failed outside that suite.
 
-The cleanup repair and this handoff are the branch tip after the commit that adds them. That tip's pull-request check is the CI result for the exact final head. Independent acceptance is not claimed.
+Cleanup repair head `cb4389a2d96f75718ae732f3cf9291a32c7aa7cb`: CI run [37198079234](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37198079234), attempt 1, success. Job: Python 3.11 tests, ID 111423973368, about 3m41s. That run is the repair commit, not the rejected `fb5839f` run.
+
+The documentation commit that records this paragraph is the branch tip after this commit. Its pull-request check is the CI result for the exact final head. Independent acceptance is not claimed.
 
 ## Operational actions
 
