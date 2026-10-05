@@ -202,8 +202,9 @@ No skip, xfail, or weakened gate assertion was added.
 - Branch: `fix/f08-telegram-risk-warning`
 - Base SHA: `dea4f80174fa7e3e663c66da753ef9ebd13dc19b`
 - Accepted F06 head contained in that merge: `401330526a8f3eaadfda2f5322a67f496ec5c221`
-- Implementation SHA: `acdfe56e179c22963928d6f13a9f20182b042a42`
-- Verified handoff SHA: `5bb238a377d05fdb3815a14b9b9c0258ea9e5529`
+- Card implementation SHA: `acdfe56e179c22963928d6f13a9f20182b042a42`
+- Reviewed head, before this audit repair: `d591f0fce45635aec7e5856426481825c69ced4f`
+- Corrective audit SHA: `e71700e714988e92f2db678116b347b44b28d84b`
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/131
 - Schema version: remains 26
 - Runtime database: not opened, copied, or modified
@@ -235,7 +236,18 @@ Those two runs are earlier handoff commits on this branch. The reviewed head `d5
 - Log result: `2910 passed, 1 warning in 155.96s (0:02:35)`
 - The job tested synthetic PR merge `a701d4b18105ff25169aecc6f4054a23edb491f1`, which had no file diff from `d591f0f`
 
-Independent review of that head requested changes. None of these runs is the CI for the corrected candidate. The corrected candidate's branch, commit, and CI are recorded with the audit repair.
+Independent review of that head requested changes. None of those runs is the CI for the corrected audit.
+
+Verified CI for corrective audit `e71700e714988e92f2db678116b347b44b28d84b`:
+
+- Run: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37371515010
+- Attempt: 1
+- Result: success
+- Job: Python 3.11 tests, ID `111969554010`
+- Log result: `2915 passed, 1 warning in 207.00s (0:03:27)`
+- The job tested synthetic PR merge `e403ce2f098e0f76a37b366b260153c98785ccee`, which had no file diff from `e71700e`
+
+The documentation commit that records this result is the branch tip after that commit. Its pull-request check is the CI for the exact final head.
 
 ## Limits
 
