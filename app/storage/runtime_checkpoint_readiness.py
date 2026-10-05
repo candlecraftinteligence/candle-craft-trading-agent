@@ -1,8 +1,10 @@
 """Bounded read-only Runtime checkpoint preflight collector and evidence assessment.
 
-This module never deploys, migrates, checkpoints, vacuums, or opens a live path by
-default. DEV tests and this process must pass an explicit existing source file.
-Collector identity is not deployed-application identity.
+This module never deploys, migrates, checkpoints, vacuums, creates an epoch,
+installs an index, backfills lineage, or opens a live path by default. DEV tests
+and this process must pass an explicit existing source file. Collector identity
+is not deployed-application identity. A valid-looking SHA is operator input, not
+proof of review, CI, or the code that is executing.
 """
 
 from __future__ import annotations
@@ -31,11 +33,31 @@ from app.storage.database import (
 )
 from app.storage.scan_payloads import INLINE_V1, SUPPORTED_FORMATS, SYMBOL_REFS_V1
 
-TOOL_VERSION: Final[str] = "cci-runtime-checkpoint-readiness-v1"
+TOOL_VERSION: Final[str] = "cci-runtime-checkpoint-readiness-v2"
 TOOL_NAME: Final[str] = "cci-runtime-checkpoint-readiness"
+PACKET_CONTRACT_VERSION: Final[str] = "f06-runtime-release-readiness-v1"
 CHECKPOINT_NAME: Final[str] = "FORENSIC_FOUNDATION_RUNTIME_CHECKPOINT"
 FUNCTIONAL_ANCHOR_SHA: Final[str] = "2bac6b4eda271bc69f2c34f42d6b7592e37fa8cc"
 OPERATIONAL_STATUS: Final[str] = "RUNTIME_CHECKPOINT_NOT_YET_AUTHORIZED"
+SOURCE_REPLAY_CAPTURE_SWITCH: Final[str] = "SOURCE_REPLAY_CAPTURE_ENABLED"
+PLAN_STATE_INDEX_NAME: Final[str] = "ix_lifecycle_records_epoch_locked_plan_state"
+PLAN_STATE_INDEX_TABLE: Final[str] = "setup_lifecycle_records"
+PLAN_STATE_INDEX_COLUMNS: Final[tuple[str, ...]] = (
+    "runtime_epoch_id",
+    "current_state",
+    "lifecycle_id",
+)
+PLAN_STATE_INDEX_PREDICATE: Final[str] = "plan_version_id is not null"
+BASELINE_MIN_SECONDS: Final[int] = 24 * 60 * 60
+PLANNING_HORIZON_MIN_DAYS: Final[int] = 10
+EVIDENCE_MAX_AGE_SECONDS: Final[int] = 7 * 24 * 60 * 60
+FINAL_CUTOVER_REVERIFICATION: Final[str] = "required_before_consumers"
+DECLARED_EVIDENCE_CLASSES: Final[frozenset[str]] = frozenset(
+    {"declared_assertion", "referenced_result"}
+)
+TOOL_ATTESTATION_CLASSES: Final[frozenset[str]] = frozenset(
+    {"tool_verified", "measured_by_collector", "attested", "ci_passed_by_tool"}
+)
 UNAVAILABLE: Final[str] = "unavailable"
 PENDING: Final[str] = "pending"
 
@@ -46,6 +68,46 @@ PROGRESS_OPCODE_INTERVAL: Final[int] = 1_000
 MAX_DETAIL_CHARS: Final[int] = 240
 OPERATING_RESERVE_FLOOR_BYTES: Final[int] = 10 * 1024**3
 OPERATING_RESERVE_FLOOR_PERCENT: Final[int] = 10
+PRESERVATION_KEYS: Final[tuple[str, ...]] = (
+    "active_plans",
+    "plan_version_binding",
+    "progress_cursors",
+    "public_outbox_sent_uncertain",
+    "external_listener_state",
+    "logical_scan_payload_compatibility",
+)
+EPOCH_LINEAGE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
+    "runtime_epochs": (
+        "epoch_id",
+        "contract_version",
+        "activated_at",
+        "cutoff_at",
+        "reviewed_release_sha",
+        "generation_binding",
+        "created_at",
+    ),
+    "runtime_epoch_control": ("control_key", "epoch_id"),
+    "runtime_operational_runs": (
+        "run_id",
+        "runtime_epoch_id",
+        "registered_at",
+        "status",
+        "producer_started_at",
+    ),
+    "runtime_operational_origins": (
+        "origin_id",
+        "runtime_epoch_id",
+        "run_id",
+        "symbol",
+        "evaluation_completed_at",
+        "decision_cutoff_at",
+        "producer_observed_at",
+        "origin_kind",
+        "status",
+        "block_reason",
+        "created_at",
+    ),
+}
 TIMESTAMP_INDEX: Final[str] = "ix_scan_runs_timestamp"
 COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
@@ -206,10 +268,14 @@ CONSUMER_INVENTORY: Final[tuple[dict[str, Any], ...]] = (
         "db_path": "explicit --database-path",
         "payload": (
             "open_read_only_database historic default assume_immutable_when_sidecars_absent=True; "
-            "full table counts, dbstat, timestamp MIN/MAX, outbox aggregations"
+            "full table counts, dbstat, timestamp MIN/MAX, outbox aggregations. "
+            "Not automatically safe for a changing WAL database with absent sidecars"
         ),
         "startup": "scripts/sqlite_maintenance.py inspect",
-        "note": "Not a bounded live preflight. Do not use it as the Runtime checkpoint collector.",
+        "note": (
+            "Not a bounded live preflight and not safe merely because the file can be opened. "
+            "Do not use it as the Runtime checkpoint collector."
+        ),
     },
     {
         "id": "sqlite_maintenance_backup",
@@ -219,8 +285,10 @@ CONSUMER_INVENTORY: Final[tuple[dict[str, Any], ...]] = (
         "payload": "SQLite online backup API; source open_read_only_database historic immutable default",
         "startup": "scripts/sqlite_maintenance.py backup",
         "note": (
-            "Not certified for a mutable live source. Restrict to a proven-quiescent window "
-            "(writers stopped; WAL/SHM absence verified) or STOP for a backup prerequisite."
+            "Not certified for a mutable live source. A changing WAL database with absent sidecars "
+            "is not automatically safe. Use a proven quiescent maintenance procedure or a separately "
+            "reviewed compatible snapshot method. Do not copy only a changing main file, delete "
+            "sidecars, or open a changing source with immutable=1."
         ),
     },
     {
@@ -259,6 +327,21 @@ CONSUMER_INVENTORY: Final[tuple[dict[str, Any], ...]] = (
         ),
         "startup": "listener --manifest-path/--state-path/--audit-path; scanner watch artifacts",
         "note": "SQLite does not contain every restart-safety side effect.",
+    },
+    {
+        "id": "durable_source_replay",
+        "module": "app.research.durable_source_replay",
+        "role": "optional_separate_evidence_writer_reader",
+        "db_path": "separate SOURCE_REPLAY_EVIDENCE_PATH store; not the scanner database",
+        "payload": "durable source-replay evidence; not setup-generation authority",
+        "startup": (
+            "SOURCE_REPLAY_CAPTURE_ENABLED; the first rollout of this packet requires the switch disabled"
+        ),
+        "note": (
+            "Unknown enabled state is not evidence that capture is disabled. An enabled proposal "
+            "is outside this packet's initial-cutover contract and needs a separate capacity, "
+            "retention, and recovery review."
+        ),
     },
     {
         "id": "unknown_external_readers",
@@ -336,11 +419,33 @@ def collect_runtime_checkpoint_preflight(
             "checkpoint_name": CHECKPOINT_NAME,
             "target": {
                 "functional_anchor_sha": FUNCTIONAL_ANCHOR_SHA,
+                "functional_anchor_role": "historical_ancestor_not_approval_of_later_main",
                 "deployment_sha": {
                     "status": PENDING,
-                    "reason": "exact_release_sha_is_the_reviewed_main_merge_of_this_readiness_pr",
+                    "reason": "exact_release_sha_is_operator_input_until_a_reviewed_merge_and_ci_exist",
                 },
                 "application_schema_version": SCHEMA_VERSION,
+            },
+            "release_contract": {
+                "packet_contract_version": PACKET_CONTRACT_VERSION,
+                "application_schema_version": SCHEMA_VERSION,
+                "functional_anchor_sha": FUNCTIONAL_ANCHOR_SHA,
+                "plan_state_index": {
+                    "name": PLAN_STATE_INDEX_NAME,
+                    "table": PLAN_STATE_INDEX_TABLE,
+                    "columns": list(PLAN_STATE_INDEX_COLUMNS),
+                    "partial_predicate": PLAN_STATE_INDEX_PREDICATE,
+                    "unique": False,
+                },
+                "epoch_lineage_tables": {
+                    name: list(columns) for name, columns in EPOCH_LINEAGE_COLUMNS.items()
+                },
+                "source_replay_capture_switch": SOURCE_REPLAY_CAPTURE_SWITCH,
+                "initial_cutover_capture": "disabled",
+                "note": (
+                    "This block is the packet contract. It is not evidence that a database "
+                    "already satisfies it, and it is not the running application identity."
+                ),
             },
             "collector_identity": collector_identity(),
             "observed_deployed_application": {
@@ -515,6 +620,8 @@ def collect_sqlite_metadata(
             if table in tables
         }
         indexes = _index_names(connection)
+        plan_state_index = inspect_plan_state_index(connection)
+        epoch_lineage = inspect_epoch_lineage(connection, tables)
         page_count = _pragma_int(connection, "page_count")
         page_size = _pragma_int(connection, "page_size")
         freelist_count = _pragma_int(connection, "freelist_count")
@@ -550,6 +657,8 @@ def collect_sqlite_metadata(
             "tables": sorted(tables),
             "columns": columns,
             "indexes": indexes,
+            "plan_state_index": plan_state_index,
+            "epoch_lineage": epoch_lineage,
             "page_count": page_count,
             "page_size": page_size,
             "freelist_count": freelist_count,
@@ -663,6 +772,8 @@ def assess_runtime_checkpoint_evidence(packet: Mapping[str, Any]) -> dict[str, A
         "This assessment never authorizes Runtime deployment.",
         "Completing a readiness PR does not mean GO_FOR_RUNTIME_DEPLOYMENT.",
         "Unobserved is not zero; a failed sample is not an empty successful scan.",
+        "A valid-looking SHA is operator input. This tool does not prove review, CI, or the currently executing code.",
+        "Declared assertions are not remote attestation.",
     ]
 
     collector = _mapping(cleaned.get("collector_report"))
@@ -716,16 +827,19 @@ def assess_runtime_checkpoint_evidence(packet: Mapping[str, Any]) -> dict[str, A
             missing.append("unknown_external_readers")
 
     restore = _mapping(operator.get("restore_evidence"))
-    if restore.get("restore_tested") is not True:
-        missing.append("restore_evidence.restore_tested")
-    if restore.get("integrity_ok") is False:
-        adverse.append("restore integrity_ok is false")
-    if restore.get("restore_path_distinct_from_source") is not True:
-        missing.append("restore_evidence.restore_path_distinct_from_source")
-    if not isinstance(restore.get("snapshot_identity"), str) or not str(restore.get("snapshot_identity")).strip():
-        missing.append("restore_evidence.snapshot_identity")
+    packet_contract = _assess_packet_contract(cleaned, missing, notes)
+    release_identity = _assess_release_identity(operator, missing, adverse, notes)
+    source_compatibility = _assess_source_compatibility(sqlite_section, missing, adverse, notes)
+    restore_summary = _assess_restore_evidence(restore, missing, adverse, notes)
+    rehearsal_summary = _assess_target_rehearsal(
+        operator, sqlite_section, restore, missing, adverse, notes
+    )
+    capacity_input = _mapping(operator.get("capacity"))
+    growth_trace = _assess_growth_traceability(capacity_input, missing, adverse, notes)
+    capture_summary = _assess_capture_switch(operator, missing, adverse)
+    evidence_identity = _assess_evidence_freshness(operator, restore, missing, adverse)
 
-    capacity = assess_capacity_budget(_mapping(operator.get("capacity")))
+    capacity = assess_capacity_budget(capacity_input)
     if capacity["status"] == "incomplete":
         missing.extend(capacity["missing"])
     elif capacity["status"] == "insufficient":
@@ -760,6 +874,7 @@ def assess_runtime_checkpoint_evidence(packet: Mapping[str, Any]) -> dict[str, A
         {
             "tool_version": TOOL_VERSION,
             "report_kind": "runtime_checkpoint_assessment",
+            "packet_contract_version": PACKET_CONTRACT_VERSION,
             "operational_status": OPERATIONAL_STATUS,
             "checkpoint_name": CHECKPOINT_NAME,
             "overall_disposition": disposition,
@@ -767,27 +882,807 @@ def assess_runtime_checkpoint_evidence(packet: Mapping[str, Any]) -> dict[str, A
             "missing_prerequisites": missing,
             "adverse_results": adverse,
             "capacity": capacity,
+            "packet_contract": packet_contract,
             "schema": {
                 "observed": observed_schema if isinstance(observed_schema, int) else UNAVAILABLE,
                 "target": SCHEMA_VERSION,
             },
             "release": {
                 "functional_anchor_sha": FUNCTIONAL_ANCHOR_SHA,
+                "functional_anchor_role": "historical_ancestor_not_approval_of_later_main",
                 "deployed_application_sha": deployed_sha if _is_commit_sha(deployed_sha) else UNAVAILABLE,
                 "target_sha": target_sha if _is_commit_sha(target_sha) else PENDING,
+                "tool_attested": False,
+                **release_identity,
             },
             "consumers": {
                 "known_ids": sorted(known_ids),
                 "unresolved": unresolved_consumers,
             },
-            "restore": {
-                "restore_tested": restore.get("restore_tested"),
-                "integrity_ok": restore.get("integrity_ok"),
-                "snapshot_identity_present": bool(str(restore.get("snapshot_identity") or "").strip()),
-            },
+            "source_compatibility": source_compatibility,
+            "target_rehearsal": rehearsal_summary,
+            "restore": restore_summary,
+            "growth_trace": growth_trace,
+            "source_replay_capture": capture_summary,
+            "evidence_identity": evidence_identity,
+            "evidence_origin": release_identity.get("evidence_origin", UNAVAILABLE),
             "notes": notes,
         }
     )
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
+def _nonempty_str(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_positive_number(value: Any) -> bool:
+    if type(value) not in {int, float}:
+        return False
+    if isinstance(value, float) and (value != value or value == float("inf")):
+        return False
+    return value > 0
+
+
+def _parse_utc_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip().endswith("Z"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC).replace(microsecond=0)
+
+
+def _normalize_predicate(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    where = re.search(r"\bwhere\b(.*)$", text, flags=re.IGNORECASE | re.DOTALL)
+    if where:
+        text = where.group(1)
+    text = re.sub(r"\s+", " ", text.strip().rstrip(";")).strip().lower()
+    return text or None
+
+
+def _quote_ident(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise StorageError(f"Unsafe SQLite identifier: {value}")
+    return '"' + value.replace('"', '""') + '"'
+
+
+def plan_state_index_matches(spec: Mapping[str, Any]) -> bool:
+    """True only for the current partial plan-state index definition."""
+
+    columns = spec.get("columns")
+    return (
+        spec.get("table") == PLAN_STATE_INDEX_TABLE
+        and isinstance(columns, list)
+        and list(columns) == list(PLAN_STATE_INDEX_COLUMNS)
+        and spec.get("unique") is False
+        and _normalize_predicate(spec.get("partial_predicate")) == PLAN_STATE_INDEX_PREDICATE
+    )
+
+
+def _plan_state_fields_present(observed: Mapping[str, Any]) -> bool:
+    predicate = observed.get("partial_predicate")
+    return (
+        isinstance(observed.get("table"), str)
+        and isinstance(observed.get("columns"), list)
+        and "partial_predicate" in observed
+        and (predicate is None or isinstance(predicate, str))
+        and type(observed.get("unique")) is bool
+    )
+
+
+def _index_name_set(indexes: Any) -> set[str] | None:
+    if indexes is None:
+        return None
+    names: set[str] = set()
+    if isinstance(indexes, Mapping):
+        for value in indexes.values():
+            if isinstance(value, list):
+                names.update(str(item) for item in value)
+            elif isinstance(value, str):
+                names.add(value)
+        return names
+    if isinstance(indexes, list):
+        return {str(item) for item in indexes}
+    return None
+
+
+def classify_plan_state_observation(sqlite_section: Mapping[str, Any]) -> str:
+    """Classify source index evidence. A matching name alone is not compatibility."""
+
+    if sqlite_section.get("status") != "measured":
+        return "not_inspected"
+    observed = sqlite_section.get("plan_state_index")
+    if isinstance(observed, Mapping) and _plan_state_fields_present(observed):
+        return "matched" if plan_state_index_matches(observed) else "mismatch"
+    if isinstance(observed, Mapping) and observed.get("status") == "absent" and not observed.get("columns"):
+        return "absent"
+    names = _index_name_set(sqlite_section.get("indexes"))
+    if isinstance(observed, Mapping) and observed.get("status") == "definition_mismatch":
+        return "mismatch"
+    if names is not None and PLAN_STATE_INDEX_NAME in names:
+        return "unproven"
+    if isinstance(observed, Mapping) and observed.get("status") == "absent":
+        return "absent"
+    if names is not None:
+        return "absent"
+    return "not_inspected"
+
+
+def inspect_plan_state_index(connection: sqlite3.Connection) -> dict[str, Any]:
+    """Read the plan-state index from SQLite metadata. Does not create it."""
+
+    row = connection.execute(
+        "SELECT tbl_name, sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+        (PLAN_STATE_INDEX_NAME,),
+    ).fetchone()
+    if row is None:
+        return {
+            "name": PLAN_STATE_INDEX_NAME,
+            "status": "absent",
+            "table": None,
+            "columns": [],
+            "unique": None,
+            "partial": None,
+            "partial_predicate": None,
+        }
+    table = str(row[0]) if row[0] is not None else ""
+    sql = None if row[1] is None else str(row[1])
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+        return {
+            "name": PLAN_STATE_INDEX_NAME,
+            "status": "unproven",
+            "reason": "unexpected_table_name",
+            "table": table,
+            "columns": [],
+            "unique": None,
+            "partial": None,
+            "partial_predicate": _normalize_predicate(sql),
+        }
+    info = connection.execute(f"PRAGMA index_info({_quote_ident(PLAN_STATE_INDEX_NAME)})").fetchall()
+    columns = [str(item[2]) for item in sorted(info, key=lambda item: int(item[0]))]
+    unique: bool | None = None
+    partial: bool | None = None
+    for index_row in connection.execute(f"PRAGMA index_list({_quote_ident(table)})").fetchall():
+        if str(index_row[1]) != PLAN_STATE_INDEX_NAME:
+            continue
+        unique = bool(int(index_row[2]))
+        if len(index_row) > 4 and index_row[4] is not None:
+            partial = bool(int(index_row[4]))
+        break
+    predicate = _normalize_predicate(sql)
+    if unique is None:
+        return {
+            "name": PLAN_STATE_INDEX_NAME,
+            "status": "unproven",
+            "reason": "uniqueness_unproven",
+            "table": table,
+            "columns": columns,
+            "unique": None,
+            "partial": partial,
+            "partial_predicate": predicate,
+        }
+    observed = {
+        "name": PLAN_STATE_INDEX_NAME,
+        "table": table,
+        "columns": columns,
+        "unique": unique,
+        "partial": bool(predicate) if partial is None else partial,
+        "partial_predicate": predicate,
+    }
+    observed["status"] = "matched" if plan_state_index_matches(observed) else "definition_mismatch"
+    return observed
+
+
+def inspect_epoch_lineage(connection: sqlite3.Connection, tables: set[str]) -> dict[str, Any]:
+    """Record epoch/lineage table presence and column order. Does not read rows or create tables."""
+
+    observed: dict[str, Any] = {}
+    for name, required in EPOCH_LINEAGE_COLUMNS.items():
+        if name not in tables:
+            observed[name] = {"present": False, "columns": [], "matches_expected": False}
+            continue
+        columns = _table_columns(connection, name)
+        observed[name] = {
+            "present": True,
+            "columns": columns,
+            "matches_expected": columns == list(required),
+        }
+    return {"status": "metadata_only", "tables": observed}
+
+
+def _evidence_class(
+    value: Any,
+    field: str,
+    missing: list[str],
+    adverse: list[str],
+) -> str | None:
+    if not isinstance(value, str):
+        _append_unique(missing, field)
+        return None
+    if value in TOOL_ATTESTATION_CLASSES:
+        _append_unique(adverse, f"{field}_claims_tool_attestation")
+        return value
+    if value not in DECLARED_EVIDENCE_CLASSES:
+        _append_unique(missing, field)
+        return None
+    return value
+
+
+def _assess_packet_contract(
+    packet: Mapping[str, Any],
+    missing: list[str],
+    notes: list[str],
+) -> dict[str, Any]:
+    supplied = packet.get("contract_version")
+    current = supplied == PACKET_CONTRACT_VERSION
+    if not current:
+        _append_unique(missing, "packet.contract_version")
+        notes.append("An older or missing packet contract does not inherit this release's prerequisites.")
+    return {
+        "required": PACKET_CONTRACT_VERSION,
+        "supplied": supplied if isinstance(supplied, str) else UNAVAILABLE,
+        "current": current,
+    }
+
+
+def _assess_release_identity(
+    operator: Mapping[str, Any],
+    missing: list[str],
+    adverse: list[str],
+    notes: list[str],
+) -> dict[str, Any]:
+    if operator.get("deployment_reported_successful") is True:
+        notes.append("A reported successful deployment does not complete missing packet evidence.")
+    origin = operator.get("evidence_origin")
+    if origin not in {"synthetic", "runtime_measured"}:
+        _append_unique(missing, "operator.evidence_origin")
+    elif origin == "synthetic":
+        notes.append("Synthetic packet facts are not Runtime measurements.")
+    else:
+        notes.append("Declared runtime_measured evidence was not attested by this tool.")
+    release = _mapping(operator.get("release_evidence"))
+    anchor = release.get("historical_functional_anchor_sha")
+    if anchor != FUNCTIONAL_ANCHOR_SHA:
+        if _is_commit_sha(anchor):
+            _append_unique(adverse, "functional_anchor_rewritten")
+        else:
+            _append_unique(missing, "release_evidence.historical_functional_anchor_sha")
+    _require_same_sha(
+        release.get("target_sha"),
+        operator.get("target_sha"),
+        missing_field="release_evidence.target_sha",
+        adverse_code="contradictory_target_sha",
+        missing=missing,
+        adverse=adverse,
+    )
+    _require_same_sha(
+        release.get("deployed_application_sha"),
+        operator.get("deployed_application_sha"),
+        missing_field="release_evidence.deployed_application_sha",
+        adverse_code="contradictory_deployed_application_sha",
+        missing=missing,
+        adverse=adverse,
+    )
+    review_class = _evidence_class(
+        release.get("review_evidence_class"),
+        "release_evidence.review_evidence_class",
+        missing,
+        adverse,
+    )
+    ci_class = _evidence_class(
+        release.get("ci_evidence_class"),
+        "release_evidence.ci_evidence_class",
+        missing,
+        adverse,
+    )
+    if review_class == "referenced_result" and not _nonempty_str(release.get("review_reference")):
+        _append_unique(missing, "release_evidence.review_reference")
+    if ci_class == "referenced_result" and not _nonempty_str(release.get("ci_reference")):
+        _append_unique(missing, "release_evidence.ci_reference")
+    return {
+        "evidence_origin": origin if origin in {"synthetic", "runtime_measured"} else UNAVAILABLE,
+        "review_evidence_class": review_class or UNAVAILABLE,
+        "ci_evidence_class": ci_class or UNAVAILABLE,
+        "tool_attested": False,
+    }
+
+
+def _require_same_sha(
+    release_sha: Any,
+    operator_sha: Any,
+    *,
+    missing_field: str,
+    adverse_code: str,
+    missing: list[str],
+    adverse: list[str],
+) -> None:
+    if not _is_commit_sha(release_sha):
+        _append_unique(missing, missing_field)
+        return
+    if _is_commit_sha(operator_sha) and release_sha != operator_sha:
+        _append_unique(adverse, adverse_code)
+
+
+def _source_epoch_status(sqlite_section: Mapping[str, Any]) -> str:
+    lineage = sqlite_section.get("epoch_lineage")
+    if not isinstance(lineage, Mapping):
+        return "not_inspected"
+    tables = lineage.get("tables")
+    if not isinstance(tables, Mapping):
+        return "not_inspected"
+    saw_absent = False
+    for name, required in EPOCH_LINEAGE_COLUMNS.items():
+        entry = tables.get(name)
+        if not isinstance(entry, Mapping) or entry.get("present") is not True:
+            saw_absent = True
+            continue
+        if list(entry.get("columns") or []) != list(required):
+            return "mismatch"
+    if saw_absent:
+        return "absent_table"
+    return "matched"
+
+
+def _assess_source_compatibility(
+    sqlite_section: Mapping[str, Any],
+    missing: list[str],
+    adverse: list[str],
+    notes: list[str],
+) -> dict[str, Any]:
+    kind = classify_plan_state_observation(sqlite_section)
+    finding = None
+    if kind == "mismatch":
+        _append_unique(adverse, "source_plan_state_index_definition_mismatch")
+    elif kind == "unproven":
+        _append_unique(missing, "source_plan_state_index_definition_unproven")
+    elif kind == "not_inspected" and sqlite_section.get("status") == "measured":
+        _append_unique(missing, "source_plan_state_index_not_inspected")
+    elif kind == "absent":
+        finding = "source_plan_state_index_absent"
+        notes.append(
+            "A missing source plan-state index can be an expected preflight finding. "
+            "The target copy is not ready until rehearsal proves schema 26 and the required index."
+        )
+    epoch_status = _source_epoch_status(sqlite_section)
+    if epoch_status == "mismatch":
+        _append_unique(adverse, "source_epoch_lineage_definition_mismatch")
+    elif epoch_status == "absent_table":
+        notes.append("Source epoch/lineage metadata is incomplete; target rehearsal must prove the tables.")
+    return {
+        "plan_state_index": kind,
+        "finding": finding,
+        "epoch_lineage": epoch_status,
+        "live_source_is_not_target_proof": True,
+    }
+
+
+def _assess_restore_evidence(
+    restore: Mapping[str, Any],
+    missing: list[str],
+    adverse: list[str],
+    notes: list[str],
+) -> dict[str, Any]:
+    if restore.get("restore_tested") is not True:
+        _append_unique(missing, "restore_evidence.restore_tested")
+    else:
+        notes.append("restore_tested=true is not measured restore evidence by itself.")
+    integrity = restore.get("integrity_ok")
+    if integrity is False:
+        _append_unique(adverse, "restore integrity_ok is false")
+    elif integrity is not True:
+        _append_unique(missing, "restore_evidence.integrity_ok")
+    if restore.get("restore_path_distinct_from_source") is not True:
+        _append_unique(missing, "restore_evidence.restore_path_distinct_from_source")
+    snapshot = restore.get("snapshot_identity")
+    if not _nonempty_str(snapshot):
+        _append_unique(missing, "restore_evidence.snapshot_identity")
+    source_identity = restore.get("source_identity")
+    if not _nonempty_str(source_identity):
+        _append_unique(missing, "restore_evidence.source_identity")
+    restored_path = restore.get("restored_copy_path")
+    if not _nonempty_str(restored_path):
+        _append_unique(missing, "restore_evidence.restored_copy_path")
+    if _nonempty_str(source_identity) and _nonempty_str(restored_path) and source_identity.strip() == restored_path.strip():
+        _append_unique(adverse, "contradictory_restore_path_identity")
+    if _nonempty_str(source_identity) and _nonempty_str(snapshot) and source_identity.strip() == snapshot.strip():
+        _append_unique(adverse, "contradictory_snapshot_identity")
+    if _parse_utc_timestamp(restore.get("observed_at_utc")) is None:
+        _append_unique(missing, "restore_evidence.observed_at_utc")
+    evidence_class = _evidence_class(
+        restore.get("integrity_evidence_class"),
+        "restore_evidence.integrity_evidence_class",
+        missing,
+        adverse,
+    )
+    if evidence_class == "referenced_result" and not _nonempty_str(restore.get("integrity_reference")):
+        _append_unique(missing, "restore_evidence.integrity_reference")
+    return {
+        "restore_tested": restore.get("restore_tested"),
+        "integrity_ok": integrity,
+        "integrity_evidence_class": evidence_class or UNAVAILABLE,
+        "snapshot_identity_present": _nonempty_str(snapshot),
+        "source_identity_present": _nonempty_str(source_identity),
+        "restored_copy_path_present": _nonempty_str(restored_path),
+        "tool_attested": False,
+    }
+
+
+def _require_matching_text(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+    key: str,
+    *,
+    missing_field: str,
+    adverse_code: str,
+    missing: list[str],
+    adverse: list[str],
+) -> None:
+    left_value = left.get(key)
+    if not _nonempty_str(left_value):
+        _append_unique(missing, missing_field)
+        return
+    right_value = right.get(key)
+    if _nonempty_str(right_value) and left_value.strip() != right_value.strip():
+        _append_unique(adverse, adverse_code)
+
+
+def _require_positive_number(payload: Mapping[str, Any], key: str, missing: list[str], field: str) -> None:
+    if not _is_positive_number(payload.get(key)):
+        _append_unique(missing, field)
+
+
+def _assess_rehearsal_epoch(
+    rehearsal: Mapping[str, Any],
+    missing: list[str],
+    adverse: list[str],
+) -> None:
+    supplied = rehearsal.get("epoch_lineage_tables")
+    if not isinstance(supplied, Mapping):
+        _append_unique(missing, "target_rehearsal.epoch_lineage_tables")
+        return
+    for name, required in EPOCH_LINEAGE_COLUMNS.items():
+        got = supplied.get(name)
+        if got is None:
+            _append_unique(missing, f"target_rehearsal.epoch_lineage_tables.{name}")
+        elif list(got) != list(required):
+            _append_unique(adverse, f"target_rehearsal.epoch_lineage_definition_mismatch:{name}")
+
+
+def _assess_target_rehearsal(
+    operator: Mapping[str, Any],
+    sqlite_section: Mapping[str, Any],
+    restore: Mapping[str, Any],
+    missing: list[str],
+    adverse: list[str],
+    notes: list[str],
+) -> dict[str, Any]:
+    rehearsal = _mapping(operator.get("target_rehearsal"))
+    if not rehearsal:
+        _append_unique(missing, "operator.target_rehearsal")
+        return {
+            "status": "missing",
+            "plan_state_index": "unverified",
+            "final_cutover_reverification": UNAVAILABLE,
+            "tool_attested": False,
+        }
+    evidence_class = _evidence_class(
+        rehearsal.get("evidence_class"),
+        "target_rehearsal.evidence_class",
+        missing,
+        adverse,
+    )
+    if evidence_class == "referenced_result" and not _nonempty_str(rehearsal.get("evidence_reference")):
+        _append_unique(missing, "target_rehearsal.evidence_reference")
+    if rehearsal.get("isolated_copy") is False:
+        _append_unique(adverse, "target_rehearsal.not_isolated_copy")
+    elif rehearsal.get("isolated_copy") is not True:
+        _append_unique(missing, "target_rehearsal.isolated_copy")
+    _require_matching_text(
+        rehearsal,
+        restore,
+        "source_identity",
+        missing_field="target_rehearsal.source_identity",
+        adverse_code="contradictory_source_identity",
+        missing=missing,
+        adverse=adverse,
+    )
+    _require_matching_text(
+        rehearsal,
+        restore,
+        "snapshot_identity",
+        missing_field="target_rehearsal.snapshot_identity",
+        adverse_code="contradictory_snapshot_identity",
+        missing=missing,
+        adverse=adverse,
+    )
+    _require_matching_text(
+        rehearsal,
+        restore,
+        "restored_copy_path",
+        missing_field="target_rehearsal.restored_copy_path",
+        adverse_code="contradictory_restored_copy_path",
+        missing=missing,
+        adverse=adverse,
+    )
+    source_schema = rehearsal.get("source_schema_version")
+    if type(source_schema) is not int:
+        _append_unique(missing, "target_rehearsal.source_schema_version")
+    else:
+        observed = sqlite_section.get("schema_version")
+        if type(observed) is int and observed != source_schema:
+            _append_unique(adverse, "contradictory_source_schema_version")
+    migrated = rehearsal.get("migrated_schema_version")
+    if migrated != SCHEMA_VERSION:
+        _append_unique(missing, "target_rehearsal.migrated_schema_version")
+    index_spec = rehearsal.get("plan_state_index")
+    index_status = "unverified"
+    if not isinstance(index_spec, Mapping) or not _plan_state_fields_present(index_spec):
+        _append_unique(missing, "target_rehearsal.plan_state_index")
+    elif plan_state_index_matches(index_spec):
+        index_status = "matched"
+    else:
+        index_status = "mismatch"
+        _append_unique(adverse, "target_rehearsal.plan_state_index_definition_mismatch")
+    _assess_rehearsal_epoch(rehearsal, missing, adverse)
+    preservation = _mapping(rehearsal.get("preservation"))
+    for key in PRESERVATION_KEYS:
+        value = preservation.get(key)
+        if value == "preserved":
+            continue
+        if value in {"failed", False}:
+            _append_unique(adverse, f"target_rehearsal.preservation_failed:{key}")
+        else:
+            _append_unique(missing, f"target_rehearsal.preservation:{key}")
+    _require_positive_number(
+        rehearsal,
+        "migration_duration_seconds",
+        missing,
+        "target_rehearsal.migration_duration_seconds",
+    )
+    _require_positive_number(
+        rehearsal,
+        "restore_duration_seconds",
+        missing,
+        "target_rehearsal.restore_duration_seconds",
+    )
+    if not _is_non_negative_int(rehearsal.get("peak_allocation_bytes")):
+        _append_unique(missing, "target_rehearsal.peak_allocation_bytes")
+    if not _is_positive_int(rehearsal.get("planned_downtime_budget_seconds")):
+        _append_unique(missing, "target_rehearsal.planned_downtime_budget_seconds")
+    if not _is_positive_int(rehearsal.get("recovery_budget_seconds")):
+        _append_unique(missing, "target_rehearsal.recovery_budget_seconds")
+    migration = rehearsal.get("migration_duration_seconds")
+    restore_duration = rehearsal.get("restore_duration_seconds")
+    downtime = rehearsal.get("planned_downtime_budget_seconds")
+    if (
+        _is_positive_number(migration)
+        and _is_positive_number(restore_duration)
+        and _is_positive_int(downtime)
+        and (float(migration) + float(restore_duration)) > float(downtime)
+    ):
+        _append_unique(adverse, "rehearsal_exceeds_downtime_budget")
+    if rehearsal.get("final_cutover_reverification") != FINAL_CUTOVER_REVERIFICATION:
+        _append_unique(missing, "target_rehearsal.final_cutover_reverification")
+    if _parse_utc_timestamp(rehearsal.get("observed_at_utc")) is None:
+        _append_unique(missing, "target_rehearsal.observed_at_utc")
+    notes.append(
+        "Target rehearsal is classified operator input. Final cutover must verify schema 26 "
+        "and the plan-state index again before consumers start."
+    )
+    return {
+        "status": "recorded",
+        "evidence_class": evidence_class or UNAVAILABLE,
+        "migrated_schema_version": migrated if migrated == SCHEMA_VERSION else UNAVAILABLE,
+        "plan_state_index": index_status,
+        "final_cutover_reverification": rehearsal.get("final_cutover_reverification", UNAVAILABLE),
+        "tool_attested": False,
+    }
+
+
+def _assess_growth_traceability(
+    capacity: Mapping[str, Any],
+    missing: list[str],
+    adverse: list[str],
+    notes: list[str],
+) -> dict[str, Any]:
+    notes.append(
+        "Existing occupancy stays in measured free space. SQLite freelist is not subtracted. "
+        "Unperformed cleanup and compression are not capacity."
+    )
+    flag_adverse = {
+        "existing_occupancy_already_in_free_space": "existing_occupancy_double_charged",
+        "freelist_not_subtracted": "freelist_subtracted_from_capacity",
+        "unperformed_cleanup_not_subtracted": "unperformed_cleanup_subtracted",
+        "compression_not_assumed": "compression_assumed",
+    }
+    for flag, adverse_code in flag_adverse.items():
+        value = capacity.get(flag)
+        if value is True:
+            continue
+        if value is False:
+            _append_unique(adverse, adverse_code)
+        else:
+            _append_unique(missing, f"capacity.{flag}")
+    if "reclaimed_cleanup_bytes" in capacity and capacity.get("reclaimed_cleanup_bytes") != 0:
+        _append_unique(adverse, "unperformed_cleanup_subtracted")
+    if "compression_ratio" in capacity:
+        _append_unique(adverse, "compression_assumed")
+    if capacity.get("freelist_bytes_subtracted") is True:
+        _append_unique(adverse, "freelist_subtracted_from_capacity")
+    baseline = capacity.get("workload_baseline")
+    if not isinstance(baseline, Mapping):
+        _append_unique(missing, "capacity.workload_baseline")
+        notes.append("A positive growth_budget_bytes without a workload baseline is not measured capacity.")
+        return {"status": "missing", "tool_attested": False}
+    status = baseline.get("status")
+    if status != "representative":
+        label = status if isinstance(status, str) and status else "missing"
+        _append_unique(
+            missing,
+            "capacity.workload_baseline.status:"
+            f"{label} (idle, failed, missing, or incomparable samples cannot establish zero growth or runway)",
+        )
+    if baseline.get("comparable") is not True:
+        _append_unique(missing, "capacity.workload_baseline.comparable")
+    if not _nonempty_str(baseline.get("workload_description")):
+        _append_unique(missing, "capacity.workload_baseline.workload_description")
+    if not _nonempty_str(baseline.get("cadence_description")):
+        _append_unique(missing, "capacity.workload_baseline.cadence_description")
+    if not _nonempty_str(baseline.get("source_identity")):
+        _append_unique(missing, "capacity.workload_baseline.source_identity")
+    started = _parse_utc_timestamp(baseline.get("observation_started_utc"))
+    ended = _parse_utc_timestamp(baseline.get("observation_ended_utc"))
+    duration: int | None = None
+    if started is None:
+        _append_unique(missing, "capacity.workload_baseline.observation_started_utc")
+    if ended is None:
+        _append_unique(missing, "capacity.workload_baseline.observation_ended_utc")
+    if started is not None and ended is not None:
+        if ended < started:
+            _append_unique(adverse, "contradictory_baseline_window")
+        else:
+            duration = int((ended - started).total_seconds())
+            if duration < BASELINE_MIN_SECONDS:
+                _append_unique(missing, "capacity.workload_baseline.observation_duration_below_24h")
+    declared_duration = baseline.get("observation_duration_seconds")
+    if (
+        declared_duration is not None
+        and duration is not None
+        and type(declared_duration) is int
+        and declared_duration != duration
+    ):
+        _append_unique(adverse, "contradictory_baseline_duration")
+    horizon = baseline.get("planning_horizon_days")
+    if type(horizon) is not int or horizon < PLANNING_HORIZON_MIN_DAYS:
+        _append_unique(missing, "capacity.planning_horizon_days")
+    samples = baseline.get("samples")
+    if samples is not None:
+        if not isinstance(samples, list) or not samples:
+            _append_unique(missing, "capacity.workload_baseline.samples")
+        else:
+            for index, sample in enumerate(samples):
+                if not isinstance(sample, Mapping):
+                    _append_unique(missing, f"capacity.workload_baseline.samples[{index}]")
+                    continue
+                quality = sample.get("quality")
+                if sample.get("comparable") is False or quality in {"idle", "failed", "missing", "incomparable"}:
+                    _append_unique(missing, f"capacity.workload_baseline.samples[{index}].incomparable")
+    return {
+        "status": status if isinstance(status, str) else UNAVAILABLE,
+        "observation_duration_seconds": duration if duration is not None else UNAVAILABLE,
+        "planning_horizon_days": horizon if type(horizon) is int else UNAVAILABLE,
+        "tool_attested": False,
+    }
+
+
+def _assess_capture_switch(
+    operator: Mapping[str, Any],
+    missing: list[str],
+    adverse: list[str],
+) -> dict[str, Any]:
+    capture = operator.get("source_replay_capture")
+    if not isinstance(capture, Mapping):
+        _append_unique(missing, "operator.source_replay_capture")
+        return {
+            "enabled": UNAVAILABLE,
+            "capture_switch": SOURCE_REPLAY_CAPTURE_SWITCH,
+            "initial_cutover_contract": "disabled",
+            "tool_attested": False,
+        }
+    if capture.get("capture_switch") != SOURCE_REPLAY_CAPTURE_SWITCH:
+        _append_unique(missing, "source_replay_capture.capture_switch")
+    enabled = capture.get("enabled")
+    if enabled is True:
+        _append_unique(adverse, "source_replay_capture_enabled_outside_initial_cutover_contract")
+    elif enabled is not False:
+        _append_unique(missing, "source_replay_capture.enabled_unknown_is_not_disabled")
+    evidence_class = _evidence_class(
+        capture.get("evidence_class"),
+        "source_replay_capture.evidence_class",
+        missing,
+        adverse,
+    )
+    if evidence_class == "referenced_result" and not _nonempty_str(capture.get("evidence_reference")):
+        _append_unique(missing, "source_replay_capture.evidence_reference")
+    return {
+        "capture_switch": SOURCE_REPLAY_CAPTURE_SWITCH,
+        "enabled": enabled if type(enabled) is bool else UNAVAILABLE,
+        "evidence_class": evidence_class or UNAVAILABLE,
+        "initial_cutover_contract": "disabled",
+        "tool_attested": False,
+    }
+
+
+def _stamp_issue(
+    name: str,
+    value: Any,
+    as_of: datetime | None,
+    missing: list[str],
+    adverse: list[str],
+) -> None:
+    if as_of is None:
+        return
+    observed = _parse_utc_timestamp(value)
+    if observed is None:
+        return
+    if observed > as_of:
+        _append_unique(adverse, f"contradictory_evidence_timestamp:{name}")
+    elif (as_of - observed).total_seconds() > EVIDENCE_MAX_AGE_SECONDS:
+        _append_unique(missing, f"stale_evidence:{name}")
+
+
+def _assess_evidence_freshness(
+    operator: Mapping[str, Any],
+    restore: Mapping[str, Any],
+    missing: list[str],
+    adverse: list[str],
+) -> dict[str, Any]:
+    as_of = _parse_utc_timestamp(operator.get("evidence_as_of_utc"))
+    if as_of is None:
+        _append_unique(missing, "operator.evidence_as_of_utc")
+    _stamp_issue("restore_evidence.observed_at_utc", restore.get("observed_at_utc"), as_of, missing, adverse)
+    rehearsal = _mapping(operator.get("target_rehearsal"))
+    _stamp_issue(
+        "target_rehearsal.observed_at_utc",
+        rehearsal.get("observed_at_utc"),
+        as_of,
+        missing,
+        adverse,
+    )
+    baseline = _mapping(_mapping(operator.get("capacity")).get("workload_baseline"))
+    _stamp_issue(
+        "capacity.workload_baseline.observation_ended_utc",
+        baseline.get("observation_ended_utc"),
+        as_of,
+        missing,
+        adverse,
+    )
+    baseline_source = baseline.get("source_identity")
+    restore_source = restore.get("source_identity")
+    if (
+        _nonempty_str(baseline_source)
+        and _nonempty_str(restore_source)
+        and baseline_source.strip() != restore_source.strip()
+    ):
+        _append_unique(adverse, "contradictory_baseline_source_identity")
+    return {
+        "as_of_utc": operator.get("evidence_as_of_utc") if as_of is not None else UNAVAILABLE,
+        "max_age_seconds": EVIDENCE_MAX_AGE_SECONDS,
+        "tool_attested": False,
+    }
 
 
 def planning_reserve_floor_bytes(volume_total_bytes: int) -> int:
@@ -1794,27 +2689,41 @@ def assert_sql_is_read_only(sql: str) -> None:
 
 
 __all__ = [
+    "BASELINE_MIN_SECONDS",
     "BUSY_TIMEOUT_MS",
     "CAPACITY_TERM_KEYS",
     "CHECKPOINT_NAME",
     "CONSUMER_INVENTORY",
     "DECODER_COMPATIBILITY_INVENTORY",
+    "EPOCH_LINEAGE_COLUMNS",
+    "EVIDENCE_MAX_AGE_SECONDS",
     "FUNCTIONAL_ANCHOR_SHA",
     "OPERATIONAL_STATUS",
+    "PACKET_CONTRACT_VERSION",
+    "PLAN_STATE_INDEX_COLUMNS",
+    "PLAN_STATE_INDEX_NAME",
+    "PLAN_STATE_INDEX_PREDICATE",
+    "PLAN_STATE_INDEX_TABLE",
+    "PLANNING_HORIZON_MIN_DAYS",
     "QUERY_DEADLINE_MS",
     "ReadinessError",
     "RECENT_RUN_LIMIT",
+    "SOURCE_REPLAY_CAPTURE_SWITCH",
     "TOOL_VERSION",
     "UNAVAILABLE",
     "assess_capacity_budget",
     "assess_runtime_checkpoint_evidence",
     "assert_sql_is_read_only",
+    "classify_plan_state_observation",
     "classify_windows_local_device",
     "collect_filesystem_observation",
     "collect_runtime_checkpoint_preflight",
     "collect_sqlite_metadata",
     "collect_volume_facts",
     "collector_identity",
+    "inspect_epoch_lineage",
+    "inspect_plan_state_index",
+    "plan_state_index_matches",
     "planning_reserve_floor_bytes",
     "load_json_object",
     "write_report_exclusive",

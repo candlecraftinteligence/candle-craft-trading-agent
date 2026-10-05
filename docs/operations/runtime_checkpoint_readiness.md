@@ -10,19 +10,37 @@ This phase prepares bounded read-only preflight diagnostics, synthetic compatibi
 
 ## 1. What this checkpoint is
 
-Functional cutoff: the entire merged forensic foundation through PR #120, plus the readiness-only PR that added this collector and runbook.
+Historical functional cutoff: the forensic foundation through PR #120. That history is not approval of later `main`.
 
-Expected application schema at the forensic-foundation checkpoint: **v25**.
+Accepted foundation for the next Runtime release packet, as merged on `main`:
 
-`PROSPECTIVE_RUNTIME_EPOCH_ISOLATION` introduces application schema **v26** as a new code/schema prerequisite. The reviewed `eef92b89` release does not acquire epoch isolation merely because a later PR exists. Runtime cutover/restart remains unauthorized until a future release is pinned to its reviewed merged SHA and a separate runbook authorizes epoch initialization.
+| Phase | Merge | Accepted head | Role |
+| --- | --- | --- | --- |
+| P5A | `44777a3b4f53919875b66940f231ea542ca38bd4` | recorded in the P5A handoff | owner monitoring and the additive plan-state index |
+| F03 | `b7c6422e3d1e2596115b7cd9cf5b1caea15072ef` | `438624dc5f291d271b4c85be5f83262ea0f40d85` | prospective research population isolation |
+| F04 | `44efa90daff8476c480eb21ed8ba43654ee8e5de` | `54bd2385dcf3b6265b3cdff8e68ecb484f9cc3a8` | durable source replay; capture stays off for the first rollout |
+| F05 | `011b9e2fc8a5c93578acceafe5505774537866df` | `9b79fb4773d5c6cb73dec275336a7ed0dc62cfea` | strict discovery failure handling |
 
-Expected application schema: **v25** (checkpoint foundation). v26 is DEV-implemented and not authorized for Runtime.
+Application schema for this release packet is **26**. Schema 26 does not by itself install `ix_lifecycle_records_epoch_locked_plan_state`. `open_operational_database` does not create that index. An existing schema-26 file needs a controlled `migrate_existing_database` (or another explicit `initialize_database`) on the restored copy. `CREATE INDEX IF NOT EXISTS` does not repair a same-named index with a different definition and does not rewrite historical rows.
 
-Known functional anchor (must remain an ancestor of the eventual release):
+Expected index definition, inspected from metadata (table, key order, and partial predicate):
 
-`2bac6b4eda271bc69f2c34f42d6b7592e37fa8cc`
+`ix_lifecycle_records_epoch_locked_plan_state` on `setup_lifecycle_records(runtime_epoch_id, current_state, lifecycle_id) WHERE plan_version_id IS NOT NULL`.
 
-Exact deployment SHA: **PENDING**. It will be the reviewed `main` merge commit that contains this readiness PR, after that merge's push CI succeeds. Do not deploy a moving `main`, a draft-PR head, or a synthetic merge SHA. Review every commit between the anchor and the chosen release.
+A matching name on any other definition is not compatibility. Live-source compatibility is recorded separately from target compatibility on the restored copy. An older source schema, or a schema-26 source that has not received the additive index, can be an expected preflight finding. The target is not ready until the actual-schema copy rehearsal proves migration to schema 26 and this index. Final cutover must verify both again before consumers start.
+
+Epoch and operational lineage tables required on the target are `runtime_epochs`, `runtime_epoch_control`, `runtime_operational_runs`, and `runtime_operational_origins`. Collect and assess do not create an epoch, install an index, or backfill lineage.
+
+Keep these identities distinct:
+
+| Identity | Meaning |
+| --- | --- |
+| Historical functional anchor | `2bac6b4eda271bc69f2c34f42d6b7592e37fa8cc`. Ancestor of the release line. Not approval of every later `main`. |
+| Collector checkout SHA | Git SHA of the diagnostic process. Not the running application. |
+| Running application identity | Process evidence only. Unavailable unless supplied independently. |
+| Proposed release SHA | Operator input for the exact candidate. A 40-hex SHA is not proof of review, CI, or the code that is executing. |
+
+A reported successful deployment does not make missing packet evidence complete. Do not deploy a moving `main`, a draft-PR head, or a synthetic merge SHA. F06 changes need their own review, merge, and release pin. This runbook still does not grant `GO_FOR_RUNTIME_DEPLOYMENT`.
 
 Trigger (all required; none are satisfied by this DEV assignment):
 
@@ -89,7 +107,7 @@ Default SQLite queries are schema/version/column/index metadata and cheap page m
 
 The collector never runs full table `COUNT(*)`, `dbstat`, JSON-history scans, `integrity_check` / `quick_check`, recursive archive inventory, checksumming of the live DB, checkpoint, `VACUUM`, journal-mode changes, cleanup, pruning, schema modification, or `open_initialized_database`.
 
-`inspect_database` (`scripts/sqlite_maintenance.py inspect`) is **not** this preflight. It still calls `open_read_only_database` with the historic `assume_immutable_when_sidecars_absent=True` default and performs table counts, `dbstat`, timestamp MIN/MAX, and outbox aggregations. Do not use it as a bounded live preflight.
+`inspect_database` (`scripts/sqlite_maintenance.py inspect`) is **not** this preflight. Its historical read-only opener (`assume_immutable_when_sidecars_absent=True`) and the backup helper are not automatically safe for a changing WAL database with absent sidecars. Inspect still performs table counts, `dbstat`, timestamp MIN/MAX, and outbox aggregations. Do not use either helper as the bounded live collector.
 
 ## 5. Collector identity vs deployed identity
 
@@ -202,7 +220,11 @@ Every affected physical volume has a planning reserve. Default floor: the greate
 
 Existing allocations are already reflected in measured free space; do not charge them twice. Include all copies that coexist, target/temp volumes, future backups during observation, and recovery headroom. Do not assume compression, half-size storage, or immediate space reclamation.
 
-Budget at least the seven-day observation window plus three days of response runway. Justify `growth_budget_bytes` from the actual baseline and workload. Missing, flat, or inconsistent samples do not establish zero future growth or infinite runway.
+The supplied `growth_budget_bytes` must trace to a timestamped ordinary-workload baseline: workload description, cadence description, observation start and end, and a stated planning horizon. Require at least 24 hours of representative baseline. Existing reliable contemporaneous records may satisfy that window. Require at least ten days of growth runway for this rollout (the seven-day observation trial plus three days of response runway is the minimum horizon, not a shorter substitute).
+
+An idle, failed, missing, or incomparable sample cannot establish zero growth or infinite runway. A positive invented number cannot establish measured capacity. Capacity for the release decision is measured on Runtime. Historical ~81 GiB observations and DEV tests are not that measurement.
+
+Account for the main database, WAL, SHM, logs, every coexisting backup, restore, candidate copy, and archive, migration temporary space, and the declared observation/response growth budget. Already occupied space is in measured free space; do not charge it twice. Incremental concurrent allocations are the new bytes. SQLite freelist pages are not filesystem free space and are not subtracted. Do not subtract cleanup that has not been performed. Do not assume a compression ratio. This repair does not add pruning, `VACUUM`, age-only retention, or a new writer.
 
 Unknown critical terms, missing/contradictory topology, or insufficient free capacity on any required physical volume: `STOP_FOR_CAPACITY_EVIDENCE` (or a named storage prerequisite). New durable writers require their own incremental write/WAL/backup model and a new readiness decision.
 
@@ -210,9 +232,9 @@ Retention for this checkpoint: preserve current evidence and recovery artifacts.
 
 ## 7. Isolated-copy rehearsal (Runtime only; not this DEV assignment)
 
-Use the verified SQLite backup mechanism after checking its source-access assumptions. A raw copy of the active main file alone is not a consistent WAL backup.
+Use a proven quiescent maintenance procedure, or a separately reviewed snapshot method that is compatible with the live journal mode. A raw copy of only the changing main SQLite file is not a consistent WAL backup. Do not delete `-wal` or `-shm` sidecars to make a copy look quiescent. Do not open a changing source with `immutable=1`. Do not restore an older outbox after new public sends.
 
-`create_verified_backup` opens the source with `open_read_only_database` **historic default** (`assume_immutable_when_sidecars_absent=True`). It is not certified for a mutable live source merely by name. Constrain backup to a separately approved, proven-quiescent maintenance window (writers stopped; WAL/SHM absence verified) or STOP for a focused backup prerequisite. This readiness PR does not add a new backup subsystem.
+`create_verified_backup` opens the source with `open_read_only_database` **historic default** (`assume_immutable_when_sidecars_absent=True`). That historical opener is not automatically safe for a changing WAL database with absent sidecars, and it is not certified for a mutable live source merely by name. Constrain backup to a separately approved, proven-quiescent maintenance window (writers stopped; WAL/SHM absence verified) or STOP for a focused backup prerequisite. This readiness repair does not add a new backup subsystem.
 
 Verified backup entry point after quiescence:
 
@@ -222,13 +244,13 @@ $QuiescentDb = "<UNRESOLVED: same verified DB path after process/DB-handle quies
 & $Python scripts\sqlite_maintenance.py backup `
   --database-path $QuiescentDb `
   --archive-directory $Archive `
-  --label rehearsal-pre-v25 `
+  --label rehearsal-pre-schema-26 `
   --dry-run
 
 & $Python scripts\sqlite_maintenance.py backup `
   --database-path $QuiescentDb `
   --archive-directory $Archive `
-  --label rehearsal-pre-v25
+  --label rehearsal-pre-schema-26
 ```
 
 Every successful backup produces a uniquely named `.sqlite` snapshot and adjacent `.sqlite.manifest.json`. Existing snapshots are never overwritten.
@@ -238,7 +260,13 @@ $Snapshot = "<UNRESOLVED: snapshot path from backup report>"
 & $Python scripts\sqlite_maintenance.py backup-verify --snapshot-path $Snapshot
 ```
 
-Restore to a **separate** working path. Rehearse the actual old schema/data to v25 on that restored copy with credentials cleared, network egress blocked, Telegram suppressed, and orders disabled. Record checksums, backup identity, integrity/FK results, counts and bounded representative comparisons, migration/restore duration, peak disk/WAL use, idempotence, failure recovery, and state/outbox/cursor continuity. Large integrity checks belong here, not on the live DB.
+Restore to a **separate** working path. Rehearse the actual source schema on that isolated copy through schema 26, including the additive plan-state index, with credentials cleared, network egress blocked, Telegram suppressed, capture disabled, and orders disabled. File names and `restore_tested=true` are not measured restore evidence. Record source identity, verified snapshot identity, restored-copy path, and observation time separately. Keep declared assertions distinguishable from referenced test results; this tool is not a remote attestation system.
+
+Require positive restore-integrity evidence. Missing or unknown integrity does not pass. A failed integrity check is adverse.
+
+On the restored copy, record preservation of active plans, plan-version binding, progress and cursors, public outbox SENT/UNCERTAIN state, external listener state, and logical scan-payload compatibility. Record measured migration duration, restore duration, and peak allocation, plus the planned downtime budget and recovery budget. Do not acquire those facts with a full live table scan. Large integrity checks belong on the isolated copy, not on the live DB.
+
+The target cannot be declared ready until that rehearsal shows schema 26 and `ix_lifecycle_records_epoch_locked_plan_state` with the expected key order and `WHERE plan_version_id IS NOT NULL`. Final cutover verifies the same facts again before consumers start. Collect and assess do not migrate the copy.
 
 Include file-backed listener offsets, command state, manifests, `latest_scan.json`, `performance_memory.json`, and other mutable external state found during inspection.
 
@@ -252,7 +280,7 @@ Declared from current source (also emitted on every collector report):
 
 | ID | Role | DB / state path | Decoder / notes |
 | --- | --- | --- | --- |
-| scanner_watch_store | writer | `--database-path` (default `scan_runs/candle_craft.db` relative to CWD) | v25 encoder; ordinary default may write `symbol_refs_v1` |
+| scanner_watch_store | writer | `--database-path` (default `scan_runs/candle_craft.db` relative to CWD) | schema-26 encoder; ordinary default may write `symbol_refs_v1` |
 | lifecycle_repository | writer | same scanner DB | lifecycle tables |
 | telegram_lifecycle_outbox | writer | same scanner DB | SENT/UNCERTAIN outbox |
 | symbol_health | writer | same scanner DB | health tables |
@@ -269,17 +297,18 @@ Declared from current source (also emitted on every collector report):
 | evidence_baseline_audit | DEV reader | refuses live Runtime path | not a Runtime preflight |
 | post_restart_funnel_audit | reader | explicit path | immutable/quiescent source mode |
 | external_listener_state | files | manifest/state/audit/latest_scan/performance_memory/watch JSONL | not in SQLite |
+| durable_source_replay | optional separate evidence writer/reader | `SOURCE_REPLAY_EVIDENCE_PATH`; not the scanner database | `SOURCE_REPLAY_CAPTURE_ENABLED`. First rollout requires the switch **disabled**. Unknown is not disabled. Enabled is outside this packet and needs its own capacity, retention, and recovery review |
 | unknown_external_readers | unresolved | UNKNOWN until Runtime inspection | rollout gate |
 
-Promote **all** consumers onto the pinned decoder-capable release together. An old reader against v25/`symbol_refs_v1` data is a failure criterion.
+Promote **all** required consumers onto the pinned decoder-capable schema-26 release together. An old reader against schema 26 or `symbol_refs_v1` data is a failure criterion. Durable source replay stays a separate optional store and stays disabled for this initial cutover.
 
 ## 9. Approved cutover sequence (encode; execute NONE of this here)
 
 1. Pin and verify the approved merged-main release SHA and its successful push CI. Preserve the old code/environment configuration and a sanitized process inventory. Stage the new environment separately. Review the complete accumulated delta and all migration contracts. Require the functional anchor to be an ancestor.
 2. Disable scheduled launches, auto-restarts, and administrative intake that can spawn work. Stop the Telegram listener/command intake. Gracefully stop the scanner/watch process and any separate outbox/writer workers after accounting for in-flight transactions and uncertain sends. Stop remaining readers. Verify process and DB-handle quiescence before any migration or code switch. Do not force-kill a transaction and assume clean completion.
 3. Take and verify the final quiescent pre-cutover snapshot, including separately identified external state. It must cover the drained boundary; an earlier rehearsal snapshot is not the final cutover source.
-4. Restore that snapshot to a separate candidate DB and run the proven v25 migration once under the isolated maintenance process. Validate the candidate and reopen it idempotently. Preserve the original and backup. Do not build a fresh empty runtime DB or selectively discard history.
-5. With every consumer stopped, promote the complete validated candidate through the rehearsed file/path switch and activate the pinned release for **all** consumers. Preserve correct SQLite sidecar relationships; do not hand-delete a WAL or mix files from different snapshots. Verify the explicitly configured DB path for scanner and listener, and all relevant state/manifest paths.
+4. Restore that snapshot to a separate candidate DB and run the proven schema-26 migration, including the additive plan-state index, once under the isolated maintenance process. Validate schema 26 and the exact index definition. Reopen the candidate idempotently. Preserve the original and backup. Do not build a fresh empty runtime DB or selectively discard history.
+5. Before starting consumers, verify schema 26 and `ix_lifecycle_records_epoch_locked_plan_state` again on the candidate that will actually be opened. Then, with every consumer stopped, promote the complete validated candidate through the rehearsed file/path switch and activate the pinned release for **all** required consumers. Keep `SOURCE_REPLAY_CAPTURE_ENABLED` disabled unless a separate review approved capture. Preserve correct SQLite sidecar relationships; do not hand-delete a WAL or mix files from different snapshots. Verify the explicitly configured DB path for scanner and listener, and all relevant state/manifest paths.
 6. Keep public delivery suppressed while performing offline/dry-run smoke validation. Do not run a live-network scan against the production DB merely because its Telegram flag says dry-run. Any bounded shadow scan belongs on an isolated copy with the intended network policy and no public side effects.
 7. Record the deployment manifest and start **one** scanner/watch owner with the approved operational flags and cadence. After its first bounded operational checks pass, start exactly one Telegram listener and the remaining approved readers/workers under the same compatible release. Public sending is restored only as specified in Adam's approved Runtime procedure.
 8. Verify actual process paths, interpreter, code revision, DB schema/path, effective flags, first new run IDs/provenance, normal storage decoding, and delivery ownership.
@@ -308,11 +337,11 @@ Immediately stop the affected runtime activity, preserve evidence, and invoke th
 Recovery cases:
 
 - **Before new operational writes/public side effects:** preserve the failed candidate, restore the coordinated pre-cutover code/data/external-state bundle under the rehearsed procedure, and record the downtime boundary.
-- **After new writes or public side effects:** never blindly replace the active DB with the old snapshot. That would lose new events and may resend messages. Stop sending, preserve the new DB/outbox/external state, reconcile uncertainty, and use a compatible forward repair or separately reviewed recovery.
-- A decoder-capable v25 release with inline-only future encoding may mitigate the encoding path; it does not erase stored references or solve unrelated lifecycle faults.
+- **After new writes or public side effects:** never blindly replace the active DB with the old snapshot, and do not restore an older outbox after new public sends. That would lose new events and may resend messages. Stop sending, preserve the new DB/outbox/external state, reconcile uncertainty, and use a compatible forward repair or separately reviewed recovery.
+- A decoder-capable schema-26 release with inline-only future encoding may mitigate the encoding path; it does not erase stored references or solve unrelated lifecycle faults.
 - `8485f033abad3333269a8f26554abade4bae5ef5` is a **candidate code fallback for removing PR #120's in-memory capture only**, because it is that merge's first parent. Verify its schema, decoder, state compatibility, and tests before listing it as approved. It is not a universal rollback for the whole forensic chain.
 
-No destructive down-migration, mass historical rewrite, outbox reset, blind retry of UNCERTAIN sends, or old-reader restart against v25/reference data.
+No destructive down-migration, mass historical rewrite, outbox reset, blind retry of UNCERTAIN sends, or old-reader restart against schema 26 or `symbol_refs_v1` data.
 
 ## 12. Deployment epoch is not research admission
 
@@ -335,11 +364,11 @@ Reuse; do not treat as Runtime proof:
 
 - Legacy schema without `raw_payload_format` reads as `inline_v1` without migration (`tests/test_storage_single_copy.py`).
 - Mixed `inline_v1` / `symbol_refs_v1` populations reconstruct losslessly; unknown/missing/corrupt formats fail closed.
-- v24→v25 additive migration preserves payload bytes; injected v25 migration failure rolls back; reopen is idempotent.
-- Representative v14 lifecycle/Telegram fixture migrates to current schema preserving economic values, identity/event keys, SENT/UNCERTAIN outbox states, and cursors (`tests/test_storage_database.py`).
-- This readiness suite proves the collector will not initialize/migrate, will not use `immutable=1` on sidecar-absent files, and will not fabricate `GO_FOR_RUNTIME_DEPLOYMENT`.
+- Historical v24→v25 additive migration preserves payload bytes; injected v25 migration failure rolls back; reopen is idempotent. That historical proof is not the schema-26 target rehearsal.
+- Representative v14 lifecycle/Telegram fixture migrates to current schema 26 preserving economic values, identity/event keys, SENT/UNCERTAIN outbox states, and cursors (`tests/test_storage_database.py`).
+- This readiness suite proves the collector will not initialize, migrate, install the plan-state index, or create an epoch. It will not use `immutable=1` on sidecar-absent files, and it will not fabricate `GO_FOR_RUNTIME_DEPLOYMENT`.
 
-A fresh v25 fixture is not proof of the unknown Runtime starting schema. That upgrade must be rehearsed on a verified separately restored copy **on Runtime**.
+A fresh schema-26 fixture is not proof of the unknown Runtime starting schema. That upgrade, including the additive index, must be rehearsed on a verified separately restored copy **on Runtime**. DEV synthetic packets are not Runtime measurements. A reported rollout does not fill this packet.
 
 ## 14. A–W matrix (source-scoped DEV status)
 
