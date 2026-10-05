@@ -33,9 +33,9 @@ from app.storage.database import (
 )
 from app.storage.scan_payloads import INLINE_V1, SUPPORTED_FORMATS, SYMBOL_REFS_V1
 
-TOOL_VERSION: Final[str] = "cci-runtime-checkpoint-readiness-v2"
+TOOL_VERSION: Final[str] = "cci-runtime-checkpoint-readiness-v3"
 TOOL_NAME: Final[str] = "cci-runtime-checkpoint-readiness"
-PACKET_CONTRACT_VERSION: Final[str] = "f06-runtime-release-readiness-v1"
+PACKET_CONTRACT_VERSION: Final[str] = "f06-runtime-release-readiness-v2"
 CHECKPOINT_NAME: Final[str] = "FORENSIC_FOUNDATION_RUNTIME_CHECKPOINT"
 FUNCTIONAL_ANCHOR_SHA: Final[str] = "2bac6b4eda271bc69f2c34f42d6b7592e37fa8cc"
 OPERATIONAL_STATUS: Final[str] = "RUNTIME_CHECKPOINT_NOT_YET_AUTHORIZED"
@@ -50,6 +50,8 @@ PLAN_STATE_INDEX_COLUMNS: Final[tuple[str, ...]] = (
 PLAN_STATE_INDEX_PREDICATE: Final[str] = "plan_version_id is not null"
 BASELINE_MIN_SECONDS: Final[int] = 24 * 60 * 60
 PLANNING_HORIZON_MIN_DAYS: Final[int] = 10
+HORIZON_DAY_SECONDS: Final[int] = 24 * 60 * 60
+GROWTH_UNIT: Final[str] = "bytes"
 EVIDENCE_MAX_AGE_SECONDS: Final[int] = 7 * 24 * 60 * 60
 FINAL_CUTOVER_REVERIFICATION: Final[str] = "required_before_consumers"
 DECLARED_EVIDENCE_CLASSES: Final[frozenset[str]] = frozenset(
@@ -436,6 +438,7 @@ def collect_runtime_checkpoint_preflight(
                     "columns": list(PLAN_STATE_INDEX_COLUMNS),
                     "partial_predicate": PLAN_STATE_INDEX_PREDICATE,
                     "unique": False,
+                    "partial": True,
                 },
                 "epoch_lineage_tables": {
                     name: list(columns) for name, columns in EPOCH_LINEAGE_COLUMNS.items()
@@ -959,28 +962,82 @@ def _quote_ident(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def plan_state_index_matches(spec: Mapping[str, Any]) -> bool:
-    """True only for the current partial plan-state index definition."""
+def classify_supplied_plan_state_index(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify a supplied index spec without installing or repairing it.
 
+    Missing or mistyped fields are incomplete. A well-typed wrong name, table,
+    column order, uniqueness, partial flag, or predicate is a mismatch.
+    A mismatch wins over missing fields so explicit bad identity stays adverse.
+    """
+
+    missing_fields: list[str] = []
+    mismatch_fields: list[str] = []
+    name = spec.get("name")
+    if not isinstance(name, str) or not name.strip():
+        missing_fields.append("name")
+    elif name != PLAN_STATE_INDEX_NAME:
+        mismatch_fields.append("name")
+    table = spec.get("table")
+    if not isinstance(table, str) or not table.strip():
+        missing_fields.append("table")
+    elif table != PLAN_STATE_INDEX_TABLE:
+        mismatch_fields.append("table")
     columns = spec.get("columns")
-    return (
-        spec.get("table") == PLAN_STATE_INDEX_TABLE
-        and isinstance(columns, list)
-        and list(columns) == list(PLAN_STATE_INDEX_COLUMNS)
-        and spec.get("unique") is False
-        and _normalize_predicate(spec.get("partial_predicate")) == PLAN_STATE_INDEX_PREDICATE
-    )
+    if not isinstance(columns, list) or not all(isinstance(item, str) for item in columns):
+        missing_fields.append("columns")
+    elif list(columns) != list(PLAN_STATE_INDEX_COLUMNS):
+        mismatch_fields.append("columns")
+    unique = spec.get("unique")
+    if type(unique) is not bool:
+        missing_fields.append("unique")
+    elif unique is not False:
+        mismatch_fields.append("unique")
+    partial = spec.get("partial")
+    if type(partial) is not bool:
+        missing_fields.append("partial")
+    elif partial is not True:
+        mismatch_fields.append("partial")
+    predicate = spec.get("partial_predicate")
+    if not isinstance(predicate, str) or not predicate.strip():
+        missing_fields.append("partial_predicate")
+    elif _normalize_predicate(predicate) != PLAN_STATE_INDEX_PREDICATE:
+        mismatch_fields.append("partial_predicate")
+    if mismatch_fields:
+        status = "mismatch"
+    elif missing_fields:
+        status = "incomplete"
+    else:
+        status = "matched"
+    return {
+        "status": status,
+        "missing_fields": missing_fields,
+        "mismatch_fields": mismatch_fields,
+    }
 
 
-def _plan_state_fields_present(observed: Mapping[str, Any]) -> bool:
+def plan_state_index_matches(spec: Mapping[str, Any]) -> bool:
+    """True only for the exact partial index named by the locked-plan query."""
+
+    return classify_supplied_plan_state_index(spec)["status"] == "matched"
+
+
+def _absent_plan_state_record(observed: Mapping[str, Any]) -> bool:
+    """An explicit absence finding is not a malformed definition."""
+
+    if observed.get("status") != "absent":
+        return False
+    columns = observed.get("columns")
+    if isinstance(columns, list) and columns:
+        return False
+    table = observed.get("table")
+    if isinstance(table, str) and table.strip():
+        return False
     predicate = observed.get("partial_predicate")
-    return (
-        isinstance(observed.get("table"), str)
-        and isinstance(observed.get("columns"), list)
-        and "partial_predicate" in observed
-        and (predicate is None or isinstance(predicate, str))
-        and type(observed.get("unique")) is bool
-    )
+    if isinstance(predicate, str) and predicate.strip():
+        return False
+    if type(observed.get("unique")) is bool or type(observed.get("partial")) is bool:
+        return False
+    return True
 
 
 def _index_name_set(indexes: Any) -> set[str] | None:
@@ -1005,17 +1062,13 @@ def classify_plan_state_observation(sqlite_section: Mapping[str, Any]) -> str:
     if sqlite_section.get("status") != "measured":
         return "not_inspected"
     observed = sqlite_section.get("plan_state_index")
-    if isinstance(observed, Mapping) and _plan_state_fields_present(observed):
-        return "matched" if plan_state_index_matches(observed) else "mismatch"
-    if isinstance(observed, Mapping) and observed.get("status") == "absent" and not observed.get("columns"):
+    if isinstance(observed, Mapping) and _absent_plan_state_record(observed):
         return "absent"
+    if isinstance(observed, Mapping):
+        return str(classify_supplied_plan_state_index(observed)["status"])
     names = _index_name_set(sqlite_section.get("indexes"))
-    if isinstance(observed, Mapping) and observed.get("status") == "definition_mismatch":
-        return "mismatch"
     if names is not None and PLAN_STATE_INDEX_NAME in names:
         return "unproven"
-    if isinstance(observed, Mapping) and observed.get("status") == "absent":
-        return "absent"
     if names is not None:
         return "absent"
     return "not_inspected"
@@ -1147,7 +1200,7 @@ def _assess_release_identity(
     if operator.get("deployment_reported_successful") is True:
         notes.append("A reported successful deployment does not complete missing packet evidence.")
     origin = operator.get("evidence_origin")
-    if origin not in {"synthetic", "runtime_measured"}:
+    if not isinstance(origin, str) or origin not in {"synthetic", "runtime_measured"}:
         _append_unique(missing, "operator.evidence_origin")
     elif origin == "synthetic":
         notes.append("Synthetic packet facts are not Runtime measurements.")
@@ -1193,7 +1246,7 @@ def _assess_release_identity(
     if ci_class == "referenced_result" and not _nonempty_str(release.get("ci_reference")):
         _append_unique(missing, "release_evidence.ci_reference")
     return {
-        "evidence_origin": origin if origin in {"synthetic", "runtime_measured"} else UNAVAILABLE,
+        "evidence_origin": origin if isinstance(origin, str) and origin in {"synthetic", "runtime_measured"} else UNAVAILABLE,
         "review_evidence_class": review_class or UNAVAILABLE,
         "ci_evidence_class": ci_class or UNAVAILABLE,
         "tool_attested": False,
@@ -1216,21 +1269,51 @@ def _require_same_sha(
         _append_unique(adverse, adverse_code)
 
 
-def _source_epoch_status(sqlite_section: Mapping[str, Any]) -> str:
+def _column_name_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return None
+    return [str(item) for item in value]
+
+
+def _assess_source_epoch_lineage(
+    sqlite_section: Mapping[str, Any],
+    missing: list[str],
+    adverse: list[str],
+) -> str:
     lineage = sqlite_section.get("epoch_lineage")
     if not isinstance(lineage, Mapping):
         return "not_inspected"
     tables = lineage.get("tables")
     if not isinstance(tables, Mapping):
-        return "not_inspected"
+        _append_unique(missing, "source_epoch_lineage.tables")
+        return "malformed"
     saw_absent = False
+    saw_malformed = False
+    saw_mismatch = False
     for name, required in EPOCH_LINEAGE_COLUMNS.items():
-        entry = tables.get(name)
-        if not isinstance(entry, Mapping) or entry.get("present") is not True:
+        if name not in tables:
             saw_absent = True
             continue
-        if list(entry.get("columns") or []) != list(required):
-            return "mismatch"
+        entry = tables.get(name)
+        if not isinstance(entry, Mapping):
+            _append_unique(missing, f"source_epoch_lineage.{name}")
+            saw_malformed = True
+            continue
+        if entry.get("present") is not True:
+            saw_absent = True
+            continue
+        columns = _column_name_list(entry.get("columns"))
+        if columns is None:
+            _append_unique(missing, f"source_epoch_lineage.{name}.columns")
+            saw_malformed = True
+            continue
+        if columns != list(required):
+            _append_unique(adverse, f"source_epoch_lineage_definition_mismatch:{name}")
+            saw_mismatch = True
+    if saw_mismatch:
+        return "mismatch"
+    if saw_malformed:
+        return "malformed"
     if saw_absent:
         return "absent_table"
     return "matched"
@@ -1244,8 +1327,15 @@ def _assess_source_compatibility(
 ) -> dict[str, Any]:
     kind = classify_plan_state_observation(sqlite_section)
     finding = None
-    if kind == "mismatch":
-        _append_unique(adverse, "source_plan_state_index_definition_mismatch")
+    observed_index = sqlite_section.get("plan_state_index")
+    if isinstance(observed_index, Mapping) and not _absent_plan_state_record(observed_index):
+        detail = classify_supplied_plan_state_index(observed_index)
+        for field in detail["missing_fields"]:
+            _append_unique(missing, f"source_plan_state_index.{field}")
+        if detail["status"] == "mismatch":
+            _append_unique(adverse, "source_plan_state_index_definition_mismatch")
+        elif detail["status"] == "incomplete":
+            _append_unique(missing, "source_plan_state_index_definition_incomplete")
     elif kind == "unproven":
         _append_unique(missing, "source_plan_state_index_definition_unproven")
     elif kind == "not_inspected" and sqlite_section.get("status") == "measured":
@@ -1256,10 +1346,8 @@ def _assess_source_compatibility(
             "A missing source plan-state index can be an expected preflight finding. "
             "The target copy is not ready until rehearsal proves schema 26 and the required index."
         )
-    epoch_status = _source_epoch_status(sqlite_section)
-    if epoch_status == "mismatch":
-        _append_unique(adverse, "source_epoch_lineage_definition_mismatch")
-    elif epoch_status == "absent_table":
+    epoch_status = _assess_source_epoch_lineage(sqlite_section, missing, adverse)
+    if epoch_status == "absent_table":
         notes.append("Source epoch/lineage metadata is incomplete; target rehearsal must prove the tables.")
     return {
         "plan_state_index": kind,
@@ -1354,10 +1442,14 @@ def _assess_rehearsal_epoch(
         _append_unique(missing, "target_rehearsal.epoch_lineage_tables")
         return
     for name, required in EPOCH_LINEAGE_COLUMNS.items():
-        got = supplied.get(name)
-        if got is None:
+        if name not in supplied:
             _append_unique(missing, f"target_rehearsal.epoch_lineage_tables.{name}")
-        elif list(got) != list(required):
+            continue
+        columns = _column_name_list(supplied.get(name))
+        if columns is None:
+            _append_unique(missing, f"target_rehearsal.epoch_lineage_tables.{name}")
+            continue
+        if columns != list(required):
             _append_unique(adverse, f"target_rehearsal.epoch_lineage_definition_mismatch:{name}")
 
 
@@ -1429,20 +1521,27 @@ def _assess_target_rehearsal(
         _append_unique(missing, "target_rehearsal.migrated_schema_version")
     index_spec = rehearsal.get("plan_state_index")
     index_status = "unverified"
-    if not isinstance(index_spec, Mapping) or not _plan_state_fields_present(index_spec):
+    if not isinstance(index_spec, Mapping):
         _append_unique(missing, "target_rehearsal.plan_state_index")
-    elif plan_state_index_matches(index_spec):
-        index_status = "matched"
     else:
-        index_status = "mismatch"
-        _append_unique(adverse, "target_rehearsal.plan_state_index_definition_mismatch")
+        detail = classify_supplied_plan_state_index(index_spec)
+        index_status = str(detail["status"])
+        for field in detail["missing_fields"]:
+            _append_unique(missing, f"target_rehearsal.plan_state_index.{field}")
+        if detail["status"] == "mismatch":
+            _append_unique(adverse, "target_rehearsal.plan_state_index_definition_mismatch")
+        elif detail["status"] == "incomplete":
+            _append_unique(missing, "target_rehearsal.plan_state_index")
     _assess_rehearsal_epoch(rehearsal, missing, adverse)
     preservation = _mapping(rehearsal.get("preservation"))
     for key in PRESERVATION_KEYS:
+        if key not in preservation:
+            _append_unique(missing, f"target_rehearsal.preservation:{key}")
+            continue
         value = preservation.get(key)
         if value == "preserved":
             continue
-        if value in {"failed", False}:
+        if value == "failed" or value is False:
             _append_unique(adverse, f"target_rehearsal.preservation_failed:{key}")
         else:
             _append_unique(missing, f"target_rehearsal.preservation:{key}")
@@ -1490,6 +1589,189 @@ def _assess_target_rehearsal(
         "final_cutover_reverification": rehearsal.get("final_cutover_reverification", UNAVAILABLE),
         "tool_attested": False,
     }
+
+
+def derived_growth_budget_bytes(
+    *,
+    observed_delta_bytes: int,
+    observation_seconds: int,
+    horizon_seconds: int,
+    allowance_bytes: int = 0,
+) -> int | None:
+    """Ceiling projection plus a non-negative allowance.
+
+    projected = ceil(observed_delta_bytes * horizon_seconds / observation_seconds)
+    derived = projected + allowance_bytes
+
+    A non-positive delta has no projection. This does not impose a minimum rate.
+    """
+
+    if (
+        type(observed_delta_bytes) is not int
+        or type(observation_seconds) is not int
+        or type(horizon_seconds) is not int
+        or type(allowance_bytes) is not int
+    ):
+        return None
+    if observed_delta_bytes <= 0 or observation_seconds <= 0 or horizon_seconds <= 0 or allowance_bytes < 0:
+        return None
+    projected = (observed_delta_bytes * horizon_seconds + observation_seconds - 1) // observation_seconds
+    return projected + allowance_bytes
+
+
+def _parse_growth_observations(
+    samples: Any,
+    *,
+    started: datetime | None,
+    ended: datetime | None,
+    missing: list[str],
+) -> list[dict[str, Any]] | None:
+    if not isinstance(samples, list):
+        _append_unique(missing, "capacity.workload_baseline.samples")
+        return None
+    parsed: list[dict[str, Any]] = []
+    usable = len(samples) >= 2
+    if not usable:
+        _append_unique(missing, "capacity.workload_baseline.samples")
+    for index, sample in enumerate(samples):
+        prefix = f"capacity.workload_baseline.samples[{index}]"
+        if not isinstance(sample, Mapping):
+            _append_unique(missing, prefix)
+            usable = False
+            continue
+        observed_at = _parse_utc_timestamp(sample.get("observed_at_utc"))
+        if observed_at is None:
+            _append_unique(missing, f"{prefix}.observed_at_utc")
+            usable = False
+        elif started is not None and ended is not None and (observed_at < started or observed_at > ended):
+            _append_unique(missing, f"{prefix}.outside_window")
+            usable = False
+        allocated = sample.get("combined_allocated_bytes")
+        if not _is_non_negative_int(allocated):
+            _append_unique(missing, f"{prefix}.combined_allocated_bytes")
+            usable = False
+        if sample.get("comparable") is not True:
+            _append_unique(missing, f"{prefix}.comparable")
+            usable = False
+        quality = sample.get("quality")
+        if not isinstance(quality, str):
+            _append_unique(missing, f"{prefix}.quality")
+            usable = False
+        elif quality != "representative":
+            _append_unique(missing, f"{prefix}.incomparable")
+            usable = False
+        if observed_at is not None and _is_non_negative_int(allocated):
+            parsed.append({"observed_at": observed_at, "allocated_bytes": int(allocated)})
+    if not usable or len(parsed) < 2:
+        return None
+    parsed.sort(key=lambda item: item["observed_at"])
+    span = int((parsed[-1]["observed_at"] - parsed[0]["observed_at"]).total_seconds())
+    if span < BASELINE_MIN_SECONDS:
+        _append_unique(missing, "capacity.workload_baseline.sample_coverage_below_24h")
+        return None
+    delta = int(parsed[-1]["allocated_bytes"]) - int(parsed[0]["allocated_bytes"])
+    if delta < 0:
+        _append_unique(missing, "capacity.workload_baseline.shrinking_observation")
+        return None
+    if delta == 0:
+        _append_unique(missing, "capacity.workload_baseline.flat_observation")
+        return None
+    return parsed
+
+
+def _derivation_int(derivation: Mapping[str, Any], key: str, missing: list[str], *, allow_zero: bool) -> int | None:
+    value = derivation.get(key)
+    if allow_zero:
+        ok = _is_non_negative_int(value)
+    else:
+        ok = _is_positive_int(value)
+    if not ok:
+        _append_unique(missing, f"capacity.growth_derivation.{key}")
+        return None
+    return int(value)
+
+
+def _assess_growth_derivation(
+    baseline: Mapping[str, Any],
+    capacity: Mapping[str, Any],
+    *,
+    observations: list[dict[str, Any]] | None,
+    horizon_days: int | None,
+    missing: list[str],
+    adverse: list[str],
+) -> dict[str, Any]:
+    derivation = baseline.get("growth_derivation")
+    if not isinstance(derivation, Mapping):
+        _append_unique(missing, "capacity.growth_derivation")
+        return {"tool_attested": False, "derived_budget_bytes": UNAVAILABLE, "evidence_class": UNAVAILABLE}
+    evidence_class = _evidence_class(
+        derivation.get("evidence_class"),
+        "capacity.growth_derivation.evidence_class",
+        missing,
+        adverse,
+    )
+    if evidence_class == "referenced_result" and not _nonempty_str(derivation.get("evidence_reference")):
+        _append_unique(missing, "capacity.growth_derivation.evidence_reference")
+    if derivation.get("unit") != GROWTH_UNIT:
+        _append_unique(missing, "capacity.growth_derivation.unit")
+    observation_count = _derivation_int(derivation, "observation_count", missing, allow_zero=False)
+    earliest = _derivation_int(derivation, "earliest_allocated_bytes", missing, allow_zero=True)
+    latest = _derivation_int(derivation, "latest_allocated_bytes", missing, allow_zero=True)
+    delta = _derivation_int(derivation, "observed_delta_bytes", missing, allow_zero=False)
+    observation_seconds = _derivation_int(derivation, "observation_seconds", missing, allow_zero=False)
+    horizon_seconds = _derivation_int(derivation, "horizon_seconds", missing, allow_zero=False)
+    projected = _derivation_int(derivation, "projected_bytes", missing, allow_zero=False)
+    allowance = _derivation_int(derivation, "allowance_bytes", missing, allow_zero=True)
+    derived = _derivation_int(derivation, "derived_budget_bytes", missing, allow_zero=False)
+    summary = {
+        "tool_attested": False,
+        "derived_budget_bytes": derived if derived is not None else UNAVAILABLE,
+        "evidence_class": evidence_class or UNAVAILABLE,
+    }
+    if observations is None:
+        return summary
+    expected_count = len(observations)
+    expected_earliest = int(observations[0]["allocated_bytes"])
+    expected_latest = int(observations[-1]["allocated_bytes"])
+    expected_delta = expected_latest - expected_earliest
+    expected_seconds = int((observations[-1]["observed_at"] - observations[0]["observed_at"]).total_seconds())
+    contract_horizon = (
+        horizon_days * HORIZON_DAY_SECONDS
+        if horizon_days is not None and horizon_days >= PLANNING_HORIZON_MIN_DAYS
+        else None
+    )
+    contradictory = False
+    if observation_count is not None and observation_count != expected_count:
+        contradictory = True
+    if earliest is not None and earliest != expected_earliest:
+        contradictory = True
+    if latest is not None and latest != expected_latest:
+        contradictory = True
+    if delta is not None and delta != expected_delta:
+        contradictory = True
+    if observation_seconds is not None and observation_seconds != expected_seconds:
+        contradictory = True
+    if horizon_seconds is not None and contract_horizon is not None and horizon_seconds != contract_horizon:
+        contradictory = True
+    expected_derived = None
+    if contract_horizon is not None and allowance is not None:
+        expected_derived = derived_growth_budget_bytes(
+            observed_delta_bytes=expected_delta,
+            observation_seconds=expected_seconds,
+            horizon_seconds=contract_horizon,
+            allowance_bytes=allowance,
+        )
+    if expected_derived is not None and allowance is not None:
+        if projected is not None and projected != expected_derived - allowance:
+            contradictory = True
+        if derived is not None and derived != expected_derived:
+            contradictory = True
+    if contradictory:
+        _append_unique(adverse, "contradictory_growth_derivation")
+    budget = capacity.get("growth_budget_bytes")
+    if expected_derived is not None and _is_positive_int(budget) and int(budget) < expected_derived:
+        _append_unique(adverse, "growth_budget_below_derived_requirement")
+    return summary
 
 
 def _assess_growth_traceability(
@@ -1566,24 +1848,29 @@ def _assess_growth_traceability(
     ):
         _append_unique(adverse, "contradictory_baseline_duration")
     horizon = baseline.get("planning_horizon_days")
-    if type(horizon) is not int or horizon < PLANNING_HORIZON_MIN_DAYS:
+    horizon_days = horizon if type(horizon) is int and horizon >= PLANNING_HORIZON_MIN_DAYS else None
+    if horizon_days is None:
         _append_unique(missing, "capacity.planning_horizon_days")
-    samples = baseline.get("samples")
-    if samples is not None:
-        if not isinstance(samples, list) or not samples:
-            _append_unique(missing, "capacity.workload_baseline.samples")
-        else:
-            for index, sample in enumerate(samples):
-                if not isinstance(sample, Mapping):
-                    _append_unique(missing, f"capacity.workload_baseline.samples[{index}]")
-                    continue
-                quality = sample.get("quality")
-                if sample.get("comparable") is False or quality in {"idle", "failed", "missing", "incomparable"}:
-                    _append_unique(missing, f"capacity.workload_baseline.samples[{index}].incomparable")
+    observations = _parse_growth_observations(
+        baseline.get("samples"),
+        started=started,
+        ended=ended,
+        missing=missing,
+    )
+    derivation = _assess_growth_derivation(
+        baseline,
+        capacity,
+        observations=observations,
+        horizon_days=horizon_days,
+        missing=missing,
+        adverse=adverse,
+    )
     return {
         "status": status if isinstance(status, str) else UNAVAILABLE,
         "observation_duration_seconds": duration if duration is not None else UNAVAILABLE,
         "planning_horizon_days": horizon if type(horizon) is int else UNAVAILABLE,
+        "derived_budget_bytes": derivation["derived_budget_bytes"],
+        "growth_evidence_class": derivation["evidence_class"],
         "tool_attested": False,
     }
 
@@ -2704,6 +2991,8 @@ __all__ = [
     "PLAN_STATE_INDEX_NAME",
     "PLAN_STATE_INDEX_PREDICATE",
     "PLAN_STATE_INDEX_TABLE",
+    "GROWTH_UNIT",
+    "HORIZON_DAY_SECONDS",
     "PLANNING_HORIZON_MIN_DAYS",
     "QUERY_DEADLINE_MS",
     "ReadinessError",
@@ -2715,6 +3004,8 @@ __all__ = [
     "assess_runtime_checkpoint_evidence",
     "assert_sql_is_read_only",
     "classify_plan_state_observation",
+    "classify_supplied_plan_state_index",
+    "derived_growth_budget_bytes",
     "classify_windows_local_device",
     "collect_filesystem_observation",
     "collect_runtime_checkpoint_preflight",

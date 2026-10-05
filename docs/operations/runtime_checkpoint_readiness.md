@@ -23,11 +23,17 @@ Accepted foundation for the next Runtime release packet, as merged on `main`:
 
 Application schema for this release packet is **26**. Schema 26 does not by itself install `ix_lifecycle_records_epoch_locked_plan_state`. `open_operational_database` does not create that index. An existing schema-26 file needs a controlled `migrate_existing_database` (or another explicit `initialize_database`) on the restored copy. `CREATE INDEX IF NOT EXISTS` does not repair a same-named index with a different definition and does not rewrite historical rows.
 
-Expected index definition, inspected from metadata (table, key order, and partial predicate):
+Expected index definition, inspected from metadata. The locked-plan query uses `INDEXED BY` this name, so another name is not a substitute:
 
-`ix_lifecycle_records_epoch_locked_plan_state` on `setup_lifecycle_records(runtime_epoch_id, current_state, lifecycle_id) WHERE plan_version_id IS NOT NULL`.
+```sql
+CREATE INDEX IF NOT EXISTS ix_lifecycle_records_epoch_locked_plan_state
+ON setup_lifecycle_records(runtime_epoch_id, current_state, lifecycle_id)
+WHERE plan_version_id IS NOT NULL;
+```
 
-A matching name on any other definition is not compatibility. Live-source compatibility is recorded separately from target compatibility on the restored copy. An older source schema, or a schema-26 source that has not received the additive index, can be an expected preflight finding. The target is not ready until the actual-schema copy rehearsal proves migration to schema 26 and this index. Final cutover must verify both again before consumers start.
+Supplied source metadata and the target rehearsal must both carry that exact name, table `setup_lifecycle_records`, column order `runtime_epoch_id`, `current_state`, `lifecycle_id`, `unique` false, and `partial` true. The predicate normalizes to `plan_version_id is not null`. A missing or mistyped name, table, column list, uniqueness, partial flag, or predicate is incomplete. A well-typed wrong name, table, column order, `unique` true, `partial` false, or different predicate is adverse. A name-only inventory entry does not prove the definition. An explicit absence on an older source, with a matching target rehearsal, stays a preflight finding.
+
+Live-source compatibility is recorded separately from target compatibility on the restored copy. An older source schema, or a schema-26 source that has not received the additive index, can be an expected preflight finding. The target is not ready until the actual-schema copy rehearsal proves migration to schema 26 and this index. Final cutover must verify both again before consumers start.
 
 Epoch and operational lineage tables required on the target are `runtime_epochs`, `runtime_epoch_control`, `runtime_operational_runs`, and `runtime_operational_origins`. Collect and assess do not create an epoch, install an index, or backfill lineage.
 
@@ -220,9 +226,19 @@ Every affected physical volume has a planning reserve. Default floor: the greate
 
 Existing allocations are already reflected in measured free space; do not charge them twice. Include all copies that coexist, target/temp volumes, future backups during observation, and recovery headroom. Do not assume compression, half-size storage, or immediate space reclamation.
 
-The supplied `growth_budget_bytes` must trace to a timestamped ordinary-workload baseline: workload description, cadence description, observation start and end, and a stated planning horizon. Require at least 24 hours of representative baseline. Existing reliable contemporaneous records may satisfy that window. Require at least ten days of growth runway for this rollout (the seven-day observation trial plus three days of response runway is the minimum horizon, not a shorter substitute).
+The supplied `growth_budget_bytes` must trace to a timestamped ordinary-workload baseline: workload description, cadence description, observation start and end, and a stated planning horizon. Require at least 24 hours of representative baseline and at least two comparable samples inside that window. Existing reliable contemporaneous records may satisfy that window. Require at least ten days of growth runway for this rollout (the seven-day observation trial plus three days of response runway is the minimum horizon, not a shorter substitute).
 
-An idle, failed, missing, or incomparable sample cannot establish zero growth or infinite runway. A positive invented number cannot establish measured capacity. Capacity for the release decision is measured on Runtime. Historical ~81 GiB observations and DEV tests are not that measurement.
+`workload_baseline.samples` entries need `observed_at_utc`, non-negative integer `combined_allocated_bytes`, `comparable` true, and `quality` `"representative"`. `workload_baseline.growth_derivation` records the arithmetic in `bytes`: `observation_count`, `earliest_allocated_bytes`, `latest_allocated_bytes`, `observed_delta_bytes`, `observation_seconds`, `horizon_seconds` (`planning_horizon_days` times 86400), `projected_bytes`, non-negative `allowance_bytes`, and `derived_budget_bytes`. Evidence class is `declared_assertion` or `referenced_result`. A referenced result also needs `evidence_reference` and the same numbers. A path alone is not a derivation. `tool_attested` stays false for both classes.
+
+Projection uses integer ceiling and does not invent a minimum growth rate:
+
+`projected_bytes = ceil(observed_delta_bytes * horizon_seconds / observation_seconds)`
+
+`derived_budget_bytes = projected_bytes + allowance_bytes`
+
+The ceiling is `(delta * horizon_seconds + observation_seconds - 1) // observation_seconds` when delta, observation, and horizon are positive and allowance is non-negative. `growth_budget_bytes` must be greater than or equal to that derived budget. A smaller positive budget is adverse (`growth_budget_below_derived_requirement`). Well-typed arithmetic that disagrees with the samples or the horizon is adverse (`contradictory_growth_derivation`). Missing samples, a missing derivation, or non-integer fields stay incomplete. One observed byte is a valid delta: over 86400 seconds and a 10-day horizon it projects to 10 bytes, so a budget of 10 meets the growth check and a budget of 1 does not.
+
+An idle, failed, missing, incomparable, flat, or shrinking sample cannot establish zero growth or infinite runway. A positive invented number cannot establish measured capacity. Capacity for the release decision is measured on Runtime. Historical ~81 GiB observations and DEV tests are not that measurement. Malformed nested values (a list where a string is required, an integer where a column list is required, an object where preservation status is required) stay field-level incomplete or adverse. They do not raise out of assess, and an adverse fact elsewhere still wins.
 
 Account for the main database, WAL, SHM, logs, every coexisting backup, restore, candidate copy, and archive, migration temporary space, and the declared observation/response growth budget. Already occupied space is in measured free space; do not charge it twice. Incremental concurrent allocations are the new bytes. SQLite freelist pages are not filesystem free space and are not subtracted. Do not subtract cleanup that has not been performed. Do not assume a compression ratio. This repair does not add pruning, `VACUUM`, age-only retention, or a new writer.
 

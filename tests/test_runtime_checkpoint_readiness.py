@@ -109,7 +109,62 @@ def _gib(n: int) -> int:
     return n * GIB
 
 
+_BASELINE_SPAN_SECONDS = 165600
+_BASELINE_EARLIEST_BYTES = 8 * GIB
+_BASELINE_DELTA_BYTES = 165600
+_BASELINE_HORIZON_SECONDS = 10 * 24 * 60 * 60
+_BASELINE_PROJECTED_BYTES = 864000
+_BASELINE_DERIVED_BYTES = 864000
+
+
+def _growth_sample(observed_at: str, allocated_bytes: int, *, quality: str = "representative") -> dict[str, Any]:
+    return {
+        "observed_at_utc": observed_at,
+        "combined_allocated_bytes": allocated_bytes,
+        "comparable": True,
+        "quality": quality,
+    }
+
+
+def _growth_derivation(**overrides: Any) -> dict[str, Any]:
+    derivation = {
+        "evidence_class": "declared_assertion",
+        "unit": "bytes",
+        "observation_count": 2,
+        "earliest_allocated_bytes": _BASELINE_EARLIEST_BYTES,
+        "latest_allocated_bytes": _BASELINE_EARLIEST_BYTES + _BASELINE_DELTA_BYTES,
+        "observed_delta_bytes": _BASELINE_DELTA_BYTES,
+        "observation_seconds": _BASELINE_SPAN_SECONDS,
+        "horizon_seconds": _BASELINE_HORIZON_SECONDS,
+        "projected_bytes": _BASELINE_PROJECTED_BYTES,
+        "allowance_bytes": 0,
+        "derived_budget_bytes": _BASELINE_DERIVED_BYTES,
+    }
+    derivation.update(overrides)
+    return derivation
+
+
 def _workload_baseline() -> dict[str, Any]:
+    return {
+        "status": "representative",
+        "workload_description": "ordinary scanner cadence on a synthetic packet",
+        "cadence_description": "configured scan interval; the historical five-minute value is not assumed",
+        "observation_started_utc": BASELINE_START,
+        "observation_ended_utc": BASELINE_END,
+        "planning_horizon_days": 10,
+        "comparable": True,
+        "source_identity": SOURCE_ID,
+        "samples": [
+            _growth_sample(BASELINE_START, _BASELINE_EARLIEST_BYTES),
+            _growth_sample(BASELINE_END, _BASELINE_EARLIEST_BYTES + _BASELINE_DELTA_BYTES),
+        ],
+        "growth_derivation": _growth_derivation(),
+    }
+
+
+def _label_only_baseline() -> dict[str, Any]:
+    """The rejected published shape: descriptions and a horizon, no quantitative trace."""
+
     return {
         "status": "representative",
         "workload_description": "ordinary scanner cadence on a synthetic packet",
@@ -1018,6 +1073,15 @@ def test_complete_packet_is_reviewable_but_not_authorized(tmp_path: Path) -> Non
     assert assessment["go_for_runtime_deployment"] is False
     assert assessment["operational_status"] == "RUNTIME_CHECKPOINT_NOT_YET_AUTHORIZED"
     assert assessment["release"]["functional_anchor_sha"] == ANCHOR
+    assert assessment["release"]["tool_attested"] is False
+    assert collector["sqlite"]["plan_state_index"]["status"] == "matched"
+    assert collector["sqlite"]["plan_state_index"]["name"] == readiness.PLAN_STATE_INDEX_NAME
+    assert collector["sqlite"]["plan_state_index"]["partial"] is True
+    assert collector["sqlite"]["plan_state_index"]["unique"] is False
+    assert assessment["source_compatibility"]["plan_state_index"] == "matched"
+    assert assessment["target_rehearsal"]["plan_state_index"] == "matched"
+    assert assessment["growth_trace"]["derived_budget_bytes"] == _BASELINE_DERIVED_BYTES
+    assert assessment["growth_trace"]["tool_attested"] is False
 
 
 def test_module_does_not_import_settings_telegram_or_writable_constructors() -> None:
@@ -1039,8 +1103,8 @@ def test_inspect_database_still_uses_historic_immutable_default() -> None:
 
 def test_schema_version_and_decoder_inventory_remain_current() -> None:
     assert SCHEMA_VERSION == 26
-    assert readiness.TOOL_VERSION == "cci-runtime-checkpoint-readiness-v2"
-    assert readiness.PACKET_CONTRACT_VERSION == "f06-runtime-release-readiness-v1"
+    assert readiness.TOOL_VERSION == "cci-runtime-checkpoint-readiness-v3"
+    assert readiness.PACKET_CONTRACT_VERSION == "f06-runtime-release-readiness-v2"
     assert set(readiness.DECODER_COMPATIBILITY_INVENTORY["supported_formats"]) == set(SUPPORTED_FORMATS)
     assert readiness.FUNCTIONAL_ANCHOR_SHA == ANCHOR
     assert readiness.PLAN_STATE_INDEX_COLUMNS == (
@@ -1401,6 +1465,343 @@ def test_collect_does_not_install_or_repair_plan_state_index(tmp_path: Path) -> 
     assert assessment["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
     assert assessment["evidence_origin"] == "synthetic"
     assert assessment["go_for_runtime_deployment"] is False
+
+
+def test_plan_state_index_identity_and_partial_flag_fail_closed() -> None:
+    reviewable = readiness.assess_runtime_checkpoint_evidence(_complete_packet(_measured_collector(SCHEMA_VERSION)))
+    assert reviewable["overall_disposition"] == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    assert reviewable["source_compatibility"]["finding"] == "source_plan_state_index_absent"
+
+    def target_case(mutation: str) -> dict[str, Any]:
+        packet = _complete_packet(_measured_collector(SCHEMA_VERSION))
+        index = packet["operator"]["target_rehearsal"]["plan_state_index"]
+        if mutation == "wrong_name":
+            index["name"] = "ix_unrelated_but_same_columns"
+        elif mutation == "missing_name":
+            index.pop("name")
+        elif mutation == "partial_false":
+            index["partial"] = False
+        elif mutation == "partial_missing":
+            index.pop("partial")
+        elif mutation == "wrong_table":
+            index["table"] = "scan_runs"
+        elif mutation == "wrong_order":
+            index["columns"] = ["current_state", "runtime_epoch_id", "lifecycle_id"]
+        elif mutation == "wrong_predicate":
+            index["partial_predicate"] = "1 = 1"
+        elif mutation == "unique_true":
+            index["unique"] = True
+        return readiness.assess_runtime_checkpoint_evidence(packet)
+
+    for mutation in ("wrong_name", "partial_false", "wrong_table", "wrong_order", "wrong_predicate", "unique_true"):
+        adverse = target_case(mutation)
+        assert adverse["overall_disposition"] == "ADVERSE_MEASURED_RESULT", mutation
+        assert "target_rehearsal.plan_state_index_definition_mismatch" in adverse["adverse_results"]
+        assert adverse["go_for_runtime_deployment"] is False
+
+    for mutation in ("missing_name", "partial_missing"):
+        incomplete = target_case(mutation)
+        assert incomplete["overall_disposition"] == "INCOMPLETE_PREREQUISITES", mutation
+        assert "target_rehearsal.plan_state_index_definition_mismatch" not in incomplete["adverse_results"]
+        assert incomplete["go_for_runtime_deployment"] is False
+
+    missing_name = target_case("missing_name")
+    assert "target_rehearsal.plan_state_index.name" in missing_name["missing_prerequisites"]
+    partial_missing = target_case("partial_missing")
+    assert "target_rehearsal.plan_state_index.partial" in partial_missing["missing_prerequisites"]
+
+    source_wrong = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    source_wrong["collector_report"]["sqlite"]["plan_state_index"] = _matching_plan_state_index()
+    source_wrong["collector_report"]["sqlite"]["plan_state_index"]["name"] = "ix_other"
+    source_result = readiness.assess_runtime_checkpoint_evidence(source_wrong)
+    assert source_result["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert "source_plan_state_index_definition_mismatch" in source_result["adverse_results"]
+
+    source_partial = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    source_partial["collector_report"]["sqlite"]["plan_state_index"] = _matching_plan_state_index()
+    source_partial["collector_report"]["sqlite"]["plan_state_index"].pop("partial")
+    source_partial_result = readiness.assess_runtime_checkpoint_evidence(source_partial)
+    assert source_partial_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "source_plan_state_index.partial" in source_partial_result["missing_prerequisites"]
+    assert "source_plan_state_index_definition_incomplete" in source_partial_result["missing_prerequisites"]
+
+
+def test_growth_budget_requires_a_quantitative_trace() -> None:
+    positive = readiness.assess_runtime_checkpoint_evidence(_complete_packet(_measured_collector(SCHEMA_VERSION)))
+    assert positive["overall_disposition"] == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    assert positive["growth_trace"]["tool_attested"] is False
+    assert positive["growth_trace"]["growth_evidence_class"] == "declared_assertion"
+    assert readiness.derived_growth_budget_bytes(
+        observed_delta_bytes=_BASELINE_DELTA_BYTES,
+        observation_seconds=_BASELINE_SPAN_SECONDS,
+        horizon_seconds=_BASELINE_HORIZON_SECONDS,
+        allowance_bytes=0,
+    ) == _BASELINE_DERIVED_BYTES
+    assert (
+        readiness.derived_growth_budget_bytes(
+            observed_delta_bytes=1,
+            observation_seconds=86400,
+            horizon_seconds=864000,
+            allowance_bytes=0,
+        )
+        == 10
+    )
+    assert (
+        readiness.derived_growth_budget_bytes(
+            observed_delta_bytes=0,
+            observation_seconds=86400,
+            horizon_seconds=864000,
+        )
+        is None
+    )
+
+    old_shape = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    old_shape["operator"]["capacity"]["workload_baseline"] = _label_only_baseline()
+    old_shape["operator"]["capacity"]["growth_budget_bytes"] = 1
+    old_shape["operator"]["capacity"]["workload_baseline"]["planning_horizon_days"] = 365
+    unlabeled = readiness.assess_runtime_checkpoint_evidence(old_shape)
+    assert unlabeled["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "capacity.workload_baseline.samples" in unlabeled["missing_prerequisites"]
+    assert "capacity.growth_derivation" in unlabeled["missing_prerequisites"]
+    assert unlabeled["go_for_runtime_deployment"] is False
+
+    labels = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    labels["operator"]["capacity"]["workload_baseline"]["samples"] = [
+        {"quality": "representative", "comparable": True},
+        {"quality": "representative", "comparable": True},
+    ]
+    labels_result = readiness.assess_runtime_checkpoint_evidence(labels)
+    assert labels_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "capacity.workload_baseline.samples[0].combined_allocated_bytes" in labels_result["missing_prerequisites"]
+    assert "contradictory_growth_derivation" not in labels_result["adverse_results"]
+
+    missing_derivation = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    missing_derivation["operator"]["capacity"]["workload_baseline"].pop("growth_derivation")
+    missing_derivation_result = readiness.assess_runtime_checkpoint_evidence(missing_derivation)
+    assert missing_derivation_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "capacity.growth_derivation" in missing_derivation_result["missing_prerequisites"]
+
+    referenced = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    referenced["operator"]["capacity"]["workload_baseline"]["growth_derivation"] = _growth_derivation(
+        evidence_class="referenced_result",
+        evidence_reference="synthetic-evidence:/growth-summary.json",
+    )
+    referenced_result = readiness.assess_runtime_checkpoint_evidence(referenced)
+    assert referenced_result["overall_disposition"] == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    assert referenced_result["growth_trace"]["growth_evidence_class"] == "referenced_result"
+    assert referenced_result["growth_trace"]["tool_attested"] is False
+
+    bare_reference = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    bare_reference["operator"]["capacity"]["workload_baseline"]["growth_derivation"] = {
+        "evidence_class": "referenced_result",
+        "evidence_reference": "synthetic-evidence:/growth-summary.json",
+        "unit": "bytes",
+    }
+    bare_result = readiness.assess_runtime_checkpoint_evidence(bare_reference)
+    assert bare_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "capacity.growth_derivation.observed_delta_bytes" in bare_result["missing_prerequisites"]
+
+    below = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    below["operator"]["capacity"]["growth_budget_bytes"] = _BASELINE_DERIVED_BYTES - 1
+    below_result = readiness.assess_runtime_checkpoint_evidence(below)
+    assert below_result["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert "growth_budget_below_derived_requirement" in below_result["adverse_results"]
+    assert below_result["go_for_runtime_deployment"] is False
+
+    equal_budget = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    equal_budget["operator"]["capacity"]["growth_budget_bytes"] = _BASELINE_DERIVED_BYTES
+    assert (
+        readiness.assess_runtime_checkpoint_evidence(equal_budget)["overall_disposition"]
+        == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    )
+
+    contradictory = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    contradictory["operator"]["capacity"]["workload_baseline"]["growth_derivation"]["projected_bytes"] = 1
+    contradictory_result = readiness.assess_runtime_checkpoint_evidence(contradictory)
+    assert contradictory_result["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert "contradictory_growth_derivation" in contradictory_result["adverse_results"]
+
+    year = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    year["operator"]["capacity"]["growth_budget_bytes"] = 1
+    year["operator"]["capacity"]["workload_baseline"]["planning_horizon_days"] = 365
+    year_result = readiness.assess_runtime_checkpoint_evidence(year)
+    assert year_result["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert "contradictory_growth_derivation" in year_result["adverse_results"]
+    assert "growth_budget_below_derived_requirement" in year_result["adverse_results"]
+
+    one_byte = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    baseline = one_byte["operator"]["capacity"]["workload_baseline"]
+    baseline["observation_started_utc"] = "2026-10-04T06:00:00Z"
+    baseline["observation_ended_utc"] = "2026-10-05T06:00:00Z"
+    baseline["observation_duration_seconds"] = 86400
+    baseline["samples"] = [
+        _growth_sample("2026-10-04T06:00:00Z", 1000),
+        _growth_sample("2026-10-05T06:00:00Z", 1001),
+    ]
+    baseline["growth_derivation"] = _growth_derivation(
+        earliest_allocated_bytes=1000,
+        latest_allocated_bytes=1001,
+        observed_delta_bytes=1,
+        observation_seconds=86400,
+        projected_bytes=10,
+        derived_budget_bytes=10,
+    )
+    one_byte["operator"]["capacity"]["growth_budget_bytes"] = 10
+    one_byte_result = readiness.assess_runtime_checkpoint_evidence(one_byte)
+    assert one_byte_result["overall_disposition"] == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    one_byte["operator"]["capacity"]["growth_budget_bytes"] = 9
+    one_byte_short = readiness.assess_runtime_checkpoint_evidence(one_byte)
+    assert one_byte_short["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert "growth_budget_below_derived_requirement" in one_byte_short["adverse_results"]
+
+    shrinking = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    shrinking["operator"]["capacity"]["workload_baseline"]["samples"] = [
+        _growth_sample(BASELINE_START, _BASELINE_EARLIEST_BYTES + 10),
+        _growth_sample(BASELINE_END, _BASELINE_EARLIEST_BYTES),
+    ]
+    shrinking_result = readiness.assess_runtime_checkpoint_evidence(shrinking)
+    assert shrinking_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "capacity.workload_baseline.shrinking_observation" in shrinking_result["missing_prerequisites"]
+    assert "contradictory_growth_derivation" not in shrinking_result["adverse_results"]
+
+    flat = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    flat["operator"]["capacity"]["workload_baseline"]["samples"] = [
+        _growth_sample(BASELINE_START, _BASELINE_EARLIEST_BYTES),
+        _growth_sample(BASELINE_END, _BASELINE_EARLIEST_BYTES),
+    ]
+    flat_result = readiness.assess_runtime_checkpoint_evidence(flat)
+    assert flat_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "capacity.workload_baseline.flat_observation" in flat_result["missing_prerequisites"]
+
+    bad_timestamp = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    bad_timestamp["operator"]["capacity"]["workload_baseline"]["samples"][1]["observed_at_utc"] = "not-a-timestamp"
+    bad_time_result = readiness.assess_runtime_checkpoint_evidence(bad_timestamp)
+    assert bad_time_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "capacity.workload_baseline.samples[1].observed_at_utc" in bad_time_result["missing_prerequisites"]
+
+    bad_number = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    bad_number["operator"]["capacity"]["workload_baseline"]["samples"][0]["combined_allocated_bytes"] = 1.5
+    bad_number["operator"]["capacity"]["workload_baseline"]["growth_derivation"]["horizon_seconds"] = "864000"
+    bad_number_result = readiness.assess_runtime_checkpoint_evidence(bad_number)
+    assert bad_number_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "capacity.workload_baseline.samples[0].combined_allocated_bytes" in bad_number_result["missing_prerequisites"]
+    assert "capacity.growth_derivation.horizon_seconds" in bad_number_result["missing_prerequisites"]
+    assert "contradictory_growth_derivation" not in bad_number_result["adverse_results"]
+
+    stale = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    stale_baseline = stale["operator"]["capacity"]["workload_baseline"]
+    stale_baseline["observation_started_utc"] = "2026-09-18T00:00:00Z"
+    stale_baseline["observation_ended_utc"] = "2026-09-20T00:00:00Z"
+    stale_baseline["observation_duration_seconds"] = 172800
+    stale_baseline["samples"] = [
+        _growth_sample("2026-09-18T00:00:00Z", 1000),
+        _growth_sample("2026-09-20T00:00:00Z", 1000 + 172800),
+    ]
+    stale_baseline["growth_derivation"] = _growth_derivation(
+        earliest_allocated_bytes=1000,
+        latest_allocated_bytes=1000 + 172800,
+        observed_delta_bytes=172800,
+        observation_seconds=172800,
+    )
+    stale_result = readiness.assess_runtime_checkpoint_evidence(stale)
+    assert stale_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "stale_evidence:capacity.workload_baseline.observation_ended_utc" in stale_result["missing_prerequisites"]
+
+
+def test_malformed_nested_evidence_stays_structured() -> None:
+    table = next(iter(readiness.EPOCH_LINEAGE_COLUMNS))
+
+    origin = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    origin["operator"]["evidence_origin"] = []
+    origin_result = readiness.assess_runtime_checkpoint_evidence(origin)
+    assert origin_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "operator.evidence_origin" in origin_result["missing_prerequisites"]
+    assert origin_result["evidence_origin"] == readiness.UNAVAILABLE
+    assert origin_result["go_for_runtime_deployment"] is False
+    assert "should-not-leak" not in json.dumps(origin_result)
+
+    source_columns = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    tables = {
+        name: {"present": True, "columns": list(columns)}
+        for name, columns in readiness.EPOCH_LINEAGE_COLUMNS.items()
+    }
+    tables[table]["columns"] = 1
+    source_columns["collector_report"]["sqlite"]["epoch_lineage"] = {"tables": tables}
+    source_result = readiness.assess_runtime_checkpoint_evidence(source_columns)
+    assert source_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert f"source_epoch_lineage.{table}.columns" in source_result["missing_prerequisites"]
+
+    wrong_columns = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    wrong_tables = {
+        name: {"present": True, "columns": list(columns)}
+        for name, columns in readiness.EPOCH_LINEAGE_COLUMNS.items()
+    }
+    wrong_tables[table]["columns"] = ["not_a_lineage_column"]
+    wrong_columns["collector_report"]["sqlite"]["epoch_lineage"] = {"tables": wrong_tables}
+    wrong_source = readiness.assess_runtime_checkpoint_evidence(wrong_columns)
+    assert wrong_source["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert f"source_epoch_lineage_definition_mismatch:{table}" in wrong_source["adverse_results"]
+
+    both = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    both["operator"]["evidence_origin"] = []
+    both["operator"]["source_replay_capture"]["enabled"] = True
+    both_result = readiness.assess_runtime_checkpoint_evidence(both)
+    assert both_result["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert "operator.evidence_origin" in both_result["missing_prerequisites"]
+    assert "source_replay_capture_enabled_outside_initial_cutover_contract" in both_result["adverse_results"]
+
+    target_columns = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    target_columns["operator"]["target_rehearsal"]["epoch_lineage_tables"][table] = 1
+    target_result = readiness.assess_runtime_checkpoint_evidence(target_columns)
+    assert target_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert f"target_rehearsal.epoch_lineage_tables.{table}" in target_result["missing_prerequisites"]
+
+    preservation = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    key = readiness.PRESERVATION_KEYS[0]
+    preservation["operator"]["target_rehearsal"]["preservation"][key] = {}
+    preservation_result = readiness.assess_runtime_checkpoint_evidence(preservation)
+    assert preservation_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert f"target_rehearsal.preservation:{key}" in preservation_result["missing_prerequisites"]
+
+    quality = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    quality["operator"]["capacity"]["workload_baseline"]["samples"] = [
+        {
+            "observed_at_utc": BASELINE_START,
+            "combined_allocated_bytes": _BASELINE_EARLIEST_BYTES,
+            "comparable": True,
+            "quality": [],
+        },
+        _growth_sample(BASELINE_END, _BASELINE_EARLIEST_BYTES + _BASELINE_DELTA_BYTES),
+    ]
+    quality_result = readiness.assess_runtime_checkpoint_evidence(quality)
+    assert quality_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "capacity.workload_baseline.samples[0].quality" in quality_result["missing_prerequisites"]
+    assert quality_result["go_for_runtime_deployment"] is False
+
+
+def test_cli_malformed_origin_writes_incomplete_assessment(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    packet = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    packet["operator"]["evidence_origin"] = []
+    evidence = tmp_path / "malformed.json"
+    output = tmp_path / "assessment.json"
+    evidence.write_text(json.dumps(packet), encoding="utf-8")
+    code = readiness_cli.main(["assess", "--evidence-path", str(evidence), "--output-path", str(output)])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    written = output.read_text(encoding="utf-8")
+    assessment = json.loads(written)
+    assert assessment["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "operator.evidence_origin" in assessment["missing_prerequisites"]
+    assert assessment["go_for_runtime_deployment"] is False
+    assert "should-not-leak" not in written
+    assert "telegram_bot_token" not in written
+    again = readiness_cli.main(["assess", "--evidence-path", str(evidence), "--output-path", str(output)])
+    again_captured = capsys.readouterr()
+    assert again == 2
+    assert "Traceback" not in again_captured.err
+    assert "should-not-leak" not in output.read_text(encoding="utf-8")
 
 
 def test_preservation_failure_and_downtime_overrun_are_adverse() -> None:
