@@ -192,7 +192,9 @@ def build_alert_integrity_manifest(
     message = "" if formatted_message is None else str(formatted_message)
     if not message.strip():
         _add_issue(issues, "error", "empty_alert_message", "Alert message is empty.", "formatted_message")
-    message_has_risk_warning = _message_has_risk_warning(message)
+    parts = tuple(str(part) for part in message_parts)
+    emitted_message = _emitted_alert_text(message, parts)
+    message_has_risk_warning = _message_has_risk_warning(emitted_message)
     message_has_invalidation = _message_has_invalidation(message)
     if not message_has_risk_warning:
         _add_issue(
@@ -242,7 +244,6 @@ def build_alert_integrity_manifest(
             key_path,
         )
 
-    parts = tuple(str(part) for part in message_parts)
     if not parts:
         _add_issue(issues, "error", "missing_message_parts", "Alert has no message parts.", "message_parts")
 
@@ -686,18 +687,43 @@ def _message_has_field(message: str, label: str) -> bool:
     return False
 
 
+_RISK_WARNING_LABEL = "Risk warning:"
+_EXECUTION_DISCIPLINE_VALUES = frozenset(
+    {
+        "no chase",
+        "no chase.",
+        "manual execution",
+        "manual execution.",
+        "manual execution only",
+        "manual execution only.",
+        "manual execution only. manage risk.",
+        "manage risk",
+        "manage risk.",
+    }
+)
+
+
+def _emitted_alert_text(formatted_message: str, message_parts: Sequence[str]) -> str:
+    """Audit the text that delivery actually emits."""
+
+    if message_parts:
+        return "\n".join(message_parts)
+    return formatted_message
+
+
+def _explicit_risk_warning_line(line: str) -> bool:
+    stripped = line.strip()
+    label = _RISK_WARNING_LABEL
+    if not stripped.lower().startswith(label.lower()):
+        return False
+    value = stripped[len(label) :].strip()
+    if not _present(value):
+        return False
+    return value.lower() not in _EXECUTION_DISCIPLINE_VALUES
+
+
 def _message_has_risk_warning(message: str) -> bool:
-    if _message_has_field(message, "Risk warning"):
-        return True
-    for line in message.splitlines():
-        text = line.strip().lower()
-        if "no chase" in text:
-            return True
-        if "manual execution" in text and "manage risk" in text:
-            return True
-        if "not financial advice" in text:
-            return True
-    return False
+    return any(_explicit_risk_warning_line(line) for line in message.splitlines())
 
 def _message_has_invalidation(message: str) -> bool:
     if _message_has_field(message, "Invalidation"):

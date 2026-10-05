@@ -263,9 +263,10 @@ def test_confirmed_formatter_matches_compact_contract_and_structured_edge_only()
         "⚔️ EXECUTION\n\n"
         "Wait for the mapped zone. No chase.\n\n"
         "🐺 Hunt live.\n\n"
+        "Risk warning: Not financial advice. Trading can result in losses.\n\n"
         "CCI · Signal. Structure. Execution."
     )
-    assert "Not financial advice." not in text
+    assert text.count("Risk warning:") == 1
     assert "Manual execution" not in text
     assert "body-closes" not in text
 
