@@ -23,7 +23,7 @@ On foundation main, `format_premium_public_signal_message` omitted an explicit r
 
 3. Put that line on confirmed, watchlist, triggered, and watchlist-upgraded cards, and on research-watch announcements only when the stored geometry is a real trade map.
 4. Leave prices, RR, invalidation, status labels, and the signature unchanged. A missing price stays `N/A`. The canonical line is not a substitute for invalidation or for a missing economic plan.
-5. Audit emitted message parts. A warning counts only when a line starts with `Risk warning:` and the remainder is present and is not an execution-discipline placeholder. "No chase" and "manual execution" alone are not evidence.
+5. Audit the joined emitted parts. A warning counts only when the complete canonical sentence, or the one documented labeled legacy sentence, is present after whitespace is collapsed and case is folded. A label, a placeholder, or an execution instruction is not enough.
 6. Do not change event keys, outbox state, or stored payload text. Newly rendered announcements get the line. An already reserved or sent economic event keeps its persisted payload and is not announced again because the formatter changed.
 7. Replace the omission test with assertions for the canonical line and for unchanged internal `risk_warning` metadata.
 
@@ -119,15 +119,42 @@ Excluded, with the reason:
 
 ## Audit
 
-`build_alert_integrity_manifest` evaluates the joined `message_parts` when parts exist. The unsplit `formatted_message` is used only when no parts were supplied. A warning that remains only in `formatted_message` after the parts dropped it is `message_missing_risk_warning`.
+`build_alert_integrity_manifest` joins `message_parts` with newlines and checks that text. An explicit empty part list stays empty. It does not fall back to `formatted_message`. Empty parts therefore report both `missing_message_parts` and `message_missing_risk_warning`. Invalidation is still read from the full formatted message, so a missing warning does not hide a present stop.
 
-A line is evidence only when it begins with `Risk warning:` and the remainder is present. Blank, `N/A`, `NA`, `NONE`, and `NULL` are not present. These exact remainders are execution discipline, not a warning: `no chase`, `no chase.`, `manual execution`, `manual execution.`, `manual execution only`, `manual execution only.`, `manual execution only. manage risk.`, `manage risk`, `manage risk.`
+Recognition is a bounded span check, not a denylist and not a prose classifier. The joined parts are normalized with `" ".join(text.split()).casefold()`: letter case and repeated spaces or newlines do not matter, and the complete sentence must remain a contiguous span. These two statements are the whole supported set:
 
-This is an exact label check, not a natural-language classifier. An older labeled line such as `Risk warning: This is not financial advice. Position size must be based on stop-loss risk, not desired profit.` still counts. `Not financial advice.` alone does not. `No chase.` alone does not.
+- `Risk warning: Not financial advice. Trading can result in losses.`
+- `Risk warning: This is not financial advice. Position size must be based on stop-loss risk, not desired profit.`
 
-`message_sha256` is still the SHA-256 of the supplied formatted text. Auditing a legacy body does not insert the canonical line and does not mint a new hash for that body. A legacy body without the label is a blocker, `message_missing_risk_warning`, which is the truthful classification.
+The second sentence is the labeled form of `BASE_RISK_WARNING` in `app/agents/trade_idea.py`. That producer stores the sentence without the `Risk warning:` label. The unlabeled field is not emitted-warning evidence. The public cards use the first sentence.
+
+These labeled sentences were inspected and are not in the set. `DEFAULT_RISK_WARNING` in `app/alerts/templates.py` is `This is not financial advice. Trading involves risk, and every setup can fail at invalidation.` `format_trade_alert` does not use it. The admin status screen uses `Risk warning: crypto derivatives are high risk. Manual review only.` The pullback formatter uses a different unlabeled sentence. A label on any of those sentences still fails the audit.
+
+A placeholder, fragment, or execution line also fails, including `Risk warning: N/A.`, `Risk warning: TBD`, `Risk warning: ...`, `Risk warning: No chase. Manual execution only.`, `Risk warning: No chase. Manage risk.`, and `Risk warning: Not`. `No chase.` and `Not financial advice.` without the full labeled sentence fail. A missing final period on the canonical sentence fails.
+
+A complete statement that `split_message` breaks across parts still matches when every part is kept, because the join restores the span. Dropping the continuation does not. At a 30-character limit the real splitter keeps `Risk warning: Not financial` and continues in `advice. Trading can result in` and `losses.`. Removing those two continuation parts leaves no supported statement, so the audit reports `message_missing_risk_warning` even though the unsplit source card is unchanged. Normal delivery uses the 4096-character splitter. The 180-character regression still keeps the canonical line once inside the length limit.
+
+The public artifact auditor treats part evidence in three ways:
+
+- The `message_parts` key is absent: legacy one-part payload. The formatted message is that one part when it is non-empty.
+- The key is present and is a sequence of strings, including `[]`: those strings are the emitted parts. An empty sequence stays empty.
+- The key is present but is a string, mapping, null, or contains a non-string item: `malformed_message_parts`. That value is not turned into warning text and is not replaced by the source body. The rebuilt check also reports `missing_message_parts` and `message_missing_risk_warning`.
+
+Stored manifests, payload text, and hashes are compared and not rewritten. An explicit empty part list against a stored one-part manifest is invalid. It surfaces the missing warning, the missing parts, and the stored-manifest mismatch. `message_sha256` remains the SHA-256 of the supplied formatted text.
 
 `risk_warning_present` remains the internal trade-idea field check. `message_has_risk_warning` is the emitted-text check. They are separate. An internal warning does not satisfy the public line, and the public line does not rewrite the stored field.
+
+## Corrective review of `d591f0f`
+
+Independent review of `d591f0fce45635aec7e5856426481825c69ced4f` requested changes. Exact-candidate CI on that head had passed 2,910 tests. The card and delivery behavior in that head stays. Two audit defects did not.
+
+F08-R1. `_explicit_risk_warning_line` accepted any present remainder after `Risk warning:` except nine exact discipline strings. On a real formatted card, these replacements were warning-present, manifest-valid, and had no issues: `Risk warning: N/A.`, `Risk warning: TBD`, `Risk warning: ...`, `Risk warning: No chase. Manual execution only.`, `Risk warning: No chase. Manage risk.`, and `Risk warning: Not`. The same helper certified the 30-character split after `advice. Trading can result in` and `losses.` were removed. The repair replaces that denylist with the two complete statements and the whitespace/case policy above.
+
+F08-R2. `_emitted_alert_text` used the source body when parts were empty, so a direct builder call with a valid card and `message_parts=()` reported the warning present while also reporting `missing_message_parts`. `_alert_message_parts` turned an explicit `[]` into `(formatted_message,)` before the artifact audit, so a valid stored one-part manifest plus `"message_parts": []` audited as valid with no issues. The repair keeps explicit empty parts empty, rejects malformed values, and keeps the omitted-key fallback documented above.
+
+The same independent probe, run against this tree without changing the probe, now passes all 13 cases: both supported statements, the unlabeled execution line, the six rejected labels, the dropped continuation, the empty builder parts, the normal 180-character split, and the explicit-empty artifact audit. Stored hashes in those artifact cases are unchanged.
+
+The admin desk fixture in `tests/test_telegram_admin_commands.py` had used `Risk warning: Manual review only; crypto derivatives are high risk.` The rejected denylist treated that sentence as a warning, so the Alert Desk and Integrity Desk tests expected a clean screen. The fixture's emitted line is now the canonical statement. Its internal `risk_warning` field is unchanged, and the admin status screen's own sentence is still not a supported warning.
 
 ## Legacy, pending, and sent content
 
@@ -153,12 +180,18 @@ Pending and sent artifacts are not edited by this patch. A restart uses the outb
 
 Local DEV only. Temporary databases and `FakeSender`. No network send.
 
-- F08 file: `tests/test_f08_telegram_risk_warning.py`, 10 passed.
-- Focused formatter, alert-agent, integrity, and coalescing set, including that file: 100 passed.
-- Related lifecycle delivery, triggered/confirmed routing, public funnel, watch mode, outbox recovery, and TP milestone tests: 300 passed.
-- `python -m compileall -q app tests` completed before the full suite, exit 0.
-- Full `python -m pytest -o addopts=`: 2910 passed, 1 existing Starlette/httpx deprecation warning, exit 0, 488.35s. That run is the final tree, including the last assertion cleanup.
+Reviewed candidate `d591f0f`, before this correction: F08 file 10 passed; focused formatter, alert-agent, integrity, and coalescing set 100 passed; related lifecycle, funnel, watch, outbox, and TP set 300 passed; full pytest 2910 passed. Those counts do not cover the corrected audit.
+
+Corrected tree:
+
+- F08 file: `tests/test_f08_telegram_risk_warning.py`, 15 passed. The file still contains the SENT duplicate and PENDING recovery tests.
+- Focused set: that file plus `tests/test_alert_agent.py`, `tests/test_alert_integrity_manifest.py`, `tests/test_telegram_signal_formatter_phase42.py`, `tests/test_telegram_formatter.py`, and `tests/test_public_signal_coalescing_phase.py`.
+- Related set: `tests/test_telegram_lifecycle_delivery_phase42.py`, `tests/test_triggered_confirmed_telegram_delivery.py`, `tests/test_public_alert_funnel.py`, `tests/test_public_alert_funnel_safety.py`, `tests/test_watch_mode.py`, `tests/test_telegram_outbox_recovery.py`, and `tests/test_public_tp_milestone_delivery.py`.
+- Focused and related together: 405 passed, exit 0, 71.31s. That is the previous 400 plus the five new audit regressions.
+- Independent probe from the review, unchanged and run outside the repo: 13 passed, exit 0, 1.15s.
+- `python -m compileall -q app tests` exit 0.
 - `git diff --check` exit 0.
+- Full `python -m pytest -o addopts=`: 2915 passed, 1 existing Starlette/httpx deprecation warning, exit 0, 452.32s. That run is this corrected tree, including the admin-fixture alignment.
 
 The old test `test_compact_signal_omits_disclaimer_but_preserves_internal_risk_warning` was replaced by `test_public_signal_states_risk_warning_and_preserves_internal_risk_warning`. It now requires the canonical line once and requires the stored `risk_warning` to remain on the idea and out of the public card. `test_verbose_confirmed_facts_do_not_expand_compact_signal` no longer requires the compact card to fit in one 300-character part. The canonical line makes that card longer than 300 characters. The test now requires that 80 extra confirmed facts leave the card identical to the baseline, that every part stays within 300 characters, and that the warning still appears once.
 
@@ -193,7 +226,16 @@ Verified CI for handoff tip `5bb238a377d05fdb3815a14b9b9c0258ea9e5529`:
 - Job: Python 3.11 tests, ID `111839268769`
 - Log result: `2910 passed, 1 warning in 203.46s (0:03:23)`
 
-The documentation commit that records these results is the branch tip after that commit. Its pull-request check is the CI for the exact final head. Do not treat `acdfe56e179c22963928d6f13a9f20182b042a42` or `fe23f141d5ed563f54145ce091df1fa6eb3d9728` alone as the candidate.
+Those two runs are earlier handoff commits on this branch. The reviewed head `d591f0fce45635aec7e5856426481825c69ced4f` was checked separately:
+
+- Run: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37333382474
+- Attempt: 1
+- Result: success
+- Job: Python 3.11 tests, ID `111841896263`
+- Log result: `2910 passed, 1 warning in 155.96s (0:02:35)`
+- The job tested synthetic PR merge `a701d4b18105ff25169aecc6f4054a23edb491f1`, which had no file diff from `d591f0f`
+
+Independent review of that head requested changes. None of these runs is the CI for the corrected candidate. The corrected candidate's branch, commit, and CI are recorded with the audit repair.
 
 ## Limits
 
@@ -202,8 +244,8 @@ The documentation commit that records these results is the branch tip after that
 - Standalone TRIGGERED text is formatted with the warning and is still not publicly sent.
 - Outcome follow-ups do not get a blanket warning.
 - Historical and pending payloads stay as stored. They can fail the new audit as `message_missing_risk_warning`. This phase does not rewrite them, rehash them, or resend them.
-- The audit does not infer a warning from prose. Only the `Risk warning:` label with a non-placeholder remainder counts, including older labeled sentences.
-- A Telegram part length below the warning line could split that line. Normal delivery uses the 4096-character splitter, which breaks on newlines first, and the warning is one short line before the signature.
+- The audit recognizes only the two complete labeled statements above, after whitespace collapse and case folding. It does not infer a warning from the internal `risk_warning` field, from `DEFAULT_RISK_WARNING`, from the admin status line, or from any other labeled sentence.
+- A complete statement split across kept delivery parts still matches. A dropped continuation does not. Normal delivery uses the 4096-character splitter, which breaks on newlines first, and the warning is one short line before the signature.
 - No production acceptance, merge, or Runtime rollout is claimed. Adam's separate code-only Runtime update remains outside this DEV phase and was not executed here.
 
 ## Operational actions

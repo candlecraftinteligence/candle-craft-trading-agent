@@ -5,7 +5,13 @@ import sqlite3
 from decimal import Decimal
 
 from app.agents.alert_agent import AlertAgent
-from app.alerts.integrity_manifest import build_alert_integrity_manifest
+from app.alerts.integrity_manifest import (
+    CANONICAL_PUBLIC_RISK_WARNING,
+    LEGACY_POSITION_SIZE_RISK_WARNING,
+    audit_alert_integrity_artifact,
+    build_alert_integrity_manifest,
+)
+from app.alerts.templates import DEFAULT_RISK_WARNING
 from app.alerts.telegram_lifecycle import (
     DEFAULT_CONFIRMED_MIN_RR,
     PUBLIC_SIGNAL_MIN_RR,
@@ -145,27 +151,46 @@ def test_explicit_warning_audit_rejects_discipline_and_placeholders() -> None:
         "No chase. We want clean entry reaction and fast movement away from chop.",
         "Manual execution only. Manage risk.",
         "Not financial advice.",
+        "This is not financial advice. Position size must be based on stop-loss risk, not desired profit.",
         "Risk warning:",
+        "Risk warning: ",
         "Risk warning: N/A",
+        "Risk warning: N/A.",
+        "Risk warning: TBD",
+        "Risk warning: ...",
         "Risk warning: No chase.",
+        "Risk warning: No chase. Manual execution only.",
+        "Risk warning: No chase. Manage risk.",
+        "Risk warning: Not",
         "Risk warning: manual execution",
+        "Risk warning: Not financial advice. Trading can result in losses",
+        f"Risk warning: {DEFAULT_RISK_WARNING}",
+        "Risk warning: crypto derivatives are high risk. Manual review only.",
+        "Risk warning: This is not financial advice. Pullback ideas are conditional and must be invalidated at the stop.",
     )
     for text in absent:
         manifest = _manifest(text)
-        assert manifest.safety_checks["message_has_risk_warning"] is False
-        assert any(issue.code == "message_missing_risk_warning" for issue in manifest.issues)
+        assert manifest.safety_checks["message_has_risk_warning"] is False, text
+        assert any(issue.code == "message_missing_risk_warning" for issue in manifest.issues), text
+        assert manifest.message_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
+        assert manifest.is_valid is False
 
-    legacy = (
+    assert CANONICAL_PUBLIC_RISK_WARNING == PUBLIC_TRADE_MAP_RISK_WARNING
+    assert LEGACY_POSITION_SIZE_RISK_WARNING == (
         "Risk warning: This is not financial advice. Position size must be based on "
         "stop-loss risk, not desired profit."
     )
-    assert _manifest(legacy).safety_checks["message_has_risk_warning"] is True
-    assert _manifest(PUBLIC_TRADE_MAP_RISK_WARNING).safety_checks["message_has_risk_warning"] is True
+    card = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, _message())
+    spaced = "risk   WARNING:  not financial advice.   trading can result in losses."
+    for warning in (PUBLIC_TRADE_MAP_RISK_WARNING, LEGACY_POSITION_SIZE_RISK_WARNING, spaced):
+        text = card.replace(PUBLIC_TRADE_MAP_RISK_WARNING, warning)
+        manifest = _manifest(text)
+        assert manifest.safety_checks["message_has_risk_warning"] is True, warning
+        assert manifest.safety_checks["message_has_invalidation"] is True
+        assert manifest.is_valid is True, [issue.code for issue in manifest.issues]
+        assert manifest.message_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    legacy_hash = hashlib.sha256(legacy.encode("utf-8")).hexdigest()
-    audited = _manifest(legacy)
-    assert audited.message_sha256 == legacy_hash
-    assert PUBLIC_TRADE_MAP_RISK_WARNING not in legacy
+    assert PUBLIC_TRADE_MAP_RISK_WARNING not in LEGACY_POSITION_SIZE_RISK_WARNING
 
 
 def test_warning_dropped_from_emitted_parts_is_not_present() -> None:
@@ -185,6 +210,124 @@ def test_warning_dropped_from_emitted_parts_is_not_present() -> None:
     emitted = _manifest(text, parts)
     assert emitted.safety_checks["message_has_risk_warning"] is True
     assert emitted.safety_checks["message_has_invalidation"] is True
+
+
+def test_complete_cross_part_warning_counts_and_a_dropped_continuation_does_not() -> None:
+    text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, _message())
+    parts = split_message(text, max_length=30)
+    assert "advice. Trading can result in" in parts
+    assert "losses." in parts
+    assert all(len(part) <= 30 for part in parts)
+    complete = _manifest(text, parts)
+    assert complete.safety_checks["message_has_risk_warning"] is True
+    assert complete.safety_checks["message_has_invalidation"] is True
+    assert " ".join(" ".join(parts).split()).count(PUBLIC_TRADE_MAP_RISK_WARNING) == 1
+
+    kept = tuple(
+        part
+        for part in parts
+        if part not in {"advice. Trading can result in", "losses."}
+    )
+    assert "Risk warning: Not financial" in kept
+    assert PUBLIC_TRADE_MAP_RISK_WARNING not in " ".join(" ".join(kept).split())
+    assert text == format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, _message())
+    dropped = _manifest(text, kept)
+    assert dropped.safety_checks["message_has_risk_warning"] is False
+    assert any(issue.code == "message_missing_risk_warning" for issue in dropped.issues)
+    assert dropped.safety_checks["message_has_invalidation"] is True
+    assert dropped.message_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_explicit_empty_parts_do_not_borrow_the_source_warning() -> None:
+    text = format_telegram_signal_message(TelegramAlertType.SIGNAL_CONFIRMED, _message())
+    manifest = _manifest(text, ())
+    codes = [issue.code for issue in manifest.issues]
+    assert "missing_message_parts" in codes
+    assert manifest.safety_checks["message_has_risk_warning"] is False
+    assert "message_missing_risk_warning" in codes
+    assert manifest.safety_checks["message_has_invalidation"] is True
+    assert manifest.message_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+_OMITTED_PARTS = object()
+
+
+def _stored_artifact(message_parts: object = _OMITTED_PARTS) -> tuple[dict[str, object], str, str]:
+    idea = _idea()
+    text = AlertAgent().format(idea)
+    manifest = build_alert_integrity_manifest(
+        trade_idea=idea,
+        formatted_message=text,
+        message_parts=(text,),
+        channel="telegram",
+        status="dry_run",
+        dry_run=True,
+        deduplication_key="synthetic:f08-parts-evidence",
+    )
+    assert manifest.is_valid is True
+    stored = manifest.model_dump(mode="python")
+    alert_result: dict[str, object] = {
+        "formatted_message": text,
+        "channel": "telegram",
+        "status": "dry_run",
+        "dry_run": True,
+        "deduplication_key": "synthetic:f08-parts-evidence",
+        "integrity_manifest": stored,
+    }
+    if message_parts is not _OMITTED_PARTS:
+        alert_result["message_parts"] = message_parts
+    artifact = {
+        "trade_idea": idea.model_dump(mode="python"),
+        "alert_result": alert_result,
+    }
+    return artifact, stored["message_sha256"], stored["payload_sha256"]
+
+
+def test_artifact_audit_keeps_explicit_empty_parts_empty() -> None:
+    artifact, message_sha, payload_sha = _stored_artifact([])
+    result = audit_alert_integrity_artifact(artifact)
+    codes = [issue.code for record in result.records for issue in record.issues]
+    assert result.summary.is_valid is False
+    assert "message_missing_risk_warning" in codes
+    assert "missing_message_parts" in codes
+    assert artifact["alert_result"]["integrity_manifest"]["message_sha256"] == message_sha  # type: ignore[index]
+    assert artifact["alert_result"]["integrity_manifest"]["payload_sha256"] == payload_sha  # type: ignore[index]
+    assert artifact["alert_result"]["message_parts"] == []  # type: ignore[index]
+
+
+def test_omitted_message_parts_use_the_formatted_message_as_one_legacy_part() -> None:
+    artifact, message_sha, payload_sha = _stored_artifact()
+    assert "message_parts" not in artifact["alert_result"]  # type: ignore[operator]
+    result = audit_alert_integrity_artifact(artifact)
+    codes = [issue.code for record in result.records for issue in record.issues]
+    assert result.summary.is_valid is True
+    assert "message_missing_risk_warning" not in codes
+    assert "missing_message_parts" not in codes
+    assert "malformed_message_parts" not in codes
+    assert artifact["alert_result"]["integrity_manifest"]["message_sha256"] == message_sha  # type: ignore[index]
+    assert artifact["alert_result"]["integrity_manifest"]["payload_sha256"] == payload_sha  # type: ignore[index]
+
+
+def test_malformed_message_parts_are_not_emitted_warning_evidence() -> None:
+    text = AlertAgent().format(_idea())
+    malformed_values = (
+        text,
+        {"part": PUBLIC_TRADE_MAP_RISK_WARNING},
+        None,
+        [text, None],
+        [PUBLIC_TRADE_MAP_RISK_WARNING, 1],
+    )
+    for value in malformed_values:
+        artifact, message_sha, payload_sha = _stored_artifact(value)
+        result = audit_alert_integrity_artifact(artifact)
+        codes = [issue.code for record in result.records for issue in record.issues]
+        assert result.summary.is_valid is False, value
+        assert "malformed_message_parts" in codes
+        assert "message_missing_risk_warning" in codes
+        assert "missing_message_parts" in codes
+        assert artifact["alert_result"]["message_parts"] == value  # type: ignore[index]
+        assert artifact["alert_result"]["integrity_manifest"]["message_sha256"] == message_sha  # type: ignore[index]
+        assert artifact["alert_result"]["integrity_manifest"]["payload_sha256"] == payload_sha  # type: ignore[index]
 
 
 def test_alert_agent_keeps_internal_risk_warning_metadata() -> None:
