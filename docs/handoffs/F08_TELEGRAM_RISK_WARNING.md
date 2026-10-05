@@ -171,7 +171,7 @@ No skip, xfail, or weakened gate assertion was added.
 - Accepted F06 head contained in that merge: `401330526a8f3eaadfda2f5322a67f496ec5c221`
 - Implementation SHA: `acdfe56e179c22963928d6f13a9f20182b042a42`
 - The documentation commit that names this SHA is the branch tip after that commit. Its pull-request check is the CI result for the exact final head.
-- Draft PR: recorded after push
+- Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/131
 - Schema version: remains 26
 - Runtime database: not opened, copied, or modified
 
