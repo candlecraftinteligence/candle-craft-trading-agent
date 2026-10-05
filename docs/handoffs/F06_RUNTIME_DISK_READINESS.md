@@ -159,6 +159,7 @@ Full local suite: 2900 passed, 1 warning, 478.15s (0:07:58), exit 0. The warning
 - Rejected prior heads: `fd749c4ba0ccf1490d0521d226481cf6ea88039f`, then `cdfcd12a580f6128a95e22e123e86e86dbde0e57`
 - Earlier index and growth repair: `b72330b75efae7c268b466f6bed7c9365ab85c88`
 - Source-metadata repair SHA: `12eb0017f4924a582ef43975856977a6440f8185`
+- Handoff SHA: `2a1df3189a33cd274ed28373779dd64061277397`
 - The documentation commit that records the verified handoff CI below is the branch tip after that commit. Its pull-request check is the CI result for the exact final head.
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/130
 - Schema version: remains 26
@@ -174,7 +175,15 @@ Source-metadata repair CI for `12eb0017f4924a582ef43975856977a6440f8185`:
 
 Earlier green runs stay historical and are not this candidate. Index and growth repair `b72330b75efae7c268b466f6bed7c9365ab85c88` passed run 37291252581. Its handoff `cabfbb011c302f366709bfe60bbfeecca1bc656d` passed run 37291636794. The reviewed tip `cdfcd12a580f6128a95e22e123e86e86dbde0e57` passed run 37292150234 and remains REQUEST_CHANGES.
 
-This handoff commit is the next candidate. The documentation commit that records its CI is the branch tip. The successful pull-request check on that tip SHA is the CI for the exact final head. Do not treat `cdfcd12a580f6128a95e22e123e86e86dbde0e57` as the candidate.
+Handoff CI for `2a1df3189a33cd274ed28373779dd64061277397`:
+
+- Run: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37296126114
+- Attempt: 1
+- Result: success
+- Job: Python 3.11 tests, ID `111717647420`
+- Log result: `2900 passed, 1 warning in 196.77s (0:03:16)`
+
+The documentation commit that records this handoff CI is the branch tip. The successful pull-request check on that tip SHA is the CI for the exact final head. Do not treat `cdfcd12a580f6128a95e22e123e86e86dbde0e57` or an earlier green run as the candidate.
 
 Acceptance is not claimed. Adam owns merge and any later Runtime procedure.
 
