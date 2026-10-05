@@ -170,12 +170,22 @@ No skip, xfail, or weakened gate assertion was added.
 - Base SHA: `dea4f80174fa7e3e663c66da753ef9ebd13dc19b`
 - Accepted F06 head contained in that merge: `401330526a8f3eaadfda2f5322a67f496ec5c221`
 - Implementation SHA: `acdfe56e179c22963928d6f13a9f20182b042a42`
-- The documentation commit that names this SHA is the branch tip after that commit. Its pull-request check is the CI result for the exact final head.
+- Verified handoff SHA: `fe23f141d5ed563f54145ce091df1fa6eb3d9728`
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/131
 - Schema version: remains 26
 - Runtime database: not opened, copied, or modified
 
-CI for the exact final head is the pull-request check on this branch tip. The run URL, attempt, and result are filled in after that check completes. This document does not claim that check until it is recorded.
+Verified CI for `fe23f141d5ed563f54145ce091df1fa6eb3d9728`:
+
+- Run: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37331889788
+- Attempt: 1
+- Result: success
+- Job: Python 3.11 tests, ID `111837239096`
+- Log result: `2910 passed, 1 warning in 180.75s (0:03:00)`
+
+Run `37331636620` on the same SHA was cancelled by the workflow concurrency group when this run was queued. It is not the result.
+
+The documentation commit that records this verified CI is the branch tip after that commit. Its pull-request check is the CI for the exact final head. Do not treat `acdfe56e179c22963928d6f13a9f20182b042a42` alone as the candidate.
 
 ## Limits
 
