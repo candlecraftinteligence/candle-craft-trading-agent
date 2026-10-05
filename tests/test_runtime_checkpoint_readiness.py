@@ -1804,6 +1804,131 @@ def test_cli_malformed_origin_writes_incomplete_assessment(tmp_path: Path, capsy
     assert "should-not-leak" not in output.read_text(encoding="utf-8")
 
 
+def test_malformed_source_index_is_not_absence() -> None:
+    control = readiness.assess_runtime_checkpoint_evidence(_complete_packet(_measured_collector(SCHEMA_VERSION)))
+    assert control["overall_disposition"] == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    assert control["source_compatibility"]["finding"] == "source_plan_state_index_absent"
+    assert control["go_for_runtime_deployment"] is False
+
+    for supplied in ([], 1, "absent"):
+        packet = _complete_packet(_measured_collector(SCHEMA_VERSION))
+        packet["collector_report"]["sqlite"]["plan_state_index"] = supplied
+        result = readiness.assess_runtime_checkpoint_evidence(packet)
+        assert result["overall_disposition"] == "INCOMPLETE_PREREQUISITES", supplied
+        assert "source_plan_state_index.supplied_type" in result["missing_prerequisites"]
+        assert result["source_compatibility"]["finding"] is None
+        assert result["source_compatibility"]["plan_state_index"] == "malformed"
+        assert result["go_for_runtime_deployment"] is False
+        assert "should-not-leak" not in json.dumps(result)
+
+    columns = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    columns["collector_report"]["sqlite"]["plan_state_index"]["columns"] = 1
+    columns_result = readiness.assess_runtime_checkpoint_evidence(columns)
+    assert columns_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "source_plan_state_index.columns" in columns_result["missing_prerequisites"]
+    assert "source_plan_state_index_definition_incomplete" in columns_result["missing_prerequisites"]
+    assert columns_result["source_compatibility"]["finding"] is None
+
+    partial = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    partial["collector_report"]["sqlite"]["plan_state_index"]["partial"] = "false"
+    partial_result = readiness.assess_runtime_checkpoint_evidence(partial)
+    assert partial_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert "source_plan_state_index.partial" in partial_result["missing_prerequisites"]
+    assert partial_result["go_for_runtime_deployment"] is False
+
+    adverse = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    adverse["collector_report"]["sqlite"]["plan_state_index"] = []
+    adverse["operator"]["source_replay_capture"]["enabled"] = True
+    adverse_result = readiness.assess_runtime_checkpoint_evidence(adverse)
+    assert adverse_result["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert "source_plan_state_index.supplied_type" in adverse_result["missing_prerequisites"]
+    assert "source_replay_capture_enabled_outside_initial_cutover_contract" in adverse_result["adverse_results"]
+
+
+def test_source_epoch_presence_requires_a_boolean() -> None:
+    table = next(iter(readiness.EPOCH_LINEAGE_COLUMNS))
+    other = next(name for name in readiness.EPOCH_LINEAGE_COLUMNS if name != table)
+
+    def lineage(present: object, *, other_columns: list[str] | None = None) -> dict[str, Any]:
+        tables = {
+            name: {"present": True, "columns": list(columns)}
+            for name, columns in readiness.EPOCH_LINEAGE_COLUMNS.items()
+        }
+        tables[table]["present"] = present
+        if other_columns is not None:
+            tables[other]["columns"] = other_columns
+        return {"tables": tables}
+
+    absent = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    absent["collector_report"]["sqlite"]["epoch_lineage"] = {
+        "tables": {name: {"present": False, "columns": []} for name in readiness.EPOCH_LINEAGE_COLUMNS}
+    }
+    absent_result = readiness.assess_runtime_checkpoint_evidence(absent)
+    assert absent_result["overall_disposition"] == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
+    assert absent_result["source_compatibility"]["epoch_lineage"] == "absent_table"
+    assert absent_result["source_compatibility"]["finding"] == "source_plan_state_index_absent"
+    assert absent_result["go_for_runtime_deployment"] is False
+
+    for marker in ([], {}, 1, "false", None):
+        packet = _complete_packet(_measured_collector(SCHEMA_VERSION))
+        packet["collector_report"]["sqlite"]["epoch_lineage"] = lineage(marker)
+        result = readiness.assess_runtime_checkpoint_evidence(packet)
+        assert result["overall_disposition"] == "INCOMPLETE_PREREQUISITES", marker
+        assert f"source_epoch_lineage.{table}.present" in result["missing_prerequisites"]
+        assert result["source_compatibility"]["epoch_lineage"] == "malformed"
+        assert result["go_for_runtime_deployment"] is False
+        assert "should-not-leak" not in json.dumps(result)
+
+    omitted = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    omitted["collector_report"]["sqlite"]["epoch_lineage"] = lineage(True)
+    del omitted["collector_report"]["sqlite"]["epoch_lineage"]["tables"][table]["present"]
+    omitted_result = readiness.assess_runtime_checkpoint_evidence(omitted)
+    assert omitted_result["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert f"source_epoch_lineage.{table}.present" in omitted_result["missing_prerequisites"]
+
+    both = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    both["collector_report"]["sqlite"]["epoch_lineage"] = lineage("false", other_columns=["not_a_lineage_column"])
+    both_result = readiness.assess_runtime_checkpoint_evidence(both)
+    assert both_result["overall_disposition"] == "ADVERSE_MEASURED_RESULT"
+    assert f"source_epoch_lineage.{table}.present" in both_result["missing_prerequisites"]
+    assert f"source_epoch_lineage_definition_mismatch:{other}" in both_result["adverse_results"]
+    assert both_result["go_for_runtime_deployment"] is False
+
+
+def test_cli_malformed_source_presence_writes_incomplete_assessment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    table = next(iter(readiness.EPOCH_LINEAGE_COLUMNS))
+    packet = _complete_packet(_measured_collector(SCHEMA_VERSION))
+    packet["collector_report"]["sqlite"]["epoch_lineage"] = {
+        "tables": {
+            name: {"present": True, "columns": list(columns)}
+            for name, columns in readiness.EPOCH_LINEAGE_COLUMNS.items()
+        }
+    }
+    packet["collector_report"]["sqlite"]["epoch_lineage"]["tables"][table]["present"] = "false"
+    evidence = tmp_path / "source_presence_packet.json"
+    output = tmp_path / "source_presence_assessment.json"
+    evidence.write_text(json.dumps(packet), encoding="utf-8")
+    code = readiness_cli.main(["assess", "--evidence-path", str(evidence), "--output-path", str(output)])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    written = output.read_text(encoding="utf-8")
+    assessment = json.loads(written)
+    assert assessment["overall_disposition"] == "INCOMPLETE_PREREQUISITES"
+    assert f"source_epoch_lineage.{table}.present" in assessment["missing_prerequisites"]
+    assert assessment["go_for_runtime_deployment"] is False
+    assert "should-not-leak" not in written
+    assert "telegram_bot_token" not in written
+    again = readiness_cli.main(["assess", "--evidence-path", str(evidence), "--output-path", str(output)])
+    again_captured = capsys.readouterr()
+    assert again == 2
+    assert "Traceback" not in again_captured.err
+    assert "should-not-leak" not in output.read_text(encoding="utf-8")
+
+
 def test_preservation_failure_and_downtime_overrun_are_adverse() -> None:
     failed = _complete_packet(_measured_collector())
     failed["operator"]["target_rehearsal"]["preservation"]["public_outbox_sent_uncertain"] = "failed"

@@ -1021,23 +1021,78 @@ def plan_state_index_matches(spec: Mapping[str, Any]) -> bool:
     return classify_supplied_plan_state_index(spec)["status"] == "matched"
 
 
-def _absent_plan_state_record(observed: Mapping[str, Any]) -> bool:
-    """An explicit absence finding is not a malformed definition."""
+def _classify_declared_absence(observed: Mapping[str, Any]) -> dict[str, Any]:
+    """Classify a record that claims the index is absent.
 
-    if observed.get("status") != "absent":
-        return False
-    columns = observed.get("columns")
-    if isinstance(columns, list) and columns:
-        return False
+    Canonical nulls and an empty column list are absence. A mistyped stand-in
+    is incomplete. A well-typed name, table, column list, flag, or predicate
+    that is not the absence sentinel is a definition mismatch.
+    """
+
+    if _absent_plan_state_record(observed):
+        return {"status": "absent", "missing_fields": [], "mismatch_fields": []}
+    missing_fields: list[str] = []
+    mismatch_fields: list[str] = []
+    name = observed.get("name")
+    if name != PLAN_STATE_INDEX_NAME:
+        if isinstance(name, str) and name.strip():
+            mismatch_fields.append("name")
+        else:
+            missing_fields.append("name")
     table = observed.get("table")
-    if isinstance(table, str) and table.strip():
-        return False
+    if table is not None:
+        if isinstance(table, str) and table.strip():
+            mismatch_fields.append("table")
+        else:
+            missing_fields.append("table")
+    columns = observed.get("columns")
+    if columns != []:
+        if isinstance(columns, list) and all(isinstance(item, str) for item in columns):
+            mismatch_fields.append("columns")
+        else:
+            missing_fields.append("columns")
+    unique = observed.get("unique")
+    if unique is not None:
+        if type(unique) is bool:
+            mismatch_fields.append("unique")
+        else:
+            missing_fields.append("unique")
+    partial = observed.get("partial")
+    if partial is not None:
+        if type(partial) is bool:
+            mismatch_fields.append("partial")
+        else:
+            missing_fields.append("partial")
     predicate = observed.get("partial_predicate")
-    if isinstance(predicate, str) and predicate.strip():
-        return False
-    if type(observed.get("unique")) is bool or type(observed.get("partial")) is bool:
-        return False
-    return True
+    if predicate is not None:
+        if isinstance(predicate, str) and predicate.strip():
+            mismatch_fields.append("partial_predicate")
+        else:
+            missing_fields.append("partial_predicate")
+    status = "mismatch" if mismatch_fields else "incomplete"
+    return {
+        "status": status,
+        "missing_fields": missing_fields,
+        "mismatch_fields": mismatch_fields,
+    }
+
+
+def _absent_plan_state_record(observed: Mapping[str, Any]) -> bool:
+    """True only for the collector's canonical absence record.
+
+    The expected name, status ``absent``, null table/uniqueness/partial/predicate,
+    and an empty column list are required. A mistyped field is not absence.
+    """
+
+    return (
+        observed.get("name") == PLAN_STATE_INDEX_NAME
+        and observed.get("status") == "absent"
+        and observed.get("table") is None
+        and observed.get("columns") == []
+        and observed.get("unique") is None
+        and observed.get("partial") is None
+        and observed.get("partial_predicate") is None
+    )
 
 
 def _index_name_set(indexes: Any) -> set[str] | None:
@@ -1061,10 +1116,12 @@ def classify_plan_state_observation(sqlite_section: Mapping[str, Any]) -> str:
 
     if sqlite_section.get("status") != "measured":
         return "not_inspected"
-    observed = sqlite_section.get("plan_state_index")
-    if isinstance(observed, Mapping) and _absent_plan_state_record(observed):
-        return "absent"
-    if isinstance(observed, Mapping):
+    if "plan_state_index" in sqlite_section:
+        observed = sqlite_section.get("plan_state_index")
+        if not isinstance(observed, Mapping):
+            return "malformed"
+        if observed.get("status") == "absent":
+            return str(_classify_declared_absence(observed)["status"])
         return str(classify_supplied_plan_state_index(observed)["status"])
     names = _index_name_set(sqlite_section.get("indexes"))
     if names is not None and PLAN_STATE_INDEX_NAME in names:
@@ -1299,7 +1356,12 @@ def _assess_source_epoch_lineage(
             _append_unique(missing, f"source_epoch_lineage.{name}")
             saw_malformed = True
             continue
-        if entry.get("present") is not True:
+        present = entry.get("present")
+        if type(present) is not bool:
+            _append_unique(missing, f"source_epoch_lineage.{name}.present")
+            saw_malformed = True
+            continue
+        if present is False:
             saw_absent = True
             continue
         columns = _column_name_list(entry.get("columns"))
@@ -1327,15 +1389,33 @@ def _assess_source_compatibility(
 ) -> dict[str, Any]:
     kind = classify_plan_state_observation(sqlite_section)
     finding = None
-    observed_index = sqlite_section.get("plan_state_index")
-    if isinstance(observed_index, Mapping) and not _absent_plan_state_record(observed_index):
-        detail = classify_supplied_plan_state_index(observed_index)
-        for field in detail["missing_fields"]:
-            _append_unique(missing, f"source_plan_state_index.{field}")
-        if detail["status"] == "mismatch":
-            _append_unique(adverse, "source_plan_state_index_definition_mismatch")
-        elif detail["status"] == "incomplete":
-            _append_unique(missing, "source_plan_state_index_definition_incomplete")
+    if "plan_state_index" in sqlite_section:
+        observed_index = sqlite_section.get("plan_state_index")
+        if not isinstance(observed_index, Mapping):
+            _append_unique(missing, "source_plan_state_index.supplied_type")
+        elif observed_index.get("status") == "absent":
+            detail = _classify_declared_absence(observed_index)
+            if detail["status"] == "absent":
+                finding = "source_plan_state_index_absent"
+                notes.append(
+                    "A missing source plan-state index can be an expected preflight finding. "
+                    "The target copy is not ready until rehearsal proves schema 26 and the required index."
+                )
+            else:
+                for field in detail["missing_fields"]:
+                    _append_unique(missing, f"source_plan_state_index.{field}")
+                if detail["status"] == "mismatch":
+                    _append_unique(adverse, "source_plan_state_index_definition_mismatch")
+                else:
+                    _append_unique(missing, "source_plan_state_index_definition_incomplete")
+        else:
+            detail = classify_supplied_plan_state_index(observed_index)
+            for field in detail["missing_fields"]:
+                _append_unique(missing, f"source_plan_state_index.{field}")
+            if detail["status"] == "mismatch":
+                _append_unique(adverse, "source_plan_state_index_definition_mismatch")
+            elif detail["status"] == "incomplete":
+                _append_unique(missing, "source_plan_state_index_definition_incomplete")
     elif kind == "unproven":
         _append_unique(missing, "source_plan_state_index_definition_unproven")
     elif kind == "not_inspected" and sqlite_section.get("status") == "measured":
