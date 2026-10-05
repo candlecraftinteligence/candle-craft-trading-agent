@@ -1,0 +1,12 @@
+{
+  "name": "Candle Craft Trading Agent",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh",
+  "terminals": [
+    {
+      "name": "api",
+      "command": "cd /workspace && . .venv/bin/activate && uvicorn app.main:app --host 127.0.0.1 --port 8000"
+    }
+  ]
+}
