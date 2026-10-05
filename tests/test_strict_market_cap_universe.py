@@ -14,6 +14,7 @@ from app.analytics.performance_memory import (
 from app.analytics.symbol_health import SymbolHealthRecord, SymbolPriorityPlan
 from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
+from app.lifecycle.owner_monitoring import discovery_failure_continues_owner_monitoring
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
@@ -558,3 +559,154 @@ def test_non_market_cap_universe_include_behavior_is_unchanged(monkeypatch: pyte
     resolution = asyncio.run(run_scan._resolve_universe_watchlist(args))
 
     assert resolution.symbols == ("BASEUSDT", "EXTRAUSDT")
+
+
+def test_missing_exchange_metadata_does_not_infer_contract_membership() -> None:
+    with pytest.raises(UniverseResolutionError, match="exchange-info source returned malformed response"):
+        build_symbol_universe_from_market_caps(
+            [_ticker("BTC")],
+            [_asset(1, symbol="BTC")],
+            exchange_info=None,
+            universe_size=1,
+            generated_at=GENERATED_AT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("tickers", "market_caps", "exchange_info", "expected"),
+    (
+        (None, [_asset(1, symbol="BTC")], {"symbols": [_contract("BTC")]}, "ticker source returned malformed"),
+        ([], [_asset(1, symbol="BTC")], {"symbols": [_contract("BTC")]}, "ticker source returned empty"),
+        (["BTCUSDT"], [_asset(1, symbol="BTC")], {"symbols": [_contract("BTC")]}, "ticker source returned malformed"),
+        ([_ticker("BTC")], None, {"symbols": [_contract("BTC")]}, "market-cap source returned malformed"),
+        ([_ticker("BTC")], [], {"symbols": [_contract("BTC")]}, "market-cap source returned empty"),
+        ([_ticker("BTC")], [_asset(1, symbol="BTC")], None, "exchange-info source returned malformed"),
+        ([_ticker("BTC")], [_asset(1, symbol="BTC")], {}, "exchange-info source returned malformed"),
+        ([_ticker("BTC")], [_asset(1, symbol="BTC")], {"symbols": []}, "exchange-info source returned empty"),
+        ([_ticker("BTC")], [_asset(1, symbol="BTC")], {"symbols": ["BTCUSDT"]}, "exchange-info source returned malformed"),
+        (
+            [_ticker("BTC")],
+            [_asset(1, symbol="BTC")],
+            {"symbols": [_contract("BTC", status="BREAK")]},
+            "no admissible USDT perpetual contracts",
+        ),
+        (
+            [_ticker("USDC")],
+            [_asset(1, symbol="USDC")],
+            {"symbols": [_contract("USDC")]},
+            "no usable USDT tickers",
+        ),
+    ),
+)
+def test_unusable_strict_source_payloads_fail_closed(tickers, market_caps, exchange_info, expected: str) -> None:
+    with pytest.raises(UniverseResolutionError, match=expected):
+        build_symbol_universe_from_market_caps(
+            tickers,
+            market_caps,
+            exchange_info=exchange_info,
+            universe_size=1,
+            generated_at=GENERATED_AT,
+        )
+
+
+def test_missing_ticker_payload_keeps_a_universe_resolution_cause() -> None:
+    async def scenario() -> None:
+        with pytest.raises(UniverseResolutionError, match="ticker source returned malformed") as raised:
+            await resolve_symbol_universe(
+                BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
+                universe_size=1,
+                market_cap_fetcher=lambda: [_asset(1, symbol="BTC")],
+                ticker_fetcher=lambda: None,
+                exchange_info_fetcher=lambda: {"symbols": [_contract("BTC")]},
+            )
+        assert discovery_failure_continues_owner_monitoring(raised.value) is True
+        assert not isinstance(raised.value, TypeError)
+        assert not isinstance(raised.value.__cause__, TypeError)
+
+    asyncio.run(scenario())
+
+
+def test_valid_strict_sources_still_resolve_with_contract_metadata() -> None:
+    async def scenario() -> None:
+        universe = await resolve_symbol_universe(
+            BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
+            universe_size=1,
+            market_cap_fetcher=lambda: [_asset(1, symbol="BTC"), _asset(2, symbol="ETH")],
+            ticker_fetcher=lambda: [_ticker("BTC"), _ticker("ETH")],
+            exchange_info_fetcher=lambda: {"symbols": [_contract("BTC"), _contract("ETH")]},
+            generated_at=GENERATED_AT,
+        )
+        assert universe.resolved_symbols == ("BTCUSDT",)
+        assert universe.diagnostics["contract_metadata_used"] is True
+        assert "ETHUSDT" not in universe.resolved_symbols
+
+    asyncio.run(scenario())
+
+
+def test_rank_above_boundary_is_not_used_to_fill_an_empty_intersection() -> None:
+    with pytest.raises(UniverseResolutionError, match="intersection is empty"):
+        _strict_resolution(
+            [_asset(1, symbol="NOCONTRACT"), _asset(2, symbol="BTC")],
+            ["NOCONTRACT", "BTC"],
+            universe_size=1,
+            contracts=[_contract("BTC")],
+        )
+
+
+def test_short_intersection_stays_smaller_than_requested_size() -> None:
+    universe = _strict_resolution(
+        [_asset(1, symbol="BTC"), _asset(2, symbol="ETH"), _asset(3, symbol="SOL")],
+        ["BTC"],
+        universe_size=3,
+        contracts=[_contract("BTC"), _contract("ETH"), _contract("SOL")],
+    )
+
+    assert universe.resolved_symbols == ("BTCUSDT",)
+    assert universe.diagnostics["final_universe_count"] == 1
+    assert max(universe.market_cap_rank_by_symbol.values()) == 1
+
+
+def test_nontrading_and_malformed_contract_rows_do_not_become_members() -> None:
+    universe = _strict_resolution(
+        [_asset(1, symbol="BTC"), _asset(2, symbol="ETH")],
+        ["BTC", "ETH"],
+        universe_size=2,
+        contracts=[
+            _contract("BTC", status="PENDING"),
+            "not-a-contract",
+            _contract("ETH"),
+        ],
+    )
+
+    assert universe.resolved_symbols == ("ETHUSDT",)
+    assert universe.diagnostics["contract_metadata_used"] is True
+    assert universe.diagnostics["non_trading_contract_excluded_count"] == 1
+    assert universe.diagnostics["malformed_contract_excluded_count"] == 1
+
+
+def test_cancellation_and_configuration_errors_are_not_universe_outages() -> None:
+    async def scenario() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await resolve_symbol_universe(
+                BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
+                universe_size=1,
+                market_cap_fetcher=_cancel,
+                ticker_fetcher=lambda: [_ticker("BTC")],
+                exchange_info_fetcher=lambda: {"symbols": [_contract("BTC")]},
+            )
+        with pytest.raises(ValueError, match="universe_size"):
+            await resolve_symbol_universe(
+                BINANCE_USDT_PERP_TOP_MARKET_CAP_MODE,
+                universe_size=0,
+                market_cap_fetcher=lambda: [_asset(1, symbol="BTC")],
+                ticker_fetcher=lambda: [_ticker("BTC")],
+                exchange_info_fetcher=lambda: {"symbols": [_contract("BTC")]},
+            )
+
+    asyncio.run(scenario())
+    assert discovery_failure_continues_owner_monitoring(ValueError("universe_size must be at least 1")) is False
+    assert discovery_failure_continues_owner_monitoring(SystemExit("bad args")) is False
+
+
+def _cancel() -> None:
+    raise asyncio.CancelledError()
