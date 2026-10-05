@@ -142,6 +142,8 @@ Full local suite: 2897 passed, 1 warning, 566.12s (0:09:26), exit 0. The warning
 - Base SHA: `011b9e2fc8a5c93578acceafe5505774537866df`
 - Rejected prior head: `fd749c4ba0ccf1490d0521d226481cf6ea88039f`
 - Repair SHA: `b72330b75efae7c268b466f6bed7c9365ab85c88`
+- Handoff SHA: `cabfbb011c302f366709bfe60bbfeecca1bc656d`
+- The documentation commit that records the verified handoff CI below is the branch tip after that commit. Its pull-request check is the CI result for the exact final head.
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/130
 - Schema version: remains 26
 - Runtime database: not opened, copied, or modified
@@ -154,7 +156,15 @@ Repair CI for `b72330b75efae7c268b466f6bed7c9365ab85c88`:
 - Job: Python 3.11 tests, ID `111701906090`
 - Log result: `2897 passed, 1 warning in 141.37s (0:02:21)`
 
-This handoff commit is the next candidate. Its own CI is recorded by the following documentation commit, and that tip's successful check is the CI for the exact final head.
+Handoff CI for `cabfbb011c302f366709bfe60bbfeecca1bc656d`:
+
+- Run: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37291636794
+- Attempt: 1
+- Result: success
+- Job: Python 3.11 tests, ID `111703167551`
+- Log result: `2897 passed, 1 warning in 214.96s (0:03:34)`
+
+The documentation commit that records this handoff CI is the branch tip. The successful pull-request check on that tip SHA is the CI for the exact final head. Do not treat `fd749c4ba0ccf1490d0521d226481cf6ea88039f` or an earlier green run as the candidate.
 
 Acceptance is not claimed. Adam owns merge and any later Runtime procedure.
 
