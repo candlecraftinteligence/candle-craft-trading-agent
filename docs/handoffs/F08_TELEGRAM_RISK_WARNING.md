@@ -169,7 +169,8 @@ No skip, xfail, or weakened gate assertion was added.
 - Branch: `fix/f08-telegram-risk-warning`
 - Base SHA: `dea4f80174fa7e3e663c66da753ef9ebd13dc19b`
 - Accepted F06 head contained in that merge: `401330526a8f3eaadfda2f5322a67f496ec5c221`
-- Code and handoff SHA: recorded on the commit that adds this file
+- Implementation SHA: `acdfe56e179c22963928d6f13a9f20182b042a42`
+- The documentation commit that names this SHA is the branch tip after that commit. Its pull-request check is the CI result for the exact final head.
 - Draft PR: recorded after push
 - Schema version: remains 26
 - Runtime database: not opened, copied, or modified
