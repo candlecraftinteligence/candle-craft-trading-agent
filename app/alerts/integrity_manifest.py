@@ -192,7 +192,9 @@ def build_alert_integrity_manifest(
     message = "" if formatted_message is None else str(formatted_message)
     if not message.strip():
         _add_issue(issues, "error", "empty_alert_message", "Alert message is empty.", "formatted_message")
-    message_has_risk_warning = _message_has_risk_warning(message)
+    parts = tuple(str(part) for part in message_parts)
+    emitted_message = _emitted_alert_text(parts)
+    message_has_risk_warning = _message_has_risk_warning(emitted_message)
     message_has_invalidation = _message_has_invalidation(message)
     if not message_has_risk_warning:
         _add_issue(
@@ -242,7 +244,6 @@ def build_alert_integrity_manifest(
             key_path,
         )
 
-    parts = tuple(str(part) for part in message_parts)
     if not parts:
         _add_issue(issues, "error", "missing_message_parts", "Alert has no message parts.", "message_parts")
 
@@ -398,7 +399,7 @@ def _audit_alert_reference(alert_ref: Mapping[str, Any]) -> AlertIntegrityAuditR
     manifest_data = _as_mapping(alert.get("integrity_manifest"))
     has_manifest = manifest_data is not None
     formatted_message = _alert_message(alert)
-    message_parts = _alert_message_parts(alert, formatted_message)
+    message_parts, parts_disposition = _resolve_alert_message_parts(alert, formatted_message)
     status = _first_non_na(alert.get("status"), alert.get("delivery_status"), alert_ref.get("status"))
     channel = _first_non_na(alert.get("channel"), alert_ref.get("channel"))
     dry_run = _bool_from_alert(alert, status)
@@ -408,6 +409,15 @@ def _audit_alert_reference(alert_ref: Mapping[str, Any]) -> AlertIntegrityAuditR
         trade_idea.get("symbol") if trade_idea is not None else NA,
     )
 
+    if parts_disposition == "malformed":
+        _add_issue(
+            issues,
+            "error",
+            "malformed_message_parts",
+            "message_parts is present but is not a sequence of strings.",
+            f"{path}.message_parts",
+            "message_parts",
+        )
     if not has_manifest:
         _add_issue(
             issues,
@@ -686,18 +696,70 @@ def _message_has_field(message: str, label: str) -> bool:
     return False
 
 
+# Complete labeled statements. The unlabeled trade-idea field is not evidence.
+# DEFAULT_RISK_WARNING and the admin status line are different sentences and are
+# not included. The canonical sentence is duplicated here so this module does not
+# import the public formatter during alert-agent startup.
+CANONICAL_PUBLIC_RISK_WARNING = (
+    "Risk warning: Not financial advice. Trading can result in losses."
+)
+LEGACY_POSITION_SIZE_RISK_WARNING = (
+    "Risk warning: This is not financial advice. Position size must be based on "
+    "stop-loss risk, not desired profit."
+)
+_SUPPORTED_RISK_WARNING_STATEMENTS = (
+    CANONICAL_PUBLIC_RISK_WARNING,
+    LEGACY_POSITION_SIZE_RISK_WARNING,
+)
+
+
+def _emitted_alert_text(message_parts: Sequence[str]) -> str:
+    """Join the parts delivery would emit. Empty parts stay empty."""
+
+    return "\n".join(message_parts)
+
+
+def _normalize_emitted_text(value: str) -> str:
+    """Collapse whitespace and case so only the complete statement has to match."""
+
+    return " ".join(value.split()).casefold()
+
+
 def _message_has_risk_warning(message: str) -> bool:
-    if _message_has_field(message, "Risk warning"):
-        return True
-    for line in message.splitlines():
-        text = line.strip().lower()
-        if "no chase" in text:
-            return True
-        if "manual execution" in text and "manage risk" in text:
-            return True
-        if "not financial advice" in text:
-            return True
-    return False
+    normalized = _normalize_emitted_text(message)
+    if not normalized:
+        return False
+    return any(
+        _normalize_emitted_text(statement) in normalized
+        for statement in _SUPPORTED_RISK_WARNING_STATEMENTS
+    )
+
+
+def _resolve_alert_message_parts(
+    alert: Mapping[str, Any],
+    formatted_message: str,
+) -> tuple[tuple[str, ...], str]:
+    """Return emitted parts and whether the field was omitted, present, or malformed.
+
+    A missing message_parts key is the legacy one-part payload. An explicit empty
+    sequence stays empty. A string, mapping, null, or non-string item is malformed
+    and is not replaced with the source body.
+    """
+
+    if "message_parts" not in alert:
+        if formatted_message == "":
+            return (), "omitted"
+        return (formatted_message,), "omitted"
+    value = alert.get("message_parts")
+    if isinstance(value, (str, bytes, bytearray, Mapping)) or not isinstance(value, Sequence):
+        return (), "malformed"
+    parts: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            return (), "malformed"
+        parts.append(item)
+    return tuple(parts), "present"
+
 
 def _message_has_invalidation(message: str) -> bool:
     if _message_has_field(message, "Invalidation"):
@@ -739,14 +801,6 @@ def _forbidden_keys(value: Any, path: str = "trade_idea") -> tuple[str, ...]:
 def _alert_message(alert: Mapping[str, Any]) -> str:
     message = _first_non_na(alert.get("formatted_message"), alert.get("message"))
     return message if message != NA else ""
-
-
-def _alert_message_parts(alert: Mapping[str, Any], formatted_message: str) -> tuple[str, ...]:
-    parts = alert.get("message_parts")
-    if isinstance(parts, Sequence) and not isinstance(parts, (str, bytes, bytearray, Mapping)):
-        cleaned = tuple(str(part) for part in parts)
-        return cleaned if cleaned else (() if formatted_message == "" else (formatted_message,))
-    return () if formatted_message == "" else (formatted_message,)
 
 
 def _bool_from_alert(alert: Mapping[str, Any], status: Any) -> bool:
