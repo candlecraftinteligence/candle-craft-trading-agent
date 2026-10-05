@@ -155,12 +155,13 @@ Full local suite: 2893 passed, exit 0, one existing Starlette/`httpx` deprecatio
 - Branch: `fix/f06-runtime-disk-readiness`
 - Base SHA: `011b9e2fc8a5c93578acceafe5505774537866df`
 - Code and runbook SHA: `73d06c293979a59637bc3214ef78ab929d0aa4ce`
-- The documentation commit that adds this handoff is the branch tip. Its pull-request check is the CI result for the exact final head.
+- Handoff SHA: `8d90af69da289212882295d29e2e2a3777946748`
+- The documentation commit that records the verified handoff CI below is the branch tip after that commit. Its pull-request check is the CI result for the exact final head.
 - Draft PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/130
 - Schema version: remains 26
 - Runtime database: not opened, copied, or modified
 
-Code-head CI, not the documentation tip:
+Code and runbook CI:
 
 - Run: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37282100327
 - Attempt: 1
@@ -168,6 +169,15 @@ Code-head CI, not the documentation tip:
 - Head SHA: `73d06c293979a59637bc3214ef78ab929d0aa4ce`
 - Job: Python 3.11 tests, ID `111672306409`
 - Log result: `2893 passed, 1 warning in 228.52s (0:03:48)`
+
+Handoff CI:
+
+- Run: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/37282720488
+- Attempt: 1
+- Result: success
+- Head SHA: `8d90af69da289212882295d29e2e2a3777946748`
+- Job: Python 3.11 tests, ID `111674296811`
+- Log result: `2893 passed, 1 warning in 208.55s (0:03:28)`
 
 Acceptance is not claimed. Adam owns merge and any later Runtime procedure.
 
