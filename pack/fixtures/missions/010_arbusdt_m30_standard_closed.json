@@ -1,0 +1,92 @@
+{
+  "cci_setup_id": "mock_setup_arb_m30_closed",
+  "symbol": "ARBUSDT",
+  "timeframe": "M30",
+  "direction": "LONG",
+  "quality_tier": "STANDARD",
+  "title": "Single-target resolution",
+  "thesis_summary": "Synthetic M30 long resolved at the first recorded target. The timeline goes from confirmation to TP_HIT and then CLOSED. There is no TP1 or TP2 step in this file.",
+  "evidence": [
+    {
+      "type": "structure",
+      "label": "Confirmed base",
+      "detail": "The long was confirmed before the target event."
+    },
+    {
+      "type": "level",
+      "label": "Single target",
+      "detail": "Only TP_HIT is recorded. Partial targets are absent on purpose."
+    },
+    {
+      "type": "invalidation",
+      "label": "Base low",
+      "detail": "The base low was the invalidation reference until resolution."
+    }
+  ],
+  "lifecycle": [
+    {
+      "cci_event_id": "evt_arb_m30_01",
+      "event_type": "SETUP_PUBLISHED",
+      "state": "ACTIVE",
+      "occurred_at": "2026-09-16T06:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_arb_m30_02",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "WATCH",
+      "occurred_at": "2026-09-16T08:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_arb_m30_03",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "STALKING",
+      "occurred_at": "2026-09-16T11:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_arb_m30_04",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TRIGGERED",
+      "occurred_at": "2026-09-16T13:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_arb_m30_05",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "CONFIRMED",
+      "occurred_at": "2026-09-16T17:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_arb_m30_06",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "TP_HIT",
+      "occurred_at": "2026-09-17T09:30:00Z",
+      "outcome_code": "TP_HIT"
+    },
+    {
+      "cci_event_id": "evt_arb_m30_07",
+      "event_type": "SETUP_RESOLVED",
+      "state": "CLOSED",
+      "occurred_at": "2026-09-17T09:31:00Z",
+      "outcome_code": "TP_HIT"
+    }
+  ],
+  "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
+  "synthetic": true,
+  "replay": {
+    "masked_title": "Confirmed base",
+    "masked_thesis": "Synthetic M30 long. A confirmed base is the structure under study. The later record is withheld.",
+    "teaching_note": "The fixture outcome is TP_HIT, then CLOSED. Quality tier was STANDARD. The aligned training decision is TRACK. The score does not measure profit.",
+    "preferred_decision": "TRACK",
+    "evidence": [
+      {
+        "type": "structure",
+        "label": "Confirmed base",
+        "detail": "The base is the reference in this drill."
+      },
+      {
+        "type": "invalidation",
+        "label": "Base low",
+        "detail": "A close through the base low ends the idea."
+      }
+    ]
+  }
+}
