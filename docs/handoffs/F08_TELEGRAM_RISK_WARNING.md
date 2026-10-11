@@ -182,7 +182,7 @@ Local DEV only. Temporary databases and `FakeSender`. No network send.
 
 Reviewed candidate `d591f0f`, before this correction: F08 file 10 passed; focused formatter, alert-agent, integrity, and coalescing set 100 passed; related lifecycle, funnel, watch, outbox, and TP set 300 passed; full pytest 2910 passed. Those counts do not cover the corrected audit.
 
-Corrected tree:
+Cursor audit correction (`e71700e`, documentation tip `78a0605`):
 
 - F08 file: `tests/test_f08_telegram_risk_warning.py`, 15 passed. The file still contains the SENT duplicate and PENDING recovery tests.
 - Focused set: that file plus `tests/test_alert_agent.py`, `tests/test_alert_integrity_manifest.py`, `tests/test_telegram_signal_formatter_phase42.py`, `tests/test_telegram_formatter.py`, and `tests/test_public_signal_coalescing_phase.py`.
@@ -260,8 +260,38 @@ The documentation commit that records this result is the branch tip after that c
 - A complete statement split across kept delivery parts still matches. A dropped continuation does not. Normal delivery uses the 4096-character splitter, which breaks on newlines first, and the warning is one short line before the signature.
 - No production acceptance, merge, or Runtime rollout is claimed. Adam's separate code-only Runtime update remains outside this DEV phase and was not executed here.
 
+## Codex completion — 2026-10-11
+
+Adam transferred implementation ownership from Cursor to Codex and requested review of the latest changes and completion of F08 on existing PR #131. The starting checkout was clean at `78a060560d3016a8e1d88db5862b073162d9eeaf`. The accepted foundation remains F06 merge `dea4f80174fa7e3e663c66da753ef9ebd13dc19b`.
+
+Codex independently verified Cursor's exact-candidate CI run `37373084460`, attempt 1, job `111974831983`: 2,915 passed, one existing Starlette/httpx warning, 181.05s. Its tested synthetic merge `6b1523ab407fac2b7e7c6f64f730e566e53d25c3` has no file differences from `78a0605`. A fresh local regression run passed 491 tests, including all 13 original independent checks. Both original repair examples now behave correctly when a trade-idea record is present.
+
+One residual F08-R2 path remained. The public auditor also supports standalone AlertResult records and `{alert_result: ...}` wrappers without a surrounding trade idea. On those inputs it skipped rebuilding the manifest and therefore skipped the emitted-warning and missing-parts checks. Four independent cases showed that a valid stored manifest plus either explicit empty parts or a same-count part with the warning removed still audited valid. The unsplit source card and stored hashes were unchanged in each case.
+
+The focused completion applies emitted-warning and missing-parts checks to that existing standalone path. It does not invent trade data or change the scanner-context requirement for an associated trade idea. Empty/malformed parts and source-only warnings are rejected whether or not a stored manifest or trade-idea wrapper is available. Supported complete canonical/legacy warnings and omitted legacy one-part metadata retain their documented behavior. Auditing leaves input text, parts, stored manifests and hashes unchanged.
+
+Executed plan and constraints:
+
+1. Reproduce the remaining supported standalone path before editing.
+2. Add the two emitted-evidence checks to that audit path and 20 regression cases covering direct/wrapped records, stored/absent manifests, empty/malformed/source-only parts, canonical/legacy positives and omitted legacy parts.
+3. Verify the four new independent cases, the original 13 and the focused formatter/integrity/admin tests; run the full repository suite, compilation and whitespace checks before commit/push.
+4. Continue the existing branch and PR; record the final pushed commit and its CI in the PR and the Codex completion report after the checks finish. Earlier Cursor CI is evidence for its own head, not the new completion commit.
+
+Only alert-integrity auditing, focused tests and this handoff change in the Codex completion. Schema 26, public gates 88/A/RR3, F03/P5A/F04/F05/F06 contracts, rendered card inventory, event identity, delivery/outbox policy, immutable historical content and restart deduplication remain unchanged. Tests use synthetic data and mocked transports. No Runtime action, Telegram send, order execution, merge or deployment is part of this completion.
+
+Codex verification:
+
+- Before the completion: 491 related and original independent checks passed in 82.91s; four additional standalone counterexamples failed.
+- After the completion: 129 focused checks passed in 10.97s, including all 17 independent cases and the 20 new regression cases.
+- Full repository suite in the isolated export: 2,934 passed, one failure, one existing Starlette/httpx warning, 560.90s. The sole failure was `test_scan_output_json_remains_untracked_and_untouched`, because `git ls-files` cannot run in an export without Git metadata. That unchanged test was rerun in the actual updated DEV checkout: one passed, exit 0, 0.37s. All 2,935 repository tests therefore have a passing local result; the final CI run checks the complete committed suite in one repository run.
+- Compilation: `python -m compileall -q app scripts src tests`, exit 0.
+- The three-file patch applied cleanly to the unchanged starting head; `git diff --check` passed.
+- Final commit and CI: recorded in PR #131 and the final Codex completion report after push.
+
+The first broad review invocation had a missing review-only temporary parent folder; the subsequent corrected invocation passed all 491 checks. This was test-harness setup, not a product defect. No assertion was weakened and no skip or xfail was introduced.
+
 ## Operational actions
 
 None on Runtime. No merge, no deployment, no listener, no watch loop, no Telegram send, no order, no live database access, and no historic resend.
 
-DEV actions were this branch from current main, local tests, a draft pull request, and CI.
+Cursor's DEV actions were this branch from current main, local tests, a draft pull request, and CI. Codex subsequently reviewed the existing branch, reproduced and fixed the standalone audit path, added 20 regression cases, verified synthetic tests and compilation, and continued the same PR. Final push/CI evidence is recorded in the PR and Codex completion report for the resulting commit; it must not be inferred from an earlier listed run.

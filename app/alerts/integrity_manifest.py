@@ -450,6 +450,25 @@ def _audit_alert_reference(alert_ref: Mapping[str, Any]) -> AlertIntegrityAuditR
                 "payload_sha256",
             )
     else:
+        # Standalone AlertResult artifacts have no trade-idea context to rebuild,
+        # but their emitted warning and part evidence can still be checked.
+        if not _message_has_risk_warning(_emitted_alert_text(message_parts)):
+            _add_issue(
+                issues,
+                "blocker",
+                "message_missing_risk_warning",
+                "Alert message must include a risk warning.",
+                f"{path}.message_parts",
+                "risk_warning",
+            )
+        if not message_parts:
+            _add_issue(
+                issues,
+                "error",
+                "missing_message_parts",
+                "Alert has no message parts.",
+                f"{path}.message_parts",
+            )
         parent_status = _status_key(alert_ref.get("parent_status"))
         if parent_status in {"alert_dry_run_created", "journal_entry_created"} or "alert_dry_run_created" in _status_history(
             alert_ref.get("status_history")

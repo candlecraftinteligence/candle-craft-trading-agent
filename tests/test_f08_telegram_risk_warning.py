@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from copy import deepcopy
 from decimal import Decimal
+
+import pytest
 
 from app.agents.alert_agent import AlertAgent
 from app.alerts.integrity_manifest import (
@@ -328,6 +331,71 @@ def test_malformed_message_parts_are_not_emitted_warning_evidence() -> None:
         assert artifact["alert_result"]["message_parts"] == value  # type: ignore[index]
         assert artifact["alert_result"]["integrity_manifest"]["message_sha256"] == message_sha  # type: ignore[index]
         assert artifact["alert_result"]["integrity_manifest"]["payload_sha256"] == payload_sha  # type: ignore[index]
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("include_manifest", [False, True])
+@pytest.mark.parametrize("parts_case", ["empty", "source_only_warning", "malformed"])
+def test_standalone_artifact_rechecks_emitted_warning_without_trade_idea(
+    wrapped: bool, include_manifest: bool, parts_case: str,
+) -> None:
+    artifact, _, _ = _stored_artifact()
+    alert = artifact["alert_result"]
+    assert isinstance(alert, dict)
+    text = alert["formatted_message"]
+    if parts_case == "empty":
+        alert["message_parts"] = []
+    elif parts_case == "source_only_warning":
+        alert["message_parts"] = [text.replace(PUBLIC_TRADE_MAP_RISK_WARNING, "No chase.")]
+    else:
+        alert["message_parts"] = None
+    if not include_manifest:
+        alert.pop("integrity_manifest")
+    standalone = {"alert_result": alert} if wrapped else alert
+    before = deepcopy(standalone)
+
+    result = audit_alert_integrity_artifact(standalone)
+    codes = [issue.code for issue in result.issues]
+
+    assert result.summary.alert_count == 1
+    assert result.summary.is_valid is False
+    assert codes.count("message_missing_risk_warning") == 1
+    if parts_case in {"empty", "malformed"}:
+        assert "missing_message_parts" in codes
+    if parts_case == "malformed":
+        assert "malformed_message_parts" in codes
+    assert "alert_without_trade_idea" not in codes
+    assert standalone == before
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("omit_parts", [False, True])
+@pytest.mark.parametrize("warning", [PUBLIC_TRADE_MAP_RISK_WARNING, LEGACY_POSITION_SIZE_RISK_WARNING])
+def test_standalone_complete_warning_and_omitted_legacy_parts_remain_valid(
+    wrapped: bool, omit_parts: bool, warning: str,
+) -> None:
+    artifact, _, _ = _stored_artifact()
+    alert = artifact["alert_result"]
+    assert isinstance(alert, dict)
+    text = alert["formatted_message"].replace(PUBLIC_TRADE_MAP_RISK_WARNING, warning)
+    manifest = _manifest(text)
+    assert manifest.is_valid is True
+    alert.update(
+        formatted_message=text,
+        integrity_manifest=manifest.model_dump(mode="python"),
+        deduplication_key=manifest.deduplication_key,
+    )
+    if not omit_parts:
+        alert["message_parts"] = [text]
+    standalone = {"alert_result": alert} if wrapped else alert
+    before = deepcopy(standalone)
+
+    result = audit_alert_integrity_artifact(standalone)
+
+    assert result.summary.alert_count == 1
+    assert result.summary.is_valid is True, result.issues
+    assert result.issues == ()
+    assert standalone == before
 
 
 def test_alert_agent_keeps_internal_risk_warning_metadata() -> None:
