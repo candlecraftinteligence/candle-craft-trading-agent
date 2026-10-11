@@ -10,6 +10,7 @@ import httpx
 from app.agents.alert_agent import AlertAgent, AlertChannel, AlertStatus
 from app.agents.trade_idea import TradeIdeaResult, create_trade_idea
 from app.alerts.templates import split_message
+from app.formatters.telegram_signal_formatter import PUBLIC_TRADE_MAP_RISK_WARNING
 
 
 def run(coro: Any) -> Any:
@@ -61,7 +62,10 @@ def test_formats_valid_trade_idea() -> None:
     assert "TP1 112" in message
     assert "TP2 120" in message
     assert "TP3 N/A" in message
-    assert "Not financial advice." not in message
+    assert message.count(PUBLIC_TRADE_MAP_RISK_WARNING) == 1
+    assert message.index(PUBLIC_TRADE_MAP_RISK_WARNING) < message.index("CCI · Signal. Structure. Execution.")
+    assert "Risk warning: N/A" not in message
+    assert "Position size must be based on stop-loss risk" not in message
     assert "Actionability" + ":" not in message
     assert "Trade Map (incomplete stored context)" not in message
     assert "Manual execution only. Manage risk." not in message
@@ -231,12 +235,16 @@ def test_unverified_data_preserved_as_unverified() -> None:
     assert "Unverified" not in message
 
 
-def test_compact_signal_omits_disclaimer_but_preserves_internal_risk_warning() -> None:
+def test_public_signal_states_risk_warning_and_preserves_internal_risk_warning() -> None:
     idea = _idea()
+    stored_warning = idea.risk_warning
     message = AlertAgent().format(idea)
 
-    assert "Not financial advice." not in message
-    assert idea.risk_warning
+    assert message.count(PUBLIC_TRADE_MAP_RISK_WARNING) == 1
+    assert stored_warning
+    assert idea.risk_warning == stored_warning
+    assert stored_warning not in message
+    assert "Risk warning: N/A" not in message
 
 
 def test_cci_signature_included() -> None:
@@ -246,14 +254,16 @@ def test_cci_signature_included() -> None:
 
 
 def test_verbose_confirmed_facts_do_not_expand_compact_signal() -> None:
+    baseline = AlertAgent().format(_idea())
     compact_message = AlertAgent().format(
         _idea(confirmed_facts=tuple(f"Fact {index}" for index in range(80)))
     )
     parts = split_message(compact_message, max_length=300)
 
-    assert len(parts) == 1
+    assert compact_message == baseline
     assert all(len(part) <= 300 for part in parts)
     assert "Fact 0" not in compact_message
+    assert sum(part.count(PUBLIC_TRADE_MAP_RISK_WARNING) for part in parts) == 1
     assert parts[-1].endswith("CCI · Signal. Structure. Execution.")
 
 

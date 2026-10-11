@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from app.alerts.integrity_manifest import build_alert_integrity_manifest
+from app.formatters.telegram_signal_formatter import PUBLIC_TRADE_MAP_RISK_WARNING
 from app.core.config import Settings
 from app.data.dtos import NA
 from app.storage.database import open_initialized_database
@@ -368,7 +369,7 @@ def _alert_row(symbol: str = "ALERTUSDT") -> dict[str, Any]:
         (
             "Direction: LONG",
             "Invalidation: Invalid below 95.",
-            "Risk warning: Manual review only; crypto derivatives are high risk.",
+            PUBLIC_TRADE_MAP_RISK_WARNING,
         )
     )
     deduplication_key = f"{symbol}-15m-liquidity_grab_pullback_swing"

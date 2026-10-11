@@ -16,6 +16,9 @@ RANGE_DASH = "\u2013"
 EM_DASH = "\u2014"
 MIDDLE_DOT = "\u00B7"
 CCI_FOOTER = f"CCI {MIDDLE_DOT} Signal. Structure. Execution."
+PUBLIC_TRADE_MAP_RISK_WARNING = (
+    "Risk warning: Not financial advice. Trading can result in losses."
+)
 COMPACT_SEPARATOR = "\u2501" * 14
 PREMIUM_SIGNAL_SEPARATOR = "\u2501" * 13
 DEFAULT_MIN_RR_DISPLAY = Decimal("3")
@@ -202,6 +205,7 @@ def format_telegram_signal_message(
 
 
 def format_research_watch_message(message: TelegramSignalMessage) -> str:
+    warning_lines = _public_trade_map_risk_warning_lines() if _research_trade_map_valid(message) else ()
     return _join(
         f"{HEADER_PREFIX} Research Watch {EM_DASH} {format_symbol(message.symbol)}",
         "",
@@ -219,6 +223,7 @@ def format_research_watch_message(message: TelegramSignalMessage) -> str:
         "",
         "Trade map:",
         *_research_trade_map_lines(message),
+        *warning_lines,
         "",
         FOOTER,
     )
@@ -268,6 +273,7 @@ def format_premium_public_signal_message(message: TelegramSignalMessage) -> str:
             if message.zone_active
             else "\U0001F43A Hunt live."
         ),
+        *_public_trade_map_risk_warning_lines(),
         "",
         CCI_FOOTER,
     )
@@ -316,8 +322,7 @@ def _format_public_signal_message(
         _public_compact_invalidation_line(message),
         "",
         _public_closing_line(message, confirmed=confirmed, triggered=triggered),
-        "",
-        "Not financial advice.",
+        *_public_trade_map_risk_warning_lines(),
         FOOTER,
     )
 
@@ -1383,6 +1388,12 @@ def _first_display(*values: Any) -> str:
     return NA
 
 
+def _public_trade_map_risk_warning_lines() -> tuple[str, ...]:
+    """One canonical public warning. It does not fill missing plan fields."""
+
+    return ("", PUBLIC_TRADE_MAP_RISK_WARNING)
+
+
 def _join(*lines: str) -> str:
     return "\n".join(lines)
 
@@ -1490,6 +1501,7 @@ def _status_key(value: Any) -> str:
 __all__ = [
     "FOOTER",
     "HEADER_PREFIX",
+    "PUBLIC_TRADE_MAP_RISK_WARNING",
     "PUBLIC_STATUS_BY_ALERT_TYPE",
     "SignalEdgeEvidence",
     "TelegramAlertType",

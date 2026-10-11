@@ -106,7 +106,8 @@ def test_valid_scalp_signal_renders_premium_compact_card() -> None:
     assert "⚔️ EXECUTION" in text
     assert "Wait for the mapped zone. No chase." in text
     assert "🐺 Hunt live." in text
-    assert "Not financial advice." not in text
+    assert text.count("Risk warning: Not financial advice. Trading can result in losses.") == 1
+    assert text.index("Risk warning:") < text.index("CCI · Signal. Structure. Execution.")
     assert "Actionability" + ":" not in text
     assert "Why this setup " + "matters" not in text
     assert "Execution " + "notes" not in text
