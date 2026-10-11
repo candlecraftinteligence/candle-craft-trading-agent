@@ -41,6 +41,7 @@ LIFECYCLE_FUNNEL_STATES = (
     "EXECUTING",
     "TP_HIT",
     "SL_HIT",
+    "BREAKEVEN",
     "INVALIDATED",
     "EXPIRED",
     "ARCHIVED",
@@ -51,7 +52,7 @@ LIFECYCLE_CONVERSION_STEPS = (
     ("TRIGGERED", "CONFIRMED"),
     ("CONFIRMED", "EXECUTING"),
 )
-LIFECYCLE_EXECUTING_OUTCOMES = ("TP_HIT", "SL_HIT", "INVALIDATED", "EXPIRED")
+LIFECYCLE_EXECUTING_OUTCOMES = ("TP_HIT", "SL_HIT", "BREAKEVEN", "INVALIDATED", "EXPIRED")
 LIFECYCLE_ACTIVE_STATES = {
     "DISCOVERED",
     "WATCHLISTED",
@@ -73,6 +74,7 @@ LIFECYCLE_PROGRESS_RANK = {
     "MANAGING": 7,
     "TP_HIT": 8,
     "SL_HIT": 8,
+    "BREAKEVEN": 8,
     "INVALIDATED": 8,
     "EXPIRED": 8,
 }
@@ -1575,6 +1577,7 @@ def _lifecycle_analytics(data: ResearchData, filters: ResearchFilters) -> dict[s
         "triggered_to_confirmed_pct": conversion_counts["TRIGGERED_to_CONFIRMED"]["conversion_rate_pct"],
         "confirmed_to_executing_pct": conversion_counts["CONFIRMED_to_EXECUTING"]["conversion_rate_pct"],
         "executing_to_tp_hit_pct": conversion_counts["EXECUTING_to_TP_HIT"]["conversion_rate_pct"],
+        "executing_to_breakeven_pct": conversion_counts["EXECUTING_to_BREAKEVEN"]["conversion_rate_pct"],
         "executing_to_sl_hit_pct": conversion_counts["EXECUTING_to_SL_HIT"]["conversion_rate_pct"],
         "executing_to_invalidated_pct": conversion_counts["EXECUTING_to_INVALIDATED"]["conversion_rate_pct"],
         "executing_to_expired_pct": conversion_counts["EXECUTING_to_EXPIRED"]["conversion_rate_pct"],
@@ -1585,7 +1588,7 @@ def _lifecycle_analytics(data: ResearchData, filters: ResearchFilters) -> dict[s
     valid_ids = {
         path["lifecycle_id"]
         for path in paths
-        if any(_path_reached_state(path, state) for state in ("CONFIRMED", "EXECUTING", "MANAGING", "TP_HIT", "SL_HIT"))
+        if any(_path_reached_state(path, state) for state in ("CONFIRMED", "EXECUTING", "MANAGING", "TP_HIT", "SL_HIT", "BREAKEVEN"))
     }
     state_duration_stats = _lifecycle_state_duration_stats(
         data.lifecycle_events,
@@ -1621,6 +1624,8 @@ def _lifecycle_analytics(data: ResearchData, filters: ResearchFilters) -> dict[s
         "confirmed_outcomes": {
             "confirmed_count": len(confirmed_ids),
             "tp_hit_count": len(confirmed_ids & ids_by_state.get("TP_HIT", set())),
+            "breakeven_count": len(confirmed_ids & ids_by_state.get("BREAKEVEN", set())),
+            "breakeven_rate_pct": _rate(len(confirmed_ids & ids_by_state.get("BREAKEVEN", set())), len(confirmed_ids)),
             "sl_hit_count": len(confirmed_ids & ids_by_state.get("SL_HIT", set())),
             "tp_hit_rate_pct": _rate(len(confirmed_ids & ids_by_state.get("TP_HIT", set())), len(confirmed_ids)),
             "sl_hit_rate_pct": _rate(len(confirmed_ids & ids_by_state.get("SL_HIT", set())), len(confirmed_ids)),

@@ -1,5 +1,7 @@
 # CCI EVAL_SEMANTICS — Executable Runtime/Replay Evaluation Contract and Differential Proof
 
+Current policy update: [TP1 reference breakeven](../handoffs/TP1_REFERENCE_BREAKEVEN.md) introduces runtime rule vocabulary v2. TP1 activates the entry-zone midpoint reference stop on subsequent candles; existing active progress records prospective adoption. BREAKEVEN is distinct from SL_HIT and implies no actual fill or net PnL. The earlier fixed-stop descriptions below are historical where they differ. StrategyReplay remains a separate simulation.
+
 **Status:** Research contract + synthetic paired proofs. No production Python change.
 **Does not** persist admissions, mint episode/trade/policy IDs, bind source/policy, add a tracker, authorize replay as runtime outcome authority, or compute expectancy.
 **Audited base commit:** `1ff5b8db984dbb0b196e02c2cb702af52c9efa42` (`main`, merge of PR #114 / R0).

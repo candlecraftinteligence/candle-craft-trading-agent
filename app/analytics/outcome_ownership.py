@@ -81,6 +81,7 @@ ECONOMIC_TERMINALS: Final[frozenset[str]] = frozenset(
     {
         SetupLifecycleState.TP_HIT.value,
         SetupLifecycleState.SL_HIT.value,
+        SetupLifecycleState.BREAKEVEN.value,
         SetupLifecycleState.INVALIDATED.value,
         SetupLifecycleState.EXPIRED.value,
     }
@@ -95,7 +96,7 @@ LIFECYCLE_SUCCESSORS: Final[frozenset[str]] = frozenset(
     }
 )
 ANALYTICS_ECONOMIC: Final[frozenset[str]] = frozenset(
-    {"TP3_HIT", "SL_HIT", "INVALIDATED", "EXPIRED", "REJECTED"}
+    {"TP3_HIT", "SL_HIT", "BREAKEVEN", "INVALIDATED", "EXPIRED", "REJECTED"}
 )
 ANALYTICS_SUCCESSORS: Final[frozenset[str]] = frozenset({"COOLDOWN"})
 PROGRESS_PHYSICAL_FIELDS: Final[tuple[str, ...]] = ("lifecycle_id", "plan_identity")
@@ -791,6 +792,14 @@ def _economic_view(
     if terminal == SetupLifecycleState.TP_HIT.value and "SL_HIT" in analytic_economic:
         conflict = True
         conflict_reason = "analytics_stop_conflicts_with_progress_tp"
+    if terminal == SetupLifecycleState.BREAKEVEN.value and any(
+        outcome in analytic_economic for outcome in ("SL_HIT", "TP3_HIT")
+    ):
+        conflict = True
+        conflict_reason = "analytics_terminal_conflicts_with_progress_breakeven"
+    if terminal in {SetupLifecycleState.TP_HIT.value, SetupLifecycleState.SL_HIT.value} and "BREAKEVEN" in analytic_economic:
+        conflict = True
+        conflict_reason = "analytics_breakeven_conflicts_with_progress_terminal"
     entry_relationship = _entry_relationship(
         terminal=terminal,
         entry_at=entry_at,
@@ -801,6 +810,12 @@ def _economic_view(
         semantic_terminal = "generic_tp_hit_not_promoted"
     elif terminal == SetupLifecycleState.TP_HIT.value and tp3_at is not None:
         semantic_terminal = "tp3_terminal"
+    elif terminal == SetupLifecycleState.BREAKEVEN.value:
+        semantic_terminal = (
+            "reference_breakeven_after_tp1"
+            if tp1_at is not None and entry_relationship == "after_entry" and stop_at is not None
+            else "reference_breakeven_evidence_unverified"
+        )
     elif terminal == SetupLifecycleState.SL_HIT.value:
         semantic_terminal = (
             "stop_after_entry" if entry_relationship == "after_entry" else "stop_entry_relationship_uncertain"
@@ -1224,6 +1239,7 @@ def _counts(
         "tp1": sum(1 for item in interpretable if item["milestones"].get("tp1_at")),
         "tp2": sum(1 for item in interpretable if item["milestones"].get("tp2_at")),
         "tp3": sum(1 for item in interpretable if item["milestones"].get("tp3_at")),
+        "reference_breakeven_after_tp1": sum(1 for item in interpretable if item["economic_status"] == "reference_breakeven_after_tp1"),
         "stop_after_entry": sum(1 for item in interpretable if item["economic_status"] == "stop_after_entry"),
         "invalidation_before_entry": sum(
             1 for item in interpretable if item["economic_status"] == "invalidation_before_entry"

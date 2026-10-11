@@ -28,6 +28,7 @@ UPPER_KNOWN_STATUSES = {
     "MANAGING",
     "REJECTED",
     "SL_HIT",
+    "BREAKEVEN",
     "STALKING",
     "STOPPED",
     "TP_HIT",
@@ -47,7 +48,7 @@ LOWER_KNOWN_STATUSES = {
 KNOWN_STATUSES = UPPER_KNOWN_STATUSES | LOWER_KNOWN_STATUSES
 LIFECYCLE_STATUSES = UPPER_KNOWN_STATUSES - {"DISCOVERED"}
 ACTIVE_TRADE_STATUSES = {"TRIGGERED", "CONFIRMED", "EXECUTING", "MANAGING"}
-TERMINAL_OUTCOME_STATUSES = {"TP_HIT", "TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "STOPPED", "CLOSED"}
+TERMINAL_OUTCOME_STATUSES = {"TP_HIT", "TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "BREAKEVEN", "STOPPED", "CLOSED"}
 PASSIVE_OR_REJECTION_STATUSES = {
     "CANCELLED",
     "DISCOVERED",
@@ -78,6 +79,7 @@ STATUS_ALIASES = {
     "rejected": "REJECTED",
     "scan_error": "scan_error",
     "scanned_no_setup": "scanned_no_setup",
+    "breakeven": "BREAKEVEN",
     "sl": "SL_HIT",
     "sl_hit": "SL_HIT",
     "stalking": "STALKING",
@@ -119,16 +121,18 @@ ALLOWED_TRANSITIONS = {
         "TP2_HIT",
         "TP3_HIT",
         "SL_HIT",
+        "BREAKEVEN",
         "STOPPED",
         "INVALIDATED",
         "EXPIRED",
         "CLOSED",
     },
-    "MANAGING": {"TP_HIT", "TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "STOPPED", "INVALIDATED", "EXPIRED", "CLOSED"},
+    "MANAGING": {"TP_HIT", "TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "BREAKEVEN", "STOPPED", "INVALIDATED", "EXPIRED", "CLOSED"},
     "TP_HIT": {"COOLDOWN", "CLOSED"},
-    "TP1_HIT": {"TP2_HIT", "TP3_HIT", "COOLDOWN", "CLOSED"},
-    "TP2_HIT": {"TP3_HIT", "COOLDOWN", "CLOSED"},
+    "TP1_HIT": {"BREAKEVEN", "TP2_HIT", "TP3_HIT", "COOLDOWN", "CLOSED"},
+    "TP2_HIT": {"BREAKEVEN", "TP3_HIT", "COOLDOWN", "CLOSED"},
     "TP3_HIT": {"COOLDOWN", "CLOSED"},
+    "BREAKEVEN": {"COOLDOWN", "CLOSED"},
     "SL_HIT": {"COOLDOWN", "CLOSED"},
     "STOPPED": {"COOLDOWN", "CLOSED"},
     "INVALIDATED": {"COOLDOWN", "CLOSED", "WATCH"},
@@ -659,7 +663,7 @@ def _audit_transition_sequence(
             warning_count += 1
 
     final_status = lifecycle_statuses[-1]
-    if final_status in {"TP_HIT", "TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT"}:
+    if final_status in {"TP_HIT", "TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "BREAKEVEN"}:
         prior = set(lifecycle_statuses[:-1])
         if "WATCH" in prior and not prior & {"TRIGGERED", "CONFIRMED", "EXECUTING", "MANAGING"}:
             _add_issue(

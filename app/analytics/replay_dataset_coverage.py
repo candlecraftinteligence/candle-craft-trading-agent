@@ -60,10 +60,11 @@ BOOLEAN_DIMENSIONS = {
     "has_missing_data",
     "has_unverified_data",
 }
-TERMINAL_LIFECYCLE_BUCKETS = {"terminal_tp", "terminal_sl", "closed"}
+TERMINAL_LIFECYCLE_BUCKETS = {"terminal_tp", "terminal_sl", "terminal_breakeven", "closed"}
 TERMINAL_OUTCOME_STATUS_KEYS = {
     "closed",
     "sl_hit",
+    "breakeven",
     "stop_loss_hit",
     "stopped",
     "tp_hit",
@@ -303,6 +304,8 @@ def classify_lifecycle_bucket(status: Any, normalized_lifecycle_status: Any = NA
         return "executing"
     if key in {"tp_hit", "tp1_hit", "tp2_hit", "tp3_hit", "take_profit_hit", "tp_1_hit", "tp_2_hit", "tp_3_hit"}:
         return "terminal_tp"
+    if key == "breakeven":
+        return "terminal_breakeven"
     if key in {"sl_hit", "stop_loss_hit", "stopped", "sl"}:
         return "terminal_sl"
     if key in {"invalidated", "expired", "cancelled", "canceled"}:

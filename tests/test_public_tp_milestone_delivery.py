@@ -454,6 +454,7 @@ def test_retryable_tp_attempt_retries_and_sends_exactly_once(
     repeated = run(_service(db_path, sender).deliver_for_run(_empty_run_result()))
 
     assert failed.failed == 1
+    assert failed.sent == 0
     assert retried.sent == 1
     assert repeated.sent == 0
     assert [item.alert_type for item in _sent_outcomes(db_path)] == [

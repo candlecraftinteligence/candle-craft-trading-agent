@@ -576,8 +576,9 @@ def test_stop_after_entry_preserves_prior_targets(
         candles.append(_stop(len(candles), direction))
         stopped = _evaluate(repository, result.record, candles)
 
-        assert stopped.record.current_state == SetupLifecycleState.SL_HIT
-        assert stopped.progress.terminal_outcome == SetupLifecycleState.SL_HIT.value
+        expected = SetupLifecycleState.BREAKEVEN if targets_before_stop else SetupLifecycleState.SL_HIT
+        assert stopped.record.current_state == expected
+        assert stopped.progress.terminal_outcome == expected.value
         assert stopped.progress.stop_at == _decision(len(candles) - 1)
         for number in range(1, 4):
             value = getattr(stopped.progress, f"tp{number}_at")

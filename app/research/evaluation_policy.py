@@ -25,7 +25,7 @@ from app.data.candle_integrity import CandleIntegrityError, timeframe_duration
 from app.strategies.liquidity_grab_pullback import LiquidityGrabMode
 
 MANIFEST_FORMAT_VERSION: Final[str] = "cci-evaluation-policy-manifest-v1"
-RUNTIME_RULE_VOCABULARY_VERSION: Final[str] = "cci-runtime-closed-candle-rules-v1"
+RUNTIME_RULE_VOCABULARY_VERSION: Final[str] = "cci-runtime-closed-candle-rules-v2"
 REPLAY_RULE_VOCABULARY_VERSION: Final[str] = "cci-replay-trade-rules-v1"
 EVALUATOR_FAMILY_RUNTIME: Final[str] = "runtime_lifecycle_closed_candle"
 EVALUATOR_FAMILY_REPLAY: Final[str] = "replay_trade_simulation"
@@ -58,6 +58,7 @@ _REPLAY_PARAMETER_KEYS: Final[tuple[str, ...]] = (
 )
 _RUNTIME_RULE_KEYS: Final[tuple[str, ...]] = (
     "entry_representation",
+    "stop_management",
     "price_touch_predicates",
     "execution_timeframe",
     "candle_eligibility",
@@ -348,6 +349,18 @@ def _replay_scope() -> dict[str, Any]:
 
 def _runtime_rules() -> dict[str, Any]:
     return {
+        "stop_management": {
+            "policy": "tp1_entry_zone_midpoint_breakeven_v1",
+            "reference": "entry_zone_midpoint_not_exchange_fill",
+            "activation": "candle_open_at_or_after_prior_tp1_close_and_adoption_cutoff",
+            "new_progress": "policy_applies_from_tracking_start",
+            "existing_progress": "persist_first_observed_decision_cutoff_preserve_older_pending_policy",
+            "original_geometry": "immutable",
+            "effective_stop": "midpoint_when_protection_active_otherwise_original_stop",
+            "unknown_or_invalid_binding": "integrity_failed_no_cursor_advance",
+            "terminal_label": "BREAKEVEN",
+            "net_pnl_or_real_fill_claim": False,
+        },
         "entry_representation": {
             "model": "inclusive_zone_overlap",
             "predicate": "high >= entry_low and low <= entry_high",
@@ -357,8 +370,8 @@ def _runtime_rules() -> dict[str, Any]:
         "price_touch_predicates": {
             "stop": {
                 "model": "directional_threshold_inequality",
-                "long": "low <= stop_loss",
-                "short": "high >= stop_loss",
+                "long": "low <= effective_stop",
+                "short": "high >= effective_stop",
                 "requires_level_inside_inclusive_range": False,
             },
             "targets": {

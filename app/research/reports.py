@@ -19,6 +19,7 @@ LIFECYCLE_FUNNEL_DISPLAY_STATES = (
     "EXECUTING",
     "TP_HIT",
     "SL_HIT",
+    "BREAKEVEN",
     "INVALIDATED",
     "ARCHIVED",
 )
@@ -589,6 +590,7 @@ def _format_lifecycle_conversion(report: Mapping[str, Any]) -> str:
                 ("TRIGGERED -> CONFIRMED", _pct_value(rates.get("triggered_to_confirmed_pct"))),
                 ("CONFIRMED -> EXECUTING", _pct_value(rates.get("confirmed_to_executing_pct"))),
                 ("EXECUTING -> TP_HIT", _pct_value(executing_tp.get("conversion_rate_pct"))),
+                ("EXECUTING -> BREAKEVEN", _pct_value(_mapping(counts.get("EXECUTING_to_BREAKEVEN")).get("conversion_rate_pct"))),
                 ("EXECUTING -> SL_HIT", _pct_value(executing_sl.get("conversion_rate_pct"))),
                 ("EXECUTING -> INVALIDATED", _pct_value(executing_invalidated.get("conversion_rate_pct"))),
                 ("EXECUTING -> EXPIRED", _pct_value(executing_expired.get("conversion_rate_pct"))),

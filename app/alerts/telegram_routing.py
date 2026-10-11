@@ -27,6 +27,7 @@ class TelegramMessageType(str, Enum):
     LIMIT_ZONE_HIT = "limit_zone_hit"
     TP_HIT = "tp_hit"
     SL_HIT = "sl_hit"
+    BREAKEVEN = "breakeven"
     INVALIDATED = "invalidated"
     WATCHLIST_CONFIRMED = "watchlist_confirmed"
     WELCOME = "welcome"
@@ -52,6 +53,7 @@ SIGNAL_CHANNEL_ALLOWED_MESSAGE_TYPES = frozenset(
         TelegramMessageType.LIMIT_ZONE_HIT,
         TelegramMessageType.TP_HIT,
         TelegramMessageType.SL_HIT,
+        TelegramMessageType.BREAKEVEN,
         TelegramMessageType.INVALIDATED,
         TelegramMessageType.WATCHLIST_CONFIRMED,
     }

@@ -205,7 +205,9 @@ class TransportStateSequenceSender(FakeSender):
             "total_parts": total_parts,
             "message_id": len(self.messages) if sent else None,
             "chat_id": "fake-public-chat" if sent else None,
-            "retry_after": 0 if state == "RETRYABLE" else None,
+            # Tests explicitly advance retries with _make_lifecycle_retry_due.
+            # A zero delay races same-pass recovery when the wall clock ticks.
+            "retry_after": 3600 if state == "RETRYABLE" else None,
             "error_category": error_category,
             "error": error_category,
         }

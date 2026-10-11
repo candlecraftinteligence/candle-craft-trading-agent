@@ -24,6 +24,7 @@ _WATCHLIST_FOCUS_BLOCKED_KEYS = {
     "reject",
     "rejected",
     "sl_hit",
+    "breakeven",
     "tp1_hit",
     "tp2_hit",
     "tp3_hit",

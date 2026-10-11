@@ -39,6 +39,7 @@ WATCHLIST_NON_EXPIRING_STATE_KEYS = {
     "tp2_hit",
     "tp3_hit",
     "sl_hit",
+    "breakeven",
     "invalidated",
     "expired",
     "cooldown",

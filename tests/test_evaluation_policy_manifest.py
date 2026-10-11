@@ -470,7 +470,7 @@ def test_entry_candle_targets_same_candle_and_horizon_cases(tmp_path: Path) -> N
     runtime_ms = _runtime(tmp_path, _record(lifecycle_id="ms"), tp_then_stop, db_name="policy-ms.sqlite")
     replay_ms = _replay(tp_then_stop, direction="long")
     assert runtime_ms.progress.tp1_at == _decision(2)
-    assert runtime_ms.progress.terminal_outcome == SetupLifecycleState.SL_HIT.value
+    assert runtime_ms.progress.terminal_outcome == SetupLifecycleState.BREAKEVEN.value
     assert replay_ms.outcome == ReplayOutcome.TP1_HIT
     assert replay_ms.sl_hit is False
     assert replay_ms.r_multiple > 0
@@ -571,7 +571,7 @@ def test_price_jumps_beyond_stop_and_target_through_full_evaluators(tmp_path: Pa
     runtime_tp = _runtime(tmp_path, _record(lifecycle_id="jump-tp"), jump_target, db_name="policy-jump-tp.sqlite")
     replay_tp = _replay(jump_target, direction="long")
     assert runtime_tp.progress.tp1_at == _decision(2)
-    assert runtime_tp.progress.terminal_outcome == SetupLifecycleState.SL_HIT.value
+    assert runtime_tp.progress.terminal_outcome == SetupLifecycleState.BREAKEVEN.value
     assert replay_tp.outcome == ReplayOutcome.EXPIRED
     assert replay_tp.highest_tp_hit == 0
     runtime_rules = _runtime_policy().to_canonical_dict()["rules"]["price_touch_predicates"]

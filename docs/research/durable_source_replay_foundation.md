@@ -1,5 +1,7 @@
 # F04 — Durable source replay foundation
 
+Current policy update: [TP1 reference breakeven](../handoffs/TP1_REFERENCE_BREAKEVEN.md) introduces runtime rule vocabulary v2. TP1 activates the entry-zone midpoint reference stop on subsequent candles; existing active progress records prospective adoption. BREAKEVEN is distinct from SL_HIT and implies no actual fill or net PnL. The earlier fixed-stop descriptions below are historical where they differ. StrategyReplay remains a separate simulation.
+
 **Status:** Optional capture and offline invocation replay. Capture is off by default. This document is the implementation contract. It is not Runtime activation, admission, or expectancy.
 
 Application schema stays **26**. The evidence store uses its own schema version **1** (`cci-durable-source-replay-store-v1`) and codec `cci-durable-source-replay-codec-v1`.

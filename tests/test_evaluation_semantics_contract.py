@@ -390,7 +390,7 @@ def test_same_candle_entry_stop_and_post_entry_stop_target(tmp_path: Path) -> No
     assert replay_post_o.sl_hit is False
 
 
-def test_earlier_tp_then_stop_is_milestone_not_a_winning_exit(tmp_path: Path) -> None:
+def test_earlier_tp_then_reference_stop_is_not_a_winning_exit(tmp_path: Path) -> None:
     # Evidence: direct evaluator / import-supported supplied state.
     candles = [
         _no_touch(0, "long"),
@@ -402,14 +402,14 @@ def test_earlier_tp_then_stop_is_milestone_not_a_winning_exit(tmp_path: Path) ->
     replay = _replay(candles, direction="long")
     assert runtime.progress.tp1_at == _decision(2)
     assert runtime.progress.tp2_at is None
-    assert runtime.progress.terminal_outcome == SetupLifecycleState.SL_HIT.value
+    assert runtime.progress.terminal_outcome == SetupLifecycleState.BREAKEVEN.value
     assert runtime.progress.stop_at == _decision(3)
     assert replay.outcome == ReplayOutcome.TP1_HIT
     assert replay.highest_tp_hit == 1
     assert replay.tp1_hit is True
     assert replay.sl_hit is False
     assert replay.r_multiple > 0
-    # Matching replay TP1 to runtime TP1 would conceal the later stop.
+    # Matching replay TP1 to runtime TP1 would conceal the later reference stop.
 
 
 def test_horizon_unfilled_filled_unresolved_and_input_exhaustion(tmp_path: Path) -> None:

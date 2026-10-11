@@ -41,10 +41,12 @@ VALID_STATES = {
     SetupLifecycleState.MANAGING,
     SetupLifecycleState.TP_HIT,
     SetupLifecycleState.SL_HIT,
+    SetupLifecycleState.BREAKEVEN,
 }
 OUTCOME_STATES = {
     SetupLifecycleState.TP_HIT,
     SetupLifecycleState.SL_HIT,
+    SetupLifecycleState.BREAKEVEN,
     SetupLifecycleState.INVALIDATED,
     SetupLifecycleState.EXPIRED,
 }
@@ -197,11 +199,13 @@ ALLOWED_TRANSITIONS: dict[SetupLifecycleState, set[SetupLifecycleState]] = {
     SetupLifecycleState.MANAGING: {
         SetupLifecycleState.TP_HIT,
         SetupLifecycleState.SL_HIT,
+        SetupLifecycleState.BREAKEVEN,
         SetupLifecycleState.INVALIDATED,
         SetupLifecycleState.EXPIRED,
     },
     SetupLifecycleState.TP_HIT: {SetupLifecycleState.COOLDOWN},
     SetupLifecycleState.SL_HIT: {SetupLifecycleState.COOLDOWN},
+    SetupLifecycleState.BREAKEVEN: {SetupLifecycleState.COOLDOWN},
     SetupLifecycleState.INVALIDATED: {SetupLifecycleState.COOLDOWN},
     SetupLifecycleState.EXPIRED: {SetupLifecycleState.COOLDOWN},
     SetupLifecycleState.COOLDOWN: {SetupLifecycleState.ARCHIVED, SetupLifecycleState.WATCHLISTED},
@@ -551,7 +555,7 @@ def evaluate_lifecycle_transition(
 
     if (
         observation.closed_candle_outcomes_managed
-        and record.current_state in {SetupLifecycleState.TP_HIT, SetupLifecycleState.SL_HIT}
+        and record.current_state in {SetupLifecycleState.TP_HIT, SetupLifecycleState.SL_HIT, SetupLifecycleState.BREAKEVEN}
     ):
         return _with_economic_identities(
             transition_record(
@@ -1514,6 +1518,8 @@ def _reason_for_state(
         return SetupTransitionReason.ENTRY_FILL_SIMULATED
     if state == SetupLifecycleState.TP_HIT:
         return SetupTransitionReason.TAKE_PROFIT_HIT
+    if state == SetupLifecycleState.BREAKEVEN:
+        return SetupTransitionReason.BREAKEVEN_STOP_HIT
     if state == SetupLifecycleState.SL_HIT:
         return SetupTransitionReason.STOP_LOSS_HIT
     if state == SetupLifecycleState.INVALIDATED:

@@ -41,6 +41,7 @@ PUBLIC_FOLLOWUP_EVENT_TYPES = frozenset(
         "tp2_hit",
         "tp3_hit",
         "sl_hit",
+        "breakeven",
         "invalidated",
         "expired",
         "cooldown",

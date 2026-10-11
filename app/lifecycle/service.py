@@ -1122,6 +1122,8 @@ def _final_outcome_for_state(state: SetupLifecycleState) -> str:
     # TP_HIT is terminal only after TP3; TP1 and TP2 remain internal milestones.
     if state == SetupLifecycleState.TP_HIT:
         return "TP3_HIT"
+    if state == SetupLifecycleState.BREAKEVEN:
+        return "BREAKEVEN"
     if state == SetupLifecycleState.SL_HIT:
         return "SL_HIT"
     if state == SetupLifecycleState.INVALIDATED:

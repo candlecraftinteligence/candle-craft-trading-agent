@@ -58,7 +58,7 @@ REQUIRED_COMPLETENESS_FIELDS = ("source", "artifact_type", "row_type", "symbol",
 CRITICAL_NA_FIELDS = ("symbol", "scan_timestamp", "status", "normalized_lifecycle_status")
 STABLE_IDENTIFIER_FIELDS = ("run_id", "scan_id", "setup_id", "trade_idea_id", "alert_id", "journal_entry_id")
 IDENTITY_FIELDS = ("row_id",) + STABLE_IDENTIFIER_FIELDS + ("source", "artifact_type", "row_type", "symbol", "scan_timestamp", "status")
-TERMINAL_STATUSES = {"TP_HIT", "TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "STOPPED", "CLOSED"}
+TERMINAL_STATUSES = {"TP_HIT", "TP1_HIT", "TP2_HIT", "TP3_HIT", "SL_HIT", "BREAKEVEN", "STOPPED", "CLOSED"}
 RESOLVED_PASSIVE_STATUSES = {
     "CANCELLED",
     "EXPIRED",

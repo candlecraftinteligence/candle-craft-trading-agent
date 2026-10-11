@@ -39,6 +39,7 @@ DEPENDENCY_BLOCKING_STATES = frozenset(
         SetupLifecycleState.MANAGING.value,
         SetupLifecycleState.TP_HIT.value,
         SetupLifecycleState.SL_HIT.value,
+        SetupLifecycleState.BREAKEVEN.value,
     }
 )
 SAFE_QUARANTINE_TRANSITIONS = {
