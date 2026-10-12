@@ -72,8 +72,10 @@ from app.lifecycle.models import (
 )
 from app.lifecycle.outcome_policy import (
     compatible_plan_identities,
+    stored_plan_geometry,
     stored_plan_geometry_failure,
 )
+from app.lifecycle.breakeven import validate_breakeven_outcome
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import entry_zone_touched, now_utc_iso
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunResult, ScannerSymbolResult
@@ -123,6 +125,7 @@ PUBLIC_LIFECYCLE_OUTBOX_ALERT_TYPES = frozenset(
         TelegramAlertType.TP2_HIT,
         TelegramAlertType.TP3_HIT,
         TelegramAlertType.SL_HIT,
+        TelegramAlertType.BREAKEVEN,
     }
 )
 PUBLIC_LIFECYCLE_OUTBOX_ALERT_BY_EVENT_TYPE = {
@@ -161,17 +164,20 @@ TERMINAL_COMPLETION_ALERT_TYPES = {
     TelegramAlertType.NO_LONGER_TRACKING.value,
     "COOLDOWN",
     TelegramAlertType.SL_HIT.value,
+    TelegramAlertType.BREAKEVEN.value,
     TelegramAlertType.TP3_HIT.value,
 }
 WATCHLIST_OUTCOME_TERMINAL_ALERT_TYPES = {
     TelegramAlertType.TP3_HIT,
     TelegramAlertType.SL_HIT,
+    TelegramAlertType.BREAKEVEN,
 }
 TP_SL_ALERT_TYPES = {
     TelegramAlertType.TP1_HIT,
     TelegramAlertType.TP2_HIT,
     TelegramAlertType.TP3_HIT,
     TelegramAlertType.SL_HIT,
+    TelegramAlertType.BREAKEVEN,
 }
 WATCHLIST_OUTCOME_TRACKING_ATTEMPT = "WATCHLIST_OUTCOME_TRACKING"
 WATCHLIST_TERMINAL_SUPPRESSION_ATTEMPT = "WATCHLIST_TERMINAL_SUPPRESSION"
@@ -5807,6 +5813,7 @@ def _can_try_public_watchlist_reconciliation(
         TelegramAlertType.TP2_HIT,
         TelegramAlertType.TP3_HIT,
         TelegramAlertType.SL_HIT,
+        TelegramAlertType.BREAKEVEN,
     }:
         return False
     return decision.reason in {
@@ -8038,6 +8045,7 @@ def is_public_lifecycle_event(state: SetupLifecycleState | str) -> bool:
         SetupLifecycleState.MANAGING,
         SetupLifecycleState.TP_HIT,
         SetupLifecycleState.SL_HIT,
+        SetupLifecycleState.BREAKEVEN,
         SetupLifecycleState.INVALIDATED,
         SetupLifecycleState.EXPIRED,
     }
@@ -8085,6 +8093,8 @@ def _alert_type_for_transition(
         return TelegramAlertType.LIMIT_HIT
     if state == SetupLifecycleState.TP_HIT:
         return _tp_alert_type(symbol_result)
+    if state == SetupLifecycleState.BREAKEVEN:
+        return TelegramAlertType.BREAKEVEN
     if state == SetupLifecycleState.SL_HIT:
         return TelegramAlertType.SL_HIT
     if state == SetupLifecycleState.INVALIDATED:
@@ -8136,6 +8146,8 @@ def _telegram_message_type_for_alert(
         return TelegramMessageType.LIMIT_ZONE_HIT
     if alert_type in {TelegramAlertType.TP1_HIT, TelegramAlertType.TP2_HIT, TelegramAlertType.TP3_HIT}:
         return TelegramMessageType.TP_HIT
+    if alert_type == TelegramAlertType.BREAKEVEN:
+        return TelegramMessageType.BREAKEVEN
     if alert_type == TelegramAlertType.SL_HIT:
         return TelegramMessageType.SL_HIT
     if alert_type in TERMINAL_UPDATE_ALERT_TYPES:
@@ -10776,6 +10788,8 @@ def _missing_required_fields(alert_type: TelegramAlertType, message: TelegramSig
         required.append(("tp2", message.tp2))
     if alert_type == TelegramAlertType.TP3_HIT:
         required.append(("tp3", message.tp3))
+    if alert_type == TelegramAlertType.BREAKEVEN:
+        required.extend((("entry_low", message.entry_low), ("entry_high", message.entry_high)))
     if alert_type == TelegramAlertType.SL_HIT:
         required.append(("stop_loss", message.stop_loss))
     return tuple(name for name, value in required if _text(value) == NA)
@@ -12072,10 +12086,8 @@ def _watchlist_outcome_for_current_result(
         )
         return None
 
-    if repository.has_attempt(signal_id=prior_alert.signal_id, alert_type=TelegramAlertType.SL_HIT) or repository.has_attempt(
-        signal_id=prior_alert.signal_id,
-        alert_type=TelegramAlertType.TP3_HIT,
-    ):
+    if any(repository.has_attempt(signal_id=prior_alert.signal_id, alert_type=terminal_type)
+           for terminal_type in (TelegramAlertType.SL_HIT, TelegramAlertType.BREAKEVEN, TelegramAlertType.TP3_HIT)):
         _persist_watchlist_outcome_audit(
             repository,
             prior_alert,
@@ -12402,7 +12414,7 @@ def _tp_sl_price_condition(
             return current_price >= level
         if side == "short":
             return current_price <= level
-    if alert_type == TelegramAlertType.SL_HIT:
+    if alert_type in {TelegramAlertType.SL_HIT, TelegramAlertType.BREAKEVEN}:
         if side == "long":
             return current_price <= level
         if side == "short":
@@ -12423,6 +12435,9 @@ def _tp_sl_level(alert_type: TelegramAlertType, message: TelegramSignalMessage) 
         return _decimal_or_none(message.tp2)
     if alert_type == TelegramAlertType.TP3_HIT:
         return _decimal_or_none(message.tp3)
+    if alert_type == TelegramAlertType.BREAKEVEN:
+        pair = _decimal_pair_values(message.entry_low, message.entry_high)
+        return (pair[0] + pair[1]) / Decimal(2) if pair is not None else None
     if alert_type == TelegramAlertType.SL_HIT:
         return _decimal_or_none(message.stop_loss)
     return None
@@ -13442,6 +13457,11 @@ def _canonical_public_outcome_blockers(
     geometry_failure = stored_plan_geometry_failure(match.record)
     if geometry_failure is not None:
         blockers.append(f"canonical_outcome_invalid_stored_geometry:{geometry_failure}")
+    if progress.terminal_outcome == SetupLifecycleState.BREAKEVEN.value and geometry_failure is None:
+        try:
+            validate_breakeven_outcome(progress, stored_plan_geometry(match.record))
+        except (ValueError, TypeError) as exc:
+            blockers.append(f"canonical_breakeven_unverified:{exc}")
     if progress.plan_identity not in compatible_plan_identities(match.record):
         blockers.append("canonical_outcome_plan_identity_mismatch")
     if _status_key(progress.integrity_status) != "verified":
@@ -13499,9 +13519,9 @@ def _canonical_public_outcome_sequence(
         milestones.append((alert_type, reached_at))
     if (
         progress.stop_at is not None
-        and _status_key(progress.terminal_outcome) == "sl_hit"
+        and _status_key(progress.terminal_outcome) in {"sl_hit", "breakeven"}
     ):
-        milestones.append((TelegramAlertType.SL_HIT, progress.stop_at))
+        milestones.append((TelegramAlertType.BREAKEVEN if progress.terminal_outcome == "BREAKEVEN" else TelegramAlertType.SL_HIT, progress.stop_at))
     return tuple(milestones)
 
 
@@ -13593,13 +13613,11 @@ def _canonical_public_outcome_deliveries(
             )
         )
 
-    if TelegramAlertType.SL_HIT in reached and not satisfied(TelegramAlertType.SL_HIT):
-        deliveries.append(
-            CanonicalPublicOutcomeDelivery(
-                alert_type=TelegramAlertType.SL_HIT,
-                reached_at=reached[TelegramAlertType.SL_HIT],
-            )
-        )
+    for terminal_type in (TelegramAlertType.SL_HIT, TelegramAlertType.BREAKEVEN):
+        if terminal_type in reached and not satisfied(terminal_type):
+            deliveries.append(CanonicalPublicOutcomeDelivery(
+                alert_type=terminal_type, reached_at=reached[terminal_type],
+            ))
     return tuple(deliveries), tuple(audits)
 
 
@@ -14676,7 +14694,7 @@ def _observed_watchlist_outcome_price(
             return candle.high
         if side == "short":
             return candle.low
-    if alert_type == TelegramAlertType.SL_HIT:
+    if alert_type in {TelegramAlertType.SL_HIT, TelegramAlertType.BREAKEVEN}:
         if side == "long":
             return candle.low
         if side == "short":
@@ -14926,6 +14944,9 @@ def _price_level_for_alert(alert_type: TelegramAlertType, message: TelegramSigna
         return _text(message.tp2)
     if alert_type == TelegramAlertType.TP3_HIT:
         return _text(message.tp3)
+    if alert_type == TelegramAlertType.BREAKEVEN:
+        pair = _decimal_pair_values(message.entry_low, message.entry_high)
+        return str((pair[0] + pair[1]) / Decimal(2)) if pair is not None else NA
     if alert_type == TelegramAlertType.SL_HIT:
         return _text(message.stop_loss)
     if alert_type == TelegramAlertType.LIMIT_HIT:

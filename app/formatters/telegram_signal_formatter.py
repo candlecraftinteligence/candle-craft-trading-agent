@@ -34,6 +34,7 @@ class TelegramAlertType(str, Enum):
     TP2_HIT = "TP2_HIT"
     TP3_HIT = "TP3_HIT"
     SL_HIT = "SL_HIT"
+    BREAKEVEN = "BREAKEVEN"
     INVALIDATED = "INVALIDATED"
     EXPIRED = "EXPIRED"
     NO_LONGER_TRACKING = "NO_LONGER_TRACKING"
@@ -71,6 +72,7 @@ PUBLIC_STATUS_BY_ALERT_TYPE = {
     TelegramAlertType.TP2_HIT: "TP2 SECURED",
     TelegramAlertType.TP3_HIT: "FULL TARGET SEQUENCE COMPLETE",
     TelegramAlertType.SL_HIT: "SETUP INVALIDATED",
+    TelegramAlertType.BREAKEVEN: "BREAKEVEN",
     TelegramAlertType.INVALIDATED: "SETUP INVALIDATED",
     TelegramAlertType.EXPIRED: "WATCH EXPIRED",
     TelegramAlertType.NO_LONGER_TRACKING: "NO LONGER TRACKING",
@@ -193,6 +195,8 @@ def format_telegram_signal_message(
         return format_tp2_hit_update(message)
     if normalized == TelegramAlertType.TP3_HIT:
         return format_tp3_hit_update(message)
+    if normalized == TelegramAlertType.BREAKEVEN:
+        return format_breakeven_update(message)
     if normalized == TelegramAlertType.SL_HIT:
         return format_sl_hit_update(message)
     if normalized == TelegramAlertType.INVALIDATED:
@@ -881,6 +885,8 @@ def format_tp1_hit_update(message: TelegramSignalMessage) -> str:
         format_price(message.tp1),
         "",
         "First objective reached.",
+        "Move SL to breakeven.",
+        _breakeven_reference_line(message),
         "",
         f"Next \u2192 TP2 {format_price(message.tp2)}",
         "",
@@ -896,6 +902,8 @@ def format_tp2_hit_update(message: TelegramSignalMessage) -> str:
         "TP1 \u2713 \u00b7 TP2 \u2713" if consolidated else format_price(message.tp2),
         "",
         "Second objective reached.",
+        "Move / keep SL at breakeven.",
+        _breakeven_reference_line(message),
         "",
         f"Final \u2192 TP3 {format_price(message.tp3)}",
         "",
@@ -922,6 +930,27 @@ def format_tp3_hit_update(message: TelegramSignalMessage) -> str:
 
 def format_trade_complete_update(message: TelegramSignalMessage) -> str:
     return format_tp3_hit_update(message)
+
+
+def _breakeven_reference_line(message: TelegramSignalMessage) -> str:
+    low = _decimal_value(message.entry_low)
+    high = _decimal_value(message.entry_high)
+    if low is None or high is None or low > high:
+        return "Breakeven reference: Unverified (entry zone unavailable)."
+    return f"Setup reference: {format_price((low + high) / Decimal(2))} (entry-zone midpoint; not your actual fill)."
+
+
+def format_breakeven_update(message: TelegramSignalMessage) -> str:
+    return _join(
+        f"{HEADER_PREFIX} {format_symbol(message.symbol)} {MIDDLE_DOT} BREAKEVEN",
+        "",
+        "Reference stop reached after TP1.",
+        _breakeven_reference_line(message),
+        "Prior TP milestones remain recorded. Remaining setup closed at reference breakeven.",
+        "Net result depends on partial exits and costs; actual fills are not tracked.",
+        "",
+        CCI_FOOTER,
+    )
 
 
 def format_sl_hit_update(message: TelegramSignalMessage) -> str:

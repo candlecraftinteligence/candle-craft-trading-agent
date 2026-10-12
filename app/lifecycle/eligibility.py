@@ -47,6 +47,7 @@ TERMINAL_STATE_KEYS = frozenset(
         "rejected",
         "expired",
         "sl_hit",
+        "breakeven",
         "stop_hit",
         "tp_hit",
         "tp1_hit",

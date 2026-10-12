@@ -15,6 +15,7 @@ from app.lifecycle.models import (
     SetupTransitionResult,
 )
 from app.lifecycle.outcome_policy import StoredPlanGeometry
+from app.lifecycle.breakeven import reference_price
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import transition_record
 
@@ -91,19 +92,21 @@ def record_stop(
     scan_run_id: str | None,
     plan_identity: str,
     ambiguity_reason: str,
+    breakeven: bool = False,
 ) -> tuple[SetupLifecycleRecord, SetupTransitionResult, SetupLifecycleOutcomeProgress]:
+    outcome = SetupLifecycleState.BREAKEVEN if breakeven else SetupLifecycleState.SL_HIT
     updated_record, transition = record_terminal_transition(
         record,
-        to_state=SetupLifecycleState.SL_HIT,
-        reason=SetupTransitionReason.STOP_LOSS_HIT,
-        event_type="terminal_sl_hit",
+        to_state=outcome,
+        reason=SetupTransitionReason.BREAKEVEN_STOP_HIT if breakeven else SetupTransitionReason.STOP_LOSS_HIT,
+        event_type="terminal_breakeven" if breakeven else "terminal_sl_hit",
         causal=causal,
         evaluated_at=evaluated_at,
         repository=repository,
         scan_run_id=scan_run_id,
         plan_identity=plan_identity,
         policy_reason=ambiguity_reason,
-        level=str(geometry.stop_loss),
+        level=str(reference_price(geometry) if breakeven else geometry.stop_loss),
     )
     candle_close = causal.close_timestamp.isoformat()
     return (
@@ -113,7 +116,7 @@ def record_stop(
             update={
                 "stop_at": candle_close,
                 "outcome_at": candle_close,
-                "terminal_outcome": SetupLifecycleState.SL_HIT.value,
+                "terminal_outcome": outcome.value,
             }
         ),
     )

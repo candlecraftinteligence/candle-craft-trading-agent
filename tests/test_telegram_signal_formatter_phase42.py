@@ -76,6 +76,7 @@ def test_public_signal_messages_use_their_canonical_footer_contract() -> None:
             TelegramAlertType.SIGNAL_CONFIRMED,
             TelegramAlertType.LIMIT_HIT,
             TelegramAlertType.SL_HIT,
+            TelegramAlertType.BREAKEVEN,
         }:
             assert text.endswith(CCI_FOOTER)
         elif alert_type in {

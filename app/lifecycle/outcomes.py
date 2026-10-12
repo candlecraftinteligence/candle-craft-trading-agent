@@ -58,6 +58,7 @@ from app.lifecycle.outcome_policy import (
     stored_plan_geometry_failure,
 )
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
+from app.lifecycle.breakeven import bind_stop_policy, protection_active, reference_stop_touched
 from app.runtime_epoch.errors import RuntimeEpochError
 from app.runtime_epoch.ownership import require_current_epoch_lifecycle_id
 
@@ -77,6 +78,7 @@ TERMINAL_OUTCOME_STATES = frozenset(
     {
         SetupLifecycleState.TP_HIT,
         SetupLifecycleState.SL_HIT,
+        SetupLifecycleState.BREAKEVEN,
         SetupLifecycleState.INVALIDATED,
         SetupLifecycleState.EXPIRED,
     }
@@ -200,6 +202,20 @@ def evaluate_closed_candle_outcomes(
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
     geometry = _stored_plan_geometry(record)
+
+    try:
+        progress = bind_stop_policy(
+            progress, geometry,
+            decision_timestamp=decision_timestamp, evaluated_at=evaluated_at,
+        )
+    except (ValueError, TypeError) as exc:
+        progress = _integrity_failure(
+            progress, status=INTEGRITY_FAILED,
+            diagnostic=f"stop_management_policy_invalid:{exc}", evaluated_at=evaluated_at,
+        )
+        repository.upsert_outcome_progress(progress)
+        return LifecycleOutcomeEvaluation(record=record, progress=progress)
+    repository.upsert_outcome_progress(progress)
 
     if not execution_candles:
         progress = _integrity_failure(
@@ -661,7 +677,12 @@ def evaluate_closed_candle_outcomes(
             continue
 
         touched_targets = _newly_touched_targets(high, low, geometry, progress)
-        if _stop_touched(high, low, geometry):
+        breakeven_active = protection_active(progress, causal.open_timestamp)
+        stop_reached = (
+            reference_stop_touched(high, low, geometry) if breakeven_active
+            else _stop_touched(high, low, geometry)
+        )
+        if stop_reached:
             ambiguity_reason = (
                 "post_entry_stop_and_target_same_candle_stop_wins"
                 if touched_targets
@@ -677,6 +698,7 @@ def evaluate_closed_candle_outcomes(
                 scan_run_id=scan_run_id,
                 plan_identity=plan_identity,
                 ambiguity_reason=ambiguity_reason,
+                breakeven=breakeven_active,
             )
             transitions.append(last_transition)
         else:

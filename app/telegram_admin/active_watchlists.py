@@ -49,6 +49,7 @@ _TP1_TYPE = TelegramAlertType.TP1_HIT.value
 _TP2_TYPE = TelegramAlertType.TP2_HIT.value
 _TP3_TYPE = TelegramAlertType.TP3_HIT.value
 _SL_TYPE = TelegramAlertType.SL_HIT.value
+_BREAKEVEN_TYPE = TelegramAlertType.BREAKEVEN.value
 _INVALIDATED_TYPE = TelegramAlertType.INVALIDATED.value
 _EXPIRED_TYPE = TelegramAlertType.EXPIRED.value
 _NO_LONGER_TRACKING_TYPE = TelegramAlertType.NO_LONGER_TRACKING.value
@@ -57,6 +58,7 @@ _RUNTIME_DATABASE_INFERENCE_BLOCKLIST = {"main_live_runtime.sqlite"}
 _TERMINAL_OUTCOME_TYPES = {
     _TP3_TYPE,
     _SL_TYPE,
+    _BREAKEVEN_TYPE,
     _INVALIDATED_TYPE,
     _EXPIRED_TYPE,
     _NO_LONGER_TRACKING_TYPE,
@@ -69,6 +71,7 @@ _WATCHLIST_QUERY_TYPES = (
     _TP2_TYPE,
     _TP3_TYPE,
     _SL_TYPE,
+    _BREAKEVEN_TYPE,
     _INVALIDATED_TYPE,
     _EXPIRED_TYPE,
     _NO_LONGER_TRACKING_TYPE,
@@ -82,6 +85,7 @@ _SIGNAL_QUERY_TYPES = (
     _TP2_TYPE,
     _TP3_TYPE,
     _SL_TYPE,
+    _BREAKEVEN_TYPE,
     _INVALIDATED_TYPE,
     _EXPIRED_TYPE,
     _NO_LONGER_TRACKING_TYPE,
@@ -138,6 +142,7 @@ _ACTIVE_SIGNAL_BLOCKED_STATE_KEYS = {
     "archived",
     "tp_hit",
     "sl_hit",
+    "breakeven",
     "stop_hit",
 }
 _WATCH_STATE_KEYS = {"watch", "watching_limit_zone", "watchlist", "watchlisted", "actionable_a_grade"}
@@ -166,8 +171,8 @@ _TERMINAL_ALERT_TYPE_KEYS = {
     "stopped",
     "stop_hit",
 }
-_COMPLETED_OUTCOME_ALERT_TYPE_KEYS = {"sl_hit", "tp3_hit"}
-_ACTIVE_SIGNAL_CLOSED_OUTCOME_KEYS = {"sl_hit", "tp3_hit"}
+_COMPLETED_OUTCOME_ALERT_TYPE_KEYS = {"sl_hit", "tp3_hit", "breakeven"}
+_ACTIVE_SIGNAL_CLOSED_OUTCOME_KEYS = {"sl_hit", "tp3_hit", "breakeven"}
 _STALKING_ALERT_TYPE_KEYS = {
     "limit_hit",
     "tp1_hit",
@@ -232,6 +237,7 @@ _PUBLIC_WATCHLIST_BLOCKED_KEYS = {
     "scanner_error",
     "scanned_no_setup",
     "sl_hit",
+    "breakeven",
     "stop_hit",
     "strategy_rejected",
     "tp3_hit",
@@ -2949,7 +2955,7 @@ def _canonical_outcome_alert_types(progress: Mapping[str, Any]) -> frozenset[str
         ("tp1_at", _TP1_TYPE),
         ("tp2_at", _TP2_TYPE),
         ("tp3_at", _TP3_TYPE),
-        ("stop_at", _SL_TYPE),
+        ("stop_at", _BREAKEVEN_TYPE if progress.get("terminal_outcome") == "BREAKEVEN" else _SL_TYPE),
     ):
         if _clean(progress.get(field_name)) != NA:
             values.add(alert_type)

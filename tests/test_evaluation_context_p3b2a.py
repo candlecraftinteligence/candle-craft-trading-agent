@@ -352,6 +352,12 @@ def test_distinct_as_of_same_closed_prefix_is_not_reconstructable(tmp_path: Path
     def _run(path: Path, cutoff: datetime) -> dict[str, object]:
         with SQLiteSetupLifecycleRepository(path) as repository:
             repository.upsert_record(record)
+            # Hold adoption fixed while varying this later evaluation cutoff.
+            # A stop-policy boundary is not provenance for subsequent passes.
+            _evaluate(
+                repository, record, [], decision_timestamp=BASE,
+                evaluated_at=processed_at, scan_run_id=None,
+            )
             result = _evaluate(
                 repository,
                 record,
@@ -379,6 +385,9 @@ def test_distinct_as_of_same_closed_prefix_is_not_reconstructable(tmp_path: Path
     second = _run(tmp_path / "asof-b.db", cutoff_b)
     assert first["entry_at"] is not None
     assert first["progress"] == second["progress"]
+    assert json.loads(first["progress"]["metadata_json"])["stop_management"][
+        "effective_from_candle_open_at"
+    ] == BASE.isoformat()
     assert first["events"] == second["events"]
     assert first["scan_runs"] == second["scan_runs"] == []
     assert "decision_timestamp" not in first["progress"]

@@ -625,12 +625,12 @@ def test_entry_tp_and_stop_milestones_are_idempotent(tmp_path: Path) -> None:
         tp_events = _event_count(repository, entered.lifecycle_id)
         assert tp_events >= entry_events
         stop_candles = tp_candles + [_candle(3, high="113", low="99")]
-        # TP1 is not terminal. A later stop still resolves the plan once.
+        # TP1 is not terminal. Its later reference stop resolves the plan once.
         sl_first = _evaluate(repository, tp_second.record, stop_candles)
         sl_events = _event_count(repository, entered.lifecycle_id)
         sl_second = _evaluate(repository, sl_first.record, stop_candles)
-        assert sl_first.record.current_state == SetupLifecycleState.SL_HIT
-        assert sl_second.record.current_state == SetupLifecycleState.SL_HIT
+        assert sl_first.record.current_state == SetupLifecycleState.BREAKEVEN
+        assert sl_second.record.current_state == SetupLifecycleState.BREAKEVEN
         assert _event_count(repository, entered.lifecycle_id) == sl_events
         assert sl_first.progress is not None and sl_second.progress is not None
         assert sl_first.progress.stop_at == sl_second.progress.stop_at

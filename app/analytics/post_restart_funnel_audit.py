@@ -154,6 +154,7 @@ TERMINAL_STATES = frozenset(
     {
         SetupLifecycleState.TP_HIT.value,
         SetupLifecycleState.SL_HIT.value,
+        SetupLifecycleState.BREAKEVEN.value,
         SetupLifecycleState.INVALIDATED.value,
         SetupLifecycleState.EXPIRED.value,
     }
@@ -1563,7 +1564,7 @@ def _outcomes(
         outcome = _state_text(row.get("terminal_outcome"))
         if lifecycle_id and outcome in TERMINAL_STATES and _timestamp_in_window(_row_timestamp(row, "outcome_at"), window):
             terminal_by_lifecycle[lifecycle_id].add(outcome)
-    for terminal in ("TP_HIT", "SL_HIT", "INVALIDATED", "EXPIRED"):
+    for terminal in ("TP_HIT", "SL_HIT", "BREAKEVEN", "INVALIDATED", "EXPIRED"):
         ids = {key for key, states in terminal_by_lifecycle.items() if terminal in states}
         counts[terminal] = {"event_count": sum(terminal in states for states in terminal_by_lifecycle.values()), "unique_setup_count": len(ids)}
     contradictory = {key: sorted(states) for key, states in sorted(terminal_by_lifecycle.items()) if len(states) > 1}

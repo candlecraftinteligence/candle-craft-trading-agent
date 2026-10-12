@@ -359,7 +359,7 @@ def test_helper_does_not_repair_timestamps_or_evaluate_candles(tmp_path: Path) -
         assert "closed_candles_as_of" not in source
 
 
-def test_tp1_then_sl_preserves_milestone_and_does_not_promote_generic_tp(tmp_path: Path) -> None:
+def test_tp1_then_breakeven_preserves_milestone_and_does_not_promote_generic_tp(tmp_path: Path) -> None:
     record = _latched()
     with SQLiteSetupLifecycleRepository(tmp_path / "sl.db") as repository:
         repository.upsert_record(record)
@@ -369,13 +369,14 @@ def test_tp1_then_sl_preserves_milestone_and_does_not_promote_generic_tp(tmp_pat
             _candle(2, high="111", low="103"),
             _candle(3, high="105", low="89"),
         ]
+        _evaluate(repository, record, candles[:1])
         result = _evaluate(repository, record, candles)
         payload = _project(repository, [record.lifecycle_id])
         interpretation = _interpretable(payload)[0]
         assert interpretation["milestones"]["tp1_at"] == result.progress.tp1_at
         assert interpretation["milestones"]["stop_at"] == result.progress.stop_at
-        assert interpretation["economic_status"] == "stop_after_entry"
-        assert interpretation["progress_terminal_outcome"] == SetupLifecycleState.SL_HIT.value
+        assert interpretation["economic_status"] == "reference_breakeven_after_tp1"
+        assert interpretation["progress_terminal_outcome"] == SetupLifecycleState.BREAKEVEN.value
         assert payload["unavailable_metrics"]["win_rate"]["value"] is None
         assert payload["unavailable_metrics"]["realized_pnl"]["status"] == UNAVAILABLE
 
@@ -467,12 +468,13 @@ def test_cooldown_does_not_erase_economic_terminal_and_latest_row_is_not_authori
             _candle(2, high="111", low="103"),
             _candle(3, high="105", low="89"),
         ]
+        _evaluate(repository, record, candles[:1])
         result = _evaluate(repository, record, candles)
         cooled = result.record.model_copy(update={"current_state": SetupLifecycleState.COOLDOWN})
         repository.upsert_record(cooled)
         payload = _project(repository, [record.lifecycle_id])
         interpretation = _interpretable(payload)[0]
-        assert interpretation["economic_status"] == "stop_after_entry"
+        assert interpretation["economic_status"] == "reference_breakeven_after_tp1"
         assert interpretation["successor_note"]
 
     record = _latched(lifecycle_id="life-conflict-term")
@@ -809,7 +811,7 @@ def test_fresh_schema_is_v23_and_progress_has_nullable_plan_version_column(tmp_p
     assert any(item["unique"] for item in indexes)
 
 
-def test_synthetic_report_artifact_is_labeled_and_matches_helper(tmp_path: Path) -> None:
+def test_synthetic_report_retains_history_while_current_stop_policy_is_explicit(tmp_path: Path) -> None:
     with SQLiteSetupLifecycleRepository(tmp_path / "report.db") as repository:
         record = _latched()
         repository.upsert_record(record)
@@ -819,6 +821,7 @@ def test_synthetic_report_artifact_is_labeled_and_matches_helper(tmp_path: Path)
             _candle(2, high="111", low="103"),
             _candle(3, high="105", low="89"),
         ]
+        _evaluate(repository, record, candles[:1])
         _evaluate(repository, record, candles)
         payload = _project(
             repository,
@@ -839,7 +842,8 @@ def test_synthetic_report_artifact_is_labeled_and_matches_helper(tmp_path: Path)
     assert artifact["canonical_outcome_per_plan_version"]["established"] is False
     assert artifact["counts"]["interpretable_plan_outcomes"]["value"] == 1
     assert artifact["plan_interpretations"][0]["economic_status"] == "stop_after_entry"
-    assert payload["plan_interpretations"][0]["economic_status"] == "stop_after_entry"
+    # The retained audit artifact describes the old fixed-stop policy; do not rewrite it.
+    assert payload["plan_interpretations"][0]["economic_status"] == "reference_breakeven_after_tp1"
     assert payload["counts"]["overlapping_milestones"]["tp1"] == 1
 
 

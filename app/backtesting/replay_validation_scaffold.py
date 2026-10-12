@@ -26,11 +26,12 @@ TimestampStatus = Literal["present", "missing", "N/A"]
 STABLE_IDENTITY_FIELDS = ("run_id", "scan_id", "setup_id", "trade_idea_id", "alert_id")
 NEGATIVE_LIFECYCLE_BUCKETS = {"no_setup", "rejected", "scan_error"}
 NEGATIVE_SETUP_BUCKETS = {"gate_failed", "near_miss", "no_setup", "rejected", "scan_error"}
-TRADE_LIFECYCLE_BUCKETS = {"triggered", "confirmed", "executing", "terminal_tp", "terminal_sl", "closed"}
-TERMINAL_LIFECYCLE_BUCKETS = {"terminal_tp", "terminal_sl", "closed"}
+TRADE_LIFECYCLE_BUCKETS = {"triggered", "confirmed", "executing", "terminal_tp", "terminal_sl", "terminal_breakeven", "closed"}
+TERMINAL_LIFECYCLE_BUCKETS = {"terminal_tp", "terminal_sl", "terminal_breakeven", "closed"}
 TERMINAL_STATUS_KEYS = {
     "closed",
     "sl_hit",
+    "breakeven",
     "stop_loss_hit",
     "stopped",
     "tp_hit",

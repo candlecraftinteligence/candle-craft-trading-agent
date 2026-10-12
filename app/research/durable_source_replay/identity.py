@@ -25,6 +25,7 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 
 IMPLEMENTATION_FILES: Final[tuple[str, ...]] = (
     "app/lifecycle/outcomes.py",
+    "app/lifecycle/breakeven.py",
     "app/lifecycle/outcome_policy.py",
     "app/lifecycle/outcome_events.py",
     "app/lifecycle/prefix_disposition_evidence.py",
