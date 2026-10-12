@@ -172,7 +172,6 @@ def evaluate_closed_candle_outcomes(
     if record.current_state not in OUTCOME_ELIGIBLE_STATES:
         return LifecycleOutcomeEvaluation(record=record, progress=progress)
 
-    existing_progress = progress is not None
     progress = progress or _new_progress(
         record,
         plan_identity=plan_identity,
@@ -206,7 +205,7 @@ def evaluate_closed_candle_outcomes(
 
     try:
         progress = bind_stop_policy(
-            progress, geometry, existing=existing_progress,
+            progress, geometry,
             decision_timestamp=decision_timestamp, evaluated_at=evaluated_at,
         )
     except (ValueError, TypeError) as exc:

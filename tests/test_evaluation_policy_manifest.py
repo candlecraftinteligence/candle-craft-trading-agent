@@ -467,7 +467,8 @@ def test_entry_candle_targets_same_candle_and_horizon_cases(tmp_path: Path) -> N
     assert replay_opt.outcome == ReplayOutcome.TP1_HIT
 
     tp_then_stop = [_no_touch(0, "long"), _both_entry(1), _target(2, "long", 1), _stop(3, "long")]
-    runtime_ms = _runtime(tmp_path, _record(lifecycle_id="ms"), tp_then_stop, db_name="policy-ms.sqlite")
+    runtime_ms = _runtime(tmp_path, _record(lifecycle_id="ms"), tp_then_stop, db_name="policy-ms.sqlite",
+                          policy_adoption_at=_decision(0))
     replay_ms = _replay(tp_then_stop, direction="long")
     assert runtime_ms.progress.tp1_at == _decision(2)
     assert runtime_ms.progress.terminal_outcome == SetupLifecycleState.BREAKEVEN.value
@@ -568,7 +569,8 @@ def test_price_jumps_beyond_stop_and_target_through_full_evaluators(tmp_path: Pa
         jump_target_candle,
         _candle(3, high="89", low="85"),
     ]
-    runtime_tp = _runtime(tmp_path, _record(lifecycle_id="jump-tp"), jump_target, db_name="policy-jump-tp.sqlite")
+    runtime_tp = _runtime(tmp_path, _record(lifecycle_id="jump-tp"), jump_target, db_name="policy-jump-tp.sqlite",
+                          policy_adoption_at=_decision(0))
     replay_tp = _replay(jump_target, direction="long")
     assert runtime_tp.progress.tp1_at == _decision(2)
     assert runtime_tp.progress.terminal_outcome == SetupLifecycleState.BREAKEVEN.value

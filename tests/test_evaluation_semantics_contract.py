@@ -167,12 +167,19 @@ def _runtime(
     decision_timestamp: datetime | None = None,
     evaluated_at: str | None = None,
     db_name: str = "runtime.sqlite",
+    policy_adoption_at: str | None = None,
 ):
     index = len(candles) - 1 if candles else 0
     decision = decision_timestamp if decision_timestamp is not None else _close(index)
     processed = evaluated_at if evaluated_at is not None else _decision(index)
     with SQLiteSetupLifecycleRepository(tmp_path / db_name) as repository:
         repository.upsert_record(record)
+        if policy_adoption_at is not None:
+            evaluate_closed_candle_outcomes(
+                record, execution_candles=(), execution_timeframe=TIMEFRAME,
+                decision_timestamp=policy_adoption_at, evaluated_at=policy_adoption_at,
+                repository=repository, scan_run_id="synthetic-policy-adoption",
+            )
         return evaluate_closed_candle_outcomes(
             record,
             execution_candles=candles,
@@ -398,7 +405,8 @@ def test_earlier_tp_then_reference_stop_is_not_a_winning_exit(tmp_path: Path) ->
         _target(2, "long", 1),
         _stop(3, "long"),
     ]
-    runtime = _runtime(tmp_path, _record(), candles, db_name="tp-then-sl.sqlite")
+    runtime = _runtime(tmp_path, _record(), candles, db_name="tp-then-sl.sqlite",
+                       policy_adoption_at=_decision(0))
     replay = _replay(candles, direction="long")
     assert runtime.progress.tp1_at == _decision(2)
     assert runtime.progress.tp2_at is None

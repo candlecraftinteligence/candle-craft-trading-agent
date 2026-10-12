@@ -350,11 +350,12 @@ def _replay_scope() -> dict[str, Any]:
 def _runtime_rules() -> dict[str, Any]:
     return {
         "stop_management": {
-            "policy": "tp1_entry_zone_midpoint_breakeven_v1",
+            "policy": "tp1_entry_zone_midpoint_breakeven_v2",
             "reference": "entry_zone_midpoint_not_exchange_fill",
             "activation": "candle_open_at_or_after_prior_tp1_close_and_adoption_cutoff",
-            "new_progress": "policy_applies_from_tracking_start",
-            "existing_progress": "persist_first_observed_decision_cutoff_preserve_older_pending_policy",
+            "new_progress": "persist_first_observed_decision_cutoff_missing_progress_is_not_new_policy_provenance",
+            "existing_progress": "preserve_bound_cutoff_otherwise_adopt_at_first_observed_decision_cutoff",
+            "pre_adoption_candles": "fixed_original_stop",
             "original_geometry": "immutable",
             "effective_stop": "midpoint_when_protection_active_otherwise_original_stop",
             "unknown_or_invalid_binding": "integrity_failed_no_cursor_advance",

@@ -369,6 +369,7 @@ def test_tp1_then_breakeven_preserves_milestone_and_does_not_promote_generic_tp(
             _candle(2, high="111", low="103"),
             _candle(3, high="105", low="89"),
         ]
+        _evaluate(repository, record, candles[:1])
         result = _evaluate(repository, record, candles)
         payload = _project(repository, [record.lifecycle_id])
         interpretation = _interpretable(payload)[0]
@@ -467,6 +468,7 @@ def test_cooldown_does_not_erase_economic_terminal_and_latest_row_is_not_authori
             _candle(2, high="111", low="103"),
             _candle(3, high="105", low="89"),
         ]
+        _evaluate(repository, record, candles[:1])
         result = _evaluate(repository, record, candles)
         cooled = result.record.model_copy(update={"current_state": SetupLifecycleState.COOLDOWN})
         repository.upsert_record(cooled)
@@ -819,6 +821,7 @@ def test_synthetic_report_retains_history_while_current_stop_policy_is_explicit(
             _candle(2, high="111", low="103"),
             _candle(3, high="105", low="89"),
         ]
+        _evaluate(repository, record, candles[:1])
         _evaluate(repository, record, candles)
         payload = _project(
             repository,

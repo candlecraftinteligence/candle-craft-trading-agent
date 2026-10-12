@@ -183,20 +183,14 @@ def test_policy_explicitly_versions_reference_breakeven():
 @pytest.mark.parametrize('targets', [1, 2])
 def test_breakeven_public_delivery_is_persisted_once_and_closes_tracking(tmp_path, targets):
     from app.alerts.telegram_lifecycle import SQLiteTelegramAlertAttemptRepository
-    from app.lifecycle.breakeven import bind_stop_policy
-    from app.lifecycle.outcome_policy import stored_plan_geometry
     from app.telegram_admin.active_watchlists import _canonical_outcome_alert_types, load_active_public_signals
-    from test_public_tp_milestone_delivery import _send_confirmed_root, _persist_progress, STOP_AT
+    from test_public_tp_milestone_delivery import _send_confirmed_root
     from test_triggered_confirmed_telegram_delivery import FakeSender, _service, _empty_run_result, run
 
     path = tmp_path / 'public_be.sqlite'
     sender = FakeSender()
     symbol = _send_confirmed_root(path, sender)
-    record, progress = _persist_progress(path, symbol, tp_count=targets, stop=True)
-    record = record.model_copy(update={'current_state': SetupLifecycleState.BREAKEVEN})
-    progress = progress.model_copy(update={'terminal_outcome': 'BREAKEVEN'})
-    progress = bind_stop_policy(progress, stored_plan_geometry(record), existing=False,
-                               decision_timestamp=STOP_AT, evaluated_at=STOP_AT)
+    record, progress = _public_breakeven_progress(path, symbol, targets)
     with SQLiteSetupLifecycleRepository(path) as repo:
         repo.upsert_record(record)
         repo.upsert_outcome_progress(progress)
@@ -235,9 +229,7 @@ def test_public_breakeven_without_policy_evidence_is_blocked(tmp_path):
 @pytest.mark.parametrize('transport_state', ['RETRYABLE', 'UNCERTAIN'])
 def test_breakeven_transport_recovery_preserves_delivery_state(tmp_path, transport_state):
     from app.alerts.telegram_lifecycle import SQLiteTelegramAlertAttemptRepository
-    from app.lifecycle.breakeven import bind_stop_policy
-    from app.lifecycle.outcome_policy import stored_plan_geometry
-    from test_public_tp_milestone_delivery import _send_confirmed_root, _persist_progress, STOP_AT
+    from test_public_tp_milestone_delivery import _send_confirmed_root
     from test_triggered_confirmed_telegram_delivery import (
         TransportStateSequenceSender, _make_lifecycle_retry_due, _service, _empty_run_result, run,
     )
@@ -245,12 +237,7 @@ def test_breakeven_transport_recovery_preserves_delivery_state(tmp_path, transpo
     path = tmp_path / 'be_transport.sqlite'
     sender = TransportStateSequenceSender('SENT', 'SENT', transport_state, 'SENT')
     symbol = _send_confirmed_root(path, sender)
-    record, progress = _persist_progress(path, symbol, tp_count=1, stop=True)
-    record = record.model_copy(update={'current_state': SetupLifecycleState.BREAKEVEN})
-    progress = bind_stop_policy(
-        progress.model_copy(update={'terminal_outcome': 'BREAKEVEN'}),
-        stored_plan_geometry(record), existing=False, decision_timestamp=STOP_AT, evaluated_at=STOP_AT,
-    )
+    record, progress = _public_breakeven_progress(path, symbol, 1)
     with SQLiteSetupLifecycleRepository(path) as repo:
         repo.upsert_record(record)
         repo.upsert_outcome_progress(progress)
@@ -265,6 +252,32 @@ def test_breakeven_transport_recovery_preserves_delivery_state(tmp_path, transpo
         attempts = [item for item in repo.list_attempts() if item.alert_type == 'BREAKEVEN']
         assert len(attempts) == 1
         assert attempts[0].delivery_state == ('SENT' if transport_state == 'RETRYABLE' else 'UNCERTAIN')
+
+
+def _public_breakeven_progress(path, symbol, targets):
+    from app.lifecycle.breakeven import bind_stop_policy
+    from app.lifecycle.outcome_policy import stored_plan_geometry
+    from test_public_tp_milestone_delivery import _persist_progress
+
+    record, entered = _persist_progress(path, symbol, tp_count=0)
+    # The shared delivery fixture defaults to a later cursor; represent the
+    # actual entry-time snapshot before establishing this policy's boundary.
+    entered = entered.model_copy(update={
+        'evaluation_cursor_open_at': json.loads(entered.metadata_json)['causal_candle_open'],
+        'evaluation_cursor_close_at': entered.entry_at,
+        'last_evaluated_at': entered.entry_at,
+    })
+    adopted = bind_stop_policy(entered, stored_plan_geometry(record),
+                               decision_timestamp=entered.entry_at, evaluated_at=entered.entry_at)
+    with SQLiteSetupLifecycleRepository(path) as repo:
+        repo.upsert_outcome_progress(adopted)
+    record, progress = _persist_progress(path, symbol, tp_count=targets, stop=True)
+    metadata = json.loads(progress.metadata_json)
+    metadata['stop_management'] = json.loads(adopted.metadata_json)['stop_management']
+    return (
+        record.model_copy(update={'current_state': SetupLifecycleState.BREAKEVEN}),
+        progress.model_copy(update={'terminal_outcome': 'BREAKEVEN', 'metadata_json': json.dumps(metadata)}),
+    )
 
 
 @pytest.mark.no_auto_epoch
@@ -286,6 +299,8 @@ def test_owner_monitoring_breakeven_replays_offline_and_is_not_a_research_loss(t
         candles = [capture_candle(0, high='103', low='99'),
                    capture_candle(1, high='111', low='103'),
                    capture_candle(2, high='105', low='101')]
+        # Adopt at initial tracking, before the later target and reference stop.
+        _monitor(path, record, candles[:1], when=capture_decision(0))
         with use_capture(CaptureConfig(enabled=True, evidence_path=evidence, operational_paths=(path,))):
             _monitor(path, record, candles, when=capture_decision(2))
         with SQLiteSetupLifecycleRepository(path, expected_identity=SYNTHETIC_IDENTITY) as repo:

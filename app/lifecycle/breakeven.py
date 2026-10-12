@@ -8,7 +8,7 @@ from app.data.candle_integrity import normalize_utc_timestamp
 from app.lifecycle.models import SetupLifecycleOutcomeProgress
 from app.lifecycle.outcome_policy import StoredPlanGeometry
 
-POLICY = "tp1_entry_zone_midpoint_breakeven_v1"
+POLICY = "tp1_entry_zone_midpoint_breakeven_v2"
 KEY = "stop_management"
 
 
@@ -20,7 +20,6 @@ def bind_stop_policy(
     progress: SetupLifecycleOutcomeProgress,
     geometry: StoredPlanGeometry,
     *,
-    existing: bool,
     decision_timestamp: object,
     evaluated_at: str,
 ) -> SetupLifecycleOutcomeProgress:
@@ -47,28 +46,28 @@ def bind_stop_policy(
         normalize_utc_timestamp(binding["adopted_at"], field_name="stop_policy_adopted_at")
         if binding["actual_fill_or_net_pnl_claim"] is not False:
             raise ValueError("invalid_stop_management_claim")
-        if binding["prior_policy"] not in (None, "fixed_original_stop"):
+        if binding["prior_policy"] != "fixed_original_stop":
             raise ValueError("unsupported_prior_stop_policy")
         boundary = binding["effective_from_candle_open_at"]
-        if binding["prior_policy"] == "fixed_original_stop" and boundary is None:
+        if boundary is None:
             raise ValueError("missing_stop_policy_adoption_boundary")
-        if boundary is not None:
-            normalize_utc_timestamp(boundary, field_name="stop_policy_effective_from")
+        normalize_utc_timestamp(boundary, field_name="stop_policy_effective_from")
         return progress
-    cutoff = None
-    if existing:
-        cutoff = normalize_utc_timestamp(decision_timestamp, field_name="stop_policy_adoption_cutoff")
-        if progress.evaluation_cursor_close_at is not None:
-            cutoff = max(cutoff, normalize_utc_timestamp(
-                progress.evaluation_cursor_close_at, field_name="stop_policy_prior_cursor"
-            ))
+    # A missing progress row does not prove that the owned setup is new.
+    # Every unbound plan adopts prospectively, including its first evaluation.
+    cutoff = normalize_utc_timestamp(decision_timestamp, field_name="stop_policy_adoption_cutoff")
+    normalize_utc_timestamp(evaluated_at, field_name="stop_policy_adopted_at")
+    if progress.evaluation_cursor_close_at is not None:
+        cutoff = max(cutoff, normalize_utc_timestamp(
+            progress.evaluation_cursor_close_at, field_name="stop_policy_prior_cursor"
+        ))
     metadata[KEY] = {
         "policy": POLICY,
         "reference_type": "entry_zone_midpoint",
         "reference_price": str(reference_price(geometry)),
         "adopted_at": evaluated_at,
-        "effective_from_candle_open_at": cutoff.isoformat() if cutoff is not None else None,
-        "prior_policy": "fixed_original_stop" if existing else None,
+        "effective_from_candle_open_at": cutoff.isoformat(),
+        "prior_policy": "fixed_original_stop",
         "actual_fill_or_net_pnl_claim": False,
     }
     return progress.model_copy(update={"metadata_json": json.dumps(metadata, sort_keys=True, separators=(",", ":"))})
@@ -85,7 +84,7 @@ def protection_active(progress: SetupLifecycleOutcomeProgress, candle_open: obje
     if opened < normalize_utc_timestamp(progress.tp1_at, field_name="breakeven_tp1_at"):
         return False
     boundary = binding.get("effective_from_candle_open_at")
-    return boundary is None or opened >= normalize_utc_timestamp(boundary, field_name="breakeven_effective_from")
+    return boundary is not None and opened >= normalize_utc_timestamp(boundary, field_name="breakeven_effective_from")
 
 
 def reference_stop_touched(high: Decimal, low: Decimal, geometry: StoredPlanGeometry) -> bool:
@@ -98,7 +97,7 @@ def validate_breakeven_outcome(progress: SetupLifecycleOutcomeProgress, geometry
     metadata = json.loads(progress.metadata_json)
     if not isinstance(metadata, dict) or KEY not in metadata:
         raise ValueError("missing_stop_management_binding")
-    bind_stop_policy(progress, geometry, existing=True, decision_timestamp=progress.last_evaluated_at,
+    bind_stop_policy(progress, geometry, decision_timestamp=progress.last_evaluated_at,
                      evaluated_at=progress.last_evaluated_at)
     if progress.entry_at is None or progress.tp1_at is None or progress.stop_at is None:
         raise ValueError("missing_breakeven_milestones")
