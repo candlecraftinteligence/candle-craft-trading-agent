@@ -841,7 +841,7 @@ def test_query_plan_is_bounded_and_legacy_growth_does_not_change_results(tmp_pat
     assert "ix_lifecycle_records_runtime_epoch" in lifecycle_plan
     assert "SCAN setup_lifecycle_records" not in lifecycle_plan
     assert "ix_lifecycle_records_runtime_epoch" in event_plan
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 27
 
 
 def _epoch_a_denominator(report: dict[str, object]) -> None:
@@ -1070,8 +1070,8 @@ def test_strategy_gates_and_schema_are_unchanged(tmp_path: Path) -> None:
             str(row[0])
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
         }
-    assert version == 26
-    assert SCHEMA_VERSION == 26
+    assert version == 27
+    assert SCHEMA_VERSION == 27
     assert "research_population_scope" not in tables
     assert MIN_PUBLIC_SETUP_QUALITY_SCORE == Decimal("88")
     assert MIN_PUBLIC_SIGNAL_GRADE == "A"

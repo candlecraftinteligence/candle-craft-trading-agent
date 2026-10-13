@@ -270,8 +270,9 @@ def evaluate_symbol_origin(
         """
         INSERT INTO runtime_operational_origins (
             origin_id, runtime_epoch_id, run_id, symbol, evaluation_completed_at,
-            decision_cutoff_at, producer_observed_at, origin_kind, status, block_reason, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            decision_cutoff_at, producer_observed_at, origin_kind, status, block_reason, created_at,
+            lifecycle_consumption_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             origin_id,
@@ -285,6 +286,7 @@ def evaluate_symbol_origin(
             ORIGIN_STATUS_GRANTED,
             None,
             evaluation_at,
+            '{"version":1,"modes":{}}',
         ),
     )
     return SymbolOriginDecision(

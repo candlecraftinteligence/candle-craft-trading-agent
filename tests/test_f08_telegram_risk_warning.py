@@ -77,7 +77,7 @@ def test_public_gates_and_schema_stay_at_the_accepted_floor() -> None:
     assert MIN_PUBLIC_SIGNAL_GRADE == "A"
     assert PUBLIC_SIGNAL_MIN_RR == Decimal("3")
     assert DEFAULT_CONFIRMED_MIN_RR == Decimal("3")
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 27
 
 
 def test_trade_map_announcements_carry_one_warning_before_the_signature() -> None:

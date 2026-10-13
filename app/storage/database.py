@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 DEFAULT_DATABASE_PATH = Path("scan_runs") / "candle_craft.db"
-SCHEMA_VERSION = 26  # PROSPECTIVE_RUNTIME_EPOCH_ISOLATION: epoch/origin/currentness indexes
+SCHEMA_VERSION = 27  # Per-mode lifecycle observation consumption on operational origins
 WRITABLE_BUSY_TIMEOUT_MS = 5_000
 WRITABLE_JOURNAL_MODE = "wal"
 WRITABLE_SYNCHRONOUS = "FULL"
@@ -1057,6 +1057,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         if existing_version < 25:
             _migrate_scan_raw_payload_format_v25(connection)
         _migrate_runtime_epoch_isolation_v26(connection)
+        # v26 owns its transaction. Keep the new column and version atomic.
+        connection.execute("BEGIN IMMEDIATE")
+        _ensure_column(connection, "runtime_operational_origins", "lifecycle_consumption_json", "TEXT")
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
     except sqlite3.Error as exc:
