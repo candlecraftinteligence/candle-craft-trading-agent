@@ -766,7 +766,7 @@ def test_t20_v25_upgrade_preserves_rows_and_rolls_back_failure(
         assert "ux_lifecycle_records_current_symbol_mode_direction" in names
 
     with open_initialized_database(db_path) as connection:
-        assert identify_schema_version(connection) == 26
+        assert identify_schema_version(connection) == 27
         after = dict(_row(connection, "v25-row"))
         assert after["runtime_epoch_id"] is None
         assert after["creation_origin_id"] is None

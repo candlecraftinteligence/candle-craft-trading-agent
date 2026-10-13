@@ -604,7 +604,8 @@ def _apply_single_lifecycle(symbol_result: ScannerSymbolResult, tmp_path, *, now
     return apply_lifecycle_to_run_result(
         _scan_result(symbol_result),
         database_path=tmp_path / "a_grade_lifecycle.db",
-        scan_run_id="run-a-grade",
+        # Each fixture time represents a distinct scan with new market inputs.
+        scan_run_id=f"synthetic-a-grade-scan:{now}",
         now=now,
     ).results[0]
 

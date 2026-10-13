@@ -431,7 +431,7 @@ def test_initialized_v25_metadata_does_not_count_or_migrate(tmp_path: Path, monk
     report = readiness.collect_runtime_checkpoint_preflight(path)
     sqlite_section = report["sqlite"]
     assert sqlite_section["status"] == "measured"
-    assert sqlite_section["schema_version"] == SCHEMA_VERSION == 26
+    assert sqlite_section["schema_version"] == SCHEMA_VERSION == 27
     assert sqlite_section["connection"]["sqlite_uri_mode"] == "ro"
     assert sqlite_section["connection"]["query_only_readback"] == 1
     assert sqlite_section["connection"]["immutable_requested"] is False
@@ -534,7 +534,7 @@ def test_live_wal_with_sidecars_is_opened_without_immutable(tmp_path: Path) -> N
     assert report["sqlite"]["status"] == "measured"
     assert report["sqlite"]["connection"]["immutable_requested"] is False
     assert report["sqlite"]["connection"]["live_mutable_source"] is True
-    assert report["sqlite"]["schema_version"] == 26
+    assert report["sqlite"]["schema_version"] == 27
     assert report["sqlite"]["recent_runs"]["status"] == "measured"
 
 
@@ -1102,7 +1102,7 @@ def test_inspect_database_still_uses_historic_immutable_default() -> None:
 
 
 def test_schema_version_and_decoder_inventory_remain_current() -> None:
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 27
     assert readiness.TOOL_VERSION == "cci-runtime-checkpoint-readiness-v3"
     assert readiness.PACKET_CONTRACT_VERSION == "f06-runtime-release-readiness-v2"
     assert set(readiness.DECODER_COMPATIBILITY_INVENTORY["supported_formats"]) == set(SUPPORTED_FORMATS)
@@ -1292,7 +1292,7 @@ def test_older_source_rehearsal_must_reach_schema_26() -> None:
     accepted = readiness.assess_runtime_checkpoint_evidence(older)
     assert accepted["overall_disposition"] == "PACKET_REVIEWABLE_NOT_AUTHORIZED"
     assert accepted["schema"]["observed"] == 24
-    assert accepted["schema"]["target"] == 26
+    assert accepted["schema"]["target"] == 27
     assert accepted["go_for_runtime_deployment"] is False
 
     unverified = _complete_packet(_measured_collector(24))
@@ -1442,7 +1442,7 @@ def test_collect_does_not_install_or_repair_plan_state_index(tmp_path: Path) -> 
         ).fetchone()
         version = connection.execute("PRAGMA user_version").fetchone()[0]
     assert row is None
-    assert version == SCHEMA_VERSION == 26
+    assert version == SCHEMA_VERSION == 27
     assert _state(missing) == before
 
     wrong = _v25(tmp_path, "wrong-index.sqlite")

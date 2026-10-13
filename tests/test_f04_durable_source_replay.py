@@ -276,7 +276,7 @@ def test_capture_disabled_does_not_touch_evidence_or_change_schema(tmp_path: Pat
     assert capture_counters() == {}
     connection = open_initialized_database(path)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 26
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 27
     finally:
         connection.close()
 
@@ -307,7 +307,7 @@ def test_owner_and_service_calls_replay_after_restart(tmp_path: Path) -> None:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
     finally:
         connection.close()
-    assert open_initialized_database(path).execute("PRAGMA user_version").fetchone()[0] == 26
+    assert open_initialized_database(path).execute("PRAGMA user_version").fetchone()[0] == 27
 
 
 def test_same_plan_second_cursor_is_a_distinct_replay(tmp_path: Path) -> None:
@@ -1029,7 +1029,7 @@ def test_missing_evidence_is_not_an_invocation(tmp_path: Path) -> None:
     assert captures == 0
     assert "missing_evidence" in kinds
 
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 27
     assert MIN_PUBLIC_SETUP_QUALITY_SCORE == Decimal("88")
     assert MIN_PUBLIC_SIGNAL_GRADE == "A"
     assert DEFAULT_PUBLIC_RR_MIN == Decimal("3")

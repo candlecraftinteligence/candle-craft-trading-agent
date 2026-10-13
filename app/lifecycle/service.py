@@ -21,6 +21,7 @@ from app.data.candle_batch_evidence import (
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
 from app.lifecycle.identity import generation_rotation_reason, new_setup_generation_id
+from app.lifecycle.observation_consumption import inspect_consumption, persist_consumption
 from app.lifecycle.models import (
     ACTIVE_LIFECYCLE_MONITORING_STATES,
     SetupLifecycleRecord,
@@ -302,7 +303,7 @@ class SetupLifecycleService:
         self,
         symbol_result: ScannerSymbolResult,
         *,
-        observation: LifecycleObservation,
+        observation: LifecycleObservation | None,
         repository: SQLiteSetupLifecycleRepository,
         scan_run_id: str | None,
         now: str,
@@ -339,7 +340,9 @@ class SetupLifecycleService:
             connection.execute("RELEASE lifecycle_symbol")
             note_savepoint_rolled_back(connection, "lifecycle_symbol")
             return None, {"origin_blocked_reason": str(exc)}, exc
-        except sqlite3.Error:
+        except Exception:
+            # Direct callers may catch unexpected errors and still commit their
+            # outer transaction. Never let a partial receipt escape the savepoint.
             connection.execute("ROLLBACK TO lifecycle_symbol")
             connection.execute("RELEASE lifecycle_symbol")
             note_savepoint_rolled_back(connection, "lifecycle_symbol")
@@ -359,6 +362,15 @@ class SetupLifecycleService:
     ) -> ScannerSymbolResult:
         connection = repository.connection
         assert connection is not None
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+        # Also acquire the writer lock for caller-owned deferred transactions.
+        # A stale SQLite snapshot fails instead of applying a lost update.
+        connection.execute(
+            "UPDATE runtime_operational_runs SET run_id = run_id WHERE run_id = ?",
+            (str(scan_run_id or "").strip(),),
+        )
         epoch = require_active_runtime_epoch(connection)
         effective_run_id = str(scan_run_id or "").strip()
         if not effective_run_id:
@@ -370,8 +382,9 @@ class SetupLifecycleService:
             run_id=effective_run_id,
             epoch=epoch,
         )
-        updated, _meta = self._apply_to_symbol_result_with_meta(
+        updated, _meta, error = self._apply_to_symbol_result_isolated(
             symbol_result,
+            observation=None,
             repository=repository,
             scan_run_id=effective_run_id,
             now=now,
@@ -379,6 +392,9 @@ class SetupLifecycleService:
             min_score_for_idea=Decimal("80"),
             runtime_epoch_id=epoch.epoch_id,
         )
+        if error is not None:
+            raise error
+        assert updated is not None
         return updated
 
     def _apply_to_symbol_result_with_meta(
@@ -409,6 +425,19 @@ class SetupLifecycleService:
         if not origin.granted:
             persist_blocked_symbol_origin(connection, origin)
             return symbol_result, {"origin_blocked_reason": origin.reason, "origin_granted": False}
+        consumption = inspect_consumption(
+            connection,
+            origin=origin,
+            observation=observation,
+            lineage={
+                "evaluation_kind": origin_kind_from_symbol_result(symbol_result),
+                "evaluation_completed_at": evaluation_completed_at_from_symbol_result(symbol_result),
+                "decision_cutoff_at": decision_cutoff_from_symbol_result(symbol_result),
+                "producer_observed_at": producer_acquisition_from_symbol_result(symbol_result),
+                "execution_timeframe": symbol_result.lifecycle_execution_timeframe,
+            },
+        )
+        replayed = consumption.legacy or consumption.owner_id is not None
         cooldown_veto = legacy_cooldown_veto(
             connection,
             symbol=observation.symbol,
@@ -416,15 +445,21 @@ class SetupLifecycleService:
             direction=observation.direction,
             now=now,
         )
-        if cooldown_veto is not None:
+        if cooldown_veto is not None and not replayed:
             return symbol_result, {"origin_blocked_reason": cooldown_veto, "origin_granted": False}
         existing = repository.get_record(
             symbol=observation.symbol,
             mode=observation.mode,
             direction=observation.direction,
         )
+        if consumption.owner_id is not None:
+            # A delayed retry belongs to its original owner, even after rotation.
+            # Load current persisted state; never replay an old state snapshot.
+            existing = repository.get_record_by_lifecycle_id(consumption.owner_id)
+        if consumption.legacy and existing is None:
+            return symbol_result, {"unverified_confirmation_observations": 1}
         prior_generation = existing
-        rotation_reason = generation_rotation_reason(
+        rotation_reason = None if replayed else generation_rotation_reason(
             existing,
             observed_structural_anchor=observation.structural_anchor,
             setup_observable=_generation_setup_observable(observation),
@@ -457,24 +492,38 @@ class SetupLifecycleService:
         )
         health_penalty_cycles = _symbol_health_penalty_cycles(symbol_health_record)
         health_score = getattr(symbol_health_record, "current_health_score", NA) if symbol_health_record is not None else NA
-        transition = evaluate_lifecycle_transition(
-            existing,
-            observation,
-            lifecycle_id=lifecycle_id,
-            now=now,
-            scan_run_id=scan_run_id,
-            required_confirmation_cycles=self.confirmation_cycles,
-            setup_tolerance_pct=self.setup_tolerance_pct,
-            symbol_health_score=health_score,
-            symbol_health_penalty_cycles=health_penalty_cycles,
-        )
+        if replayed:
+            assert existing is not None
+            transition = SetupTransitionResult(
+                lifecycle_id=existing.lifecycle_id,
+                symbol=existing.symbol,
+                from_state=existing.current_state,
+                to_state=existing.current_state,
+                reason=SetupTransitionReason.NO_CHANGE,
+                transitioned=False,
+                notes=("confirmation_consumption_Unverified" if consumption.legacy
+                       else "observation_already_consumed"),
+                record=existing,
+            )
+        else:
+            transition = evaluate_lifecycle_transition(
+                existing,
+                observation,
+                lifecycle_id=lifecycle_id,
+                now=now,
+                scan_run_id=scan_run_id,
+                required_confirmation_cycles=self.confirmation_cycles,
+                setup_tolerance_pct=self.setup_tolerance_pct,
+                symbol_health_score=health_score,
+                symbol_health_penalty_cycles=health_penalty_cycles,
+            )
         final_record = transition.record
         outcome_progress: SetupLifecycleOutcomeProgress | None = None
         effective_transition = transition
         generated_transitions: list[SetupTransitionResult] = []
         if transition.transitioned:
             generated_transitions.append(transition)
-        persistence_blocked = (
+        persistence_blocked = replayed or (
             not transition.allowed
             and transition.notes.startswith("invalid_stored_plan_geometry:")
         )
@@ -488,6 +537,9 @@ class SetupLifecycleService:
             transition = transition.model_copy(update={"record": final_record})
             effective_transition = transition
         if final_record is not None and not persistence_blocked:
+            persist_consumption(
+                connection, consumption, lifecycle_id=final_record.lifecycle_id, consumed_at=now,
+            )
             if rotation_reason is not None and prior_generation is not None:
                 repository.supersede_record(prior_generation.lifecycle_id)
             repository.upsert_record(final_record)
@@ -577,6 +629,8 @@ class SetupLifecycleService:
             transition=effective_transition,
             symbol_health_penalty_cycles=health_penalty_cycles,
         )
+        meta["duplicate_confirmation_observations"] = int(consumption.owner_id is not None)
+        meta["unverified_confirmation_observations"] = int(consumption.legacy)
         return updated, meta
 
     def reset(self) -> None:
@@ -972,6 +1026,8 @@ def _empty_process_summary(*, scanned_symbols: int) -> dict[str, Any]:
         "expired": 0,
         "actionable_a_grade": 0,
         "symbol_health_penalties_applied": 0,
+        "duplicate_confirmation_observations": 0,
+        "unverified_confirmation_observations": 0,
     }
 
 
@@ -1001,6 +1057,8 @@ def _add_process_meta(summary: dict[str, Any], meta: Mapping[str, Any]) -> None:
         "expired",
         "actionable_a_grade",
         "symbol_health_penalties_applied",
+        "duplicate_confirmation_observations",
+        "unverified_confirmation_observations",
     ):
         summary[key] = int(summary.get(key, 0)) + int(meta.get(key, 0))
 

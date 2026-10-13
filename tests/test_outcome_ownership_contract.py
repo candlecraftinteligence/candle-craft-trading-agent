@@ -759,7 +759,7 @@ def test_helper_leaves_inputs_and_sqlite_rows_unchanged(tmp_path: Path) -> None:
         after_rows = {table: _sql_rows(repository, table) for table in before_rows}
         schema_after = repository._connection.execute("PRAGMA user_version").fetchone()[0]
     assert before_rows == after_rows
-    assert schema_before == schema_after == SCHEMA_VERSION == 26
+    assert schema_before == schema_after == SCHEMA_VERSION == 27
     source = Path("app/analytics/outcome_ownership.py").read_text(encoding="utf-8")
     assert "sqlite3" not in source
     assert "open_initialized_database" not in source
@@ -784,7 +784,7 @@ def test_helper_is_not_wired_into_runtime_or_research_consumers() -> None:
         evidence_baseline_audit,
     ):
         assert banned not in inspect.getsource(module)
-    assert SCHEMA_VERSION == 26
+    assert SCHEMA_VERSION == 27
     assert evidence_contract_payload()["outcome_ownership"]["feeds_operational_decisions"] is False
 
 
@@ -802,7 +802,7 @@ def test_fresh_schema_is_v23_and_progress_has_nullable_plan_version_column(tmp_p
             dict(row)
             for row in connection.execute("PRAGMA index_list(setup_lifecycle_outcome_progress)")
         ]
-    assert user_version == 26 == SCHEMA_VERSION
+    assert user_version == 27 == SCHEMA_VERSION
     assert "plan_identity" in progress_columns
     assert "plan_version_id" in progress_columns
     assert "last_eligibility_decision_at" in progress_columns

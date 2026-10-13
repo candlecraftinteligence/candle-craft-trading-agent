@@ -836,14 +836,14 @@ def test_r16_v26_without_epoch_fails_before_mutation(
         assert identify_schema_version(connection) == SCHEMA_VERSION
         assert load_active_runtime_epoch(connection) is None
     before = _schema_snapshot(db_path)
-    assert before["version"] == 26
+    assert before["version"] == 27
     monkeypatch.setenv("RUNTIME_EPOCH_ID", SYNTHETIC_EPOCH_ID)
     with pytest.raises(RuntimeEpochError):
         inspect_operational_database(db_path, expected_identity=SYNTHETIC_IDENTITY)
     with pytest.raises(RuntimeEpochError):
         open_repository_database(db_path, expected_identity=SYNTHETIC_IDENTITY)
     after = _schema_snapshot(db_path)
-    assert after["version"] == 26
+    assert after["version"] == 27
     assert after["epoch_count"] == 0
 
 

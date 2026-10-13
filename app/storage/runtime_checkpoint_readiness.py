@@ -77,6 +77,7 @@ PRESERVATION_KEYS: Final[tuple[str, ...]] = (
     "public_outbox_sent_uncertain",
     "external_listener_state",
     "logical_scan_payload_compatibility",
+    "confirmation_consumption_receipts",
 )
 EPOCH_LINEAGE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
     "runtime_epochs": (
@@ -108,6 +109,7 @@ EPOCH_LINEAGE_COLUMNS: Final[dict[str, tuple[str, ...]]] = {
         "status",
         "block_reason",
         "created_at",
+        "lifecycle_consumption_json",
     ),
 }
 TIMESTAMP_INDEX: Final[str] = "ix_scan_runs_timestamp"
@@ -179,7 +181,7 @@ CONSUMER_INVENTORY: Final[tuple[dict[str, Any], ...]] = (
         "module": "scripts/run_scan.py + app.storage.repositories.store_scan_result",
         "role": "writer",
         "db_path": "explicit --database-path; default scan_runs/candle_craft.db relative to CWD",
-        "payload": "encodes via encode_scan_raw_payload; decoder-capable v26 writer",
+        "payload": f"encodes via encode_scan_raw_payload; decoder-capable v{SCHEMA_VERSION} writer",
         "startup": "scripts/run_scan.py including --watch / watch_supervisor",
     },
     {
@@ -1200,7 +1202,7 @@ def inspect_epoch_lineage(connection: sqlite3.Connection, tables: set[str]) -> d
     """Record epoch/lineage table presence and column order. Does not read rows or create tables."""
 
     observed: dict[str, Any] = {}
-    for name, required in EPOCH_LINEAGE_COLUMNS.items():
+    for name, required in _source_epoch_lineage_columns(identify_schema_version(connection)).items():
         if name not in tables:
             observed[name] = {"present": False, "columns": [], "matches_expected": False}
             continue
@@ -1211,6 +1213,16 @@ def inspect_epoch_lineage(connection: sqlite3.Connection, tables: set[str]) -> d
             "matches_expected": columns == list(required),
         }
     return {"status": "metadata_only", "tables": observed}
+
+
+def _source_epoch_lineage_columns(schema_version: Any) -> dict[str, tuple[str, ...]]:
+    # Inspect older sources as they are; only the rehearsed target must have v27 receipts.
+    if type(schema_version) is int and 0 <= schema_version < 27:
+        return {
+            name: tuple(column for column in columns if column != "lifecycle_consumption_json")
+            for name, columns in EPOCH_LINEAGE_COLUMNS.items()
+        }
+    return EPOCH_LINEAGE_COLUMNS
 
 
 def _evidence_class(
@@ -1347,7 +1359,7 @@ def _assess_source_epoch_lineage(
     saw_absent = False
     saw_malformed = False
     saw_mismatch = False
-    for name, required in EPOCH_LINEAGE_COLUMNS.items():
+    for name, required in _source_epoch_lineage_columns(sqlite_section.get("schema_version")).items():
         if name not in tables:
             saw_absent = True
             continue
@@ -1399,7 +1411,7 @@ def _assess_source_compatibility(
                 finding = "source_plan_state_index_absent"
                 notes.append(
                     "A missing source plan-state index can be an expected preflight finding. "
-                    "The target copy is not ready until rehearsal proves schema 26 and the required index."
+                    f"The target copy is not ready until rehearsal proves schema {SCHEMA_VERSION} and the required index."
                 )
             else:
                 for field in detail["missing_fields"]:
@@ -1424,7 +1436,7 @@ def _assess_source_compatibility(
         finding = "source_plan_state_index_absent"
         notes.append(
             "A missing source plan-state index can be an expected preflight finding. "
-            "The target copy is not ready until rehearsal proves schema 26 and the required index."
+            f"The target copy is not ready until rehearsal proves schema {SCHEMA_VERSION} and the required index."
         )
     epoch_status = _assess_source_epoch_lineage(sqlite_section, missing, adverse)
     if epoch_status == "absent_table":
@@ -1658,7 +1670,7 @@ def _assess_target_rehearsal(
     if _parse_utc_timestamp(rehearsal.get("observed_at_utc")) is None:
         _append_unique(missing, "target_rehearsal.observed_at_utc")
     notes.append(
-        "Target rehearsal is classified operator input. Final cutover must verify schema 26 "
+        f"Target rehearsal is classified operator input. Final cutover must verify schema {SCHEMA_VERSION} "
         "and the plan-state index again before consumers start."
     )
     return {

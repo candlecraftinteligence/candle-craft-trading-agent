@@ -896,7 +896,7 @@ def test_locked_plan_monitoring_index_is_added_without_schema_bump(tmp_path: Pat
         ).fetchone()
         assert row is not None
         assert "plan_version_id IS NOT NULL" in str(row[0])
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 26
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 27
     finally:
         connection.close()
 
