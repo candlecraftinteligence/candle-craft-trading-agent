@@ -2,6 +2,7 @@
 
 Base: upstream main `208b6e99038418f5ceb136cda85a3f1468ccf40f` (PR #132).
 Branch: `codex/confirmation-observation-idempotency`.
+PR and final validation record: [#133](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/133).
 Scope: bounded original-P4 prerequisite; no Runtime deployment or database operation.
 
 ## Defect and production reachability
@@ -145,9 +146,18 @@ monitoring, and unchanged research/public counting units.
 Validation uses synthetic databases under the repository-recognized `pytest_tmp`
 directory, fake exchange adapters, and fake Telegram senders. Windows sandbox
 setup failures were separated from application failures; database path protections
-were not changed. Exact final implementation SHA, full pytest/compilation results,
-review disposition, and CI run references are recorded in the focused PR and final
-handoff after validation. Earlier failing/intermediate runs are not acceptance.
+were not changed. The final focused run passed **175 tests** on 2026-10-13, covering
+the two new test modules plus `test_lifecycle.py` and
+`test_runtime_checkpoint_readiness.py` (local log:
+`C:\CandleCraftDev\pytest_tmp\confirmation-final-focused.log`). Final acceptance
+runs the complete `python -m pytest`, `python -m compileall -q app scripts src tests`,
+`python -m pip check`, and `git diff --check`. The full local log is
+`C:\CandleCraftDev\pytest_tmp\confirmation-final-full.log`.
+Exact final implementation SHA, completed full-suite results, review disposition,
+and CI run links are recorded in [PR #133](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/133)
+and the final handoff after validation. Its required validation workflow is
+`.github/workflows/ci.yml` / `Python 3.11 tests`. Earlier failing/intermediate runs
+are not acceptance.
 
 The separate review pass examined origin scope, pre-rotation ownership, transaction
 failure behavior, unmarked history, event consumers, schema/readiness/replay
