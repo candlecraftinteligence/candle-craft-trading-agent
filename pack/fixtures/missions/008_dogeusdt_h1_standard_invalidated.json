@@ -1,0 +1,80 @@
+{
+  "cci_setup_id": "mock_setup_doge_h1_invalidated",
+  "symbol": "DOGEUSDT",
+  "timeframe": "H1",
+  "direction": "LONG",
+  "quality_tier": "STANDARD",
+  "title": "Stalk failed before trigger",
+  "thesis_summary": "Synthetic H1 long invalidated while still stalking. Structure failed before a trigger. The outcome code is INVALIDATED. No result was added after the fact.",
+  "evidence": [
+    {
+      "type": "structure",
+      "label": "Stalking shelf",
+      "detail": "The long was stalking a shelf under the last higher low."
+    },
+    {
+      "type": "context",
+      "label": "No trigger",
+      "detail": "The timeline has no TRIGGERED event. The idea failed in place."
+    },
+    {
+      "type": "invalidation",
+      "label": "Shelf lost",
+      "detail": "A close through the stalking shelf is the INVALIDATED event."
+    }
+  ],
+  "lifecycle": [
+    {
+      "cci_event_id": "evt_doge_h1_01",
+      "event_type": "SETUP_PUBLISHED",
+      "state": "ACTIVE",
+      "occurred_at": "2026-09-20T08:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_doge_h1_02",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "WATCH",
+      "occurred_at": "2026-09-20T11:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_doge_h1_03",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "STALKING",
+      "occurred_at": "2026-09-20T15:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_doge_h1_04",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "INVALIDATED",
+      "occurred_at": "2026-09-20T19:20:00Z",
+      "outcome_code": "INVALIDATED"
+    },
+    {
+      "cci_event_id": "evt_doge_h1_05",
+      "event_type": "SETUP_RESOLVED",
+      "state": "CLOSED",
+      "occurred_at": "2026-09-20T19:21:00Z",
+      "outcome_code": "INVALIDATED"
+    }
+  ],
+  "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
+  "synthetic": true,
+  "replay": {
+    "masked_title": "Shelf under watch",
+    "masked_thesis": "Synthetic H1 long. Price is stalking a shelf. No trigger is included in this masked brief. The later record is withheld.",
+    "teaching_note": "INVALIDATED arrived before any trigger, and the file then CLOSED. The aligned training decision is NO TRADE.",
+    "preferred_decision": "NO_TRADE",
+    "evidence": [
+      {
+        "type": "structure",
+        "label": "Stalking shelf",
+        "detail": "The shelf is still the area under study."
+      },
+      {
+        "type": "context",
+        "label": "No trigger in the brief",
+        "detail": "The masked brief does not include a trigger."
+      }
+    ]
+  }
+}
