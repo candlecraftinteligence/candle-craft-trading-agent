@@ -29,7 +29,7 @@ make it safe to resend. Missing historical evidence remains Unverified.
 
 `tests/test_outbox_migration_preservation.py` uses the genuine schema-26 catalog
 and synthetic rows only. It populates events, attempts and delivery parts with
-pending, sent, uncertain, sending and final-failure states. It compares every
+pending, sent, uncertain, in-flight and final-failure states. It compares every
 persisted table, including SQLite sequence values, through migration and reopen.
 The only allowed historical row extension is the nullable schema-27 receipt
 column. It also injects migration failures after column creation and version

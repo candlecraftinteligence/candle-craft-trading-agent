@@ -16,7 +16,7 @@ def _seed_outbox(path):
         ("sent", "SENT", "SENT", "sent", "SENT", 1),
         ("uncertain", "RESERVED", "UNCERTAIN", "reserved", "UNCERTAIN", 1),
         ("failed", "FAILED", "FAILED_FINAL", "failed", "FAILED_FINAL", 3),
-        ("sending", "RESERVED", "SENDING", "reserved", "SENDING", 1),
+        ("in-flight", "RESERVED", "IN_FLIGHT", "reserved", "IN_FLIGHT", 1),
         ("pending", "RESERVED", "PENDING", "reserved", "PENDING", 0),
     )
     with sqlite3.connect(path) as connection:
