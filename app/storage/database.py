@@ -1010,7 +1010,6 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "public_alert_events", "part_count", "INTEGER NOT NULL DEFAULT 1")
         _ensure_column(connection, "public_alert_events", "completed_at", "TEXT")
         _ensure_column(connection, "public_alert_events", "uncertain_at", "TEXT")
-        _migrate_public_alert_delivery_state_v16(connection)
         _ensure_nullable_telegram_sent_at(connection)
         _ensure_column(connection, "telegram_alert_attempts", "delivery_state", "TEXT NOT NULL DEFAULT 'N/A'")
         _ensure_column(connection, "telegram_alert_attempts", "delivery_attempt_id", "TEXT")
@@ -1020,7 +1019,9 @@ def initialize_database(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, "telegram_alert_attempts", "telegram_chat_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "telegram_message_id", "TEXT")
         _ensure_column(connection, "telegram_alert_attempts", "delivery_part_count", "INTEGER NOT NULL DEFAULT 1")
-        _migrate_public_alert_delivery_state_v16(connection)
+        # Existing v16+ outbox state is authoritative, including pending placeholders.
+        if existing_version < 16:
+            _migrate_public_alert_delivery_state_v16(connection)
         _ensure_telegram_alert_attempt_indexes(connection)
         _ensure_public_alert_event_indexes(connection)
         _ensure_column(connection, "symbol_health", "timeout_strikes", "INTEGER NOT NULL DEFAULT 0")
