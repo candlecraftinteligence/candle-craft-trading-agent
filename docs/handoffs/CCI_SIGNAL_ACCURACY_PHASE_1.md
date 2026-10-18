@@ -6,7 +6,8 @@ Astra must issue APPROVED, REQUIRES_CORRECTION, or REJECTED against the exact fi
 
 Base: `e461c9c501196c3377d53beedae2c930c6d5c21f` (merge of PR #134).
 Branch: `fix/cci-signal-accuracy-p1-candle-freshness`.
-Pull request: opened from this branch. The URL is recorded in the comparison artifact after `gh pr create`.
+Head: `854465795964638e99a17b2c88f66f1266ea0aee`.
+Pull request: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/135
 Scope: correctness of essential candle coverage at the scan decision cutoff. No Runtime database, listener, watch loop, order execution, or deploy.
 
 ## Objective
