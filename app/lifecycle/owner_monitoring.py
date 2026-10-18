@@ -133,6 +133,12 @@ class OwnerMonitoringResult:
         }
 
 
+def _account_monitored_outcome(repository: Any, evaluation: Any) -> None:
+    from app.lifecycle.service import account_monitored_outcome
+
+    account_monitored_outcome(repository, evaluation)
+
+
 def select_tracking_obligations(
     repository: SQLiteSetupLifecycleRepository,
 ) -> tuple[SetupLifecycleRecord, ...]:
@@ -223,6 +229,7 @@ def monitor_tracking_obligations(
     default_timeframe: str = "15m",
     record_missing_evidence: bool = False,
     skip_lifecycle_ids: Collection[str] = (),
+    on_evaluation: Callable[[Any], None] | None = None,
 ) -> OwnerMonitoringResult:
     """Evaluate every open economic obligation that has candle evidence.
 
@@ -342,6 +349,9 @@ def monitor_tracking_obligations(
                 handoff=None,
                 evidence_lineage=evidence.lineage,
             )
+            _account_monitored_outcome(repository, evaluation)
+            if on_evaluation is not None:
+                on_evaluation(evaluation)
         except Exception as exc:
             connection.execute("ROLLBACK TO owner_monitor")
             connection.execute("RELEASE owner_monitor")

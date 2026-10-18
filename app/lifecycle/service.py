@@ -22,7 +22,11 @@ from app.data.candle_freshness import observation_has_essential_freshness_failur
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
 from app.lifecycle.identity import generation_rotation_reason, new_setup_generation_id
-from app.lifecycle.observation_consumption import inspect_consumption, persist_consumption
+from app.lifecycle.observation_consumption import (
+    inspect_consumption,
+    persist_consumption,
+    persist_source_owner_bindings,
+)
 from app.lifecycle.models import (
     ACTIVE_LIFECYCLE_MONITORING_STATES,
     SetupLifecycleRecord,
@@ -281,6 +285,14 @@ class SetupLifecycleService:
                 assert updated is not None
                 updated_results.append(updated)
                 _add_process_meta(process_summary, meta)
+            monitored_transitions: dict[str, list[SetupTransitionResult]] = {}
+
+            def _collect_monitored_transitions(evaluation: Any) -> None:
+                record = getattr(evaluation, "record", None)
+                if record is None:
+                    return
+                monitored_transitions.setdefault(record.symbol, []).extend(evaluation.transitions)
+
             owner_monitoring = monitor_tracking_obligations(
                 repository,
                 evidence_by_key=evidence_from_symbol_results(
@@ -291,7 +303,17 @@ class SetupLifecycleService:
                 scan_run_id=effective_run_id,
                 default_timeframe=str(result.config.execution_timeframe or "15m"),
                 record_missing_evidence=False,
+                on_evaluation=_collect_monitored_transitions,
             )
+            delivered: list[ScannerSymbolResult] = []
+            for symbol_result in updated_results:
+                extra = tuple(monitored_transitions.get(symbol_result.symbol, ()))
+                if extra and not symbol_result.lifecycle_transitions:
+                    symbol_result = symbol_result.model_copy(
+                        update={"lifecycle_transitions": extra}
+                    )
+                delivered.append(symbol_result)
+            updated_results = delivered
             process_summary["owner_monitoring"] = owner_monitoring.as_dict()
         process_summary["processed_symbols"] = (
             len(updated_results)
@@ -431,62 +453,71 @@ class SetupLifecycleService:
             return symbol_result, {"origin_blocked_reason": origin.reason, "origin_granted": False}
         scanner_observation = observation
         lineage = _consumption_lineage(symbol_result)
+        consumption = inspect_consumption(
+            connection,
+            origin=origin,
+            observation=scanner_observation,
+            lineage=lineage,
+        )
+        if consumption.bound_owners:
+            return self._account_source_bound_owners(
+                _records_for_source_bindings(
+                    repository,
+                    consumption.bound_owners,
+                    observation=scanner_observation,
+                    runtime_epoch_id=runtime_epoch_id,
+                ),
+                observation=scanner_observation,
+                symbol_result=symbol_result,
+                repository=repository,
+                now=now,
+                scan_run_id=scan_run_id,
+                origin=origin,
+                consumption=consumption,
+                runtime_epoch_id=runtime_epoch_id,
+                replay=True,
+            )
         if (
-            observation_has_essential_freshness_failure(observation)
+            observation_has_essential_freshness_failure(scanner_observation)
+            and consumption.owner_id is None
+            and not consumption.legacy
             and repository.get_record(
-                symbol=observation.symbol,
-                mode=observation.mode,
-                direction=observation.direction,
+                symbol=scanner_observation.symbol,
+                mode=scanner_observation.mode,
+                direction=scanner_observation.direction,
             )
             is None
         ):
-            # Rebind before inspect. The receipt key is the owner mode, so a
-            # directionless challenge/N/A retry must hash the same identity it
-            # stored. Selection is limited to the active epoch.
-            owners = _stale_discovery_owners(
-                connection,
+            owners = _active_epoch_hold_owners(
                 repository,
-                origin_id=str(origin.origin_id or ""),
-                observation=observation,
+                observation=scanner_observation,
                 runtime_epoch_id=runtime_epoch_id,
             )
-            if len(owners) > 1:
-                if _bound_lifecycle_ids(connection, str(origin.origin_id or "")) is None:
-                    cooldown_veto = legacy_cooldown_veto(
-                        connection,
-                        symbol=scanner_observation.symbol,
-                        mode=scanner_observation.mode,
-                        direction=scanner_observation.direction,
-                        now=now,
-                    )
-                    if cooldown_veto is not None:
-                        return symbol_result, {
-                            "origin_blocked_reason": cooldown_veto,
-                            "origin_granted": False,
-                        }
-                return self._hold_current_owners_for_stale_discovery(
+            if owners:
+                cooldown_veto = legacy_cooldown_veto(
+                    connection,
+                    symbol=scanner_observation.symbol,
+                    mode=scanner_observation.mode,
+                    direction=scanner_observation.direction,
+                    now=now,
+                )
+                if cooldown_veto is not None:
+                    return symbol_result, {
+                        "origin_blocked_reason": cooldown_veto,
+                        "origin_granted": False,
+                    }
+                return self._account_source_bound_owners(
                     owners,
-                    observation=observation,
+                    observation=scanner_observation,
                     symbol_result=symbol_result,
                     repository=repository,
                     now=now,
                     scan_run_id=scan_run_id,
                     origin=origin,
-                    lineage=lineage,
+                    consumption=consumption,
                     runtime_epoch_id=runtime_epoch_id,
+                    replay=False,
                 )
-            if len(owners) == 1:
-                observation = replace(
-                    observation,
-                    mode=owners[0].mode,
-                    direction=owners[0].direction,
-                )
-        consumption = inspect_consumption(
-            connection,
-            origin=origin,
-            observation=observation,
-            lineage=lineage,
-        )
         replayed = consumption.legacy or consumption.owner_id is not None
         cooldown_veto = legacy_cooldown_veto(
             connection,
@@ -675,7 +706,7 @@ class SetupLifecycleService:
         meta["unverified_confirmation_observations"] = int(consumption.legacy)
         return updated, meta
 
-    def _hold_current_owners_for_stale_discovery(
+    def _account_source_bound_owners(
         self,
         owners: Sequence[SetupLifecycleRecord],
         *,
@@ -685,37 +716,40 @@ class SetupLifecycleService:
         now: str,
         scan_run_id: str | None,
         origin: Any,
-        lineage: dict[str, Any],
+        consumption: Any,
         runtime_epoch_id: str,
+        replay: bool,
     ) -> tuple[ScannerSymbolResult, dict[str, Any]]:
-        """Hold every active-epoch owner and account for each one.
+        """Hold the recorded owners of one source decision and account for each.
 
-        The receipt for a directionless discovery is one mode slot per owner,
-        written in the same savepoint as that owner's state. A retry replays
-        those bindings and does not treat the scan as new confirmation work.
-        Outcome monitoring still runs. Candles apply only when they match the
-        timeframe already recorded for that owner.
+        The receipt stores the original scanner observation. Owner identity is
+        a binding on that decision, so several directions of one mode remain
+        distinct. The receipt is written once, in the same symbol savepoint as
+        every owner update. A retry uses those bindings and does not admit an
+        owner created later. Candles apply only when they match the timeframe
+        already recorded for that owner.
         """
 
         connection = repository.connection
         assert connection is not None
+        if not replay:
+            persist_source_owner_bindings(
+                connection,
+                consumption,
+                owners=tuple(
+                    {
+                        "lifecycle_id": owner.lifecycle_id,
+                        "mode": owner.mode,
+                        "direction": owner.direction,
+                    }
+                    for owner in owners
+                ),
+                consumed_at=now,
+            )
         generated: list[SetupTransitionResult] = []
-        duplicates = 0
         for owner in owners:
             bound = replace(observation, mode=owner.mode, direction=owner.direction)
-            consumption = inspect_consumption(
-                connection,
-                origin=origin,
-                observation=bound,
-                lineage=lineage,
-            )
-            replayed = consumption.legacy or consumption.owner_id is not None
-            if consumption.owner_id is not None and consumption.owner_id != owner.lifecycle_id:
-                raise RuntimeEpochIdentityCollisionError(
-                    "Observation consumption integrity exception: conflicting lifecycle owner"
-                )
-            if replayed:
-                duplicates += 1
+            if replay:
                 record = owner
                 transition = SetupTransitionResult(
                     lifecycle_id=record.lifecycle_id,
@@ -745,12 +779,6 @@ class SetupLifecycleService:
                     }
                 )
                 transition = transition.model_copy(update={"record": record})
-                persist_consumption(
-                    connection,
-                    consumption,
-                    lifecycle_id=record.lifecycle_id,
-                    consumed_at=now,
-                )
                 if transition.event is not None:
                     repository.insert_event(transition.event)
                 repository.upsert_record(record)
@@ -804,7 +832,7 @@ class SetupLifecycleService:
         return updated, {
             "origin_granted": True,
             "freshness_owner_hold": len(tuple(owners)),
-            "duplicate_confirmation_observations": duplicates,
+            "duplicate_confirmation_observations": len(tuple(owners)) if replay else 0,
         }
 
     def reset(self) -> None:
@@ -1310,54 +1338,36 @@ def _consumption_lineage(symbol_result: ScannerSymbolResult) -> dict[str, Any]:
     }
 
 
-def _bound_lifecycle_ids(connection: sqlite3.Connection, origin_id: str) -> tuple[str, ...] | None:
-    row = connection.execute(
-        """
-        SELECT lifecycle_consumption_json
-        FROM runtime_operational_origins
-        WHERE origin_id = ?
-        """,
-        (origin_id,),
-    ).fetchone()
-    if row is None or row[0] in (None, ""):
-        return None
-    try:
-        document = json.loads(row[0])
-    except json.JSONDecodeError:
-        return None
-    modes = document.get("modes") if isinstance(document, dict) else None
-    if not isinstance(modes, dict) or not modes:
-        return None
-    lifecycle_ids: list[str] = []
-    for slot in modes.values():
-        if isinstance(slot, dict) and slot.get("lifecycle_id"):
-            lifecycle_ids.append(str(slot["lifecycle_id"]))
-    return tuple(lifecycle_ids) if lifecycle_ids else None
-
-
-def _stale_discovery_owners(
-    connection: sqlite3.Connection,
+def _records_for_source_bindings(
     repository: SQLiteSetupLifecycleRepository,
+    bindings: Sequence[tuple[str, str, str]],
     *,
-    origin_id: str,
     observation: LifecycleObservation,
     runtime_epoch_id: str,
 ) -> tuple[SetupLifecycleRecord, ...]:
-    stored_ids = _bound_lifecycle_ids(connection, origin_id)
-    if stored_ids is not None:
-        records: list[SetupLifecycleRecord] = []
-        for lifecycle_id in stored_ids:
-            record = repository.get_record_by_lifecycle_id(lifecycle_id)
-            if (
-                record is None
-                or record.symbol != observation.symbol
-                or record.runtime_epoch_id != runtime_epoch_id
-            ):
-                raise RuntimeEpochIdentityCollisionError(
-                    "Observation consumption integrity exception: conflicting lifecycle owner"
-                )
-            records.append(record)
-        return tuple(records)
+    records: list[SetupLifecycleRecord] = []
+    for lifecycle_id, mode, direction in bindings:
+        record = repository.get_record_by_lifecycle_id(lifecycle_id)
+        if (
+            record is None
+            or record.symbol != observation.symbol
+            or record.runtime_epoch_id != runtime_epoch_id
+            or record.mode != mode
+            or record.direction != direction
+        ):
+            raise RuntimeEpochIdentityCollisionError(
+                "Observation consumption integrity exception: conflicting lifecycle owner"
+            )
+        records.append(record)
+    return tuple(records)
+
+
+def _active_epoch_hold_owners(
+    repository: SQLiteSetupLifecycleRepository,
+    *,
+    observation: LifecycleObservation,
+    runtime_epoch_id: str,
+) -> tuple[SetupLifecycleRecord, ...]:
     return tuple(
         sorted(
             (
@@ -1369,6 +1379,35 @@ def _stale_discovery_owners(
             ),
             key=lambda record: (record.mode, record.direction, record.lifecycle_id),
         )
+    )
+
+
+def account_monitored_outcome(repository: SQLiteSetupLifecycleRepository, evaluation: Any) -> None:
+    """Write canonical terminal analytics for an owner-monitoring evaluation.
+
+    The caller invokes this inside the owner savepoint, after candle progress
+    is written and before that savepoint is released.
+    """
+
+    record = evaluation.record
+    transition = evaluation.last_transition
+    if transition is None or transition.record is None:
+        transition = SetupTransitionResult(
+            lifecycle_id=record.lifecycle_id,
+            symbol=record.symbol,
+            from_state=record.current_state,
+            to_state=record.current_state,
+            reason=SetupTransitionReason.NO_CHANGE,
+            transitioned=False,
+            record=record,
+        )
+    else:
+        transition = transition.model_copy(update={"record": record})
+    _persist_terminal_analytics(
+        repository,
+        transition,
+        LifecycleObservation(symbol=record.symbol),
+        evaluation.progress,
     )
 
 
