@@ -16,7 +16,11 @@ from threading import Barrier
 import pytest
 
 from app.lifecycle.economic_identity import latch_economic_identities
-from app.lifecycle.models import SetupLifecycleOutcomeProgress, SetupLifecycleState
+from app.lifecycle.models import (
+    SetupLifecycleOutcomeProgress,
+    SetupLifecycleState,
+    SetupTransitionReason,
+)
 from app.lifecycle.outcome_policy import compatible_plan_identities
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.service import SetupLifecycleService
@@ -1109,3 +1113,188 @@ def test_incompatible_receipt_is_not_reinterpreted(tmp_path, damage) -> None:
     assert summary["failed_symbols"] == 1
     assert "integrity exception" in summary["errors"][0]["detail"]
     assert _record_snapshot(path, "swing-owner") == before
+
+
+def test_direct_and_monitored_owner_transitions_are_both_returned(tmp_path):
+    from app.alerts.telegram_lifecycle import (
+        _symbol_results_for_lifecycle_delivery,
+    )
+
+    path = bootstrap_operational_test_database(
+        tmp_path / "combined.sqlite"
+    )
+    _seed_current(path, (
+        ("swing-long", "swing", "long"),
+        ("swing-short", "swing", "short"),
+    ))
+    _register(path, "decision")
+
+    symbol = _stale_result(_tp_candles()).model_copy(update={
+        "rejected_strategy_modes": ("swing",),
+        "strategy_diagnostics": {
+            "swing": {"mode": "swing", "bias": "long"},
+        },
+    })
+
+    result = _ok(_apply(
+        path,
+        symbol,
+        "decision",
+        "2026-01-01T14:01:00Z",
+    ))
+
+    assert len(_analytics(path)) == 2
+    returned = result.results[0]
+
+    assert {
+        transition.lifecycle_id
+        for transition in returned.lifecycle_transitions
+    } == {"swing-long", "swing-short"}
+
+    delivery = _symbol_results_for_lifecycle_delivery(returned)
+    assert {
+        item.lifecycle_state.lifecycle_id
+        for item in delivery
+    } == {"swing-long", "swing-short"}
+    stored = {
+        lifecycle_id: _record_snapshot(path, lifecycle_id)
+        for lifecycle_id in ("swing-long", "swing-short")
+    }
+    assert stored["swing-long"]["current_state"] == SetupLifecycleState.SL_HIT.value
+    assert stored["swing-short"]["current_state"] == SetupLifecycleState.TP_HIT.value
+    assert stored["swing-long"]["stop_loss"] == "90"
+    assert stored["swing-short"]["stop_loss"] == "112"
+    sequence = [
+        (item.lifecycle_id, item.to_state, item.reason)
+        for item in returned.lifecycle_transitions
+    ]
+    long_states = [state for lifecycle_id, state, _reason in sequence if lifecycle_id == "swing-long"]
+    short_states = [state for lifecycle_id, state, _reason in sequence if lifecycle_id == "swing-short"]
+    assert long_states == [
+        SetupLifecycleState.EXECUTING,
+        SetupLifecycleState.MANAGING,
+        SetupLifecycleState.SL_HIT,
+    ]
+    assert short_states == [
+        SetupLifecycleState.EXECUTING,
+        SetupLifecycleState.MANAGING,
+        SetupLifecycleState.TP_HIT,
+    ]
+    long_terminal = (
+        "swing-long",
+        SetupLifecycleState.SL_HIT,
+        SetupTransitionReason.STOP_LOSS_HIT,
+    )
+    short_start = next(item for item in sequence if item[0] == "swing-short")
+    assert sequence.index(long_terminal) < sequence.index(short_start)
+    for item in returned.lifecycle_transitions:
+        owner = stored[item.lifecycle_id]
+        assert item.record is not None
+        assert item.record.lifecycle_id == item.lifecycle_id
+        assert item.record.direction == owner["direction"]
+        assert item.record.plan_version_id == owner["plan_version_id"]
+        assert item.record.entry_low == "100"
+        assert item.record.entry_high == "102"
+        assert item.record.stop_loss == owner["stop_loss"]
+    for item in delivery:
+        owner = stored[item.lifecycle_state.lifecycle_id]
+        assert item.lifecycle_state.direction == owner["direction"]
+        assert item.lifecycle_state.plan_version_id == owner["plan_version_id"]
+        assert item.lifecycle_state.stop_loss == owner["stop_loss"]
+    events = _rows(
+        path,
+        "SELECT lifecycle_id, reason FROM setup_lifecycle_events ORDER BY event_id",
+    )
+    short_reasons = [row["reason"] for row in events if row["lifecycle_id"] == "swing-short"]
+    assert short_reasons.index(SetupTransitionReason.TP1_MILESTONE.value) < short_reasons.index(
+        SetupTransitionReason.TP2_MILESTONE.value
+    ) < short_reasons.index(SetupTransitionReason.TAKE_PROFIT_HIT.value)
+    long_reasons = [row["reason"] for row in events if row["lifecycle_id"] == "swing-long"]
+    assert long_reasons.index(SetupTransitionReason.ENTRY_FILL_SIMULATED.value) < long_reasons.index(
+        SetupTransitionReason.STOP_LOSS_HIT.value
+    )
+    events_before = events
+    analytics_before = _analytics(path)
+    retry = _ok(_apply(path, symbol, "decision", "2026-01-01T14:02:00Z"))
+    assert retry.results[0].lifecycle_transitions == ()
+    assert _symbol_results_for_lifecycle_delivery(retry.results[0]) == (retry.results[0],)
+    assert _analytics(path) == analytics_before
+    assert _rows(
+        path,
+        "SELECT lifecycle_id, reason FROM setup_lifecycle_events ORDER BY event_id",
+    ) == events_before
+
+
+def _swing_long_stale(candles):
+    return _stale_result(candles).model_copy(update={
+        "rejected_strategy_modes": ("swing",),
+        "strategy_diagnostics": {"swing": {"mode": "swing", "bias": "long"}},
+    })
+
+
+def test_direct_only_owner_transition_is_delivered(tmp_path) -> None:
+    from app.alerts.telegram_lifecycle import _symbol_results_for_lifecycle_delivery
+
+    path = bootstrap_operational_test_database(tmp_path / "direct-only.sqlite")
+    _seed_current(path, (("swing-long", "swing", "long"),))
+    _register(path, "decision")
+    result = _ok(_apply(path, _swing_long_stale(_tp_candles()), "decision", "2026-01-01T14:01:00Z"))
+    returned = result.results[0]
+    assert {item.lifecycle_id for item in returned.lifecycle_transitions} == {"swing-long"}
+    assert returned.lifecycle_transitions[-1].to_state == SetupLifecycleState.SL_HIT
+    delivery = _symbol_results_for_lifecycle_delivery(returned)
+    assert {item.lifecycle_state.lifecycle_id for item in delivery} == {"swing-long"}
+    assert _analytics(path) == [{"lifecycle_id": "swing-long", "final_outcome": "SL_HIT"}]
+
+
+def test_monitoring_only_transitions_reach_delivery(tmp_path, monkeypatch) -> None:
+    from app.alerts.telegram_lifecycle import _symbol_results_for_lifecycle_delivery
+
+    path = bootstrap_operational_test_database(tmp_path / "monitor-only.sqlite")
+    _seed_current(path, (("swing-long", "swing", "long"), ("swing-short", "swing", "short")))
+    _register(path, "decision")
+    original = SQLiteSetupLifecycleRepository.upsert_record
+    failed = {"done": False}
+
+    def _fail_direct(self, record):
+        if not failed["done"] and record.lifecycle_id == "swing-long":
+            failed["done"] = True
+            raise ValueError("forced direct failure")
+        return original(self, record)
+
+    monkeypatch.setattr(SQLiteSetupLifecycleRepository, "upsert_record", _fail_direct)
+    result = _apply(path, _swing_long_stale(_tp_candles()), "decision", "2026-01-01T14:01:00Z")
+    summary = _summary(result)
+    assert summary["status"] == "PARTIAL"
+    assert "forced direct failure" in summary["errors"][0]["detail"]
+    returned = result.results[0]
+    assert {item.lifecycle_id for item in returned.lifecycle_transitions} == {"swing-long", "swing-short"}
+    delivery = _symbol_results_for_lifecycle_delivery(returned)
+    assert {item.lifecycle_state.lifecycle_id for item in delivery} == {"swing-long", "swing-short"}
+    assert _analytics(path) == [
+        {"lifecycle_id": "swing-long", "final_outcome": "SL_HIT"},
+        {"lifecycle_id": "swing-short", "final_outcome": "TP3_HIT"},
+    ]
+
+
+def test_rolled_back_monitoring_transition_is_not_delivered(tmp_path, monkeypatch) -> None:
+    from app.alerts.telegram_lifecycle import _symbol_results_for_lifecycle_delivery
+
+    path = bootstrap_operational_test_database(tmp_path / "monitor-rollback.sqlite")
+    _seed_current(path, (("swing-long", "swing", "long"), ("swing-short", "swing", "short")))
+    _register(path, "decision")
+    original = SQLiteSetupLifecycleRepository.upsert_outcome_analytics
+
+    def _fail_short(self, record):
+        if record.lifecycle_id == "swing-short":
+            raise ValueError("forced short analytics failure")
+        return original(self, record)
+
+    monkeypatch.setattr(SQLiteSetupLifecycleRepository, "upsert_outcome_analytics", _fail_short)
+    result = _ok(_apply(path, _swing_long_stale(_tp_candles()), "decision", "2026-01-01T14:01:00Z"))
+    returned = result.results[0]
+    assert {item.lifecycle_id for item in returned.lifecycle_transitions} == {"swing-long"}
+    delivery = _symbol_results_for_lifecycle_delivery(returned)
+    assert {item.lifecycle_state.lifecycle_id for item in delivery} == {"swing-long"}
+    assert _record_snapshot(path, "swing-short")["current_state"] == SetupLifecycleState.CONFIRMED.value
+    assert _analytics(path) == [{"lifecycle_id": "swing-long", "final_outcome": "SL_HIT"}]

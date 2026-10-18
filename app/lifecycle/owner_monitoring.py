@@ -350,8 +350,6 @@ def monitor_tracking_obligations(
                 evidence_lineage=evidence.lineage,
             )
             _account_monitored_outcome(repository, evaluation)
-            if on_evaluation is not None:
-                on_evaluation(evaluation)
         except Exception as exc:
             connection.execute("ROLLBACK TO owner_monitor")
             connection.execute("RELEASE owner_monitor")
@@ -367,6 +365,8 @@ def monitor_tracking_obligations(
         else:
             connection.execute("RELEASE owner_monitor")
             note_savepoint_released(connection, "owner_monitor")
+        if on_evaluation is not None:
+            on_evaluation(evaluation)
 
         evaluated.append(record.lifecycle_id)
         covered.append(key)

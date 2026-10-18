@@ -307,12 +307,12 @@ class SetupLifecycleService:
             )
             delivered: list[ScannerSymbolResult] = []
             for symbol_result in updated_results:
-                extra = tuple(monitored_transitions.get(symbol_result.symbol, ()))
-                if extra and not symbol_result.lifecycle_transitions:
-                    symbol_result = symbol_result.model_copy(
-                        update={"lifecycle_transitions": extra}
+                delivered.append(
+                    _with_committed_monitoring_transitions(
+                        symbol_result,
+                        tuple(monitored_transitions.get(symbol_result.symbol, ())),
                     )
-                delivered.append(symbol_result)
+                )
             updated_results = delivered
             process_summary["owner_monitoring"] = owner_monitoring.as_dict()
         process_summary["processed_symbols"] = (
@@ -1380,6 +1380,63 @@ def _active_epoch_hold_owners(
             key=lambda record: (record.mode, record.direction, record.lifecycle_id),
         )
     )
+
+
+def _transition_event_identity(transition: SetupTransitionResult) -> tuple[Any, ...]:
+    """Identity of one committed lifecycle event.
+
+    Milestones that share a lifecycle or a terminal state stay distinct.
+    Only the same event payload is treated as a duplicate.
+    """
+
+    event = transition.event
+    if event is None:
+        from_state = transition.from_state.value if transition.from_state is not None else None
+        return (
+            transition.lifecycle_id,
+            from_state,
+            transition.to_state.value,
+            transition.reason.value,
+            bool(transition.transitioned),
+            transition.notes,
+        )
+    event_from = event.from_state.value if event.from_state is not None else None
+    return (
+        event.lifecycle_id,
+        event_from,
+        event.to_state.value,
+        event.reason.value,
+        event.timestamp,
+        event.notes,
+    )
+
+
+def _with_committed_monitoring_transitions(
+    symbol_result: ScannerSymbolResult,
+    monitored: Sequence[SetupTransitionResult],
+) -> ScannerSymbolResult:
+    """Append monitoring transitions after the direct sequence.
+
+    Direct processing has already ordered its own milestones. Monitoring
+    transitions were recorded only after their owner savepoint released, in
+    evaluation order. An exact event already present in the direct sequence
+    is not repeated.
+    """
+
+    if not monitored:
+        return symbol_result
+    direct = tuple(symbol_result.lifecycle_transitions or ())
+    seen = {_transition_event_identity(item) for item in direct}
+    added: list[SetupTransitionResult] = []
+    for item in monitored:
+        identity = _transition_event_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        added.append(item)
+    if not added:
+        return symbol_result
+    return symbol_result.model_copy(update={"lifecycle_transitions": direct + tuple(added)})
 
 
 def account_monitored_outcome(repository: SQLiteSetupLifecycleRepository, evaluation: Any) -> None:
