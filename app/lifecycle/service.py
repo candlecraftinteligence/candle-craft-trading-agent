@@ -18,6 +18,7 @@ from app.data.candle_batch_evidence import (
     HANDOFF_UNAVAILABLE,
     associate_execution_handoff,
 )
+from app.data.candle_freshness import observation_has_essential_freshness_failure
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
 from app.lifecycle.identity import generation_rotation_reason, new_setup_generation_id
@@ -51,12 +52,15 @@ from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import (
     DEFAULT_CONFIRMATION_CYCLES,
     DEFAULT_SETUP_MERGE_TOLERANCE_PCT,
+    PLAN_LOCK_STATES,
     LifecycleObservation,
     confirmed_observation_block_reasons,
     entry_zone_touched,
     evaluate_lifecycle_transition,
     now_utc_iso,
 )
+
+_FRESHNESS_OWNER_HOLD_STATES = PLAN_LOCK_STATES | {SetupLifecycleState.TRIGGERED}
 from app.runtime_epoch.authority import require_active_runtime_epoch
 from app.runtime_epoch.errors import (
     RuntimeEpochConfigurationError,
@@ -456,6 +460,24 @@ class SetupLifecycleService:
             # A delayed retry belongs to its original owner, even after rotation.
             # Load current persisted state; never replay an old state snapshot.
             existing = repository.get_record_by_lifecycle_id(consumption.owner_id)
+        if existing is None and not replayed and observation_has_essential_freshness_failure(observation):
+            owners = tuple(
+                record
+                for record in repository.list_records_for_symbol(symbol=observation.symbol)
+                if record.is_current and record.current_state in _FRESHNESS_OWNER_HOLD_STATES
+            )
+            if len(owners) == 1:
+                existing = owners[0]
+                observation = replace(observation, mode=existing.mode, direction=existing.direction)
+            elif owners:
+                return self._hold_current_owners_for_stale_discovery(
+                    owners,
+                    observation=observation,
+                    symbol_result=symbol_result,
+                    repository=repository,
+                    now=now,
+                    scan_run_id=scan_run_id,
+                )
         if consumption.legacy and existing is None:
             return symbol_result, {"unverified_confirmation_observations": 1}
         prior_generation = existing
@@ -632,6 +654,71 @@ class SetupLifecycleService:
         meta["duplicate_confirmation_observations"] = int(consumption.owner_id is not None)
         meta["unverified_confirmation_observations"] = int(consumption.legacy)
         return updated, meta
+
+    def _hold_current_owners_for_stale_discovery(
+        self,
+        owners: Sequence[SetupLifecycleRecord],
+        *,
+        observation: LifecycleObservation,
+        symbol_result: ScannerSymbolResult,
+        repository: SQLiteSetupLifecycleRepository,
+        now: str,
+        scan_run_id: str | None,
+    ) -> tuple[ScannerSymbolResult, dict[str, Any]]:
+        """Keep every current owner and still evaluate its closed candle prefix.
+
+        A stale discovery often has no direction, so it does not match the owned
+        plan's identity. That must not insert a second lifecycle row.
+        """
+
+        execution_candles = symbol_result.lifecycle_execution_candles
+        last_record = owners[0]
+        last_transition: SetupTransitionResult | None = None
+        generated: list[SetupTransitionResult] = []
+        progress: SetupLifecycleOutcomeProgress | None = None
+        for owner in owners:
+            bound = replace(observation, mode=owner.mode, direction=owner.direction)
+            transition = evaluate_lifecycle_transition(
+                owner,
+                bound,
+                lifecycle_id=owner.lifecycle_id,
+                now=now,
+                scan_run_id=scan_run_id,
+                required_confirmation_cycles=self.confirmation_cycles,
+                setup_tolerance_pct=self.setup_tolerance_pct,
+            )
+            record = transition.record or owner
+            repository.upsert_record(record)
+            if execution_candles is not None:
+                outcome = invoke_closed_candle_outcomes(
+                    evaluate_closed_candle_outcomes,
+                    caller_path=CALLER_LIFECYCLE_SERVICE,
+                    record=record,
+                    execution_candles=execution_candles,
+                    execution_timeframe=symbol_result.lifecycle_execution_timeframe,
+                    decision_timestamp=symbol_result.lifecycle_decision_timestamp or now,
+                    evaluated_at=now,
+                    repository=repository,
+                    scan_run_id=scan_run_id,
+                    delivery=symbol_result.lifecycle_execution_batch_delivery,
+                    evidence_lineage="lifecycle_service_freshness_owner_hold",
+                )
+                record = outcome.record
+                progress = outcome.progress
+                generated.extend(outcome.transitions)
+                if outcome.last_transition is not None:
+                    transition = outcome.last_transition
+            last_record = record
+            last_transition = transition
+        updated = symbol_result.model_copy(
+            update={
+                "lifecycle_state": last_record,
+                "lifecycle_transition": last_transition,
+                "lifecycle_transitions": tuple(generated),
+                "lifecycle_outcome_progress": progress,
+            }
+        )
+        return updated, {"origin_granted": True, "freshness_owner_hold": len(tuple(owners))}
 
     def reset(self) -> None:
         with SQLiteSetupLifecycleRepository(
@@ -910,6 +997,8 @@ def _setup_tolerance_pct(value: Decimal | str | None) -> Decimal:
 
 
 def _generation_setup_observable(observation: LifecycleObservation) -> bool:
+    if observation_has_essential_freshness_failure(observation):
+        return False
     return bool(
         observation.valid_trade_idea
         or observation.pullback_and_rr_valid

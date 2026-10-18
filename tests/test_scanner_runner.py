@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -38,14 +39,45 @@ _INTERVAL_MS = {
 def _time_aligned_candles(
     candles: list[dict[str, Decimal | int]],
     interval: str,
+    *,
+    as_of: datetime | Callable[[], datetime] | None = None,
 ) -> list[dict[str, Decimal | int]]:
+    """Place OHLC on the interval grid so the latest closed bar covers ``as_of``.
+
+    Relative order and prices stay unchanged. The series is shifted so the last
+    candle that is closed at ``as_of`` has its scheduled close on the required
+    coverage boundary. A still-open final bar stays open.
+    """
+
+    from app.data.candle_freshness import required_scheduled_close_ms, utc_epoch_milliseconds
+
     duration = _INTERVAL_MS[interval.lower()]
     pattern_anchor = max(0, len(candles) - 6)
     start = pattern_anchor * (_INTERVAL_MS["15m"] - duration) if interval.lower() == "5m" else 0
-    return [
+    aligned = [
         {**candle, "timestamp": start + (int(candle["timestamp"]) * duration)}
         for candle in candles
     ]
+    if not aligned or interval.lower() not in _INTERVAL_MS:
+        return aligned
+    decision = as_of() if callable(as_of) else (as_of or datetime.now(timezone.utc))
+    try:
+        required_ms = required_scheduled_close_ms(interval, decision)
+    except ValueError:
+        return aligned
+    decision_ms = utc_epoch_milliseconds(decision)
+    last_closed_close: int | None = None
+    for candle in aligned:
+        open_ms = int(candle["timestamp"])
+        close_ms = open_ms + duration
+        if close_ms <= decision_ms:
+            last_closed_close = close_ms
+    if last_closed_close is None:
+        last_closed_close = int(aligned[-1]["timestamp"]) + duration
+    shift = required_ms - last_closed_close
+    if shift == 0:
+        return aligned
+    return [{**candle, "timestamp": int(candle["timestamp"]) + shift} for candle in aligned]
 
 
 def run(coro: Any) -> Any:
@@ -170,6 +202,7 @@ class FakeExchangeClient:
         failing_symbols: set[str] | None = None,
         failing_timeframes: set[str] | None = None,
         delayed_methods: dict[str, float] | None = None,
+        candle_as_of: datetime | Callable[[], datetime] | None = None,
     ) -> None:
         self.candles_by_symbol = candles_by_symbol
         self.funding = funding
@@ -179,6 +212,7 @@ class FakeExchangeClient:
         self.failing_symbols = failing_symbols or set()
         self.failing_timeframes = failing_timeframes or set()
         self.delayed_methods = delayed_methods or {}
+        self.candle_as_of = candle_as_of
         self.requested_symbols: list[str] = []
         self.requested_klines: list[tuple[str, str]] = []
         self.requested_kline_limits: list[tuple[str, str, int]] = []
@@ -192,7 +226,11 @@ class FakeExchangeClient:
             raise RuntimeError(f"mocked kline failure for {symbol}")
         if interval in self.failing_timeframes:
             raise RuntimeError(f"mocked kline failure for {symbol} {interval}")
-        return _time_aligned_candles(self.candles_by_symbol[symbol][-limit:], interval)
+        return _time_aligned_candles(
+            self.candles_by_symbol[symbol][-limit:],
+            interval,
+            as_of=self.candle_as_of,
+        )
 
     async def get_ticker(self, symbol: str) -> dict[str, Decimal | str | int]:
         await self._maybe_delay("get_ticker")
@@ -1395,6 +1433,7 @@ def test_global_context_precedes_symbol_queue_and_removes_only_available_labels(
             "BTCUSDT": _strategy_pullback_candles(),
         },
         failing_timeframes={"2d"},
+        candle_as_of=decision_at,
     )
     config = _config(
         ["ENAUSDT", "BTCUSDT"],
@@ -1439,6 +1478,7 @@ def test_btc_d_failure_is_isolated_and_missing_label_remains_visible() -> None:
             "BTCUSDT": _strategy_pullback_candles(),
         },
         failing_timeframes={"2d"},
+        candle_as_of=decision_at,
     )
 
     result = run(
@@ -1483,6 +1523,7 @@ def test_global_context_uses_closed_btc_candle_not_open_spike() -> None:
     client = FakeExchangeClient(
         {"ENAUSDT": candles, "BTCUSDT": candles},
         failing_timeframes={"2d"},
+        candle_as_of=decision_at,
     )
 
     result = run(
@@ -1515,6 +1556,7 @@ def test_repeated_scans_inside_btc_d_ttl_use_one_provider_observation() -> None:
     client = FakeExchangeClient(
         {"ENAUSDT": _strategy_pullback_candles(), "BTCUSDT": _strategy_pullback_candles()},
         failing_timeframes={"2d"},
+        candle_as_of=decision_at,
     )
     runner = ScannerRunner(exchange_client=client, btc_d_context_service=service)
     config = _config(
@@ -1540,14 +1582,14 @@ def test_research_only_global_context_does_not_change_strategy_or_delivery_outpu
         "BTCUSDT": _strategy_pullback_candles(),
     }
     baseline = run(
-        ScannerRunner(exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})).run(
+        ScannerRunner(exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at)).run(
             _config(["ENAUSDT"], decision_timestamp=decision_at)
         )
     )
     provider = FakeBtcDominanceProvider(decision_at)
     enriched = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at),
             btc_d_context_service=BtcDominanceContextService(
                 provider,
                 clock=lambda: decision_at,
@@ -1591,6 +1633,7 @@ def test_global_context_alone_cannot_create_trade_idea_or_telegram_alert() -> No
     client = FakeExchangeClient(
         {"ENAUSDT": _flat_candles(), "BTCUSDT": _flat_candles()},
         failing_timeframes={"2d"},
+        candle_as_of=decision_at,
     )
 
     result = run(
@@ -1679,12 +1722,12 @@ def test_research_only_microstructure_does_not_change_strategy_lifecycle_or_deli
     candles = {"BTCUSDT": _strategy_pullback_candles()}
     baseline = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at)
         ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
     )
     enriched = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at),
             microstructure_flow_service=_StaticMicrostructureService(
                 _verified_microstructure_snapshot(decision_at)
             ),
@@ -1749,12 +1792,12 @@ def test_disabled_microstructure_does_not_call_or_change_scanner_behavior() -> N
     candles = {"BTCUSDT": _strategy_pullback_candles()}
     baseline = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at)
         ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
     ).results[0]
     disabled = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at),
             microstructure_flow_service=_StaticMicrostructureService(
                 error=AssertionError("disabled service must not be called")
             ),
@@ -1776,7 +1819,7 @@ def test_stale_research_only_microstructure_does_not_change_quality_or_plan() ->
     candles = {"BTCUSDT": _strategy_pullback_candles()}
     baseline = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at)
         ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
     ).results[0]
     stale = _verified_microstructure_snapshot(decision_at).model_copy(
@@ -1788,7 +1831,7 @@ def test_stale_research_only_microstructure_does_not_change_quality_or_plan() ->
     )
     enriched = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at),
             microstructure_flow_service=_StaticMicrostructureService(stale),
         ).run(
             _config(
@@ -1834,6 +1877,7 @@ def test_microstructure_service_exception_does_not_crash_scanner() -> None:
             exchange_client=FakeExchangeClient(
                 {"BTCUSDT": _strategy_pullback_candles()},
                 failing_timeframes={"2d"},
+                candle_as_of=decision_at,
             ),
             microstructure_flow_service=_StaticMicrostructureService(
                 error=RuntimeError("synthetic snapshot failure")
@@ -1901,6 +1945,7 @@ def test_nonverified_microstructure_preserves_truthful_optional_diagnostics(
             exchange_client=FakeExchangeClient(
                 {"BTCUSDT": _strategy_pullback_candles()},
                 failing_timeframes={"2d"},
+                candle_as_of=decision_at,
             ),
             microstructure_flow_service=_StaticMicrostructureService(unavailable),
         ).run(
@@ -2042,12 +2087,12 @@ def _baseline_and_liquidation_scan(snapshot):
     candles = {"BTCUSDT": _strategy_pullback_candles()}
     baseline = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at)
         ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
     )
     enriched = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at),
             liquidation_flow_service=_StaticLiquidationService(snapshot),
         ).run(
             _config(
@@ -2135,12 +2180,12 @@ def test_liquidation_service_failure_does_not_crash_or_change_scanner_signal() -
     candles = {"BTCUSDT": _strategy_pullback_candles()}
     baseline = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at)
         ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
     )
     failed = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at),
             liquidation_flow_service=_StaticLiquidationService(
                 error=RuntimeError("synthetic snapshot failure")
             ),
@@ -2171,12 +2216,12 @@ def test_disabled_liquidation_never_calls_service_or_changes_behavior() -> None:
     candles = {"BTCUSDT": _strategy_pullback_candles()}
     baseline = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at)
         ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
     ).results[0]
     disabled = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at),
             liquidation_flow_service=_StaticLiquidationService(
                 error=AssertionError("disabled service must not be called")
             ),
@@ -2255,12 +2300,12 @@ def _baseline_and_order_book_scan(snapshot):
     candles = {"BTCUSDT": _strategy_pullback_candles()}
     baseline = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"})
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at)
         ).run(_config(["BTCUSDT"], decision_timestamp=decision_at))
     )
     enriched = run(
         ScannerRunner(
-            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}),
+            exchange_client=FakeExchangeClient(candles, failing_timeframes={"2d"}, candle_as_of=decision_at),
             order_book_liquidity_service=_StaticOrderBookService(snapshot),
         ).run(
             _config(
