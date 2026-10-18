@@ -1,0 +1,82 @@
+{
+  "status": "IMPLEMENTED_AND_VERIFIED_AWAITING_ASTRA_REVIEW",
+  "merged": false,
+  "deployed": false,
+  "independently_approved": false,
+  "base_sha": "e461c9c501196c3377d53beedae2c930c6d5c21f",
+  "reviewed_head_sha": "142cb789c7a72b16d6c2eac240923af7398f7383",
+  "earlier_reviewed_head_sha": "96bdff361499d40633802517c13111d860d1accc",
+  "reviewed_verdict": "REQUIRES_CORRECTION",
+  "earlier_correction_sha": "14436983ff9630ea2bbed7afb1a2569757ae6022",
+  "correction_sha": "5ac009adcb85f349a1f4b943c97ec3876b4d1c02",
+  "head_sha": "5ac009adcb85f349a1f4b943c97ec3876b4d1c02",
+  "branch": "fix/cci-signal-accuracy-p1-candle-freshness",
+  "pull_request": "https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/135",
+  "policy_version": "essential-candle-freshness-v1",
+  "anchor": "unix_epoch_utc",
+  "publication_allowance_ms": 0,
+  "schema_version": 27,
+  "schema_migration": false,
+  "base_reproduction": {
+    "captured_before_edit": false,
+    "method": "separate worktree at the base SHA after the candidate existed",
+    "decision_cutoff": "2026-03-01T14:00:00Z",
+    "last_15m_open": "2026-02-22T13:45:00Z",
+    "closed_candles_as_of_accepted": 220,
+    "trade_idea_created": true,
+    "best_rr": "3.06779661",
+    "status": "JOURNAL_ENTRY_CREATED"
+  },
+  "fixture_acceptance": {
+    "stale_false_acceptances": {"numerator": 0, "denominator": 6, "cases": ["15m_7d", "12h_7d", "2h_7d", "15m_one_interval", "cache_after_next_close", "fresh_http_old_candles"]},
+    "stale_qualifying_contributions": {"numerator": 0, "denominator": 1, "cases": ["registered_scan_then_15m_stale_hold"]},
+    "unexplained_fresh_control_changes": {"numerator": 0, "denominator": 3, "cases": ["fresh_long", "flat_no_setup", "short_mirror_if_idea"]},
+    "unassessable": ["no_eligible_runtime_cohort"]
+  },
+  "empirical": {
+    "eligible_cohort": false,
+    "metrics": "N/A",
+    "profitability_inferred": false
+  },
+  "verification": {
+    "pytest_exit_code": 0,
+    "pytest_collected": 3080,
+    "pytest_elapsed_seconds": 1513,
+    "pytest_on_reviewed_head": 3076,
+    "reviewed_head_ci_run": 39141451547,
+    "earlier_reviewed_head_ci_run": 39132090968,
+    "pytest_on_earlier_reviewed_head": 3061,
+    "new_freshness_tests_collected": 26,
+    "confirmation_consumption_tests_collected": 37,
+    "owner_correction_tests_collected": 36,
+    "compileall_exit_code": 0,
+    "pip_check": "no broken requirements",
+    "git_diff_check_exit_code": 0,
+    "bugbot": "not rerun for this correction",
+    "bugbot_is_astra_approval": false
+  },
+  "benchmark": {
+    "workload": "one-symbol in-memory ScannerRunner, public fixture, failing 2d fetch, decision 2026-03-02T14:00:00Z, 3 iterations after 1 warmup",
+    "kline_calls": {"base": 6, "candidate": 6},
+    "seconds_per_scan": {"base": 5.217, "candidate": 5.928},
+    "tracemalloc_peak_bytes": {"base": 5670044, "candidate": 5688015},
+    "diagnostic_json_bytes": {"base": 37968, "candidate": 46707},
+    "freshness_receipt_bytes": 2881,
+    "database_rows_written": 0,
+    "noise": "single-process sample, not a statistical benchmark"
+  },
+  "fingerprint": {
+    "state_machine_py_changed": true,
+    "outcomes_py_changed": false,
+    "candle_integrity_py_changed": false,
+    "correction_changes_fingerprint_again": false,
+    "effect": "durable replay implementation id changes because phase 1 edited state_machine.py; neither lifecycle correction edits that file again. Old captures must not silent-match",
+    "receipt": "version 2 source slot keeps the original observation digest and an explicit owners list. Version 1 mode slots stay single-owner and are copied forward only by an explicit upgrade. No schema migration."
+  },
+  "publication_allowance_note": "Zero allowance can reject a decision before the required candle is available. Cache lifetime or the next scan cadence can extend the interruption. Availability cost only; not an expectancy result.",
+  "public_floors_unchanged": {
+    "public_rr": "3",
+    "public_setup_quality_score": "88",
+    "internal_strategy_rr": "2.5"
+  }
+}

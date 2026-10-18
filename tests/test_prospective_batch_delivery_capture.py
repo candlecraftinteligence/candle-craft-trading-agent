@@ -579,26 +579,37 @@ def test_both_2d_routes_and_incomplete_pairs() -> None:
 
     run(scenario())
 
-    client = FakeExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes={"2d"})
+    coverage_decision = _decision_after_rows("15m", 220)
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=coverage_decision,
+    )
     primary_2d = run(
         ScannerRunner(exchange_client=client).run(
             _scan_config(
                 interval="2d",
                 execution_timeframe="2d",
                 htf_timeframe="2d",
-                decision_timestamp=_decision_after_rows("15m", 220),
+                decision_timestamp=coverage_decision,
             )
         )
     )
     strategy_2d = run(
-        ScannerRunner(exchange_client=FakeExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes=set())).run(
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(
+                {"BTCUSDT": _flat_candles()},
+                failing_timeframes=set(),
+                candle_as_of=coverage_decision,
+            )
+        ).run(
             _scan_config(
                 enable_strategy_output=True,
                 interval="1d",
                 execution_timeframe="15m",
                 htf_timeframe="2d",
                 candle_limit=80,
-                decision_timestamp=_decision_after_rows("15m", 220),
+                decision_timestamp=coverage_decision,
             )
         )
     )
@@ -608,8 +619,12 @@ def test_both_2d_routes_and_incomplete_pairs() -> None:
 
 
 def test_closed_filter_and_execution_timeframe_selection() -> None:
-    client = FakeExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes={"2d"})
     decision = datetime(2026, 1, 1, tzinfo=UTC)
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=decision,
+    )
     result = run(
         ScannerRunner(exchange_client=client, capture_clock=ControllableDatetimeClock(decision)).run(
             _scan_config(decision_timestamp=decision, enable_strategy_output=False)
@@ -626,8 +641,12 @@ def test_closed_filter_and_execution_timeframe_selection() -> None:
 
 
 def test_no_strategy_matching_and_mismatching_execution_timeframes() -> None:
-    client = FakeExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes={"2d"})
     decision = datetime(2026, 1, 1, tzinfo=UTC)
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=decision,
+    )
     matched = run(
         ScannerRunner(exchange_client=client).run(
             _scan_config(decision_timestamp=decision, interval="15m", execution_timeframe="15m")
@@ -646,8 +665,12 @@ def test_no_strategy_matching_and_mismatching_execution_timeframes() -> None:
 
 
 def test_ordinary_runner_to_lifecycle_handoff(tmp_path: Path) -> None:
-    client = FakeExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes={"2d"})
     decision = datetime(2026, 1, 1, tzinfo=UTC)
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=decision,
+    )
     runner = ScannerRunner(exchange_client=client, capture_clock=ControllableDatetimeClock(decision + timedelta(seconds=5)))
     result = run(runner.run(_scan_config(decision_timestamp=decision)))
     db_path = tmp_path / "handoff.sqlite"
@@ -906,8 +929,12 @@ def test_replacement_copy_does_not_establish_exact_membership() -> None:
 
 
 def test_ordinary_closed_candle_path_preserves_exact_membership() -> None:
-    client = FakeExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes={"2d"})
     decision = datetime(2026, 1, 1, tzinfo=UTC)
+    client = FakeExchangeClient(
+        {"BTCUSDT": _flat_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=decision,
+    )
     result = run(
         ScannerRunner(exchange_client=client, capture_clock=ControllableDatetimeClock(decision)).run(
             _scan_config(decision_timestamp=decision, enable_strategy_output=False)
@@ -1020,15 +1047,24 @@ def test_override_get_klines_is_not_bypassed() -> None:
 
 
 def test_capture_includes_accepted_and_rejected_without_denominator() -> None:
+    capture_decision = datetime(2026, 1, 1, tzinfo=UTC)
     rejected = run(
-        ScannerRunner(exchange_client=FakeExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes={"2d"})).run(
-            _scan_config(decision_timestamp=datetime(2026, 1, 1, tzinfo=UTC))
-        )
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(
+                {"BTCUSDT": _flat_candles()},
+                failing_timeframes={"2d"},
+                candle_as_of=capture_decision,
+            )
+        ).run(_scan_config(decision_timestamp=capture_decision))
     )
     accepted_like = run(
-        ScannerRunner(exchange_client=FakeExchangeClient({"BTCUSDT": _flat_candles()}, failing_timeframes={"2d"})).run(
-            _scan_config(decision_timestamp=datetime(2026, 1, 1, tzinfo=UTC), enable_strategy_output=True)
-        )
+        ScannerRunner(
+            exchange_client=FakeExchangeClient(
+                {"BTCUSDT": _flat_candles()},
+                failing_timeframes={"2d"},
+                candle_as_of=capture_decision,
+            )
+        ).run(_scan_config(decision_timestamp=capture_decision, enable_strategy_output=True))
     )
     assert rejected.results[0].lifecycle_execution_batch_delivery is not None
     assert accepted_like.results[0].lifecycle_execution_batch_delivery is not None

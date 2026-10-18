@@ -110,6 +110,14 @@ from app.data.candle_batch_evidence import (
     observe_synthetic_2d_resample,
     unavailable_delivery,
 )
+from app.data.candle_freshness import (
+    POLICY_VERSION,
+    CandleFreshnessStatus,
+    EssentialFreshnessBundle,
+    assess_candle_freshness,
+    assess_essential_discovery,
+    essential_discovery_roles,
+)
 from app.data.candle_integrity import (
     CandleIntegrityError,
     closed_candles_as_of,
@@ -161,6 +169,10 @@ DEFAULT_STRATEGY_MODES = (
 DIRECT_STRATEGY_TIMEFRAMES = ("12h", "4h", "1h", "15m")
 SYNTHETIC_2D_SOURCE_TIMEFRAME = "1d"
 NO_VALID_STRATEGY_SETUP_REASON = "No valid Liquidity-Grab Pullback setup."
+ESSENTIAL_CANDLE_FRESHNESS_REJECTION = (
+    "Essential candle inputs do not cover the latest required completed interval "
+    "at the scan decision cutoff."
+)
 MIN_12H_VOLUME_PROFILE_CANDLES = 20
 MIN_STRATEGY_CLOSED_CANDLES = 20
 MIN_REGIME_CLOSED_CANDLES = 40
@@ -1268,6 +1280,18 @@ class ScannerRunner:
                 )
                 if not closed:
                     return timeframe, (), f"BTC {timeframe} has no closed candles"
+                freshness = assess_candle_freshness(
+                    closed,
+                    symbol="BTCUSDT",
+                    timeframe=timeframe,
+                    role="optional_btc_context",
+                    decision_timestamp=config.decision_timestamp,
+                )
+                if not freshness.passed:
+                    return timeframe, (), (
+                        f"BTC {timeframe} candles are not current "
+                        f"({freshness.reason})"
+                    )
                 return timeframe, tuple(closed), None
             except Exception as exc:
                 self.logger.debug(
@@ -1547,6 +1571,32 @@ class ScannerRunner:
                 technical_result=technical,
                 derivatives_enrichment=derivatives_enrichment,
                 strategy_execution=strategy_execution,
+            )
+
+        freshness_receipt = _freshness_receipt(strategy_execution.strategy_diagnostics)
+        if freshness_receipt is None or freshness_receipt.get("discovery_passed") is not True:
+            if freshness_receipt is None:
+                base_unverified = [
+                    *base_unverified,
+                    (
+                        "essential_candle_freshness: Unverified "
+                        f"(reason=assessment_missing,policy_version={POLICY_VERSION},allowance_ms=0)"
+                    ),
+                ]
+            return self._symbol_result(
+                symbol=symbol,
+                status=ScannerPipelineStatus.SCANNED_NO_SETUP,
+                status_history=(ScannerPipelineStatus.SCANNED_NO_SETUP,),
+                candles=candles,
+                current_price=current_price,
+                optional_data=optional_data,
+                missing_data=base_missing,
+                unverified_data=base_unverified,
+                rejection_reason=ESSENTIAL_CANDLE_FRESHNESS_REJECTION,
+                technical_result=technical,
+                derivatives_enrichment=derivatives_enrichment,
+                strategy_execution=strategy_execution,
+                rejection_stage_override="essential_candle_freshness",
             )
 
         derivatives_input = _derivatives_input(
@@ -1961,13 +2011,25 @@ class ScannerRunner:
                     lambda symbol=symbol: client.get_klines(symbol, timeframe, fetch_limit),
                     timeout_sec=_optional_request_timeout(config),
                 )
-                context[key] = self._closed_candles_for_analysis(
+                closed = self._closed_candles_for_analysis(
                     candles,
                     symbol=symbol,
                     timeframe=timeframe,
                     config=config,
                     minimum_closed_history=MIN_REGIME_CLOSED_CANDLES,
                 )
+                freshness = assess_candle_freshness(
+                    closed,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    role="optional_regime",
+                    decision_timestamp=config.decision_timestamp,
+                )
+                if not freshness.passed:
+                    raise RuntimeError(
+                        f"{symbol} {timeframe} regime candles are not current ({freshness.reason})"
+                    )
+                context[key] = closed
             except Exception as exc:
                 self.logger.debug("Market climate %s candles unavailable: %s", symbol, exc)
                 context["missing_data"].append(f"{symbol}_candles: N/A ({exc})")
@@ -2004,6 +2066,29 @@ class ScannerRunner:
                     logical_cutoff=config.decision_timestamp,
                     parent=primary_delivery,
                 )
+            freshness = assess_essential_discovery(
+                symbol=symbol,
+                decision_timestamp=config.decision_timestamp,
+                roles=essential_discovery_roles(
+                    strategy_enabled=False,
+                    primary_timeframe=primary_timeframe,
+                    execution_timeframe=execution_timeframe,
+                    confirmation_timeframe=config.confirmation_timeframe,
+                    bias_timeframe=config.bias_timeframe,
+                    structure_timeframe=config.structure_timeframe,
+                    htf_timeframe=config.htf_timeframe,
+                ),
+                candles_by_timeframe={primary_timeframe: tuple(primary_candles)},
+            )
+            if not freshness.passed:
+                blocked = _freshness_blocked_strategy_execution(
+                    config=config,
+                    bundle=freshness,
+                    execution_candles=profile_candles,
+                    execution_timeframe=execution_timeframe,
+                    execution_delivery=execution_delivery,
+                )
+                return blocked
             volume_profile = _volume_profile_for_timeframe(
                 symbol=symbol,
                 timeframe=execution_timeframe,
@@ -2011,6 +2096,9 @@ class ScannerRunner:
             )
             return _StrategyExecution(
                 strategy_missing_data=volume_profile.missing_data,
+                strategy_diagnostics={
+                    "essential_candle_freshness": freshness.receipt(),
+                },
                 volume_profile=volume_profile,
                 execution_candles=profile_candles,
                 execution_timeframe=execution_timeframe,
@@ -2029,6 +2117,37 @@ class ScannerRunner:
             )
         )
         execution_timeframe = config.execution_timeframe.strip().lower()
+        freshness = timeframe_context.get("essential_candle_freshness")
+        if not isinstance(freshness, EssentialFreshnessBundle):
+            freshness = assess_essential_discovery(
+                symbol=symbol,
+                decision_timestamp=config.decision_timestamp,
+                roles=(),
+                candles_by_timeframe={},
+            )
+        hard_freshness_failure = any(
+            item.status is CandleFreshnessStatus.STALE for item in freshness.assessments
+        )
+        if hard_freshness_failure or not freshness.assessments:
+            blocked = _freshness_blocked_strategy_execution(
+                config=config,
+                bundle=freshness,
+                execution_candles=tuple(candles_by_timeframe.get(execution_timeframe, ())),
+                execution_timeframe=execution_timeframe,
+                execution_delivery=deliveries_by_timeframe.get(execution_timeframe)
+                or self._observe_empty_execution(
+                    execution_timeframe=execution_timeframe,
+                    logical_cutoff=config.decision_timestamp,
+                    parent=primary_delivery,
+                ),
+            )
+            return blocked.model_copy(
+                update={
+                    "strategy_missing_data": _unique_strings(
+                        [*blocked.strategy_missing_data, *timeframe_missing]
+                    )
+                }
+            )
         execution_volume_profile = _volume_profile_for_timeframe(
             symbol=symbol,
             timeframe=execution_timeframe,
@@ -2066,6 +2185,10 @@ class ScannerRunner:
         missing_data = list(timeframe_missing)
         missing_data.extend(execution_volume_profile.missing_data)
         unverified_data: list[str] = []
+        if not freshness.passed:
+            soft_missing, soft_unverified = freshness.diagnostic_lines()
+            missing_data.extend(soft_missing)
+            unverified_data.extend(soft_unverified)
         timeframe_limit_warnings = _sequence_from_diagnostics(timeframe_context.get("timeframe_limit_warnings"))
         formatted_output = NA
         selected_setup: LiquidityGrabSetup | None = None
@@ -2098,6 +2221,7 @@ class ScannerRunner:
             mode_diagnostics["target_intelligence"] = target_intelligence.model_dump(mode="json")
             if timeframe_limit_warnings:
                 mode_diagnostics["timeframe_limit_warnings"] = timeframe_limit_warnings
+            mode_diagnostics["essential_candle_freshness"] = freshness.receipt()
             diagnostics[mode_name] = mode_diagnostics
             missing_data.extend(result.missing_data)
             unverified_data.extend(result.unverified_data)
@@ -2112,6 +2236,11 @@ class ScannerRunner:
             else:
                 rejected_modes.append(mode_name)
 
+        if not _freshness_receipt(diagnostics):
+            diagnostics = {
+                **diagnostics,
+                "essential_candle_freshness": freshness.receipt(),
+            }
         return _StrategyExecution(
             strategy_name=config.strategy_name,
             strategy_results=strategy_results,
@@ -2161,6 +2290,7 @@ class ScannerRunner:
         limit_warnings: list[str] = []
         primary_timeframe = config.interval.strip().lower()
         htf_source: str = NA
+        daily_source_candles: tuple[Any, ...] = ()
 
         if config.htf_timeframe.strip().lower() == "2d":
             source_candles: Sequence[Any] = ()
@@ -2234,6 +2364,7 @@ class ScannerRunner:
                     missing_data.extend(_strategy_data_error_diagnostics("2d"))
                 else:
                     missing_data.extend(_strategy_history_diagnostics("2d", 0))
+            daily_source_candles = tuple(source_candles)
 
         for timeframe in _direct_strategy_timeframes(config):
             if timeframe == primary_timeframe:
@@ -2283,6 +2414,13 @@ class ScannerRunner:
             else:
                 missing_data.extend(_strategy_history_diagnostics(timeframe, len(closed_batch.candles)))
 
+        freshness = assess_essential_discovery(
+            symbol=symbol,
+            decision_timestamp=config.decision_timestamp,
+            roles=_essential_roles_for_config(config),
+            candles_by_timeframe=candles_by_timeframe,
+            daily_source_candles=daily_source_candles,
+        )
         return (
             candles_by_timeframe,
             deliveries_by_timeframe,
@@ -2290,6 +2428,7 @@ class ScannerRunner:
             {
                 "htf_2d_context_source": htf_source,
                 "timeframe_limit_warnings": _unique_strings(limit_warnings),
+                "essential_candle_freshness": freshness,
             },
         )
 
@@ -3694,6 +3833,53 @@ def _exchange_kline_limit(*, exchange: str, requested_limit: int, label: str, wa
             f"for Binance kline limit {BINANCE_KLINE_LIMIT_MIN}-{BINANCE_KLINE_LIMIT_MAX}."
         )
     return clamped
+
+
+def _essential_roles_for_config(config: ScannerRunConfig) -> tuple[tuple[str, str], ...]:
+    return essential_discovery_roles(
+        strategy_enabled=bool(config.enable_strategy_output and config.strategy_name),
+        primary_timeframe=config.interval,
+        execution_timeframe=config.execution_timeframe,
+        confirmation_timeframe=config.confirmation_timeframe,
+        bias_timeframe=config.bias_timeframe,
+        structure_timeframe=config.structure_timeframe,
+        htf_timeframe=config.htf_timeframe,
+    )
+
+
+def _freshness_receipt(diagnostics: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    direct = diagnostics.get("essential_candle_freshness")
+    if isinstance(direct, Mapping) and "discovery_passed" in direct:
+        return direct
+    for value in diagnostics.values():
+        if not isinstance(value, Mapping):
+            continue
+        nested = value.get("essential_candle_freshness")
+        if isinstance(nested, Mapping) and "discovery_passed" in nested:
+            return nested
+    return None
+
+
+def _freshness_blocked_strategy_execution(
+    *,
+    config: ScannerRunConfig,
+    bundle: EssentialFreshnessBundle,
+    execution_candles: Sequence[Any],
+    execution_timeframe: str,
+    execution_delivery: CandleBatchDelivery | None,
+) -> _StrategyExecution:
+    missing, unverified = bundle.diagnostic_lines()
+    return _StrategyExecution(
+        strategy_name=config.strategy_name or NA,
+        strategy_diagnostics={"essential_candle_freshness": bundle.receipt()},
+        strategy_missing_data=missing,
+        strategy_unverified_data=unverified,
+        rejected_strategy_modes=tuple(mode.value for mode in config.strategy_modes),
+        execution_candles=tuple(execution_candles),
+        execution_timeframe=execution_timeframe,
+        decision_timestamp=config.decision_timestamp,
+        execution_batch_delivery=execution_delivery,
+    )
 
 
 def _direct_strategy_timeframes(config: ScannerRunConfig) -> tuple[str, ...]:

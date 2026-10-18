@@ -18,10 +18,15 @@ from app.data.candle_batch_evidence import (
     HANDOFF_UNAVAILABLE,
     associate_execution_handoff,
 )
+from app.data.candle_freshness import observation_has_essential_freshness_failure
 from app.data.dtos import NA
 from app.formatters.scanner_display import build_symbol_display, representative_strategy_diagnostics
 from app.lifecycle.identity import generation_rotation_reason, new_setup_generation_id
-from app.lifecycle.observation_consumption import inspect_consumption, persist_consumption
+from app.lifecycle.observation_consumption import (
+    inspect_consumption,
+    persist_consumption,
+    persist_source_owner_bindings,
+)
 from app.lifecycle.models import (
     ACTIVE_LIFECYCLE_MONITORING_STATES,
     SetupLifecycleRecord,
@@ -51,12 +56,15 @@ from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle.state_machine import (
     DEFAULT_CONFIRMATION_CYCLES,
     DEFAULT_SETUP_MERGE_TOLERANCE_PCT,
+    PLAN_LOCK_STATES,
     LifecycleObservation,
     confirmed_observation_block_reasons,
     entry_zone_touched,
     evaluate_lifecycle_transition,
     now_utc_iso,
 )
+
+_FRESHNESS_OWNER_HOLD_STATES = PLAN_LOCK_STATES | {SetupLifecycleState.TRIGGERED}
 from app.runtime_epoch.authority import require_active_runtime_epoch
 from app.runtime_epoch.errors import (
     RuntimeEpochConfigurationError,
@@ -277,6 +285,14 @@ class SetupLifecycleService:
                 assert updated is not None
                 updated_results.append(updated)
                 _add_process_meta(process_summary, meta)
+            monitored_transitions: dict[str, list[SetupTransitionResult]] = {}
+
+            def _collect_monitored_transitions(evaluation: Any) -> None:
+                record = getattr(evaluation, "record", None)
+                if record is None:
+                    return
+                monitored_transitions.setdefault(record.symbol, []).extend(evaluation.transitions)
+
             owner_monitoring = monitor_tracking_obligations(
                 repository,
                 evidence_by_key=evidence_from_symbol_results(
@@ -287,7 +303,17 @@ class SetupLifecycleService:
                 scan_run_id=effective_run_id,
                 default_timeframe=str(result.config.execution_timeframe or "15m"),
                 record_missing_evidence=False,
+                on_evaluation=_collect_monitored_transitions,
             )
+            delivered: list[ScannerSymbolResult] = []
+            for symbol_result in updated_results:
+                delivered.append(
+                    _with_committed_monitoring_transitions(
+                        symbol_result,
+                        tuple(monitored_transitions.get(symbol_result.symbol, ())),
+                    )
+                )
+            updated_results = delivered
             process_summary["owner_monitoring"] = owner_monitoring.as_dict()
         process_summary["processed_symbols"] = (
             len(updated_results)
@@ -425,24 +451,79 @@ class SetupLifecycleService:
         if not origin.granted:
             persist_blocked_symbol_origin(connection, origin)
             return symbol_result, {"origin_blocked_reason": origin.reason, "origin_granted": False}
+        scanner_observation = observation
+        lineage = _consumption_lineage(symbol_result)
         consumption = inspect_consumption(
             connection,
             origin=origin,
-            observation=observation,
-            lineage={
-                "evaluation_kind": origin_kind_from_symbol_result(symbol_result),
-                "evaluation_completed_at": evaluation_completed_at_from_symbol_result(symbol_result),
-                "decision_cutoff_at": decision_cutoff_from_symbol_result(symbol_result),
-                "producer_observed_at": producer_acquisition_from_symbol_result(symbol_result),
-                "execution_timeframe": symbol_result.lifecycle_execution_timeframe,
-            },
+            observation=scanner_observation,
+            lineage=lineage,
         )
+        if consumption.bound_owners:
+            return self._account_source_bound_owners(
+                _records_for_source_bindings(
+                    repository,
+                    consumption.bound_owners,
+                    observation=scanner_observation,
+                    runtime_epoch_id=runtime_epoch_id,
+                ),
+                observation=scanner_observation,
+                symbol_result=symbol_result,
+                repository=repository,
+                now=now,
+                scan_run_id=scan_run_id,
+                origin=origin,
+                consumption=consumption,
+                runtime_epoch_id=runtime_epoch_id,
+                replay=True,
+            )
+        if (
+            observation_has_essential_freshness_failure(scanner_observation)
+            and consumption.owner_id is None
+            and not consumption.legacy
+            and repository.get_record(
+                symbol=scanner_observation.symbol,
+                mode=scanner_observation.mode,
+                direction=scanner_observation.direction,
+            )
+            is None
+        ):
+            owners = _active_epoch_hold_owners(
+                repository,
+                observation=scanner_observation,
+                runtime_epoch_id=runtime_epoch_id,
+            )
+            if owners:
+                cooldown_veto = legacy_cooldown_veto(
+                    connection,
+                    symbol=scanner_observation.symbol,
+                    mode=scanner_observation.mode,
+                    direction=scanner_observation.direction,
+                    now=now,
+                )
+                if cooldown_veto is not None:
+                    return symbol_result, {
+                        "origin_blocked_reason": cooldown_veto,
+                        "origin_granted": False,
+                    }
+                return self._account_source_bound_owners(
+                    owners,
+                    observation=scanner_observation,
+                    symbol_result=symbol_result,
+                    repository=repository,
+                    now=now,
+                    scan_run_id=scan_run_id,
+                    origin=origin,
+                    consumption=consumption,
+                    runtime_epoch_id=runtime_epoch_id,
+                    replay=False,
+                )
         replayed = consumption.legacy or consumption.owner_id is not None
         cooldown_veto = legacy_cooldown_veto(
             connection,
-            symbol=observation.symbol,
-            mode=observation.mode,
-            direction=observation.direction,
+            symbol=scanner_observation.symbol,
+            mode=scanner_observation.mode,
+            direction=scanner_observation.direction,
             now=now,
         )
         if cooldown_veto is not None and not replayed:
@@ -547,7 +628,7 @@ class SetupLifecycleService:
             repository.insert_event(transition.event)
         _log_lifecycle_actionability_audit(symbol_result, observation, transition)
 
-        execution_candles = symbol_result.lifecycle_execution_candles
+        execution_candles = _matching_execution_candles(repository, final_record, symbol_result)
         try:
             batch_handoff = associate_execution_handoff(
                 symbol_result.lifecycle_execution_batch_delivery,
@@ -589,20 +670,12 @@ class SetupLifecycleService:
 
         if final_record is not None:
             effective_transition = effective_transition.model_copy(update={"record": final_record})
-            outcome_record = _outcome_analytics_record(
+            _persist_terminal_analytics(
                 repository,
                 effective_transition,
                 observation,
-                outcome_progress=outcome_progress,
+                outcome_progress,
             )
-            if outcome_record is not None:
-                already_persisted = any(
-                    item.lifecycle_id == outcome_record.lifecycle_id
-                    and item.final_outcome == outcome_record.final_outcome
-                    for item in repository.list_outcome_analytics(symbol=outcome_record.symbol)
-                )
-                if effective_transition.transitioned or not already_persisted:
-                    repository.upsert_outcome_analytics(outcome_record)
         audit_updates = {
             "candidate_quality_grade": observation.candidate_quality_grade,
             "final_quality_grade": observation.final_quality_grade,
@@ -632,6 +705,135 @@ class SetupLifecycleService:
         meta["duplicate_confirmation_observations"] = int(consumption.owner_id is not None)
         meta["unverified_confirmation_observations"] = int(consumption.legacy)
         return updated, meta
+
+    def _account_source_bound_owners(
+        self,
+        owners: Sequence[SetupLifecycleRecord],
+        *,
+        observation: LifecycleObservation,
+        symbol_result: ScannerSymbolResult,
+        repository: SQLiteSetupLifecycleRepository,
+        now: str,
+        scan_run_id: str | None,
+        origin: Any,
+        consumption: Any,
+        runtime_epoch_id: str,
+        replay: bool,
+    ) -> tuple[ScannerSymbolResult, dict[str, Any]]:
+        """Hold the recorded owners of one source decision and account for each.
+
+        The receipt stores the original scanner observation. Owner identity is
+        a binding on that decision, so several directions of one mode remain
+        distinct. The receipt is written once, in the same symbol savepoint as
+        every owner update. A retry uses those bindings and does not admit an
+        owner created later. Candles apply only when they match the timeframe
+        already recorded for that owner.
+        """
+
+        connection = repository.connection
+        assert connection is not None
+        if not replay:
+            persist_source_owner_bindings(
+                connection,
+                consumption,
+                owners=tuple(
+                    {
+                        "lifecycle_id": owner.lifecycle_id,
+                        "mode": owner.mode,
+                        "direction": owner.direction,
+                    }
+                    for owner in owners
+                ),
+                consumed_at=now,
+            )
+        generated: list[SetupTransitionResult] = []
+        for owner in owners:
+            bound = replace(observation, mode=owner.mode, direction=owner.direction)
+            if replay:
+                record = owner
+                transition = SetupTransitionResult(
+                    lifecycle_id=record.lifecycle_id,
+                    symbol=record.symbol,
+                    from_state=record.current_state,
+                    to_state=record.current_state,
+                    reason=SetupTransitionReason.NO_CHANGE,
+                    transitioned=False,
+                    notes="observation_already_consumed",
+                    record=record,
+                )
+            else:
+                transition = evaluate_lifecycle_transition(
+                    owner,
+                    bound,
+                    lifecycle_id=owner.lifecycle_id,
+                    now=now,
+                    scan_run_id=scan_run_id,
+                    required_confirmation_cycles=self.confirmation_cycles,
+                    setup_tolerance_pct=self.setup_tolerance_pct,
+                )
+                record = transition.record or owner
+                record = record.model_copy(
+                    update={
+                        "runtime_epoch_id": runtime_epoch_id,
+                        "creation_origin_id": owner.creation_origin_id or origin.origin_id,
+                    }
+                )
+                transition = transition.model_copy(update={"record": record})
+                if transition.event is not None:
+                    repository.insert_event(transition.event)
+                repository.upsert_record(record)
+            execution_candles = _matching_execution_candles(repository, record, symbol_result)
+            progress: SetupLifecycleOutcomeProgress | None = None
+            if execution_candles is not None:
+                try:
+                    batch_handoff = associate_execution_handoff(
+                        symbol_result.lifecycle_execution_batch_delivery,
+                        execution_candles=execution_candles,
+                        execution_timeframe=symbol_result.lifecycle_execution_timeframe,
+                        logical_cutoff=symbol_result.lifecycle_decision_timestamp or now,
+                    )
+                except Exception:
+                    batch_handoff = BatchHandoffAssociation(
+                        disposition=HANDOFF_UNAVAILABLE,
+                        reason="capture_representation_failed",
+                        delivery=None,
+                        execution_timeframe=symbol_result.lifecycle_execution_timeframe,
+                        logical_cutoff=None,
+                        execution_snapshot=None,
+                        matched_fingerprint=None,
+                        observed_at=None,
+                    )
+                outcome = invoke_closed_candle_outcomes(
+                    evaluate_closed_candle_outcomes,
+                    caller_path=CALLER_LIFECYCLE_SERVICE,
+                    record=record,
+                    execution_candles=execution_candles,
+                    execution_timeframe=symbol_result.lifecycle_execution_timeframe,
+                    decision_timestamp=symbol_result.lifecycle_decision_timestamp or now,
+                    evaluated_at=now,
+                    repository=repository,
+                    scan_run_id=scan_run_id,
+                    delivery=symbol_result.lifecycle_execution_batch_delivery,
+                    handoff=batch_handoff,
+                    evidence_lineage="lifecycle_service_freshness_owner_hold",
+                )
+                record = outcome.record
+                progress = outcome.progress
+                generated.extend(outcome.transitions)
+                if outcome.last_transition is not None:
+                    transition = outcome.last_transition
+                transition = transition.model_copy(update={"record": record})
+            _persist_terminal_analytics(repository, transition, bound, progress)
+        updated = symbol_result.model_copy(
+            update={
+                "lifecycle_transitions": tuple(generated),
+            }
+        )
+        return updated, {
+            "origin_granted": True,
+            "freshness_owner_hold": len(tuple(owners)),
+            "duplicate_confirmation_observations": len(tuple(owners)) if replay else 0,
+        }
 
     def reset(self) -> None:
         with SQLiteSetupLifecycleRepository(
@@ -910,6 +1112,8 @@ def _setup_tolerance_pct(value: Decimal | str | None) -> Decimal:
 
 
 def _generation_setup_observable(observation: LifecycleObservation) -> bool:
+    if observation_has_essential_freshness_failure(observation):
+        return False
     return bool(
         observation.valid_trade_idea
         or observation.pullback_and_rr_valid
@@ -1122,6 +1326,186 @@ def _log_lifecycle_actionability_audit(
 def _audit_reason(reasons: Sequence[str]) -> str:
     cleaned = tuple(_display(reason) for reason in reasons if _display(reason) != NA)
     return ";".join(cleaned) if cleaned else NA
+
+
+def _consumption_lineage(symbol_result: ScannerSymbolResult) -> dict[str, Any]:
+    return {
+        "evaluation_kind": origin_kind_from_symbol_result(symbol_result),
+        "evaluation_completed_at": evaluation_completed_at_from_symbol_result(symbol_result),
+        "decision_cutoff_at": decision_cutoff_from_symbol_result(symbol_result),
+        "producer_observed_at": producer_acquisition_from_symbol_result(symbol_result),
+        "execution_timeframe": symbol_result.lifecycle_execution_timeframe,
+    }
+
+
+def _records_for_source_bindings(
+    repository: SQLiteSetupLifecycleRepository,
+    bindings: Sequence[tuple[str, str, str]],
+    *,
+    observation: LifecycleObservation,
+    runtime_epoch_id: str,
+) -> tuple[SetupLifecycleRecord, ...]:
+    records: list[SetupLifecycleRecord] = []
+    for lifecycle_id, mode, direction in bindings:
+        record = repository.get_record_by_lifecycle_id(lifecycle_id)
+        if (
+            record is None
+            or record.symbol != observation.symbol
+            or record.runtime_epoch_id != runtime_epoch_id
+            or record.mode != mode
+            or record.direction != direction
+        ):
+            raise RuntimeEpochIdentityCollisionError(
+                "Observation consumption integrity exception: conflicting lifecycle owner"
+            )
+        records.append(record)
+    return tuple(records)
+
+
+def _active_epoch_hold_owners(
+    repository: SQLiteSetupLifecycleRepository,
+    *,
+    observation: LifecycleObservation,
+    runtime_epoch_id: str,
+) -> tuple[SetupLifecycleRecord, ...]:
+    return tuple(
+        sorted(
+            (
+                record
+                for record in repository.list_records_for_symbol(symbol=observation.symbol)
+                if record.is_current
+                and record.runtime_epoch_id == runtime_epoch_id
+                and record.current_state in _FRESHNESS_OWNER_HOLD_STATES
+            ),
+            key=lambda record: (record.mode, record.direction, record.lifecycle_id),
+        )
+    )
+
+
+def _transition_event_identity(transition: SetupTransitionResult) -> tuple[Any, ...]:
+    """Identity of one committed lifecycle event.
+
+    Milestones that share a lifecycle or a terminal state stay distinct.
+    Only the same event payload is treated as a duplicate.
+    """
+
+    event = transition.event
+    if event is None:
+        from_state = transition.from_state.value if transition.from_state is not None else None
+        return (
+            transition.lifecycle_id,
+            from_state,
+            transition.to_state.value,
+            transition.reason.value,
+            bool(transition.transitioned),
+            transition.notes,
+        )
+    event_from = event.from_state.value if event.from_state is not None else None
+    return (
+        event.lifecycle_id,
+        event_from,
+        event.to_state.value,
+        event.reason.value,
+        event.timestamp,
+        event.notes,
+    )
+
+
+def _with_committed_monitoring_transitions(
+    symbol_result: ScannerSymbolResult,
+    monitored: Sequence[SetupTransitionResult],
+) -> ScannerSymbolResult:
+    """Append monitoring transitions after the direct sequence.
+
+    Direct processing has already ordered its own milestones. Monitoring
+    transitions were recorded only after their owner savepoint released, in
+    evaluation order. An exact event already present in the direct sequence
+    is not repeated.
+    """
+
+    if not monitored:
+        return symbol_result
+    direct = tuple(symbol_result.lifecycle_transitions or ())
+    seen = {_transition_event_identity(item) for item in direct}
+    added: list[SetupTransitionResult] = []
+    for item in monitored:
+        identity = _transition_event_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        added.append(item)
+    if not added:
+        return symbol_result
+    return symbol_result.model_copy(update={"lifecycle_transitions": direct + tuple(added)})
+
+
+def account_monitored_outcome(repository: SQLiteSetupLifecycleRepository, evaluation: Any) -> None:
+    """Write canonical terminal analytics for an owner-monitoring evaluation.
+
+    The caller invokes this inside the owner savepoint, after candle progress
+    is written and before that savepoint is released.
+    """
+
+    record = evaluation.record
+    transition = evaluation.last_transition
+    if transition is None or transition.record is None:
+        transition = SetupTransitionResult(
+            lifecycle_id=record.lifecycle_id,
+            symbol=record.symbol,
+            from_state=record.current_state,
+            to_state=record.current_state,
+            reason=SetupTransitionReason.NO_CHANGE,
+            transitioned=False,
+            record=record,
+        )
+    else:
+        transition = transition.model_copy(update={"record": record})
+    _persist_terminal_analytics(
+        repository,
+        transition,
+        LifecycleObservation(symbol=record.symbol),
+        evaluation.progress,
+    )
+
+
+def _matching_execution_candles(
+    repository: SQLiteSetupLifecycleRepository,
+    record: SetupLifecycleRecord | None,
+    symbol_result: ScannerSymbolResult,
+):
+    candles = symbol_result.lifecycle_execution_candles
+    if record is None or candles is None:
+        return candles
+    supplied = str(symbol_result.lifecycle_execution_timeframe or "").strip().lower()
+    for progress in repository.list_outcome_progress(lifecycle_id=record.lifecycle_id):
+        required = str(progress.execution_timeframe or "").strip().lower()
+        if required and required != NA.lower() and required != supplied:
+            return None
+        return candles
+    return candles
+
+
+def _persist_terminal_analytics(
+    repository: SQLiteSetupLifecycleRepository,
+    transition: SetupTransitionResult,
+    observation: LifecycleObservation,
+    outcome_progress: SetupLifecycleOutcomeProgress | None,
+) -> None:
+    outcome_record = _outcome_analytics_record(
+        repository,
+        transition,
+        observation,
+        outcome_progress=outcome_progress,
+    )
+    if outcome_record is None:
+        return
+    already_persisted = any(
+        item.lifecycle_id == outcome_record.lifecycle_id
+        and item.final_outcome == outcome_record.final_outcome
+        for item in repository.list_outcome_analytics(symbol=outcome_record.symbol)
+    )
+    if transition.transitioned or not already_persisted:
+        repository.upsert_outcome_analytics(outcome_record)
 
 
 def _outcome_analytics_record(

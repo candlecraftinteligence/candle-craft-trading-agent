@@ -6,6 +6,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.data.candle_freshness import (
+    freshness_failure_preserves_owner,
+    observation_has_essential_freshness_failure,
+)
 from app.data.dtos import NA
 from app.lifecycle.economic_identity import latch_economic_identities
 from app.lifecycle.identity import setup_geometry_identity
@@ -117,6 +121,7 @@ PLAN_LOCK_STATES = {
     SetupLifecycleState.EXECUTING,
     SetupLifecycleState.MANAGING,
 }
+_FRESHNESS_OWNER_HOLD_STATES = PLAN_LOCK_STATES | {SetupLifecycleState.TRIGGERED}
 INITIAL_PUBLIC_WATCHLIST_PENDING_GATES = frozenset(
     {
         "below_min_rr",
@@ -426,8 +431,13 @@ def evaluate_lifecycle_transition(
     timestamp = now or now_utc_iso()
     required_cycles = _required_confirmation_cycles(required_confirmation_cycles, symbol_health_penalty_cycles)
     if record is None:
-        initial_state = initial_state_for_observation(observation)
-        confirmation_count = 1 if _confirmation_countable(observation) else 0
+        freshness_blocked = observation_has_essential_freshness_failure(observation)
+        initial_state = (
+            SetupLifecycleState.REJECTED
+            if freshness_blocked
+            else initial_state_for_observation(observation)
+        )
+        confirmation_count = 0 if freshness_blocked else (1 if _confirmation_countable(observation) else 0)
         if _target_requires_confirmation(initial_state) and confirmation_count < required_cycles:
             initial_state = _initial_pre_confirmation_state(observation)
         quality_grade = _quality_grade_or_score(observation)
@@ -576,6 +586,28 @@ def evaluate_lifecycle_transition(
     if not observation.closed_candle_outcomes_managed and _stored_monitoring_entry_zone_touched(record, observation):
         observation = _observation_with_stored_plan(observation, record, entry_filled=True)
 
+    if (
+        record.current_state in _FRESHNESS_OWNER_HOLD_STATES
+        and freshness_failure_preserves_owner(observation)
+        and not observation.tp_hit
+        and not observation.sl_hit
+    ):
+        held = record.model_copy(update={"last_seen_at": timestamp})
+        return _with_economic_identities(
+            SetupTransitionResult(
+                lifecycle_id=record.lifecycle_id,
+                symbol=record.symbol,
+                from_state=record.current_state,
+                to_state=record.current_state,
+                reason=SetupTransitionReason.NO_CHANGE,
+                transitioned=False,
+                notes="essential_candle_freshness_discovery_hold",
+                record=held,
+            ),
+            observation,
+            previous=record,
+        )
+
     updated_record = _record_with_observation(
         record,
         observation,
@@ -645,6 +677,8 @@ def evaluate_lifecycle_transition(
 
 
 def initial_state_for_observation(observation: LifecycleObservation) -> SetupLifecycleState:
+    if observation_has_essential_freshness_failure(observation):
+        return SetupLifecycleState.REJECTED
     target = observed_state(observation)
     if target == SetupLifecycleState.ACTIONABLE_A_GRADE:
         return SetupLifecycleState.ACTIONABLE_A_GRADE
@@ -662,6 +696,8 @@ def observed_state(observation: LifecycleObservation) -> SetupLifecycleState:
         return SetupLifecycleState.TP_HIT
     if observation.sl_hit:
         return SetupLifecycleState.SL_HIT
+    if observation_has_essential_freshness_failure(observation):
+        return SetupLifecycleState.REJECTED
     if observation.invalidated:
         return SetupLifecycleState.INVALIDATED
     if _text(observation.active_invalidation_reason) != NA:
@@ -1121,6 +1157,10 @@ def _next_confirmation_count(
 ) -> int:
     if _terminal_observation(observation):
         return 0
+    if observation_has_essential_freshness_failure(observation):
+        if record.current_state in _FRESHNESS_OWNER_HOLD_STATES:
+            return record.confirmation_count
+        return 0
     if not _confirmation_countable(observation):
         return record.confirmation_count if _setup_observable(observation) and consistent else 0
     if consistent:
@@ -1129,6 +1169,8 @@ def _next_confirmation_count(
 
 
 def _confirmation_countable(observation: LifecycleObservation) -> bool:
+    if observation_has_essential_freshness_failure(observation):
+        return False
     return (
         _confirmed_observation_ready(observation)
         or observation.actionable_a_grade_candidate

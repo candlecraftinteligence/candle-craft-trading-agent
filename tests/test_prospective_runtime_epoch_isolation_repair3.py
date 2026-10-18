@@ -102,7 +102,9 @@ def test_r61_operational_run_is_registered_before_producer(tmp_path: Path) -> No
     scanned = run_scanner(
         ScannerRunner(
             exchange_client=FakeAdapterExchangeClient(
-                {"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"}
+                {"BTCUSDT": _strategy_pullback_candles()},
+                failing_timeframes={"2d"},
+                candle_as_of=clock_now,
             ),
             clock=lambda: clock_now,
             capture_clock=lambda: clock_now,
@@ -792,6 +794,7 @@ def test_r86_multi_symbol_producer_preserves_earlier_origin(tmp_path: Path) -> N
             exchange_client=FakeAdapterExchangeClient(
                 {"BTCUSDT": candles, "ETHUSDT": candles},
                 failing_timeframes={"2d"},
+                candle_as_of=lambda: clock["now"],
             ),
             clock=_clock,
             capture_clock=_clock,

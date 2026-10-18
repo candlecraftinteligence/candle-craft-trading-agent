@@ -345,7 +345,11 @@ def test_r32_actual_producer_path_supplies_evaluation_completion(tmp_path: Path)
     db_path = _bootstrap(tmp_path / "r32.db", CUTOFF_IDENTITY)
     _register_run(db_path, "r32-run", registered_at="2026-03-01T13:59:00Z")
     clock_now = datetime(2026, 3, 1, 14, 0, tzinfo=UTC)
-    client = FakeAdapterExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
+    client = FakeAdapterExchangeClient(
+        {"BTCUSDT": _strategy_pullback_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=clock_now,
+    )
     scanned = run_scanner(
         ScannerRunner(
             exchange_client=client,
@@ -1153,8 +1157,13 @@ def _producer_lifecycle_then_deliver(
         registered_at="2026-03-01T13:59:00Z",
         expected_identity=SYNTHETIC_IDENTITY,
     )
-    clock = {"now": datetime(2026, 3, 1, 14, 0, tzinfo=UTC)}
-    client = FakeAdapterExchangeClient({"BTCUSDT": candles}, failing_timeframes={"2d"})
+    # Even Unix-epoch day so synthetic 2d pairing matches the unshifted fixture.
+    clock = {"now": datetime(2026, 3, 2, 14, 0, tzinfo=UTC)}
+    client = FakeAdapterExchangeClient(
+        {"BTCUSDT": candles},
+        failing_timeframes={"2d"},
+        candle_as_of=lambda: clock["now"],
+    )
     runner = ScannerRunner(
         exchange_client=client,
         clock=lambda: clock["now"],
@@ -1168,7 +1177,7 @@ def _producer_lifecycle_then_deliver(
         first,
         database_path=db_path,
         scan_run_id=f"{run_prefix}-run-1",
-        now="2026-03-01T14:00:01Z",
+        now="2026-03-02T14:00:01Z",
         expected_identity=SYNTHETIC_IDENTITY,
         confirmation_cycles=2,
     )
@@ -1178,13 +1187,13 @@ def _producer_lifecycle_then_deliver(
         registered_at="2026-03-01T14:04:00Z",
         expected_identity=SYNTHETIC_IDENTITY,
     )
-    clock["now"] = datetime(2026, 3, 1, 14, 5, tzinfo=UTC)
+    clock["now"] = datetime(2026, 3, 2, 14, 5, tzinfo=UTC)
     second = run_scanner(runner.run(_config(["BTCUSDT"])))
     applied = apply_lifecycle_to_run_result(
         second,
         database_path=db_path,
         scan_run_id=f"{run_prefix}-run-2",
-        now="2026-03-01T14:05:01Z",
+        now="2026-03-02T14:05:01Z",
         expected_identity=SYNTHETIC_IDENTITY,
         confirmation_cycles=2,
     )

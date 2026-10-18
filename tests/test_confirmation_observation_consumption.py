@@ -441,7 +441,7 @@ def test_producer_retry_does_not_confirm_one_scan(tmp_path, monkeypatch, same_ti
     observed = []
 
     def retry(self, result, *, scan_run_id=None, now=None):
-        now = "2026-03-01T14:30:00Z" if same_time else now
+        now = "2026-03-02T14:30:00Z" if same_time else now
         first = original(self, result, scan_run_id=scan_run_id, now=now)
         again = original(self, result, scan_run_id=scan_run_id, now=now)
         observed.extend([first.results[0].lifecycle_state, again.results[0].lifecycle_state])

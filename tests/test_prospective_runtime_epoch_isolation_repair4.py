@@ -1069,7 +1069,9 @@ def _patch_production_orchestration(
     candles_by_symbol: dict[str, list],
     sender: FakeSender,
 ):
-    clock = {"now": datetime(2026, 3, 1, 14, 0, tzinfo=UTC)}
+    # Monday, and an even Unix-epoch day. Daily alignment then keeps the same
+    # synthetic 2d pairing as the unshifted fixture, so the public score stays 89.
+    clock = {"now": datetime(2026, 3, 2, 14, 0, tzinfo=UTC)}
 
     def _tick() -> datetime:
         current = clock["now"]
@@ -1079,7 +1081,11 @@ def _patch_production_orchestration(
     def _timestamp() -> str:
         return _tick().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    client = FakeAdapterExchangeClient(candles_by_symbol, failing_timeframes={"2d"})
+    client = FakeAdapterExchangeClient(
+        candles_by_symbol,
+        failing_timeframes={"2d"},
+        candle_as_of=lambda: clock["now"],
+    )
 
     def _runner(cache=None, **_kwargs):
         return ScannerRunner(
