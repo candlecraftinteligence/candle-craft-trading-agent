@@ -2,11 +2,13 @@
 
 Status: IMPLEMENTED_AND_VERIFIED — AWAITING_ASTRA_REVIEW.
 This is not merged, not deployed, and not independently approved.
-Astra must issue APPROVED, REQUIRES_CORRECTION, or REJECTED against the exact final head.
+Astra's review of `338d134ac46d8801c8318838cb9f5f1a239f6a73` was REQUIRES_CORRECTION. That verdict is not withdrawn. The corrected head needs a new independent review. Do not treat this handoff as approval or as authorization to merge.
 
 Base: `e461c9c501196c3377d53beedae2c930c6d5c21f` (merge of PR #134).
 Branch: `fix/cci-signal-accuracy-p1-candle-freshness`.
-Head: `854465795964638e99a17b2c88f66f1266ea0aee`.
+Reviewed head: `338d134ac46d8801c8318838cb9f5f1a239f6a73`.
+Correction commit: `31ca289154e3fd3cf5d8a606c4858681d0630280`.
+The documentation commit that names that SHA does not change behavior. Review the pull request head, which contains the correction.
 Pull request: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/135
 Scope: correctness of essential candle coverage at the scan decision cutoff. No Runtime database, listener, watch loop, order execution, or deploy.
 
@@ -30,7 +32,7 @@ For a supported fixed duration with canonical anchor `A` and duration `delta`:
 
 Supported anchors are the existing minute, hour, and day durations, including synthetic 2d on the Unix-epoch UTC grid. Weekly and other undocumented anchors are unverified, not guessed. A still-forming next candle cannot repair a missing completed interval. Each timeframe uses its own `E`. A naturally older 12h or 2d close is not judged stale by the 15m interval.
 
-Operational tradeoff: with a zero allowance, a scan whose decision falls in the gap after a boundary and before the venue publishes that candle is rejected until the candle arrives. No feed contract in this repository documents a bounded publication delay.
+Operational tradeoff: with a zero allowance, a decision made before the required closed candle is available is rejected. Cache lifetime or the next scan cadence can extend that interruption. It is an availability cost. It is not evidence of better expectancy. No feed contract in this repository documents a bounded publication delay.
 
 ## What changed
 
@@ -53,9 +55,24 @@ On a separate worktree at `e461c9c`, with decision `2026-03-01 14:00 UTC` and a 
 
 That probe was run after the candidate existed, against the unchanged base commit. It was not a pytest captured before the first edit. The candidate tests now reject that class of input.
 
+## Astra correction
+
+Review comment on PR #135 required four lifecycle corrections. The full suite on `338d134` was already green (3043 passed, GitHub run 39113072506). These probes were not in that suite. They failed on that head and pass after `31ca289`.
+
+1. Multiple owners reached TP_HIT, SL_HIT, or BREAKEVEN, and `setup_outcome_analytics` stayed empty. The multi-owner hold wrote lifecycle rows and skipped the shared analytics insert, keeping only the last owner's in-memory context. Each owner now gets the same terminal analytics insert, in the same transaction, including an identical retry that does not add a second row.
+2. One swing/long owner plus a stale challenge/N/A result stored the receipt under `challenge` and pointed it at the swing lifecycle. The identical retry raised `RuntimeEpochIdentityCollisionError`: "Observation consumption integrity exception: conflicting lifecycle owner". The owner mode and direction are now reconciled before the receipt is hashed. Identical, restarted, and later processing of the same decision are idempotent. A changed decision cutoff still raises "conflicting decision content".
+3. Two current owners, applied twice, both returned SUCCESS, left `lifecycle_consumption_json` at `{"version":1,"modes":{}}`, left `duplicate_confirmation_observations` at 0, and advanced `last_seen_at` again. Each affected owner now gets a mode slot and lifecycle binding in the same transaction as the hold. A retry reports those owners as duplicate confirmation observations and does not move `last_seen_at`. An owner that appears after the first binding is not added to that origin.
+4. A current CONFIRMED legacy row, and a foreign-epoch row, were eligible for the hold because selection only checked `is_current` and lifecycle state. Writing them hit the existing epoch guard (`Legacy lifecycle identity collision: refusing to overwrite, relabel, or supersede an untagged row.` or `Lifecycle ownership does not match the active runtime epoch.`). Selection now requires the active runtime epoch. Legacy-only, foreign-only, current-only, and mixed populations were tested. The write-side ownership guards are unchanged.
+
+A 5m batch is not applied to an owner whose outcome progress already records a different execution timeframe. That used to mark `execution_timeframe_changed:15m->5m`. Outcome monitoring still runs when the timeframe matches. A symbol savepoint still rolls back a failed owner write, and the receipt with it.
+
+The public regression uses `2026-03-02 14:00 UTC`, an even Unix-epoch day on which this fixture scores 89 and the fake sender fires. A later 15m-stale scan adds no sender call and no public-alert row. The March 1 score-86 block remains a separate threshold check. The 88 floor was not lowered.
+
+`app/lifecycle/outcomes.py`, `app/lifecycle/breakeven.py`, and `app/data/candle_integrity.py` were not edited. `app/lifecycle/state_machine.py` was not edited again, so this correction does not move the durable-replay fingerprint a second time. The fingerprint change from the phase 1 `state_machine.py` edit remains.
+
 ## Fixture results
 
-`tests/test_essential_candle_freshness.py` collected 25 tests, all passing.
+`tests/test_essential_candle_freshness.py` collected 26 tests. `tests/test_essential_candle_freshness_owner_corrections.py` collected 17. All passed.
 
 Stale false acceptances in that module: 0. The covered stale inputs are a seven-day 15m, 12h, and 2h shift, a one-interval 15m lag, a cache hit after the next close, and a fresh HTTP response that still carries old candles. None created a trade idea.
 
@@ -77,7 +94,7 @@ The public fixture scores 89 and reaches the fake sender when the decision falls
 | Open or stale inputs | Reproduced defect. Open and future candles were already excluded. Tail coverage is new. |
 | Repeated observations of one candle | Protected by the existing confirmation-consumption policy. Distinct registered scans of a still-current candle still count. |
 | Countertrend evidence | Unverified. Deferred. |
-| Target path and TP1 reference breakeven | Protected. Outcome accounting was not edited. |
+| Target path and TP1 reference breakeven | Protected. Outcome evaluation and breakeven economics were not edited. Multi-owner stale discovery now writes the existing terminal analytics row for every owner. |
 | BTC, ETH, and regime context | Optional. Stale series are withheld. They are not a new required symbol gate. |
 | 2h structure | Essential when it is the configured structure role. An informational 2h layer is not by itself a strategy defect. |
 | Owner monitoring | A freshness failure keeps execution candles and still evaluates the closed prefix. |
@@ -85,7 +102,8 @@ The public fixture scores 89 and reaches the fake sender when the decision falls
 
 ## Verification
 
-- `python -m pytest`: exit 0. 3043 collected tests.
+- `python -m pytest`: exit 0. 3061 collected tests.
+- Before `31ca289`, the four new owner probes failed on `338d134` for the reasons in the Astra correction section. After that commit they passed.
 - `python -m compileall -q app scripts src tests`: exit 0.
 - `python -m pip check`: no broken requirements.
 - `git diff --check`: exit 0.
@@ -108,7 +126,8 @@ Revert this branch. There is no schema migration and no Runtime data rewrite. Re
 
 ## Remaining limitations
 
-- Zero publication allowance can reject a scan in the short gap after a candle boundary before the venue publishes it.
+- Zero publication allowance rejects a decision made before the required closed candle is available. Cache lifetime or the next scan cadence can extend that interruption. That is an availability cost, not an expectancy result.
+- One origin stores one consumption slot per mode. Two current owners of the same mode on one directionless scan remain an integrity conflict and roll back together, rather than binding only one of them.
 - The durable-replay implementation fingerprint changes because `state_machine.py` changed.
 - The public fixture's synthetic 2d trend, and therefore the 86 versus 89 score, depends on whether the daily grid preserves the original 2d pairing. The quality floors were not changed.
 - No empirical Runtime cohort was available.
