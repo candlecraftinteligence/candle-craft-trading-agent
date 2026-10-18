@@ -132,6 +132,7 @@ The public fixture scores 89 and reaches the fake sender when the decision falls
 
 - `python -m pytest`: exit 0. 3080 collected tests. The run took about 1513 seconds. The only warning was the existing Starlette `httpx` deprecation.
 - Before `31ca289`, the four earlier owner probes failed on `338d134`. Before `1443698`, the two accounting probes failed on `96bdff3`. Before `5ac009a`, the combined handoff probe failed on `142cb78` because `lifecycle_transitions` contained only `swing-long`. Those probes pass after `5ac009a`.
+- GitHub CI for reviewed head `142cb789c7a72b16d6c2eac240923af7398f7383` is run 39141451547, 3076 passed. CI for the earlier reviewed head `96bdff3` is run 39132090968, 3061 passed. The pull request description records CI for the review head that contains this documentation.
 - `python -m compileall -q app scripts src tests`: exit 0.
 - `python -m pip check`: no broken requirements.
 - `git diff --check`: exit 0.
