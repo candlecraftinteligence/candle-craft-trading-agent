@@ -649,3 +649,115 @@ def test_registered_scans_confirm_fresh_evidence_and_a_later_stale_scan_holds_th
     assert after == before
     assert len(sender.calls) == calls_after_confirm
 
+
+@pytest.mark.no_auto_epoch
+def test_publicly_eligible_fresh_control_sends_and_a_later_stale_scan_does_not(tmp_path, monkeypatch) -> None:
+    """An even Unix-epoch day scores 89, above the 88 public floor.
+
+    The March 1 fixture scores 86 and is already blocked by that floor, so a
+    later stale scan with zero sends does not isolate freshness.
+    """
+
+    decision = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)
+    db_path = bootstrap_operational_test_database(tmp_path / "public-fresh.sqlite")
+    sender = FakeSender()
+    clock = {"now": decision}
+
+    def _tick() -> datetime:
+        current = clock["now"]
+        clock["now"] = current + timedelta(seconds=5)
+        return current
+
+    client = _SelectiveStaleAdapter(
+        {"BTCUSDT": _public_min_rr_pullback_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=lambda: clock["now"],
+    )
+
+    def _runner(cache=None, **_kwargs):
+        return ScannerRunner(exchange_client=client, market_data_cache=cache, clock=_tick, capture_clock=_tick)
+
+    original_init = TelegramLifecycleDeliveryService.__init__
+
+    def _init(self, *args, **kwargs):
+        kwargs["sender"] = sender
+        settings = kwargs.get("settings") or Settings(
+            _env_file=None,
+            telegram_dry_run=True,
+            telegram_signals_enabled=False,
+            local_manual_mode=True,
+            order_execution_enabled=False,
+        )
+        kwargs["settings"] = settings.model_copy(update={"telegram_public_watchlist_enabled": True})
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(run_scan, "_scanner_runner", _runner)
+    monkeypatch.setattr(run_scan, "_watch_iteration_timestamp", lambda: _tick().strftime("%Y-%m-%dT%H:%M:%SZ"))
+    monkeypatch.setattr("app.lifecycle.service.now_utc_iso", lambda: clock["now"].strftime("%Y-%m-%dT%H:%M:%SZ"))
+    monkeypatch.setattr(TelegramLifecycleDeliveryService, "__init__", _init)
+    monkeypatch.setattr(run_scan, "WATCH_STATE_PATH", tmp_path / "watch_state.json")
+    monkeypatch.setattr(run_scan, "WATCH_STATE_CANONICAL_BASE_DIR", tmp_path)
+    argv = [
+        "--symbols",
+        "BTCUSDT",
+        "--database-path",
+        str(db_path),
+        "--runtime-epoch-id",
+        SYNTHETIC_EPOCH_ID,
+        "--runtime-epoch-cutoff-at",
+        SYNTHETIC_CUTOFF_AT,
+        "--runtime-reviewed-release-sha",
+        SYNTHETIC_RELEASE_SHA,
+        "--runtime-generation-binding",
+        SYNTHETIC_GENERATION_BINDING,
+        "--lifecycle",
+        "--store-scan",
+        "--telegram-manual-signals",
+        "--no-cache",
+        "--candle-limit",
+        "220",
+    ]
+    asyncio.run(run_scan.main(argv))
+    asyncio.run(run_scan.main(argv))
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        confirmed = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT lifecycle_id, current_state, confirmation_count, plan_version_id
+                FROM setup_lifecycle_records
+                WHERE current_state = ?
+                """,
+                (SetupLifecycleState.CONFIRMED.value,),
+            )
+        ]
+        public_before = connection.execute(
+            "SELECT COUNT(*) FROM public_alert_events"
+        ).fetchone()[0]
+    assert confirmed
+    assert all(int(row["confirmation_count"]) >= 2 for row in confirmed)
+    calls_after_confirm = len(sender.calls)
+    assert calls_after_confirm >= 1
+    assert public_before >= 1
+    client.shift_timeframes.add("15m")
+    asyncio.run(run_scan.main(argv))
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        held = dict(
+            connection.execute(
+                """
+                SELECT lifecycle_id, current_state, confirmation_count, plan_version_id
+                FROM setup_lifecycle_records
+                WHERE lifecycle_id = ?
+                """,
+                (confirmed[0]["lifecycle_id"],),
+            ).fetchone()
+        )
+        public_after = connection.execute(
+            "SELECT COUNT(*) FROM public_alert_events"
+        ).fetchone()[0]
+    assert held == confirmed[0]
+    assert len(sender.calls) == calls_after_confirm
+    assert public_after == public_before
+
