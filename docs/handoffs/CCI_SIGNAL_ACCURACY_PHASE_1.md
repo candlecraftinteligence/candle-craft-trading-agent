@@ -2,13 +2,13 @@
 
 Status: IMPLEMENTED_AND_VERIFIED — AWAITING_ASTRA_REVIEW.
 This is not merged, not deployed, and not independently approved.
-Astra's review of `96bdff361499d40633802517c13111d860d1accc` was REQUIRES_CORRECTION. That verdict is not withdrawn. The corrected head needs a new independent review. Do not treat this handoff as approval or as authorization to merge.
+Astra's review of `142cb789c7a72b16d6c2eac240923af7398f7383` was REQUIRES_CORRECTION. That verdict is not withdrawn. The corrected head needs a new independent review. Do not treat this handoff as approval or as authorization to merge.
 
 Base: `e461c9c501196c3377d53beedae2c930c6d5c21f` (merge of PR #134).
 Branch: `fix/cci-signal-accuracy-p1-candle-freshness`.
-Earlier reviewed head: `338d134ac46d8801c8318838cb9f5f1a239f6a73`.
-Latest reviewed head: `96bdff361499d40633802517c13111d860d1accc`.
-Final behavior commit: `14436983ff9630ea2bbed7afb1a2569757ae6022`.
+Earlier reviewed heads: `338d134ac46d8801c8318838cb9f5f1a239f6a73`, `96bdff361499d40633802517c13111d860d1accc`.
+Latest reviewed head: `142cb789c7a72b16d6c2eac240923af7398f7383`.
+Final behavior commit: `5ac009adcb85f349a1f4b943c97ec3876b4d1c02`.
 The documentation commit that names that SHA does not change behavior. Review the pull request head, which contains the correction.
 Pull request: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/135
 Scope: correctness of essential candle coverage at the scan decision cutoff. No Runtime database, listener, watch loop, order execution, or deploy.
@@ -86,9 +86,21 @@ Schema stays 27. `lifecycle_consumption_json` is already text, so version 2 is a
 
 `app/lifecycle/outcomes.py`, `app/lifecycle/breakeven.py`, `app/data/candle_integrity.py`, and `app/lifecycle/state_machine.py` were not edited in this correction. The durable-replay fingerprint does not move again.
 
+## Transition handoff correction
+
+Review comment https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/135#issuecomment-6251925179 on exact head `142cb789c7a72b16d6c2eac240923af7398f7383` was REQUIRES_CORRECTION. The source-decision identity and same-mode accounting fixes stay.
+
+A swing/long stale observation closed swing-long at SL_HIT during direct processing. Owner monitoring then closed swing-short at TP_HIT and wrote both analytics rows. The service copied monitoring transitions onto the symbol only when the direct list was empty, so the returned `lifecycle_transitions` and the delivery adapter contained swing-long only. An identical retry could not restore the short transition because both owners were already terminal.
+
+`test_direct_and_monitored_owner_transitions_are_both_returned` failed on that head with `{'swing-long'} == {'swing-long', 'swing-short'}`.
+
+`5ac009adcb85f349a1f4b943c97ec3876b4d1c02` records a monitoring evaluation only after `RELEASE owner_monitor`, then appends those transitions after the direct sequence. A monitoring transition is omitted only when its lifecycle, states, reason, timestamp, and event notes match a transition already in the direct list. Different milestones for one owner stay in that owner's order. A rolled-back evaluation is not added.
+
+After that commit the combined result delivers both owners with their lifecycle ids, directions, plan versions, and stored stops. The long owner's transitions finish before the short owner's begin. The short owner's stored events stay TP1, then TP2, then the terminal take-profit. An identical retry adds no lifecycle events, analytics rows, or delivery transitions. Direct-only and monitoring-only batches still include the owners they closed. A short-owner analytics failure leaves that owner CONFIRMED and out of the delivery batch.
+
 ## Fixture results
 
-`tests/test_essential_candle_freshness.py` collected 26 tests. `tests/test_essential_candle_freshness_owner_corrections.py` collected 32 tests. `tests/test_confirmation_observation_consumption.py` collected 37 tests. All passed.
+`tests/test_essential_candle_freshness.py` collected 26 tests. `tests/test_essential_candle_freshness_owner_corrections.py` collected 36 tests. `tests/test_confirmation_observation_consumption.py` collected 37 tests. All passed.
 
 Stale false acceptances in that module: 0. The covered stale inputs are a seven-day 15m, 12h, and 2h shift, a one-interval 15m lag, a cache hit after the next close, and a fresh HTTP response that still carries old candles. None created a trade idea.
 
@@ -118,8 +130,8 @@ The public fixture scores 89 and reaches the fake sender when the decision falls
 
 ## Verification
 
-- `python -m pytest`: exit 0. 3076 collected tests. The run took about 1184 seconds. The only warning was the existing Starlette `httpx` deprecation.
-- Before `31ca289`, the four earlier owner probes failed on `338d134`. Before `1443698`, the two remaining probes failed on `96bdff3`: same-mode processing was PARTIAL with "conflicting decision content", committed SL_HIT and TP_HIT, and left analytics and transitions empty; changed challenge content on the same origin returned SUCCESS with a new TRIGGERED confirmation. Both pass after `1443698`.
+- `python -m pytest`: exit 0. 3080 collected tests. The run took about 1513 seconds. The only warning was the existing Starlette `httpx` deprecation.
+- Before `31ca289`, the four earlier owner probes failed on `338d134`. Before `1443698`, the two accounting probes failed on `96bdff3`. Before `5ac009a`, the combined handoff probe failed on `142cb78` because `lifecycle_transitions` contained only `swing-long`. Those probes pass after `5ac009a`.
 - `python -m compileall -q app scripts src tests`: exit 0.
 - `python -m pip check`: no broken requirements.
 - `git diff --check`: exit 0.
