@@ -4,10 +4,12 @@
   "deployed": false,
   "independently_approved": false,
   "base_sha": "e461c9c501196c3377d53beedae2c930c6d5c21f",
-  "reviewed_head_sha": "338d134ac46d8801c8318838cb9f5f1a239f6a73",
+  "reviewed_head_sha": "96bdff361499d40633802517c13111d860d1accc",
+  "earlier_reviewed_head_sha": "338d134ac46d8801c8318838cb9f5f1a239f6a73",
   "reviewed_verdict": "REQUIRES_CORRECTION",
-  "correction_sha": "31ca289154e3fd3cf5d8a606c4858681d0630280",
-  "head_sha": "31ca289154e3fd3cf5d8a606c4858681d0630280",
+  "earlier_correction_sha": "31ca289154e3fd3cf5d8a606c4858681d0630280",
+  "correction_sha": "14436983ff9630ea2bbed7afb1a2569757ae6022",
+  "head_sha": "14436983ff9630ea2bbed7afb1a2569757ae6022",
   "branch": "fix/cci-signal-accuracy-p1-candle-freshness",
   "pull_request": "https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/135",
   "policy_version": "essential-candle-freshness-v1",
@@ -38,14 +40,17 @@
   },
   "verification": {
     "pytest_exit_code": 0,
-    "pytest_collected": 3061,
-    "pytest_on_reviewed_head": 3043,
+    "pytest_collected": 3076,
+    "pytest_elapsed_seconds": 1184,
+    "pytest_on_reviewed_head": 3061,
+    "reviewed_head_ci_run": 39132090968,
     "new_freshness_tests_collected": 26,
-    "owner_correction_tests_collected": 17,
+    "confirmation_consumption_tests_collected": 37,
+    "owner_correction_tests_collected": 32,
     "compileall_exit_code": 0,
     "pip_check": "no broken requirements",
     "git_diff_check_exit_code": 0,
-    "bugbot": "no findings",
+    "bugbot": "not rerun for this correction",
     "bugbot_is_astra_approval": false
   },
   "benchmark": {
@@ -63,7 +68,8 @@
     "outcomes_py_changed": false,
     "candle_integrity_py_changed": false,
     "correction_changes_fingerprint_again": false,
-    "effect": "durable replay implementation id changes because phase 1 edited state_machine.py; the lifecycle correction does not edit that file again. Old captures must not silent-match"
+    "effect": "durable replay implementation id changes because phase 1 edited state_machine.py; neither lifecycle correction edits that file again. Old captures must not silent-match",
+    "receipt": "version 2 source slot keeps the original observation digest and an explicit owners list. Version 1 mode slots stay single-owner and are copied forward only by an explicit upgrade. No schema migration."
   },
   "publication_allowance_note": "Zero allowance can reject a decision before the required candle is available. Cache lifetime or the next scan cadence can extend the interruption. Availability cost only; not an expectancy result.",
   "public_floors_unchanged": {

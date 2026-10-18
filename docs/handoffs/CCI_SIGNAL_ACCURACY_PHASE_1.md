@@ -2,12 +2,13 @@
 
 Status: IMPLEMENTED_AND_VERIFIED — AWAITING_ASTRA_REVIEW.
 This is not merged, not deployed, and not independently approved.
-Astra's review of `338d134ac46d8801c8318838cb9f5f1a239f6a73` was REQUIRES_CORRECTION. That verdict is not withdrawn. The corrected head needs a new independent review. Do not treat this handoff as approval or as authorization to merge.
+Astra's review of `96bdff361499d40633802517c13111d860d1accc` was REQUIRES_CORRECTION. That verdict is not withdrawn. The corrected head needs a new independent review. Do not treat this handoff as approval or as authorization to merge.
 
 Base: `e461c9c501196c3377d53beedae2c930c6d5c21f` (merge of PR #134).
 Branch: `fix/cci-signal-accuracy-p1-candle-freshness`.
-Reviewed head: `338d134ac46d8801c8318838cb9f5f1a239f6a73`.
-Correction commit: `31ca289154e3fd3cf5d8a606c4858681d0630280`.
+Earlier reviewed head: `338d134ac46d8801c8318838cb9f5f1a239f6a73`.
+Latest reviewed head: `96bdff361499d40633802517c13111d860d1accc`.
+Final behavior commit: `14436983ff9630ea2bbed7afb1a2569757ae6022`.
 The documentation commit that names that SHA does not change behavior. Review the pull request head, which contains the correction.
 Pull request: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/135
 Scope: correctness of essential candle coverage at the scan decision cutoff. No Runtime database, listener, watch loop, order execution, or deploy.
@@ -40,7 +41,7 @@ Operational tradeoff: with a zero allowance, a decision made before the required
 - The scanner assesses primary, execution, confirmation, bias, structure, and the synthetic 2d source when that higher timeframe is configured. Shared timeframes are assessed once. Optional 4h and 1h are not a new global gate. Optional BTC and regime candles that are not current are withheld through the existing optional path.
 - A stale present series does not run strategy scoring, so passed gates are not manufactured from outdated candles. A missing series still runs the existing missing-data diagnostics, and the discovery gate still refuses a trade idea when the receipt does not pass.
 - A freshness failure returns a normal scanned-no-setup result and keeps execution candles, so one symbol cannot abort the scan and owner monitoring is not starved.
-- A new lifecycle row with a freshness failure starts REJECTED with confirmation count 0. An owned plan in a hold state is left in place when freshness is the only required-data failure. Closed-prefix outcome evaluation still runs. A directionless stale rescan is bound back to the current owner instead of inserting a second row.
+- A new lifecycle row with a freshness failure starts REJECTED with confirmation count 0. An owned plan in a hold state is left in place when freshness is the only required-data failure. Closed-prefix outcome evaluation still runs. A directionless stale rescan keeps the original scanner observation as the decision identity and records each held owner as a binding. It does not insert a second setup row.
 - Schema stays 27. No migration. Diagnostics use the existing missing and unverified strings plus the strategy diagnostic receipt. Outbox state, public quality 88, public grade A, and public RR 3 are unchanged. The internal 2.5R floor is unchanged.
 
 `app/lifecycle/state_machine.py` is part of the durable-replay implementation fingerprint. This change moves that fingerprint. Existing captures must report an unsupported implementation rather than a silent match. `app/lifecycle/outcomes.py` and `app/data/candle_integrity.py` were not edited, so outcome-evaluator bytes and the historical closed-prefix utility are unchanged.
@@ -60,19 +61,34 @@ That probe was run after the candidate existed, against the unchanged base commi
 Review comment on PR #135 required four lifecycle corrections. The full suite on `338d134` was already green (3043 passed, GitHub run 39113072506). These probes were not in that suite. They failed on that head and pass after `31ca289`.
 
 1. Multiple owners reached TP_HIT, SL_HIT, or BREAKEVEN, and `setup_outcome_analytics` stayed empty. The multi-owner hold wrote lifecycle rows and skipped the shared analytics insert, keeping only the last owner's in-memory context. Each owner now gets the same terminal analytics insert, in the same transaction, including an identical retry that does not add a second row.
-2. One swing/long owner plus a stale challenge/N/A result stored the receipt under `challenge` and pointed it at the swing lifecycle. The identical retry raised `RuntimeEpochIdentityCollisionError`: "Observation consumption integrity exception: conflicting lifecycle owner". The owner mode and direction are now reconciled before the receipt is hashed. Identical, restarted, and later processing of the same decision are idempotent. A changed decision cutoff still raises "conflicting decision content".
-3. Two current owners, applied twice, both returned SUCCESS, left `lifecycle_consumption_json` at `{"version":1,"modes":{}}`, left `duplicate_confirmation_observations` at 0, and advanced `last_seen_at` again. Each affected owner now gets a mode slot and lifecycle binding in the same transaction as the hold. A retry reports those owners as duplicate confirmation observations and does not move `last_seen_at`. An owner that appears after the first binding is not added to that origin.
+2. One swing/long owner plus a stale challenge/N/A result stored the receipt under `challenge` and pointed it at the swing lifecycle. The identical retry raised `RuntimeEpochIdentityCollisionError`: "Observation consumption integrity exception: conflicting lifecycle owner". `31ca289` rebound the observation to the owner before hashing it. That removed the retry collision and is superseded by the final correction below: the original observation is hashed, and the owner mode and direction stay on the binding. Identical, restarted, and later processing of the same decision are idempotent. A changed decision cutoff still raises "conflicting decision content".
+3. Two current owners, applied twice, both returned SUCCESS, left `lifecycle_consumption_json` at `{"version":1,"modes":{}}`, left `duplicate_confirmation_observations` at 0, and advanced `last_seen_at` again. `31ca289` stored one mode slot per owner. The final correction stores those owners on the original source decision instead. A retry reports those owners as duplicate confirmation observations and does not move `last_seen_at`. An owner that appears after the first binding is not added to that origin.
 4. A current CONFIRMED legacy row, and a foreign-epoch row, were eligible for the hold because selection only checked `is_current` and lifecycle state. Writing them hit the existing epoch guard (`Legacy lifecycle identity collision: refusing to overwrite, relabel, or supersede an untagged row.` or `Lifecycle ownership does not match the active runtime epoch.`). Selection now requires the active runtime epoch. Legacy-only, foreign-only, current-only, and mixed populations were tested. The write-side ownership guards are unchanged.
 
 A 5m batch is not applied to an owner whose outcome progress already records a different execution timeframe. That used to mark `execution_timeframe_changed:15m->5m`. Outcome monitoring still runs when the timeframe matches. A symbol savepoint still rolls back a failed owner write, and the receipt with it.
 
 The public regression uses `2026-03-02 14:00 UTC`, an even Unix-epoch day on which this fixture scores 89 and the fake sender fires. A later 15m-stale scan adds no sender call and no public-alert row. The March 1 score-86 block remains a separate threshold check. The 88 floor was not lowered.
 
-`app/lifecycle/outcomes.py`, `app/lifecycle/breakeven.py`, and `app/data/candle_integrity.py` were not edited. `app/lifecycle/state_machine.py` was not edited again, so this correction does not move the durable-replay fingerprint a second time. The fingerprint change from the phase 1 `state_machine.py` edit remains.
+`app/lifecycle/outcomes.py`, `app/lifecycle/breakeven.py`, and `app/data/candle_integrity.py` were not edited. `app/lifecycle/state_machine.py` was not edited again, so neither lifecycle correction moves the durable-replay fingerprint a second time. The fingerprint change from the phase 1 `state_machine.py` edit remains.
+
+## Final correction
+
+Review comment https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/135#issuecomment-6250676151 on exact head `96bdff361499d40633802517c13111d860d1accc` was REQUIRES_CORRECTION. GitHub run 39132090968 on that SHA passed 3061 tests. The two probes below failed on that head and pass after `14436983ff9630ea2bbed7afb1a2569757ae6022`.
+
+1. Same-mode owners lost terminal accounting. A current swing/long owner and a current swing/short owner were both valid. Stale discovery wrote both into one mode slot. The second binding raised "conflicting decision content", the symbol savepoint removed the receipt, and owner monitoring then committed SL_HIT and TP_HIT with empty `setup_outcome_analytics` and empty `lifecycle_transitions`. The original challenge observation is now the receipt. Both owners are explicit bindings. The same closed-candle sequence persists SL_HIT for the long plan and TP_HIT with TP3_HIT analytics for the short plan. Each returned transition keeps that owner's lifecycle id, plan version, and stored geometry. An identical retry adds no analytics row, lifecycle event, or public alert.
+2. Rebinding lost the original decision. A stale challenge/N/A discovery held a swing owner and recorded only the rebound swing receipt. The same registered scan and symbol could then supply changed qualifying challenge/long content, with the evaluation origin, completion time, decision cutoff, acquisition delivery, execution timeframe, and execution candles unchanged. That call returned SUCCESS, `new_candidates=1`, `confirmation_pending=1`, and a new challenge/long lifecycle in TRIGGERED with `confirmation_count=1`. The digest is now the original scanner observation. The changed content raises "conflicting decision content" and adds no lifecycle or confirmation. An identical retry of the original decision stays idempotent.
+
+Source identity and owner binding are separate. One discovery may hold several owners, including opposite directions of one mode. A later observation of a different mode remains a separate contribution under the existing per-mode contract. A retry uses the recorded bindings: an owner created later does not join, and rotation or a terminal state does not redirect the decision to a replacement owner.
+
+Version 1 receipts stay one owner per mode, with keys `lifecycle_id`, `digest`, and `consumed_at`. Version 2 keeps the top-level keys `version` and `modes`. A copied mode slot may add an `owners` list of that single lifecycle. A source slot is `digest`, `consumed_at`, and `owners`, with no `lifecycle_id`. Each binding is `lifecycle_id`, `mode`, and `direction`. Unknown versions, extra top-level keys, and malformed slots fail closed. A version 1 document is not reread as a multi-owner receipt. Adding a source binding beside an existing version 1 mode slot copies those slots forward explicitly.
+
+Schema stays 27. `lifecycle_consumption_json` is already text, so version 2 is a document contract, not a migration. The monitoring path calls the same terminal-analytics helper inside the owner savepoint. If that insert fails, the savepoint removes the terminal progress. A discovery failure that continues into monitoring cannot leave a terminal progress row without its analytics row.
+
+`app/lifecycle/outcomes.py`, `app/lifecycle/breakeven.py`, `app/data/candle_integrity.py`, and `app/lifecycle/state_machine.py` were not edited in this correction. The durable-replay fingerprint does not move again.
 
 ## Fixture results
 
-`tests/test_essential_candle_freshness.py` collected 26 tests. `tests/test_essential_candle_freshness_owner_corrections.py` collected 17. All passed.
+`tests/test_essential_candle_freshness.py` collected 26 tests. `tests/test_essential_candle_freshness_owner_corrections.py` collected 32 tests. `tests/test_confirmation_observation_consumption.py` collected 37 tests. All passed.
 
 Stale false acceptances in that module: 0. The covered stale inputs are a seven-day 15m, 12h, and 2h shift, a one-interval 15m lag, a cache hit after the next close, and a fresh HTTP response that still carries old candles. None created a trade idea.
 
@@ -102,12 +118,12 @@ The public fixture scores 89 and reaches the fake sender when the decision falls
 
 ## Verification
 
-- `python -m pytest`: exit 0. 3061 collected tests.
-- Before `31ca289`, the four new owner probes failed on `338d134` for the reasons in the Astra correction section. After that commit they passed.
+- `python -m pytest`: exit 0. 3076 collected tests. The run took about 1184 seconds. The only warning was the existing Starlette `httpx` deprecation.
+- Before `31ca289`, the four earlier owner probes failed on `338d134`. Before `1443698`, the two remaining probes failed on `96bdff3`: same-mode processing was PARTIAL with "conflicting decision content", committed SL_HIT and TP_HIT, and left analytics and transitions empty; changed challenge content on the same origin returned SUCCESS with a new TRIGGERED confirmation. Both pass after `1443698`.
 - `python -m compileall -q app scripts src tests`: exit 0.
 - `python -m pip check`: no broken requirements.
 - `git diff --check`: exit 0.
-- Cursor Bugbot on the uncommitted diff: no findings. That is not Astra's review.
+- No new Cursor Bugbot pass was run for this correction. An earlier Bugbot note is not Astra's review.
 
 Bounded fake scan, one symbol, public-fixture candles, three timed iterations after one warmup. Same six kline calls on base and candidate. No database write in this in-memory runner.
 
@@ -127,7 +143,6 @@ Revert this branch. There is no schema migration and no Runtime data rewrite. Re
 ## Remaining limitations
 
 - Zero publication allowance rejects a decision made before the required closed candle is available. Cache lifetime or the next scan cadence can extend that interruption. That is an availability cost, not an expectancy result.
-- One origin stores one consumption slot per mode. Two current owners of the same mode on one directionless scan remain an integrity conflict and roll back together, rather than binding only one of them.
-- The durable-replay implementation fingerprint changes because `state_machine.py` changed.
+- The durable-replay implementation fingerprint changes because `state_machine.py` changed in the original phase 1 commit. The later lifecycle corrections do not move it again.
 - The public fixture's synthetic 2d trend, and therefore the 86 versus 89 score, depends on whether the daily grid preserves the original 2d pairing. The quality floors were not changed.
 - No empirical Runtime cohort was available.
