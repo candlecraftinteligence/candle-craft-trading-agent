@@ -20,6 +20,7 @@ from app.context import (
 from app.core.confirmed_data_health import confirmed_data_health_for_symbol
 from app.core.process_memory import ProcessMemoryReading
 from app.data.dtos import NA
+from app.data.timeframes import resample_ohlcv_candles
 from app.formatters.scanner_display import build_symbol_display, display_fields
 from app.pipeline import scanner_runner as scanner_runner_module
 from app.pipeline.scanner_runner import ScannerPipelineStatus, ScannerRunConfig, ScannerRunner
@@ -34,6 +35,12 @@ _INTERVAL_MS = {
     "1d": 24 * 60 * 60_000,
     "2d": 2 * 24 * 60 * 60_000,
 }
+
+# 220 closed daily bars aligned to this instant start on an even Unix-epoch day,
+# so the synthetic 2D resample emits 110 candles. The following UTC midnight
+# moves that window onto an odd epoch day and emits 109. Scanner tests share
+# this instant between the mock series and the decision cutoff.
+_SYNTHETIC_2D_DECISION = datetime(2026, 10, 18, 12, tzinfo=timezone.utc)
 
 
 def _time_aligned_candles(
@@ -1191,8 +1198,16 @@ def test_missing_strategy_context_is_marked_na() -> None:
 
 
 def test_scanner_does_not_request_binance_2d_and_uses_synthetic_2d() -> None:
-    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
-    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"])))
+    client = FakeExchangeClient(
+        {"BTCUSDT": _strategy_pullback_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=_SYNTHETIC_2D_DECISION,
+    )
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(["BTCUSDT"], decision_timestamp=_SYNTHETIC_2D_DECISION)
+        )
+    )
 
     requested_intervals = [interval for _symbol, interval in client.requested_klines]
     diagnostics = result.results[0].strategy_diagnostics["challenge"]
@@ -1204,8 +1219,20 @@ def test_scanner_does_not_request_binance_2d_and_uses_synthetic_2d() -> None:
 
 
 def test_replay_candles_1000_clamps_execution_timeframes_only() -> None:
-    client = FakeExchangeClient({"BTCUSDT": _strategy_pullback_candles()}, failing_timeframes={"2d"})
-    result = run(ScannerRunner(exchange_client=client).run(_config(["BTCUSDT"], replay_candles=1000)))
+    client = FakeExchangeClient(
+        {"BTCUSDT": _strategy_pullback_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=_SYNTHETIC_2D_DECISION,
+    )
+    result = run(
+        ScannerRunner(exchange_client=client).run(
+            _config(
+                ["BTCUSDT"],
+                replay_candles=1000,
+                decision_timestamp=_SYNTHETIC_2D_DECISION,
+            )
+        )
+    )
 
     requested_limits = {(interval, limit) for _symbol, interval, limit in client.requested_kline_limits}
     diagnostics = result.results[0].strategy_diagnostics["challenge"]
@@ -1215,6 +1242,65 @@ def test_replay_candles_1000_clamps_execution_timeframes_only() -> None:
     assert ("12h", 220) in requested_limits
     assert ("1d", 440) in requested_limits
     assert ("1d", 2000) not in requested_limits
+    assert diagnostics["htf_2d_context_source"] == "synthetic_from_1d"
+    assert diagnostics["candles_2d_count"] == 110
+
+
+def _synthetic_2d_count(decision: datetime) -> int:
+    aligned = _time_aligned_candles(_strategy_pullback_candles(), "1d", as_of=decision)
+    return len(
+        resample_ohlcv_candles(
+            aligned,
+            target_interval="2d",
+            decision_timestamp=decision,
+        )
+    )
+
+
+def test_pullback_fixture_synthetic_2d_count_follows_the_explicit_clock() -> None:
+    same_day_edges = (
+        datetime(2026, 10, 18, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, 18, 23, 59, 59, 999000, tzinfo=timezone.utc),
+        _SYNTHETIC_2D_DECISION,
+    )
+    next_day_edges = (
+        datetime(2026, 10, 19, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, 19, 0, 0, 1, tzinfo=timezone.utc),
+        datetime(2026, 10, 19, 12, tzinfo=timezone.utc),
+    )
+    leap_day = (
+        datetime(2024, 2, 29, 0, 0, tzinfo=timezone.utc),
+        datetime(2024, 2, 29, 23, 59, 59, tzinfo=timezone.utc),
+    )
+    year_boundary_before = datetime(2024, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+    year_boundary_after = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+    for decision in same_day_edges:
+        assert _synthetic_2d_count(decision) == 110
+    for decision in (*next_day_edges, datetime(2024, 3, 1, 0, 0, tzinfo=timezone.utc)):
+        assert _synthetic_2d_count(decision) == 109
+    for decision in leap_day:
+        assert _synthetic_2d_count(decision) == 110
+    assert _synthetic_2d_count(year_boundary_before) == 110
+    assert _synthetic_2d_count(year_boundary_after) == 109
+
+
+def test_pinned_synthetic_2d_decision_ignores_a_different_runner_clock() -> None:
+    hostile_clock = datetime(2026, 10, 19, 12, tzinfo=timezone.utc)
+    client = FakeExchangeClient(
+        {"BTCUSDT": _strategy_pullback_candles()},
+        failing_timeframes={"2d"},
+        candle_as_of=_SYNTHETIC_2D_DECISION,
+    )
+    result = run(
+        ScannerRunner(exchange_client=client, clock=lambda: hostile_clock).run(
+            _config(["BTCUSDT"], decision_timestamp=_SYNTHETIC_2D_DECISION)
+        )
+    )
+
+    diagnostics = result.results[0].strategy_diagnostics["challenge"]
+    requested_intervals = [interval for _symbol, interval in client.requested_klines]
+    assert "2d" not in requested_intervals
     assert diagnostics["htf_2d_context_source"] == "synthetic_from_1d"
     assert diagnostics["candles_2d_count"] == 110
 
