@@ -19,6 +19,7 @@ from research.market_data_foundation.cmc import (
     LISTINGS_PATH,
     CmcContractError,
     http_disposition,
+    listing_domain_problems,
     membership_problems,
     parse_global_metrics,
     parse_listings,
@@ -27,11 +28,10 @@ from research.market_data_foundation.cmc import (
 )
 from research.market_data_foundation.constants import (
     EVIDENCE_SCHEMA_VERSION,
-    MAX_RETRY_BACKOFF_SECONDS,
     MIN_RETRY_BACKOFF_SECONDS,
     PHASE,
 )
-from research.market_data_foundation.evidence import Observation, digest, sha256_bytes
+from research.market_data_foundation.evidence import Observation, canonical_json, digest, sha256_bytes
 from research.market_data_foundation.paths import resolve_output
 from research.market_data_foundation.top100 import (
     VenueContract,
@@ -119,6 +119,10 @@ def run_public_sample(
 
     def attempt(provider: str, url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
         nonlocal partial_reason
+        if budget.study_stopped_reason:
+            if partial_reason is None:
+                partial_reason = budget.study_stopped_reason
+            return None
         try:
             return _get(
                 client,
@@ -134,15 +138,20 @@ def run_public_sample(
                 policy_digest=policy_digest,
             )
         except BudgetExceeded as exc:
-            if exc.reason in {f"{provider}_stopped", f"{provider}_attempts", "deadline", "deadline_during_stream"}:
-                provider_errors.append({"provider": provider, "reason": exc.reason})
-                if exc.reason in {"deadline", "deadline_during_stream"}:
-                    partial_reason = exc.reason
-                return None
-            partial_reason = exc.reason
+            provider_errors.append({"provider": provider, "reason": exc.reason})
+            if exc.reason in {
+                "deadline",
+                "deadline_during_stream",
+                "total_bytes",
+                "total_bytes_during_stream",
+                "http_attempts",
+            } or budget.study_stopped_reason:
+                if partial_reason is None:
+                    partial_reason = budget.study_stopped_reason or exc.reason
             return None
         except StudyCancelled as exc:
-            partial_reason = exc.reason
+            if partial_reason is None:
+                partial_reason = exc.reason
             return None
 
     listings_body = attempt(
@@ -159,8 +168,15 @@ def run_public_sample(
             )
         except CmcContractError as exc:
             provider_errors.append({"provider": "cmc", "reason": exc.reason})
+            _annotate_call(calls, disposition="malformed", failure=exc.reason)
+    elif listings_body is not None and listings_body.get("disposition") == "malformed":
+        provider_errors.append({"provider": "cmc", "reason": str(listings_body.get("failure") or "malformed")})
     elif listings_body is not None and listings_body.get("status_code") not in {0, 200}:
         provider_errors.append({"provider": "cmc", "reason": f"http_{listings_body.get('status_code')}"})
+    if listings is not None:
+        domain = listing_domain_problems(listings)
+        if domain:
+            _annotate_call(calls, disposition="malformed", failure=domain[0])
     global_body = attempt("cmc", f"{KEYLESS_ROOT}{GLOBAL_METRICS_PATH}", {"convert": "USD"})
     if global_body and global_body.get("json") is not None and global_body["status_code"] == 200:
         try:
@@ -171,6 +187,30 @@ def run_public_sample(
             )
         except CmcContractError as exc:
             provider_errors.append({"provider": "cmc", "reason": exc.reason})
+            _annotate_call(calls, disposition="malformed", failure=exc.reason)
+    if global_metrics is not None:
+        native = {
+            "btc_dominance": global_metrics.btc_dominance,
+            "eth_dominance": global_metrics.eth_dominance,
+            "total_market_cap_usd": global_metrics.total_market_cap_usd,
+        }
+        usable = not global_metrics.domain_problems and not global_metrics.missing_fields
+        failure = None
+        if global_metrics.domain_problems:
+            failure = global_metrics.domain_problems[0]
+        elif global_metrics.missing_fields:
+            failure = f"missing_{global_metrics.missing_fields[0]}"
+        _annotate_call(
+            calls,
+            disposition="verified" if usable else "malformed",
+            failure=failure,
+            metrics={
+                "native": native,
+                "normalized": native if usable else None,
+                "unit": "cmc_global_metrics",
+                "asset_id": "global",
+            },
+        )
     info = attempt("binance", "https://fapi.binance.com/fapi/v1/exchangeInfo")
     tickers = attempt("binance", "https://fapi.binance.com/fapi/v1/ticker/24hr")
     if info is not None or tickers is not None:
@@ -256,44 +296,70 @@ def run_public_sample(
         "websocket": "not_executed",
         "identity_note": "no CMC-id crosswalk was supplied; ticker matches are not identity-validated",
     }
+    if partial_reason is None and budget.study_stopped_reason:
+        summary["partial_reason"] = budget.study_stopped_reason
     _persist(root, summary, observations)
     return summary
 
 
 def replay_saved(root: Path, *, decision_cutoff: datetime) -> dict[str, Any]:
-    """Admit saved observations only when both source and receipt times precede the cutoff."""
+    """Replay normalized observations that were valid and available at the cutoff.
+
+    A fitting timestamp does not admit a failed, missing, or schema-invalid row.
+    Raw bodies are not part of the artifact.
+    """
 
     from research.market_data_foundation.timeutil import originally_available
 
+    empty = {"admitted": [], "inadmissible": [], "reproduced": [], "raw_bodies_retained": False}
     path = resolve_output(root, "observations.json")
     if not path.exists():
-        return {"status": "missing", "reason": "observations_artifact_absent", "admitted": [], "inadmissible": []}
+        return {"status": "missing", "reason": "observations_artifact_absent", **empty}
     payload = json.loads(path.read_text(encoding="utf-8"))
-    recorded = payload.get("checksum")
+    if not isinstance(payload, dict):
+        return {"status": "malformed", "reason": "invalid_schema", **empty}
+    if payload.get("schema_version") != EVIDENCE_SCHEMA_VERSION or payload.get("raw_bodies_retained") is not False:
+        return {"status": "malformed", "reason": "invalid_schema", **empty}
     body = payload.get("observations")
-    if recorded != digest(body):
-        return {"status": "malformed", "reason": "checksum_mismatch", "admitted": [], "inadmissible": []}
+    if not isinstance(body, list) or payload.get("checksum") != digest(body):
+        reason = "checksum_mismatch" if isinstance(body, list) else "invalid_schema"
+        return {"status": "malformed", "reason": reason, **empty}
     admitted = []
     inadmissible = []
     for item in body:
+        if not _observation_schema_ok(item):
+            inadmissible.append({"evidence_id": None, "availability": "invalid_schema"})
+            continue
         stamps = item.get("timestamps") or {}
         measurement = parse_utc_timestamp(stamps.get("measurement_at"))
         available = parse_utc_timestamp(stamps.get("received_at"))
-        status = originally_available(
+        availability = originally_available(
             measurement_at=measurement,
             available_to_cci_at=available,
             decision_cutoff=decision_cutoff,
         )
-        row = {"evidence_id": item.get("evidence_id"), "availability": status}
-        if status == "verified":
-            admitted.append(row)
-        else:
+        row = {
+            "evidence_id": item.get("evidence_id"),
+            "availability": availability,
+            "validity": item.get("validity"),
+            "asset_id": item.get("asset_id"),
+            "normalized_unit": item.get("normalized_unit"),
+            "normalized_value": item.get("normalized_value"),
+        }
+        if item.get("validity") != "verified" or item.get("normalized_value") in (None, ""):
+            row["availability"] = str(item.get("validity") or "missing")
             inadmissible.append(row)
+            continue
+        if availability != "verified":
+            inadmissible.append(row)
+            continue
+        admitted.append(row)
     return {
         "status": "replayed",
         "decision_cutoff": decision_cutoff.isoformat(),
         "admitted": admitted,
         "inadmissible": inadmissible,
+        "reproduced": _reproduced_metrics(admitted),
         "raw_bodies_retained": False,
     }
 
@@ -379,6 +445,8 @@ def _get(
         body = b""
         error = None
         stop_reason = None
+        received_bytes = 0
+        study_stop = None
         try:
             with client.stream("GET", url, params=params) as response:
                 status_code = response.status_code
@@ -388,37 +456,34 @@ def _get(
                     if key.lower() in _HEADER_ALLOW
                 }
                 chunks: list[bytes] = []
-                total = 0
                 for chunk in response.iter_bytes():
-                    budget.ensure_during_stream(total + len(chunk))
-                    total += len(chunk)
-                    if total > budget.max_response_bytes:
+                    received_bytes += len(chunk)
+                    budget.ensure_during_stream(received_bytes)
+                    if received_bytes > budget.max_response_bytes:
                         truncated = True
                         stop_reason = "response_bytes"
                         budget.stop_provider(provider, reason=stop_reason, attempt=attempt)
                         break
                     chunks.append(chunk)
                 body = b"".join(chunks)
-                nbytes = total
         except BudgetExceeded as exc:
             error = exc.reason
             stop_reason = exc.reason
-            nbytes = len(body)
-            budget.stop_provider(provider, reason=exc.reason, attempt=attempt)
+            if exc.reason in {"total_bytes", "total_bytes_during_stream", "deadline", "deadline_during_stream"}:
+                study_stop = exc.reason
+            else:
+                budget.stop_provider(provider, reason=exc.reason, attempt=attempt)
         except StudyCancelled as exc:
             error = exc.reason
             stop_reason = exc.reason
-            nbytes = len(body)
-            budget.stop_provider(provider, reason=exc.reason, attempt=attempt)
+            study_stop = exc.reason
         except httpx.TimeoutException:
             error = "timeout"
-            nbytes = 0
         except httpx.TransportError:
             error = "transport"
-            nbytes = 0
+        nbytes = received_bytes
         received_at = clock().isoformat()
         latency_ms = int((time.perf_counter() - started) * 1000)
-        budget.record_attempt(provider, nbytes)
         record = {
             "provider": provider,
             "url": url,
@@ -439,8 +504,22 @@ def _get(
             "stopped_reason": stop_reason,
         }
         calls.append(record)
+        try:
+            budget.record_attempt(provider, nbytes)
+        except BudgetExceeded as exc:
+            study_stop = study_stop or exc.reason
+            record["error"] = record["error"] or exc.reason
+            record["stopped_reason"] = record["stopped_reason"] or exc.reason
+        if study_stop:
+            budget.mark_study_stopped(study_stop, provider=provider, attempt=attempt)
+            record["stopped_reason"] = study_stop
+        if study_stop or truncated or stop_reason:
+            if status_code in {401, 403}:
+                budget.stop_provider(provider, reason=f"http_{status_code}", attempt=attempt)
+                record["stopped_reason"] = f"http_{status_code}"
+            break
         retryable = error in {"timeout", "transport"} or status_code == 429 or status_code >= 500
-        if truncated or stop_reason or not retryable or attempt >= budget.max_retries:
+        if not retryable or attempt >= budget.max_retries:
             if status_code in {401, 403}:
                 budget.stop_provider(provider, reason=f"http_{status_code}", attempt=attempt)
                 record["stopped_reason"] = f"http_{status_code}"
@@ -453,28 +532,114 @@ def _get(
         if delay:
             sleeper(delay)
         attempt += 1
-    payload: dict[str, Any] = {
+    disposition, failure, decoded = _decode_body(
+        body,
+        status_code=status_code,
+        truncated=truncated,
+        error=calls[-1]["error"],
+        stop_reason=calls[-1]["stopped_reason"],
+    )
+    calls[-1]["disposition"] = disposition
+    calls[-1]["failure"] = failure
+    calls[-1]["source_timestamp"] = _measurement_timestamp(decoded)
+    calls[-1]["api_error"] = failure == "provider_api_error"
+    return {
         "status_code": status_code,
         "truncated": truncated,
-        "sha256": sha256_bytes(body) if body else None,
-        "json": None,
-        "disposition": "unverified" if (truncated or stop_reason or error) else http_disposition(status_code) if status_code else "unverified",
+        "sha256": calls[-1]["sha256"],
+        "json": decoded,
+        "disposition": disposition,
+        "failure": failure,
         "requested_at": calls[-1]["requested_at"],
         "received_at": calls[-1]["received_at"],
         "stopped_reason": calls[-1]["stopped_reason"],
     }
-    if body and not truncated and error is None:
-        try:
-            payload["json"] = json.loads(body)
-        except json.JSONDecodeError:
-            payload["disposition"] = "malformed"
-    source_timestamp = _measurement_timestamp(payload.get("json"))
-    calls[-1]["source_timestamp"] = source_timestamp
-    if _provider_api_error(payload.get("json")):
-        calls[-1]["api_error"] = True
-        if payload["disposition"] == "verified":
-            payload["disposition"] = "malformed"
-    return payload
+
+
+def _decode_body(
+    body: bytes,
+    *,
+    status_code: int,
+    truncated: bool,
+    error: str | None,
+    stop_reason: str | None,
+) -> tuple[str, str | None, Any]:
+    """One disposition for transport, decoding, and the provider envelope.
+
+    HTTP 200 is not verified evidence by itself.
+    """
+
+    if status_code in {401, 403, 429}:
+        return "access_blocked", f"http_{status_code}", None
+    if truncated or error or stop_reason:
+        reason = error or stop_reason or "truncated"
+        kind = "unverified" if reason in {"timeout", "transport", "deadline", "deadline_during_stream"} else "malformed"
+        return kind, reason, None
+    if not body:
+        if status_code == 200:
+            return "malformed", "empty_body", None
+        if status_code == 0:
+            return "unverified", "no_response", None
+        return http_disposition(status_code), f"http_{status_code}", None
+    try:
+        decoded = json.loads(body.decode("utf-8"))
+    except UnicodeDecodeError:
+        return "malformed", "invalid_encoding", None
+    except json.JSONDecodeError:
+        return "malformed", "malformed_json", None
+    if _provider_api_error(decoded):
+        return "malformed", "provider_api_error", decoded
+    if status_code != 200:
+        return http_disposition(status_code), f"http_{status_code}", decoded
+    return "verified", None, decoded
+
+
+def _observation_schema_ok(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    required = {
+        "evidence_id",
+        "validity",
+        "timestamps",
+        "normalized_value",
+        "normalized_unit",
+        "code_sha",
+        "policy_digest",
+        "provider",
+    }
+    if not required <= set(item):
+        return False
+    return isinstance(item.get("timestamps"), dict)
+
+
+def _reproduced_metrics(admitted: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    reproduced: list[dict[str, Any]] = []
+    for item in admitted:
+        if item.get("normalized_unit") != "cmc_global_metrics":
+            continue
+        parsed = json.loads(str(item.get("normalized_value")))
+        if isinstance(parsed, dict):
+            reproduced.append(parsed)
+    return reproduced
+
+
+def _annotate_call(
+    calls: list[dict[str, Any]],
+    *,
+    disposition: str,
+    failure: str | None,
+    metrics: dict[str, Any] | None = None,
+) -> None:
+    if not calls:
+        return
+    record = calls[-1]
+    current = record.get("disposition")
+    if current not in {None, "verified", "unverified"} and disposition == "verified":
+        return
+    record["disposition"] = disposition
+    record["failure"] = failure
+    if metrics is not None:
+        record["normalized_metrics"] = metrics
 
 
 def _measurement_timestamp(body: Any) -> str | None:
@@ -530,7 +695,7 @@ def _retry_delay(value: str | None, *, now: datetime | None = None) -> float | N
         seconds = (parsed - moment).total_seconds()
     if seconds < 0:
         seconds = 0.0
-    return min(seconds, MAX_RETRY_BACKOFF_SECONDS)
+    return seconds
 
 
 def _contracts(exchange_info: Any, tickers: Any) -> list[VenueContract]:
@@ -695,10 +860,34 @@ def _observation_for_call(
     code_sha: str,
     policy_digest: str,
 ) -> dict[str, Any]:
-    validity = "malformed" if call.get("error") else "unverified"
-    if call.get("status_code") == 200 and not call.get("error") and not call.get("truncated"):
-        validity = "malformed" if call.get("api_error") else "verified"
-    if call.get("status_code") in {401, 403, 429}:
+    validity = str(call.get("disposition") or "unverified")
+    if validity not in {
+        "verified",
+        "missing",
+        "stale",
+        "malformed",
+        "incompatible",
+        "unverified",
+        "unsupported",
+        "access_blocked",
+        "not_applicable",
+    }:
+        validity = "unverified"
+    metrics = call.get("normalized_metrics") if isinstance(call.get("normalized_metrics"), dict) else None
+    native_value = None
+    normalized_value = None
+    normalized_unit = "response"
+    asset_id = "unmapped"
+    if metrics is not None:
+        if metrics.get("native") is not None:
+            native_value = canonical_json(metrics.get("native"))
+        if metrics.get("normalized") is not None:
+            normalized_value = canonical_json(metrics.get("normalized"))
+            normalized_unit = str(metrics.get("unit") or "unspecified")
+            asset_id = str(metrics.get("asset_id") or "unmapped")
+    if validity == "verified" and normalized_value is None:
+        validity = "unverified"
+    if call.get("status_code") in {401, 403, 429} and validity == "verified":
         validity = "access_blocked"
     observation = Observation(
         evidence_id=digest({"url": call["url"], "attempt": call["attempt"], "sha": call.get("sha256")})[:24],
@@ -711,11 +900,11 @@ def _observation_for_call(
         parameters=dict(call.get("params") or {}),
         venue=str(call["provider"]),
         instrument_id=str((call.get("params") or {}).get("symbol") or "universe"),
-        asset_id="unmapped",
-        native_value=None,
-        native_unit="response",
-        normalized_value=None,
-        normalized_unit="response",
+        asset_id=asset_id,
+        native_value=native_value,
+        native_unit=normalized_unit if native_value is not None else "response",
+        normalized_value=normalized_value,
+        normalized_unit=normalized_unit,
         timestamps={
             "requested_at": call.get("requested_at"),
             "received_at": call.get("received_at"),
@@ -730,7 +919,7 @@ def _observation_for_call(
         request_weight=(call.get("headers") or {}).get("x-mbx-used-weight-1m"),
         raw_sha256=call.get("sha256"),
         validity=validity,
-        reason_code=str(call.get("stopped_reason") or call.get("error") or "recorded"),
+        reason_code=str(call.get("failure") or call.get("stopped_reason") or call.get("error") or "recorded"),
     )
     return observation.as_dict()
 

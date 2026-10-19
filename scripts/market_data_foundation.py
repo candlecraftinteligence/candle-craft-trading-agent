@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--research-root", type=Path, default=None)
     parser.add_argument("--docs", action="store_true")
     parser.add_argument("--online-summary", type=Path, default=None)
+    parser.add_argument("--decision-cutoff", default=None, help="Explicit UTC cutoff required for replay")
+    parser.add_argument("--code-sha", default=None, help="Code provenance recorded on a sample. Defaults to git HEAD.")
     args = parser.parse_args(argv)
     flags = enforce_research_process()
     root = resolve_research_root(args.research_root or default_research_root())
@@ -57,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
                 client=client,
                 budget=budget,
                 transport_label="live",
-                code_sha="cli",
+                code_sha=_code_sha(args.code_sha),
             )
         _emit(root, "sample", {"process_flags": flags, "lowered_reason": LOWERED_REASON, "online": online})
     elif args.mode == "benchmark":
@@ -80,15 +84,15 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
     elif args.mode == "replay":
-        from datetime import UTC, datetime
-
+        cutoff = _parse_cutoff(args.decision_cutoff)
         _emit(
             root,
             "replay",
             {
                 "process_flags": flags,
                 "label": "captured_artifact",
-                "replay": replay_saved(root, decision_cutoff=datetime(2026, 10, 18, 12, tzinfo=UTC)),
+                "code_sha": _code_sha(args.code_sha),
+                "replay": replay_saved(root, decision_cutoff=cutoff),
             },
         )
     elif args.mode == "write-docs":
@@ -111,6 +115,34 @@ def main(argv: list[str] | None = None) -> int:
     if args.docs or args.mode == "write-docs":
         write_package(_docs_from_repo(), online=online)
     return 0
+
+
+def _code_sha(explicit: str | None) -> str:
+    if explicit and explicit.strip():
+        return explicit.strip()
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _parse_cutoff(value: str | None) -> datetime:
+    if value is None or not str(value).strip():
+        raise SystemExit("replay requires --decision-cutoff as an aware UTC timestamp")
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise SystemExit("replay decision cutoff must be an aware ISO-8601 timestamp") from exc
+    if moment.tzinfo is None:
+        raise SystemExit("replay decision cutoff must include a timezone")
+    return moment
 
 
 def _docs_from_repo() -> Path:

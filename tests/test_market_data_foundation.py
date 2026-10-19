@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -912,8 +913,10 @@ def test_r5_stream_deadline_and_retry_after_http_date(monkeypatch, tmp_path: Pat
     )
     assert result["disposition"] != "verified"
     assert calls[0]["stopped_reason"] == "deadline_during_stream"
-    delay = _retry_delay("Thu, 01 Jan 2099 00:00:00 GMT", now=datetime(2026, 10, 19, tzinfo=UTC))
-    assert delay == 30.0
+    far = _retry_delay("Thu, 01 Jan 2099 00:00:00 GMT", now=datetime(2026, 10, 19, tzinfo=UTC))
+    assert far == (datetime(2099, 1, 1, tzinfo=UTC) - datetime(2026, 10, 19, tzinfo=UTC)).total_seconds()
+    assert far > 30
+    assert _retry_delay("120", now=_ADMITTED_AT) == 120.0
     assert _retry_delay(None, now=_ADMITTED_AT) == 1.0
     skipped = run_public_sample(
         root=tmp_path,
@@ -1025,4 +1028,257 @@ def test_r8_offline_comparison_and_configured_workload_are_not_live() -> None:
     assert benchmark["scanner_invoked"] is False
     assert benchmark["configured_requests"] > 8
     assert benchmark["five_minute_headroom"] == "not_measured"
+
+
+def test_b1_invalid_quote_domain_and_late_receipt_are_not_masked_by_a_crosswalk() -> None:
+    payload = _synthetic_payload()
+    payload["data"][0]["quote"]["USD"]["market_cap"] = "-10"
+    payload["data"][0]["quote"]["USD"]["price"] = "-1"
+    page = parse_listings(payload, raw_sha256="synthetic", synthetic=True)
+    invalid = evaluate_top100(
+        page,
+        (_contract("BTC"),),
+        crosswalk=(_crosswalk("BTC", "1"),),
+        count_kind="synthetic",
+        **_admit(),
+    )
+    assert invalid.structural_status == "verified"
+    assert invalid.temporal_status == "verified"
+    assert invalid.domain_status == "unverified"
+    assert "impossible_price_usd" in invalid.domain_problems
+    assert "impossible_market_cap_usd" in invalid.domain_problems
+    assert invalid.membership_status == "unverified"
+    assert invalid.queued_symbols == ()
+    assert invalid.identity_validated_assets == 0
+    restored = parse_listings(_synthetic_payload(), raw_sha256="synthetic", synthetic=True)
+    late = evaluate_top100(
+        restored,
+        (_contract("BTC"),),
+        crosswalk=(_crosswalk("BTC", "1"),),
+        count_kind="synthetic",
+        acquired_at=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
+        decision_cutoff=datetime(2025, 12, 31, 23, 59, tzinfo=UTC),
+    )
+    assert late.structural_status == "verified"
+    assert late.domain_status == "verified"
+    assert "acquisition_after_decision" in late.temporal_problem_codes
+    assert "asset_after_decision" in late.temporal_problem_codes
+    assert late.membership_status == "unverified"
+    assert late.queued_symbols == ()
+
+
+def _persisted_observations(root: Path) -> list[dict[str, object]]:
+    return json.loads((root / "observations.json").read_text(encoding="utf-8"))["observations"]
+
+
+def test_b2_failure_status_is_the_persisted_observation(tmp_path: Path) -> None:
+    def run(first: _Response, name: str) -> tuple[dict[str, object], list[dict[str, object]]]:
+        def stream(method, url, params=None):
+            if "listings" in url:
+                return first
+            if "global-metrics" in url:
+                return _Response(
+                    json.dumps(
+                        {
+                            "status": {"error_code": 0, "timestamp": "2026-01-01T00:00:00Z"},
+                            "data": {
+                                "btc_dominance": 50,
+                                "eth_dominance": 10,
+                                "last_updated": "2026-01-01T00:00:00Z",
+                                "quote": {"USD": {"total_market_cap": 100}},
+                            },
+                        }
+                    ).encode()
+                )
+            if "exchangeInfo" in url:
+                return _Response(b'{"symbols":[]}')
+            return _Response(b"[]")
+
+        summary = run_public_sample(
+            root=tmp_path / name,
+            client=SimpleNamespace(stream=stream),
+            budget=StudyBudget(max_http_attempts=20, max_retries=0),
+            transport_label="synthetic_transport",
+            clock=lambda: _ADMITTED_AT,
+            sleeper=lambda _delay: None,
+        )
+        assert (tmp_path / name / "sample_summary.json").exists()
+        return summary, _persisted_observations(tmp_path / name)
+
+    malformed_summary, malformed_rows = run(_Response(b"{"), "json")
+    first = malformed_rows[0]
+    assert first["validity"] != "verified"
+    assert malformed_summary["cmc_listings"] is None
+    assert any("fapi.binance.com" in call["url"] for call in malformed_summary["calls"])
+    encoded_summary, encoded_rows = run(_Response(b"\xff"), "encoding")
+    assert encoded_rows[0]["validity"] == "malformed"
+    assert encoded_rows[0]["reason_code"] == "invalid_encoding"
+    assert encoded_summary["partial_reason"] is None
+    empty_rows = run(_Response(b""), "empty")[1]
+    assert empty_rows[0]["validity"] == "malformed"
+    assert empty_rows[0]["reason_code"] == "empty_body"
+    parser_rows = run(
+        _Response(
+            json.dumps(
+                {"status": {"error_code": 0, "timestamp": "2026-01-01T00:00:00Z"}, "data": {"not": "a list"}}
+            ).encode()
+        ),
+        "parser",
+    )[1]
+    assert parser_rows[0]["validity"] == "malformed"
+    assert parser_rows[0]["reason_code"] == "listings_data_not_a_list"
+
+
+def test_b3_replay_reproduces_normalized_metrics_and_rejects_failures(tmp_path: Path) -> None:
+    from research.market_data_foundation.online import replay_saved
+
+    def sample(body: bytes, name: str) -> None:
+        def stream(method, url, params=None):
+            if "global-metrics" in url:
+                return _Response(body)
+            if "listings" in url:
+                return _Response(json.dumps(_synthetic_payload()).encode())
+            if "exchangeInfo" in url:
+                return _Response(b'{"symbols":[]}')
+            return _Response(b"[]")
+
+        run_public_sample(
+            root=tmp_path / name,
+            client=SimpleNamespace(stream=stream),
+            budget=StudyBudget(max_http_attempts=20, max_retries=0),
+            transport_label="synthetic_transport",
+            clock=lambda: _ADMITTED_AT,
+            code_sha="abc123",
+            sleeper=lambda _delay: None,
+        )
+
+    sample(
+        json.dumps(
+            {
+                "status": {"error_code": 1008, "error_message": "plan", "timestamp": "2026-01-01T00:00:00Z"},
+                "data": {"last_updated": "2026-01-01T00:00:00Z"},
+            }
+        ).encode(),
+        "api-error",
+    )
+    failed = replay_saved(tmp_path / "api-error", decision_cutoff=datetime(2026, 1, 1, 0, 6, tzinfo=UTC))
+    assert failed["raw_bodies_retained"] is False
+    assert all(row.get("normalized_unit") != "cmc_global_metrics" or row["validity"] != "verified" for row in failed["admitted"])
+    assert failed["reproduced"] == []
+    saved_failed = _persisted_observations(tmp_path / "api-error")
+    global_failed = next(row for row in saved_failed if "global-metrics" in str(row["endpoint"]))
+    assert global_failed["validity"] == "malformed"
+
+    sample(
+        json.dumps(
+            {
+                "status": {"error_code": 0, "timestamp": "2026-01-01T00:00:00Z"},
+                "data": {
+                    "btc_dominance": 50,
+                    "eth_dominance": 10,
+                    "last_updated": "2026-01-01T00:00:00Z",
+                    "quote": {"USD": {"total_market_cap": 100}},
+                },
+            }
+        ).encode(),
+        "metrics",
+    )
+    cutoff = datetime(2026, 1, 1, 0, 6, tzinfo=UTC)
+    replayed = replay_saved(tmp_path / "metrics", decision_cutoff=cutoff)
+    assert replayed["reproduced"] == [
+        {"btc_dominance": "50", "eth_dominance": "10", "total_market_cap_usd": "100"}
+    ]
+    assert replayed["admitted"]
+    assert all(row["validity"] == "verified" for row in replayed["admitted"])
+    late = replay_saved(tmp_path / "metrics", decision_cutoff=datetime(2026, 1, 1, tzinfo=UTC))
+    assert late["admitted"] == []
+    assert late["reproduced"] == []
+    artifact_path = tmp_path / "metrics" / "observations.json"
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["observations"][0]["validity"] = "verified"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+    tampered = replay_saved(tmp_path / "metrics", decision_cutoff=cutoff)
+    assert tampered["status"] == "malformed"
+    assert tampered["reason"] == "checksum_mismatch"
+    artifact["schema_version"] = None
+    artifact["checksum"] = "ignored"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+    invalid = replay_saved(tmp_path / "metrics", decision_cutoff=cutoff)
+    assert invalid["status"] == "malformed"
+    assert invalid["reason"] == "invalid_schema"
+
+
+def test_b4_study_bytes_and_retry_after_are_not_shortened(tmp_path: Path) -> None:
+    from research.market_data_foundation.online import _get, _retry_delay
+
+    class Chunked:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, method, url, params=None):
+            self.calls += 1
+            response = _Response(b"")
+            response._parts = (b"12345678", b"12345678")
+
+            def iter_bytes():
+                yield from response._parts
+
+            response.iter_bytes = iter_bytes
+            return response
+
+    client = Chunked()
+    summary = run_public_sample(
+        root=tmp_path / "bytes",
+        client=client,
+        budget=StudyBudget(max_total_bytes=10, max_response_bytes=100, max_retries=0, max_http_attempts=20),
+        transport_label="synthetic_transport",
+        clock=lambda: _ADMITTED_AT,
+        sleeper=lambda _delay: None,
+    )
+    assert client.calls == 1
+    assert summary["budget"]["bytes_read"] == 16
+    assert summary["partial_reason"] in {"total_bytes_during_stream", "total_bytes"}
+    assert summary["budget"]["stop_events"]
+    assert summary["budget"]["stop_events"][0]["attempt"] == 0
+    assert (tmp_path / "bytes" / "sample_summary.json").exists()
+    assert _retry_delay("120", now=_ADMITTED_AT) == 120.0
+    dated = _retry_delay("Thu, 01 Jan 2026 00:07:00 GMT", now=datetime(2026, 1, 1, 0, 5, tzinfo=UTC))
+    assert dated == 120.0
+    slept: list[float] = []
+    budget = StudyBudget(max_retries=1, deadline_monotonic=time.monotonic() + 5, max_http_attempts=5)
+    calls: list[dict[str, object]] = []
+    limited = _Response(b"{}", status_code=429)
+    limited.headers["Retry-After"] = "120"
+    _get(
+        SimpleNamespace(stream=lambda method, url, params=None: limited),
+        budget,
+        calls,
+        provider="cmc",
+        url="https://synthetic.invalid",
+        clock=lambda: _ADMITTED_AT,
+        sleeper=slept.append,
+        run_id="r",
+        code_sha="real-sha",
+        policy_digest="p",
+    )
+    assert slept == []
+    assert calls[0]["stopped_reason"] == "retry_after_exceeds_deadline"
+    assert calls[0]["code_sha"] == "real-sha"
+
+
+def test_b3_replay_cli_uses_real_provenance_and_an_explicit_cutoff(tmp_path: Path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "market_data_foundation_cli",
+        Path("scripts/market_data_foundation.py"),
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with pytest.raises(SystemExit, match="decision-cutoff"):
+        module.main(["replay", "--research-root", str(tmp_path)])
+    sha = module._code_sha(None)
+    assert sha != "cli"
+    assert len(sha) == 40
 

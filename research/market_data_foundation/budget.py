@@ -56,6 +56,7 @@ class StudyBudget:
     cancelled: bool = False
     live_sampling_authorized: bool = False
     shared_ip_spare_capacity: str = "unknown"
+    study_stopped_reason: str | None = None
 
     def provider_cap(self, provider: str) -> int:
         caps = {
@@ -68,6 +69,8 @@ class StudyBudget:
     def ensure_can_attempt(self, provider: str) -> None:
         if self.cancelled:
             raise StudyCancelled()
+        if self.study_stopped_reason:
+            raise BudgetExceeded(self.study_stopped_reason)
         if time.monotonic() > self.deadline_monotonic:
             raise BudgetExceeded("deadline")
         if provider in self.stopped_providers:
@@ -104,7 +107,16 @@ class StudyBudget:
     def stop_provider(self, provider: str, *, reason: str, attempt: int) -> None:
         self.stopped_providers.add(provider)
         self.stop_events.append(
-            {"provider": provider, "reason": reason, "attempt": attempt}
+            {"provider": provider, "reason": reason, "attempt": attempt, "scope": "provider"}
+        )
+
+    def mark_study_stopped(self, reason: str, *, provider: str, attempt: int) -> None:
+        """A study-wide limit stops every later request. The triggering attempt is kept."""
+
+        if self.study_stopped_reason is None:
+            self.study_stopped_reason = reason
+        self.stop_events.append(
+            {"provider": provider, "reason": reason, "attempt": attempt, "scope": "study"}
         )
 
     def retry_delay_fits(self, delay_seconds: float) -> bool:
@@ -136,4 +148,5 @@ class StudyBudget:
             "cancelled": self.cancelled,
             "live_sampling_authorized": self.live_sampling_authorized,
             "shared_ip_spare_capacity": self.shared_ip_spare_capacity,
+            "study_stopped_reason": self.study_stopped_reason,
         }

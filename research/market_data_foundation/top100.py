@@ -9,7 +9,13 @@ from typing import Sequence
 
 from app.universe.symbol_universe import STABLECOIN_BASES, _is_leveraged_token_base
 
-from research.market_data_foundation.cmc import CmcAsset, CmcListingPage, membership_problems, temporal_problems
+from research.market_data_foundation.cmc import (
+    CmcAsset,
+    CmcListingPage,
+    listing_domain_problems,
+    membership_problems,
+    temporal_problems,
+)
 from research.market_data_foundation.constants import TOP100_SIZE
 
 
@@ -74,6 +80,8 @@ class StageCounts:
     temporal_status: str = "unverified"
     structural_problems: tuple[str, ...] = ()
     temporal_problem_codes: tuple[str, ...] = ()
+    domain_status: str = "unverified"
+    domain_problems: tuple[str, ...] = ()
     unverified_candidates: tuple[str, ...] = ()
     identity_basis: str = "cmc_id_crosswalk"
 
@@ -103,6 +111,8 @@ class StageCounts:
             "temporal_status": self.temporal_status,
             "structural_problems": list(self.structural_problems),
             "temporal_problem_codes": list(self.temporal_problem_codes),
+            "domain_status": self.domain_status,
+            "domain_problems": list(self.domain_problems),
             "unverified_candidates": list(self.unverified_candidates),
             "identity_basis": self.identity_basis,
             "denominators": {
@@ -136,12 +146,18 @@ def evaluate_top100(
             decision_cutoff=decision_cutoff,
             max_age=max_age,
         )
+    domain = listing_domain_problems(page, expected=expected)
     structural_status = "verified" if not structural else "unverified"
     temporal_status = "verified" if not temporal else "unverified"
-    membership_status = "verified" if structural_status == "verified" and temporal_status == "verified" else "unverified"
+    domain_status = "verified" if not domain else "unverified"
+    membership_status = (
+        "verified"
+        if structural_status == "verified" and temporal_status == "verified" and domain_status == "verified"
+        else "unverified"
+    )
     boundary = [asset for asset in page.assets if asset.rank is not None and 1 <= asset.rank <= expected]
     # Exclusions happen after the boundary. Higher ranks are ignored, not promoted.
-    if structural or temporal:
+    if structural or temporal or domain:
         owner_symbols = tuple(dict.fromkeys(owner.symbol.upper() for owner in owners))
         return StageCounts(
             requested_global_assets=expected,
@@ -174,6 +190,8 @@ def evaluate_top100(
             temporal_status=temporal_status,
             structural_problems=structural,
             temporal_problem_codes=temporal,
+            domain_status=domain_status,
+            domain_problems=domain,
             unverified_candidates=tuple(asset.symbol for asset in boundary),
             identity_basis="not_admitted",
         )
@@ -253,6 +271,8 @@ def evaluate_top100(
         temporal_status=temporal_status,
         structural_problems=structural,
         temporal_problem_codes=temporal,
+        domain_status=domain_status,
+        domain_problems=domain,
         identity_basis="cmc_id_crosswalk",
     )
 

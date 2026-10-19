@@ -180,10 +180,39 @@ def temporal_problems(
     """Timestamp validity is separate from rank completeness."""
 
     problems: list[str] = []
+    if acquired_at > decision_cutoff:
+        problems.append("acquisition_after_decision")
     _collect_time_problem(problems, "envelope", page.envelope_timestamp, acquired_at, decision_cutoff, max_age)
     for asset in page.assets:
         _collect_time_problem(problems, "asset", asset.last_updated, acquired_at, decision_cutoff, max_age)
         _collect_time_problem(problems, "quote", asset.quote_last_updated, acquired_at, decision_cutoff, max_age)
+    return tuple(dict.fromkeys(problems))
+
+
+def listing_domain_problems(page: CmcListingPage, *, expected: int = 100) -> tuple[str, ...]:
+    """Required quote evidence is separate from rank completeness.
+
+    A negative price or market cap is not a usable ranking input. A missing
+    required quote is not zero. Ranks outside 1..N are ignored here so they
+    cannot refill the boundary.
+    """
+
+    problems: list[str] = []
+    for asset in page.assets:
+        if asset.rank is None or not 1 <= asset.rank <= expected:
+            continue
+        if asset.price_usd is None:
+            problems.append("missing_price_usd")
+        else:
+            price_problem = _domain_problem("price_usd", asset.price_usd, kind="price")
+            if price_problem is not None:
+                problems.append(price_problem)
+        if asset.market_cap_usd is None:
+            problems.append("missing_market_cap_usd")
+        else:
+            cap_problem = _domain_problem("market_cap_usd", asset.market_cap_usd, kind="capitalization")
+            if cap_problem is not None:
+                problems.append(cap_problem)
     return tuple(dict.fromkeys(problems))
 
 
@@ -205,6 +234,9 @@ def _collect_time_problem(
     if future_timestamp(moment, received_at=acquired_at):
         problems.append(f"future_{label}_timestamp")
         return
+    if moment > decision_cutoff:
+        problems.append(f"{label}_after_decision")
+        return
     oldest_allowed = min(acquired_at, decision_cutoff) - max_age
     if moment < oldest_allowed:
         problems.append(f"stale_{label}_timestamp")
@@ -216,7 +248,7 @@ def _domain_problem(name: str, text: str | None, *, kind: str) -> str | None:
     number = Decimal(text)
     if kind == "dominance" and (number < 0 or number > 100):
         return f"impossible_{name}"
-    if kind == "capitalization" and number < 0:
+    if kind in {"capitalization", "price"} and number < 0:
         return f"impossible_{name}"
     return None
 
