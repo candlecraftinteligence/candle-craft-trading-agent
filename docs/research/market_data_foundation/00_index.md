@@ -3,8 +3,8 @@
 Research-only market-data evidence phase. Production gates, schema, and providers are unchanged.
 
 Base SHA: `962dbbb35db942beef0423c0763555e665da668d`
-Head SHA: `the commit that contains this package; a later commit requires a new review`
-PR: recorded after the pull request is opened
+Head SHA: the pull request head. Opening commit `579fb7966726a8a78809c3c190d49330a9ef27d0` predates this packet update. Review the final PR head.
+PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/136
 
 ## Index
 
