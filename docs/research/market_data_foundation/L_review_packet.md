@@ -2,10 +2,10 @@
 
 - Repository: `candlecraftinteligence/candle-craft-trading-agent`
 - Base SHA: `962dbbb35db942beef0423c0763555e665da668d`
-- Head SHA: `pending commit`
-- PR: pending
-- Tests: pending the full pytest run
-- CI: pending the pull request checks
+- Head SHA: `the commit that contains this packet`
+- PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/136
+- Tests: 3110 passed, 1 warning, Python 3.11.9, 2026-10-19, on the correction commit; this packet line does not change assertions
+- CI: required GitHub check on this exact commit; an earlier green run does not cover it
 
 Production paths touched: none. Scanner, config, schema, strategy, Telegram, and lifecycle code are unchanged.
 

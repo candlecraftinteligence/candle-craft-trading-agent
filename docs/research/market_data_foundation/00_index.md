@@ -3,7 +3,7 @@
 Research-only market-data evidence phase. Production gates, schema, and providers are unchanged.
 
 Base SHA: `962dbbb35db942beef0423c0763555e665da668d`
-Head SHA: `recorded at commit`
+Head SHA: `the commit that contains this packet`
 PR: opened after push
 
 ## Index
