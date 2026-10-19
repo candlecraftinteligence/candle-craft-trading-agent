@@ -1,0 +1,873 @@
+[
+  {
+    "metric_id": "ohlcv_binance_usdm",
+    "provider": "Binance USD-M Futures",
+    "api_version": "fapi/v1",
+    "endpoint": "GET https://fapi.binance.com/fapi/v1/klines",
+    "parameters": "symbol, interval, limit (clamped to 1500)",
+    "direct_or_aggregate": "direct venue",
+    "venue": "binance_usdm",
+    "instrument_type": "USDT-margined perpetual when discovery admits it",
+    "contract_id": "exchange symbol, for example BTCUSDT",
+    "currencies": "quote USDT; base is the contract base asset; multiplier is not stripped",
+    "raw_fields": "kline[0] open ms, [1..4] OHLC, [5] base volume, [6] close ms, [7] quote volume, [8] trade count; [9]/[10] taker buy volumes remain inside raw_source only",
+    "native_unit": "price in quote asset; volume in base asset; quote volume in quote asset",
+    "normalized_unit": "CandleDTO decimals; taker buy volume is not a normalized field",
+    "conversion": "none",
+    "timestamps": "open and venue close are millisecond fields. Publication time is unavailable. Response time is not the candle time.",
+    "refresh": "exchange candle cadence; cache TTL 60s is not a publication allowance",
+    "history": "limit clamped at 1500; no unbounded pagination in the client",
+    "fetcher": "BinanceFuturesClient._get_klines_delivery",
+    "normalizer": "normalize_binance_klines",
+    "cache": "CachedMarketDataClient.get_klines data_type=candles",
+    "consumer": "scanner candle fetch, essential freshness, technical structure, 2d resampler input when the source is 1d",
+    "role": "required for configured strategy timeframes",
+    "missing_behavior": "freshness missing or unverified; missing bars are not zero volume",
+    "code_present": "yes",
+    "dev_exercised": "existing candle and freshness tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/data/exchange_clients/binance_futures.py",
+        "line": 88,
+        "contains": "\"/fapi/v1/klines\""
+      },
+      {
+        "path": "app/data/normalizers/binance.py",
+        "line": 41,
+        "contains": "volume=decimal_from(require_index(raw, 5, row_path)"
+      },
+      {
+        "path": "app/cache/market_data_cache.py",
+        "line": 49,
+        "contains": "\"candles\": 60"
+      }
+    ]
+  },
+  {
+    "metric_id": "ohlcv_bybit_linear",
+    "provider": "Bybit V5",
+    "api_version": "v5",
+    "endpoint": "GET https://api.bybit.com/v5/market/kline",
+    "parameters": "category=linear, symbol, interval, limit (max 1000)",
+    "direct_or_aggregate": "direct venue",
+    "venue": "bybit_linear",
+    "instrument_type": "linear perpetual when category=linear",
+    "contract_id": "Bybit symbol",
+    "currencies": "linear USDT quote when the symbol is a USDT contract",
+    "raw_fields": "list row start, OHLC, volume, turnover",
+    "native_unit": "price in quote; volume in base; turnover in quote",
+    "normalized_unit": "CandleDTO; close_timestamp left N/A and later derived as open plus duration",
+    "conversion": "interval names mapped in _to_bybit_interval; 2d is not a native Bybit interval in that map",
+    "timestamps": "start time is the open. No venue close field is copied. Newest-first rows are reversed only when strictly descending.",
+    "refresh": "cache TTL 60s for candles",
+    "history": "limit max 1000",
+    "fetcher": "BybitLinearClient.get_klines",
+    "normalizer": "normalize_bybit_klines",
+    "cache": "same candle cache key family, exchange name bybit_linear",
+    "consumer": "same candle consumers when the selected exchange is Bybit",
+    "role": "required only on the Bybit exchange path",
+    "missing_behavior": "integrity rejects unordered or gapped series; derived close is not a publication time",
+    "code_present": "yes",
+    "dev_exercised": "existing Bybit normalizer tests where present; this phase checks envelope and OI separately",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/data/exchange_clients/bybit_linear.py",
+        "line": 53,
+        "contains": "\"/v5/market/kline\""
+      },
+      {
+        "path": "app/data/normalizers/bybit.py",
+        "line": 48,
+        "contains": "quote_volume=optional_decimal"
+      }
+    ]
+  },
+  {
+    "metric_id": "ohlcv_synthetic_2d",
+    "provider": "CCI resampler",
+    "api_version": "internal",
+    "endpoint": "resample_ohlcv_candles target 2d from closed 1d",
+    "parameters": "decision_timestamp",
+    "direct_or_aggregate": "derived from same-venue 1d candles",
+    "venue": "same as the daily source",
+    "instrument_type": "same contract as the daily source",
+    "contract_id": "same symbol",
+    "currencies": "unchanged",
+    "raw_fields": "two complete UTC-epoch daily candles",
+    "native_unit": "source candle units",
+    "normalized_unit": "2d OHLC; volume is the sum of the two daily volumes",
+    "conversion": "open from first, close from second, high max, low min, volume sum",
+    "timestamps": "bucket anchored at Unix epoch UTC. Incomplete pairs are omitted.",
+    "refresh": "follows the daily source; a fresh 2d label is stale if a daily input is stale",
+    "history": "only complete closed pairs at the decision cutoff",
+    "fetcher": "daily klines then resampler",
+    "normalizer": "app.data.timeframes.resample_ohlcv_candles",
+    "cache": "cached as candles when the caller stores the result",
+    "consumer": "scanner synthetic 2d path",
+    "role": "required only when the configured interval is 2d",
+    "missing_behavior": "incomplete pair emits nothing for that bucket",
+    "code_present": "yes",
+    "dev_exercised": "existing timeframe tests; this phase checks volume conservation",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/data/timeframes.py",
+        "line": 29,
+        "contains": "target_interval='2d' only"
+      }
+    ]
+  },
+  {
+    "metric_id": "rolling_24h_ticker",
+    "provider": "Binance USD-M and Bybit V5",
+    "api_version": "fapi/v1 and v5",
+    "endpoint": "GET /fapi/v1/ticker/24hr and GET /v5/market/tickers",
+    "parameters": "symbol; Binance all-symbol call omits symbol",
+    "direct_or_aggregate": "direct venue rolling window, not a closed candle",
+    "venue": "the requested venue",
+    "instrument_type": "the requested contract",
+    "contract_id": "symbol",
+    "currencies": "Binance quoteVolume is quote-asset turnover, not proven USD. Bybit turnover24h is the same class of quote turnover.",
+    "raw_fields": "lastPrice, volume/volume24h, quoteVolume/turnover24h, high/low",
+    "native_unit": "USDT quote turnover when the contract quote is USDT",
+    "normalized_unit": "TickerDTO last_price, volume_24h, quote_volume_24h",
+    "conversion": "Binance priceChangePercent is divided by 100 into a ratio. USDT is not converted to USD.",
+    "timestamps": "Binance uses ticker closeTime. Bybit copies response envelope time into TickerDTO.timestamp.",
+    "refresh": "cache TTL ticker 15s",
+    "history": "single rolling snapshot; not a fixed UTC day",
+    "fetcher": "get_ticker / get_24h_tickers",
+    "normalizer": "normalize_binance_ticker / normalize_bybit_ticker",
+    "cache": "data_type=ticker",
+    "consumer": "universe quote-volume filter and scanner price",
+    "role": "required for market-cap discovery liquidity intersection; optional as a mark source",
+    "missing_behavior": "missing quote volume excludes the ticker row; it is not treated as zero",
+    "code_present": "yes",
+    "dev_exercised": "universe tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/data/exchange_clients/binance_futures.py",
+        "line": 121,
+        "contains": "\"/fapi/v1/ticker/24hr\""
+      },
+      {
+        "path": "app/data/normalizers/bybit.py",
+        "line": 79,
+        "contains": "\"bybit.ticker\""
+      },
+      {
+        "path": "app/cache/market_data_cache.py",
+        "line": 50,
+        "contains": "\"ticker\": 15"
+      }
+    ]
+  },
+  {
+    "metric_id": "mark_index_last",
+    "provider": "venue ticker or funding payload",
+    "api_version": "as the parent endpoint",
+    "endpoint": "Bybit tickers include markPrice and indexPrice. Binance 24h ticker normalizer does not set them. Funding history may carry markPrice.",
+    "parameters": "symbol",
+    "direct_or_aggregate": "direct venue",
+    "venue": "same as parent",
+    "instrument_type": "same contract",
+    "contract_id": "symbol",
+    "currencies": "quote asset of that contract",
+    "raw_fields": "lastPrice, markPrice, indexPrice",
+    "native_unit": "quote price",
+    "normalized_unit": "TickerDTO fields; Binance 24h path leaves mark and index at N/A",
+    "conversion": "none; last, mark, and index are not interchangeable",
+    "timestamps": "no dedicated mark publication time on the 24h ticker path",
+    "refresh": "ticker TTL 15s or funding TTL 60s",
+    "history": "snapshot",
+    "fetcher": "get_ticker or funding history",
+    "normalizer": "ticker and funding normalizers",
+    "cache": "ticker or funding",
+    "consumer": "context and display; not a silent substitute for candle closes",
+    "role": "optional",
+    "missing_behavior": "N/A on the DTO",
+    "code_present": "partial",
+    "dev_exercised": "this phase's Bybit ticker fixture",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/data/normalizers/bybit.py",
+        "line": 87,
+        "contains": "mark_price=optional_decimal(data.get(\"markPrice\")"
+      }
+    ]
+  },
+  {
+    "metric_id": "funding_settled_history",
+    "provider": "Binance USD-M and Bybit V5",
+    "api_version": "fapi/v1 and v5",
+    "endpoint": "GET /fapi/v1/fundingRate and GET /v5/market/funding/history",
+    "parameters": "symbol, limit; Bybit category=linear",
+    "direct_or_aggregate": "direct venue settled history",
+    "venue": "requested venue",
+    "instrument_type": "perpetual",
+    "contract_id": "symbol",
+    "currencies": "rate is dimensionless; mark price is quote",
+    "raw_fields": "fundingRate, funding time, markPrice when present",
+    "native_unit": "fraction per settlement interval, not percent and not basis points",
+    "normalized_unit": "FundingDTO.funding_rate decimal fraction",
+    "conversion": "not divided or multiplied; 0.0001 fraction is 0.01 percent",
+    "timestamps": "funding time is the settlement observation. Predicted next rate from premiumIndex is not requested. next funding time is N/A when absent.",
+    "refresh": "cache TTL funding 60s and funding_history 60s",
+    "history": "Binance limit max 1000; Bybit limit max 200",
+    "fetcher": "get_funding_rate via history",
+    "normalizer": "normalize_*_funding",
+    "cache": "data_type funding",
+    "consumer": "derivatives enrichment current_funding_rate",
+    "role": "optional enrichment",
+    "missing_behavior": "N/A funding context",
+    "code_present": "yes",
+    "dev_exercised": "existing derivatives tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/data/exchange_clients/binance_futures.py",
+        "line": 153,
+        "contains": "\"/fapi/v1/fundingRate\""
+      },
+      {
+        "path": "app/data/exchange_clients/bybit_linear.py",
+        "line": 79,
+        "contains": "\"/v5/market/funding/history\""
+      }
+    ]
+  },
+  {
+    "metric_id": "open_interest",
+    "provider": "Binance USD-M and Bybit V5",
+    "api_version": "fapi/v1, futures/data, v5",
+    "endpoint": "GET /fapi/v1/openInterest, GET /futures/data/openInterestHist, GET /v5/market/open-interest",
+    "parameters": "symbol; Binance history period; Bybit intervalTime",
+    "direct_or_aggregate": "direct venue",
+    "venue": "requested venue",
+    "instrument_type": "linear perpetual on these clients",
+    "contract_id": "symbol",
+    "currencies": "unit is not stored; Binance history also has sumOpenInterestValue",
+    "raw_fields": "openInterest or sumOpenInterest; Bybit singleOpenInterest is ignored",
+    "native_unit": "Binance current openInterest is contracts in the official coin/contract convention for that symbol; history sumOpenInterest is the same family and sumOpenInterestValue is quote notional. Bybit unit is not proven here.",
+    "normalized_unit": "OpenInterestDTO.open_interest with unit N/A; notional_value set from sumOpenInterestValue when present",
+    "conversion": "enrichment percent change uses open_interest, not notional, so a pure price move is not position growth when both samples share a unit. The unit itself is not proven by the DTO.",
+    "timestamps": "Binance time or timestamp ms; Bybit row timestamp ms. Snapshot versus interval history must not be mixed.",
+    "refresh": "cache TTL 30s",
+    "history": "Binance history limit max 500; Bybit limit max 200",
+    "fetcher": "get_open_interest and get_open_interest_history",
+    "normalizer": "normalize_*_open_interest",
+    "cache": "open_interest and open_interest_history",
+    "consumer": "derivatives enrichment and BTC context freshness window",
+    "role": "optional",
+    "missing_behavior": "N/A; never zero",
+    "code_present": "yes",
+    "dev_exercised": "this phase's both-field Bybit fixture and unit assertion",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/data/exchange_clients/binance_futures.py",
+        "line": 175,
+        "contains": "\"/futures/data/openInterestHist\""
+      },
+      {
+        "path": "app/data/normalizers/bybit.py",
+        "line": 158,
+        "contains": "\"openInterest\""
+      }
+    ]
+  },
+  {
+    "metric_id": "long_short_account_ratio",
+    "provider": "Binance USD-M and Bybit V5",
+    "api_version": "futures/data and v5",
+    "endpoint": "GET /futures/data/globalLongShortAccountRatio and GET /v5/market/account-ratio",
+    "parameters": "symbol, period, limit",
+    "direct_or_aggregate": "direct venue account population, not a position population",
+    "venue": "requested venue",
+    "instrument_type": "perpetual",
+    "contract_id": "symbol",
+    "currencies": "dimensionless ratio",
+    "raw_fields": "longShortRatio or Bybit account-ratio equivalent",
+    "native_unit": "account long/short ratio",
+    "normalized_unit": "Decimal returned directly, not a DTO",
+    "conversion": "none; not equal to top-trader position ratio or taker flow",
+    "timestamps": "row timestamp exists on the payload and is not retained by the Decimal return",
+    "refresh": "cache TTL long_short_ratio 60s",
+    "history": "limit max 500",
+    "fetcher": "get_long_short_ratio",
+    "normalizer": "normalize_*_long_short_ratio",
+    "cache": "long_short_ratio",
+    "consumer": "optional derivatives input when the caller passes it",
+    "role": "optional",
+    "missing_behavior": "caller-specific; a missing ratio must stay N/A",
+    "code_present": "yes",
+    "dev_exercised": "client tests if present",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/data/exchange_clients/binance_futures.py",
+        "line": 184,
+        "contains": "\"/futures/data/globalLongShortAccountRatio\""
+      },
+      {
+        "path": "app/data/exchange_clients/bybit_linear.py",
+        "line": 131,
+        "contains": "\"/v5/market/account-ratio\""
+      }
+    ]
+  },
+  {
+    "metric_id": "taker_flow",
+    "provider": "Binance USD-M aggTrade",
+    "api_version": "public websocket",
+    "endpoint": "symbol@aggTrade with st=1",
+    "parameters": "subscribed symbols",
+    "direct_or_aggregate": "direct venue aggressor prints",
+    "venue": "binance_usdm",
+    "instrument_type": "USD-M",
+    "contract_id": "symbol",
+    "currencies": "base quantity and quote price",
+    "raw_fields": "q, p, m; m true means the buyer is the maker so the seller is the aggressor",
+    "native_unit": "base quantity",
+    "normalized_unit": "agg trade event",
+    "conversion": "kline taker-buy indexes are not normalized",
+    "timestamps": "trade time on the event; a quiet socket is not zero flow",
+    "refresh": "stream; stale threshold microstructure_flow_stale_sec default 5",
+    "history": "in-memory only; no persisted tape in this phase",
+    "fetcher": "microstructure service",
+    "normalizer": "app.microstructure.agg_trade",
+    "cache": "not the market-data file cache",
+    "consumer": "optional microstructure enrichment",
+    "role": "optional; default disabled",
+    "missing_behavior": "disabled or stale is unavailable, not zero",
+    "code_present": "yes",
+    "dev_exercised": "existing microstructure tests",
+    "runtime_enabled": "unverified; code default microstructure_flow_enabled false",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/microstructure/models.py",
+        "line": 14,
+        "contains": "aggTrade"
+      },
+      {
+        "path": "app/core/config.py",
+        "line": 78,
+        "contains": "microstructure_flow_enabled: bool = False"
+      }
+    ]
+  },
+  {
+    "metric_id": "order_book_binance_usdm",
+    "provider": "Binance USD-M",
+    "api_version": "fapi/v1 plus websocket depth",
+    "endpoint": "GET /fapi/v1/depth and depthUpdate st=1",
+    "parameters": "symbol, limit, update speed",
+    "direct_or_aggregate": "direct venue visible book",
+    "venue": "binance_usdm",
+    "instrument_type": "USD-M",
+    "contract_id": "symbol",
+    "currencies": "price in quote, quantity in base",
+    "raw_fields": "lastUpdateId, bids, asks, E, T; diff fields U, u, pu",
+    "native_unit": "quote price and base quantity",
+    "normalized_unit": "local book quantities; zero quantity deletes a level on the diff path",
+    "conversion": "none",
+    "timestamps": "snapshot E and T are required by the parser. Synchronization needs the diff sequence. Snapshot-only research is not_applicable for sync.",
+    "refresh": "stale threshold default 5s; default feature flag false",
+    "history": "no book history archive",
+    "fetcher": "order book service",
+    "normalizer": "parse_binance_depth_snapshot and parse_binance_depth_event",
+    "cache": "in-memory book",
+    "consumer": "optional order-book liquidity research context",
+    "role": "optional; default disabled",
+    "missing_behavior": "unverified or unavailable; a crossed book is not a valid sync",
+    "code_present": "yes",
+    "dev_exercised": "existing order-book tests; this phase adds a crossed snapshot fixture",
+    "runtime_enabled": "unverified; code default order_book_liquidity_enabled false",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/microstructure/order_book_service.py",
+        "line": 92,
+        "contains": "\"/fapi/v1/depth\""
+      },
+      {
+        "path": "app/core/config.py",
+        "line": 84,
+        "contains": "order_book_liquidity_enabled: bool = False"
+      }
+    ]
+  },
+  {
+    "metric_id": "liquidations_binance_force_order",
+    "provider": "Binance USD-M forceOrder stream",
+    "api_version": "merged public stream",
+    "endpoint": "forceOrder st=1; st=2 COIN-M is rejected",
+    "parameters": "all-market stream filtered to tracked symbols",
+    "direct_or_aggregate": "observed venue events, not a modelled heatmap",
+    "venue": "binance_usdm",
+    "instrument_type": "USD-M",
+    "contract_id": "order symbol",
+    "currencies": "base quantity times average price for quote notional",
+    "raw_fields": "o.S side, o.z filled quantity, o.ap average price, E, T",
+    "native_unit": "base quantity; SELL means a long was liquidated",
+    "normalized_unit": "BinanceLiquidationOrder",
+    "conversion": "quote notional = accumulated filled quantity times average price",
+    "timestamps": "event time and trade time. No REST liquidation history client.",
+    "refresh": "stale threshold default 30s; default flag false",
+    "history": "not retained as a complete venue history; gaps after reconnect are coverage gaps",
+    "fetcher": "liquidation service",
+    "normalizer": "parse_binance_liquidation",
+    "cache": "in-memory aggregator",
+    "consumer": "optional liquidation research context",
+    "role": "optional; default disabled",
+    "missing_behavior": "no events is N/A, not zero liquidations",
+    "code_present": "yes",
+    "dev_exercised": "existing liquidation tests",
+    "runtime_enabled": "unverified; code default liquidation_flow_enabled false",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/microstructure/liquidation.py",
+        "line": 58,
+        "contains": "def parse_binance_liquidation("
+      },
+      {
+        "path": "app/core/config.py",
+        "line": 81,
+        "contains": "liquidation_flow_enabled: bool = False"
+      }
+    ]
+  },
+  {
+    "metric_id": "btc_directional_context",
+    "provider": "CCI from same-venue BTCUSDT candles plus optional funding and OI",
+    "api_version": "internal",
+    "endpoint": "build_internal_btc_context",
+    "parameters": "12h, 2h, 15m candles",
+    "direct_or_aggregate": "derived from same-venue candles",
+    "venue": "the scan exchange",
+    "instrument_type": "BTCUSDT perpetual",
+    "contract_id": "BTCUSDT",
+    "currencies": "quote of BTCUSDT",
+    "raw_fields": "closed candles",
+    "native_unit": "candle units",
+    "normalized_unit": "context trend components",
+    "conversion": "technical structure agent; stale if the latest close is older than two intervals",
+    "timestamps": "component time is the latest candle close, not the computation time",
+    "refresh": "each scan when btc_context_enabled",
+    "history": "the fetched candle window",
+    "fetcher": "exchange klines",
+    "normalizer": "candle normalizer then technical structure",
+    "cache": "candle cache",
+    "consumer": "global BTC context",
+    "role": "default enabled in Settings; runtime activation unverified",
+    "missing_behavior": "component unavailable with a reason",
+    "code_present": "yes",
+    "dev_exercised": "existing context tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/context/btc.py",
+        "line": 19,
+        "contains": "BTC_CONTEXT_TIMEFRAMES = (\"12h\", \"2h\", \"15m\")"
+      },
+      {
+        "path": "app/core/config.py",
+        "line": 70,
+        "contains": "btc_context_enabled: bool = True"
+      }
+    ]
+  },
+  {
+    "metric_id": "eth_regime_candles",
+    "provider": "same venue ETHUSDT klines",
+    "api_version": "same as OHLCV",
+    "endpoint": "scanner market-regime fetch",
+    "parameters": "bias timeframe, or 1d when bias is 2d",
+    "direct_or_aggregate": "direct venue candles feeding a derived regime",
+    "venue": "scan exchange",
+    "instrument_type": "ETHUSDT",
+    "contract_id": "ETHUSDT",
+    "currencies": "ETHUSDT quote",
+    "raw_fields": "klines",
+    "native_unit": "candle units",
+    "normalized_unit": "closed candle series",
+    "conversion": "none beyond the candle contract",
+    "timestamps": "essential freshness role optional_regime; a regime computed from stale ETH candles is not fresh",
+    "refresh": "only when market_regime_enabled",
+    "history": "configured fetch limit",
+    "fetcher": "ScannerRunner._fetch_market_regime_context",
+    "normalizer": "candle normalizer",
+    "cache": "candle cache",
+    "consumer": "evaluate_market_regime eth_candles",
+    "role": "optional; ScannerRunConfig.market_regime_enabled defaults false. There is no standalone ETH context service.",
+    "missing_behavior": "ETHUSDT_candles: N/A",
+    "code_present": "yes",
+    "dev_exercised": "regime tests construct eth candles directly",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/pipeline/scanner_runner.py",
+        "line": 286,
+        "contains": "market_regime_enabled: bool = False"
+      },
+      {
+        "path": "app/pipeline/scanner_runner.py",
+        "line": 2006,
+        "contains": "\"ETHUSDT\", \"eth_candles\""
+      }
+    ]
+  },
+  {
+    "metric_id": "btc_dominance",
+    "provider": "CoinPaprika",
+    "api_version": "v1",
+    "endpoint": "GET https://api.coinpaprika.com/v1/global",
+    "parameters": "none",
+    "direct_or_aggregate": "provider global methodology",
+    "venue": "not a venue",
+    "instrument_type": "global dominance percentage",
+    "contract_id": "not a contract",
+    "currencies": "percentage points",
+    "raw_fields": "bitcoin_dominance_percentage, last_updated",
+    "native_unit": "percent 0 to 100",
+    "normalized_unit": "BtcDominanceObservation",
+    "conversion": "none",
+    "timestamps": "last_updated is interpreted as Unix seconds. That is not a candle close and not an acquisition time.",
+    "refresh": "cache TTL default 300s; fresh 600s; max stale 3600s. Stale fallback is labeled stale.",
+    "history": "latest snapshot only",
+    "fetcher": "CoinPaprikaBtcDominanceProvider",
+    "normalizer": "BtcDominanceObservation",
+    "cache": "BtcDominanceContextService memory cache",
+    "consumer": "global context and regime btc_d_context when supplied",
+    "role": "default btc_d_context_enabled true; runtime unverified",
+    "missing_behavior": "context unavailable; not zero",
+    "code_present": "yes",
+    "dev_exercised": "existing BTC.D tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/context/btc_d.py",
+        "line": 25,
+        "contains": "COINPAPRIKA_BTC_D_SOURCE = \"coinpaprika:/v1/global\""
+      }
+    ]
+  },
+  {
+    "metric_id": "market_regime",
+    "provider": "CCI regime classifier",
+    "api_version": "internal",
+    "endpoint": "evaluate_market_regime",
+    "parameters": "btc and eth candles, optional dominance and breadth fields",
+    "direct_or_aggregate": "derived",
+    "venue": "lineage is the candle venue plus CoinPaprika when BTC.D is attached",
+    "instrument_type": "not a contract",
+    "contract_id": "not a contract",
+    "currencies": "n/a",
+    "raw_fields": "MarketRegimeInput",
+    "native_unit": "upstream units",
+    "normalized_unit": "regime state and adjustments",
+    "conversion": "classifier; USDT.D defaults to N/A and is recorded missing",
+    "timestamps": "decision_timestamp plus candle closes. Computation time does not refresh stale inputs.",
+    "refresh": "once per scan when enabled",
+    "history": "candle window",
+    "fetcher": "regime candle fetch",
+    "normalizer": "regime classifier",
+    "cache": "candle and BTC.D caches",
+    "consumer": "scanner regime adjustment when enabled",
+    "role": "optional; default off",
+    "missing_behavior": "missing inputs are named N/A",
+    "code_present": "yes",
+    "dev_exercised": "regime tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/regime/classifier.py",
+        "line": 419,
+        "contains": "\"USDT.D_context: N/A\""
+      }
+    ]
+  },
+  {
+    "metric_id": "sector_strength",
+    "provider": "CCI sector rotation",
+    "api_version": "cci_sector_rotation_v1",
+    "endpoint": "internal classification and returns",
+    "parameters": "closed candles at 15m, 1h, 4h, 24h; ranking horizon 4h",
+    "direct_or_aggregate": "derived from constituent candles and a static taxonomy",
+    "venue": "constituent candle venue",
+    "instrument_type": "classified assets",
+    "contract_id": "constituent symbols",
+    "currencies": "return ratios",
+    "raw_fields": "sector taxonomy and candle returns",
+    "native_unit": "constituent candle units",
+    "normalized_unit": "research context",
+    "conversion": "median constituent returns; minimum verified constituents default 3",
+    "timestamps": "freshness is two intervals on the constituent series",
+    "refresh": "per enrichment call",
+    "history": "horizon lookbacks",
+    "fetcher": "already fetched candles",
+    "normalizer": "sector rotation",
+    "cache": "none of its own",
+    "consumer": "apply_sector_context_to_symbol_result, which does not recalculate a trading decision",
+    "role": "research only",
+    "missing_behavior": "UNAVAILABLE or UNCLASSIFIED; not a gate pass",
+    "code_present": "yes",
+    "dev_exercised": "sector tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/context/sector_rotation.py",
+        "line": 27,
+        "contains": "SECTOR_USAGE: Final = \"research_only\""
+      },
+      {
+        "path": "app/context/sector_scanner_enrichment.py",
+        "line": 13,
+        "contains": "without recalculating any trading decision field"
+      }
+    ]
+  },
+  {
+    "metric_id": "global_market_cap_rank",
+    "provider": "CoinPaprika",
+    "api_version": "v1",
+    "endpoint": "GET https://api.coinpaprika.com/v1/tickers?quotes=USD",
+    "parameters": "quotes=USD",
+    "direct_or_aggregate": "provider market-cap methodology, then intersection with Binance USDT perpetual metadata",
+    "venue": "rank is global; contract admission is Binance USD-M",
+    "instrument_type": "PERPETUAL, TRADING, quote USDT, underlying COIN",
+    "contract_id": "base+USDT only when exchangeInfo symbol matches",
+    "currencies": "CoinPaprika market cap is USD methodology. Binance quote volume is USDT turnover. They are not equated.",
+    "raw_fields": "id, symbol, rank, quotes.USD.market_cap",
+    "native_unit": "USD market cap in the provider methodology; rank integer",
+    "normalized_unit": "SymbolUniverse rank map",
+    "conversion": "identity is provider id plus symbol. Ambiguous symbols are excluded. Rank greater than N is excluded and not refilled.",
+    "timestamps": "provider payload does not become a candle time. generated_at is acquisition time.",
+    "refresh": "each universe resolution; no rank cache on the strict path (cache_used false)",
+    "history": "latest ranking payload",
+    "fetcher": "fetch_coinpaprika_market_cap_rankings",
+    "normalizer": "strict market-cap universe builder",
+    "cache": "not used for the strict ranking path",
+    "consumer": "discovery symbol list. Active owners are a separate monitoring set.",
+    "role": "required for market-cap universe mode",
+    "missing_behavior": "universe resolution error; discovery failure does not stop owner monitoring",
+    "code_present": "yes",
+    "dev_exercised": "strict universe tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/universe/symbol_universe.py",
+        "line": 539,
+        "contains": "\"/tickers\""
+      },
+      {
+        "path": "app/universe/symbol_universe.py",
+        "line": 461,
+        "contains": "provider_asset.rank > universe_size"
+      },
+      {
+        "path": "app/universe/symbol_universe.py",
+        "line": 711,
+        "contains": "STABLECOIN_BASES"
+      }
+    ]
+  },
+  {
+    "metric_id": "macro_calendar",
+    "provider": "BLS, Federal Reserve, BEA",
+    "api_version": "public calendar documents",
+    "endpoint": "BLS ICS, Fed calendar HTML, BEA release_dates.json",
+    "parameters": "none beyond the documented URLs",
+    "direct_or_aggregate": "official calendar pages, parsed",
+    "venue": "not a venue",
+    "instrument_type": "macro event",
+    "contract_id": "event id",
+    "currencies": "not a price",
+    "raw_fields": "release schedule fields",
+    "native_unit": "event timestamp",
+    "normalized_unit": "MacroEvent",
+    "conversion": "US Eastern schedule normalized to UTC",
+    "timestamps": "source schedule time and fetched_at. Vintage revision semantics are only as complete as the parsed page.",
+    "refresh": "cache TTL default 6 hours; max stale 48 hours",
+    "history": "the fetched calendar window",
+    "fetcher": "macro providers",
+    "normalizer": "macro event models",
+    "cache": "macro event cache",
+    "consumer": "macro risk context",
+    "role": "default macro_event_context_enabled true; runtime unverified. Not a setup-generation authority.",
+    "missing_behavior": "source status unavailable or unverified",
+    "code_present": "yes",
+    "dev_exercised": "macro tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/context/macro_providers.py",
+        "line": 44,
+        "contains": "BLS_CALENDAR_URL"
+      },
+      {
+        "path": "app/core/config.py",
+        "line": 74,
+        "contains": "macro_event_context_enabled: bool = True"
+      }
+    ]
+  },
+  {
+    "metric_id": "essential_candle_freshness",
+    "provider": "CCI policy",
+    "api_version": "essential-candle-freshness-v1",
+    "endpoint": "assess_candle_freshness",
+    "parameters": "decision cutoff, role, timeframe, allowance",
+    "direct_or_aggregate": "policy over candle timestamps",
+    "venue": "the candle venue",
+    "instrument_type": "the candle series",
+    "contract_id": "symbol",
+    "currencies": "n/a",
+    "raw_fields": "open timestamp and timeframe duration",
+    "native_unit": "UTC timestamp",
+    "normalized_unit": "pass, stale, missing, unverified",
+    "conversion": "required close E = anchor + floor((D - allowance - anchor) / delta) * delta; allowance is zero",
+    "timestamps": "scheduled close is open plus duration. Cache TTL is not an allowance. Unix epoch UTC anchor, including synthetic 2d.",
+    "refresh": "evaluated at the decision cutoff",
+    "history": "latest closed candle must cover E",
+    "fetcher": "n/a",
+    "normalizer": "n/a",
+    "cache": "n/a",
+    "consumer": "discovery confirmation gate",
+    "role": "required for essential discovery roles",
+    "missing_behavior": "stale or missing blocks new confirmation; owner preservation is a separate rule",
+    "code_present": "yes",
+    "dev_exercised": "essential freshness tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/data/candle_freshness.py",
+        "line": 47,
+        "contains": "POLICY_VERSION = \"essential-candle-freshness-v1\""
+      },
+      {
+        "path": "app/data/candle_freshness.py",
+        "line": 49,
+        "contains": "PUBLICATION_ALLOWANCE = timedelta(0)"
+      }
+    ]
+  },
+  {
+    "metric_id": "public_quality_and_rr_gates",
+    "provider": "CCI",
+    "api_version": "current constants",
+    "endpoint": "canonical public setup-quality decision and public RR",
+    "parameters": "evaluated setup quality score and grade; planned RR",
+    "direct_or_aggregate": "decision gate",
+    "venue": "n/a",
+    "instrument_type": "n/a",
+    "contract_id": "n/a",
+    "currencies": "n/a",
+    "raw_fields": "quality_score, quality_grade, rr",
+    "native_unit": "score points and RR multiple",
+    "normalized_unit": "pass or named blocker",
+    "conversion": "none",
+    "timestamps": "n/a",
+    "refresh": "n/a",
+    "history": "n/a",
+    "fetcher": "n/a",
+    "normalizer": "n/a",
+    "cache": "n/a",
+    "consumer": "public signal and watchlist eligibility",
+    "role": "required for public output",
+    "missing_behavior": "unevaluated quality is not a pass",
+    "code_present": "yes",
+    "dev_exercised": "public signal quality tests; this phase reasserts the constants",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "app/analytics/public_signal_quality.py",
+        "line": 10,
+        "contains": "MIN_PUBLIC_SIGNAL_GRADE = \"A\""
+      },
+      {
+        "path": "app/analytics/public_signal_quality.py",
+        "line": 11,
+        "contains": "MIN_PUBLIC_SETUP_QUALITY_SCORE = Decimal(\"88\")"
+      },
+      {
+        "path": "app/alerts/telegram_lifecycle.py",
+        "line": 288,
+        "contains": "PUBLIC_SIGNAL_MIN_RR = Decimal(\"3\")"
+      },
+      {
+        "path": "app/core/minimum_rr.py",
+        "line": 8,
+        "contains": "DEFAULT_CONFIGURED_MINIMUM_RR = Decimal(\"2.5\")"
+      },
+      {
+        "path": "app/storage/database.py",
+        "line": 9,
+        "contains": "SCHEMA_VERSION = 27"
+      }
+    ]
+  },
+  {
+    "metric_id": "watch_cadence",
+    "provider": "CCI watch supervisor",
+    "api_version": "schedule_after_iteration",
+    "endpoint": "scripts/run_scan.py --watch-interval-sec",
+    "parameters": "interval seconds, default 60",
+    "direct_or_aggregate": "scheduler",
+    "venue": "n/a",
+    "instrument_type": "n/a",
+    "contract_id": "n/a",
+    "currencies": "n/a",
+    "raw_fields": "scheduled start, actual start, finish",
+    "native_unit": "seconds",
+    "normalized_unit": "next scheduled start",
+    "conversion": "next start is scheduled start plus N intervals, not a sleep appended after completion",
+    "timestamps": "monotonic clock",
+    "refresh": "every iteration",
+    "history": "n/a",
+    "fetcher": "n/a",
+    "normalizer": "n/a",
+    "cache": "n/a",
+    "consumer": "watch loop",
+    "role": "operational; this phase does not start it",
+    "missing_behavior": "n/a",
+    "code_present": "yes",
+    "dev_exercised": "watch supervisor tests",
+    "runtime_enabled": "unverified",
+    "expectancy_benefit": "not established",
+    "code_refs": [
+      {
+        "path": "scripts/run_scan.py",
+        "line": 610,
+        "contains": "default=60.0"
+      },
+      {
+        "path": "app/watch_supervisor.py",
+        "line": 82,
+        "contains": "first_next_start = scheduled + interval"
+      }
+    ]
+  }
+]

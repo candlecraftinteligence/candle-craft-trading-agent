@@ -1,0 +1,133 @@
+[
+  {
+    "finding_id": "MDF-TIME-001",
+    "family": "temporal",
+    "severity": "medium",
+    "classification": "code_contract",
+    "summary": "Production integer timestamps are milliseconds, and a seconds spacing is not rewritten.",
+    "expected": "Callers declare seconds or milliseconds. Acquisition time is not a substitute producer time.",
+    "observed": "sibling spacing classification=spacing_matches_seconds; historical availability of a bar fetched after the cutoff is incompatible",
+    "consumers": [
+      "app.data.candle_integrity.normalize_utc_timestamp",
+      "freshness and replay cutoffs"
+    ],
+    "evidence_ids": [
+      "synthetic:seconds-spacing",
+      "synthetic:late-fetch"
+    ],
+    "follow_up": "Keep second-based provider timestamps off the millisecond normalizer.",
+    "reproduction": "timeutil.classify_unit_confusion and originally_available",
+    "production_incident": "not established"
+  },
+  {
+    "finding_id": "MDF-CANDLE-001",
+    "family": "candles",
+    "severity": "medium",
+    "classification": "code_contract",
+    "summary": "Shared candle-sequence validation does not reject impossible OHLC or negative volume.",
+    "expected": "A shared integrity boundary rejects impossible prices and negative volume before features.",
+    "observed": "validate_candle_sequence checks order, anchors, and continuity. OHLC and volume checks exist later in selected consumers.",
+    "consumers": [
+      "app.data.candle_integrity.validate_candle_sequence",
+      "app.analytics.target_intelligence",
+      "app.agents.technical_structure"
+    ],
+    "evidence_ids": [
+      "code:candle_integrity.py"
+    ],
+    "follow_up": "A later phase can fail closed at the shared boundary without weakening freshness or RR.",
+    "reproduction": "ohlc_problems on high<low and volume<0; validate_candle_sequence does not raise for those fields",
+    "production_incident": "not established"
+  },
+  {
+    "finding_id": "MDF-OI-001",
+    "family": "open_interest",
+    "severity": "medium",
+    "classification": "code_contract",
+    "summary": "Bybit openInterest is stored without a unit label. A differing singleOpenInterest is not halved.",
+    "expected": "The DTO records both-sides versus single-side and the unit. Differing fields are not silently averaged.",
+    "observed": "repository value 20 unit N/A; divided_by_two=False; disposition=unverified. Bybit's public open-interest page retrieved 2026-10-19 defines openInterest as the sum of both sides and singleOpenInterest as one side. For linear BTCUSDT the documented unit is BTC.",
+    "consumers": [
+      "app.data.normalizers.bybit.normalize_bybit_open_interest",
+      "derivatives enrichment"
+    ],
+    "evidence_ids": [
+      "synthetic:bybit-oi-both-fields"
+    ],
+    "follow_up": "Record the applicable Bybit schema field and unit before any cross-venue OI comparison.",
+    "reproduction": "bybit_open_interest_fields",
+    "production_incident": "not established"
+  },
+  {
+    "finding_id": "MDF-PX-001",
+    "family": "prices",
+    "severity": "low",
+    "classification": "code_contract",
+    "summary": "Bybit ticker DTO timestamp copies the response envelope time when no measurement time exists.",
+    "expected": "Envelope time and measurement time stay separate. A missing measurement time stays missing.",
+    "observed": "copied_envelope_time=True measurement_timestamp=None",
+    "consumers": [
+      "app.data.normalizers.bybit.normalize_bybit_ticker"
+    ],
+    "evidence_ids": [
+      "synthetic:bybit-ticker-envelope"
+    ],
+    "follow_up": "Store response time separately and leave measurement time N/A when the payload has none.",
+    "reproduction": "bybit_ticker_timestamp_source",
+    "production_incident": "not established"
+  },
+  {
+    "finding_id": "MDF-BOOK-001",
+    "family": "order_book",
+    "severity": "info",
+    "classification": "methodology",
+    "summary": "A REST snapshot alone cannot prove diff-stream synchronization.",
+    "expected": "Synchronization is not_applicable without a sequenced diff stream.",
+    "observed": "synchronization=not_applicable crossed=True on a synthetic bid 100 / ask 99 snapshot",
+    "consumers": [
+      "app.microstructure.order_book.parse_binance_depth_snapshot"
+    ],
+    "evidence_ids": [
+      "synthetic:crossed-snapshot"
+    ],
+    "follow_up": "Keep order-book research on the existing snapshot-plus-diff implementation.",
+    "reproduction": "order_book_snapshot_diagnosis",
+    "production_incident": "not established"
+  },
+  {
+    "finding_id": "MDF-LIQ-001",
+    "family": "liquidations",
+    "severity": "high",
+    "classification": "code_contract",
+    "summary": "No received liquidation events is missing coverage, not zero liquidations.",
+    "expected": "Empty or absent streams stay N/A unless coverage proves there were no events.",
+    "observed": "disposition=missing event_count=None",
+    "consumers": [
+      "app.microstructure.liquidation_service"
+    ],
+    "evidence_ids": [
+      "synthetic:empty-liquidation-stream"
+    ],
+    "follow_up": "Do not let an unsubscribed or gapped stream satisfy a liquidation feature.",
+    "reproduction": "liquidation_observation(None)",
+    "production_incident": "not established"
+  },
+  {
+    "finding_id": "MDF-FUND-001",
+    "family": "funding",
+    "severity": "low",
+    "classification": "code_contract",
+    "summary": "CCI funding reads are last settled history, not the predicted premium-index rate.",
+    "expected": "Settled and predicted rates stay distinct.",
+    "observed": "BinanceFuturesClient.get_funding_rate uses /fapi/v1/fundingRate history. premiumIndex is not requested.",
+    "consumers": [
+      "app.analytics.derivatives_enrichment"
+    ],
+    "evidence_ids": [
+      "code:binance_futures.py:get_funding_rate"
+    ],
+    "follow_up": "Name the consumer value last settled funding unless a predicted endpoint is added and tested.",
+    "reproduction": "inspect BinanceFuturesClient.get_funding_rate",
+    "production_incident": "not established"
+  }
+]
