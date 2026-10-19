@@ -1282,3 +1282,86 @@ def test_b3_replay_cli_uses_real_provenance_and_an_explicit_cutoff(tmp_path: Pat
     assert sha != "cli"
     assert len(sha) == 40
 
+
+def test_b4_terminal_429_stops_that_provider_for_the_rest_of_the_run(tmp_path: Path) -> None:
+    from email.utils import format_datetime
+
+    origin = datetime(2026, 1, 1, tzinfo=UTC)
+    for retries, kind in ((0, "numeric"), (0, "http-date"), (1, "numeric"), (1, "http-date")):
+        clock = {"now": origin}
+        slept: list[float] = []
+
+        def current() -> datetime:
+            return clock["now"]
+
+        def advance(delay: float) -> None:
+            slept.append(delay)
+            clock["now"] = clock["now"] + timedelta(seconds=delay)
+
+        def stream(method: str, url: str, params: None = None) -> _Response:
+            if "listings" in url:
+                limited = _Response(b"{}", status_code=429)
+                if kind == "numeric":
+                    limited.headers["Retry-After"] = "120"
+                else:
+                    limited.headers["Retry-After"] = format_datetime(
+                        current() + timedelta(seconds=120),
+                        usegmt=True,
+                    )
+                return limited
+            if "global-metrics" in url:
+                return _Response(b'{"status":{"error_code":0,"timestamp":"2026-01-01T00:00:00Z"},"data":{}}')
+            if "exchangeInfo" in url:
+                return _Response(b'{"symbols":[]}')
+            return _Response(b"[]")
+
+        root = tmp_path / f"{kind}-{retries}"
+        summary = run_public_sample(
+            root=root,
+            client=SimpleNamespace(stream=stream),
+            budget=StudyBudget(
+                max_retries=retries,
+                max_http_attempts=20,
+                deadline_monotonic=time.monotonic() + 1000,
+            ),
+            transport_label="synthetic_transport",
+            clock=current,
+            sleeper=advance,
+            code_sha="rate-limit",
+        )
+        cmc = [call for call in summary["calls"] if call["provider"] == "cmc"]
+        assert [call["url"].endswith("/listings/latest") for call in cmc] == [True] * (retries + 1)
+        assert all("global-metrics" not in call["url"] for call in cmc)
+        assert cmc[0]["requested_at"].startswith("2026-01-01T00:00:00")
+        assert cmc[-1]["status_code"] == 429
+        assert cmc[-1]["attempt"] == retries
+        assert cmc[-1]["stopped_reason"] == "http_429"
+        assert cmc[-1]["headers"]["Retry-After"]
+        if retries == 0:
+            assert slept == []
+        else:
+            assert slept == [120.0]
+            assert cmc[-1]["requested_at"].startswith("2026-01-01T00:02:00")
+        assert summary["budget"]["stopped_providers"] == ["cmc"]
+        assert summary["budget"]["stop_events"][-1]["reason"] == "http_429"
+        assert summary["budget"]["stop_events"][-1]["attempt"] == retries
+        assert summary["budget"]["stop_events"][-1]["scope"] == "provider"
+        assert summary["partial_reason"] is None
+        assert any(call["provider"] == "binance" for call in summary["calls"])
+        assert any(call["provider"] == "coinpaprika" for call in summary["calls"])
+        persisted = json.loads((root / "sample_summary.json").read_text(encoding="utf-8"))
+        saved_terminal = [call for call in persisted["calls"] if call["provider"] == "cmc"][-1]
+        assert saved_terminal["status_code"] == 429
+        assert saved_terminal["attempt"] == retries
+        assert saved_terminal["disposition"] == "access_blocked"
+        assert saved_terminal["stopped_reason"] == "http_429"
+        assert saved_terminal["headers"]["Retry-After"]
+        assert persisted["budget"]["stopped_providers"] == ["cmc"]
+        assert persisted["partial_reason"] is None
+        saved = json.loads((root / "observations.json").read_text(encoding="utf-8"))
+        terminal = saved["observations"][retries]
+        assert terminal["validity"] == "access_blocked"
+        assert terminal["response_status"] == "429"
+        assert terminal["reason_code"] == "http_429"
+        assert (root / "sample_summary.json").exists()
+

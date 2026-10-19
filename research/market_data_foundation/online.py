@@ -520,7 +520,7 @@ def _get(
             break
         retryable = error in {"timeout", "transport"} or status_code == 429 or status_code >= 500
         if not retryable or attempt >= budget.max_retries:
-            if status_code in {401, 403}:
+            if status_code in {401, 403, 429}:
                 budget.stop_provider(provider, reason=f"http_{status_code}", attempt=attempt)
                 record["stopped_reason"] = f"http_{status_code}"
             break
