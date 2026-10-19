@@ -3,8 +3,8 @@
 Research-only market-data evidence phase. Production gates, schema, and providers are unchanged.
 
 Base SHA: `962dbbb35db942beef0423c0763555e665da668d`
-Head SHA: the pull request head. Opening commit `579fb7966726a8a78809c3c190d49330a9ef27d0` predates this packet update. Review the final PR head.
-PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/136
+Head SHA: `recorded at commit`
+PR: opened after push
 
 ## Index
 
@@ -23,7 +23,7 @@ PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/13
 - [L. Review packet](L_review_packet.md)
 - [Evidence contract](evidence_contract.md)
 
-Raw provider payloads, when a live round succeeds, stay under gitignored `research_runs/market_data_foundation/`.
-A hash in this package does not by itself let a reviewer rebuild a payload that was not committed.
+Normalized observations may be written under gitignored `research_runs/market_data_foundation/`.
+Raw provider bodies are not stored. A hash does not rebuild a discarded payload.
 
 Runtime enablement for every production source is `unverified`. Code defaults are not deployment evidence.

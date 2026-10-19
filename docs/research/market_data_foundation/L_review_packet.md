@@ -2,16 +2,26 @@
 
 - Repository: `candlecraftinteligence/candle-craft-trading-agent`
 - Base SHA: `962dbbb35db942beef0423c0763555e665da668d`
-- Fixture-pin commit: `5a80b24ca627b85e4fef49206dbca10f886de1a6`
-- Head SHA: the pull request head that contains this packet. Review that exact head. A later commit requires a new review.
-- PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/136
-- Cause: `test_scanner_does_not_request_binance_2d_and_uses_synthetic_2d` and `test_replay_candles_1000_clamps_execution_timeframes_only` left both the mock daily alignment and the scanner decision cutoff on the wall clock. The 220-day pullback fixture is resampled into Unix-epoch 2D buckets. On 2026-10-18 UTC that window emits 110 complete candles. From 2026-10-19 00:00:00 UTC it emits 109, because the first day is an incomplete bucket. The same 109 result was reproduced on this branch and on a clean checkout of base `962dbbb` on 2026-10-19. Main CI last passed on 2026-10-18 (`gh` run 39147457349). Production scanner code is unchanged.
-- Repair: `tests/test_scanner_runner.py` pins `_SYNTHETIC_2D_DECISION` to 2026-10-18 12:00:00 UTC. Both tests pass that instant as `candle_as_of` and `decision_timestamp`. The expected synthetic count remains 110. The replay test still requires limits `("15m", 500)`, `("12h", 220)`, and `("1d", 440)`, and still rejects a 2D fetch and a 2000-bar daily fetch. `test_pullback_fixture_synthetic_2d_count_follows_the_explicit_clock` checks 00:00 and 23:59:59.999 on 2026-10-18, the 2026-10-19 midnight boundary, 2024-02-29, and the 2025 year boundary. `test_pinned_synthetic_2d_decision_ignores_a_different_runner_clock` keeps the count at 110 when the runner clock is 2026-10-19 and the explicit decision stays on 2026-10-18.
-- Tests: Python 3.11.9. `python -m pip check` reported no broken requirements. `python -m compileall -q app scripts src tests` succeeded. `python -m pytest` passed 3101 tests, 1 warning, 557.02s.
-- CI: [run 39246821231](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39246821231) succeeded on the fixture-pin commit. Python 3.11 reported 3101 passed, 1 warning, 173.47s. Review the pull request head that contains this packet only after its own required CI is green.
+- Head SHA: `pending commit`
+- PR: pending
+- Tests: pending the full pytest run
+- CI: pending the pull request checks
 
-Production paths touched: none. This repair changes the scanner tests and this packet.
+Production paths touched: none. Scanner, config, schema, strategy, Telegram, and lifecycle code are unchanged.
 
-Independent reviewer: Astra. This document is not Astra approval.
+Astra verdict on `cc44ae98168038f39fe4e27f0f7fe2b2ad73cb43`: REQUIRES_CORRECTION. This packet is the correction, not approval.
+
+| id | resolution | remaining limit |
+| --- | --- | --- |
+| R1 | CMC-id crosswalk required; ticker-only matches stay unverified and unqueued. Settlement, quote, type, and multiplier are checked. Prior 100/74 claims withdrawn. | No retained crosswalk for the earlier live page, so that page is not re-certified. |
+| R2 | Structural ranks and temporal validity are separate. Invalid ranking does not queue. Dominance and capitalization domains are checked. | Freshness window is the explicit six-hour research window, not a production allowance. |
+| R3 | Provider blocks are isolated. Error envelopes are not observed comparisons. A partial summary is always written. | None for the injected cases. |
+| R4 | Sampling writes normalized observations with checksums. Replay reads that artifact. Raw bodies are not claimed as stored. MCP connection is implementer-reported and independently unverified. | Sanitized MCP schemas were not in the repo. No new MCP call. |
+| R5 | Deadline and byte limits apply during streaming. Retry-After accepts HTTP-date. Live sampling stays off. Metered calls stay off. | Shared-IP spare capacity remains unknown. |
+| R6 | `depth_update_gap` removed. Tests use `SynchronizedLocalOrderBook`. | Production book code unchanged. |
+| R7 | Funding and OI are traced through enrichment and `REJECTED_BY_DERIVATIVES`. Liquidation cases use `SymbolLiquidationAggregator`. | Source timestamps are still dropped before rejection. That gap is recorded, not patched. |
+| R8 | Synthetic price, volume, OI, and funding comparison plus a configured-request benchmark. Provider matrix uses the 2026-10-19 documents. | Live metrics and Binance weight table remain unresolved. CoinGlass higher-plan prices are incomplete. |
+
+Independent reviewer: Astra. This document is not Astra approval. A new head needs a new review.
 
 Allowed next action after a verdict: only what the verdict names. No Runtime pull, restart, or database action is authorized by this phase.

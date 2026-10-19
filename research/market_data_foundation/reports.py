@@ -83,8 +83,8 @@ def _index(meta: dict[str, Any]) -> str:
             "- [L. Review packet](L_review_packet.md)",
             "- [Evidence contract](evidence_contract.md)",
             "",
-            "Raw provider payloads, when a live round succeeds, stay under gitignored `research_runs/market_data_foundation/`.",
-            "A hash in this package does not by itself let a reviewer rebuild a payload that was not committed.",
+            "Normalized observations may be written under gitignored `research_runs/market_data_foundation/`.",
+            "Raw provider bodies are not stored. A hash does not rebuild a discarded payload.",
             "",
             "Runtime enablement for every production source is `unverified`. Code defaults are not deployment evidence.",
             "",
@@ -239,7 +239,18 @@ Binance `globalLongShortAccountRatio` and Bybit `account-ratio` are account popu
 Order-book synchronization is not applicable for a snapshot that has no diff sequence. A partial liquidation stream does not prove total liquidations. A modelled heatmap is not an observed event.
 
 Production incident status for these code contracts: not established.
+
+The derivatives path continues through `_fetch_optional_market_data`, `_derivatives_enrichment_input`, and `_derivatives_rejection` to `REJECTED_BY_DERIVATIVES`. Current funding and open interest are numbers. Their source timestamps are not fields on that input. Previous open interest is `history[-2]`. A rejection can therefore be computed from stale or future inputs. That is a recorded gap. The gate is unchanged.
+
+`liquidation_observation` is a research helper. The production coverage cases below come from `SymbolLiquidationAggregator`.
 """
+    from research.market_data_foundation.consumers import (
+        derivatives_timestamp_probe,
+        production_liquidation_coverage_probe,
+    )
+
+    body += "\n```json\n" + json.dumps(derivatives_timestamp_probe(), indent=2) + "\n```\n"
+    body += "\n```json\n" + json.dumps(production_liquidation_coverage_probe(), indent=2) + "\n```\n"
     return body
 
 
@@ -254,6 +265,8 @@ A candle open is not its close. A response envelope time is not a measurement ti
 Historical reconstruction requires both an admissible measurement time and proof CCI had the input at the decision cutoff. A later fetch can support a structural check. It cannot prove the earlier decision saw that bar.
 
 Cache kinds used by the existing cache are miss, hit, and expiry refetch. A failed fetch raises and is not stored. The cache key includes the exchange name, so Binance and Bybit entries do not share a key when callers pass that name.
+
+A connected liquidation snapshot uses the snapshot clock as `observed_at`. That clock is not an event measurement time.
 """
     return body
 
@@ -261,27 +274,21 @@ Cache kinds used by the existing cache are miss, hit, and expiry refetch. A fail
 def _providers() -> str:
     return """# F. Provider matrix
 
-Access date for this document: 2026-10-19. Seed URLs are the assignment's primary docs. A live call is recorded only in the attached online summary. Documentation availability is not an entitlement.
+Access date: 2026-10-19. Pages below were read that day. A missing cell is unresolved, not a guessed quota. No subscription was purchased. Live sampling is skipped because shared-IP spare capacity is unknown.
 
-| interface | role in CCI | exercised by this phase | rights / cost | blocker |
+| endpoint | history / resolution | rate / entitlement | cost / rights | unresolved |
 | --- | --- | --- | --- | --- |
-| Binance USD-M public REST | production candles, ticker, funding history, OI, account ratio | code audit; live only if the sample summary says observed | public market data. Commercial redistribution of stored payloads is not established here. | none for public REST; shared IP spare capacity unknown |
-| Bybit V5 public REST | production linear client | code audit; live only if the sample summary says observed | public market data. Commercial redistribution not established. | OI unit and single-versus-both convention not proven from the repository DTO |
-| CoinPaprika v1 | production ranks and BTC dominance | code audit; live only if the sample summary says observed | public API. FAQ should be re-read before publishing stored tickers. | full ticker payload may exceed the response cap |
-| CMC keyless REST | shadow listings and global metrics only | shadow adapter; live only if the sample summary says observed | keyless GET, no key header. Numeric free quota is not invented. Commercial use and redistribution need a later reading of the current license. | not a production source |
-| CMC authenticated REST and derivatives | not integrated | not called | `X-CMC_PRO_API_KEY` is a different credential from MCP. Derivatives market pairs are not assumed keyless. | no entitlement used |
-| CMC MCP | research interface only | see G | separate header and entitlement | configuration is not a connection |
-| CoinGlass | not integrated | documentation and synthetic contracts only | plan resolution, retention, and commercial rights are unresolved | no authorized no-overage entitlement, so no call |
+| Binance USD-M `GET /fapi/v1/klines` | repository cap `BINANCE_KLINE_LIMIT_MAX = 1500`. Official weight table was not retrieved: the developer page returned a bot wall. | public REST. Shared IP weight is cumulative and was not isolated. | public market data. Redistribution of stored bodies is not established. | current official request weight by limit |
+| Bybit `GET /v5/market/kline` | intervals `1,3,5,15,30,60,120,240,360,720,D,W,M`. Limit 1 to 1000, default 200. Newest first. Linear volume is base coin; turnover is quote. Retrieved from the V5 kline page. | public. Category defaults to linear. IP rate on this page was not stated. | public market data. Redistribution not established. | numeric IP rate limit |
+| Bybit `GET /v5/market/open-interest` | `openInterest` is both sides; `singleOpenInterest` is one side. Linear BTCUSDT unit is BTC. | public. Not called for a new sample in this correction. | no overage call | cross-venue unit equivalence |
+| CoinPaprika `GET /v1/tickers` | FAQ: REST price resolution is up to 10, 3, or 1 minute by plan. Price is a volume-weighted aggregate, not one venue. | FAQ: 10 requests/second per IP. Further quotas are plan-specific. HTTP 429 or 402 at the limit. | FAQ: commercial use inside the customer company is for paid packages. Redistribution requires Enterprise and a contract. CCI's current keyless call is not a paid package. | free-tier monthly quota; whether keyless `/v1/tickers` is inside the 10/second pool only |
+| CMC keyless `GET /v3/cryptocurrency/listings/latest` and `GET /v1/global-metrics/quotes/latest` | listings page is a current rank snapshot, not a history archive. CMC100 is a different index. | keyless GET, no API-key header, IP rate pool. No numeric quota on the keyless page. | commercial redistribution not established. Authenticated REST uses `X-CMC_PRO_API_KEY` and was not called. `/v5` derivatives market pairs are not on the keyless list. | numeric keyless quota and license for stored rows |
+| CMC MCP | not a REST history source | separate `X-CMC-MCP-API-KEY`. Two prior reads are implementer-reported only. | no new paid call | independent connection proof |
+| CoinGlass `GET /api/futures/liquidation/history` | intervals include 1m through 1w. Limit default and max 1000. Time is milliseconds. Values are USD notionals. Plan interval gate: Hobbyist `>=4h`, Startup `>=30m`, Standard and above no interval limit. Retrieved from the liquidation-history reference. | header `CG-API-KEY`. Not called. | pricing page: Hobbyist $29/month or $348/year, 80+ endpoints, 30 requests/minute, updates at most 1 minute, personal use. Startup $79/month or $948/year. Higher plan prices and the history-range column headers did not survive the page text. | exact history-range column for each plan; Enterprise price; whether USD liquidations may be retained |
 
-Revalidated on 2026-10-19 from the keyless public API page: the root is `https://pro-api.coinmarketcap.com/public-api`, GET only, no API-key header, and the rate pool is IP-based. The page does not state a numeric free quota. It documents `/v3/cryptocurrency/listings/latest` and `/v1/global-metrics/quotes/latest`, plus the canonical map and metadata paths. CMC100 is a separate index endpoint, not the Top-100 listings. The keyless standard list on that page does not include the `/v5` derivatives market-pair routes, so those remain untested and not assumed keyless. Authenticated REST still uses `X-CMC_PRO_API_KEY`, which was not sent.
+CoinGlass remains disabled. There is no verified no-overage allowance.
 
-Bybit's open-interest page, retrieved the same day, defines `openInterest` as the sum of both sides and `singleOpenInterest` as one side. For linear BTCUSDT the documented unit is BTC. Inverse BTCUSD is documented in USD. The repository stores `openInterest` and leaves `unit` as N/A.
-
-Same-venue exchange data remains the candidate authority for that venue's candles, trades, mark, index, funding, OI, positioning, taker flow, and book. That is a recommendation to test, not a result of this sample.
-
-Global rank and dominance are methodology measurements. CoinPaprika stays in production during this phase.
-
-Questions for a later licensing pass, not sent to the providers: whether stored CMC or CoinPaprika responses may be committed; whether derived commercial signals require a paid contract; whether CoinGlass historical liquidations can be retained.
+Same-venue exchange data remains the candidate authority for that venue. CoinPaprika stays the production rank source. This matrix is not a provider rollout.
 """
 
 
@@ -289,9 +296,9 @@ def _mcp(mcp: dict[str, Any] | None) -> str:
     if not mcp:
         return """# G. CMC MCP
 
-Status: blocked pending the implementation session's tool inventory.
+Status: `implementer-reported and independently unverified`.
 
-Keyless REST does not imply keyless MCP. This CLI does not read or send an MCP key. A written Cursor config is not a connection.
+The earlier session reported a tool list and two read-only calls. Sanitized protocol schemas and response receipts were not retained in this repository. That prose is not independent proof of a connection. No additional MCP call is made here. Keyless REST does not imply keyless MCP. This CLI does not read or send an MCP key.
 """
     status = mcp.get("status", "blocked")
     tools = mcp.get("tools") or []
@@ -318,11 +325,13 @@ def _top100(online: dict[str, Any] | None) -> str:
 
 The boundary is ranks 1 through 100 before exclusions. Rank 101 is never used to refill a stable, wrapped, ambiguous, or unsupported asset.
 
-Existing policy excludes stablecoin bases and leveraged-token bases at the Binance contract filter. Wrapped assets are not merged into an underlying. A `1000` prefix is not stripped. Symbol collisions are excluded. Missing quote volume is insufficient evidence, not zero.
+Identity is a CMC-id crosswalk with source, retrieval time, and record id. A unique ticker is only an unverified candidate. It does not increment identity-validated or eligible counts. Quote, settlement, contract type, and multiplier must match the crosswalk. Prefixes are not stripped. Wrapped assets are not merged.
 
-Owner monitoring is a separate count. This phase does not execute the production scanner, so scan attempts are zero and are not called successful scans.
+The earlier live summary's 100 validated and 74 eligible figures were ticker joins without that crosswalk. Those counts are withdrawn. They are not restated as validated identity.
 
-Synthetic stage tests cover the boundary. A live stage count below is included only when an online summary is attached, and its `count_kind` says whether it is live or a synthetic transport.
+An incomplete or temporally invalid ranking does not feed the sample queue. Structural rank completeness and timestamp validity are separate statuses.
+
+Owner monitoring is a separate count. This phase does not execute the production scanner, so scan attempts are zero.
 """
     if not online or not online.get("top100"):
         return base + "\nLive Top-100 summary: not attached.\n"
@@ -340,8 +349,13 @@ Offline probes, all synthetic or pure-function:
 - Cache: a failed fetch is not stored; a hit keeps the measurement time distinct from cache bookkeeping time; Binance and Bybit keys stay separate.
 - Candle pairing uses exact open timestamps. Unmatched rows are kept.
 
-Same-venue vendor comparison is not applicable unless a vendor payload identifies the venue and the sample summary says it was fetched. Cross-venue differences are context. Rank differences are methodology until a defect is shown.
+Same-venue vendor comparison is not applicable unless a vendor payload identifies the venue and the sample summary says it was fetched. Cross-venue differences are context. Symbol-only CoinPaprika overlap is not validated identity.
+
+The representative offline comparison below is synthetic. Captured prices are unavailable because raw bodies were not retained. Live comparison was not repeated.
 """
+    from research.market_data_foundation.study import offline_metric_comparison
+
+    text += "\n```json\n" + json.dumps(offline_metric_comparison(), indent=2) + "\n```\n"
     if online and online.get("btc_cross_venue"):
         text += "\nAttached cross-venue BTC note:\n\n```json\n"
         text += json.dumps(online["btc_cross_venue"], indent=2)
@@ -361,12 +375,23 @@ def _cadence(cadence: dict[str, Any], online: dict[str, Any] | None) -> str:
         "```json\n"
         + json.dumps(cadence, indent=2)
         + "\n```\n\n"
-        "The offline microbenchmark times freshness checks only. It does not claim Runtime capacity.\n\n"
+        "The 30-symbol freshness microbenchmark is not the selected-universe benchmark. "
+        "The configured-workload benchmark below counts scanner kline and optional reads and times a local freshness plus 2d resample stage. "
+        "It does not call the network and does not claim five-minute headroom.\n\n"
         "Cost projection uses 288 cycles per day only as a what-if for a 300-second cadence, "
         "and a 30-day month. Request counts are not billing credits. "
         "The code-default 60-second interval would be 1440 cycles per day if that default were the Runtime setting. "
         "Runtime cadence is unverified.\n"
     )
+    from research.market_data_foundation.study import selected_universe_benchmark
+
+    bench = selected_universe_benchmark(("BTCUSDT", "ETHUSDT"))
+    published = {
+        key: value
+        for key, value in bench.items()
+        if key not in {"plan", "local_stage_seconds"}
+    }
+    text += "\nConfigured-universe local benchmark:\n\n```json\n" + json.dumps(published, indent=2) + "\n```\n"
     if online and online.get("budget"):
         text += "\nAttached request accounting:\n\n```json\n" + json.dumps(online["budget"], indent=2) + "\n```\n"
     if online and online.get("benchmark"):
@@ -419,9 +444,22 @@ def _review(meta: dict[str, Any]) -> str:
             f"- Tests: {meta.get('tests', 'pending the full pytest run')}",
             f"- CI: {meta.get('ci', 'pending the pull request checks')}",
             "",
-            "Production paths touched: none intended. The diff should be the research package, its CLI, tests, docs, and `.gitignore`.",
+            "Production paths touched: none. Scanner, config, schema, strategy, Telegram, and lifecycle code are unchanged.",
             "",
-            "Independent reviewer: Astra. This document is not Astra approval.",
+            "Astra verdict on `cc44ae98168038f39fe4e27f0f7fe2b2ad73cb43`: REQUIRES_CORRECTION. This packet is the correction, not approval.",
+            "",
+            "| id | resolution | remaining limit |",
+            "| --- | --- | --- |",
+            "| R1 | CMC-id crosswalk required; ticker-only matches stay unverified and unqueued. Settlement, quote, type, and multiplier are checked. Prior 100/74 claims withdrawn. | No retained crosswalk for the earlier live page, so that page is not re-certified. |",
+            "| R2 | Structural ranks and temporal validity are separate. Invalid ranking does not queue. Dominance and capitalization domains are checked. | Freshness window is the explicit six-hour research window, not a production allowance. |",
+            "| R3 | Provider blocks are isolated. Error envelopes are not observed comparisons. A partial summary is always written. | None for the injected cases. |",
+            "| R4 | Sampling writes normalized observations with checksums. Replay reads that artifact. Raw bodies are not claimed as stored. MCP connection is implementer-reported and independently unverified. | Sanitized MCP schemas were not in the repo. No new MCP call. |",
+            "| R5 | Deadline and byte limits apply during streaming. Retry-After accepts HTTP-date. Live sampling stays off. Metered calls stay off. | Shared-IP spare capacity remains unknown. |",
+            "| R6 | `depth_update_gap` removed. Tests use `SynchronizedLocalOrderBook`. | Production book code unchanged. |",
+            "| R7 | Funding and OI are traced through enrichment and `REJECTED_BY_DERIVATIVES`. Liquidation cases use `SymbolLiquidationAggregator`. | Source timestamps are still dropped before rejection. That gap is recorded, not patched. |",
+            "| R8 | Synthetic price, volume, OI, and funding comparison plus a configured-request benchmark. Provider matrix uses the 2026-10-19 documents. | Live metrics and Binance weight table remain unresolved. CoinGlass higher-plan prices are incomplete. |",
+            "",
+            "Independent reviewer: Astra. This document is not Astra approval. A new head needs a new review.",
             "",
             "Allowed next action after a verdict: only what the verdict names. No Runtime pull, restart, or database action is authorized by this phase.",
             "",

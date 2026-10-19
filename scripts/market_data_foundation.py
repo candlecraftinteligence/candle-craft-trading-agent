@@ -17,12 +17,12 @@ from research.market_data_foundation.budget import StudyBudget
 from research.market_data_foundation.cadence import (
     cadence_contract,
     freshness_microbenchmark,
-    project_acquisition,
     usage_projection,
 )
 from research.market_data_foundation.constants import LOWERED_REASON
 from research.market_data_foundation.integrity import canonical_findings
-from research.market_data_foundation.online import run_public_sample
+from research.market_data_foundation.online import replay_saved, run_public_sample
+from research.market_data_foundation.study import offline_metric_comparison, selected_universe_benchmark
 from research.market_data_foundation.paths import default_research_root, resolve_research_root
 from research.market_data_foundation.reports import render_package, write_package
 from research.market_data_foundation.safety import enforce_research_process
@@ -52,30 +52,43 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "sample":
         budget = StudyBudget()
         with httpx.Client(timeout=budget.timeout_seconds, headers={"User-Agent": "cci-market-data-foundation/dev"}) as client:
-            online = run_public_sample(root=root, client=client, budget=budget, transport_label="live")
+            online = run_public_sample(
+                root=root,
+                client=client,
+                budget=budget,
+                transport_label="live",
+                code_sha="cli",
+            )
         _emit(root, "sample", {"process_flags": flags, "lowered_reason": LOWERED_REASON, "online": online})
     elif args.mode == "benchmark":
-        bench = freshness_microbenchmark()
-        latencies = [
-            call["latency_ms"] / 1000
-            for call in (online or {}).get("calls", [])
-            if isinstance(call.get("latency_ms"), int)
-        ]
+        comparison = offline_metric_comparison()
+        selected = tuple(comparison["selected"])
         _emit(
             root,
             "benchmark",
             {
                 "process_flags": flags,
                 "cadence": cadence_contract(),
-                "microbenchmark": bench,
-                "projection": project_acquisition(
-                    measured_latency_seconds=latencies,
-                    requests_per_cycle=len(latencies),
-                ),
+                "microbenchmark": freshness_microbenchmark(),
+                "selected_universe": selected_universe_benchmark(selected),
+                "comparison": comparison,
                 "usage": usage_projection(
-                    measured_calls_per_cycle=len(latencies) or None,
+                    measured_calls_per_cycle=None,
                     measured_weight_per_cycle=None,
                 ),
+                "live_network": "not_executed",
+            },
+        )
+    elif args.mode == "replay":
+        from datetime import UTC, datetime
+
+        _emit(
+            root,
+            "replay",
+            {
+                "process_flags": flags,
+                "label": "captured_artifact",
+                "replay": replay_saved(root, decision_cutoff=datetime(2026, 10, 18, 12, tzinfo=UTC)),
             },
         )
     elif args.mode == "write-docs":

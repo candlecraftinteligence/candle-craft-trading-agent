@@ -184,7 +184,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - fetcher: get_funding_rate via history
 - normalizer: normalize_*_funding
 - cache: data_type funding
-- consumer: derivatives enrichment current_funding_rate
+- consumer: ScannerRunner._fetch_optional_market_data then _derivatives_enrichment_input then _derivatives_rejection; REJECTED_BY_DERIVATIVES drops source timestamps
 - role: optional enrichment
 - missing_behavior: N/A funding context
 - code_present: yes
@@ -194,6 +194,10 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - code refs:
   - `app/data/exchange_clients/binance_futures.py:153` contains `"/fapi/v1/fundingRate"`
   - `app/data/exchange_clients/bybit_linear.py:79` contains `"/v5/market/funding/history"`
+  - `app/pipeline/scanner_runner.py:2435` contains `async def _fetch_optional_market_data(`
+  - `app/pipeline/scanner_runner.py:4397` contains `def _derivatives_enrichment_input(`
+  - `app/pipeline/scanner_runner.py:4422` contains `def _derivatives_rejection(`
+  - `app/pipeline/scanner_runner.py:1670` contains `status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,`
 
 ## open_interest
 
@@ -216,7 +220,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - fetcher: get_open_interest and get_open_interest_history
 - normalizer: normalize_*_open_interest
 - cache: open_interest and open_interest_history
-- consumer: derivatives enrichment and BTC context freshness window
+- consumer: derivatives enrichment current_open_interest; previous sample is history[-2]; timestamps are not copied onto those numbers
 - role: optional
 - missing_behavior: N/A; never zero
 - code_present: yes
@@ -346,7 +350,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - cache: in-memory aggregator
 - consumer: optional liquidation research context
 - role: optional; default disabled
-- missing_behavior: no events is N/A, not zero liquidations
+- missing_behavior: disconnected or gapped coverage is unavailable, not zero. A covered empty window on SymbolLiquidationAggregator reports event_count 0. liquidation_observation(None) is a separate helper and is not that aggregator.
 - code_present: yes
 - dev_exercised: existing liquidation tests
 - runtime_enabled: unverified; code default liquidation_flow_enabled false

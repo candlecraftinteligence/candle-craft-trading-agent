@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Sequence
 
 from app.universe.symbol_universe import STABLECOIN_BASES, _is_leveraged_token_base
 
-from research.market_data_foundation.cmc import CmcAsset, CmcListingPage, membership_problems
+from research.market_data_foundation.cmc import CmcAsset, CmcListingPage, membership_problems, temporal_problems
 from research.market_data_foundation.constants import TOP100_SIZE
 
 
@@ -22,6 +23,24 @@ class VenueContract:
     status: str
     underlying_type: str
     quote_volume_usdt: str | None
+    settlement_asset: str = ""
+    multiplier: str = ""
+
+
+@dataclass(frozen=True)
+class IdentityCrosswalk:
+    """Provenance-backed CMC id to one exchange asset. A ticker is not this record."""
+
+    cmc_id: str
+    venue: str
+    base_asset: str
+    quote_asset: str
+    settlement_asset: str
+    contract_type: str
+    multiplier: str
+    source: str
+    retrieved_at: str
+    source_record_id: str
 
 
 @dataclass(frozen=True)
@@ -51,6 +70,12 @@ class StageCounts:
     count_kind: str
     exclusions: tuple[dict[str, str], ...]
     queued_symbols: tuple[str, ...] = ()
+    structural_status: str = "unverified"
+    temporal_status: str = "unverified"
+    structural_problems: tuple[str, ...] = ()
+    temporal_problem_codes: tuple[str, ...] = ()
+    unverified_candidates: tuple[str, ...] = ()
+    identity_basis: str = "cmc_id_crosswalk"
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -74,6 +99,12 @@ class StageCounts:
             "scan_count_meaning": "not_executed; a successful scan is not claimed",
             "exclusions": list(self.exclusions),
             "queued_symbols": list(self.queued_symbols),
+            "structural_status": self.structural_status,
+            "temporal_status": self.temporal_status,
+            "structural_problems": list(self.structural_problems),
+            "temporal_problem_codes": list(self.temporal_problem_codes),
+            "unverified_candidates": list(self.unverified_candidates),
+            "identity_basis": self.identity_basis,
             "denominators": {
                 "requested_global_assets": self.requested_global_assets,
                 "received_rows": self.received_rows,
@@ -87,15 +118,66 @@ def evaluate_top100(
     contracts: Sequence[VenueContract],
     *,
     owners: Sequence[OwnerFixture] = (),
+    crosswalk: Sequence[IdentityCrosswalk] = (),
+    acquired_at: datetime | None = None,
+    decision_cutoff: datetime | None = None,
+    max_age: timedelta = timedelta(hours=6),
     minimum_quote_volume_usdt: Decimal = Decimal("0"),
     expected: int = TOP100_SIZE,
     count_kind: str,
 ) -> StageCounts:
-    problems = membership_problems(page, expected=expected)
-    membership_status = "verified" if not problems else "unverified"
+    structural = membership_problems(page, expected=expected)
+    if acquired_at is None or decision_cutoff is None:
+        temporal: tuple[str, ...] = ("missing_acquisition_or_decision_context",)
+    else:
+        temporal = temporal_problems(
+            page,
+            acquired_at=acquired_at,
+            decision_cutoff=decision_cutoff,
+            max_age=max_age,
+        )
+    structural_status = "verified" if not structural else "unverified"
+    temporal_status = "verified" if not temporal else "unverified"
+    membership_status = "verified" if structural_status == "verified" and temporal_status == "verified" else "unverified"
     boundary = [asset for asset in page.assets if asset.rank is not None and 1 <= asset.rank <= expected]
     # Exclusions happen after the boundary. Higher ranks are ignored, not promoted.
-    identities = _identity_decisions(boundary)
+    if structural or temporal:
+        owner_symbols = tuple(dict.fromkeys(owner.symbol.upper() for owner in owners))
+        return StageCounts(
+            requested_global_assets=expected,
+            received_rows=len(page.assets),
+            valid_ranked_assets=sum(1 for asset in page.assets if asset.rank_status == "valid" and asset.rank is not None),
+            identity_validated_assets=0,
+            supported_eligible_contracts=0,
+            liquidity_qualified_contracts=0,
+            unique_queued_discovery_contracts=0,
+            scan_attempts=0,
+            successfully_completed_scans=0,
+            insufficient_evidence_rejections=0,
+            other_failures=0,
+            accepted_outcomes=0,
+            rejected_outcomes=0,
+            owner_monitoring_count=len(owner_symbols),
+            owners_outside_discovery=len(owner_symbols),
+            membership_status=membership_status,
+            count_kind=count_kind,
+            exclusions=(
+                {
+                    "provider_id": "",
+                    "symbol": "",
+                    "rank": "",
+                    "reason": "ranking_not_admitted",
+                },
+            ),
+            queued_symbols=(),
+            structural_status=structural_status,
+            temporal_status=temporal_status,
+            structural_problems=structural,
+            temporal_problem_codes=temporal,
+            unverified_candidates=tuple(asset.symbol for asset in boundary),
+            identity_basis="not_admitted",
+        )
+    decisions, matched = _identity_decisions(boundary, crosswalk, contracts)
     exclusions: list[dict[str, str]] = []
     queued: list[str] = []
     identity_validated = 0
@@ -103,9 +185,8 @@ def evaluate_top100(
     liquid = 0
     insufficient = 0
     other = 0
-    contracts_by_base = _admissible_contracts(contracts)
     for asset in boundary:
-        decision = identities[asset.provider_id]
+        decision = decisions[asset.provider_id]
         if decision != "validated":
             exclusions.append(
                 {
@@ -122,14 +203,12 @@ def evaluate_top100(
             exclusions.append(_reason(asset, "existing_stable_or_leveraged_policy"))
             other += 1
             continue
-        matches = contracts_by_base.get(asset.symbol, ())
-        if len(matches) != 1:
-            reason = "ambiguous_venue_contract" if len(matches) > 1 else "no_supported_usdt_perpetual"
-            exclusions.append(_reason(asset, reason))
+        contract = matched.get(asset.provider_id)
+        if contract is None:
+            exclusions.append(_reason(asset, "no_supported_usdt_perpetual"))
             other += 1
             continue
         supported += 1
-        contract = matches[0]
         if contract.quote_volume_usdt is None:
             exclusions.append(_reason(asset, "quote_volume_missing"))
             insufficient += 1
@@ -170,6 +249,11 @@ def evaluate_top100(
         count_kind=count_kind,
         exclusions=tuple(exclusions),
         queued_symbols=tuple(queued),
+        structural_status=structural_status,
+        temporal_status=temporal_status,
+        structural_problems=structural,
+        temporal_problem_codes=temporal,
+        identity_basis="cmc_id_crosswalk",
     )
 
 
@@ -227,7 +311,11 @@ def _spread(rows: Sequence[tuple[str, str]], count: int) -> list[tuple[str, str]
     return ordered[:count]
 
 
-def _identity_decisions(assets: Sequence[CmcAsset]) -> dict[str, str]:
+def _identity_decisions(
+    assets: Sequence[CmcAsset],
+    crosswalk: Sequence[IdentityCrosswalk],
+    contracts: Sequence[VenueContract],
+) -> tuple[dict[str, str], dict[str, VenueContract]]:
     by_symbol: dict[str, list[CmcAsset]] = {}
     for asset in assets:
         by_symbol.setdefault(asset.symbol, []).append(asset)
@@ -236,32 +324,61 @@ def _identity_decisions(assets: Sequence[CmcAsset]) -> dict[str, str]:
         for symbol, rows in by_symbol.items()
         if len({row.provider_id for row in rows}) > 1
     }
+    by_id: dict[str, list[IdentityCrosswalk]] = {}
+    for row in crosswalk:
+        by_id.setdefault(row.cmc_id, []).append(row)
     decisions: dict[str, str] = {}
+    matched: dict[str, VenueContract] = {}
     for asset in assets:
         if asset.symbol in ambiguous:
             decisions[asset.provider_id] = "ambiguous_symbol"
-        elif asset.provider_id.strip() == "":
+            continue
+        if asset.provider_id.strip() == "":
             decisions[asset.provider_id] = "missing_provider_id"
-        else:
-            decisions[asset.provider_id] = "validated"
-    return decisions
+            continue
+        rows = by_id.get(asset.provider_id, [])
+        if not rows:
+            decisions[asset.provider_id] = "unverified_no_crosswalk"
+            continue
+        if len(rows) != 1:
+            decisions[asset.provider_id] = "ambiguous_crosswalk"
+            continue
+        row = rows[0]
+        if not (row.source.strip() and row.retrieved_at.strip() and row.source_record_id.strip()):
+            decisions[asset.provider_id] = "unverified_missing_provenance"
+            continue
+        if row.base_asset.upper() != asset.symbol:
+            decisions[asset.provider_id] = "crosswalk_symbol_mismatch"
+            continue
+        hits = [contract for contract in contracts if _contract_matches_crosswalk(contract, row)]
+        if len(hits) != 1:
+            decisions[asset.provider_id] = "ambiguous_venue_contract" if len(hits) > 1 else "no_supported_usdt_perpetual"
+            continue
+        decisions[asset.provider_id] = "validated"
+        matched[asset.provider_id] = hits[0]
+    return decisions, matched
 
 
-def _admissible_contracts(contracts: Sequence[VenueContract]) -> dict[str, tuple[VenueContract, ...]]:
-    grouped: dict[str, list[VenueContract]] = {}
-    for contract in contracts:
-        if contract.quote_asset.upper() != "USDT":
-            continue
-        if contract.contract_type.upper() != "PERPETUAL":
-            continue
-        if contract.status.upper() != "TRADING":
-            continue
-        if contract.underlying_type.upper() != "COIN":
-            continue
-        if contract.symbol.upper() != f"{contract.base_asset.upper()}USDT":
-            continue
-        grouped.setdefault(contract.base_asset.upper(), []).append(contract)
-    return {base: tuple(rows) for base, rows in grouped.items()}
+def _contract_matches_crosswalk(contract: VenueContract, row: IdentityCrosswalk) -> bool:
+    if contract.venue != row.venue:
+        return False
+    if contract.base_asset.upper() != row.base_asset.upper():
+        return False
+    if contract.quote_asset.upper() != "USDT" or row.quote_asset.upper() != "USDT":
+        return False
+    if contract.settlement_asset.upper() != "USDT" or row.settlement_asset.upper() != "USDT":
+        return False
+    if contract.contract_type.upper() != "PERPETUAL" or row.contract_type.upper() != "PERPETUAL":
+        return False
+    if contract.status.upper() != "TRADING":
+        return False
+    if contract.underlying_type.upper() != "COIN":
+        return False
+    if contract.symbol.upper() != f"{contract.base_asset.upper()}USDT":
+        return False
+    if not contract.multiplier or contract.multiplier != row.multiplier:
+        return False
+    return True
 
 
 def _reason(asset: CmcAsset, reason: str) -> dict[str, str]:

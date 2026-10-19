@@ -289,16 +289,6 @@ def order_book_snapshot_diagnosis(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def depth_update_gap(*, previous_final_id: int, first_id: int, final_id: int) -> str:
-    if first_id > previous_final_id + 1:
-        return "gap"
-    if final_id < previous_final_id:
-        return "out_of_order"
-    if first_id <= previous_final_id:
-        return "overlap_or_duplicate"
-    return "contiguous"
-
-
 def liquidation_observation(payload: dict[str, Any] | None, *, coverage: str) -> dict[str, Any]:
     if payload is None:
         return {

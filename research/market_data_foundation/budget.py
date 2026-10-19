@@ -52,7 +52,10 @@ class StudyBudget:
     bytes_read: int = 0
     by_provider: dict[str, int] = field(default_factory=dict)
     stopped_providers: set[str] = field(default_factory=set)
+    stop_events: list[dict[str, object]] = field(default_factory=list)
     cancelled: bool = False
+    live_sampling_authorized: bool = False
+    shared_ip_spare_capacity: str = "unknown"
 
     def provider_cap(self, provider: str) -> int:
         caps = {
@@ -76,6 +79,16 @@ class StudyBudget:
         if self.bytes_read > self.max_total_bytes:
             raise BudgetExceeded("total_bytes")
 
+    def ensure_during_stream(self, pending_bytes: int = 0) -> None:
+        """Deadline, cancellation, and remaining bytes apply while a body is arriving."""
+
+        if self.cancelled:
+            raise StudyCancelled("cancelled_during_stream")
+        if time.monotonic() > self.deadline_monotonic:
+            raise BudgetExceeded("deadline_during_stream")
+        if self.bytes_read + max(int(pending_bytes), 0) > self.max_total_bytes:
+            raise BudgetExceeded("total_bytes_during_stream")
+
     def record_attempt(self, provider: str, nbytes: int) -> None:
         self.http_attempts += 1
         self.by_provider[provider] = self.by_provider.get(provider, 0) + 1
@@ -88,8 +101,11 @@ class StudyBudget:
             raise BudgetExceeded("mcp_data_calls")
         self.mcp_data_calls += 1
 
-    def stop_provider(self, provider: str) -> None:
+    def stop_provider(self, provider: str, *, reason: str, attempt: int) -> None:
         self.stopped_providers.add(provider)
+        self.stop_events.append(
+            {"provider": provider, "reason": reason, "attempt": attempt}
+        )
 
     def retry_delay_fits(self, delay_seconds: float) -> bool:
         if delay_seconds < 0:
@@ -116,5 +132,8 @@ class StudyBudget:
             "max_concurrency": self.max_concurrency,
             "online_rounds": self.online_rounds,
             "stopped_providers": sorted(self.stopped_providers),
+            "stop_events": list(self.stop_events),
             "cancelled": self.cancelled,
+            "live_sampling_authorized": self.live_sampling_authorized,
+            "shared_ip_spare_capacity": self.shared_ip_spare_capacity,
         }

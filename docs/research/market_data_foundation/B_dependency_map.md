@@ -15,7 +15,7 @@ Optional flags defaulting to false are not Runtime proof. `runtime_enabled` is u
 | long_short_account_ratio | long_short_ratio; caller-specific; a missing ratio must stay N/A | optional |
 | taker_flow | not the market-data file cache; disabled or stale is unavailable, not zero | optional; default disabled |
 | order_book_binance_usdm | in-memory book; unverified or unavailable; a crossed book is not a valid sync | optional; default disabled |
-| liquidations_binance_force_order | in-memory aggregator; no events is N/A, not zero liquidations | optional; default disabled |
+| liquidations_binance_force_order | in-memory aggregator; disconnected or gapped coverage is unavailable, not zero. A covered empty window on SymbolLiquidationAggregator reports event_count 0. liquidation_observation(None) is a separate helper and is not that aggregator. | optional; default disabled |
 | btc_directional_context | candle cache; component unavailable with a reason | default enabled in Settings; runtime activation unverified |
 | eth_regime_candles | candle cache; ETHUSDT_candles: N/A | optional; ScannerRunConfig.market_regime_enabled defaults false. There is no standalone ETH context service. |
 | btc_dominance | BtcDominanceContextService memory cache; context unavailable; not zero | default btc_d_context_enabled true; runtime unverified |

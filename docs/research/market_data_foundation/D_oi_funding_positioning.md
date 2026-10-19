@@ -80,3 +80,45 @@ Binance `globalLongShortAccountRatio` and Bybit `account-ratio` are account popu
 Order-book synchronization is not applicable for a snapshot that has no diff sequence. A partial liquidation stream does not prove total liquidations. A modelled heatmap is not an observed event.
 
 Production incident status for these code contracts: not established.
+
+The derivatives path continues through `_fetch_optional_market_data`, `_derivatives_enrichment_input`, and `_derivatives_rejection` to `REJECTED_BY_DERIVATIVES`. Current funding and open interest are numbers. Their source timestamps are not fields on that input. Previous open interest is `history[-2]`. A rejection can therefore be computed from stale or future inputs. That is a recorded gap. The gate is unchanged.
+
+`liquidation_observation` is a research helper. The production coverage cases below come from `SymbolLiquidationAggregator`.
+
+```json
+{
+  "consumer": "ScannerRunner._derivatives_enrichment_input and _derivatives_rejection",
+  "previous_open_interest_selector": "history[-2]",
+  "previous_open_interest": "9.00000000",
+  "current_funding_rate": "0.01000000",
+  "current_open_interest": "11.00000000",
+  "source_timestamps_on_enrichment_input": false,
+  "stale_funding_timestamp": "2020-01-01T00:00:00+00:00",
+  "future_open_interest_timestamp": "2030-01-01T00:00:00+00:00",
+  "decision_cutoff": "2026-10-18T12:00:00+00:00",
+  "rejection_without_timestamp_check": "Severe derivatives conflict against long: funding extreme_positive, OI rising, crowding high, squeeze balanced.",
+  "production_incident": "not established",
+  "gate_change": "none",
+  "gap": "numeric funding and open interest can reach REJECTED_BY_DERIVATIVES without a source-time check"
+}
+```
+
+```json
+{
+  "consumer": "SymbolLiquidationAggregator",
+  "helper_liquidation_observation_is_not_this_consumer": true,
+  "disconnected_status": "UNAVAILABLE",
+  "disconnected_reason": "stream_disconnected",
+  "gapped_status": "UNAVAILABLE",
+  "gapped_reason": "stream_disconnected",
+  "gapped_disconnect_count": 1,
+  "covered_empty_status": "VERIFIED",
+  "covered_empty_complete": true,
+  "covered_empty_event_count": 0,
+  "covered_empty_is_observed_zero": true,
+  "connected_observed_at_is_snapshot_clock": true,
+  "fresh_snapshot_clock_is_not_an_event_time": true,
+  "production_incident": "not established",
+  "unavailable_status": "UNAVAILABLE"
+}
+```

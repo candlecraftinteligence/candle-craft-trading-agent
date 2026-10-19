@@ -7,9 +7,11 @@ not success. Null market data stays null.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+from research.market_data_foundation.timeutil import future_timestamp
 
 KEYLESS_ROOT = "https://pro-api.coinmarketcap.com/public-api"
 LISTINGS_PATH = "/v3/cryptocurrency/listings/latest"
@@ -59,6 +61,7 @@ class CmcGlobalMetrics:
     synthetic: bool
     raw_sha256: str
     missing_fields: tuple[str, ...] = field(default_factory=tuple)
+    domain_problems: tuple[str, ...] = field(default_factory=tuple)
 
 
 def parse_listings(payload: Any, *, raw_sha256: str, synthetic: bool) -> CmcListingPage:
@@ -100,6 +103,19 @@ def parse_global_metrics(payload: Any, *, raw_sha256: str, synthetic: bool) -> C
         missing.append("total_market_cap_usd")
     if updated is None:
         missing.append("last_updated")
+    domain: list[str] = []
+    for name, text, kind in (
+        ("btc_dominance", btc, "dominance"),
+        ("eth_dominance", eth, "dominance"),
+        ("total_market_cap_usd", cap, "capitalization"),
+    ):
+        problem = _domain_problem(name, text, kind=kind)
+        if problem is not None:
+            domain.append(problem)
+    if updated is not None and parse_utc_timestamp(updated) is None:
+        domain.append("malformed_last_updated")
+    if status.get("timestamp") not in (None, "") and parse_utc_timestamp(_optional_text(status.get("timestamp"))) is None:
+        domain.append("malformed_envelope_timestamp")
     return CmcGlobalMetrics(
         btc_dominance=btc,
         eth_dominance=eth,
@@ -110,6 +126,7 @@ def parse_global_metrics(payload: Any, *, raw_sha256: str, synthetic: bool) -> C
         synthetic=synthetic,
         raw_sha256=raw_sha256,
         missing_fields=tuple(missing),
+        domain_problems=tuple(domain),
     )
 
 
@@ -133,10 +150,75 @@ def membership_problems(page: CmcListingPage, *, expected: int = 100) -> tuple[s
     expected_ranks = set(range(1, expected + 1))
     if set(present) != expected_ranks:
         problems.append("ranks_are_not_exactly_1_to_n")
-    timestamps = {asset.last_updated for asset in page.assets}
-    if None in timestamps:
-        problems.append("missing_asset_timestamp")
     return tuple(problems)
+
+
+def parse_utc_timestamp(value: str | None) -> datetime | None:
+    """Accept an aware ISO-8601 instant. Naive strings and prose are not times."""
+
+    if value is None:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    return moment.astimezone(UTC)
+
+
+def temporal_problems(
+    page: CmcListingPage,
+    *,
+    acquired_at: datetime,
+    decision_cutoff: datetime,
+    max_age: timedelta = timedelta(hours=6),
+) -> tuple[str, ...]:
+    """Timestamp validity is separate from rank completeness."""
+
+    problems: list[str] = []
+    _collect_time_problem(problems, "envelope", page.envelope_timestamp, acquired_at, decision_cutoff, max_age)
+    for asset in page.assets:
+        _collect_time_problem(problems, "asset", asset.last_updated, acquired_at, decision_cutoff, max_age)
+        _collect_time_problem(problems, "quote", asset.quote_last_updated, acquired_at, decision_cutoff, max_age)
+    return tuple(dict.fromkeys(problems))
+
+
+def _collect_time_problem(
+    problems: list[str],
+    label: str,
+    raw: str | None,
+    acquired_at: datetime,
+    decision_cutoff: datetime,
+    max_age: timedelta,
+) -> None:
+    if raw is None:
+        problems.append(f"missing_{label}_timestamp")
+        return
+    moment = parse_utc_timestamp(raw)
+    if moment is None:
+        problems.append(f"malformed_{label}_timestamp")
+        return
+    if future_timestamp(moment, received_at=acquired_at):
+        problems.append(f"future_{label}_timestamp")
+        return
+    oldest_allowed = min(acquired_at, decision_cutoff) - max_age
+    if moment < oldest_allowed:
+        problems.append(f"stale_{label}_timestamp")
+
+
+def _domain_problem(name: str, text: str | None, *, kind: str) -> str | None:
+    if text is None:
+        return None
+    number = Decimal(text)
+    if kind == "dominance" and (number < 0 or number > 100):
+        return f"impossible_{name}"
+    if kind == "capitalization" and number < 0:
+        return f"impossible_{name}"
+    return None
 
 
 def _envelope(payload: Any) -> tuple[dict[str, Any], Any]:

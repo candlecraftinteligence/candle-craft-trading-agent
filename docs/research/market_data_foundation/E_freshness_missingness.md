@@ -33,3 +33,5 @@ A candle open is not its close. A response envelope time is not a measurement ti
 Historical reconstruction requires both an admissible measurement time and proof CCI had the input at the decision cutoff. A later fetch can support a structural check. It cannot prove the earlier decision saw that bar.
 
 Cache kinds used by the existing cache are miss, hit, and expiry refetch. A failed fetch raises and is not stored. The cache key includes the exchange name, so Binance and Bybit entries do not share a key when callers pass that name.
+
+A connected liquidation snapshot uses the snapshot clock as `observed_at`. That clock is not an event measurement time.

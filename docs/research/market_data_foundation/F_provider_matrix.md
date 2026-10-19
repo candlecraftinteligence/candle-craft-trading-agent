@@ -1,23 +1,17 @@
 # F. Provider matrix
 
-Access date for this document: 2026-10-19. Seed URLs are the assignment's primary docs. A live call is recorded only in the attached online summary. Documentation availability is not an entitlement.
+Access date: 2026-10-19. Pages below were read that day. A missing cell is unresolved, not a guessed quota. No subscription was purchased. Live sampling is skipped because shared-IP spare capacity is unknown.
 
-| interface | role in CCI | exercised by this phase | rights / cost | blocker |
+| endpoint | history / resolution | rate / entitlement | cost / rights | unresolved |
 | --- | --- | --- | --- | --- |
-| Binance USD-M public REST | production candles, ticker, funding history, OI, account ratio | code audit; live only if the sample summary says observed | public market data. Commercial redistribution of stored payloads is not established here. | none for public REST; shared IP spare capacity unknown |
-| Bybit V5 public REST | production linear client | code audit; live only if the sample summary says observed | public market data. Commercial redistribution not established. | OI unit and single-versus-both convention not proven from the repository DTO |
-| CoinPaprika v1 | production ranks and BTC dominance | code audit; live only if the sample summary says observed | public API. FAQ should be re-read before publishing stored tickers. | full ticker payload may exceed the response cap |
-| CMC keyless REST | shadow listings and global metrics only | shadow adapter; live only if the sample summary says observed | keyless GET, no key header. Numeric free quota is not invented. Commercial use and redistribution need a later reading of the current license. | not a production source |
-| CMC authenticated REST and derivatives | not integrated | not called | `X-CMC_PRO_API_KEY` is a different credential from MCP. Derivatives market pairs are not assumed keyless. | no entitlement used |
-| CMC MCP | research interface only | see G | separate header and entitlement | configuration is not a connection |
-| CoinGlass | not integrated | documentation and synthetic contracts only | plan resolution, retention, and commercial rights are unresolved | no authorized no-overage entitlement, so no call |
+| Binance USD-M `GET /fapi/v1/klines` | repository cap `BINANCE_KLINE_LIMIT_MAX = 1500`. Official weight table was not retrieved: the developer page returned a bot wall. | public REST. Shared IP weight is cumulative and was not isolated. | public market data. Redistribution of stored bodies is not established. | current official request weight by limit |
+| Bybit `GET /v5/market/kline` | intervals `1,3,5,15,30,60,120,240,360,720,D,W,M`. Limit 1 to 1000, default 200. Newest first. Linear volume is base coin; turnover is quote. Retrieved from the V5 kline page. | public. Category defaults to linear. IP rate on this page was not stated. | public market data. Redistribution not established. | numeric IP rate limit |
+| Bybit `GET /v5/market/open-interest` | `openInterest` is both sides; `singleOpenInterest` is one side. Linear BTCUSDT unit is BTC. | public. Not called for a new sample in this correction. | no overage call | cross-venue unit equivalence |
+| CoinPaprika `GET /v1/tickers` | FAQ: REST price resolution is up to 10, 3, or 1 minute by plan. Price is a volume-weighted aggregate, not one venue. | FAQ: 10 requests/second per IP. Further quotas are plan-specific. HTTP 429 or 402 at the limit. | FAQ: commercial use inside the customer company is for paid packages. Redistribution requires Enterprise and a contract. CCI's current keyless call is not a paid package. | free-tier monthly quota; whether keyless `/v1/tickers` is inside the 10/second pool only |
+| CMC keyless `GET /v3/cryptocurrency/listings/latest` and `GET /v1/global-metrics/quotes/latest` | listings page is a current rank snapshot, not a history archive. CMC100 is a different index. | keyless GET, no API-key header, IP rate pool. No numeric quota on the keyless page. | commercial redistribution not established. Authenticated REST uses `X-CMC_PRO_API_KEY` and was not called. `/v5` derivatives market pairs are not on the keyless list. | numeric keyless quota and license for stored rows |
+| CMC MCP | not a REST history source | separate `X-CMC-MCP-API-KEY`. Two prior reads are implementer-reported only. | no new paid call | independent connection proof |
+| CoinGlass `GET /api/futures/liquidation/history` | intervals include 1m through 1w. Limit default and max 1000. Time is milliseconds. Values are USD notionals. Plan interval gate: Hobbyist `>=4h`, Startup `>=30m`, Standard and above no interval limit. Retrieved from the liquidation-history reference. | header `CG-API-KEY`. Not called. | pricing page: Hobbyist $29/month or $348/year, 80+ endpoints, 30 requests/minute, updates at most 1 minute, personal use. Startup $79/month or $948/year. Higher plan prices and the history-range column headers did not survive the page text. | exact history-range column for each plan; Enterprise price; whether USD liquidations may be retained |
 
-Revalidated on 2026-10-19 from the keyless public API page: the root is `https://pro-api.coinmarketcap.com/public-api`, GET only, no API-key header, and the rate pool is IP-based. The page does not state a numeric free quota. It documents `/v3/cryptocurrency/listings/latest` and `/v1/global-metrics/quotes/latest`, plus the canonical map and metadata paths. CMC100 is a separate index endpoint, not the Top-100 listings. The keyless standard list on that page does not include the `/v5` derivatives market-pair routes, so those remain untested and not assumed keyless. Authenticated REST still uses `X-CMC_PRO_API_KEY`, which was not sent.
+CoinGlass remains disabled. There is no verified no-overage allowance.
 
-Bybit's open-interest page, retrieved the same day, defines `openInterest` as the sum of both sides and `singleOpenInterest` as one side. For linear BTCUSDT the documented unit is BTC. Inverse BTCUSD is documented in USD. The repository stores `openInterest` and leaves `unit` as N/A.
-
-Same-venue exchange data remains the candidate authority for that venue's candles, trades, mark, index, funding, OI, positioning, taker flow, and book. That is a recommendation to test, not a result of this sample.
-
-Global rank and dominance are methodology measurements. CoinPaprika stays in production during this phase.
-
-Questions for a later licensing pass, not sent to the providers: whether stored CMC or CoinPaprika responses may be committed; whether derived commercial signals require a paid contract; whether CoinGlass historical liquidations can be retained.
+Same-venue exchange data remains the candidate authority for that venue. CoinPaprika stays the production rank source. This matrix is not a provider rollout.
