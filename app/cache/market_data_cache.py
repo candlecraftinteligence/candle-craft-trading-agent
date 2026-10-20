@@ -579,7 +579,7 @@ def _serialize_value(value: Any) -> Any:
     return value
 
 
-def _deserialize_value(value: Any) -> Any:
+def _deserialize_value(value: Any, *, preserve_non_finite_decimals: bool = False) -> Any:
     if isinstance(value, Mapping):
         cache_type = value.get(CACHE_TYPE_FIELD)
         if cache_type == "pydantic":
@@ -594,17 +594,28 @@ def _deserialize_value(value: Any) -> Any:
             if isinstance(raw_decimal, bool) or raw_decimal is None:
                 raise ValueError(f"Invalid cached decimal: {raw_decimal!r}")
             parsed = Decimal(str(raw_decimal))
-            if not parsed.is_finite():
+            if not parsed.is_finite() and not preserve_non_finite_decimals:
                 raise ValueError(f"Non-finite cached decimal: {raw_decimal!r}")
             return parsed
         if cache_type == "tuple":
-            return tuple(_deserialize_value(item) for item in value.get("items", ()))
+            return tuple(
+                _deserialize_value(item, preserve_non_finite_decimals=preserve_non_finite_decimals)
+                for item in value.get("items", ())
+            )
         if cache_type == "list":
-            return [_deserialize_value(item) for item in value.get("items", ())]
+            return [
+                _deserialize_value(item, preserve_non_finite_decimals=preserve_non_finite_decimals)
+                for item in value.get("items", ())
+            ]
         if cache_type == "dict":
+            decoded_items = [(_deserialize_value(key), item) for key, item in value.get("items", ())]
+            # Candle payloads keep non-finite decimals intact so closed-window
+            # eligibility, not cache transport, decides whether they are usable.
+            candle_payload = {"open", "high", "low", "close"}.issubset(key for key, _item in decoded_items)
+            allow_non_finite = preserve_non_finite_decimals or candle_payload
             return {
-                _deserialize_value(key): _deserialize_value(item)
-                for key, item in value.get("items", ())
+                key: _deserialize_value(item, preserve_non_finite_decimals=allow_non_finite)
+                for key, item in decoded_items
             }
     return value
 

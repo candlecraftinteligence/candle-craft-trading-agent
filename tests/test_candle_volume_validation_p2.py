@@ -1151,6 +1151,123 @@ def test_r1_cutoff_parity_across_direct_cache_and_provider_paths() -> None:
     assert provider_eligible_exc.value.reason == CandleIntegrityReason.INVALID_OHLC_GEOMETRY
 
 
+@pytest.mark.parametrize(
+    "bad_volume",
+    [
+        Decimal("NaN"),
+        Decimal("sNaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
+        "NaN",
+        "sNaN",
+        "Infinity",
+        "-Infinity",
+    ],
+)
+def test_r1_non_finite_future_volume_has_cache_delivery_parity(
+    bad_volume: Any,
+    tmp_path: Path,
+) -> None:
+    closed = _control_candle(BASE_MS, volume=Decimal("10"))
+    forming = _control_candle(BASE_MS + FIFTEEN_MIN_MS, volume=bad_volume)
+    rows = [closed, forming]
+    before_close = BASE_MS + FIFTEEN_MIN_MS
+    after_close = BASE_MS + 2 * FIFTEEN_MIN_MS
+
+    def eligible_count(delivered: Any, cutoff: int) -> int:
+        window = closed_candles_as_of(delivered, timeframe="15m", decision_timestamp=cutoff)
+        return len(window.candles)
+
+    direct_before = eligible_count(rows, before_close)
+    assert direct_before == 1
+    with pytest.raises(CandleIntegrityError) as direct_after:
+        eligible_count(rows, after_close)
+    assert direct_after.value.reason == CandleIntegrityReason.INVALID_VOLUME
+    assert direct_after.value.index == 1
+
+    cache_file = tmp_path / "non_finite_volume.json"
+    clock = {"now": 100.0}
+    cache = MarketDataCache(file_path=cache_file, ttl_seconds=60, now=lambda: clock["now"])
+
+    async def fetch() -> list[dict[str, Any]]:
+        return rows
+
+    key = {"symbol": "BTCUSDT", "case": str(bad_volume)}
+    miss = _run_immediate(cache.get_or_fetch(data_type="candles", key_parts=key, fetch=fetch))
+    hit = _run_immediate(cache.get_or_fetch(data_type="candles", key_parts=key, fetch=fetch))
+    repeat_hit = _run_immediate(cache.get_or_fetch(data_type="candles", key_parts=key, fetch=fetch))
+    reloaded = MarketDataCache(file_path=cache_file, ttl_seconds=60, now=lambda: clock["now"])
+    file_hit = _run_immediate(reloaded.get_or_fetch(data_type="candles", key_parts=key, fetch=fetch))
+    clock["now"] = 161.0
+    expiry = _run_immediate(reloaded.get_or_fetch(data_type="candles", key_parts=key, fetch=fetch))
+
+    for delivered in (miss, hit, repeat_hit, file_hit, expiry):
+        assert eligible_count(delivered, before_close) == 1
+        with pytest.raises(CandleIntegrityError) as after_exc:
+            eligible_count(delivered, after_close)
+        assert after_exc.value.reason == CandleIntegrityReason.INVALID_VOLUME
+        assert after_exc.value.index == 1
+
+
+def test_r1_non_finite_eligible_interior_candle_is_not_skipped(tmp_path: Path) -> None:
+    rows = [
+        _control_candle(BASE_MS, volume=Decimal("NaN")),
+        _control_candle(BASE_MS + FIFTEEN_MIN_MS, volume=Decimal("10")),
+    ]
+    cutoff = BASE_MS + 2 * FIFTEEN_MIN_MS
+    cache_file = tmp_path / "interior_nan.json"
+    cache = MarketDataCache(file_path=cache_file, ttl_seconds=60, now=lambda: 50.0)
+
+    async def fetch() -> list[dict[str, Any]]:
+        return rows
+
+    miss = _run_immediate(
+        cache.get_or_fetch(data_type="candles", key_parts={"symbol": "ETHUSDT"}, fetch=fetch)
+    )
+    hit = _run_immediate(
+        cache.get_or_fetch(data_type="candles", key_parts={"symbol": "ETHUSDT"}, fetch=fetch)
+    )
+    reloaded = MarketDataCache(file_path=cache_file, ttl_seconds=60, now=lambda: 50.0)
+    file_hit = _run_immediate(
+        reloaded.get_or_fetch(data_type="candles", key_parts={"symbol": "ETHUSDT"}, fetch=fetch)
+    )
+    for delivered in (rows, miss, hit, file_hit):
+        with pytest.raises(CandleIntegrityError) as exc_info:
+            closed_candles_as_of(delivered, timeframe="15m", decision_timestamp=cutoff)
+        assert exc_info.value.reason == CandleIntegrityReason.INVALID_VOLUME
+        assert exc_info.value.index == 0
+
+
+def test_r1_cache_preserves_zero_volume_and_rejects_unrelated_non_finite_decimals(tmp_path: Path) -> None:
+    rows = [_control_candle(BASE_MS, volume=Decimal("0"))]
+    cache = MarketDataCache(now=lambda: 10.0)
+
+    async def fetch_candles() -> list[dict[str, Any]]:
+        return rows
+
+    miss = _run_immediate(
+        cache.get_or_fetch(data_type="candles", key_parts={"symbol": "SOLUSDT"}, fetch=fetch_candles)
+    )
+    hit = _run_immediate(
+        cache.get_or_fetch(data_type="candles", key_parts={"symbol": "SOLUSDT"}, fetch=fetch_candles)
+    )
+    for delivered in (miss, hit):
+        window = closed_candles_as_of(
+            delivered,
+            timeframe="15m",
+            decision_timestamp=BASE_MS + FIFTEEN_MIN_MS,
+        )
+        assert len(window.candles) == 1
+        assert window.candles[0]["volume"] == Decimal("0")
+
+    async def fetch_ticker() -> dict[str, Decimal]:
+        return {"last_price": Decimal("NaN")}
+
+    _run_immediate(cache.get_or_fetch(data_type="ticker", key_parts={"symbol": "SOLUSDT"}, fetch=fetch_ticker))
+    with pytest.raises(ValueError, match="Non-finite cached decimal"):
+        _run_immediate(cache.get_or_fetch(data_type="ticker", key_parts={"symbol": "SOLUSDT"}, fetch=fetch_ticker))
+
+
 def test_r2_price_only_and_optional_volume_contracts_are_consistent() -> None:
     series = [_control_candle(BASE_MS + i * FIFTEEN_MIN_MS) for i in range(250)]
     price_only = [{k: v for k, v in bar.items() if k != "volume"} for bar in series]
