@@ -57,3 +57,6 @@ replay_reports/*.json
 replay_validation/*.json
 replay_validation/*.jsonl
 !replay_validation/.gitkeep
+
+# DEV-only market-data foundation runs. Raw provider payloads stay local.
+research_runs/

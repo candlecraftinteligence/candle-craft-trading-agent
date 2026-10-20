@@ -1,0 +1,17 @@
+# F. Provider matrix
+
+Access date: 2026-10-19. Pages below were read that day. A missing cell is unresolved, not a guessed quota. No subscription was purchased. Live sampling is skipped because shared-IP spare capacity is unknown.
+
+| endpoint | history / resolution | rate / entitlement | cost / rights | unresolved |
+| --- | --- | --- | --- | --- |
+| Binance USD-M `GET /fapi/v1/klines` | repository cap `BINANCE_KLINE_LIMIT_MAX = 1500`. Official weight table was not retrieved: the developer page returned a bot wall. | public REST. Shared IP weight is cumulative and was not isolated. | public market data. Redistribution of stored bodies is not established. | current official request weight by limit |
+| Bybit `GET /v5/market/kline` | intervals `1,3,5,15,30,60,120,240,360,720,D,W,M`. Limit 1 to 1000, default 200. Newest first. Linear volume is base coin; turnover is quote. Retrieved from the V5 kline page. | public. Category defaults to linear. IP rate on this page was not stated. | public market data. Redistribution not established. | numeric IP rate limit |
+| Bybit `GET /v5/market/open-interest` | `openInterest` is both sides; `singleOpenInterest` is one side. Linear BTCUSDT unit is BTC. | public. Not called for a new sample in this correction. | no overage call | cross-venue unit equivalence |
+| CoinPaprika `GET /v1/tickers` | FAQ: REST price resolution is up to 10, 3, or 1 minute by plan. Price is a volume-weighted aggregate, not one venue. | FAQ: 10 requests/second per IP. Further quotas are plan-specific. HTTP 429 or 402 at the limit. | FAQ: commercial use inside the customer company is for paid packages. Redistribution requires Enterprise and a contract. CCI's current keyless call is not a paid package. | free-tier monthly quota; whether keyless `/v1/tickers` is inside the 10/second pool only |
+| CMC keyless `GET /v3/cryptocurrency/listings/latest` and `GET /v1/global-metrics/quotes/latest` | listings page is a current rank snapshot, not a history archive. CMC100 is a different index. | keyless GET, no API-key header, IP rate pool. No numeric quota on the keyless page. | commercial redistribution not established. Authenticated REST uses `X-CMC_PRO_API_KEY` and was not called. `/v5` derivatives market pairs are not on the keyless list. | numeric keyless quota and license for stored rows |
+| CMC MCP | not a REST history source | separate `X-CMC-MCP-API-KEY`. Two prior reads are implementer-reported only. | no new paid call | independent connection proof |
+| CoinGlass `GET /api/futures/liquidation/history` | intervals include 1m through 1w. Limit default and max 1000. Time is milliseconds. Values are USD notionals. Plan interval gate: Hobbyist `>=4h`, Startup `>=30m`, Standard and above no interval limit. Retrieved from the liquidation-history reference. | header `CG-API-KEY`. Not called. | pricing page: Hobbyist $29/month or $348/year, 80+ endpoints, 30 requests/minute, updates at most 1 minute, personal use. Startup $79/month or $948/year. Higher plan prices and the history-range column headers did not survive the page text. | exact history-range column for each plan; Enterprise price; whether USD liquidations may be retained |
+
+CoinGlass remains disabled. There is no verified no-overage allowance.
+
+Same-venue exchange data remains the candidate authority for that venue. CoinPaprika stays the production rank source. This matrix is not a provider rollout.
