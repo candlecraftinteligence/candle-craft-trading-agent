@@ -32,9 +32,9 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/data/exchange_clients/binance_futures.py:88` contains `"/fapi/v1/klines"`
+  - `app/data/exchange_clients/binance_futures.py:105` contains `"/fapi/v1/klines"`
   - `app/data/normalizers/binance.py:41` contains `volume=decimal_from(require_index(raw, 5, row_path)`
-  - `app/cache/market_data_cache.py:49` contains `"candles": 60`
+  - `app/cache/market_data_cache.py:58` contains `"candles": 60`
 
 ## ohlcv_bybit_linear
 
@@ -65,7 +65,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/data/exchange_clients/bybit_linear.py:53` contains `"/v5/market/kline"`
+  - `app/data/exchange_clients/bybit_linear.py:69` contains `"/v5/market/kline"`
   - `app/data/normalizers/bybit.py:48` contains `quote_volume=optional_decimal`
 
 ## ohlcv_synthetic_2d
@@ -128,9 +128,9 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/data/exchange_clients/binance_futures.py:121` contains `"/fapi/v1/ticker/24hr"`
+  - `app/data/exchange_clients/binance_futures.py:138` contains `"/fapi/v1/ticker/24hr"`
   - `app/data/normalizers/bybit.py:79` contains `"bybit.ticker"`
-  - `app/cache/market_data_cache.py:50` contains `"ticker": 15`
+  - `app/cache/market_data_cache.py:59` contains `"ticker": 15`
 
 ## mark_index_last
 
@@ -184,7 +184,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - fetcher: get_funding_rate via history
 - normalizer: normalize_*_funding
 - cache: data_type funding
-- consumer: ScannerRunner._fetch_optional_market_data then _derivatives_enrichment_input then _derivatives_rejection; REJECTED_BY_DERIVATIVES drops source timestamps
+- consumer: ScannerRunner._fetch_optional_market_data then _derivatives_enrichment_input then _derivatives_rejection; REJECTED_BY_DERIVATIVES drops source timestamps. Shadow evidence is separate and cannot validate a confirmation.
 - role: optional enrichment
 - missing_behavior: N/A funding context
 - code_present: yes
@@ -192,12 +192,12 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/data/exchange_clients/binance_futures.py:153` contains `"/fapi/v1/fundingRate"`
-  - `app/data/exchange_clients/bybit_linear.py:79` contains `"/v5/market/funding/history"`
-  - `app/pipeline/scanner_runner.py:2435` contains `async def _fetch_optional_market_data(`
-  - `app/pipeline/scanner_runner.py:4397` contains `def _derivatives_enrichment_input(`
-  - `app/pipeline/scanner_runner.py:4422` contains `def _derivatives_rejection(`
-  - `app/pipeline/scanner_runner.py:1670` contains `status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,`
+  - `app/data/derivatives_source_evidence.py:48` contains `"/fapi/v1/fundingRate"`
+  - `app/data/derivatives_source_evidence.py:52` contains `"/v5/market/funding/history"`
+  - `app/pipeline/scanner_runner.py:2449` contains `async def _fetch_optional_market_data(`
+  - `app/pipeline/scanner_runner.py:4507` contains `def _derivatives_enrichment_input(`
+  - `app/pipeline/scanner_runner.py:4532` contains `def _derivatives_rejection(`
+  - `app/pipeline/scanner_runner.py:1684` contains `status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,`
 
 ## open_interest
 
@@ -220,7 +220,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - fetcher: get_open_interest and get_open_interest_history
 - normalizer: normalize_*_open_interest
 - cache: open_interest and open_interest_history
-- consumer: derivatives enrichment current_open_interest; previous sample is history[-2]; timestamps are not copied onto those numbers
+- consumer: derivatives enrichment current_open_interest; legacy previous sample is history[-2]; timestamps are not copied onto those numbers. Shadow pairing is separate and cannot validate a confirmation.
 - role: optional
 - missing_behavior: N/A; never zero
 - code_present: yes
@@ -228,7 +228,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/data/exchange_clients/binance_futures.py:175` contains `"/futures/data/openInterestHist"`
+  - `app/data/derivatives_source_evidence.py:47` contains `"/futures/data/openInterestHist"`
   - `app/data/normalizers/bybit.py:158` contains `"openInterest"`
 
 ## long_short_account_ratio
@@ -260,8 +260,8 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/data/exchange_clients/binance_futures.py:184` contains `"/futures/data/globalLongShortAccountRatio"`
-  - `app/data/exchange_clients/bybit_linear.py:131` contains `"/v5/market/account-ratio"`
+  - `app/data/derivatives_source_evidence.py:49` contains `"/futures/data/globalLongShortAccountRatio"`
+  - `app/data/derivatives_source_evidence.py:53` contains `"/v5/market/account-ratio"`
 
 ## taker_flow
 
@@ -420,8 +420,8 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/pipeline/scanner_runner.py:286` contains `market_regime_enabled: bool = False`
-  - `app/pipeline/scanner_runner.py:2006` contains `"ETHUSDT", "eth_candles"`
+  - `app/pipeline/scanner_runner.py:290` contains `market_regime_enabled: bool = False`
+  - `app/pipeline/scanner_runner.py:2020` contains `"ETHUSDT", "eth_candles"`
 
 ## btc_dominance
 

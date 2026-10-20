@@ -14,6 +14,23 @@ from app.data.candle_batch_evidence import (
     observe_adapter_normalized_batch,
     unavailable_delivery,
 )
+from app.data.derivatives_instrument import InstrumentMetadata, parse_binance_usds_instrument
+from app.data.derivatives_source_evidence import (
+    ENDPOINT_BINANCE_ACCOUNT_RATIO,
+    ENDPOINT_BINANCE_EXCHANGE_INFO,
+    ENDPOINT_BINANCE_FUNDING,
+    ENDPOINT_BINANCE_OPEN_INTEREST,
+    ENDPOINT_BINANCE_OPEN_INTEREST_HIST,
+    REASON_EVIDENCE_REPRESENTATION_FAILED,
+    MetricEvidenceDelivery,
+    capture_acquisition,
+    describe_binance_account_ratio,
+    describe_binance_funding_history,
+    describe_binance_open_interest,
+    describe_binance_open_interest_history,
+    represent_delivery,
+    unavailable_batch,
+)
 from app.data.dtos import CandleDTO, FundingDTO, OpenInterestDTO, TickerDTO
 from app.data.exceptions import ExchangeResponseError
 from app.data.exchange_clients.base import PublicHTTPExchangeClient
@@ -136,32 +153,94 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         return payload
 
     async def get_funding_rate(self, symbol: str) -> FundingDTO:
+        return (await self.get_funding_rate_with_evidence(symbol)).value
+
+    async def get_funding_rate_with_evidence(
+        self,
+        symbol: str,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
         normalized_symbol = symbol.upper()
-        history = await self.get_funding_rate_history(normalized_symbol, limit=1)
-        if not history:
-            payload = await self._get_json(
-                "/fapi/v1/fundingRate",
-                params={"symbol": normalized_symbol, "limit": 1},
-            )
-            return normalize_binance_funding(normalized_symbol, payload)
-        return history[-1]
+        history = await self.get_funding_rate_history_with_evidence(
+            normalized_symbol,
+            limit=1,
+            capture_clock=capture_clock,
+        )
+        if history.value:
+            return represent_delivery(history.value[-1], history.evidence)
+        params = {"symbol": normalized_symbol, "limit": 1}
+        payload = await self._get_json(ENDPOINT_BINANCE_FUNDING, params=params)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_binance_funding(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_binance_funding_history(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="funding",
+            endpoint=ENDPOINT_BINANCE_FUNDING,
+        )
+        return represent_delivery(value, evidence)
 
     async def get_funding_rate_history(self, symbol: str, limit: int = 100) -> list[FundingDTO]:
+        return (await self.get_funding_rate_history_with_evidence(symbol, limit=limit)).value
+
+    async def get_funding_rate_history_with_evidence(
+        self,
+        symbol: str,
+        limit: int = 100,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
         _validate_limit(limit, maximum=1000)
         normalized_symbol = symbol.upper()
-        payload = await self._get_json(
-            "/fapi/v1/fundingRate",
-            params={"symbol": normalized_symbol, "limit": limit},
+        params = {"symbol": normalized_symbol, "limit": limit}
+        payload = await self._get_json(ENDPOINT_BINANCE_FUNDING, params=params)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_binance_funding_history(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_binance_funding_history(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="funding",
+            endpoint=ENDPOINT_BINANCE_FUNDING,
         )
-        return normalize_binance_funding_history(normalized_symbol, payload)
+        return represent_delivery(value, evidence)
 
     async def get_open_interest(self, symbol: str) -> OpenInterestDTO:
+        return (await self.get_open_interest_with_evidence(symbol)).value
+
+    async def get_open_interest_with_evidence(
+        self,
+        symbol: str,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
         normalized_symbol = symbol.upper()
-        payload = await self._get_json(
-            "/fapi/v1/openInterest",
-            params={"symbol": normalized_symbol},
+        params = {"symbol": normalized_symbol}
+        payload = await self._get_json(ENDPOINT_BINANCE_OPEN_INTEREST, params=params)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_binance_open_interest(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_binance_open_interest(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="open_interest",
+            endpoint=ENDPOINT_BINANCE_OPEN_INTEREST,
         )
-        return normalize_binance_open_interest(normalized_symbol, payload)
+        return represent_delivery(value, evidence)
 
     async def get_open_interest_history(
         self,
@@ -169,22 +248,85 @@ class BinanceFuturesClient(PublicHTTPExchangeClient):
         limit: int = 30,
         period: str = "5m",
     ) -> list[OpenInterestDTO]:
+        return (await self.get_open_interest_history_with_evidence(symbol, limit=limit, period=period)).value
+
+    async def get_open_interest_history_with_evidence(
+        self,
+        symbol: str,
+        limit: int = 30,
+        period: str = "5m",
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
         _validate_limit(limit, maximum=500)
         normalized_symbol = symbol.upper()
-        payload = await self._get_json(
-            "/futures/data/openInterestHist",
-            params={"symbol": normalized_symbol, "period": period, "limit": limit},
+        params = {"symbol": normalized_symbol, "period": period, "limit": limit}
+        payload = await self._get_json(ENDPOINT_BINANCE_OPEN_INTEREST_HIST, params=params)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_binance_open_interest_history(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_binance_open_interest_history(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="open_interest_history",
+            endpoint=ENDPOINT_BINANCE_OPEN_INTEREST_HIST,
         )
-        return normalize_binance_open_interest_history(normalized_symbol, payload)
+        return represent_delivery(value, evidence)
 
     async def get_long_short_ratio(self, symbol: str, limit: int = 1, period: str = "5m") -> Decimal:
+        return (await self.get_long_short_ratio_with_evidence(symbol, limit=limit, period=period)).value
+
+    async def get_long_short_ratio_with_evidence(
+        self,
+        symbol: str,
+        limit: int = 1,
+        period: str = "5m",
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
         _validate_limit(limit, maximum=500)
         normalized_symbol = symbol.upper()
-        payload = await self._get_json(
-            "/futures/data/globalLongShortAccountRatio",
-            params={"symbol": normalized_symbol, "period": period, "limit": limit},
+        params = {"symbol": normalized_symbol, "period": period, "limit": limit}
+        payload = await self._get_json(ENDPOINT_BINANCE_ACCOUNT_RATIO, params=params)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_binance_long_short_ratio(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_binance_account_ratio(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="account_ratio",
+            endpoint=ENDPOINT_BINANCE_ACCOUNT_RATIO,
         )
-        return normalize_binance_long_short_ratio(normalized_symbol, payload)
+        return represent_delivery(value, evidence)
+
+    async def get_instrument_metadata(
+        self,
+        symbol: str,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> InstrumentMetadata:
+        normalized_symbol = symbol.upper()
+        payload = await self._get_json(ENDPOINT_BINANCE_EXCHANGE_INFO, params={"symbol": normalized_symbol})
+        return parse_binance_usds_instrument(
+            payload,
+            requested_symbol=normalized_symbol,
+            acquisition=capture_acquisition(capture_clock),
+        )
+
+
+def _describe_safely(build, *, metric: str, endpoint: str):
+    try:
+        return build()
+    except Exception:
+        return unavailable_batch(metric=metric, endpoint=endpoint, reason=REASON_EVIDENCE_REPRESENTATION_FAILED)
 
 
 def _validate_limit(limit: int, *, maximum: int) -> None:

@@ -29,6 +29,10 @@ from app.analytics.derivatives_enrichment import (
     DerivativesEnrichmentResult,
     enrich_derivatives,
 )
+from app.analytics.derivatives_source_truth import (
+    DerivativesSourceTruthResult,
+    evaluate_derivatives_source_truth,
+)
 from app.analytics.near_miss_intelligence import NearMissIntelligence, build_near_miss_intelligence
 from app.analytics.pullback_intelligence import PullbackIntelligenceResult, build_pullback_intelligence
 from app.analytics.market_regime import (
@@ -309,6 +313,7 @@ class ScannerRunConfig(BaseModel):
     order_book_liquidity_bootstrap_concurrency: int = 2
     order_book_liquidity_event_buffer_size: int = 256
     decision_timestamp: datetime | None = None
+    derivatives_source_truth_shadow: bool = False
 
     model_config = ConfigDict(frozen=True)
 
@@ -656,6 +661,11 @@ class ScannerSymbolResult(BaseModel):
     lifecycle_decision_timestamp: datetime | None = Field(default=None, exclude=True)
     lifecycle_execution_batch_delivery: CandleBatchDelivery | None = Field(default=None, exclude=True, repr=False)
     lifecycle_batch_handoff: BatchHandoffAssociation | None = Field(default=None, exclude=True, repr=False)
+    derivatives_source_truth_shadow: DerivativesSourceTruthResult | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -790,6 +800,10 @@ class _OptionalMarketData(BaseModel):
     missing_data: tuple[str, ...] = ()
     unverified_data: tuple[str, ...] = ()
     sector_member_feature: SectorMemberFeature | None = None
+    derivatives_source_truth_requested: bool = Field(default=False, exclude=True)
+    derivatives_evidence: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
+    derivatives_instrument: Any | None = Field(default=None, exclude=True, repr=False)
+    derivatives_decision_cutoff: datetime | None = Field(default=None, exclude=True)
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -2461,7 +2475,7 @@ class ScannerRunner:
                 if label not in skipped_fast_labels
             )
         )
-        values_by_label = {label: value for label, value, _missing, _warning in optional_results}
+        values_by_label = {label: value for label, value, _missing, _warning, _evidence in optional_results}
         for label, _method_name in optional_specs:
             if label in skipped_fast_labels:
                 missing_data.append(f"{label}: N/A")
@@ -2470,7 +2484,7 @@ class ScannerRunner:
             result = next((item for item in optional_results if item[0] == label), None)
             if result is None:
                 continue
-            _label, _value, missing, warning = result
+            _label, _value, missing, warning, _evidence = result
             if missing is not None:
                 missing_data.append(missing)
             if warning is not None:
@@ -2490,6 +2504,18 @@ class ScannerRunner:
         if previous_open_interest == NA:
             missing_data.append("previous_open_interest: N/A")
 
+        evidence: dict[str, Any] | None = None
+        instrument = None
+        if config.derivatives_source_truth_shadow:
+            evidence = {
+                label: item
+                for label, _value, _missing, _warning, item in optional_results
+                if item is not None
+            }
+            for label in skipped_fast_labels:
+                evidence[label] = _shadow_unavailable(label, symbol, "fast_mode_skipped")
+            instrument = await self._shadow_instrument(client, symbol, config)
+
         return _OptionalMarketData(
             ticker=ticker,
             funding=funding,
@@ -2501,6 +2527,10 @@ class ScannerRunner:
             warnings=_unique_strings(warnings),
             missing_data=_unique_strings(missing_data),
             unverified_data=_unique_strings(unverified_data),
+            derivatives_source_truth_requested=config.derivatives_source_truth_shadow,
+            derivatives_evidence=evidence,
+            derivatives_instrument=instrument,
+            derivatives_decision_cutoff=config.decision_timestamp,
         )
 
     async def _optional_call(
@@ -2510,21 +2540,64 @@ class ScannerRunner:
         symbol: str,
         config: ScannerRunConfig,
         label: str,
-    ) -> tuple[str, Any | None, str | None, str | None]:
-        method = getattr(client, method_name, None)
+    ) -> tuple[str, Any | None, str | None, str | None, Any | None]:
+        evidence_method = getattr(client, f"{method_name}_with_evidence", None) if config.derivatives_source_truth_shadow else None
+        method = evidence_method if callable(evidence_method) else getattr(client, method_name, None)
         if not callable(method):
-            return label, None, f"{label}: N/A", None
+            evidence = _shadow_unavailable(label, symbol, "adapter_has_no_source_evidence") if config.derivatives_source_truth_shadow else None
+            return label, None, f"{label}: N/A", None, evidence
         try:
+            if callable(evidence_method):
+                delivery = await self._request_public_api(
+                    config,
+                    f"{symbol} {label}",
+                    lambda: evidence_method(symbol, capture_clock=self.capture_clock),
+                    timeout_sec=_optional_request_timeout(config),
+                )
+                return label, getattr(delivery, "value", delivery), None, None, getattr(delivery, "evidence", None)
             value = await self._request_public_api(
                 config,
                 f"{symbol} {label}",
                 lambda: method(symbol),
                 timeout_sec=_optional_request_timeout(config),
             )
-            return label, value, None, None
+            evidence = (
+                _shadow_unavailable(label, symbol, "adapter_has_no_source_evidence")
+                if config.derivatives_source_truth_shadow
+                else None
+            )
+            return label, value, None, None, evidence
         except Exception as exc:
             self.logger.debug("Optional %s fetch failed for symbol=%s: %s", label, symbol, exc)
-            return label, None, f"{label}: N/A", f"{label} unavailable from public endpoint: {exc}"
+            evidence = _shadow_unavailable(label, symbol, "source_fetch_failed") if config.derivatives_source_truth_shadow else None
+            return label, None, f"{label}: N/A", f"{label} unavailable from public endpoint: {exc}", evidence
+
+    async def _shadow_instrument(self, client: BaseExchangeClient, symbol: str, config: ScannerRunConfig) -> Any:
+        from app.data.derivatives_instrument import unverified_instrument
+
+        method = getattr(client, "get_instrument_metadata", None)
+        if not callable(method):
+            return unverified_instrument(
+                exchange=config.exchange,
+                requested_symbol=symbol,
+                source_endpoint="get_instrument_metadata",
+                reason="adapter_has_no_source_evidence",
+            )
+        try:
+            return await self._request_public_api(
+                config,
+                f"{symbol} instrument_metadata",
+                lambda: method(symbol, capture_clock=self.capture_clock),
+                timeout_sec=_optional_request_timeout(config),
+            )
+        except Exception as exc:
+            self.logger.debug("Shadow instrument lookup failed for symbol=%s: %s", symbol, exc)
+            return unverified_instrument(
+                exchange=config.exchange,
+                requested_symbol=symbol,
+                source_endpoint="get_instrument_metadata",
+                reason="instrument_lookup_failed",
+            )
 
     async def _request_klines_delivery(
         self,
@@ -2693,6 +2766,7 @@ class ScannerRunner:
         candidate_quality_grade = _display_decimal_or_text(
             getattr(setup_quality.quality_grade, "value", setup_quality.quality_grade)
         )
+        shadow = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
         return ScannerSymbolResult(
             symbol=symbol,
             status=status,
@@ -2828,6 +2902,42 @@ class ScannerRunner:
             setup_quality=setup_quality,
             candidate_quality_grade=candidate_quality_grade,
             final_quality_grade=candidate_quality_grade,
+            derivatives_source_truth_shadow=shadow,
+        )
+
+
+def _shadow_unavailable(label: str, symbol: str, reason: str) -> Any:
+    from app.data.derivatives_source_evidence import unavailable_batch
+
+    return unavailable_batch(metric=label, endpoint=label, requested_symbol=symbol, reason=reason)
+
+
+def _derivatives_shadow_result(
+    optional_data: _OptionalMarketData,
+    liquidation_flow: Any,
+) -> DerivativesSourceTruthResult | None:
+    if not optional_data.derivatives_source_truth_requested:
+        return None
+    evidence = optional_data.derivatives_evidence or {}
+    try:
+        return evaluate_derivatives_source_truth(
+            decision_cutoff=optional_data.derivatives_decision_cutoff,
+            instrument=optional_data.derivatives_instrument,
+            open_interest=evidence.get("open_interest"),
+            open_interest_history=evidence.get("open_interest_history"),
+            funding=evidence.get("funding_rate"),
+            funding_history=evidence.get("funding_history"),
+            account_ratio=evidence.get("long_short_ratio"),
+            liquidation_snapshot=liquidation_flow,
+        )
+    except Exception as exc:
+        return DerivativesSourceTruthResult(
+            classification="evaluation_error",
+            validated_confirmation=False,
+            supports_long="unverified",
+            supports_short="unverified",
+            reason_codes=("evaluation_error",),
+            evaluation_error=type(exc).__name__,
         )
 
 

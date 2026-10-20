@@ -14,6 +14,15 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from app.data.derivatives_source_evidence import (
+    REASON_ADAPTER_WITHOUT_EVIDENCE,
+    DerivativesEvidenceBatch,
+    MetricEvidenceDelivery,
+    apply_cache_delivery,
+    represent_delivery,
+    sample_capture_clock,
+    unavailable_batch,
+)
 from app.data.candle_batch_evidence import (
     CACHE_KIND_EXPIRY_REFETCH,
     CACHE_KIND_HIT,
@@ -53,6 +62,7 @@ DEFAULT_TTLS_SECONDS: dict[str, int] = {
     "open_interest": 30,
     "open_interest_history": 30,
     "long_short_ratio": 60,
+    "instrument": 300,
 }
 
 
@@ -486,6 +496,259 @@ class CachedMarketDataClient(BaseExchangeClient):
             fetch=fetch,
         )
 
+    async def get_funding_rate_with_evidence(self, symbol: str, *, capture_clock: Callable[[], datetime] | None = None) -> MetricEvidenceDelivery:
+        normalized_symbol = symbol.upper()
+        return await self._cached_metric_evidence(
+            data_type="funding",
+            key_parts={
+                "exchange": self.exchange_name,
+                "symbol": normalized_symbol,
+                "endpoint": "get_funding_rate",
+                "interval": None,
+                "limit": 1,
+                "params": {},
+            },
+            metric="funding",
+            endpoint="get_funding_rate",
+            capture_clock=capture_clock,
+            fetch=lambda: _call_evidence_or_legacy(
+                self.client,
+                "get_funding_rate_with_evidence",
+                "get_funding_rate",
+                normalized_symbol,
+                {},
+                capture_clock=capture_clock,
+                metric="funding",
+                endpoint="get_funding_rate",
+            ),
+        )
+
+    async def get_funding_rate_history_with_evidence(
+        self,
+        symbol: str,
+        limit: int = 100,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
+        normalized_symbol = symbol.upper()
+        return await self._cached_metric_evidence(
+            data_type="funding_history",
+            key_parts={
+                "exchange": self.exchange_name,
+                "symbol": normalized_symbol,
+                "endpoint": "get_funding_rate_history",
+                "interval": None,
+                "limit": limit,
+                "params": {},
+            },
+            metric="funding",
+            endpoint="get_funding_rate_history",
+            capture_clock=capture_clock,
+            fetch=lambda: _call_evidence_or_legacy(
+                self.client,
+                "get_funding_rate_history_with_evidence",
+                "get_funding_rate_history",
+                normalized_symbol,
+                {"limit": limit},
+                capture_clock=capture_clock,
+                metric="funding",
+                endpoint="get_funding_rate_history",
+            ),
+        )
+
+    async def get_open_interest_with_evidence(self, symbol: str, *, capture_clock: Callable[[], datetime] | None = None) -> MetricEvidenceDelivery:
+        normalized_symbol = symbol.upper()
+        return await self._cached_metric_evidence(
+            data_type="open_interest",
+            key_parts={
+                "exchange": self.exchange_name,
+                "symbol": normalized_symbol,
+                "endpoint": "get_open_interest",
+                "interval": None,
+                "limit": None,
+                "params": {},
+            },
+            metric="open_interest",
+            endpoint="get_open_interest",
+            capture_clock=capture_clock,
+            fetch=lambda: _call_evidence_or_legacy(
+                self.client,
+                "get_open_interest_with_evidence",
+                "get_open_interest",
+                normalized_symbol,
+                {},
+                capture_clock=capture_clock,
+                metric="open_interest",
+                endpoint="get_open_interest",
+            ),
+        )
+
+    async def get_open_interest_history_with_evidence(
+        self,
+        symbol: str,
+        limit: int = 30,
+        period: str | None = None,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
+        normalized_symbol = symbol.upper()
+        default_period = _default_parameter(self.client, "get_open_interest_history", "period")
+        effective_period = period if period is not None else default_period
+        if effective_period is None:
+            effective_period = getattr(self.client, "open_interest_interval", None)
+        params: dict[str, Any] = {"limit": limit}
+        if period is not None:
+            params["period"] = period
+        return await self._cached_metric_evidence(
+            data_type="open_interest_history",
+            key_parts={
+                "exchange": self.exchange_name,
+                "symbol": normalized_symbol,
+                "endpoint": "get_open_interest_history",
+                "interval": effective_period,
+                "limit": limit,
+                "params": {"period": effective_period},
+            },
+            metric="open_interest",
+            endpoint="get_open_interest_history",
+            capture_clock=capture_clock,
+            fetch=lambda: _call_evidence_or_legacy(
+                self.client,
+                "get_open_interest_history_with_evidence",
+                "get_open_interest_history",
+                normalized_symbol,
+                params,
+                capture_clock=capture_clock,
+                metric="open_interest",
+                endpoint="get_open_interest_history",
+            ),
+        )
+
+    async def get_long_short_ratio_with_evidence(
+        self,
+        symbol: str,
+        limit: int = 1,
+        period: str | None = None,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
+        normalized_symbol = symbol.upper()
+        default_period = _default_parameter(self.client, "get_long_short_ratio", "period")
+        effective_period = period if period is not None else default_period
+        params: dict[str, Any] = {"limit": limit}
+        if period is not None:
+            params["period"] = period
+        return await self._cached_metric_evidence(
+            data_type="long_short_ratio",
+            key_parts={
+                "exchange": self.exchange_name,
+                "symbol": normalized_symbol,
+                "endpoint": "get_long_short_ratio",
+                "interval": effective_period,
+                "limit": limit,
+                "params": {"period": effective_period},
+            },
+            metric="account_ratio",
+            endpoint="get_long_short_ratio",
+            capture_clock=capture_clock,
+            fetch=lambda: _call_evidence_or_legacy(
+                self.client,
+                "get_long_short_ratio_with_evidence",
+                "get_long_short_ratio",
+                normalized_symbol,
+                params,
+                capture_clock=capture_clock,
+                metric="account_ratio",
+                endpoint="get_long_short_ratio",
+            ),
+        )
+
+    async def get_instrument_metadata(self, symbol: str, *, capture_clock: Callable[[], datetime] | None = None) -> Any:
+        from app.data.derivatives_instrument import InstrumentMetadata, unverified_instrument
+
+        normalized_symbol = symbol.upper()
+        method = getattr(self.client, "get_instrument_metadata", None)
+        if not callable(method):
+            return unverified_instrument(
+                exchange=self.exchange_name,
+                requested_symbol=normalized_symbol,
+                source_endpoint="get_instrument_metadata",
+                reason=REASON_ADAPTER_WITHOUT_EVIDENCE,
+            )
+        box: list[InstrumentMetadata] = []
+
+        async def fetch() -> dict[str, str]:
+            metadata = await method(normalized_symbol, capture_clock=capture_clock)
+            if isinstance(metadata, InstrumentMetadata):
+                box.append(metadata)
+            return {"source": "instrument_metadata", "symbol": normalized_symbol}
+
+        recorded = await self.cache.get_or_fetch_with_local_delivery(
+            data_type="instrument",
+            key_parts={
+                "exchange": self.exchange_name,
+                "symbol": normalized_symbol,
+                "endpoint": "get_instrument_metadata",
+                "interval": None,
+                "limit": None,
+                "params": {},
+            },
+            fetch=fetch,
+            bind_upstream=lambda: box[-1] if box else None,
+        )
+        if isinstance(recorded.retained_upstream, InstrumentMetadata):
+            return recorded.retained_upstream
+        reason = (
+            "legacy_cache_entry_lacks_acquisition_observation"
+            if recorded.file_loaded_entry
+            else "uninstrumented_cache_entry_lacks_acquisition_observation"
+        )
+        return unverified_instrument(
+            exchange=self.exchange_name,
+            requested_symbol=normalized_symbol,
+            source_endpoint="get_instrument_metadata",
+            reason=reason,
+        )
+
+    async def _cached_metric_evidence(
+        self,
+        *,
+        data_type: str,
+        key_parts: Mapping[str, Any],
+        metric: str,
+        endpoint: str,
+        capture_clock: Callable[[], datetime] | None,
+        fetch: Callable[[], Awaitable[MetricEvidenceDelivery]],
+    ) -> MetricEvidenceDelivery:
+        box: list[DerivativesEvidenceBatch] = []
+
+        async def fetch_value() -> Any:
+            delivery = await fetch()
+            box.append(delivery.evidence)
+            return delivery.value
+
+        recorded = await self.cache.get_or_fetch_with_local_delivery(
+            data_type=data_type,
+            key_parts=key_parts,
+            fetch=fetch_value,
+            bind_upstream=lambda: box[-1] if box else None,
+        )
+        try:
+            delivered_at = sample_capture_clock(capture_clock)
+        except (TypeError, ValueError, OverflowError, OSError):
+            delivered_at = None
+        upstream = recorded.retained_upstream if isinstance(recorded.retained_upstream, DerivativesEvidenceBatch) else None
+        evidence = apply_cache_delivery(
+            upstream,
+            delivery_kind=recorded.delivery_kind,
+            delivered_at=delivered_at,
+            file_rehydrated=recorded.file_loaded_entry,
+            legacy_value=recorded.value,
+            metric=metric,
+            endpoint=endpoint,
+        )
+        return represent_delivery(recorded.value, evidence)
+
     async def aclose(self) -> None:
         close = getattr(self.client, "aclose", None)
         if callable(close):
@@ -519,6 +782,34 @@ def _default_parameter(client: BaseExchangeClient, method_name: str, parameter_n
     if parameter is None or parameter.default is inspect.Parameter.empty:
         return None
     return parameter.default
+
+
+async def _call_evidence_or_legacy(
+    client: BaseExchangeClient,
+    evidence_method_name: str,
+    legacy_method_name: str,
+    symbol: str,
+    params: Mapping[str, Any],
+    *,
+    capture_clock: Callable[[], datetime] | None,
+    metric: str,
+    endpoint: str,
+) -> MetricEvidenceDelivery:
+    evidence_method = getattr(client, evidence_method_name, None)
+    if callable(evidence_method):
+        accepted = _accepted_kwargs(evidence_method, params)
+        return await evidence_method(symbol, capture_clock=capture_clock, **accepted)
+    value = await _call_public_method(client, legacy_method_name, symbol, params)
+    return represent_delivery(
+        value,
+        unavailable_batch(
+            metric=metric,
+            endpoint=endpoint,
+            exchange=str(getattr(client, "exchange_name", "N/A")),
+            requested_symbol=symbol,
+            reason=REASON_ADAPTER_WITHOUT_EVIDENCE,
+        ),
+    )
 
 
 async def _call_public_method(
