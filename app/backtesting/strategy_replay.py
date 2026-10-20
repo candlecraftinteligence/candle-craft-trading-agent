@@ -372,6 +372,7 @@ class StrategyReplayEngine:
                     candles,
                     timeframe=timeframe,
                     require_continuity=True,
+                    require_volume=False,
                 )
         execution_timeframe = replay_config.execution_timeframe
         raw_execution = tuple(candles_by_timeframe.get(execution_timeframe, ()))
@@ -789,6 +790,7 @@ def _slice_until(
         timeframe=timeframe,
         decision_timestamp=decision_timestamp,
         minimum_closed_history=0,
+        require_volume=False,
     ).candles
 
 

@@ -119,6 +119,13 @@ def has_valid_stored_plan_geometry(record: Any) -> bool:
 
 
 def candle_range(causal: CausalCandle) -> tuple[Decimal, Decimal]:
+    """Price-range evidence for owned-outcome evaluation.
+
+    Required: strictly positive high/low with high >= low. Open/close, if present,
+    must sit inside that range. Volume/quote_volume/turnover, if present, must be
+    non-negative. Missing volume is allowed so price-only outcome bars remain usable.
+    trade_count is outside this contract and is not inspected.
+    """
     high = _required_decimal(_field(causal.source, "high"), "candle_high")
     low = _required_decimal(_field(causal.source, "low"), "candle_low")
     if high <= 0 or low <= 0 or high < low:

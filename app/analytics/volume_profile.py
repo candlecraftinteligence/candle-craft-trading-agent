@@ -227,6 +227,16 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_ProfileCandle, ..
         if required["low"] > min(required["open"], required["close"]):
             raise ValueError(f"Malformed candle candles[{index}]: low is above open or close.")
 
+        from app.data.candle_integrity import (
+            normalize_optional_timestamp_ms,
+            validate_optional_candle_metadata,
+        )
+
+        normalize_optional_timestamp_ms(
+            _field(candle, "timestamp"),
+            field_name=f"candles[{index}].timestamp",
+        )
+        validate_optional_candle_metadata(candle, path=f"candles[{index}]")
         volume_value = _field(candle, "volume")
         if _is_missing(volume_value):
             volume: MaybeDecimal = NA

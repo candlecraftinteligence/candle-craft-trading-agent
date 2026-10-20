@@ -44,7 +44,7 @@ def build_internal_btc_context(
         if not candles:
             continue
         try:
-            timeline = validate_candle_sequence(candles, timeframe=timeframe)
+            timeline = validate_candle_sequence(candles, timeframe=timeframe, require_volume=False)
             observed_at = timeline[-1].close_timestamp
             age_seconds = _age_seconds(generated_utc, observed_at)
             status = _freshness_status(

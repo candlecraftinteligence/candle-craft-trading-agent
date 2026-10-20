@@ -658,6 +658,7 @@ def _latest_close(candles: Sequence[Any], timeframe: str, decision_timestamp: st
             decision_timestamp=decision_timestamp,
             minimum_closed_history=0,
             require_continuity=False,
+            require_volume=False,
         )
     except (TypeError, ValueError):
         return None

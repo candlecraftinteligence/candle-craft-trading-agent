@@ -167,7 +167,7 @@ def _causal_regime_candles(
             candles,
             timeframe=timeframe,
             decision_timestamp=decision_timestamp,
-            minimum_closed_history=0,
+            minimum_closed_history=0, require_volume=False,
         )
     except CandleIntegrityError as exc:
         return (), (f"{symbol}_candles: N/A ({exc})",)
@@ -504,6 +504,13 @@ def _normalized_candles(raw_candles: Sequence[Any]) -> tuple[_Candle, ...]:
             if raw_volume not in (None, "", NA):
                 if _decimal_from(raw_volume, "candle.volume") < 0:
                     return ()
+            from app.data.candle_integrity import (
+                normalize_optional_timestamp_ms,
+                validate_optional_candle_metadata,
+            )
+
+            normalize_optional_timestamp_ms(_field(item, "timestamp"), field_name="candle.timestamp")
+            validate_optional_candle_metadata(item, path="candle")
             candle = _Candle(
                 open=open_price,
                 high=high_price,

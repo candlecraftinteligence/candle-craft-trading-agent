@@ -67,7 +67,6 @@ class CandleDTO(MarketDataDTO):
                 CandleIntegrityError,
                 CandleIntegrityReason,
                 normalize_utc_timestamp,
-                validate_candle_values,
             )
 
             timeframe = str(data.get("interval") or "unknown").strip().lower() or "unknown"
@@ -104,22 +103,60 @@ class CandleDTO(MarketDataDTO):
                         timeframe=timeframe,
                     ) from exc
 
-            validate_candle_values(
-                data,
-                timeframe=timeframe,
-                require_volume=True,
-            )
+            for price_field in ("open", "high", "low", "close"):
+                raw_price = data.get(price_field)
+                if isinstance(raw_price, bool):
+                    raise CandleIntegrityError(
+                        CandleIntegrityReason.INVALID_PRICE,
+                        f"CandleDTO field '{price_field}' must be a finite Decimal, not bool",
+                        timeframe=timeframe,
+                    )
+            for vol_field in ("volume", "quote_volume"):
+                raw_vol = data.get(vol_field, NA)
+                if isinstance(raw_vol, bool):
+                    raise CandleIntegrityError(
+                        CandleIntegrityReason.INVALID_VOLUME,
+                        f"CandleDTO field '{vol_field}' must not be bool",
+                        timeframe=timeframe,
+                    )
+            raw_trades = data.get("trade_count", NA)
+            if isinstance(raw_trades, bool) or (
+                raw_trades != NA and raw_trades is not None and not isinstance(raw_trades, int)
+            ):
+                raise CandleIntegrityError(
+                    CandleIntegrityReason.INVALID_VOLUME,
+                    "CandleDTO field 'trade_count' must be an integer or N/A",
+                    timeframe=timeframe,
+                )
         return data
 
     @model_validator(mode="after")
     def _validate_constructed_candle(self) -> CandleDTO:
-        from app.data.candle_integrity import validate_candle_values
+        from app.data.candle_integrity import CandleIntegrityError, CandleIntegrityReason
 
-        validate_candle_values(
-            self,
-            timeframe=self.interval,
-            require_volume=True,
-        )
+        timeframe = str(self.interval or "unknown").strip().lower() or "unknown"
+        for price_field in ("open", "high", "low", "close"):
+            val = getattr(self, price_field)
+            if not isinstance(val, Decimal) or not val.is_finite():
+                raise CandleIntegrityError(
+                    CandleIntegrityReason.INVALID_PRICE,
+                    f"CandleDTO field '{price_field}' must be a finite Decimal",
+                    timeframe=timeframe,
+                )
+        if not isinstance(self.volume, Decimal) or not self.volume.is_finite():
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_VOLUME,
+                "CandleDTO field 'volume' must be a finite Decimal",
+                timeframe=timeframe,
+            )
+        if self.quote_volume != NA and (
+            not isinstance(self.quote_volume, Decimal) or not self.quote_volume.is_finite()
+        ):
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_VOLUME,
+                "CandleDTO field 'quote_volume' must be a finite Decimal or N/A",
+                timeframe=timeframe,
+            )
         return self
 
 

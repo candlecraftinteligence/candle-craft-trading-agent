@@ -1195,8 +1195,19 @@ def _normalize_candles(candles: Sequence[Any], label: str) -> tuple[tuple[_Candl
             continue
 
         raw_timestamp = _get_field(candle, "timestamp")
-        if isinstance(raw_timestamp, bool):
-            errors.append(f"Malformed candle {label}[{index}].timestamp: boolean timestamp is invalid.")
+        try:
+            from app.data.candle_integrity import (
+                normalize_optional_timestamp_ms,
+                validate_optional_candle_metadata,
+            )
+
+            normalized_timestamp = normalize_optional_timestamp_ms(
+                raw_timestamp,
+                field_name=f"{label}[{index}].timestamp",
+            )
+            validate_optional_candle_metadata(candle, path=f"{label}[{index}]")
+        except ValueError as exc:
+            errors.append(str(exc))
             continue
         volume_value = _get_field(candle, "volume")
         try:
@@ -1211,7 +1222,7 @@ def _normalize_candles(candles: Sequence[Any], label: str) -> tuple[tuple[_Candl
         normalized.append(
             _Candle(
                 index=index,
-                timestamp=_normalize_timestamp(_get_field(candle, "timestamp")),
+                timestamp=normalized_timestamp,
                 open=required["open"],
                 high=required["high"],
                 low=required["low"],

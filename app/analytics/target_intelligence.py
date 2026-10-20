@@ -902,10 +902,24 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_Candle, ...], tup
         if volume != NA and volume < 0:
             warnings.append(f"candles[{index}].volume: negative")
             continue
+        try:
+            from app.data.candle_integrity import (
+                normalize_optional_timestamp_ms,
+                validate_optional_candle_metadata,
+            )
+
+            normalized_ts = normalize_optional_timestamp_ms(
+                _field(candle, "timestamp"),
+                field_name=f"candles[{index}].timestamp",
+            )
+            validate_optional_candle_metadata(candle, path=f"candles[{index}]")
+        except ValueError:
+            warnings.append(f"candles[{index}]: malformed")
+            continue
         normalized.append(
             _Candle(
                 index=int(_field(candle, "index") if _field(candle, "index") is not None else index),
-                timestamp=_field(candle, "timestamp") if _field(candle, "timestamp") is not None else NA,
+                timestamp=normalized_ts,
                 open=open_price,
                 high=high,
                 low=low,

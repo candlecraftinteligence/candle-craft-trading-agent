@@ -602,19 +602,10 @@ def _deserialize_value(value: Any) -> Any:
         if cache_type == "list":
             return [_deserialize_value(item) for item in value.get("items", ())]
         if cache_type == "dict":
-            result = {
+            return {
                 _deserialize_value(key): _deserialize_value(item)
                 for key, item in value.get("items", ())
             }
-            if all(k in result for k in ("open", "high", "low", "close")):
-                from app.data.candle_integrity import validate_candle_values
-
-                validate_candle_values(
-                    result,
-                    timeframe=str(result.get("interval") or "unknown"),
-                    require_volume="volume" in result,
-                )
-            return result
     return value
 
 

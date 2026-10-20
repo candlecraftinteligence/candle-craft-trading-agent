@@ -46,6 +46,7 @@ from app.data.candle_integrity import (
     CandleIntegrityReason,
     closed_candles_as_of,
     evaluate_candle_shadow_diagnostics,
+    get_recorded_candle_shadow_diagnostics,
     normalize_utc_timestamp,
     validate_candle_sequence,
     validate_candle_values,
@@ -68,6 +69,7 @@ from app.lifecycle.outcomes import (
 )
 from app.lifecycle.owner_monitoring import (
     SymbolMonitoringEvidence,
+    _latest_close,
     classify_market_data_failure,
     monitor_obligations_with_market_data,
 )
@@ -350,17 +352,26 @@ def test_binance_and_bybit_normalizers_enforce_ohlcv_and_ordering() -> None:
     assert dto_list[0].volume == Decimal("15.5")
     assert dto_list[0].quote_volume == Decimal("1565.5")
 
-    # Negative volume, zero low, high < open, NaN, bool rejected in Binance normalizer
+    # Parse-level malformed fields remain rejected at the normalizer.
     for mutated_row, expected_exc in (
-        ([BASE_MS, "100", "99", "98", "99", "10", BASE_MS + FIFTEEN_MIN_MS - 1, "100", 5], CandleIntegrityError),
-        ([BASE_MS, "100", "101", "0", "100", "10", BASE_MS + FIFTEEN_MIN_MS - 1, "100", 5], CandleIntegrityError),
-        ([BASE_MS, "100", "101", "99", "100", "-1", BASE_MS + FIFTEEN_MIN_MS - 1, "100", 5], CandleIntegrityError),
         ([BASE_MS, "100", "101", "99", "100", "NaN", BASE_MS + FIFTEEN_MIN_MS - 1, "100", 5], ExchangeResponseError),
         ([True, "100", "101", "99", "100", "10", BASE_MS + FIFTEEN_MIN_MS - 1, "100", 5], ExchangeResponseError),
         ([BASE_MS, "100", "101", "99"], ExchangeMissingFieldError),
     ):
         with pytest.raises(expected_exc):
             normalize_binance_klines("BTCUSDT", "15m", [mutated_row])
+
+    # OHLC/volume geometry is preserved through DTO construction so forming rows
+    # can be delivered, then rejected at the eligible closed-window boundary.
+    for mutated_row, expected_reason in (
+        ([BASE_MS, "100", "99", "98", "99", "10", BASE_MS + FIFTEEN_MIN_MS - 1, "100", 5], CandleIntegrityReason.INVALID_OHLC_GEOMETRY),
+        ([BASE_MS, "100", "101", "0", "100", "10", BASE_MS + FIFTEEN_MIN_MS - 1, "100", 5], CandleIntegrityReason.INVALID_PRICE),
+        ([BASE_MS, "100", "101", "99", "100", "-1", BASE_MS + FIFTEEN_MIN_MS - 1, "100", 5], CandleIntegrityReason.INVALID_VOLUME),
+    ):
+        delivered = normalize_binance_klines("BTCUSDT", "15m", [mutated_row])
+        with pytest.raises(CandleIntegrityError) as seq_exc:
+            validate_candle_sequence(delivered, timeframe="15m")
+        assert seq_exc.value.reason == expected_reason
 
     # Bybit newest-first valid payload reversed; mixed order is NOT sorted away
     bybit_newest_first = {
@@ -395,12 +406,14 @@ def test_binance_and_bybit_normalizers_enforce_ohlcv_and_ordering() -> None:
         validate_candle_sequence(mixed_dtos, timeframe="15m", require_continuity=False)
     assert mixed_exc.value.reason == CandleIntegrityReason.OUT_OF_ORDER
 
-    with pytest.raises(CandleIntegrityError):
-        normalize_bybit_klines(
-            "BTCUSDT",
-            "15m",
-            {"result": {"list": [[str(BASE_MS), "100", "103", "99", "102", "-5", "500"]]}},
-        )
+    bybit_negative = normalize_bybit_klines(
+        "BTCUSDT",
+        "15m",
+        {"result": {"list": [[str(BASE_MS), "100", "103", "99", "102", "-5", "500"]]}},
+    )
+    with pytest.raises(CandleIntegrityError) as bybit_vol_exc:
+        validate_candle_sequence(bybit_negative, timeframe="15m")
+    assert bybit_vol_exc.value.reason == CandleIntegrityReason.INVALID_VOLUME
 
 
 # ---------------------------------------------------------------------------
@@ -575,8 +588,9 @@ def test_freshness_policy_and_cache_delivery_parity(tmp_path: Path) -> None:
     corrupt_cache = MarketDataCache(file_path=cache_file, ttl_seconds=60, now=lambda: 1500.0)
     assert corrupt_cache.errors == 1  # corrupt_envelope skipped and counted
     corrupt_client = CachedMarketDataClient(stub, corrupt_cache)
+    tampered = asyncio.run(corrupt_client.get_klines("BTCUSDT", "15m", 1))
     with pytest.raises(CandleIntegrityError) as cache_exc:
-        asyncio.run(corrupt_client.get_klines("BTCUSDT", "15m", 1))
+        closed_candles_as_of(tampered, timeframe="15m", decision_timestamp=decision_at)
     assert cache_exc.value.reason == CandleIntegrityReason.INVALID_VOLUME
 
 
@@ -735,12 +749,66 @@ def test_shadow_diagnostics_are_deterministic_and_non_gating() -> None:
     assert diag.rule_version == SHADOW_RULE_VERSION
     assert diag.observation_kind == "synthetic_fixture"
     assert diag.old_decision == "pass"
-    assert diag.new_decision == "pass"
+    assert diag.new_decision == "shadow_flag"
     assert diag.would_flag_under_strict_shadow is True
+    assert diag.disagreement_count == 2
+    assert diag.total_flag_count == 2
     assert diag.reason_counts == {
         "flat_zero_volume_bar": 1,
         "positive_range_zero_volume_bar": 1,
     }
+
+    stacked = [
+        _control_candle(
+            BASE_MS,
+            open="100",
+            high="102",
+            low="99",
+            close="101",
+            volume="0",
+            quote_volume="1000",
+        )
+    ]
+    stacked_diag = evaluate_candle_shadow_diagnostics(
+        stacked,
+        timeframe="15m",
+        consumer="unit_test_probe",
+        synthetic_fixture=True,
+    )
+    assert stacked_diag.disagreement_count == 1
+    assert stacked_diag.total_flag_count == 2
+    assert stacked_diag.reason_counts == {
+        "positive_range_zero_volume_bar": 1,
+        "quote_volume_positive_on_zero_base_volume": 1,
+    }
+
+    extreme = [
+        _control_candle(BASE_MS, open="100", high="2000", low="100", close="100", volume="10"),
+        _control_candle(
+            BASE_MS + FIFTEEN_MIN_MS,
+            close_timestamp=BASE_MS + 3 * FIFTEEN_MIN_MS,
+        ),
+    ]
+    extra = evaluate_candle_shadow_diagnostics(
+        extreme,
+        timeframe="15m",
+        consumer="unit_test_probe",
+        synthetic_fixture=True,
+    )
+    assert extra.reason_counts["extreme_range_to_low_ratio"] == 1
+    assert extra.reason_counts["close_timestamp_exceeds_scheduled_close"] == 1
+
+    from app.data.candle_integrity import clear_recorded_candle_shadow_diagnostics
+
+    clear_recorded_candle_shadow_diagnostics()
+    recorded = evaluate_candle_shadow_diagnostics(
+        candles,
+        timeframe="15m",
+        consumer="unit_test_probe",
+        synthetic_fixture=True,
+        record=True,
+    )
+    assert recorded in get_recorded_candle_shadow_diagnostics()
 
 
 # ---------------------------------------------------------------------------
@@ -985,7 +1053,8 @@ def test_multi_symbol_scanner_isolates_malformed_symbol_from_valid_symbol() -> N
         failing_timeframes={"2d"},
     )
 
-    run_result = run(ScannerRunner(exchange_client=client).run(_config(["BADUSDT", "BTCUSDT"])))
+    runner = ScannerRunner(exchange_client=client)
+    run_result = run(runner.run(_config(["BADUSDT", "BTCUSDT"])))
 
     assert run_result.scanned_symbols == 2
     assert run_result.results[0].status == ScannerPipelineStatus.REJECTED_BY_TECHNICAL
@@ -1017,3 +1086,154 @@ def test_multi_symbol_scanner_isolates_malformed_symbol_from_valid_symbol() -> N
     assert run_result_2d.results[0].status == ScannerPipelineStatus.SCAN_ERROR
     assert "candle_integrity:invalid_ohlc_geometry" in str(run_result_2d.results[0].error_message)
     assert run_result_2d.results[1].status != ScannerPipelineStatus.SCAN_ERROR
+    recorded = runner.latest_candle_shadow_diagnostics()
+    assert recorded
+    assert all(item.old_decision in {"pass", "reject"} for item in recorded)
+    assert all(item.rule_version == SHADOW_RULE_VERSION for item in recorded)
+
+
+# ---------------------------------------------------------------------------
+# Astra R1–R4 rereview regressions
+# ---------------------------------------------------------------------------
+
+
+def _run_immediate(coro: Any) -> Any:
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    raise RuntimeError("probe unexpectedly requested asynchronous I/O")
+
+
+def test_r1_cutoff_parity_across_direct_cache_and_provider_paths() -> None:
+    closed = _control_candle(BASE_MS)
+    forming_bad = _control_candle(
+        BASE_MS + FIFTEEN_MIN_MS,
+        open="100",
+        high="90",
+        low="99",
+        close="100",
+        volume="10",
+    )
+    cutoff = BASE_MS + FIFTEEN_MIN_MS
+    eligible_cutoff = BASE_MS + 2 * FIFTEEN_MIN_MS
+    rows = [closed, forming_bad]
+
+    direct = closed_candles_as_of(rows, timeframe="15m", decision_timestamp=cutoff)
+    assert len(direct.candles) == 1
+    assert direct.excluded_unclosed_count == 1
+
+    cache = MarketDataCache(now=lambda: 100.0)
+
+    async def fetch() -> list[dict[str, Any]]:
+        return rows
+
+    miss = _run_immediate(cache.get_or_fetch(data_type="candles", key_parts={"symbol": "BTCUSDT"}, fetch=fetch))
+    hit = _run_immediate(cache.get_or_fetch(data_type="candles", key_parts={"symbol": "BTCUSDT"}, fetch=fetch))
+    miss_window = closed_candles_as_of(miss, timeframe="15m", decision_timestamp=cutoff)
+    hit_window = closed_candles_as_of(hit, timeframe="15m", decision_timestamp=cutoff)
+    assert len(miss_window.candles) == 1
+    assert len(hit_window.candles) == 1
+
+    provider_rows = [
+        [BASE_MS, "100", "101", "99", "100", "10", BASE_MS + FIFTEEN_MIN_MS - 1],
+        [BASE_MS + FIFTEEN_MIN_MS, "100", "90", "99", "100", "10", BASE_MS + 2 * FIFTEEN_MIN_MS - 1],
+    ]
+    provider = normalize_binance_klines("BTCUSDT", "15m", provider_rows)
+    provider_window = closed_candles_as_of(provider, timeframe="15m", decision_timestamp=cutoff)
+    assert len(provider_window.candles) == 1
+
+    with pytest.raises(CandleIntegrityError) as eligible_exc:
+        closed_candles_as_of(rows, timeframe="15m", decision_timestamp=eligible_cutoff)
+    assert eligible_exc.value.reason == CandleIntegrityReason.INVALID_OHLC_GEOMETRY
+    with pytest.raises(CandleIntegrityError) as provider_eligible_exc:
+        closed_candles_as_of(provider, timeframe="15m", decision_timestamp=eligible_cutoff)
+    assert provider_eligible_exc.value.reason == CandleIntegrityReason.INVALID_OHLC_GEOMETRY
+
+
+def test_r2_price_only_and_optional_volume_contracts_are_consistent() -> None:
+    series = [_control_candle(BASE_MS + i * FIFTEEN_MIN_MS) for i in range(250)]
+    price_only = [{k: v for k, v in bar.items() if k != "volume"} for bar in series]
+    none_volume = [{**bar, "volume": None} for bar in series]
+
+    replayed = StrategyReplayEngine().replay_symbol("BTCUSDT", {"15m": price_only})
+    assert replayed.historical_candles == 250
+
+    assert _latest_close(price_only[:1], "15m", "2024-01-01T00:15:00+00:00") == "2024-01-01T00:15:00+00:00"
+
+    cache = MarketDataCache(now=lambda: 100.0)
+
+    async def fetch() -> list[dict[str, Any]]:
+        return none_volume
+
+    miss = _run_immediate(cache.get_or_fetch(data_type="candles", key_parts={"symbol": "ETHUSDT"}, fetch=fetch))
+    hit = _run_immediate(cache.get_or_fetch(data_type="candles", key_parts={"symbol": "ETHUSDT"}, fetch=fetch))
+    miss_status = TechnicalStructureAgent().analyze(miss, timeframe="15m").analysis_status
+    hit_status = TechnicalStructureAgent().analyze(hit, timeframe="15m").analysis_status
+    assert miss_status == TechnicalAnalysisStatus.VALID
+    assert hit_status == TechnicalAnalysisStatus.VALID
+
+    absent_status = TechnicalStructureAgent().analyze(price_only, timeframe="15m").analysis_status
+    assert absent_status == TechnicalAnalysisStatus.VALID
+
+
+def test_r3_direct_analytical_timestamps_reject_malformed_supplied_values() -> None:
+    series = [_control_candle(BASE_MS + i * FIFTEEN_MIN_MS) for i in range(250)]
+    agent = TechnicalStructureAgent()
+    assert agent.analyze(series, timeframe="15m").analysis_status == TechnicalAnalysisStatus.VALID
+
+    missing_ts = [{k: v for k, v in bar.items() if k != "timestamp"} for bar in series]
+    assert agent.analyze(missing_ts, timeframe="15m").analysis_status == TechnicalAnalysisStatus.VALID
+
+    for bad_value in (BASE_MS + 0.5, "bad-timestamp", float("inf")):
+        mutated = [dict(bar) for bar in series]
+        mutated[50]["timestamp"] = bad_value
+        result = agent.analyze(mutated, timeframe="15m")
+        assert result.analysis_status == TechnicalAnalysisStatus.DATA_ERROR
+        assert result.is_valid is False
+
+    grab_mutated = [dict(bar) for bar in series]
+    grab_mutated[10]["timestamp"] = "bad-timestamp"
+    with pytest.raises(ValueError):
+        LiquidityGrabEngine().analyze(
+            LiquidityGrabInput(
+                symbol="BTCUSDT",
+                candles_2d=series,
+                candles_12h=series,
+                candles_15m=grab_mutated,
+                candles_5m=series,
+            )
+        )
+
+
+def test_r4_optional_volume_aliases_are_all_validated() -> None:
+    with pytest.raises(CandleIntegrityError) as exc_info:
+        validate_candle_values(_control_candle(quote_volume="1000", turnover="-1"))
+    assert exc_info.value.reason == CandleIntegrityReason.INVALID_VOLUME
+    assert "turnover" in str(exc_info.value)
+
+    validated = validate_candle_values(_control_candle(quote_volume="1000", turnover="20"))
+    assert validated.quote_volume == Decimal("1000")
+    assert validated.turnover == Decimal("20")
+
+    series = [_control_candle(BASE_MS + i * FIFTEEN_MIN_MS) for i in range(250)]
+    agent = TechnicalStructureAgent()
+    for field, value in (("quote_volume", "-1"), ("turnover", "NaN"), ("trade_count", True)):
+        mutated = [dict(bar) for bar in series]
+        mutated[50][field] = value
+        result = agent.analyze(mutated, timeframe="15m")
+        assert result.analysis_status == TechnicalAnalysisStatus.DATA_ERROR
+
+    causal = closed_candles_as_of(
+        (_control_candle(trade_count=-1),),
+        timeframe="15m",
+        decision_timestamp=BASE_MS + FIFTEEN_MIN_MS,
+        require_volume=False,
+        validate_values=False,
+    ).timeline[0]
+    from app.data.candle_integrity import CausalCandle
+
+    assert isinstance(causal, CausalCandle)
+    high, low = candle_range(causal)
+    assert high == Decimal("101")
+    assert low == Decimal("99")

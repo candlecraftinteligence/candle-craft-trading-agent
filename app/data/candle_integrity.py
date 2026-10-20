@@ -97,6 +97,7 @@ class ValidatedCandleValues:
     close: Decimal
     volume: Decimal | None
     quote_volume: Decimal | None = None
+    turnover: Decimal | None = None
     trade_count: int | None = None
 
 
@@ -115,6 +116,11 @@ class CandleShadowDiagnostic:
     reason_counts: dict[str, int]
     sampled_indices: dict[str, tuple[int, ...]]
     promotion_evidence_required: tuple[str, ...]
+    total_flag_count: int = 0
+
+
+_MAX_RECORDED_SHADOW_DIAGNOSTICS = 256
+_RECORDED_SHADOW_DIAGNOSTICS: list[CandleShadowDiagnostic] = []
 
 
 def timeframe_duration(timeframe: str) -> timedelta:
@@ -178,7 +184,14 @@ def validate_candle_values(
     timeframe: str | None = None,
     require_volume: bool = True,
 ) -> ValidatedCandleValues:
-    """Validate candle OHLC price positivity, cross-field geometry, and volume."""
+    """Validate candle OHLC price positivity, cross-field geometry, and volume.
+
+    ``require_volume=True`` is the provider/OHLCV default. Price-only consumers
+    (replay prefixes, owner latest-close telemetry, freshness, sector features)
+    must pass ``require_volume=False``. Missing volume stays ``None`` and is never
+    fabricated as zero. Every supplied ``quote_volume`` and ``turnover`` value is
+    validated independently; the fields are not interchangeable.
+    """
 
     normalized_timeframe = str(timeframe or _field(candle, "interval") or "unknown").strip().lower() or "unknown"
     if candle is None or isinstance(candle, (bool, str, bytes, bytearray, int, float, Decimal, list, tuple, set, frozenset)):
@@ -272,7 +285,7 @@ def validate_candle_values(
                 index=index,
             )
 
-    quote_volume_value: Decimal | None = None
+    parsed_optional_volumes: dict[str, Decimal] = {}
     for quote_field in ("quote_volume", "turnover"):
         if not _has_field(candle, quote_field):
             continue
@@ -294,8 +307,9 @@ def validate_candle_values(
                 timeframe=normalized_timeframe,
                 index=index,
             )
-        quote_volume_value = parsed_quote
-        break
+        parsed_optional_volumes[quote_field] = parsed_quote
+    quote_volume_value = parsed_optional_volumes.get("quote_volume")
+    turnover_value = parsed_optional_volumes.get("turnover")
 
     trade_count_value: int | None = None
     if _has_field(candle, "trade_count"):
@@ -318,6 +332,7 @@ def validate_candle_values(
         close=close_price,
         volume=volume_value,
         quote_volume=quote_volume_value,
+        turnover=turnover_value,
         trade_count=trade_count_value,
     )
 
@@ -507,11 +522,12 @@ def evaluate_candle_shadow_diagnostics(
     consumer: str,
     source: str = "unknown",
     synthetic_fixture: bool = False,
+    record: bool = False,
 ) -> CandleShadowDiagnostic:
     """Observational shadow diagnostics for candidate rules lacking hard-gate proof.
 
     Leaves eligibility and lifecycle behavior unchanged while recording bounded,
-    deterministic counts and sample indices.
+    deterministic per-candle decision disagreement counts and rule flag counts.
     """
 
     normalized_timeframe = str(timeframe).strip().lower() or "unknown"
@@ -523,9 +539,12 @@ def evaluate_candle_shadow_diagnostics(
 
     reason_counts: dict[str, int] = {}
     sampled_indices: dict[str, list[int]] = {}
+    disagreeing_indices: set[int] = set()
+    enforced_rejected_count = 0
 
     def _record(reason: str, idx: int) -> None:
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        disagreeing_indices.add(idx)
         bucket = sampled_indices.setdefault(reason, [])
         if len(bucket) < _MAX_SHADOW_SAMPLE_INDICES:
             bucket.append(idx)
@@ -539,6 +558,7 @@ def evaluate_candle_shadow_diagnostics(
                 require_volume=False,
             )
         except CandleIntegrityError:
+            enforced_rejected_count += 1
             continue
 
         if values.volume is not None and values.volume == 0:
@@ -547,11 +567,17 @@ def evaluate_candle_shadow_diagnostics(
             else:
                 _record("positive_range_zero_volume_bar", index)
 
-        if values.volume is not None and values.quote_volume is not None:
-            if values.volume == 0 and values.quote_volume > 0:
-                _record("quote_volume_positive_on_zero_base_volume", index)
-            elif values.volume > 0 and values.quote_volume == 0:
-                _record("quote_volume_zero_on_positive_base_volume", index)
+        for opt_quote in (values.quote_volume, values.turnover):
+            if values.volume is not None and opt_quote is not None:
+                if values.volume == 0 and opt_quote > 0:
+                    _record("quote_volume_positive_on_zero_base_volume", index)
+                    break
+                if values.volume > 0 and opt_quote == 0:
+                    _record("quote_volume_zero_on_positive_base_volume", index)
+                    break
+
+        if values.low > 0 and (values.high - values.low) / values.low > Decimal("10"):
+            _record("extreme_range_to_low_ratio", index)
 
         if duration_ms > 0:
             raw_open = _first_present_field(candle, ("timestamp", "open_timestamp", "opened_at"))
@@ -561,19 +587,31 @@ def evaluate_candle_shadow_diagnostics(
                     open_ms = _epoch_milliseconds(open_dt)
                     if open_ms % duration_ms != 0:
                         _record("unanchored_open_timestamp", index)
-                except ValueError:
+                    raw_close = _first_present_field(candle, ("close_timestamp", "closed_at"))
+                    if not _is_missing(raw_close):
+                        close_dt = normalize_utc_timestamp(raw_close, field_name="close_timestamp")
+                        if close_dt > open_dt + timedelta(milliseconds=duration_ms):
+                            _record("close_timestamp_exceeds_scheduled_close", index)
+                except (ValueError, OverflowError):
                     pass
 
-    disagreement_count = sum(reason_counts.values())
-    return CandleShadowDiagnostic(
+    disagreement_count = len(disagreeing_indices)
+    total_flag_count = sum(reason_counts.values())
+    old_decision = "reject" if enforced_rejected_count > 0 else "pass"
+    new_decision = (
+        "reject"
+        if enforced_rejected_count > 0
+        else ("shadow_flag" if disagreement_count > 0 else "pass")
+    )
+    diagnostic = CandleShadowDiagnostic(
         rule_version=SHADOW_RULE_VERSION,
         consumer=consumer,
         source=source,
         timeframe=normalized_timeframe,
         observation_kind="synthetic_fixture" if synthetic_fixture else "exchange_observation",
         sample_count=len(candles),
-        old_decision="pass",
-        new_decision="pass",
+        old_decision=old_decision,
+        new_decision=new_decision,
         would_flag_under_strict_shadow=disagreement_count > 0,
         disagreement_count=disagreement_count,
         reason_counts=dict(sorted(reason_counts.items())),
@@ -583,7 +621,65 @@ def evaluate_candle_shadow_diagnostics(
             "Zero false-rejection proof on legitimate low-liquidity closed intervals",
             "Explicit Astra review approval before promoting any shadow rule to a hard gate",
         ),
+        total_flag_count=total_flag_count,
     )
+    if record:
+        if len(_RECORDED_SHADOW_DIAGNOSTICS) >= _MAX_RECORDED_SHADOW_DIAGNOSTICS:
+            _RECORDED_SHADOW_DIAGNOSTICS.pop(0)
+        _RECORDED_SHADOW_DIAGNOSTICS.append(diagnostic)
+    return diagnostic
+
+
+def get_recorded_candle_shadow_diagnostics() -> tuple[CandleShadowDiagnostic, ...]:
+    return tuple(_RECORDED_SHADOW_DIAGNOSTICS)
+
+
+def clear_recorded_candle_shadow_diagnostics() -> None:
+    _RECORDED_SHADOW_DIAGNOSTICS.clear()
+
+
+def normalize_optional_timestamp_ms(value: Any, *, field_name: str = "timestamp") -> int | str:
+    """Validate an optional candle timestamp without truncation, or return NA when absent."""
+
+    if _is_missing(value):
+        return NA
+    dt = normalize_utc_timestamp(value, field_name=field_name)
+    return _epoch_milliseconds(dt)
+
+
+def validate_optional_candle_metadata(candle: Any, *, path: str) -> None:
+    """Validate optional quote_volume, turnover, trade_count, and close_timestamp when supplied."""
+
+    for quote_field in ("quote_volume", "turnover"):
+        if not _has_field(candle, quote_field):
+            continue
+        raw_quote = _field(candle, quote_field)
+        if raw_quote is None or (isinstance(raw_quote, str) and raw_quote.strip() == NA):
+            continue
+        if isinstance(raw_quote, str) and not raw_quote.strip():
+            raise ValueError(f"Malformed candle {path}.{quote_field}: value is blank.")
+        parsed_quote = _parse_finite_decimal(raw_quote)
+        if parsed_quote is None or parsed_quote < 0:
+            raise ValueError(
+                f"Malformed candle {path}.{quote_field}: must be a finite non-negative decimal."
+            )
+
+    if _has_field(candle, "trade_count"):
+        raw_trades = _field(candle, "trade_count")
+        if raw_trades is not None and not (isinstance(raw_trades, str) and raw_trades.strip() == NA):
+            parsed_trades = _parse_non_negative_int(raw_trades)
+            if parsed_trades is None:
+                raise ValueError(
+                    f"Malformed candle {path}.trade_count: must be a non-negative integer."
+                )
+
+    for close_field in ("close_timestamp", "closed_at"):
+        if not _has_field(candle, close_field):
+            continue
+        raw_close = _field(candle, close_field)
+        if _is_missing(raw_close):
+            continue
+        normalize_utc_timestamp(raw_close, field_name=f"{path}.{close_field}")
 
 
 def _has_field(candle: Any, name: str) -> bool:
@@ -659,10 +755,14 @@ __all__ = [
     "ClosedCandleWindow",
     "SHADOW_RULE_VERSION",
     "ValidatedCandleValues",
+    "clear_recorded_candle_shadow_diagnostics",
     "closed_candles_as_of",
     "evaluate_candle_shadow_diagnostics",
+    "get_recorded_candle_shadow_diagnostics",
+    "normalize_optional_timestamp_ms",
     "normalize_utc_timestamp",
     "timeframe_duration",
     "validate_candle_sequence",
     "validate_candle_values",
+    "validate_optional_candle_metadata",
 ]
