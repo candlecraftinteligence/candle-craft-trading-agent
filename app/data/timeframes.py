@@ -34,7 +34,7 @@ def resample_ohlcv_candles(
         candles,
         timeframe="1d",
         decision_timestamp=decision_timestamp,
-        minimum_closed_history=0,
+        minimum_closed_history=0, require_volume=False,
     )
     buckets: dict[int, list[Any]] = {}
     close_timestamps: dict[int, int] = {}
@@ -60,11 +60,14 @@ def resample_ohlcv_candles(
             continue
         if _int_field(second, "timestamp") != bucket_start + _DAY_MS:
             continue
-        open_price = _decimal_field(first, "open")
-        high_price = max(_decimal_field(first, "high"), _decimal_field(second, "high"))
-        low_price = min(_decimal_field(first, "low"), _decimal_field(second, "low"))
-        close_price = _decimal_field(second, "close")
-        volume = _decimal_field(first, "volume") + _decimal_field(second, "volume")
+        first_values = _validate_constituent(first)
+        second_values = _validate_constituent(second)
+        open_price = first_values.open
+        high_price = max(first_values.high, second_values.high)
+        low_price = min(first_values.low, second_values.low)
+        close_price = second_values.close
+        assert first_values.volume is not None and second_values.volume is not None
+        volume = first_values.volume + second_values.volume
         timestamp = bucket_start
         close_timestamp = close_timestamps[bucket]
 
@@ -106,6 +109,7 @@ def resample_ohlcv_candles(
             optional_value = _field(first, optional_field)
             if optional_value not in (None, "", NA):
                 resampled[optional_field] = optional_value
+        _validate_aggregate_2d(resampled)
         output.append(resampled)
 
     return output
@@ -154,6 +158,21 @@ def _sum_optional_ints(first: Any, second: Any, name: str) -> MaybeInt:
     if first_value in (None, "", NA) or second_value in (None, "", NA):
         return NA
     return _int_field(first, name) + _int_field(second, name)
+
+
+def _validate_constituent(candle: Any) -> Any:
+    from app.data.candle_integrity import validate_candle_values
+
+    vals = validate_candle_values(candle, timeframe="1d", require_volume=False)
+    if vals.volume is None:
+        raise ValueError("Missing required numeric field volume.")
+    return vals
+
+
+def _validate_aggregate_2d(candle: Any) -> Any:
+    from app.data.candle_integrity import validate_candle_values
+
+    return validate_candle_values(candle, timeframe="2d", require_volume=True)
 
 
 __all__ = ["resample_ohlcv_candles"]

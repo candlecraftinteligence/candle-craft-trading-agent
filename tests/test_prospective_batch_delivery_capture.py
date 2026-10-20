@@ -125,11 +125,14 @@ def _scan_config(**overrides: object):
 
 
 def _kline_row(open_ms: int, *, duration_ms: int, close: str = "100.0") -> list[Any]:
+    close_dec = Decimal(str(close))
+    high_str = str(max(Decimal("101.0"), close_dec + Decimal("1.0")))
+    low_str = str(min(Decimal("99.0"), close_dec - Decimal("1.0")))
     return [
         open_ms,
         "100.0",
-        "101.0",
-        "99.0",
+        high_str,
+        low_str,
         close,
         "10.0",
         open_ms + duration_ms - 1,

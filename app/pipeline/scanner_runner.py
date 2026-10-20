@@ -1906,7 +1906,7 @@ class ScannerRunner:
             candles,
             timeframe=timeframe,
             decision_timestamp=config.decision_timestamp,
-            minimum_closed_history=minimum_closed_history,
+            minimum_closed_history=minimum_closed_history, validate_values=False,
         )
         if window.excluded_unclosed_count:
             self.logger.debug(
@@ -1916,7 +1916,7 @@ class ScannerRunner:
                 timeframe,
                 window.decision_timestamp.isoformat(),
             )
-        return window.candles
+        return _record_scanner_shadow_window(self, window.candles, symbol=symbol, timeframe=timeframe, config=config)
 
     async def _fetch_primary_candles(
         self,
@@ -5413,6 +5413,38 @@ def _unique_strings(values: Sequence[str]) -> tuple[str, ...]:
         if cleaned and cleaned not in output:
             output.append(cleaned)
     return tuple(output)
+
+
+def _record_scanner_shadow_window(
+    runner: ScannerRunner,
+    candles: tuple[Any, ...],
+    *,
+    symbol: str,
+    timeframe: str,
+    config: ScannerRunConfig,
+) -> tuple[Any, ...]:
+    from app.data.candle_integrity import evaluate_candle_shadow_diagnostics
+
+    diag = evaluate_candle_shadow_diagnostics(
+        candles,
+        timeframe=timeframe,
+        consumer=f"ScannerRunner:{symbol}",
+        source=str(config.exchange or "unknown"),
+        record=True,
+    )
+    bucket: list[Any] = getattr(runner, "_candle_shadow_diagnostics", None) or []
+    if len(bucket) >= 256:
+        bucket.pop(0)
+    bucket.append(diag)
+    setattr(runner, "_candle_shadow_diagnostics", bucket)
+    return candles
+
+
+def _latest_candle_shadow_diagnostics(self: ScannerRunner) -> tuple[Any, ...]:
+    return tuple(getattr(self, "_candle_shadow_diagnostics", ()))
+
+
+ScannerRunner.latest_candle_shadow_diagnostics = _latest_candle_shadow_diagnostics  # type: ignore[attr-defined]
 
 
 __all__ = [

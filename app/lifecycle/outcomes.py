@@ -235,6 +235,7 @@ def evaluate_closed_candle_outcomes(
             decision_timestamp=decision_timestamp,
             minimum_closed_history=0,
             require_continuity=True,
+            validate_values=False,
         )
         progress = _with_applied_eligibility_cutoff(progress, window)
         prefix_evidence = start_prefix_pass_evidence(

@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.data.candle_integrity import closed_candles_as_of, normalize_utc_timestamp
+from app.data.candle_integrity import CandleIntegrityError, closed_candles_as_of, normalize_utc_timestamp
 from app.data.exceptions import ExchangeClientError
 from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleRecord
@@ -52,7 +52,7 @@ GAP_CURSOR_INTERVAL = "irrecoverable_cursor_interval"
 # PermissionError, and other local setup errors subclass it, while ConnectionError
 # and TimeoutError remain named here.
 EXPECTED_MARKET_DATA_ERRORS = (
-    ExchangeClientError,
+    ExchangeClientError, CandleIntegrityError,
     TimeoutError,
     ConnectionError,
 )
@@ -658,6 +658,7 @@ def _latest_close(candles: Sequence[Any], timeframe: str, decision_timestamp: st
             decision_timestamp=decision_timestamp,
             minimum_closed_history=0,
             require_continuity=False,
+            require_volume=False,
         )
     except (TypeError, ValueError):
         return None

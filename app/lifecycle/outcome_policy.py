@@ -119,13 +119,50 @@ def has_valid_stored_plan_geometry(record: Any) -> bool:
 
 
 def candle_range(causal: CausalCandle) -> tuple[Decimal, Decimal]:
+    """Price-range evidence for owned-outcome evaluation.
+
+    Required: strictly positive high/low with high >= low. Open/close, if present,
+    must sit inside that range. Volume/quote_volume/turnover, if present, must be
+    non-negative. Missing volume is allowed so price-only outcome bars remain usable.
+    trade_count is outside this contract and is not inspected.
+    """
     high = _required_decimal(_field(causal.source, "high"), "candle_high")
     low = _required_decimal(_field(causal.source, "low"), "candle_low")
-    if high < low:
+    if high <= 0 or low <= 0 or high < low:
         raise ValueError(
             "candle_integrity:invalid_ohlc_range "
             f"open={causal.open_timestamp.isoformat()} high={high} low={low}"
         )
+    for field_name in ("open", "close"):
+        raw_price = _field(causal.source, field_name)
+        if raw_price is None or (isinstance(raw_price, str) and raw_price.strip() == NA):
+            continue
+        if isinstance(raw_price, str) and not raw_price.strip():
+            raise ValueError(
+                "candle_integrity:invalid_ohlc_range "
+                f"open={causal.open_timestamp.isoformat()} {field_name}=blank"
+            )
+        price = _required_decimal(raw_price, f"candle_{field_name}")
+        if price <= 0 or not (low <= price <= high):
+            raise ValueError(
+                "candle_integrity:invalid_ohlc_range "
+                f"open={causal.open_timestamp.isoformat()} {field_name}={price} high={high} low={low}"
+            )
+    for vol_field in ("volume", "quote_volume", "turnover"):
+        raw_vol = _field(causal.source, vol_field)
+        if raw_vol is None or (isinstance(raw_vol, str) and raw_vol.strip() == NA):
+            continue
+        if isinstance(raw_vol, str) and not raw_vol.strip():
+            raise ValueError(
+                f"candle_integrity:invalid_{vol_field} "
+                f"open={causal.open_timestamp.isoformat()}"
+            )
+        vol = _required_decimal(raw_vol, f"candle_{vol_field}")
+        if vol < 0:
+            raise ValueError(
+                f"candle_integrity:invalid_{vol_field} "
+                f"open={causal.open_timestamp.isoformat()} {vol_field}={vol}"
+            )
     return high, low
 
 
@@ -170,6 +207,8 @@ def _stored_invalidation(record: Any) -> str:
 
 
 def _required_decimal(value: Any, name: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"invalid_{name}")
     if value in (None, "", NA):
         raise ValueError(f"missing_{name}")
     try:

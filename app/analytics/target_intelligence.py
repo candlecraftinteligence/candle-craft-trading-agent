@@ -872,6 +872,9 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_Candle, ...], tup
     normalized: list[_Candle] = []
     warnings: list[str] = []
     for index, candle in enumerate(candles):
+        if candle is None:
+            warnings.append(f"candles[{index}]: N/A")
+            continue
         try:
             open_price = _decimal_from(_field(candle, "open"), f"candles[{index}].open")
             high = _decimal_from(_field(candle, "high"), f"candles[{index}].high")
@@ -880,15 +883,43 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_Candle, ...], tup
         except ValueError:
             warnings.append(f"candles[{index}]: N/A")
             continue
-        if high < low or high < max(open_price, close) or low > min(open_price, close):
+        if (
+            low <= 0
+            or high < low
+            or high < max(open_price, close)
+            or low > min(open_price, close)
+        ):
             warnings.append(f"candles[{index}]: malformed")
             continue
         volume_value = _field(candle, "volume")
-        volume: MaybeDecimal = NA if _is_missing(volume_value) else _decimal_from(volume_value, f"candles[{index}].volume")
+        try:
+            volume: MaybeDecimal = (
+                NA if _is_missing(volume_value) else _decimal_from(volume_value, f"candles[{index}].volume")
+            )
+        except ValueError:
+            warnings.append(f"candles[{index}].volume: malformed")
+            continue
+        if volume != NA and volume < 0:
+            warnings.append(f"candles[{index}].volume: negative")
+            continue
+        try:
+            from app.data.candle_integrity import (
+                normalize_optional_timestamp_ms,
+                validate_optional_candle_metadata,
+            )
+
+            normalized_ts = normalize_optional_timestamp_ms(
+                _field(candle, "timestamp"),
+                field_name=f"candles[{index}].timestamp",
+            )
+            validate_optional_candle_metadata(candle, path=f"candles[{index}]")
+        except ValueError:
+            warnings.append(f"candles[{index}]: malformed")
+            continue
         normalized.append(
             _Candle(
                 index=int(_field(candle, "index") if _field(candle, "index") is not None else index),
-                timestamp=_field(candle, "timestamp") if _field(candle, "timestamp") is not None else NA,
+                timestamp=normalized_ts,
                 open=open_price,
                 high=high,
                 low=low,
@@ -896,6 +927,8 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_Candle, ...], tup
                 volume=volume,
             )
         )
+    if warnings:
+        return (), tuple(warnings)
     return tuple(normalized), tuple(warnings)
 
 
@@ -1001,6 +1034,8 @@ def _is_missing(value: Any) -> bool:
 
 
 def _decimal_from(value: Any, path: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid target intelligence decimal at {path}: {value!r}")
     try:
         decimal = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

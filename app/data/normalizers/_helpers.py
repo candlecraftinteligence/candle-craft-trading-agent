@@ -33,17 +33,27 @@ def require_index(row: Sequence[Any], index: int, path: str) -> Any:
 
 
 def decimal_from(value: Any, path: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ExchangeResponseError(f"Invalid decimal at {path}: {value!r}")
     try:
-        return Decimal(str(value))
+        parsed = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise ExchangeResponseError(f"Invalid decimal at {path}: {value!r}") from exc
+    if not parsed.is_finite():
+        raise ExchangeResponseError(f"Non-finite decimal at {path}: {value!r}")
+    return parsed
 
 
 def int_from(value: Any, path: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise ExchangeResponseError(f"Invalid integer at {path}: {value!r}") from exc
+    if isinstance(value, bool):
+        raise ExchangeResponseError(f"Invalid integer at {path}: {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned and (cleaned.isdigit() or (cleaned.startswith("-") and cleaned[1:].isdigit())):
+            return int(cleaned)
+    raise ExchangeResponseError(f"Invalid integer at {path}: {value!r}")
 
 
 def optional_decimal(value: Any, path: str) -> MaybeDecimal:

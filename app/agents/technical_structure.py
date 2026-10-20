@@ -186,6 +186,14 @@ class TechnicalStructureAgent:
         )
 
     def analyze(self, candles: Sequence[Any], *, timeframe: str = NA) -> TechnicalStructureResult:
+        """Analyze already-collected OHLC candles.
+
+        Required fields are the four prices. Volume, timestamps, quote_volume,
+        turnover, trade_count, and close_timestamp are optional: absent values
+        stay N/A and do not manufacture confirmation, while a supplied malformed
+        value is a DATA_ERROR. This API is timestamp-optional; missing timestamps
+        are allowed, but present timestamps are not truncated.
+        """
         normalized, errors = _normalize_candles(candles)
         supplied_count = (
             len(candles)
@@ -399,9 +407,13 @@ def calculate_ema_series(values: Sequence[Decimal], period: int) -> tuple[MaybeD
     return tuple(output)
 
 
-def calculate_atr(candles: Sequence[_Candle], period: int = 14) -> MaybeDecimal:
+def calculate_atr(candles: Sequence[Any], period: int = 14) -> MaybeDecimal:
     if period < 1:
         raise ValueError("period must be at least 1")
+    if candles and not all(isinstance(item, _Candle) for item in candles):
+        candles, errors = _normalize_candles(candles)
+        if errors:
+            raise ValueError(errors[0])
     if len(candles) < period + 1:
         return NA
 
@@ -465,6 +477,9 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_Candle, ...], tup
 
         if len(required) != 4:
             continue
+        if any(price <= 0 for price in required.values()):
+            errors.append(f"Malformed candle candles[{index}]: OHLC prices must be positive.")
+            continue
         if required["high"] < required["low"]:
             errors.append(f"Malformed candle candles[{index}]: high is lower than low.")
             continue
@@ -476,9 +491,27 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_Candle, ...], tup
             continue
 
         timestamp = _get_field(candle, "timestamp")
+        try:
+            from app.data.candle_integrity import (
+                normalize_optional_timestamp_ms,
+                validate_optional_candle_metadata,
+            )
+
+            normalized_timestamp = normalize_optional_timestamp_ms(
+                timestamp,
+                field_name=f"candles[{index}].timestamp",
+            )
+            validate_optional_candle_metadata(candle, path=f"candles[{index}]")
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
         volume = _get_field(candle, "volume")
         try:
-            normalized_volume = NA if _is_missing(volume) else _decimal_from(volume, f"candles[{index}].volume")
+            normalized_volume = (
+                NA
+                if (_is_missing(volume) or volume == NA)
+                else _decimal_from(volume, f"candles[{index}].volume")
+            )
         except ValueError as exc:
             errors.append(str(exc))
             continue
@@ -490,7 +523,7 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_Candle, ...], tup
         normalized.append(
             _Candle(
                 index=index,
-                timestamp=_normalize_timestamp(timestamp),
+                timestamp=normalized_timestamp,
                 open=required["open"],
                 high=required["high"],
                 low=required["low"],
@@ -709,7 +742,7 @@ def _get_field(candle: Any, field: str) -> Any:
 
 
 def _normalize_timestamp(value: Any) -> MaybeInt:
-    if _is_missing(value):
+    if _is_missing(value) or isinstance(value, bool):
         return NA
     try:
         return int(value)
@@ -718,6 +751,8 @@ def _normalize_timestamp(value: Any) -> MaybeInt:
 
 
 def _decimal_from(value: Any, path: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"Malformed candle data at {path}: invalid decimal {value!r}.")
     try:
         decimal = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

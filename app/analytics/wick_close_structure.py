@@ -170,10 +170,22 @@ def _post_bos_sample(candles: Sequence[Any], bos_index: int, latest_price: Maybe
 
 
 def _candle_view(candle: Any) -> _CandleView:
+    from app.data.candle_integrity import (
+        normalize_optional_timestamp_ms,
+        validate_optional_candle_metadata,
+    )
+
     open_price = _decimal_from(_get_field(candle, "open"), "candle.open")
     high = _decimal_from(_get_field(candle, "high"), "candle.high")
     low = _decimal_from(_get_field(candle, "low"), "candle.low")
     close = _decimal_from(_get_field(candle, "close"), "candle.close")
+    if low <= 0 or high < low or high < max(open_price, close) or low > min(open_price, close):
+        raise ValueError("Malformed wick-close candle OHLC geometry.")
+    normalize_optional_timestamp_ms(_get_field(candle, "timestamp"), field_name="candle.timestamp")
+    raw_vol = _get_field(candle, "volume")
+    if not _is_missing(raw_vol) and _decimal_from(raw_vol, "candle.volume") < 0:
+        raise ValueError("Malformed wick-close candle volume.")
+    validate_optional_candle_metadata(candle, path="candle")
     return _CandleView(open=open_price, high=high, low=low, close=close)
 
 
@@ -247,6 +259,8 @@ def _get_field(candle: Any, field: str) -> Any:
 
 
 def _decimal_from(value: Any, path: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"Malformed wick-close data at {path}: invalid decimal {value!r}.")
     try:
         decimal = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

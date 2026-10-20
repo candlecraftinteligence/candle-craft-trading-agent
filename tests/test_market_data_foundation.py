@@ -18,7 +18,7 @@ from app.analytics.public_signal_quality import (
 )
 from app.core.minimum_rr import DEFAULT_CONFIGURED_MINIMUM_RR
 from app.data.candle_freshness import POLICY_VERSION, PUBLICATION_ALLOWANCE
-from app.data.candle_integrity import validate_candle_sequence
+from app.data.candle_integrity import CandleIntegrityError, validate_candle_sequence
 from app.lifecycle.models import SetupLifecycleRecord, SetupLifecycleState
 from app.lifecycle.owner_monitoring import discovery_failure_continues_owner_monitoring
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
@@ -297,7 +297,9 @@ def test_candle_semantics_do_not_treat_flat_zero_volume_as_a_gap() -> None:
     assert "continuity_gap" not in diagnose_sequence((present,), timeframe="1m")
     broken = _candle(0, high=Decimal("1"), low=Decimal("5"))
     assert "impossible_ohlc" in ohlc_problems(broken)
-    validate_candle_sequence((broken,), timeframe="1m")
+    with pytest.raises(CandleIntegrityError):
+        validate_candle_sequence((broken,), timeframe="1m")
+    validate_candle_sequence((broken,), timeframe="1m", validate_values=False)
     negative = _candle(0, volume=Decimal("-1"))
     assert any(item.startswith("volume_negative") for item in diagnose_sequence((negative,), timeframe="1m"))
     gapped = (_candle(0), _candle(120_000))

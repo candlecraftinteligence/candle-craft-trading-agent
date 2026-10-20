@@ -356,7 +356,7 @@ def assess_candle_freshness(
             candles,
             timeframe=normalized,
             decision_timestamp=decision,
-            minimum_closed_history=0,
+            minimum_closed_history=0, require_volume=False,
         )
     except CandleIntegrityError as exc:
         return _unverified(
@@ -533,7 +533,7 @@ def _two_day_pair_assessment(
             daily_source_candles,
             timeframe="1d",
             decision_timestamp=decision,
-            minimum_closed_history=0,
+            minimum_closed_history=0, require_volume=False,
         )
     except (CandleIntegrityError, TypeError, ValueError):
         return _unverified(
