@@ -218,6 +218,8 @@ def _normalize_candles(candles: Sequence[Any]) -> tuple[tuple[_ProfileCandle, ..
                 raise ValueError(f"Missing required OHLC field candles[{index}].{field}.")
             required[field] = _decimal_from(value, f"candles[{index}].{field}")
 
+        if any(price <= 0 for price in required.values()):
+            raise ValueError(f"Malformed candle candles[{index}]: OHLC prices must be positive.")
         if required["high"] < required["low"]:
             raise ValueError(f"Malformed candle candles[{index}]: high is lower than low.")
         if required["high"] < max(required["open"], required["close"]):
@@ -341,6 +343,8 @@ def _is_missing(value: Any) -> bool:
 
 
 def _decimal_from(value: Any, path: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"Malformed volume profile data at {path}: invalid decimal {value!r}.")
     try:
         decimal = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

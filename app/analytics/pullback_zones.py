@@ -1191,6 +1191,9 @@ def _normalize_candles(candles: Sequence[Any], label: str) -> tuple[tuple[_Candl
 
         if len(required) != 4:
             continue
+        if any(price <= 0 for price in required.values()):
+            errors.append(f"Malformed candle {label}[{index}]: OHLC prices must be positive.")
+            continue
         if required["high"] < required["low"]:
             errors.append(f"Malformed candle {label}[{index}]: high is lower than low.")
             continue
@@ -1201,6 +1204,10 @@ def _normalize_candles(candles: Sequence[Any], label: str) -> tuple[tuple[_Candl
             errors.append(f"Malformed candle {label}[{index}]: low is above open or close.")
             continue
 
+        raw_timestamp = _get_field(candle, "timestamp")
+        if isinstance(raw_timestamp, bool):
+            errors.append(f"Malformed candle {label}[{index}].timestamp: boolean timestamp is invalid.")
+            continue
         volume_value = _get_field(candle, "volume")
         try:
             volume = NA if _is_missing(volume_value) else _decimal_from(volume_value, f"{label}[{index}].volume")
@@ -1284,7 +1291,7 @@ def _get_field(candle: Any, field: str) -> Any:
 
 
 def _normalize_timestamp(value: Any) -> MaybeInt:
-    if _is_missing(value):
+    if _is_missing(value) or isinstance(value, bool):
         return NA
     try:
         return int(value)
@@ -1293,6 +1300,8 @@ def _normalize_timestamp(value: Any) -> MaybeInt:
 
 
 def _decimal_from(value: Any, path: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"Malformed pullback-zone data at {path}: invalid decimal {value!r}.")
     try:
         decimal = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

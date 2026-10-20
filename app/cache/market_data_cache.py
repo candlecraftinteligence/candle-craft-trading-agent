@@ -229,11 +229,13 @@ class MarketDataCache:
         if not isinstance(entries, Mapping):
             self.errors += 1
             return
-        self._entries = {
-            str(key): dict(value)
-            for key, value in entries.items()
-            if isinstance(value, Mapping) and value.get("version") == CACHE_FILE_VERSION
-        }
+        loaded_entries: dict[str, dict[str, Any]] = {}
+        for key, value in entries.items():
+            if not _is_valid_cache_entry_envelope(value):
+                self.errors += 1
+                continue
+            loaded_entries[str(key)] = dict(value)
+        self._entries = loaded_entries
         self._capture_by_entry_id = {}
         self._file_loaded_entry_ids = {id(entry) for entry in self._entries.values()}
 
@@ -586,19 +588,51 @@ def _deserialize_value(value: Any) -> Any:
             model = _load_model_class(str(class_path)) if class_path else None
             if model is not None:
                 return model.model_validate(data)
-            return data
+            raise ValueError(f"Unsupported or unknown cached model class: {class_path!r}")
         if cache_type == "decimal":
-            return Decimal(str(value.get("value")))
+            raw_decimal = value.get("value")
+            if isinstance(raw_decimal, bool) or raw_decimal is None:
+                raise ValueError(f"Invalid cached decimal: {raw_decimal!r}")
+            parsed = Decimal(str(raw_decimal))
+            if not parsed.is_finite():
+                raise ValueError(f"Non-finite cached decimal: {raw_decimal!r}")
+            return parsed
         if cache_type == "tuple":
             return tuple(_deserialize_value(item) for item in value.get("items", ()))
         if cache_type == "list":
             return [_deserialize_value(item) for item in value.get("items", ())]
         if cache_type == "dict":
-            return {
+            result = {
                 _deserialize_value(key): _deserialize_value(item)
                 for key, item in value.get("items", ())
             }
+            if all(k in result for k in ("open", "high", "low", "close")):
+                from app.data.candle_integrity import validate_candle_values
+
+                validate_candle_values(
+                    result,
+                    timeframe=str(result.get("interval") or "unknown"),
+                    require_volume="volume" in result,
+                )
+            return result
     return value
+
+
+def _is_valid_cache_entry_envelope(entry: Any) -> bool:
+    if not isinstance(entry, Mapping) or entry.get("version") != CACHE_FILE_VERSION:
+        return False
+    expires_at = entry.get("expires_at")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+        return False
+    if expires_at != expires_at or expires_at in (float("inf"), float("-inf")):
+        return False
+    created_at = entry.get("created_at")
+    if created_at is not None:
+        if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
+            return False
+        if created_at != created_at or created_at in (float("inf"), float("-inf")):
+            return False
+    return "value" in entry
 
 
 def _load_model_class(class_path: str) -> type[BaseModel] | None:

@@ -166,7 +166,7 @@ def test_bearish_choch_detection_after_bullish_context() -> None:
 
 
 def test_trend_context() -> None:
-    bullish = TechnicalStructureAgent().analyze(_trend_candles(start=1, step=1))
+    bullish = TechnicalStructureAgent().analyze(_trend_candles(start=10, step=1))
     bearish = TechnicalStructureAgent().analyze(_trend_candles(start=300, step=-1))
     neutral = TechnicalStructureAgent().analyze(_flat_candles())
 

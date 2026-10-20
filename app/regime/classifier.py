@@ -489,14 +489,29 @@ def _normalized_candles(raw_candles: Sequence[Any]) -> tuple[_Candle, ...]:
     candles: list[_Candle] = []
     for item in raw_candles:
         try:
+            open_price = _decimal_from(_field(item, "open"), "candle.open")
+            high_price = _decimal_from(_field(item, "high"), "candle.high")
+            low_price = _decimal_from(_field(item, "low"), "candle.low")
+            close_price = _decimal_from(_field(item, "close"), "candle.close")
+            if (
+                low_price <= 0
+                or high_price < low_price
+                or not (low_price <= open_price <= high_price)
+                or not (low_price <= close_price <= high_price)
+            ):
+                return ()
+            raw_volume = _field(item, "volume")
+            if raw_volume not in (None, "", NA):
+                if _decimal_from(raw_volume, "candle.volume") < 0:
+                    return ()
             candle = _Candle(
-                open=_decimal_from(_field(item, "open"), "candle.open"),
-                high=_decimal_from(_field(item, "high"), "candle.high"),
-                low=_decimal_from(_field(item, "low"), "candle.low"),
-                close=_decimal_from(_field(item, "close"), "candle.close"),
+                open=open_price,
+                high=high_price,
+                low=low_price,
+                close=close_price,
             )
         except ValueError:
-            continue
+            return ()
         candles.append(candle)
     return tuple(candles)
 
@@ -627,6 +642,8 @@ def _decimal_or_zero(value: Any) -> Decimal:
 
 
 def _decimal_from(value: Any, path: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid decimal at {path}: {value!r}")
     try:
         decimal = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

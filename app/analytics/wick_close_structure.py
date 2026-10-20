@@ -174,6 +174,8 @@ def _candle_view(candle: Any) -> _CandleView:
     high = _decimal_from(_get_field(candle, "high"), "candle.high")
     low = _decimal_from(_get_field(candle, "low"), "candle.low")
     close = _decimal_from(_get_field(candle, "close"), "candle.close")
+    if low <= 0 or high < low or high < max(open_price, close) or low > min(open_price, close):
+        raise ValueError("Malformed wick-close candle OHLC geometry.")
     return _CandleView(open=open_price, high=high, low=low, close=close)
 
 
@@ -247,6 +249,8 @@ def _get_field(candle: Any, field: str) -> Any:
 
 
 def _decimal_from(value: Any, path: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"Malformed wick-close data at {path}: invalid decimal {value!r}.")
     try:
         decimal = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

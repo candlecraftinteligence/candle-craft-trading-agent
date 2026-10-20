@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -17,6 +19,8 @@ _UNIT_DURATION = {
     "d": timedelta(days=1),
     "w": timedelta(weeks=1),
 }
+SHADOW_RULE_VERSION = "candle-integrity-shadow-v1"
+_MAX_SHADOW_SAMPLE_INDICES = 10
 
 
 class CandleIntegrityReason(str, Enum):
@@ -26,8 +30,15 @@ class CandleIntegrityReason(str, Enum):
     INVALID_TIMEFRAME = "invalid_timeframe"
     DUPLICATE_TIMESTAMP = "duplicate_timestamp"
     OUT_OF_ORDER = "out_of_order"
+    OVERLAPPING_INTERVAL = "overlapping_interval"
     CONTINUITY_GAP = "continuity_gap"
     INSUFFICIENT_CLOSED_HISTORY = "insufficient_closed_history"
+    INVALID_CANDLE = "invalid_candle"
+    MISSING_PRICE = "missing_price"
+    INVALID_PRICE = "invalid_price"
+    INVALID_OHLC_GEOMETRY = "invalid_ohlc_geometry"
+    MISSING_VOLUME = "missing_volume"
+    INVALID_VOLUME = "invalid_volume"
 
 
 class CandleIntegrityError(ValueError):
@@ -55,6 +66,11 @@ class CausalCandle:
     source: Any
     open_timestamp: datetime
     close_timestamp: datetime
+    index: int | None = None
+
+    @property
+    def derived_close_timestamp(self) -> datetime:
+        return self.close_timestamp
 
     @property
     def open_timestamp_ms(self) -> int:
@@ -71,6 +87,34 @@ class ClosedCandleWindow:
     timeline: tuple[CausalCandle, ...]
     decision_timestamp: datetime
     excluded_unclosed_count: int
+
+
+@dataclass(frozen=True)
+class ValidatedCandleValues:
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal | None
+    quote_volume: Decimal | None = None
+    trade_count: int | None = None
+
+
+@dataclass(frozen=True)
+class CandleShadowDiagnostic:
+    rule_version: str
+    consumer: str
+    source: str
+    timeframe: str
+    observation_kind: str
+    sample_count: int
+    old_decision: str
+    new_decision: str
+    would_flag_under_strict_shadow: bool
+    disagreement_count: int
+    reason_counts: dict[str, int]
+    sampled_indices: dict[str, tuple[int, ...]]
+    promotion_evidence_required: tuple[str, ...]
 
 
 def timeframe_duration(timeframe: str) -> timedelta:
@@ -98,11 +142,19 @@ def normalize_utc_timestamp(value: Any, *, field_name: str = "timestamp") -> dat
         return value.astimezone(UTC)
     if isinstance(value, bool):
         raise ValueError(f"{field_name} must be an epoch-millisecond or datetime value")
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
         try:
-            return datetime.fromtimestamp(float(value) / 1000, tz=UTC)
+            return datetime.fromtimestamp(value / 1000, tz=UTC)
         except (OverflowError, OSError, ValueError) as exc:
             raise ValueError(f"{field_name} is outside the supported UTC range") from exc
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError(f"{field_name} must be an integral epoch-millisecond value")
+        return normalize_utc_timestamp(int(value), field_name=field_name)
+    if isinstance(value, Decimal):
+        if not value.is_finite() or value != int(value):
+            raise ValueError(f"{field_name} must be an integral epoch-millisecond value")
+        return normalize_utc_timestamp(int(value), field_name=field_name)
     if isinstance(value, str):
         cleaned = value.strip()
         if not cleaned or cleaned == NA:
@@ -119,11 +171,164 @@ def normalize_utc_timestamp(value: Any, *, field_name: str = "timestamp") -> dat
     raise ValueError(f"{field_name} must be an epoch-millisecond or datetime value")
 
 
+def validate_candle_values(
+    candle: Any,
+    *,
+    index: int | None = None,
+    timeframe: str | None = None,
+    require_volume: bool = True,
+) -> ValidatedCandleValues:
+    """Validate candle OHLC price positivity, cross-field geometry, and volume."""
+
+    normalized_timeframe = str(timeframe or _field(candle, "interval") or "unknown").strip().lower() or "unknown"
+    if candle is None or isinstance(candle, (bool, str, bytes, bytearray, int, float, Decimal, list, tuple, set, frozenset)):
+        raise CandleIntegrityError(
+            CandleIntegrityReason.INVALID_CANDLE,
+            "candle must be a mapping or candle object",
+            timeframe=normalized_timeframe,
+            index=index,
+        )
+    if not isinstance(candle, Mapping) and not any(
+        hasattr(candle, name) for name in ("open", "high", "low", "close")
+    ):
+        raise CandleIntegrityError(
+            CandleIntegrityReason.INVALID_CANDLE,
+            "candle does not expose OHLC fields",
+            timeframe=normalized_timeframe,
+            index=index,
+        )
+
+    parsed_prices: dict[str, Decimal] = {}
+    for price_name in ("open", "high", "low", "close"):
+        if not _has_field(candle, price_name):
+            raise CandleIntegrityError(
+                CandleIntegrityReason.MISSING_PRICE,
+                f"candle is missing required price field '{price_name}'",
+                timeframe=normalized_timeframe,
+                index=index,
+            )
+        raw_price = _field(candle, price_name)
+        if _is_missing(raw_price) or (isinstance(raw_price, str) and not raw_price.strip()):
+            raise CandleIntegrityError(
+                CandleIntegrityReason.MISSING_PRICE,
+                f"candle is missing required price field '{price_name}'",
+                timeframe=normalized_timeframe,
+                index=index,
+            )
+        price_value = _parse_finite_decimal(raw_price)
+        if price_value is None or price_value <= 0:
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_PRICE,
+                f"candle price field '{price_name}' must be a finite positive number",
+                timeframe=normalized_timeframe,
+                index=index,
+            )
+        parsed_prices[price_name] = price_value
+
+    open_price = parsed_prices["open"]
+    high_price = parsed_prices["high"]
+    low_price = parsed_prices["low"]
+    close_price = parsed_prices["close"]
+    if (
+        low_price > high_price
+        or not (low_price <= open_price <= high_price)
+        or not (low_price <= close_price <= high_price)
+    ):
+        raise CandleIntegrityError(
+            CandleIntegrityReason.INVALID_OHLC_GEOMETRY,
+            (
+                "candle OHLC geometry violates low <= open, close <= high "
+                f"(open={open_price}, high={high_price}, low={low_price}, close={close_price})"
+            ),
+            timeframe=normalized_timeframe,
+            index=index,
+        )
+
+    has_volume = _has_field(candle, "volume")
+    raw_volume = _field(candle, "volume") if has_volume else None
+    if not has_volume or raw_volume is None or (isinstance(raw_volume, str) and raw_volume.strip() == NA):
+        if require_volume:
+            raise CandleIntegrityError(
+                CandleIntegrityReason.MISSING_VOLUME,
+                "candle is missing required volume field 'volume'",
+                timeframe=normalized_timeframe,
+                index=index,
+            )
+        volume_value: Decimal | None = None
+    else:
+        if isinstance(raw_volume, str) and not raw_volume.strip():
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_VOLUME,
+                "candle field 'volume' is blank",
+                timeframe=normalized_timeframe,
+                index=index,
+            )
+        volume_value = _parse_finite_decimal(raw_volume)
+        if volume_value is None or volume_value < 0:
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_VOLUME,
+                "candle field 'volume' must be a finite non-negative number",
+                timeframe=normalized_timeframe,
+                index=index,
+            )
+
+    quote_volume_value: Decimal | None = None
+    for quote_field in ("quote_volume", "turnover"):
+        if not _has_field(candle, quote_field):
+            continue
+        raw_quote = _field(candle, quote_field)
+        if raw_quote is None or (isinstance(raw_quote, str) and raw_quote.strip() == NA):
+            continue
+        if isinstance(raw_quote, str) and not raw_quote.strip():
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_VOLUME,
+                f"candle optional field '{quote_field}' is blank",
+                timeframe=normalized_timeframe,
+                index=index,
+            )
+        parsed_quote = _parse_finite_decimal(raw_quote)
+        if parsed_quote is None or parsed_quote < 0:
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_VOLUME,
+                f"candle optional field '{quote_field}' must be a finite non-negative number",
+                timeframe=normalized_timeframe,
+                index=index,
+            )
+        quote_volume_value = parsed_quote
+        break
+
+    trade_count_value: int | None = None
+    if _has_field(candle, "trade_count"):
+        raw_trades = _field(candle, "trade_count")
+        if raw_trades is not None and not (isinstance(raw_trades, str) and raw_trades.strip() == NA):
+            parsed_trades = _parse_non_negative_int(raw_trades)
+            if parsed_trades is None:
+                raise CandleIntegrityError(
+                    CandleIntegrityReason.INVALID_VOLUME,
+                    "candle optional field 'trade_count' must be a non-negative integer",
+                    timeframe=normalized_timeframe,
+                    index=index,
+                )
+            trade_count_value = parsed_trades
+
+    return ValidatedCandleValues(
+        open=open_price,
+        high=high_price,
+        low=low_price,
+        close=close_price,
+        volume=volume_value,
+        quote_volume=quote_volume_value,
+        trade_count=trade_count_value,
+    )
+
+
 def validate_candle_sequence(
     candles: Sequence[Any],
     *,
     timeframe: str,
     require_continuity: bool = True,
+    require_volume: bool = True,
+    validate_values: bool = True,
 ) -> tuple[CausalCandle, ...]:
     if isinstance(candles, (str, bytes)) or not isinstance(candles, Sequence):
         raise ValueError("candles must be a sequence")
@@ -134,6 +339,13 @@ def validate_candle_sequence(
     previous_open: datetime | None = None
 
     for index, candle in enumerate(candles):
+        if candle is None or isinstance(candle, (bool, str, bytes, bytearray, int, float, Decimal, list, tuple, set, frozenset)):
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_CANDLE,
+                "candle must be a mapping or candle object",
+                timeframe=normalized_timeframe,
+                index=index,
+            )
         raw_open = _first_present_field(candle, ("timestamp", "open_timestamp", "opened_at"))
         if _is_missing(raw_open):
             raise CandleIntegrityError(
@@ -152,7 +364,16 @@ def validate_candle_sequence(
                 index=index,
             ) from exc
 
-        derived_close = open_timestamp + duration
+        try:
+            derived_close = open_timestamp + duration
+        except OverflowError as exc:
+            raise CandleIntegrityError(
+                CandleIntegrityReason.INVALID_OPEN_TIMESTAMP,
+                "candle close boundary overflows supported UTC range",
+                timeframe=normalized_timeframe,
+                index=index,
+            ) from exc
+
         raw_close = _first_present_field(candle, ("close_timestamp", "closed_at"))
         if _is_missing(raw_close):
             close_timestamp = derived_close
@@ -191,6 +412,16 @@ def validate_candle_sequence(
                     index=index,
                 )
             expected_open = previous_open + duration
+            if open_timestamp < expected_open:
+                raise CandleIntegrityError(
+                    CandleIntegrityReason.OVERLAPPING_INTERVAL,
+                    (
+                        f"candle open {open_timestamp.isoformat()} overlaps prior interval closing at "
+                        f"{expected_open.isoformat()}"
+                    ),
+                    timeframe=normalized_timeframe,
+                    index=index,
+                )
             if require_continuity and open_timestamp != expected_open:
                 raise CandleIntegrityError(
                     CandleIntegrityReason.CONTINUITY_GAP,
@@ -199,11 +430,20 @@ def validate_candle_sequence(
                     index=index,
                 )
 
+        if validate_values:
+            validate_candle_values(
+                candle,
+                index=index,
+                timeframe=normalized_timeframe,
+                require_volume=require_volume,
+            )
+
         timeline.append(
             CausalCandle(
                 source=candle,
                 open_timestamp=open_timestamp,
                 close_timestamp=close_timestamp,
+                index=index,
             )
         )
         previous_open = open_timestamp
@@ -218,6 +458,8 @@ def closed_candles_as_of(
     decision_timestamp: Any,
     minimum_closed_history: int = 1,
     require_continuity: bool = True,
+    require_volume: bool = True,
+    validate_values: bool = True,
 ) -> ClosedCandleWindow:
     if minimum_closed_history < 0:
         raise ValueError("minimum_closed_history must be zero or greater")
@@ -227,8 +469,18 @@ def closed_candles_as_of(
         candles,
         timeframe=normalized_timeframe,
         require_continuity=require_continuity,
+        require_volume=require_volume,
+        validate_values=False,
     )
     eligible = tuple(item for item in timeline if item.close_timestamp <= decision_utc)
+    if validate_values:
+        for item in eligible:
+            validate_candle_values(
+                item.source,
+                index=item.index,
+                timeframe=normalized_timeframe,
+                require_volume=require_volume,
+            )
     if len(eligible) < minimum_closed_history:
         raise CandleIntegrityError(
             CandleIntegrityReason.INSUFFICIENT_CLOSED_HISTORY,
@@ -246,6 +498,98 @@ def closed_candles_as_of(
         decision_timestamp=decision_utc,
         excluded_unclosed_count=len(timeline) - len(eligible),
     )
+
+
+def evaluate_candle_shadow_diagnostics(
+    candles: Sequence[Any],
+    *,
+    timeframe: str,
+    consumer: str,
+    source: str = "unknown",
+    synthetic_fixture: bool = False,
+) -> CandleShadowDiagnostic:
+    """Observational shadow diagnostics for candidate rules lacking hard-gate proof.
+
+    Leaves eligibility and lifecycle behavior unchanged while recording bounded,
+    deterministic counts and sample indices.
+    """
+
+    normalized_timeframe = str(timeframe).strip().lower() or "unknown"
+    try:
+        duration = timeframe_duration(normalized_timeframe)
+        duration_ms = int(duration.total_seconds() * 1000)
+    except CandleIntegrityError:
+        duration_ms = 0
+
+    reason_counts: dict[str, int] = {}
+    sampled_indices: dict[str, list[int]] = {}
+
+    def _record(reason: str, idx: int) -> None:
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        bucket = sampled_indices.setdefault(reason, [])
+        if len(bucket) < _MAX_SHADOW_SAMPLE_INDICES:
+            bucket.append(idx)
+
+    for index, candle in enumerate(candles):
+        try:
+            values = validate_candle_values(
+                candle,
+                index=index,
+                timeframe=normalized_timeframe,
+                require_volume=False,
+            )
+        except CandleIntegrityError:
+            continue
+
+        if values.volume is not None and values.volume == 0:
+            if values.open == values.high == values.low == values.close:
+                _record("flat_zero_volume_bar", index)
+            else:
+                _record("positive_range_zero_volume_bar", index)
+
+        if values.volume is not None and values.quote_volume is not None:
+            if values.volume == 0 and values.quote_volume > 0:
+                _record("quote_volume_positive_on_zero_base_volume", index)
+            elif values.volume > 0 and values.quote_volume == 0:
+                _record("quote_volume_zero_on_positive_base_volume", index)
+
+        if duration_ms > 0:
+            raw_open = _first_present_field(candle, ("timestamp", "open_timestamp", "opened_at"))
+            if not _is_missing(raw_open):
+                try:
+                    open_dt = normalize_utc_timestamp(raw_open, field_name="open_timestamp")
+                    open_ms = _epoch_milliseconds(open_dt)
+                    if open_ms % duration_ms != 0:
+                        _record("unanchored_open_timestamp", index)
+                except ValueError:
+                    pass
+
+    disagreement_count = sum(reason_counts.values())
+    return CandleShadowDiagnostic(
+        rule_version=SHADOW_RULE_VERSION,
+        consumer=consumer,
+        source=source,
+        timeframe=normalized_timeframe,
+        observation_kind="synthetic_fixture" if synthetic_fixture else "exchange_observation",
+        sample_count=len(candles),
+        old_decision="pass",
+        new_decision="pass",
+        would_flag_under_strict_shadow=disagreement_count > 0,
+        disagreement_count=disagreement_count,
+        reason_counts=dict(sorted(reason_counts.items())),
+        sampled_indices={key: tuple(indices) for key, indices in sorted(sampled_indices.items())},
+        promotion_evidence_required=(
+            "Cross-venue Binance USD-M and Bybit Linear empirical frequency audit over >=30 days",
+            "Zero false-rejection proof on legitimate low-liquidity closed intervals",
+            "Explicit Astra review approval before promoting any shadow rule to a hard gate",
+        ),
+    )
+
+
+def _has_field(candle: Any, name: str) -> bool:
+    if isinstance(candle, Mapping):
+        return name in candle
+    return hasattr(candle, name)
 
 
 def _field(candle: Any, name: str) -> Any:
@@ -266,6 +610,42 @@ def _is_missing(value: Any) -> bool:
     return value is None or value == "" or value == NA
 
 
+def _parse_finite_decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return Decimal(str(value))
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned.upper() == NA:
+            return None
+        try:
+            parsed = Decimal(cleaned)
+        except (InvalidOperation, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+    return None
+
+
+def _parse_non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or not cleaned.isdigit():
+            return None
+        return int(cleaned)
+    return None
+
+
 def _epoch_milliseconds(value: datetime) -> int:
     delta = value - _EPOCH_UTC
     return (delta.days * 86_400_000) + (delta.seconds * 1000) + (delta.microseconds // 1000)
@@ -274,10 +654,15 @@ def _epoch_milliseconds(value: datetime) -> int:
 __all__ = [
     "CandleIntegrityError",
     "CandleIntegrityReason",
+    "CandleShadowDiagnostic",
     "CausalCandle",
     "ClosedCandleWindow",
+    "SHADOW_RULE_VERSION",
+    "ValidatedCandleValues",
     "closed_candles_as_of",
+    "evaluate_candle_shadow_diagnostics",
     "normalize_utc_timestamp",
     "timeframe_duration",
     "validate_candle_sequence",
+    "validate_candle_values",
 ]

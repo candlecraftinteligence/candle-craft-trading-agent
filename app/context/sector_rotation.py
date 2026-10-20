@@ -305,7 +305,7 @@ def build_sector_member_feature(
             candles,
             timeframe=normalized_timeframe,
             decision_timestamp=decision_timestamp,
-            minimum_closed_history=1,
+            minimum_closed_history=1, require_volume=False,
         )
         returns = _returns_from_closed_window(window.timeline, source_duration)
         usable_returns = tuple(value for value in returns.values() if value is not None)

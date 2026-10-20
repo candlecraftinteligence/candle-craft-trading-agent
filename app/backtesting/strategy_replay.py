@@ -1574,7 +1574,13 @@ def _empty_symbol_result(
 
 def _normalize_candles(candles: Sequence[Any], *, timeframe: str) -> tuple[_ReplayCandle, ...]:
     output: list[_ReplayCandle] = []
-    timeline = validate_candle_sequence(candles, timeframe=timeframe, require_continuity=True)
+    timeline = validate_candle_sequence(
+        candles,
+        timeframe=timeframe,
+        require_continuity=True,
+        require_volume=False,
+        validate_values=True,
+    )
     for index, causal in enumerate(timeline):
         candle = causal.source
         output.append(
@@ -1605,6 +1611,8 @@ def _normalize_optional_decimal(value: Any) -> MaybeDecimal:
 
 
 def _decimal_from(value: Any, path: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"Malformed replay data at {path}: invalid decimal {value!r}.")
     try:
         decimal = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:

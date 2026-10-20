@@ -1906,7 +1906,7 @@ class ScannerRunner:
             candles,
             timeframe=timeframe,
             decision_timestamp=config.decision_timestamp,
-            minimum_closed_history=minimum_closed_history,
+            minimum_closed_history=minimum_closed_history, validate_values=False,
         )
         if window.excluded_unclosed_count:
             self.logger.debug(
