@@ -1664,15 +1664,74 @@ def evidence_map_reasons(evidence: Mapping[str, Any] | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(reasons))
 
 
+def observation_temporal_reasons(
+    observation: DerivativesObservation,
+    cutoff: datetime | None,
+    batch: DerivativesEvidenceBatch | None = None,
+) -> tuple[str, ...]:
+    """Cutoff and cache-chronology rules for one observation. Does not sample a clock."""
+
+    reasons = list(_temporal_reasons(observation, cutoff))
+    reasons.extend(_cache_chronology(batch))
+    return tuple(dict.fromkeys(reasons))
+
+
+def observation_context_freshness(
+    metric_at: datetime | None,
+    cutoff: datetime | None,
+    allowance_ms: int | None,
+) -> tuple[str, tuple[str, ...]]:
+    """Cadence-or-period freshness. Does not sample a clock or choose a cutoff."""
+
+    return _freshness(metric_at, cutoff, allowance_ms)
+
+
+def series_period_allowance_ms(period: str) -> int | None:
+    """Verified series-period allowance. Unknown text stays unknown."""
+
+    return _period_ms(period)
+
+
+def evidence_visible_at_cutoff(
+    *,
+    decision_cutoff: datetime | None,
+    instrument: InstrumentMetadata | None = None,
+    open_interest: DerivativesEvidenceBatch | None = None,
+    open_interest_history: DerivativesEvidenceBatch | None = None,
+    funding: DerivativesEvidenceBatch | None = None,
+    funding_history: DerivativesEvidenceBatch | None = None,
+    account_ratio: DerivativesEvidenceBatch | None = None,
+) -> dict[str, Any]:
+    """Return the instrument and batches the evaluator can see at this cutoff.
+
+    This is the same visibility step ``evaluate_derivatives_source_truth`` uses.
+    It does not sample a clock and it does not admit evidence by itself.
+    """
+
+    visible = _instrument_visible_at_cutoff(instrument, decision_cutoff)
+    return {
+        "instrument": visible,
+        "open_interest": bind_instrument_batch(open_interest, visible),
+        "open_interest_history": bind_instrument_batch(open_interest_history, visible),
+        "funding": bind_instrument_batch(funding, visible),
+        "funding_history": bind_instrument_batch(funding_history, visible),
+        "account_ratio": bind_instrument_batch(account_ratio, visible),
+    }
+
+
 __all__ = [
     "ENFORCEMENT",
     "SHADOW_FRESHNESS_POLICY",
     "DerivativesSourceTruthResult",
     "OpenInterestPairSelection",
     "evaluate_derivatives_source_truth",
+    "evidence_visible_at_cutoff",
     "liquidation_coverage_label",
     "native_position_change_pct",
+    "observation_context_freshness",
+    "observation_temporal_reasons",
     "quote_notional",
     "select_open_interest_pair",
+    "series_period_allowance_ms",
     "write_dev_shadow_artifact",
 ]

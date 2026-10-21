@@ -194,10 +194,10 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - code refs:
   - `app/data/derivatives_source_evidence.py:48` contains `"/fapi/v1/fundingRate"`
   - `app/data/derivatives_source_evidence.py:52` contains `"/v5/market/funding/history"`
-  - `app/pipeline/scanner_runner.py:2449` contains `async def _fetch_optional_market_data(`
-  - `app/pipeline/scanner_runner.py:4507` contains `def _derivatives_enrichment_input(`
-  - `app/pipeline/scanner_runner.py:4532` contains `def _derivatives_rejection(`
-  - `app/pipeline/scanner_runner.py:1684` contains `status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,`
+  - `app/pipeline/scanner_runner.py:2471` contains `async def _fetch_optional_market_data(`
+  - `app/pipeline/scanner_runner.py:4638` contains `def _derivatives_enrichment_input(`
+  - `app/pipeline/scanner_runner.py:4663` contains `def _derivatives_rejection(`
+  - `app/pipeline/scanner_runner.py:1706` contains `status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,`
 
 ## open_interest
 
@@ -420,8 +420,8 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `app/pipeline/scanner_runner.py:290` contains `market_regime_enabled: bool = False`
-  - `app/pipeline/scanner_runner.py:2020` contains `"ETHUSDT", "eth_candles"`
+  - `app/pipeline/scanner_runner.py:295` contains `market_regime_enabled: bool = False`
+  - `app/pipeline/scanner_runner.py:2042` contains `"ETHUSDT", "eth_candles"`
 
 ## btc_dominance
 

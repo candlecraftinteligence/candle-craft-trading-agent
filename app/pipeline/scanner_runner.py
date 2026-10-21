@@ -29,6 +29,11 @@ from app.analytics.derivatives_enrichment import (
     DerivativesEnrichmentResult,
     enrich_derivatives,
 )
+from app.analytics.derivatives_causal_observation import (
+    assess_frozen_bundle,
+    capture_observation_boundary,
+    freeze_derivatives_bundle,
+)
 from app.analytics.derivatives_source_truth import (
     DerivativesSourceTruthResult,
     evaluate_derivatives_source_truth,
@@ -666,6 +671,11 @@ class ScannerSymbolResult(BaseModel):
         exclude=True,
         repr=False,
     )
+    derivatives_causal_observation: Any | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -804,6 +814,7 @@ class _OptionalMarketData(BaseModel):
     derivatives_evidence: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     derivatives_instrument: Any | None = Field(default=None, exclude=True, repr=False)
     derivatives_decision_cutoff: datetime | None = Field(default=None, exclude=True)
+    derivatives_frozen_bundle: Any | None = Field(default=None, exclude=True, repr=False)
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -953,7 +964,7 @@ class ScannerRunner:
                 market_regime_context = await self._fetch_market_regime_context(
                     client, run_config, progress=progress
                 )
-            for symbol_config in run_config.symbols:
+            for iteration_index, symbol_config in enumerate(run_config.symbols):
                 if scan_deadline is not None and time.monotonic() >= scan_deadline:
                     global_timeout_hit = True
                     self.logger.warning("Full scan timeout reached before symbol=%s.", symbol_config.symbol)
@@ -974,6 +985,7 @@ class ScannerRunner:
                     symbol_timeout = min(symbol_timeout, remaining_scan_seconds)
 
                 try:
+                    symbol_deadline = time.monotonic() + symbol_timeout
                     symbol_result = await asyncio.wait_for(
                         self._scan_symbol(
                             symbol_config,
@@ -981,6 +993,8 @@ class ScannerRunner:
                             client,
                             global_context=global_context,
                             progress=progress,
+                            iteration_index=iteration_index,
+                            symbol_deadline=symbol_deadline,
                         ),
                         timeout=symbol_timeout,
                     )
@@ -1468,6 +1482,8 @@ class ScannerRunner:
         *,
         global_context: GlobalContextSnapshot | None = None,
         progress: Callable[[str], Any] | None = None,
+        iteration_index: int | None = None,
+        symbol_deadline: float | None = None,
     ) -> ScannerSymbolResult:
         symbol = symbol_config.symbol
         microstructure_flow = self._microstructure_snapshot(symbol, config)
@@ -1478,7 +1494,13 @@ class ScannerRunner:
         technical_candles = _technical_candles(candles)
         current_price = _current_price_from_candles(candles)
         await _emit_progress(progress, "Fetching derivatives...")
-        optional_data = await self._fetch_optional_market_data(client, symbol, config)
+        optional_data = await self._fetch_optional_market_data(
+            client,
+            symbol,
+            config,
+            iteration_index=iteration_index,
+            symbol_deadline=symbol_deadline,
+        )
 
         optional_data = optional_data.model_copy(
             update={
@@ -2451,6 +2473,9 @@ class ScannerRunner:
         client: BaseExchangeClient,
         symbol: str,
         config: ScannerRunConfig,
+        *,
+        iteration_index: int | None = None,
+        symbol_deadline: float | None = None,
     ) -> _OptionalMarketData:
         missing_data: list[str] = []
         unverified_data: list[str] = []
@@ -2468,13 +2493,37 @@ class ScannerRunner:
             "open_interest_history",
             "long_short_ratio",
         } if config.fast_mode else set()
-        optional_results = await asyncio.gather(
-            *(
-                self._optional_call(client, method_name, symbol, config, label)
-                for label, method_name in optional_specs
-                if label not in skipped_fast_labels
-            )
+        # When a symbol deadline is active, overlap the shadow instrument lookup
+        # with the optional gather and cancel it if it is still running. That
+        # keeps the extra lookup from extending production collection. Callers
+        # without a symbol deadline keep the sequential lookup.
+        deadline_blocks_instrument = (
+            config.derivatives_source_truth_shadow
+            and symbol_deadline is not None
+            and time.monotonic() >= symbol_deadline
         )
+        instrument_task = None
+        if config.derivatives_source_truth_shadow and symbol_deadline is not None and not deadline_blocks_instrument:
+            instrument_task = asyncio.create_task(
+                self._shadow_instrument(client, symbol, config),
+                name="cci-shadow-instrument",
+            )
+        try:
+            optional_results = await asyncio.gather(
+                *(
+                    self._optional_call(client, method_name, symbol, config, label)
+                    for label, method_name in optional_specs
+                    if label not in skipped_fast_labels
+                )
+            )
+        except BaseException:
+            if instrument_task is not None:
+                instrument_task.cancel()
+                try:
+                    await instrument_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            raise
         values_by_label = {label: value for label, value, _missing, _warning, _evidence in optional_results}
         for label, _method_name in optional_specs:
             if label in skipped_fast_labels:
@@ -2506,6 +2555,7 @@ class ScannerRunner:
 
         evidence: dict[str, Any] | None = None
         instrument = None
+        frozen = None
         if config.derivatives_source_truth_shadow:
             evidence = {
                 label: item
@@ -2514,7 +2564,30 @@ class ScannerRunner:
             }
             for label in skipped_fast_labels:
                 evidence[label] = _shadow_unavailable(label, symbol, "fast_mode_skipped")
-            instrument = await self._shadow_instrument(client, symbol, config)
+            if instrument_task is not None:
+                instrument = await _finish_shadow_instrument_task(instrument_task, symbol, config.exchange)
+            elif deadline_blocks_instrument:
+                from app.data.derivatives_instrument import unverified_instrument
+
+                instrument = unverified_instrument(
+                    exchange=config.exchange,
+                    requested_symbol=symbol,
+                    source_endpoint="get_instrument_metadata",
+                    reason="instrument_lookup_not_waited",
+                )
+            else:
+                instrument = await self._shadow_instrument(client, symbol, config)
+            boundary = capture_observation_boundary(self.capture_clock)
+            frozen = freeze_derivatives_bundle(
+                evidence,
+                instrument=instrument,
+                strategy_cutoff=config.decision_timestamp,
+                observation=boundary,
+                symbol=symbol,
+                requested_venue=config.exchange,
+                scan_mode="fast" if config.fast_mode else "full",
+                iteration_index=iteration_index,
+            )
 
         return _OptionalMarketData(
             ticker=ticker,
@@ -2531,6 +2604,7 @@ class ScannerRunner:
             derivatives_evidence=evidence,
             derivatives_instrument=instrument,
             derivatives_decision_cutoff=config.decision_timestamp,
+            derivatives_frozen_bundle=frozen,
         )
 
     async def _optional_call(
@@ -2766,7 +2840,7 @@ class ScannerRunner:
         candidate_quality_grade = _display_decimal_or_text(
             getattr(setup_quality.quality_grade, "value", setup_quality.quality_grade)
         )
-        shadow = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
+        shadow, causal = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
         return ScannerSymbolResult(
             symbol=symbol,
             status=status,
@@ -2903,6 +2977,7 @@ class ScannerRunner:
             candidate_quality_grade=candidate_quality_grade,
             final_quality_grade=candidate_quality_grade,
             derivatives_source_truth_shadow=shadow,
+            derivatives_causal_observation=causal,
         )
 
 
@@ -2915,12 +2990,13 @@ def _shadow_unavailable(label: str, symbol: str, reason: str) -> Any:
 def _derivatives_shadow_result(
     optional_data: _OptionalMarketData,
     liquidation_flow: Any,
-) -> DerivativesSourceTruthResult | None:
+) -> tuple[DerivativesSourceTruthResult | None, Any | None]:
     if not optional_data.derivatives_source_truth_requested:
-        return None
-    evidence = optional_data.derivatives_evidence or {}
+        return None, None
+    bundle = optional_data.derivatives_frozen_bundle
+    evidence = bundle.evidence_map() if bundle is not None else (optional_data.derivatives_evidence or {})
     try:
-        return evaluate_derivatives_source_truth(
+        strategy = evaluate_derivatives_source_truth(
             decision_cutoff=optional_data.derivatives_decision_cutoff,
             instrument=optional_data.derivatives_instrument,
             open_interest=evidence.get("open_interest"),
@@ -2931,7 +3007,7 @@ def _derivatives_shadow_result(
             liquidation_snapshot=liquidation_flow,
         )
     except Exception as exc:
-        return DerivativesSourceTruthResult(
+        strategy = DerivativesSourceTruthResult(
             classification="evaluation_error",
             validated_confirmation=False,
             supports_long="unverified",
@@ -2939,6 +3015,61 @@ def _derivatives_shadow_result(
             reason_codes=("evaluation_error",),
             evaluation_error=type(exc).__name__,
         )
+    if bundle is None:
+        return strategy, None
+    try:
+        causal = assess_frozen_bundle(
+            bundle,
+            strategy_evaluation=strategy,
+            liquidation_snapshot=liquidation_flow,
+        )
+    except Exception as exc:
+        from app.analytics.derivatives_causal_observation import unavailable_causal_record
+
+        causal = unavailable_causal_record(
+            bundle,
+            strategy_evaluation=strategy,
+            reason="evaluation_error",
+            error_name=type(exc).__name__,
+        )
+    return strategy, causal
+
+
+async def _finish_shadow_instrument_task(task: asyncio.Task[Any] | None, symbol: str, exchange: str) -> Any:
+    """Use a finished shadow lookup. Cancel one that is still running."""
+
+    from app.data.derivatives_instrument import unverified_instrument
+
+    if task is None:
+        return unverified_instrument(
+            exchange=exchange,
+            requested_symbol=symbol,
+            source_endpoint="get_instrument_metadata",
+            reason="adapter_has_no_source_evidence",
+        )
+    if task.done():
+        try:
+            return task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            return unverified_instrument(
+                exchange=exchange,
+                requested_symbol=symbol,
+                source_endpoint="get_instrument_metadata",
+                reason="instrument_lookup_failed",
+            )
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):
+        pass
+    return unverified_instrument(
+        exchange=exchange,
+        requested_symbol=symbol,
+        source_endpoint="get_instrument_metadata",
+        reason="instrument_lookup_not_waited",
+    )
 
 
 def _setup_quality_for_result(
