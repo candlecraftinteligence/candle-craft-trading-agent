@@ -11,6 +11,8 @@ from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 
+import pytest
+
 from app.analytics.derivatives_source_truth import (
     DerivativesSourceTruthResult,
     evaluate_derivatives_source_truth,
@@ -489,18 +491,28 @@ def test_regular_funding_is_settled_and_special_is_not_relabeled() -> None:
     regular_rows[0]["rateType"] = "Regular"
     regular = binance_funding(regular_rows)
     assert regular.observations[0].rate_kind == RATE_SETTLED_FUNDING
+    assert regular.observations[0].subtype_declarations == (("rateType", "Regular"),)
     assert "regular_funding" in regular.observations[0].reason_codes
     assert "unexpected_funding_subtype" not in regular.observations[0].reason_codes
     regular_result = evaluate_binance_funding(regular_rows)
     assert regular_result.classification == "eligible_no_conflict_detected"
     assert regular_result.funding_label == RATE_SETTLED_FUNDING
+    regular_fact = next(item for item in regular_result.to_dict()["lineage"] if item["role"] == "selected_funding")
+    assert regular_fact["components"] == [{"raw_field": "rateType", "raw_value": "Regular"}]
     assert_cannot_confirm(regular_result)
 
     alternate = funding_payload("0.0001", FUNDING_AT)
     alternate[0]["fundingRateType"] = "regular"
+    alternate_batch = binance_funding(alternate)
+    assert alternate_batch.observations[0].semantic_quality == QUALITY_UNVERIFIED
+    assert alternate_batch.observations[0].rate_kind == "regular"
+    assert alternate_batch.observations[0].subtype_declarations == (("fundingRateType", "regular"),)
+    assert "unexpected_funding_subtype" in alternate_batch.observations[0].reason_codes
     alternate_result = evaluate_binance_funding(alternate)
-    assert alternate_result.funding_label == RATE_SETTLED_FUNDING
-    assert alternate_result.classification == "eligible_no_conflict_detected"
+    assert alternate_result.funding_label != RATE_SETTLED_FUNDING
+    assert alternate_result.classification == "unverified"
+    assert "unexpected_funding_subtype" in alternate_result.reason_codes
+    assert_cannot_confirm(alternate_result)
 
     special_rows = funding_payload("0.0001", FUNDING_AT)
     special_rows[0]["rateType"] = "Special"
@@ -704,3 +716,160 @@ def test_synthetic_share_uncertainty_crossing_zero_is_unverified() -> None:
     assert fact.numeric_value is None
     assert fact.quality == QUALITY_UNVERIFIED
     assert "ratio_component_conflict" not in reasons
+
+
+@pytest.mark.parametrize(
+    ("venue", "extra_fields", "expected_reasons", "expected_components"),
+    [
+        (
+            "bybit",
+            {"rateType": "Regular"},
+            ("unexpected_funding_subtype",),
+            [{"raw_field": "rateType", "raw_value": "Regular"}],
+        ),
+        (
+            "bybit",
+            {"fundingRateType": "Regular"},
+            ("unexpected_funding_subtype",),
+            [{"raw_field": "fundingRateType", "raw_value": "Regular"}],
+        ),
+        (
+            "binance",
+            {"fundingRateType": "regular"},
+            ("unexpected_funding_subtype",),
+            [{"raw_field": "fundingRateType", "raw_value": "regular"}],
+        ),
+        (
+            "binance",
+            {"rateType": "Regular", "fundingRateType": "predicted"},
+            ("unexpected_funding_subtype", "contradictory_funding_evidence"),
+            [
+                {"raw_field": "rateType", "raw_value": "Regular"},
+                {"raw_field": "fundingRateType", "raw_value": "predicted"},
+            ],
+        ),
+        (
+            "binance",
+            {"rateType": "Regular", "fundingRateType": "Special"},
+            ("unsupported_funding_subtype", "unexpected_funding_subtype", "contradictory_funding_evidence"),
+            [
+                {"raw_field": "rateType", "raw_value": "Regular"},
+                {"raw_field": "fundingRateType", "raw_value": "Special"},
+            ],
+        ),
+        (
+            "binance",
+            {"rateType": "Regular", "fundingRateType": "unexpected"},
+            ("unexpected_funding_subtype", "contradictory_funding_evidence"),
+            [
+                {"raw_field": "rateType", "raw_value": "Regular"},
+                {"raw_field": "fundingRateType", "raw_value": "unexpected"},
+            ],
+        ),
+        (
+            "binance",
+            {"rateType": "Regular", "fundingRateType": "Regular"},
+            ("unexpected_funding_subtype",),
+            [
+                {"raw_field": "rateType", "raw_value": "Regular"},
+                {"raw_field": "fundingRateType", "raw_value": "Regular"},
+            ],
+        ),
+        (
+            "binance",
+            {"rateType": ""},
+            ("unexpected_funding_subtype",),
+            [{"raw_field": "rateType", "raw_value": NA}],
+        ),
+        (
+            "binance",
+            {"rateType": None},
+            ("unexpected_funding_subtype",),
+            [{"raw_field": "rateType", "raw_value": NA}],
+        ),
+        (
+            "binance",
+            {"rateType": 123},
+            ("unexpected_funding_subtype",),
+            [{"raw_field": "rateType", "raw_value": "123"}],
+        ),
+        (
+            "binance",
+            {"rateType": "settled_funding"},
+            ("unexpected_funding_subtype",),
+            [{"raw_field": "rateType", "raw_value": "settled_funding"}],
+        ),
+    ],
+)
+def test_d1_funding_subtype_scope_and_sibling_declarations(
+    tmp_path,
+    venue: str,
+    extra_fields: dict,
+    expected_reasons: tuple[str, ...],
+    expected_components: list[dict[str, str]],
+) -> None:
+    if venue == "bybit":
+        row = fund_row(**extra_fields)
+        batch = bybit_funding([row])
+        result = evaluate_bybit(funding_rows=[row])
+    else:
+        rows = funding_payload("0.0001", FUNDING_AT)
+        rows[0].update(extra_fields)
+        batch = binance_funding(rows)
+        result = evaluate_binance_funding(rows)
+
+    obs = batch.observations[0]
+    assert obs.semantic_quality == QUALITY_UNVERIFIED
+    assert obs.rate_kind != RATE_SETTLED_FUNDING
+    for code in expected_reasons:
+        assert code in obs.reason_codes
+        assert code in result.reason_codes
+    assert result.classification == "unverified"
+    assert result.funding_label != RATE_SETTLED_FUNDING
+    assert result.funding_rate == NA
+    assert result.supports_long == "unverified"
+    assert result.supports_short == "unverified"
+    assert_cannot_confirm(result)
+
+    payload = result.to_dict()
+    excluded = [item for item in payload["lineage"] if item["role"] == "excluded_funding"]
+    assert len(excluded) == 1
+    assert excluded[0]["components"] == expected_components
+    for code in expected_reasons:
+        assert code in excluded[0]["reason_codes"]
+
+    restored = DerivativesSourceTruthResult.from_dict(payload)
+    assert restored.to_dict() == payload
+    artifact_path = tmp_path / "d1-subtype-artifact.json"
+    write_dev_shadow_artifact(artifact_path, result)
+    artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact_payload == payload
+
+
+def test_d1_field_order_and_duplicate_row_order_invariance() -> None:
+    base = funding_payload("0.0001", FUNDING_AT)[0]
+    row_forward = {**base, "rateType": "Regular", "fundingRateType": "predicted"}
+    row_reverse = {"fundingRateType": "predicted", "rateType": "Regular", **base}
+    res_forward = evaluate_binance_funding([row_forward])
+    res_reverse = evaluate_binance_funding([row_reverse])
+    assert res_forward.to_dict() == res_reverse.to_dict()
+
+    bybit_forward = evaluate_bybit(funding_rows=[fund_row(rateType="Regular", fundingRateType="Special")])
+    bybit_reverse = evaluate_bybit(funding_rows=[fund_row(fundingRateType="Special", rateType="Regular")])
+    assert bybit_forward.to_dict() == bybit_reverse.to_dict()
+
+    valid_row = {**base, "rateType": "Regular"}
+    invalid_bybit_style = {**base, "fundingRateType": "regular"}
+    special_row = {**base, "rateType": "Special"}
+    for left, right in (
+        (valid_row, invalid_bybit_style),
+        (special_row, invalid_bybit_style),
+        (valid_row, row_forward),
+    ):
+        first = evaluate_binance_funding([left, right])
+        second = evaluate_binance_funding([right, left])
+        assert outcome(first) == outcome(second)
+        assert first.to_dict() == second.to_dict()
+        assert first.classification == "unverified"
+        assert_cannot_confirm(first)
+

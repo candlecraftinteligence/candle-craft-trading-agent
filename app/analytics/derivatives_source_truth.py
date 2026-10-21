@@ -952,7 +952,13 @@ def _select_funding(
     failures = [(item, codes) for item, codes in failures if codes]
     if failures:
         failed = {id(item) for item, _codes in failures}
-        group_reasons = tuple(dict.fromkeys(code for _item, codes in failures for code in codes))
+        group_reasons = tuple(
+            dict.fromkeys(
+                code
+                for _item, codes in sorted(failures, key=lambda pair: _funding_sort(pair[0]))
+                for code in codes
+            )
+        )
         marks = list(foreign_marks)
         for item in local:
             own = next((codes for obs, codes in failures if obs is item), ())
@@ -978,15 +984,17 @@ def _funding_candidate_failures(
     batch: DerivativesEvidenceBatch | None,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
-    if (
-        observation.rate_kind != RATE_SETTLED_FUNDING
-        or "unexpected_funding_subtype" in observation.reason_codes
-        or "unsupported_funding_subtype" in observation.reason_codes
-    ):
-        if "unsupported_funding_subtype" in observation.reason_codes:
-            reasons.append("unsupported_funding_subtype")
-        else:
-            reasons.append("unexpected_funding_subtype")
+    subtype_failures = tuple(
+        code
+        for code in (
+            "unsupported_funding_subtype",
+            "unexpected_funding_subtype",
+            "contradictory_funding_evidence",
+        )
+        if code in observation.reason_codes
+    )
+    if observation.rate_kind != RATE_SETTLED_FUNDING or subtype_failures:
+        reasons.extend(subtype_failures or ("unexpected_funding_subtype",))
     reasons.extend(_temporal_reasons(observation, cutoff))
     reasons.extend(_cache_chronology(batch))
     quantity = observation.quantities[0] if observation.quantities else None
@@ -999,9 +1007,16 @@ def _funding_candidate_failures(
     return tuple(dict.fromkeys(reasons))
 
 
-def _funding_sort(observation: DerivativesObservation) -> tuple[str, str, str]:
+def _funding_sort(observation: DerivativesObservation) -> tuple[Any, ...]:
     raw = observation.quantities[0].raw_value if observation.quantities else ""
-    return (observation.endpoint, observation.identity.returned_symbol or "", raw)
+    return (
+        observation.endpoint,
+        observation.identity.returned_symbol or "",
+        raw,
+        observation.rate_kind,
+        getattr(observation, "subtype_declarations", ()),
+        observation.reason_codes,
+    )
 
 
 def _select_ratio(
@@ -1516,7 +1531,17 @@ def _descending_time(value: str | None) -> str:
 def _lineage_sort_key(item: SourceLineageFact) -> tuple[Any, ...]:
     priority = _lineage_priority(item.role)
     time_key = _descending_time(item.metric_time) if priority >= 20 else (item.metric_time or "")
-    return (priority, time_key, item.endpoint, item.raw_field, item.raw_value, item.role)
+    return (
+        priority,
+        time_key,
+        item.endpoint,
+        item.raw_field,
+        item.raw_value,
+        item.role,
+        item.rate_kind,
+        item.components,
+        item.reason_codes,
+    )
 
 
 def _prioritize_lineage(facts: Sequence[SourceLineageFact]) -> tuple[tuple[SourceLineageFact, ...], int]:
@@ -1576,10 +1601,13 @@ def _lineage_fact(
     extra_reasons: tuple[str, ...] = (),
 ) -> SourceLineageFact:
     quantity = _primary_lineage_quantity(observation)
-    components = tuple(
-        (item.raw_field, item.raw_value)
-        for item in observation.quantities
-        if quantity is None or item.raw_field != quantity.raw_field
+    components = (
+        *(
+            (item.raw_field, item.raw_value)
+            for item in observation.quantities
+            if quantity is None or item.raw_field != quantity.raw_field
+        ),
+        *getattr(observation, "subtype_declarations", ()),
     )
     delivered = None
     if batch is not None and batch.cache.delivered_at is not None:

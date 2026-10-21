@@ -135,6 +135,7 @@ class DerivativesObservation:
     semantic_quality: str
     reason_codes: tuple[str, ...]
     raw_retained: bool
+    subtype_declarations: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -769,9 +770,15 @@ def _funding_rows(
                 reason_codes=tuple(dict.fromkeys((*rate.reason_codes, "unexpected_funding_magnitude"))),
             )
         metric_time = _row_metric_time(data, (time_field,), ("fundingTime", "fundingRateTimestamp"), "funding_settlement_time")
-        subtype = _supplied_funding_subtype(data)
+        declarations = _supplied_funding_subtypes(data)
         semantic, reasons = _observation_quality(identity, (rate,), metric_time)
-        rate_kind, semantic, reasons = _apply_funding_subtype(subtype, semantic, reasons)
+        rate_kind, semantic, reasons = _apply_funding_subtype(
+            exchange=exchange,
+            endpoint=endpoint,
+            declarations=declarations,
+            semantic=semantic,
+            reasons=reasons,
+        )
         observations.append(
             DerivativesObservation(
                 metric="funding",
@@ -788,6 +795,7 @@ def _funding_rows(
                 semantic_quality=semantic,
                 reason_codes=reasons,
                 raw_retained=True,
+                subtype_declarations=tuple((item.field, item.raw_value) for item in declarations),
             )
         )
     return _batch(
@@ -1061,25 +1069,98 @@ _FUNDING_ROW_IDENTITY_CONFLICTS = frozenset(
 )
 
 
+_FUNDING_SUBTYPE_FIELDS = ("rateType", "fundingRateType")
+_VERIFIED_FUNDING_SUBTYPE_SOURCE = ("binance_futures", ENDPOINT_BINANCE_FUNDING, "rateType")
+
+
+@dataclass(frozen=True)
+class _FundingSubtypeDeclaration:
+    field: str
+    raw_value: str
+    token: str | None
+
+
 def _apply_funding_subtype(
-    subtype: str | None,
+    *,
+    exchange: str,
+    endpoint: str,
+    declarations: Sequence[_FundingSubtypeDeclaration],
     semantic: str,
     reasons: tuple[str, ...],
 ) -> tuple[str, str, tuple[str, ...]]:
-    """Map a documented funding subtype without treating an unknown token as ordinary."""
+    """Map a documented funding subtype only for its verified source contract.
 
-    if subtype is None:
+    Ordinary funding history rows without any subtype declaration remain settled
+    funding. When one or more subtype declarations are present, only Binance
+    ``/fapi/v1/fundingRate`` with native ``rateType="Regular"`` and no sibling
+    declaration is verified as ordinary settled funding.
+    """
+
+    if not declarations:
         return RATE_SETTLED_FUNDING, semantic, tuple(dict.fromkeys((*reasons, RATE_SETTLED_FUNDING)))
-    token = subtype.casefold()
-    if token == "regular":
+    if (
+        len(declarations) == 1
+        and (exchange, endpoint, declarations[0].field) == _VERIFIED_FUNDING_SUBTYPE_SOURCE
+        and declarations[0].token == "regular"
+    ):
         return (
             RATE_SETTLED_FUNDING,
             semantic,
             tuple(dict.fromkeys((*reasons, RATE_SETTLED_FUNDING, "regular_funding"))),
         )
-    if token == "special":
-        return subtype, QUALITY_UNVERIFIED, tuple(dict.fromkeys((*reasons, "unsupported_funding_subtype")))
-    return subtype, QUALITY_UNVERIFIED, tuple(dict.fromkeys((*reasons, "unexpected_funding_subtype")))
+    extra: list[str] = []
+    tokens = {item.token for item in declarations}
+    has_unsupported = False
+    has_unexpected = False
+    for item in declarations:
+        verified_source = (exchange, endpoint, item.field) == _VERIFIED_FUNDING_SUBTYPE_SOURCE
+        if item.token is None:
+            has_unexpected = True
+        elif item.token == "special":
+            has_unsupported = True
+            if not verified_source:
+                has_unexpected = True
+        elif item.token == "regular":
+            if not verified_source:
+                has_unexpected = True
+        else:
+            has_unexpected = True
+    if has_unsupported:
+        extra.append("unsupported_funding_subtype")
+    if has_unexpected:
+        extra.append("unexpected_funding_subtype")
+    if len(declarations) > 1 and (None in tokens or len(tokens) > 1):
+        extra.append("contradictory_funding_evidence")
+    if not extra:
+        extra.append("unexpected_funding_subtype")
+    rejected_quality = QUALITY_CONFLICT if semantic == QUALITY_CONFLICT else QUALITY_UNVERIFIED
+    return (
+        _rejected_funding_rate_kind(declarations),
+        rejected_quality,
+        tuple(dict.fromkeys((*reasons, *extra))),
+    )
+
+
+def _rejected_funding_rate_kind(declarations: Sequence[_FundingSubtypeDeclaration]) -> str:
+    special = sorted(
+        (item.raw_value for item in declarations if item.token == "special"),
+        key=lambda val: (val.casefold(), val),
+    )
+    if special:
+        return NA if special[0] == RATE_SETTLED_FUNDING else special[0]
+    non_regular = sorted(
+        (item.raw_value for item in declarations if item.token is not None and item.token not in {"regular", "special"}),
+        key=lambda val: (val.casefold(), val),
+    )
+    if non_regular:
+        return NA if non_regular[0] == RATE_SETTLED_FUNDING else non_regular[0]
+    if any(item.token is None for item in declarations):
+        return NA
+    regular = sorted(
+        (item.raw_value for item in declarations if item.raw_value and item.raw_value != RATE_SETTLED_FUNDING),
+        key=lambda val: (val.casefold(), val),
+    )
+    return regular[0] if regular else NA
 
 
 def _funding_batch_reasons(observations: Sequence[DerivativesObservation]) -> tuple[str, ...]:
@@ -1098,20 +1179,31 @@ def _funding_batch_reasons(observations: Sequence[DerivativesObservation]) -> tu
         reasons.append("unsupported_funding_subtype")
     if any("unexpected_funding_subtype" in item.reason_codes for item in pool):
         reasons.append("unexpected_funding_subtype")
+    if any("contradictory_funding_evidence" in item.reason_codes for item in pool):
+        reasons.append("contradictory_funding_evidence")
     return tuple(reasons)
 
 
-def _supplied_funding_subtype(data: Mapping[str, Any]) -> str | None:
-    """Return a supplied rateType or fundingRateType token. Absence means ordinary history."""
+def _supplied_funding_subtypes(data: Mapping[str, Any]) -> tuple[_FundingSubtypeDeclaration, ...]:
+    """Return all supplied subtype declarations in canonical field order."""
 
-    for key in ("rateType", "fundingRateType"):
+    declarations: list[_FundingSubtypeDeclaration] = []
+    for key in _FUNDING_SUBTYPE_FIELDS:
         if key not in data:
             continue
         value = data.get(key)
-        if value in (None, "", NA):
-            continue
-        return str(value).strip()[:64]
-    return None
+        if isinstance(value, str):
+            cleaned = value.strip()[:64]
+            if cleaned and cleaned != NA:
+                declarations.append(
+                    _FundingSubtypeDeclaration(field=key, raw_value=cleaned, token=cleaned.casefold())
+                )
+            else:
+                declarations.append(_FundingSubtypeDeclaration(field=key, raw_value=NA, token=None))
+        else:
+            raw_text = NA if value in (None, "") else (str(value).strip()[:64] or NA)
+            declarations.append(_FundingSubtypeDeclaration(field=key, raw_value=raw_text, token=None))
+    return tuple(declarations)
 
 
 def _row_metric_time(
