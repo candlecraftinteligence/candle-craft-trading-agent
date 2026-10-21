@@ -40,7 +40,7 @@
       },
       {
         "path": "app/cache/market_data_cache.py",
-        "line": 58,
+        "line": 59,
         "contains": "\"candles\": 60"
       }
     ]
@@ -163,7 +163,7 @@
       },
       {
         "path": "app/cache/market_data_cache.py",
-        "line": 59,
+        "line": 60,
         "contains": "\"ticker\": 15"
       }
     ]

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.data.derivatives_source_evidence import (
     REASON_ADAPTER_WITHOUT_EVIDENCE,
+    REASON_EVIDENCE_REPRESENTATION_FAILED,
     DerivativesEvidenceBatch,
     MetricEvidenceDelivery,
     apply_cache_delivery,
@@ -734,19 +735,26 @@ class CachedMarketDataClient(BaseExchangeClient):
             bind_upstream=lambda: box[-1] if box else None,
         )
         try:
-            delivered_at = sample_capture_clock(capture_clock)
-        except (TypeError, ValueError, OverflowError, OSError):
-            delivered_at = None
-        upstream = recorded.retained_upstream if isinstance(recorded.retained_upstream, DerivativesEvidenceBatch) else None
-        evidence = apply_cache_delivery(
-            upstream,
-            delivery_kind=recorded.delivery_kind,
-            delivered_at=delivered_at,
-            file_rehydrated=recorded.file_loaded_entry,
-            legacy_value=recorded.value,
-            metric=metric,
-            endpoint=endpoint,
-        )
+            try:
+                delivered_at = sample_capture_clock(capture_clock)
+            except Exception:
+                delivered_at = None
+            upstream = recorded.retained_upstream if isinstance(recorded.retained_upstream, DerivativesEvidenceBatch) else None
+            evidence = apply_cache_delivery(
+                upstream,
+                delivery_kind=recorded.delivery_kind,
+                delivered_at=delivered_at,
+                file_rehydrated=recorded.file_loaded_entry,
+                legacy_value=recorded.value,
+                metric=metric,
+                endpoint=endpoint,
+            )
+        except Exception:
+            evidence = unavailable_batch(
+                metric=metric,
+                endpoint=endpoint,
+                reason=REASON_EVIDENCE_REPRESENTATION_FAILED,
+            )
         return represent_delivery(recorded.value, evidence)
 
     async def aclose(self) -> None:

@@ -140,9 +140,9 @@ def parse_binance_usds_instrument(
         reasons.append("unknown_contract_type")
     if base == NA or quote == NA or margin == NA:
         reasons.append("incomplete_instrument_identity")
-    funding_ms = _hours_to_ms(row.get("fundingIntervalHours"))
-    if funding_ms is None and "fundingIntervalHours" in row:
-        reasons.append("malformed_funding_cadence")
+    # fundingIntervalHours belongs to /fapi/v1/fundingInfo, which this adapter does not call.
+    # exchangeInfo does not establish cadence, including when a fixture injects the field.
+    funding_ms = None
     quality = QUALITY_VERIFIED
     if reasons or multiplier != MULTIPLIER_NOT_APPLICABLE:
         quality = QUALITY_UNVERIFIED
@@ -277,19 +277,62 @@ def bind_instrument_batch(
     return replace(batch, observations=observations, semantic_quality=quality, reason_codes=reasons)
 
 
+_IDENTITY_CONFLICTS = frozenset(
+    {
+        "symbol_conflict",
+        "venue_mismatch",
+        "category_mismatch",
+        "request_context_identity_conflict",
+        "settlement_mismatch",
+        "contract_mismatch",
+    }
+)
+
+
+def _identity_conflicts(
+    observation: DerivativesObservation,
+    instrument: InstrumentMetadata | None,
+) -> tuple[str, ...]:
+    """Compare a metric with a verified instrument without overwriting response identity."""
+
+    if instrument is None or instrument.quality != QUALITY_VERIFIED:
+        return ()
+    reasons: list[str] = []
+    if instrument.exchange != observation.exchange:
+        reasons.append("venue_mismatch")
+    requested = observation.identity.requested_symbol
+    returned = observation.identity.returned_symbol
+    if instrument.symbol and requested and requested != instrument.symbol:
+        reasons.append("symbol_conflict")
+        if returned is None:
+            reasons.append("request_context_identity_conflict")
+    if returned is not None and instrument.symbol and returned != instrument.symbol:
+        reasons.append("symbol_conflict")
+    category = observation.identity.market_category
+    if (
+        observation.identity.category_provenance == "response"
+        and category not in {NA, instrument.market_category}
+    ):
+        reasons.append("category_mismatch")
+    settlement = getattr(observation.identity, "settlement_asset", NA)
+    if settlement not in {None, NA, instrument.settlement_asset}:
+        reasons.append("settlement_mismatch")
+    contract_type = getattr(observation.identity, "contract_type", NA)
+    if contract_type not in {None, NA, instrument.contract_type}:
+        reasons.append("contract_mismatch")
+    return tuple(dict.fromkeys(reasons))
+
+
 def bind_instrument_observation(
     observation: DerivativesObservation,
     instrument: InstrumentMetadata | None,
 ) -> DerivativesObservation:
     reasons = list(observation.reason_codes)
+    conflicts = _identity_conflicts(observation, instrument)
+    if conflicts or any(code in _IDENTITY_CONFLICTS for code in observation.reason_codes):
+        reasons.extend(conflicts)
+        return _retarget(observation, observation.quantities, tuple(dict.fromkeys(reasons)), QUALITY_CONFLICT)
     if observation.metric != "open_interest":
-        if instrument is not None and instrument.quality == QUALITY_VERIFIED:
-            if instrument.exchange != observation.exchange:
-                reasons.append("venue_mismatch")
-                return _retarget(observation, observation.quantities, tuple(dict.fromkeys(reasons)), QUALITY_CONFLICT)
-            if observation.identity.returned_symbol not in (None, instrument.symbol):
-                reasons.append("symbol_conflict")
-                return _retarget(observation, observation.quantities, tuple(dict.fromkeys(reasons)), QUALITY_CONFLICT)
         return observation
     if instrument is None or instrument.quality != QUALITY_VERIFIED:
         reasons.append("unit_unverified")
@@ -392,20 +435,6 @@ def _binance_multiplier(row: Mapping[str, Any]) -> str:
         if value != 1:
             return MULTIPLIER_UNVERIFIED
     return MULTIPLIER_NOT_APPLICABLE
-
-
-def _hours_to_ms(value: Any) -> int | None:
-    if value in (None, "", NA):
-        return None
-    if isinstance(value, bool):
-        return None
-    try:
-        hours = int(str(value))
-    except ValueError:
-        return None
-    if hours <= 0:
-        return None
-    return hours * 60 * 60 * 1000
 
 
 def _minutes_to_ms(value: Any) -> int | None:

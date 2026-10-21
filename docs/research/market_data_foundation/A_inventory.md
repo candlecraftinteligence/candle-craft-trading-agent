@@ -34,7 +34,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - code refs:
   - `app/data/exchange_clients/binance_futures.py:105` contains `"/fapi/v1/klines"`
   - `app/data/normalizers/binance.py:41` contains `volume=decimal_from(require_index(raw, 5, row_path)`
-  - `app/cache/market_data_cache.py:58` contains `"candles": 60`
+  - `app/cache/market_data_cache.py:59` contains `"candles": 60`
 
 ## ohlcv_bybit_linear
 
@@ -130,7 +130,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - code refs:
   - `app/data/exchange_clients/binance_futures.py:138` contains `"/fapi/v1/ticker/24hr"`
   - `app/data/normalizers/bybit.py:79` contains `"bybit.ticker"`
-  - `app/cache/market_data_cache.py:59` contains `"ticker": 15`
+  - `app/cache/market_data_cache.py:60` contains `"ticker": 15`
 
 ## mark_index_last
 

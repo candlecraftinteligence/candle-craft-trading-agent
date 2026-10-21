@@ -203,12 +203,13 @@ def parse_time(value: Any, *, role: str, meaning: str) -> TimeFact:
     if value is None or value == "" or value == NA:
         return missing_time(role, meaning, "missing_metric_timestamp" if role == "metric" else "missing_exchange_response_time")
     raw = str(value)
+    malformed = "malformed_metric_timestamp" if role == "metric" else "malformed_exchange_response_time"
     if isinstance(value, bool):
-        return TimeFact(role, meaning, None, raw, QUALITY_UNVERIFIED, ("malformed_metric_timestamp",))
+        return TimeFact(role, meaning, None, raw, QUALITY_UNVERIFIED, (malformed,))
     try:
         parsed = normalize_utc_timestamp(value, field_name=role)
     except (TypeError, ValueError, OverflowError, OSError):
-        return TimeFact(role, meaning, None, raw, QUALITY_UNVERIFIED, ("malformed_metric_timestamp",))
+        return TimeFact(role, meaning, None, raw, QUALITY_UNVERIFIED, (malformed,))
     return TimeFact(role, meaning, parsed, raw, QUALITY_VERIFIED, ())
 
 
@@ -389,23 +390,36 @@ def unavailable_batch(
 
 
 def capture_acquisition(capture_clock: Callable[[], datetime] | None) -> AcquisitionFact:
-    return _safe_acquired(capture_clock)
+    """Stamp acquisition only for a caller that has a successful response in hand.
 
+    A failing clock does not raise and does not fall through to another clock.
+    Cancellation and process-level interruptions are not evidence failures.
+    """
 
-def _safe_acquired(capture_clock: Callable[[], datetime] | None) -> AcquisitionFact:
     try:
         return acquisition_fact(sample_capture_clock(capture_clock), quality=QUALITY_VERIFIED)
-    except (TypeError, ValueError, OverflowError, OSError):
-        return acquisition_fact(None, quality=QUALITY_UNVERIFIED, reason_codes=("malformed_acquisition_timestamp",))
+    except Exception:
+        return acquisition_fact(
+            None,
+            quality=QUALITY_MISSING,
+            reason_codes=("missing_acquisition_timestamp", "acquisition_capture_failed"),
+        )
 
 
 def _resolve_acquisition(
     capture_clock: Callable[[], datetime] | None,
     acquisition: AcquisitionFact | None,
 ) -> AcquisitionFact:
+    """Pure description never samples a clock, even when the caller supplied one."""
+
+    del capture_clock
     if acquisition is not None:
         return acquisition
-    return _safe_acquired(capture_clock)
+    return acquisition_fact(
+        None,
+        quality=QUALITY_MISSING,
+        reason_codes=("missing_acquisition_timestamp", "description_without_acquisition_fact"),
+    )
 
 
 def describe_binance_open_interest(
@@ -433,7 +447,7 @@ def describe_binance_open_interest(
         unit=UNIT_UNKNOWN,
         counting_convention=COUNT_OPEN_CONTRACT,
     )
-    metric_time = parse_time(data.get("time"), role="metric", meaning="open_interest_snapshot_time")
+    metric_time = _row_metric_time(data, ("time",), ("timestamp",), "open_interest_snapshot_time")
     response_time = missing_time("response", "exchange_response", "missing_exchange_response_time")
     semantic, reasons = _observation_quality(identity, (quantity,), metric_time)
     observation = DerivativesObservation(
@@ -498,8 +512,7 @@ def describe_binance_open_interest_history(
             unit=UNIT_QUOTE_NOTIONAL,
             counting_convention=COUNT_NOT_APPLICABLE,
         )
-        ambiguous = _ambiguous_metric_time(data, ("timestamp",), ("time",))
-        metric_time = ambiguous or parse_time(data.get("timestamp"), role="metric", meaning="open_interest_period_time")
+        metric_time = _row_metric_time(data, ("timestamp",), ("time",), "open_interest_period_time")
         semantic, reasons = _observation_quality(identity, (quantity, notional), metric_time)
         observations.append(
             DerivativesObservation(
@@ -597,7 +610,7 @@ def describe_bybit_open_interest(
                     counting_convention=COUNT_SINGLE_SIDE,
                 )
             )
-        metric_time = parse_time(data.get("timestamp"), role="metric", meaning="open_interest_sample_time")
+        metric_time = _row_metric_time(data, ("timestamp",), ("time",), "open_interest_sample_time")
         semantic, reasons = _observation_quality(identity, quantities, metric_time)
         observations.append(
             DerivativesObservation(
@@ -755,9 +768,16 @@ def _funding_rows(
                 quality=QUALITY_UNVERIFIED,
                 reason_codes=tuple(dict.fromkeys((*rate.reason_codes, "unexpected_funding_magnitude"))),
             )
-        metric_time = parse_time(data.get(time_field), role="metric", meaning="funding_settlement_time")
+        metric_time = _row_metric_time(data, (time_field,), ("fundingTime", "fundingRateTimestamp"), "funding_settlement_time")
+        subtype = _supplied_funding_subtype(data)
         semantic, reasons = _observation_quality(identity, (rate,), metric_time)
-        reasons = tuple(dict.fromkeys((*reasons, RATE_SETTLED_FUNDING)))
+        if subtype is None:
+            rate_kind = RATE_SETTLED_FUNDING
+            reasons = tuple(dict.fromkeys((*reasons, RATE_SETTLED_FUNDING)))
+        else:
+            rate_kind = subtype
+            semantic = QUALITY_UNVERIFIED
+            reasons = tuple(dict.fromkeys((*reasons, "unexpected_funding_subtype")))
         observations.append(
             DerivativesObservation(
                 metric="funding",
@@ -770,12 +790,13 @@ def _funding_rows(
                 response_time=response_time,
                 acquisition=acquired,
                 series_period=NA,
-                rate_kind=RATE_SETTLED_FUNDING,
+                rate_kind=rate_kind,
                 semantic_quality=semantic,
                 reason_codes=reasons,
                 raw_retained=True,
             )
         )
+    settled = bool(observations) and all(item.rate_kind == RATE_SETTLED_FUNDING for item in observations)
     return _batch(
         metric="funding",
         endpoint=endpoint,
@@ -783,7 +804,7 @@ def _funding_rows(
         observations=tuple(observations),
         acquisition=acquired,
         response_time=response_time,
-        extra_reasons=(RATE_SETTLED_FUNDING,),
+        extra_reasons=(RATE_SETTLED_FUNDING,) if settled else (("unexpected_funding_subtype",) if observations else ()),
     )
 
 
@@ -840,7 +861,7 @@ def _account_ratio_rows(
             long_part=long_part,
             short_part=short_part,
         )
-        metric_time = parse_time(data.get("timestamp"), role="metric", meaning="account_ratio_period_time")
+        metric_time = _row_metric_time(data, ("timestamp",), ("time",), "account_ratio_period_time")
         reasons = tuple(
             dict.fromkeys(
                 (
@@ -894,71 +915,131 @@ def _account_ratio_quantity(
     long_part: QuantityFact,
     short_part: QuantityFact,
 ) -> tuple[QuantityFact, tuple[str, ...]]:
+    """Validate holder shares before trusting a supplied or derived quotient.
+
+    Share consistency allows one unit in the last place of the coarser supplied
+    share. That is the provider's decimal scale, not a trading threshold.
+    """
+
     reasons: list[str] = []
-    if ratio_field and raw_ratio not in (None, "", NA):
-        ratio = parse_quantity(
+    reasons.extend(_share_domain_reasons(long_part))
+    reasons.extend(_share_domain_reasons(short_part))
+    shares_present = long_part.numeric_value is not None and short_part.numeric_value is not None
+    if shares_present and "invalid_account_ratio" not in reasons and not _shares_sum_consistent(long_part, short_part):
+        reasons.append("account_share_inconsistent")
+    short_value = short_part.numeric_value
+    if short_value is None or short_value == 0 or long_part.numeric_value is None:
+        reasons.append("invalid_denominator")
+    explicit = ratio_field is not None and raw_ratio not in (None, "", NA)
+    if explicit and "invalid_denominator" not in reasons and "invalid_account_ratio" not in reasons and "account_share_inconsistent" not in reasons:
+        parsed = parse_quantity(
             raw_ratio,
-            raw_field=ratio_field,
+            raw_field=ratio_field or "longShortRatio",
             unit=UNIT_ACCOUNT_RATIO,
             counting_convention=COUNT_NOT_APPLICABLE,
         )
-        ratio = replace(ratio, multiplier_applicability=MULTIPLIER_NOT_APPLICABLE)
-        if ratio.numeric_value is not None and ratio.numeric_value <= 0:
-            ratio = replace(
-                ratio,
-                quality=QUALITY_UNVERIFIED,
-                reason_codes=tuple(dict.fromkeys((*ratio.reason_codes, "invalid_account_ratio"))),
-            )
-        if (
-            ratio.numeric_value is not None
-            and long_part.numeric_value is not None
-            and short_part.numeric_value is not None
-            and short_part.numeric_value > 0
-        ):
-            implied = (long_part.numeric_value / short_part.numeric_value).quantize(OUTPUT_QUANT)
-            if ratio.numeric_value.quantize(OUTPUT_QUANT) != implied:
+        if parsed.numeric_value is None or parsed.numeric_value <= 0:
+            reasons.append("invalid_account_ratio")
+        else:
+            implied = long_part.numeric_value / short_value
+            if not _within_share_precision(parsed.numeric_value, implied, long_part.raw_value, short_part.raw_value):
                 reasons.append("ratio_component_conflict")
-                ratio = replace(
-                    ratio,
-                    quality=QUALITY_CONFLICT,
-                    reason_codes=tuple(dict.fromkeys((*ratio.reason_codes, "ratio_component_conflict"))),
-                )
-        return ratio, tuple(reasons)
-    if short_part.numeric_value is None or short_part.numeric_value == 0 or long_part.numeric_value is None:
-        missing = parse_quantity(
-            None,
-            raw_field=ratio_field or "long_short_ratio",
+            elif not reasons:
+                return replace(parsed, multiplier_applicability=MULTIPLIER_NOT_APPLICABLE), ()
+    if not explicit and not reasons and short_value not in (None, 0) and long_part.numeric_value is not None:
+        value = (long_part.numeric_value / short_value).quantize(OUTPUT_QUANT)
+        return QuantityFact(
+            raw_field="buyRatio/sellRatio",
+            raw_value=format(value, "f"),
+            numeric_value=value,
             unit=UNIT_ACCOUNT_RATIO,
+            unit_asset=NA,
             counting_convention=COUNT_NOT_APPLICABLE,
-        )
-        return replace(
-            missing,
-            quality=QUALITY_UNVERIFIED,
-            reason_codes=("invalid_denominator", "missing_quantity"),
+            multiplier=NA,
             multiplier_applicability=MULTIPLIER_NOT_APPLICABLE,
-        ), ("invalid_denominator",)
-    if long_part.numeric_value < 0 or short_part.numeric_value < 0:
-        missing = parse_quantity(None, raw_field="long_short_ratio", unit=UNIT_ACCOUNT_RATIO, counting_convention=COUNT_NOT_APPLICABLE)
-        return replace(
-            missing,
-            quality=QUALITY_UNVERIFIED,
-            reason_codes=("invalid_account_ratio",),
-            multiplier_applicability=MULTIPLIER_NOT_APPLICABLE,
-        ), ("invalid_account_ratio",)
-    value = (long_part.numeric_value / short_part.numeric_value).quantize(OUTPUT_QUANT)
+            transformation="long_account_over_short_account",
+            quality=QUALITY_VERIFIED,
+            reason_codes=(),
+        ), ()
+    raw_text = NA if raw_ratio in (None, "") else str(raw_ratio)
+    quality = QUALITY_CONFLICT if "ratio_component_conflict" in reasons else QUALITY_UNVERIFIED
     return QuantityFact(
-        raw_field="buyRatio/sellRatio",
-        raw_value=str(value),
-        numeric_value=value,
+        raw_field=ratio_field or "buyRatio/sellRatio",
+        raw_value=raw_text,
+        numeric_value=None,
         unit=UNIT_ACCOUNT_RATIO,
         unit_asset=NA,
         counting_convention=COUNT_NOT_APPLICABLE,
         multiplier=NA,
         multiplier_applicability=MULTIPLIER_NOT_APPLICABLE,
-        transformation="long_account_over_short_account",
-        quality=QUALITY_VERIFIED,
-        reason_codes=(),
-    ), ()
+        transformation="none",
+        quality=quality,
+        reason_codes=tuple(dict.fromkeys(reasons or ("invalid_account_ratio",))),
+    ), tuple(dict.fromkeys(reasons or ("invalid_account_ratio",)))
+
+
+def _share_domain_reasons(part: QuantityFact) -> tuple[str, ...]:
+    if part.quality == QUALITY_MISSING or part.numeric_value is None:
+        return ()
+    value = part.numeric_value
+    if not value.is_finite() or value < 0 or value > 1:
+        return ("invalid_account_ratio",)
+    return ()
+
+
+def _shares_sum_consistent(long_part: QuantityFact, short_part: QuantityFact) -> bool:
+    if long_part.numeric_value is None or short_part.numeric_value is None:
+        return False
+    return _within_share_precision(
+        long_part.numeric_value + short_part.numeric_value,
+        Decimal(1),
+        long_part.raw_value,
+        short_part.raw_value,
+    )
+
+
+def _within_share_precision(left: Decimal, right: Decimal, *raw_values: str) -> bool:
+    quantum = max(_stated_quantum(raw) for raw in raw_values)
+    return abs(left - right) <= quantum
+
+
+def _stated_quantum(raw: str) -> Decimal:
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError):
+        return Decimal(1)
+    if not value.is_finite():
+        return Decimal(1)
+    exponent = value.as_tuple().exponent
+    if not isinstance(exponent, int) or exponent >= 0:
+        return Decimal(1)
+    return Decimal(10) ** exponent
+
+
+def _supplied_funding_subtype(data: Mapping[str, Any]) -> str | None:
+    """History endpoints document no rate subtype. A supplied one stays unverified."""
+
+    for key in ("rateType", "fundingRateType"):
+        if key not in data:
+            continue
+        value = data.get(key)
+        if value in (None, "", NA):
+            continue
+        return str(value).strip()[:64]
+    return None
+
+
+def _row_metric_time(
+    data: Mapping[str, Any],
+    primary: Sequence[str],
+    alternates: Sequence[str],
+    meaning: str,
+) -> TimeFact:
+    ambiguous = _ambiguous_metric_time(data, primary, alternates)
+    if ambiguous is not None:
+        return replace(ambiguous, meaning=meaning)
+    field = primary[0] if primary else ""
+    return parse_time(data.get(field), role="metric", meaning=meaning)
 
 
 def _ambiguous_metric_time(data: Mapping[str, Any], primary: Sequence[str], alternates: Sequence[str]) -> TimeFact | None:

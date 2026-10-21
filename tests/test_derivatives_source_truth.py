@@ -133,7 +133,7 @@ def funding_payload(rate: str, moment: datetime) -> list[dict[str, Any]]:
     return [{"symbol": "BTCUSDT", "fundingRate": rate, "fundingTime": millis(moment)}]
 
 
-def ratio_payload(moment: datetime, ratio: str = "1.10000000", long_account: str = "0.55", short_account: str = "0.50") -> list[dict[str, Any]]:
+def ratio_payload(moment: datetime, ratio: str = "1.22222222", long_account: str = "0.55", short_account: str = "0.45") -> list[dict[str, Any]]:
     return [
         {
             "symbol": "BTCUSDT",
@@ -158,6 +158,7 @@ def describe_binance_case(
     acquisition_at: datetime = CUTOFF,
     instrument: Any = _DEFAULT_INSTRUMENT,
     include_ratio: bool = True,
+    synthetic_cadence: bool = False,
 ):
     if history is None:
         history = [(PREVIOUS, "100", "10000000"), (current[0], current[1], "11000000")]
@@ -194,9 +195,16 @@ def describe_binance_case(
         if include_ratio
         else None
     )
+    resolved_instrument = (
+        None if instrument is None else binance_instrument(acquisition_at) if instrument is _DEFAULT_INSTRUMENT else instrument
+    )
+    if synthetic_cadence and resolved_instrument is not None:
+        # exchangeInfo does not establish Binance funding cadence. Tests that
+        # demonstrate current-context eligibility supply this interval explicitly.
+        resolved_instrument = replace(resolved_instrument, funding_interval_ms=8 * 60 * 60 * 1000)
     return evaluate_derivatives_source_truth(
         decision_cutoff=CUTOFF,
-        instrument=None if instrument is None else binance_instrument(acquisition_at) if instrument is _DEFAULT_INSTRUMENT else instrument,
+        instrument=resolved_instrument,
         open_interest=current_batch,
         open_interest_history=history_batch,
         funding_history=funding_batch,
@@ -230,6 +238,7 @@ def test_native_quantity_change_ignores_mark_price() -> None:
     flat = describe_binance_case(
         current=(CUTOFF, "2.5"),
         history=[(PREVIOUS, "2.5", "250"), (CUTOFF, "2.5", "275")],
+        synthetic_cadence=True,
     )
     assert_cannot_confirm(flat)
     assert flat.classification == "eligible_no_conflict_detected"
@@ -240,18 +249,25 @@ def test_native_quantity_change_ignores_mark_price() -> None:
 
 
 def test_valid_native_increase_and_exact_funding_fraction() -> None:
-    result = describe_binance_case()
+    vendor = describe_binance_case()
+    assert_cannot_confirm(vendor)
+    assert vendor.oi_change_pct == "10.00000000"
+    assert vendor.oi_comparison_interval_ms == 300_000
+    assert vendor.oi_interval_label == "300000ms"
+    assert vendor.funding_label == RATE_SETTLED_FUNDING
+    assert vendor.funding_rate == "0.00010000"
+    assert vendor.funding_percent == "0.01000000"
+    assert vendor.funding_basis_points == "1.00000000"
+    assert vendor.funding_cadence_ms is None
+    assert "funding_cadence_unknown" in vendor.reason_codes
+    assert vendor.classification != "eligible_no_conflict_detected"
+    assert vendor.account_ratio == "1.22222222"
+    result = describe_binance_case(synthetic_cadence=True)
     assert_cannot_confirm(result)
     assert result.classification == "eligible_no_conflict_detected"
     assert result.oi_change_pct == "10.00000000"
-    assert result.oi_comparison_interval_ms == 300_000
-    assert result.oi_interval_label == "300000ms"
-    assert result.funding_label == RATE_SETTLED_FUNDING
-    assert result.funding_rate == "0.00010000"
-    assert result.funding_percent == "0.01000000"
-    assert result.funding_basis_points == "1.00000000"
     assert result.funding_cadence_ms == 8 * 60 * 60 * 1000
-    assert result.account_ratio == "1.10000000"
+    assert result.account_ratio == "1.22222222"
 
 
 def test_unknown_unit_without_instrument_is_unverified() -> None:
@@ -303,7 +319,7 @@ def test_binance_and_bybit_clients_preserve_legacy_values_and_source_semantics()
             "time": millis(CUTOFF),
             "result": {
                 "category": "linear",
-                "list": [{"symbol": "BTCUSDT", "buyRatio": "0.55", "sellRatio": "0.50", "timestamp": millis(CUTOFF)}],
+                "list": [{"symbol": "BTCUSDT", "buyRatio": "0.49", "sellRatio": "0.51", "timestamp": millis(CUTOFF)}],
             },
         },
         "/v5/market/instruments-info": {
@@ -379,6 +395,7 @@ def test_binance_and_bybit_clients_preserve_legacy_values_and_source_semantics()
     assert found["binance_ratio"].evidence.observations[0].metric_time.at == CUTOFF
     assert not hasattr(found["binance_ratio"].value, "timestamp")
     assert found["binance_meta"].base_asset == "BTC"
+    assert found["binance_meta"].funding_interval_ms is None
     assert found["binance_meta"].multiplier_applicability == "not_applicable"
     quantities = found["bybit_oi"].evidence.observations[-1].quantities
     assert [item.raw_field for item in quantities] == ["openInterest", "singleOpenInterest"]
@@ -394,7 +411,7 @@ def test_binance_and_bybit_clients_preserve_legacy_values_and_source_semantics()
     assert any(path == "/fapi/v1/openInterest" and params.get("symbol") == "BTCUSDT" for path, params in binance_router.calls)
     assert any(path == "/v5/market/open-interest" and params.get("category") == "linear" for path, params in bybit_router.calls)
     legacy_ratio = normalize_binance_long_short_ratio("BTCUSDT", ratio_payload(CUTOFF))
-    assert legacy_ratio == Decimal("1.10000000")
+    assert legacy_ratio == Decimal("1.22222222")
     assert found["binance_ratio"].value == legacy_ratio
 
 
@@ -473,6 +490,7 @@ def test_wrong_identity_inverse_and_multiplier_stay_unverified() -> None:
         acquisition=acquired(),
     )
     assert shib.base_asset == "1000SHIB"
+    assert shib.funding_interval_ms is None
     assert shib.multiplier_applicability == "not_applicable"
     shib_current = describe_binance_open_interest(
         requested_symbol="1000SHIBUSDT",
@@ -500,7 +518,7 @@ def test_wrong_identity_inverse_and_multiplier_stay_unverified() -> None:
     )
     shib_result = evaluate_derivatives_source_truth(
         decision_cutoff=CUTOFF,
-        instrument=shib,
+        instrument=replace(shib, funding_interval_ms=8 * 60 * 60 * 1000),
         open_interest=shib_current,
         open_interest_history=shib_history,
         funding_history=shib_funding,
@@ -649,7 +667,7 @@ def test_bybit_single_side_is_preserved_and_not_substituted() -> None:
         requested_symbol="BTCUSDT",
         payload={
             "time": millis(CUTOFF),
-            "result": {"category": "linear", "list": [{"symbol": "BTCUSDT", "buyRatio": "0.55", "sellRatio": "0.50", "timestamp": millis(CUTOFF)}]},
+            "result": {"category": "linear", "list": [{"symbol": "BTCUSDT", "buyRatio": "0.49", "sellRatio": "0.51", "timestamp": millis(CUTOFF)}]},
         },
         request_params={"category": "linear", "symbol": "BTCUSDT", "period": "5min"},
         capture_clock=None,
@@ -669,8 +687,12 @@ def test_bybit_single_side_is_preserved_and_not_substituted() -> None:
 
 
 def test_temporal_boundaries_do_not_fabricate_or_clamp() -> None:
-    before = describe_binance_case(current=(CUTOFF - timedelta(seconds=1), "110"), acquisition_at=CUTOFF - timedelta(seconds=1))
-    equal = describe_binance_case()
+    before = describe_binance_case(
+        current=(CUTOFF - timedelta(seconds=1), "110"),
+        acquisition_at=CUTOFF - timedelta(seconds=1),
+        synthetic_cadence=True,
+    )
+    equal = describe_binance_case(synthetic_cadence=True)
     metric_after = describe_binance_case(current=(CUTOFF + timedelta(seconds=1), "110"))
     acquired_after = describe_binance_case(acquisition_at=CUTOFF + timedelta(seconds=1))
     historical_row_fetched_late = describe_binance_case(
@@ -810,12 +832,16 @@ def test_oi_pairing_is_deterministic_and_does_not_use_history_index() -> None:
 
 
 def test_funding_and_account_ratio_semantics() -> None:
-    stale = describe_binance_case(funding_at=STALE_FUNDING_AT)
+    stale = describe_binance_case(funding_at=STALE_FUNDING_AT, synthetic_cadence=True)
     assert "stale_for_current_context" in stale.reason_codes
     assert stale.classification == "unverified"
     assert_cannot_confirm(stale)
 
-    no_cadence = describe_binance_case(instrument=binance_instrument())
+    parsed_with_exchange_info_hours = binance_instrument()
+    assert parsed_with_exchange_info_hours.funding_interval_ms is None
+    no_cadence = describe_binance_case(instrument=parsed_with_exchange_info_hours)
+    assert no_cadence.funding_cadence_ms is None
+    assert "funding_cadence_unknown" in no_cadence.reason_codes
     instrument = parse_binance_usds_instrument(
         {"symbols": [{"symbol": "BTCUSDT", "baseAsset": "BTC", "quoteAsset": "USDT", "marginAsset": "USDT", "contractType": "PERPETUAL"}]},
         requested_symbol="BTCUSDT",
@@ -826,7 +852,6 @@ def test_funding_and_account_ratio_semantics() -> None:
     assert "freshness_unjustified" in unknown_cadence.reason_codes
     assert unknown_cadence.classification != "eligible_no_conflict_detected"
     assert_cannot_confirm(unknown_cadence)
-    del no_cadence
 
     huge = describe_binance_case(funding_rate="1.5")
     assert "unexpected_funding_magnitude" in huge.reason_codes

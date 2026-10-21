@@ -36,7 +36,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "code_refs": (
             {"path": "app/data/exchange_clients/binance_futures.py", "line": 105, "contains": '"/fapi/v1/klines"'},
             {"path": "app/data/normalizers/binance.py", "line": 41, "contains": "volume=decimal_from(require_index(raw, 5, row_path)"},
-            {"path": "app/cache/market_data_cache.py", "line": 58, "contains": '"candles": 60'},
+            {"path": "app/cache/market_data_cache.py", "line": 59, "contains": '"candles": 60'},
         ),
     },
     {
@@ -135,7 +135,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "code_refs": (
             {"path": "app/data/exchange_clients/binance_futures.py", "line": 138, "contains": '"/fapi/v1/ticker/24hr"'},
             {"path": "app/data/normalizers/bybit.py", "line": 79, "contains": '"bybit.ticker"'},
-            {"path": "app/cache/market_data_cache.py", "line": 59, "contains": '"ticker": 15'},
+            {"path": "app/cache/market_data_cache.py", "line": 60, "contains": '"ticker": 15'},
         ),
     },
     {

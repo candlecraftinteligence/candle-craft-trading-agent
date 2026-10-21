@@ -62,6 +62,66 @@ _BINANCE_QUANTITY_FIELDS = frozenset(
     }
 )
 _PRIMARY_COUNTS = frozenset({COUNT_OPEN_CONTRACT, COUNT_BOTH_SIDES})
+_SUPPORT_STATES = frozenset({NA, "unverified", "false", "eligible_no_conflict_detected"})
+_LINEAGE_LIMIT = 32
+_IDENTITY_FAILURES = frozenset(
+    {
+        "symbol_conflict",
+        "venue_mismatch",
+        "category_mismatch",
+        "identity_conflict",
+        "request_context_identity_conflict",
+        "settlement_mismatch",
+        "contract_mismatch",
+        "unsupported_inverse",
+    }
+)
+
+
+@dataclass(frozen=True)
+class SourceLineageFact:
+    role: str
+    exchange: str
+    endpoint: str
+    requested_symbol: str
+    returned_symbol: str | None
+    market_category: str
+    contract_type: str | None
+    settlement_asset: str | None
+    base_asset: str | None
+    raw_field: str
+    raw_value: str
+    unit: str
+    counting_convention: str
+    transformation: str
+    metric_time: str | None
+    response_time: str | None
+    acquired_at: str | None
+    cache_delivered_at: str | None
+    reason_codes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "exchange": self.exchange,
+            "endpoint": self.endpoint,
+            "requested_symbol": self.requested_symbol,
+            "returned_symbol": self.returned_symbol,
+            "market_category": self.market_category,
+            "contract_type": self.contract_type,
+            "settlement_asset": self.settlement_asset,
+            "base_asset": self.base_asset,
+            "raw_field": self.raw_field,
+            "raw_value": self.raw_value,
+            "unit": self.unit,
+            "counting_convention": self.counting_convention,
+            "transformation": self.transformation,
+            "metric_time": self.metric_time,
+            "response_time": self.response_time,
+            "acquired_at": self.acquired_at,
+            "cache_delivered_at": self.cache_delivered_at,
+            "reason_codes": list(self.reason_codes),
+        }
 
 
 @dataclass(frozen=True)
@@ -89,6 +149,18 @@ class DerivativesSourceTruthResult:
     evaluation_error: str | None = None
     liquidation_coverage: str = "not_collected"
     freshness_policy: str = SHADOW_FRESHNESS_POLICY
+    lineage: tuple[SourceLineageFact, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "mode", "shadow")
+        object.__setattr__(self, "enforcement", ENFORCEMENT)
+        object.__setattr__(self, "validated_confirmation", False)
+        if self.supports_long not in _SUPPORT_STATES:
+            object.__setattr__(self, "supports_long", "unverified")
+        if self.supports_short not in _SUPPORT_STATES:
+            object.__setattr__(self, "supports_short", "unverified")
+        if len(self.lineage) > _LINEAGE_LIMIT:
+            object.__setattr__(self, "lineage", self.lineage[:_LINEAGE_LIMIT])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -115,13 +187,79 @@ class DerivativesSourceTruthResult:
             "evaluation_error": self.evaluation_error,
             "liquidation_coverage": self.liquidation_coverage,
             "freshness_policy": self.freshness_policy,
+            "lineage": [item.to_dict() for item in self.lineage],
         }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> DerivativesSourceTruthResult:
+        """Supported deserialization. Shadow constants cannot be restored as live."""
+
+        data = dict(payload)
+        lineage_payload = data.get("lineage") or ()
+        facts: list[SourceLineageFact] = []
+        if isinstance(lineage_payload, Sequence) and not isinstance(lineage_payload, (str, bytes)):
+            for item in lineage_payload:
+                if isinstance(item, SourceLineageFact):
+                    facts.append(item)
+                elif isinstance(item, Mapping):
+                    facts.append(
+                        SourceLineageFact(
+                            role=str(item.get("role") or "input"),
+                            exchange=str(item.get("exchange") or NA),
+                            endpoint=str(item.get("endpoint") or NA),
+                            requested_symbol=str(item.get("requested_symbol") or NA),
+                            returned_symbol=item.get("returned_symbol") if item.get("returned_symbol") is None else str(item.get("returned_symbol")),
+                            market_category=str(item.get("market_category") or NA),
+                            contract_type=item.get("contract_type"),
+                            settlement_asset=item.get("settlement_asset"),
+                            base_asset=item.get("base_asset"),
+                            raw_field=str(item.get("raw_field") or NA),
+                            raw_value=str(item.get("raw_value") or NA),
+                            unit=str(item.get("unit") or NA),
+                            counting_convention=str(item.get("counting_convention") or NA),
+                            transformation=str(item.get("transformation") or NA),
+                            metric_time=item.get("metric_time"),
+                            response_time=item.get("response_time"),
+                            acquired_at=item.get("acquired_at"),
+                            cache_delivered_at=item.get("cache_delivered_at"),
+                            reason_codes=tuple(str(code) for code in item.get("reason_codes") or ()),
+                        )
+                    )
+        allowed = {
+            "classification",
+            "decision_cutoff",
+            "oi_change_pct",
+            "oi_comparison_interval_ms",
+            "oi_interval_label",
+            "oi_change_context",
+            "funding_rate",
+            "funding_label",
+            "funding_percent",
+            "funding_basis_points",
+            "funding_cadence_ms",
+            "account_ratio",
+            "supports_long",
+            "supports_short",
+            "reason_codes",
+            "dependencies",
+            "exclusions",
+            "evaluation_error",
+            "liquidation_coverage",
+            "freshness_policy",
+        }
+        kwargs: dict[str, Any] = {key: data[key] for key in allowed if key in data}
+        for key in ("reason_codes", "dependencies", "exclusions"):
+            if key in kwargs and not isinstance(kwargs[key], tuple):
+                kwargs[key] = tuple(kwargs[key])
+        kwargs["lineage"] = tuple(facts)
+        return cls(**kwargs)
 
 
 @dataclass(frozen=True)
 class _OiPoint:
     observation: DerivativesObservation
     quantity: QuantityFact
+    cache_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -208,13 +346,26 @@ def evaluate_derivatives_source_truth(
             open_interest_history=bind_instrument_batch(open_interest_history, visible_instrument),
             funding=bind_instrument_batch(funding, visible_instrument),
             funding_history=bind_instrument_batch(funding_history, visible_instrument),
-            account_ratio=account_ratio,
+            account_ratio=bind_instrument_batch(account_ratio, visible_instrument),
             price_change_pct=price_change_pct,
             price_quality=price_quality,
             liquidation_snapshot=liquidation_snapshot,
         )
     except Exception as exc:
-        return _error_result(type(exc).__name__, liquidation_coverage_label(liquidation_snapshot))
+        return _error_result(
+            type(exc).__name__,
+            liquidation_coverage_label(liquidation_snapshot),
+            lineage=_safe_input_lineage(
+                instrument=None,
+                batches=(
+                    ("input_open_interest", open_interest),
+                    ("input_open_interest_history", open_interest_history),
+                    ("input_funding", funding),
+                    ("input_funding_history", funding_history),
+                    ("input_account_ratio", account_ratio),
+                ),
+            ),
+        )
 
 
 def select_open_interest_pair(
@@ -234,39 +385,32 @@ def select_open_interest_pair(
         return OpenInterestPairSelection(
             None, None, NA, "not_admissible", ("missing_open_interest",), tuple(exclusions)
         )
-    newest_at = max(point.observation.metric_time.at for point in timed if point.observation.metric_time.at is not None)
-    newest = [point for point in timed if point.observation.metric_time.at == newest_at]
-    primary = [point for point in newest if point.quantity.counting_convention in _PRIMARY_COUNTS]
-    chosen_newest = primary or newest
-    conflict = _duplicate_conflict(chosen_newest)
-    if conflict:
-        exclusions.extend(_exclusion(point, "duplicate_conflict") for point in chosen_newest)
+    groups: dict[datetime, list[_OiPoint]] = {}
+    for point in timed:
+        moment = point.observation.metric_time.at
+        if moment is not None:
+            groups.setdefault(moment, []).append(point)
+    newest_at = max(groups)
+    current, collapse_reasons, collapse_exclusions = _collapse_timestamp_group(
+        _chosen_series_points(groups[newest_at])
+    )
+    exclusions.extend(collapse_exclusions)
+    if current is None:
         return OpenInterestPairSelection(
             None,
             None,
             NA,
             "not_admissible",
-            ("duplicate_conflict",),
+            collapse_reasons,
             tuple(dict.fromkeys(exclusions)),
         )
-    current = sorted(chosen_newest, key=_point_sort)[0]
     current_reasons = _point_block_reasons(current, cutoff)
-    if current_reasons:
-        exclusions.append(_exclusion(current, ",".join(current_reasons)))
-        return OpenInterestPairSelection(
-            None,
-            None,
-            NA,
-            "not_admissible",
-            current_reasons,
-            tuple(dict.fromkeys(exclusions)),
-        )
     earlier = [
         point
-        for point in timed
-        if point.observation.metric_time.at is not None
-        and point.observation.metric_time.at < newest_at
-        and _series_compatible(current, point)
+        for moment, grouped in groups.items()
+        if moment < newest_at
+        for point in grouped
+        if _series_compatible(current, point)
     ]
     earlier.sort(key=lambda point: point.observation.metric_time.at or datetime.min.replace(tzinfo=newest_at.tzinfo), reverse=True)
     if not earlier:
@@ -275,7 +419,7 @@ def select_open_interest_pair(
             for point in timed
             if point.observation.metric_time.at is not None and point.observation.metric_time.at < newest_at
         ]
-        reasons = ["missing_previous_open_interest"]
+        reasons = ["missing_previous_open_interest", *current_reasons]
         cross_instrument = [
             point
             for point in prior
@@ -296,7 +440,31 @@ def select_open_interest_pair(
             tuple(dict.fromkeys(exclusions)),
             current_quantity=current.quantity.numeric_value,
         )
-    previous = earlier[0]
+    previous_at = earlier[0].observation.metric_time.at
+    previous_group = [point for point in earlier if point.observation.metric_time.at == previous_at]
+    previous, previous_collapse_reasons, previous_exclusions = _collapse_timestamp_group(previous_group)
+    exclusions.extend(previous_exclusions)
+    if previous is None:
+        return OpenInterestPairSelection(
+            None,
+            None,
+            NA,
+            "not_admissible",
+            tuple(dict.fromkeys((*previous_collapse_reasons, *current_reasons))),
+            tuple(dict.fromkeys(exclusions)),
+            current_quantity=current.quantity.numeric_value,
+        )
+    if current_reasons:
+        exclusions.append(_exclusion(current, ",".join(current_reasons)))
+        return OpenInterestPairSelection(
+            None,
+            None,
+            NA,
+            "not_admissible",
+            current_reasons,
+            tuple(dict.fromkeys(exclusions)),
+            current_quantity=current.quantity.numeric_value,
+        )
     previous_reasons = _point_block_reasons(previous, cutoff)
     if previous_reasons:
         exclusions.append(_exclusion(previous, ",".join(previous_reasons)))
@@ -480,6 +648,21 @@ def _evaluate(
         dependencies=dependencies,
         exclusions=tuple(dict.fromkeys(exclusions)),
         liquidation_coverage=liquidation_coverage_label(liquidation_snapshot),
+        lineage=_bounded_lineage(
+            _result_lineage(
+                instrument=instrument,
+                oi_pair=oi_pair,
+                funding_obs=funding_obs,
+                ratio_obs=ratio_obs,
+                batches=(
+                    ("open_interest", open_interest),
+                    ("open_interest_history", open_interest_history),
+                    ("funding", funding),
+                    ("funding_history", funding_history),
+                    ("account_ratio", account_ratio),
+                ),
+            )
+        ),
     )
 
 
@@ -527,11 +710,12 @@ def _direction_from_change(engine: DerivativesEnrichmentEngine, change_pct: Deci
 def _oi_points(batch: DerivativesEvidenceBatch | None) -> list[_OiPoint]:
     if batch is None:
         return []
+    cache_reasons = _cache_chronology(batch)
     points: list[_OiPoint] = []
     for observation in batch.observations:
         primary = _chosen_quantity(observation)
         if primary is not None:
-            points.append(_OiPoint(observation, primary))
+            points.append(_OiPoint(observation, primary, cache_reasons))
     return points
 
 
@@ -594,6 +778,7 @@ def _point_block_reasons(point: _OiPoint, cutoff: datetime | None) -> tuple[str,
         reasons.append("unsupported_inverse")
     if "multiplier_unverified" in observation.reason_codes:
         reasons.append("multiplier_unverified")
+    reasons.extend(point.cache_reasons)
     reasons.extend(_temporal_reasons(observation, cutoff))
     return tuple(dict.fromkeys(reasons))
 
@@ -609,8 +794,12 @@ def _temporal_reasons(observation: DerivativesObservation, cutoff: datetime | No
     if metric is not None and acquired is not None and metric > acquired:
         reasons.append("metric_after_acquisition")
     response = observation.response_time.at
+    if observation.response_time.quality == QUALITY_UNVERIFIED:
+        reasons.append("malformed_exchange_response_time")
     if response is not None and metric is not None and metric > response:
         reasons.append("metric_after_response")
+    if response is not None and acquired is not None and response > acquired:
+        reasons.append("response_after_acquisition")
     if cutoff is None:
         reasons.append("missing_decision_cutoff")
     else:
@@ -628,27 +817,34 @@ def _select_funding(
     instrument: InstrumentMetadata | None,
 ) -> tuple[DerivativesObservation | None, tuple[str, ...]]:
     del instrument
-    points = [item for batch in (history, current) if batch is not None for item in batch.observations]
-    if not points:
+    owned = {id(item): batch for batch in (history, current) if batch is not None for item in batch.observations}
+    observations = [item for batch in (history, current) if batch is not None for item in batch.observations]
+    if not observations:
         return None, ("missing_funding",)
-    timed = [item for item in points if item.metric_time.at is not None and item.metric_time.quality == QUALITY_VERIFIED]
+    timed = [item for item in observations if item.metric_time.at is not None and item.metric_time.quality == QUALITY_VERIFIED]
     if not timed:
         return None, ("missing_metric_timestamp",)
     newest_at = max(item.metric_time.at for item in timed if item.metric_time.at is not None)
     newest = [item for item in timed if item.metric_time.at == newest_at]
     if _funding_conflict(newest):
         return None, ("duplicate_conflict",)
-    chosen = newest[0]
-    if chosen.rate_kind != RATE_SETTLED_FUNDING:
+    if _observation_provenance_conflict(newest):
+        return None, ("conflicting_provenance",)
+    chosen = sorted(newest, key=lambda item: (item.endpoint, item.quantities[0].raw_value if item.quantities else ""))[0]
+    if chosen.rate_kind != RATE_SETTLED_FUNDING or "unexpected_funding_subtype" in chosen.reason_codes:
         return None, ("unexpected_funding_subtype",)
     reasons = list(_temporal_reasons(chosen, cutoff))
+    reasons.extend(_cache_chronology(owned.get(id(chosen))))
+    reasons.extend(code for code in chosen.reason_codes if code in _IDENTITY_FAILURES)
     quantity = chosen.quantities[0] if chosen.quantities else None
     if quantity is None or quantity.unit != UNIT_FUNDING_FRACTION or quantity.numeric_value is None:
         reasons.append("malformed_quantity")
     elif abs(quantity.numeric_value) >= 1:
         reasons.append("unexpected_funding_magnitude")
-    if chosen.semantic_quality == QUALITY_CONFLICT:
+    if chosen.semantic_quality == QUALITY_CONFLICT and "symbol_conflict" not in reasons:
         reasons.append("symbol_conflict")
+    if chosen.semantic_quality != QUALITY_VERIFIED and not reasons:
+        reasons.append("unverified_funding_semantics")
     if reasons:
         return chosen, tuple(dict.fromkeys(reasons))
     return chosen, ()
@@ -668,13 +864,30 @@ def _select_ratio(
         return None, ("missing_metric_timestamp",)
     newest_at = max(item.metric_time.at for item in timed if item.metric_time.at is not None)
     newest = [item for item in timed if item.metric_time.at == newest_at]
+    if _observation_provenance_conflict(newest):
+        return None, ("conflicting_provenance",)
     values = {_ratio_value(item) for item in newest}
     if len(values) > 1:
         return None, ("duplicate_conflict",)
-    chosen = newest[0]
+    chosen = sorted(newest, key=lambda item: item.endpoint)[0]
+    identity = tuple(code for code in chosen.reason_codes if code in _IDENTITY_FAILURES)
+    ratio_failures = tuple(
+        code
+        for code in chosen.reason_codes
+        if code
+        in {
+            "invalid_denominator",
+            "ratio_component_conflict",
+            "invalid_account_ratio",
+            "account_share_inconsistent",
+        }
+    )
+    if chosen.semantic_quality != QUALITY_VERIFIED or identity or ratio_failures:
+        reasons = identity or ratio_failures or ("invalid_account_ratio",)
+        reasons = tuple(dict.fromkeys((*reasons, *_cache_chronology(batch), *_temporal_reasons(chosen, cutoff))))
+        return None, reasons
     reasons = list(_temporal_reasons(chosen, cutoff))
-    if "invalid_denominator" in chosen.reason_codes or "ratio_component_conflict" in chosen.reason_codes:
-        reasons.extend(code for code in chosen.reason_codes if code in {"invalid_denominator", "ratio_component_conflict"})
+    reasons.extend(_cache_chronology(batch))
     if _ratio_value(chosen) is None:
         reasons.append("invalid_account_ratio")
     period_ms = _period_ms(chosen.series_period)
@@ -750,6 +963,17 @@ def _classification(reasons: tuple[str, ...], *, eligible: bool, conflict: bool)
         "non_finite_quantity",
         "ambiguous_metric_timestamp",
         "endpoint_incompatible",
+        "response_after_acquisition",
+        "delivery_before_acquisition",
+        "malformed_exchange_response_time",
+        "conflicting_provenance",
+        "request_context_identity_conflict",
+        "account_share_inconsistent",
+        "settlement_mismatch",
+        "contract_mismatch",
+        "unexpected_funding_subtype",
+        "description_without_acquisition_fact",
+        "acquisition_capture_failed",
     }
     if any(reason in unverified_markers for reason in reasons):
         return "unverified"
@@ -777,6 +1001,119 @@ def _series_period_ms(batch: DerivativesEvidenceBatch | None) -> int | None:
 
 def _period_ms(period: str) -> int | None:
     return _PERIOD_MS.get(str(period).strip().lower())
+
+
+def _chosen_series_points(points: Sequence[_OiPoint]) -> list[_OiPoint]:
+    """Keep one instrument series at a timestamp.
+
+    Another instrument observed at the same time is not a value conflict, and a
+    conflict inside the chosen series does not fall through to that other series.
+    """
+
+    primary = [point for point in points if point.quantity.counting_convention in _PRIMARY_COUNTS]
+    pool = primary or list(points)
+    if not pool:
+        return []
+    anchor = sorted(pool, key=_point_sort)[0]
+    key = _series_partition(anchor)
+    return [point for point in pool if _series_partition(point) == key]
+
+
+def _collapse_timestamp_group(
+    points: Sequence[_OiPoint],
+) -> tuple[_OiPoint | None, tuple[str, ...], tuple[str, ...]]:
+    """Collapse one timestamp. Conflicts exclude the whole group."""
+
+    if not points:
+        return None, ("missing_open_interest",), ()
+    partitions: dict[tuple[Any, ...], list[_OiPoint]] = {}
+    for point in points:
+        partitions.setdefault(_series_partition(point), []).append(point)
+    exclusions = tuple(_exclusion(point, "duplicate_conflict") for point in points)
+    if len(partitions) != 1:
+        return None, ("duplicate_conflict",), exclusions
+    group = next(iter(partitions.values()))
+    chronology = _group_chronology(group)
+    if chronology:
+        return None, chronology, tuple(_exclusion(point, ",".join(chronology)) for point in group)
+    if _values_conflict(group):
+        return None, ("duplicate_conflict",), exclusions
+    if _provenance_conflict(group):
+        return None, ("conflicting_provenance",), tuple(_exclusion(point, "conflicting_provenance") for point in group)
+    return sorted(group, key=_point_sort)[0], (), ()
+
+
+def _series_partition(point: _OiPoint) -> tuple[Any, ...]:
+    quantity = point.quantity
+    identity = point.observation.identity
+    return (
+        point.observation.exchange,
+        identity.requested_symbol,
+        identity.returned_symbol,
+        quantity.counting_convention,
+        quantity.unit,
+        quantity.unit_asset,
+    )
+
+
+def _values_conflict(points: Sequence[_OiPoint]) -> bool:
+    values: list[Decimal] = []
+    for point in points:
+        if point.quantity.numeric_value is None:
+            return True
+        values.append(point.quantity.numeric_value)
+    return len(set(values)) > 1
+
+
+def _provenance_conflict(points: Sequence[_OiPoint]) -> bool:
+    if len(points) <= 1:
+        return False
+    if len({point.observation.acquisition.acquired_at for point in points}) > 1:
+        return True
+    if len({point.observation.acquisition.quality for point in points}) > 1:
+        return True
+    if len({point.observation.response_time.at for point in points}) > 1:
+        return True
+    endpoints = {(point.observation.endpoint, point.quantity.raw_field) for point in points}
+    if len(endpoints) == 1:
+        return False
+    return not (endpoints <= _BINANCE_QUANTITY_FIELDS and len(endpoints) == 2)
+
+
+def _group_chronology(points: Sequence[_OiPoint]) -> tuple[str, ...]:
+    reasons: list[str] = []
+    for point in points:
+        reasons.extend(point.cache_reasons)
+        response = point.observation.response_time.at
+        acquired = point.observation.acquisition.acquired_at
+        if response is not None and acquired is not None and response > acquired:
+            reasons.append("response_after_acquisition")
+        if point.observation.response_time.quality == QUALITY_UNVERIFIED:
+            reasons.append("malformed_exchange_response_time")
+    return tuple(dict.fromkeys(reasons))
+
+
+def _observation_provenance_conflict(observations: Sequence[DerivativesObservation]) -> bool:
+    if len(observations) <= 1:
+        return False
+    if len({item.acquisition.acquired_at for item in observations}) > 1:
+        return True
+    if len({item.response_time.at for item in observations}) > 1:
+        return True
+    return False
+
+
+def _cache_chronology(batch: DerivativesEvidenceBatch | None) -> tuple[str, ...]:
+    if batch is None:
+        return ()
+    delivered = batch.cache.delivered_at
+    acquired = batch.acquisition.acquired_at
+    if delivered is not None and acquired is not None and delivered < acquired:
+        return ("delivery_before_acquisition",)
+    original = batch.cache.original_acquired_at
+    if delivered is not None and original is not None and delivered < original:
+        return ("delivery_before_acquisition",)
+    return ()
 
 
 def _duplicate_conflict(points: Sequence[_OiPoint]) -> bool:
@@ -842,7 +1179,11 @@ def _dec_text(value: Decimal | None) -> str:
     return format(value.quantize(OUTPUT_QUANT), "f")
 
 
-def _error_result(error_name: str, liquidation_coverage: str) -> DerivativesSourceTruthResult:
+def _error_result(
+    error_name: str,
+    liquidation_coverage: str,
+    lineage: tuple[SourceLineageFact, ...] = (),
+) -> DerivativesSourceTruthResult:
     return DerivativesSourceTruthResult(
         validated_confirmation=False,
         classification="evaluation_error",
@@ -852,6 +1193,132 @@ def _error_result(error_name: str, liquidation_coverage: str) -> DerivativesSour
         dependencies=("validated_confirmation_not_emitted",),
         evaluation_error=error_name,
         liquidation_coverage=liquidation_coverage,
+        lineage=lineage,
+    )
+
+
+def _result_lineage(
+    *,
+    instrument: InstrumentMetadata | None,
+    oi_pair: OpenInterestPairSelection,
+    funding_obs: DerivativesObservation | None,
+    ratio_obs: DerivativesObservation | None,
+    batches: Sequence[tuple[str, DerivativesEvidenceBatch | None]],
+) -> tuple[SourceLineageFact, ...]:
+    del funding_obs, ratio_obs
+    facts: list[SourceLineageFact] = []
+    instrument_fact = _instrument_lineage(instrument)
+    if instrument_fact is not None:
+        facts.append(instrument_fact)
+    for role, batch in batches:
+        if batch is None:
+            continue
+        for observation in batch.observations:
+            fact_role = role
+            if observation.metric == "open_interest":
+                fact_role = "excluded_oi" if oi_pair.change_pct is None else "selected_current_oi"
+            facts.append(_lineage_fact(fact_role, observation, batch, instrument))
+    return tuple(facts)
+
+
+def _safe_input_lineage(
+    *,
+    instrument: InstrumentMetadata | None,
+    batches: Sequence[tuple[str, DerivativesEvidenceBatch | None]],
+) -> tuple[SourceLineageFact, ...]:
+    try:
+        facts: list[SourceLineageFact] = []
+        instrument_fact = _instrument_lineage(instrument)
+        if instrument_fact is not None:
+            facts.append(instrument_fact)
+        for role, batch in batches:
+            if batch is None:
+                continue
+            for observation in getattr(batch, "observations", ()):
+                facts.append(_lineage_fact(role, observation, batch, None))
+        return _bounded_lineage(facts)
+    except Exception:
+        return ()
+
+
+def _bounded_lineage(facts: Sequence[SourceLineageFact]) -> tuple[SourceLineageFact, ...]:
+    ordered = tuple(
+        sorted(
+            facts,
+            key=lambda item: (
+                item.role,
+                item.endpoint,
+                item.metric_time or "",
+                item.raw_field,
+                item.raw_value,
+            ),
+        )
+    )
+    return ordered[:_LINEAGE_LIMIT]
+
+
+def _instrument_lineage(instrument: InstrumentMetadata | None) -> SourceLineageFact | None:
+    if instrument is None:
+        return None
+    try:
+        acquired = instrument.acquisition.acquired_at
+        return SourceLineageFact(
+            role="instrument",
+            exchange=instrument.exchange,
+            endpoint=instrument.source_endpoint,
+            requested_symbol=instrument.requested_symbol,
+            returned_symbol=instrument.symbol,
+            market_category=instrument.market_category,
+            contract_type=instrument.contract_type,
+            settlement_asset=instrument.settlement_asset,
+            base_asset=instrument.base_asset,
+            raw_field="instrument",
+            raw_value=instrument.symbol or NA,
+            unit=NA,
+            counting_convention=NA,
+            transformation="instrument_metadata",
+            metric_time=None,
+            response_time=None,
+            acquired_at=acquired.isoformat() if acquired is not None else None,
+            cache_delivered_at=None,
+            reason_codes=tuple(instrument.reason_codes),
+        )
+    except Exception:
+        return None
+
+
+def _lineage_fact(
+    role: str,
+    observation: DerivativesObservation,
+    batch: DerivativesEvidenceBatch | None,
+    instrument: InstrumentMetadata | None,
+) -> SourceLineageFact:
+    quantity = next((item for item in observation.quantities if item.unit != UNIT_QUOTE_NOTIONAL), None)
+    if quantity is None and observation.quantities:
+        quantity = observation.quantities[0]
+    delivered = None
+    if batch is not None and batch.cache.delivered_at is not None:
+        delivered = batch.cache.delivered_at.isoformat()
+    return SourceLineageFact(
+        role=role,
+        exchange=observation.exchange,
+        endpoint=observation.endpoint,
+        requested_symbol=observation.identity.requested_symbol,
+        returned_symbol=observation.identity.returned_symbol,
+        market_category=observation.identity.market_category,
+        contract_type=getattr(instrument, "contract_type", None) if instrument is not None else None,
+        settlement_asset=getattr(instrument, "settlement_asset", None) if instrument is not None else None,
+        base_asset=getattr(instrument, "base_asset", None) if instrument is not None else None,
+        raw_field=quantity.raw_field if quantity is not None else NA,
+        raw_value=quantity.raw_value if quantity is not None else NA,
+        unit=quantity.unit if quantity is not None else NA,
+        counting_convention=quantity.counting_convention if quantity is not None else NA,
+        transformation=quantity.transformation if quantity is not None else NA,
+        metric_time=observation.metric_time.at.isoformat() if observation.metric_time.at is not None else None,
+        response_time=observation.response_time.at.isoformat() if observation.response_time.at is not None else None,
+        acquired_at=observation.acquisition.acquired_at.isoformat() if observation.acquisition.acquired_at is not None else None,
+        cache_delivered_at=delivered,
+        reason_codes=tuple(observation.reason_codes),
     )
 
 
