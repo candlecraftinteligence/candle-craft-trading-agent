@@ -1042,8 +1042,11 @@ def test_partial_metadata_and_evaluator_failures_stay_outside_production_gates(m
         ).run(_config(["BTCUSDT"], decision_timestamp=CUTOFF, derivatives_source_truth_shadow=True))
     )
     assert _public_run(off_meta) == _public_run(on_meta)
-    _assert_cache_stats(off_meta, on_meta, extra_misses=1)
-    assert on_meta.results[0].derivatives_causal_observation.bundle.instrument_attempt == "failed"
+    _assert_cache_stats(off_meta, on_meta)
+    causal_meta = on_meta.results[0].derivatives_causal_observation
+    assert causal_meta.bundle.instrument_attempt == "withheld"
+    assert "instrument_lookup_withheld" in causal_meta.bundle.instrument.reason_codes
+    assert causal_meta.bundle.instrument.acquisition.acquired_at is None
     assert not any("instrument" in item for item in on_meta.results[0].missing_data)
 
     def boom(**_kwargs: Any) -> Any:
@@ -1101,17 +1104,18 @@ def test_slow_shadow_metadata_cannot_consume_the_symbol_deadline() -> None:
     assert on.results[0].status == off.results[0].status
     assert on.results[0].status_history == off.results[0].status_history
     assert off_client.instrument_calls == 0
-    assert on_client.instrument_calls == 1
+    assert on_client.instrument_calls == 0
     assert off_client.requested_klines == on_client.requested_klines
     causal = on.results[0].derivatives_causal_observation
-    assert causal.bundle.instrument_attempt == "not_waited"
-    assert "instrument_lookup_not_waited" in causal.bundle.instrument.reason_codes
+    assert causal.bundle.instrument_attempt == "withheld"
+    assert "instrument_lookup_withheld" in causal.bundle.instrument.reason_codes
+    assert causal.bundle.instrument.acquisition.acquired_at is None
     assert not any("instrument" in item for item in on.results[0].missing_data)
     assert _public_run(off) == _public_run(on)
-    _assert_cache_stats(off, on, extra_misses=1)
+    _assert_cache_stats(off, on)
 
 
-def test_completed_instrument_lookup_is_not_repeated_for_the_second_assessment() -> None:
+def test_symbol_deadline_does_not_collect_shadow_instrument_metadata() -> None:
     class CountingInstrument(FakeExchangeClient):
         def __init__(self) -> None:
             super().__init__({"BTCUSDT": _strategy_pullback_candles()}, candle_as_of=CUTOFF)
@@ -1141,11 +1145,12 @@ def test_completed_instrument_lookup_is_not_repeated_for_the_second_assessment()
             )
         )
     )
-    assert client.instrument_calls == 1
+    assert client.instrument_calls == 0
     causal = result.results[0].derivatives_causal_observation
-    assert causal.bundle.instrument_attempt == "completed"
+    assert causal.bundle.instrument_attempt == "withheld"
     assert causal.strategy_assessment.evaluation is not None
     assert causal.research_assessment.status == "assessed"
+    assert causal.validated_confirmation is False
 
 
 def test_cancellation_propagates_and_does_not_leak_the_shadow_task() -> None:

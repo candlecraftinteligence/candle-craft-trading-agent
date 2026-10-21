@@ -14,6 +14,15 @@ Not claimed: improved signal accuracy, profitability, or positive expectancy. Sh
 - `derivatives_source_truth_shadow` still defaults to false.
 - The supplied October 21, 2026 scanner/listener report is operational evidence only. This phase did not inspect or operate Runtime.
 
+## Astra review corrections
+
+Reviewed head `29b1c720ac3e7890284f2b1fbae6bb56c33e3ba8` requested changes. The corrections stay inside the original shadow boundary: no new endpoint, no background service, no longer production timeout, no second validator, and no change to strategy thresholds or lifecycle.
+
+- Production isolation: do not collect shadow instrument metadata while it can share the production client or extend a symbol deadline. Record the metadata as unavailable.
+- Conflict counts: a group marked by the existing selectors is not admissible. Keep the raw-row denominator and the P3 `duplicate_conflict` result.
+- Research pairs: count a research quantity change only when the selected OI pair was delivered by the research observation.
+- Construction isolation: a malformed instrument or a bundle-construction failure remains shadow evidence and leaves the production scan status unchanged.
+
 ## Source-to-consumer timing
 
 | Label | Fact | Where it is taken | What it does not prove |
@@ -28,7 +37,7 @@ Not claimed: improved signal accuracy, profitability, or positive expectancy. Sh
 
 Asynchronous responses keep their own timestamps. The record reports the acquisition span and sets `simultaneous_exchange_snapshot` false. One cutoff applies to the whole bundle.
 
-Global-context BTC optional fetch has no symbol deadline, so its instrument lookup stays sequential and its bundle is not a symbol-iteration study row. The symbol scan that follows still uses the original decision timestamp.
+Global-context BTC optional fetch withholds instrument metadata. It runs beside the BTC candle requests, so a metadata lookup would share their client. Its bundle is not a symbol-iteration study row. The symbol scan that follows still uses the original decision timestamp.
 
 ## Architecture
 
@@ -38,7 +47,13 @@ Assessment A is the P3 result at cutoff E. The scanner still calls `evaluate_der
 
 The research admission count adds one requirement the P3 evaluator does not have: included deliveries must have been delivered to this consumer at or before G. That count does not rewrite the embedded P3 classification. A cache hit after E can show earlier collector acquisition and later retrieval. It does not show that the original strategy consumed the item by E. Cache retention is `not_recorded` because bookkeeping `created_at` is not an evidence-clock timestamp.
 
-Under a symbol deadline, `get_instrument_metadata` starts as task `cci-shadow-instrument` during the optional gather and is cancelled if it is still running when the gather finishes. The reason is `instrument_lookup_not_waited`. Callers without a deadline, including global context, keep the sequential lookup. The two assessments reuse that one metadata result. No second instrument fetch and no new endpoint.
+Shadow metadata does not run on the production client while a symbol deadline or global-context collection is active. The scanner records `instrument_lookup_withheld`, with acquisition time missing, and does not start `get_instrument_metadata`. That avoids occupying a shared connection and avoids extending a production deadline. A direct caller with no deadline and no withhold flag may perform one lookup after the optional gather returns; both assessments reuse that result. No second instrument fetch and no new endpoint.
+
+A malformed instrument object is replaced with `instrument_representation_invalid` before bundle construction reads its reason codes. If construction still fails, the scanner keeps the legacy values already fetched and emits `shadow_bundle_construction_failed` with a missing observation cutoff. It does not sample a replacement clock or fetch metadata again. `CancelledError` still propagates.
+
+Study admission uses the existing OI, funding, and ratio selectors. A `duplicate_conflict`, `conflicting_provenance`, or `contradictory_funding_evidence` mark removes that group from the admissible count. Raw received rows stay in the received-row denominator, and observations outside the conflicting group stay admissible. The embedded P3 classification is not rewritten and is not cleared to make the counters match.
+
+Research valid-pair and verified-change counters increment only when the selector's current and previous OI observations, and the batches that carry them, were delivered at or before the research observation. Equality with the observation cutoff counts. A missing delivery stamp does not. Strategy-role pair counters follow the labeled P3 evaluation. Delivery after the observation can leave that P3 change in place while the research counter stays at zero.
 
 `write_dev_causal_shadow_artifact` is an explicit DEV JSON route. The scanner does not call it. Scanner bundles do not retain inputs, so a scanner study is diagnostic: `replay_complete` is false and it cannot report complete verified coverage. The synthetic fixture retains inputs and can be replayed from the recorded cutoffs without sampling a clock.
 
@@ -87,12 +102,12 @@ Populations are `requested_venue={venue}|scan_mode={fast|full}`. Rates are not p
 | Received source rows | source row | Rows in received slots before deduplication |
 | Unique observations | unique observation | Identity and time deduplication inside each attempt |
 | Semantically verified observations | unique observation | After instrument visibility at that cutoff |
-| Causally admissible observations | unique observation | P3 temporal and semantic gates; research also requires recorded consumer delivery at or before G |
+| Causally admissible observations | unique observation | Temporal and semantic gates, excluding a group the existing selectors mark as a conflict; research also requires recorded consumer delivery at or before G |
 | Fresh observations | admissible unique observation | Freshness among the admissible population only |
-| OI pair opportunities | assessed attempt | One per attempt assessed at that cutoff; valid pairs and verified quantity changes use this denominator |
+| OI pair opportunities | assessed attempt | One per attempt assessed at that cutoff. Strategy-role valid and verified changes follow the labeled P3 evaluation. Research-role changes also require delivery of the selected pair |
 | Attempts assessed at both cutoffs | symbol iteration | Mutually exclusive with unassessed, research-clock unavailable, and evaluation error |
 
-Metric slot dispositions are mutually exclusive: received, skipped, unsupported, failed, empty, unassessed. Early scan errors stay in the attempt denominator as `errored` rather than disappearing. `complete_verified_coverage` is true only when inputs are retained, every attempt is assessed at both cutoffs, every slot was received, and every unique observation is verified and causally admissible at both cutoffs.
+Metric slot dispositions are mutually exclusive: received, skipped, unsupported, failed, empty, unassessed. Early scan errors stay in the attempt denominator as `errored` rather than disappearing. `complete_verified_coverage` is true only when inputs are retained, every attempt is assessed at both cutoffs, every slot was received, and every unique observation is verified and causally admissible at both cutoffs. A conflicting duplicate remains a received row and a distinct unique observation, and it makes this flag false. The other admissible rows stay visible in the admissible numerator.
 
 The synthetic study (`build_synthetic_causal_fixture`, code revision `synthetic-fixture-not-a-release`) has three attempts: one full BTC observation, one unassessed ETH scan error, and one fast BTC skip. Its full population is 2 attempts and 10 slots. Strategy-cutoff admissible observations are 0 of 5. Research-cutoff admissible observations are 5 of 5. The verified-coverage fixture acquires 30 seconds before E and observes 1 second after E, and it is the case that reports complete verified coverage. Rejected evidence is a data-quality finding, not a market-condition label.
 
@@ -107,14 +122,15 @@ Workload: the synthetic hero bundle, 6 observations, 5 metric slots, 30 in-proce
 
 Serializing that one retained-input study allocated a tracemalloc peak of 421,025 bytes and an artifact of 60,331 bytes. P4 evaluates the same bundle twice and builds availability claims, so the median is higher than one P3 evaluation. The max includes ordinary timer noise on this machine.
 
-A symbol deadline still cancels a slow instrument lookup. The tested case uses a 30-second metadata sleep, a 2-second symbol timeout, and a 10-second request timeout. Shadow ON keeps the production status, does not add an instrument miss to production `missing_data`, and starts the lookup once. Cache misses can increase by one for a lookup that is cancelled before insertion. Cache entries and writes do not increase in that case. Kline request counts match shadow OFF.
+A symbol deadline does not start a slow instrument lookup. The tested case uses a 30-second metadata sleep, a 2-second symbol timeout, and a 10-second request timeout. Shadow ON keeps the production status, does not call metadata, does not add an instrument miss to production `missing_data`, and does not add a cache miss. Kline request counts match shadow OFF. The same withholding applies to global context, which collects BTC candles and BTC derivatives on one client.
 
 ## Limitations
 
 - Scanner studies omit retained inputs. Bounded evaluator lineage is not a complete replay record. Recomputation requires the fixture or another artifact with `replay_complete`.
-- Research admissibility is stricter than P3 because it requires recorded consumer delivery. The embedded P3 classification is not rewritten to match that count.
-- Overlapping a cancelled instrument request with the optional gather can still occupy a connection-pool slot until cancellation. It does not add an endpoint or a second fetch of data the gather already collected.
-- Global context does not have a symbol deadline, so a slow instrument lookup there remains sequential and can be cancelled only by the caller's own timeout.
+- Research admissibility is stricter than P3 because it requires recorded consumer delivery and the existing selector's group-conflict marks. The embedded P3 classification is not rewritten to match that count.
+- Research pair counters are stricter than the embedded P3 change. Strategy-role pair counters still follow that labeled evaluation.
+- Symbol scans and global context do not collect instrument metadata. A shadow bundle from those callers has `instrument_lookup_withheld` and no metadata acquisition time. Direct no-deadline callers can still perform one post-gather lookup.
+- A malformed metadata object or a bundle-construction exception stays in the shadow record. It does not change the production status.
 - Code revision on scanner records is `N/A`. It is not a live git SHA.
 - No representative prospective coverage, latency distribution from Runtime, or outcome study exists yet.
 

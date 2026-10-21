@@ -1692,6 +1692,78 @@ def series_period_allowance_ms(period: str) -> int | None:
     return _period_ms(period)
 
 
+_GROUP_REJECTION_REASONS = frozenset(
+    {
+        "duplicate_conflict",
+        "conflicting_provenance",
+        "contradictory_funding_evidence",
+    }
+)
+
+
+@dataclass(frozen=True)
+class VisibleSelectorAdmission:
+    """Group conflicts and the selected OI pair from the existing selectors.
+
+    The batches are the already-bound batches from ``evidence_visible_at_cutoff``.
+    ``group_rejections`` maps a bound observation id to conflict reasons.
+    Identical duplicates are not rejections. ``selected_oi_ids`` is empty unless
+    the open-interest selector admitted a native quantity pair.
+    """
+
+    group_rejections: Mapping[int, tuple[str, ...]]
+    selected_oi_ids: tuple[int, ...]
+
+
+def visible_selector_admission(
+    *,
+    decision_cutoff: datetime | None,
+    instrument: InstrumentMetadata | None = None,
+    open_interest: DerivativesEvidenceBatch | None = None,
+    open_interest_history: DerivativesEvidenceBatch | None = None,
+    funding: DerivativesEvidenceBatch | None = None,
+    funding_history: DerivativesEvidenceBatch | None = None,
+    account_ratio: DerivativesEvidenceBatch | None = None,
+) -> VisibleSelectorAdmission:
+    """Reuse the evaluator's selectors. This does not apply a second rule set."""
+
+    cutoff = _coerce_cutoff(decision_cutoff)
+    points = [
+        point
+        for point in (_oi_points(open_interest) + _oi_points(open_interest_history))
+        if point.quantity.unit != UNIT_QUOTE_NOTIONAL
+    ]
+    period_ms = _series_period_ms(open_interest_history) or _series_period_ms(open_interest)
+    selection = select_open_interest_pair(points, cutoff=cutoff, period_ms=period_ms)
+    funding_choice = _select_funding(funding, funding_history, cutoff, instrument)
+    ratio_choice = _select_ratio(account_ratio, cutoff)
+    grouped: dict[int, list[str]] = {}
+    for obs_id, reasons in (
+        *selection.marked_exclusions,
+        *funding_choice.excluded,
+        *ratio_choice.excluded,
+    ):
+        blocking = [code for code in reasons if code in _GROUP_REJECTION_REASONS]
+        if not blocking:
+            continue
+        bucket = grouped.setdefault(int(obs_id), [])
+        for code in blocking:
+            if code not in bucket:
+                bucket.append(code)
+    selected: tuple[int, ...] = ()
+    if (
+        selection.change_pct is not None
+        and selection.context != "not_admissible"
+        and selection.current_observation is not None
+        and selection.previous_observation is not None
+    ):
+        selected = (id(selection.current_observation), id(selection.previous_observation))
+    return VisibleSelectorAdmission(
+        group_rejections={obs_id: tuple(codes) for obs_id, codes in grouped.items()},
+        selected_oi_ids=selected,
+    )
+
+
 def evidence_visible_at_cutoff(
     *,
     decision_cutoff: datetime | None,
@@ -1733,5 +1805,7 @@ __all__ = [
     "quote_notional",
     "select_open_interest_pair",
     "series_period_allowance_ms",
+    "visible_selector_admission",
+    "VisibleSelectorAdmission",
     "write_dev_shadow_artifact",
 ]

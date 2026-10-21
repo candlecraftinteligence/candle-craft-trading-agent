@@ -32,6 +32,7 @@ from app.analytics.derivatives_enrichment import (
 from app.analytics.derivatives_causal_observation import (
     assess_frozen_bundle,
     capture_observation_boundary,
+    fallback_shadow_bundle,
     freeze_derivatives_bundle,
 )
 from app.analytics.derivatives_source_truth import (
@@ -1331,7 +1332,12 @@ class ScannerRunner:
 
         fetched = await asyncio.gather(
             *(fetch_timeframe(timeframe) for timeframe in BTC_CONTEXT_TIMEFRAMES),
-            self._fetch_optional_market_data(client, "BTCUSDT", config),
+            self._fetch_optional_market_data(
+                client,
+                "BTCUSDT",
+                config,
+                withhold_shadow_instrument=True,
+            ),
         )
         optional_data = fetched[-1]
         timeframe_results = fetched[:-1]
@@ -2476,6 +2482,7 @@ class ScannerRunner:
         *,
         iteration_index: int | None = None,
         symbol_deadline: float | None = None,
+        withhold_shadow_instrument: bool = False,
     ) -> _OptionalMarketData:
         missing_data: list[str] = []
         unverified_data: list[str] = []
@@ -2493,37 +2500,23 @@ class ScannerRunner:
             "open_interest_history",
             "long_short_ratio",
         } if config.fast_mode else set()
-        # When a symbol deadline is active, overlap the shadow instrument lookup
-        # with the optional gather and cancel it if it is still running. That
-        # keeps the extra lookup from extending production collection. Callers
-        # without a symbol deadline keep the sequential lookup.
-        deadline_blocks_instrument = (
+        # Do not start instrument metadata on the production client. A symbol
+        # deadline and global-context collection withhold the lookup so it
+        # cannot take the shared connection or extend a production deadline.
+        # The withheld record has no invented acquisition time. A direct caller
+        # with neither a deadline nor the withhold flag may look up metadata
+        # only after this gather returns.
+        withhold_instrument = bool(
             config.derivatives_source_truth_shadow
-            and symbol_deadline is not None
-            and time.monotonic() >= symbol_deadline
+            and (withhold_shadow_instrument or symbol_deadline is not None)
         )
-        instrument_task = None
-        if config.derivatives_source_truth_shadow and symbol_deadline is not None and not deadline_blocks_instrument:
-            instrument_task = asyncio.create_task(
-                self._shadow_instrument(client, symbol, config),
-                name="cci-shadow-instrument",
+        optional_results = await asyncio.gather(
+            *(
+                self._optional_call(client, method_name, symbol, config, label)
+                for label, method_name in optional_specs
+                if label not in skipped_fast_labels
             )
-        try:
-            optional_results = await asyncio.gather(
-                *(
-                    self._optional_call(client, method_name, symbol, config, label)
-                    for label, method_name in optional_specs
-                    if label not in skipped_fast_labels
-                )
-            )
-        except BaseException:
-            if instrument_task is not None:
-                instrument_task.cancel()
-                try:
-                    await instrument_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            raise
+        )
         values_by_label = {label: value for label, value, _missing, _warning, _evidence in optional_results}
         for label, _method_name in optional_specs:
             if label in skipped_fast_labels:
@@ -2564,30 +2557,42 @@ class ScannerRunner:
             }
             for label in skipped_fast_labels:
                 evidence[label] = _shadow_unavailable(label, symbol, "fast_mode_skipped")
-            if instrument_task is not None:
-                instrument = await _finish_shadow_instrument_task(instrument_task, symbol, config.exchange)
-            elif deadline_blocks_instrument:
-                from app.data.derivatives_instrument import unverified_instrument
+            scan_mode = "fast" if config.fast_mode else "full"
+            try:
+                if withhold_instrument:
+                    from app.data.derivatives_instrument import unverified_instrument
 
-                instrument = unverified_instrument(
-                    exchange=config.exchange,
-                    requested_symbol=symbol,
-                    source_endpoint="get_instrument_metadata",
-                    reason="instrument_lookup_not_waited",
+                    instrument = unverified_instrument(
+                        exchange=config.exchange,
+                        requested_symbol=symbol,
+                        source_endpoint="get_instrument_metadata",
+                        reason="instrument_lookup_withheld",
+                    )
+                else:
+                    instrument = await self._shadow_instrument(client, symbol, config)
+                boundary = capture_observation_boundary(self.capture_clock)
+                frozen = freeze_derivatives_bundle(
+                    evidence,
+                    instrument=instrument,
+                    strategy_cutoff=config.decision_timestamp,
+                    observation=boundary,
+                    symbol=symbol,
+                    requested_venue=config.exchange,
+                    scan_mode=scan_mode,
+                    iteration_index=iteration_index,
                 )
-            else:
-                instrument = await self._shadow_instrument(client, symbol, config)
-            boundary = capture_observation_boundary(self.capture_clock)
-            frozen = freeze_derivatives_bundle(
-                evidence,
-                instrument=instrument,
-                strategy_cutoff=config.decision_timestamp,
-                observation=boundary,
-                symbol=symbol,
-                requested_venue=config.exchange,
-                scan_mode="fast" if config.fast_mode else "full",
-                iteration_index=iteration_index,
-            )
+                instrument = frozen.instrument
+            except Exception as exc:
+                frozen = fallback_shadow_bundle(
+                    evidence,
+                    symbol=symbol,
+                    requested_venue=config.exchange,
+                    strategy_cutoff=config.decision_timestamp,
+                    scan_mode=scan_mode,
+                    iteration_index=iteration_index,
+                    error_name=type(exc).__name__,
+                )
+                instrument = frozen.instrument
 
         return _OptionalMarketData(
             ticker=ticker,
@@ -3033,43 +3038,6 @@ def _derivatives_shadow_result(
             error_name=type(exc).__name__,
         )
     return strategy, causal
-
-
-async def _finish_shadow_instrument_task(task: asyncio.Task[Any] | None, symbol: str, exchange: str) -> Any:
-    """Use a finished shadow lookup. Cancel one that is still running."""
-
-    from app.data.derivatives_instrument import unverified_instrument
-
-    if task is None:
-        return unverified_instrument(
-            exchange=exchange,
-            requested_symbol=symbol,
-            source_endpoint="get_instrument_metadata",
-            reason="adapter_has_no_source_evidence",
-        )
-    if task.done():
-        try:
-            return task.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            return unverified_instrument(
-                exchange=exchange,
-                requested_symbol=symbol,
-                source_endpoint="get_instrument_metadata",
-                reason="instrument_lookup_failed",
-            )
-    task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, Exception):
-        pass
-    return unverified_instrument(
-        exchange=exchange,
-        requested_symbol=symbol,
-        source_endpoint="get_instrument_metadata",
-        reason="instrument_lookup_not_waited",
-    )
 
 
 def _setup_quality_for_result(

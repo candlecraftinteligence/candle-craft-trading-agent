@@ -29,11 +29,13 @@ from app.analytics.derivatives_source_truth import (
     observation_context_freshness,
     observation_temporal_reasons,
     series_period_allowance_ms,
+    visible_selector_admission,
 )
 from app.data.candle_integrity import normalize_utc_timestamp
 from app.data.derivatives_instrument import (
     InstrumentMetadata,
     parse_binance_usds_instrument,
+    unverified_instrument,
 )
 from app.data.derivatives_source_evidence import (
     QUALITY_MISSING,
@@ -321,6 +323,7 @@ def freeze_derivatives_bundle(
     code_revision: str = NA,
     attempt_id: str | None = None,
 ) -> FrozenDerivativesBundle:
+    instrument = represented_instrument(instrument, exchange=requested_venue, symbol=symbol)
     slots = tuple((str(key), value) for key, value in (evidence or {}).items())
     exchange = _evidence_exchange(slots, instrument)
     strategy_text = _iso(strategy_cutoff) or NA
@@ -370,6 +373,83 @@ def assess_frozen_bundle(
         research_dt=research_dt,
         research_evaluation=research_evaluation,
     )
+
+
+def represented_instrument(instrument: Any, *, exchange: str, symbol: str) -> Any:
+    """Keep a real instrument record. Replace a malformed one without copying its clock."""
+
+    if instrument is None:
+        return None
+    if (
+        isinstance(instrument, InstrumentMetadata)
+        and _reason_codes_are_text(getattr(instrument, "reason_codes", ()))
+        and isinstance(getattr(instrument, "acquisition", None), AcquisitionFact)
+    ):
+        return instrument
+    reason = "instrument_representation_invalid"
+    return unverified_instrument(
+        exchange=exchange or NA,
+        requested_symbol=symbol or NA,
+        source_endpoint="get_instrument_metadata",
+        reason=reason,
+    )
+
+
+def fallback_shadow_bundle(
+    evidence: Mapping[str, Any] | None,
+    *,
+    symbol: str,
+    requested_venue: str,
+    strategy_cutoff: datetime | None,
+    scan_mode: str,
+    iteration_index: int | None,
+    error_name: str,
+) -> FrozenDerivativesBundle:
+    """Build an explicit unavailable bundle after construction failed.
+
+    Successfully fetched evidence batches are kept. The observation cutoff is
+    missing rather than replaced with a new clock sample, and metadata is not
+    fetched again.
+    """
+
+    safe = {
+        str(key): value
+        for key, value in (evidence or {}).items()
+        if isinstance(value, DerivativesEvidenceBatch)
+    }
+    instrument = unverified_instrument(
+        exchange=requested_venue or NA,
+        requested_symbol=symbol or NA,
+        source_endpoint="get_instrument_metadata",
+        reason="shadow_bundle_construction_failed",
+    )
+    boundary = _failed_boundary(("shadow_bundle_construction_failed", error_name))
+    cutoff = strategy_cutoff if isinstance(strategy_cutoff, datetime) else None
+    try:
+        return freeze_derivatives_bundle(
+            safe,
+            instrument=instrument,
+            strategy_cutoff=cutoff,
+            observation=boundary,
+            symbol=symbol,
+            requested_venue=requested_venue or NA,
+            scan_mode=scan_mode,
+            iteration_index=iteration_index,
+        )
+    except Exception:
+        return FrozenDerivativesBundle(
+            slots=tuple(safe.items()),
+            instrument=instrument,
+            strategy_cutoff=cutoff,
+            observation=boundary,
+            symbol=symbol,
+            requested_venue=requested_venue or NA,
+            evidence_exchange=requested_venue or NA,
+            scan_mode=scan_mode,
+            iteration_index=iteration_index,
+            attempt_id=f"{requested_venue}:{symbol}:{_index_text(iteration_index)}:{scan_mode}:construction-failed",
+            instrument_attempt="unavailable",
+        )
 
 
 def unavailable_causal_record(
@@ -1231,6 +1311,20 @@ def _tally_cutoff(
     claims = {claim.metric: claim for claim in assessment.availability}
     instrument = visible.get("instrument")
     allowance_funding = getattr(instrument, "funding_interval_ms", None) if getattr(instrument, "quality", None) == QUALITY_VERIFIED else None
+    admission = visible_selector_admission(
+        decision_cutoff=cutoff,
+        instrument=instrument if isinstance(instrument, InstrumentMetadata) else None,
+        open_interest=_batch(visible.get("open_interest")),
+        open_interest_history=_batch(visible.get("open_interest_history")),
+        funding=_batch(visible.get("funding")),
+        funding_history=_batch(visible.get("funding_history")),
+        account_ratio=_batch(visible.get("account_ratio")),
+    )
+    slot_by_bound_id = {
+        id(observation): slot
+        for slot, argument in _SLOT_ARGUMENT.items()
+        for observation in getattr(_batch(visible.get(argument)), "observations", ())
+    }
     verified = admissible = fresh = admissible_oi = delivered = 0
     for _key, items in grouped.items():
         bound_items = []
@@ -1257,9 +1351,22 @@ def _tally_cutoff(
         temporally_clear = all(not any(code in _BLOCKING_TEMPORAL for code in codes) for codes in temporal)
         semantically_ok = all(item.semantic_quality == QUALITY_VERIFIED for _slot, item, _batch, _claim in bound_items)
         consumer_ok = all(claim is not None and claim.consumer_delivered_before_cutoff == "true" for _slot, _item, _batch, claim in bound_items)
+        rejection_codes = [
+            code
+            for _slot, item, _batch, _claim in bound_items
+            for code in admission.group_rejections.get(id(item), ())
+        ]
+        if rejection_codes:
+            for code in dict.fromkeys(rejection_codes):
+                tally.overlap[(role, code, "unique_observation")] += 1
         if consumer_ok:
             delivered += 1
-        role_admissible = temporally_clear and semantically_ok and (role != RESEARCH_CUTOFF_ROLE or consumer_ok)
+        role_admissible = (
+            temporally_clear
+            and semantically_ok
+            and not rejection_codes
+            and (role != RESEARCH_CUTOFF_ROLE or consumer_ok)
+        )
         if role_admissible:
             admissible += 1
             if any(item.metric == "open_interest" for _slot, item, _batch, _claim in bound_items):
@@ -1277,7 +1384,17 @@ def _tally_cutoff(
     tally.consumer_delivered[role] += delivered
     tally.oi_opportunities[role] += 1
     evaluation = assessment.evaluation
-    if evaluation is not None and evaluation.oi_change_pct != NA and evaluation.oi_change_context != "not_admissible":
+    pair_visible = role != RESEARCH_CUTOFF_ROLE or _research_selected_pair_delivered(
+        admission.selected_oi_ids,
+        claims,
+        slot_by_bound_id,
+    )
+    if (
+        pair_visible
+        and evaluation is not None
+        and evaluation.oi_change_pct != NA
+        and evaluation.oi_change_context != "not_admissible"
+    ):
         tally.oi_valid[role] += 1
         if "notional_not_position_growth" not in evaluation.reason_codes and "zero_baseline" not in evaluation.reason_codes:
             tally.oi_verified_change[role] += 1
@@ -1292,6 +1409,22 @@ def _tally_cutoff(
             for item, _batch in bound_items
         ):
             tally.overlap[(role, "stale_measurements", "unique_observation")] += 1
+
+
+def _research_selected_pair_delivered(
+    selected_ids: tuple[int, ...],
+    claims: Mapping[str, Any],
+    slot_by_bound_id: Mapping[int, str],
+) -> bool:
+    """The selected current and previous OI observations must both be delivered."""
+
+    if len(selected_ids) != 2:
+        return False
+    for obs_id in selected_ids:
+        claim = claims.get(slot_by_bound_id.get(obs_id, ""))
+        if claim is None or claim.consumer_delivered_before_cutoff != "true":
+            return False
+    return True
 
 
 def _group_fresh(bound_items: Sequence[tuple[Any, ...]], cutoff: datetime | None, allowance_funding: int | None) -> bool:
@@ -1350,9 +1483,9 @@ def _population_report(population: str, tally: _PopulationTally) -> dict[str, An
     rates.append(_rate("unique_observations", tally.unique, tally.received_rows, "source_row_to_unique_observation", "not_cutoff_specific", population, (), "identity/time deduplication inside each attempt"))
     for role in (STRATEGY_CUTOFF_ROLE, RESEARCH_CUTOFF_ROLE):
         rule = (
-            "p3_evaluator_temporal_and_semantic_gates"
+            "existing_selector_validation_blocks_conflicting_groups"
             if role == STRATEGY_CUTOFF_ROLE
-            else "p3_evaluator_temporal_and_semantic_gates_and_recorded_consumer_delivery_at_or_before_observation"
+            else "existing_selector_validation_blocks_conflicting_groups_and_requires_recorded_consumer_delivery"
         )
         exclusions = ("research_assessment_unavailable",) if role == RESEARCH_CUTOFF_ROLE and tally.research_unavailable else ()
         rates.append(_rate("semantically_verified_observations", tally.verified[role], tally.unique, "unique_observation", role, population, exclusions, "bound instrument visibility at this cutoff"))
@@ -1361,8 +1494,18 @@ def _population_report(population: str, tally: _PopulationTally) -> dict[str, An
         rates.append(_rate("admissible_oi_observations", tally.admissible_oi[role], tally.unique, "unique_observation", role, population, exclusions, "open-interest observations inside the causal admission rule"))
         rates.append(_rate("consumer_delivered_before_cutoff_observations", tally.consumer_delivered[role], tally.unique, "unique_observation", role, population, exclusions, "recorded consumer delivery at or before the labeled cutoff"))
         rates.append(_rate("oi_pair_opportunities", tally.oi_opportunities[role], tally.oi_opportunities[role], "assessed_attempt", role, population, exclusions, "one pair opportunity per attempt assessed at this cutoff"))
-        rates.append(_rate("valid_oi_pairs", tally.oi_valid[role], tally.oi_opportunities[role], "oi_pair_opportunity", role, population, exclusions, "evaluator produced a native quantity change"))
-        rates.append(_rate("verified_oi_quantity_changes", tally.oi_verified_change[role], tally.oi_opportunities[role], "oi_pair_opportunity", role, population, exclusions, "native quantity change without notional substitution or zero baseline"))
+        pair_rule = (
+            "labeled P3 evaluation produced a native quantity change"
+            if role == STRATEGY_CUTOFF_ROLE
+            else "selected OI pair and its batches were delivered at or before the research observation, and the labeled evaluation produced a native quantity change"
+        )
+        verified_rule = (
+            "labeled P3 native quantity change without notional substitution or zero baseline"
+            if role == STRATEGY_CUTOFF_ROLE
+            else "selected delivered OI pair whose labeled evaluation is a native quantity change without notional substitution or zero baseline"
+        )
+        rates.append(_rate("valid_oi_pairs", tally.oi_valid[role], tally.oi_opportunities[role], "oi_pair_opportunity", role, population, exclusions, pair_rule))
+        rates.append(_rate("verified_oi_quantity_changes", tally.oi_verified_change[role], tally.oi_opportunities[role], "oi_pair_opportunity", role, population, exclusions, verified_rule))
     overlapping = [
         {
             "name": name,
@@ -1588,8 +1731,16 @@ def _has_identity(observation: DerivativesObservation) -> bool:
     return any(code in _IDENTITY_CODES for code in observation.reason_codes)
 
 
-def _has_identity_codes(codes: Sequence[str]) -> bool:
+def _has_identity_codes(codes: Any) -> bool:
+    if not _reason_codes_are_text(codes):
+        return False
     return any(code in _IDENTITY_CODES for code in codes)
+
+
+def _reason_codes_are_text(codes: Any) -> bool:
+    if isinstance(codes, (str, bytes)) or not isinstance(codes, Sequence):
+        return False
+    return all(isinstance(code, str) for code in codes)
 
 
 def _evidence_exchange(slots: Sequence[tuple[str, Any]], instrument: Any) -> str:
@@ -1604,12 +1755,20 @@ def _evidence_exchange(slots: Sequence[tuple[str, Any]], instrument: Any) -> str
 
 
 def _instrument_attempt(instrument: Any) -> str:
-    codes = tuple(getattr(instrument, "reason_codes", ()) or ())
+    raw = getattr(instrument, "reason_codes", ())
+    codes = raw if _reason_codes_are_text(raw) else ()
+    if "instrument_lookup_withheld" in codes:
+        return "withheld"
     if "instrument_lookup_not_waited" in codes:
         return "not_waited"
     if "instrument_lookup_failed" in codes:
         return "failed"
-    if instrument is None or "adapter_has_no_source_evidence" in codes:
+    if (
+        instrument is None
+        or "adapter_has_no_source_evidence" in codes
+        or "instrument_representation_invalid" in codes
+        or "shadow_bundle_construction_failed" in codes
+    ):
         return "unavailable"
     return "completed"
 
@@ -1831,11 +1990,11 @@ _DEFINITIONS = {
     "metric_opportunities": "Five scanner derivative slots per attempt: open_interest, open_interest_history, funding_rate, funding_history, long_short_ratio.",
     "metric_dispositions": "Mutually exclusive slot states: received, skipped, unsupported, failed, empty, unassessed.",
     "received_source_rows": "Raw observation rows in received slots before deduplication.",
-    "unique_observations": "Rows collapsed inside one attempt when metric, venue, endpoint, symbol, metric time, primary raw value, subtype, and acquisition provenance match. Conflicting values stay distinct. Totals sum per-attempt unique counts.",
-    "semantically_verified_observations": "Unique observations whose instrument-bound semantics are verified at the labeled cutoff.",
-    "causally_admissible_observations": "At the original strategy cutoff this is the existing evaluator temporal and semantic result. At the research cutoff it also requires recorded consumer delivery at or before the observation event. A later admissible observation does not make evidence available to the earlier strategy decision.",
+    "unique_observations": "Rows collapsed inside one attempt when metric, venue, endpoint, symbol, metric time, primary raw value, subtype, and acquisition provenance match. Conflicting values stay distinct. Totals sum per-attempt unique counts. Received-row denominators stay on the raw rows.",
+    "semantically_verified_observations": "Unique observations whose instrument-bound semantics are verified at the labeled cutoff. A conflicting group can still contain individually verified rows.",
+    "causally_admissible_observations": "Temporal and semantic gates plus the existing selector's group conflicts. A duplicate_conflict, conflicting_provenance, or contradictory_funding_evidence mark excludes that group. Observations at other timestamps and in other metrics stay admissible. Research admission also requires recorded consumer delivery at or before the observation event. A later admissible observation does not make evidence available to the earlier strategy decision.",
     "fresh_observations": "Admissible observations whose existing cadence-or-period freshness helper returns current. The denominator is the admissible population. An empty admissible population is N/A.",
-    "oi_pairs": "One opportunity per attempt assessed at that cutoff. A verified quantity change is a native quantity result that is not notional growth and not a zero baseline.",
+    "oi_pairs": "One opportunity per attempt assessed at that cutoff. Strategy-role valid and verified counts follow the labeled P3 evaluation. Research-role counts also require the selected current and previous observations, and the batches that carry them, to be delivered at or before the research observation. A verified quantity change is a native quantity result that is not notional growth and not a zero baseline.",
     "attempts_assessed_at_both_cutoffs": "Exclusive disposition assessed_both. Clock failures, evaluation errors, and unassessed attempts are separate dispositions and are not dropped.",
     "overlapping_reasons": "Reason counts are not a partition. Their percentages are not additive and are not required to sum to 100 percent.",
     "cache_retention": "P3 does not record a cache insertion instant on the evidence clock. Retention before a cutoff is not_recorded. TTL is not freshness and is not historical availability.",
