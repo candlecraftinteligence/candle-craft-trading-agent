@@ -29,6 +29,12 @@ from app.analytics.derivatives_enrichment import (
     DerivativesEnrichmentResult,
     enrich_derivatives,
 )
+from app.analytics.derivatives_causal_observation import (
+    assess_frozen_bundle,
+    capture_observation_boundary,
+    fallback_shadow_bundle,
+    freeze_derivatives_bundle,
+)
 from app.analytics.derivatives_source_truth import (
     DerivativesSourceTruthResult,
     evaluate_derivatives_source_truth,
@@ -666,6 +672,11 @@ class ScannerSymbolResult(BaseModel):
         exclude=True,
         repr=False,
     )
+    derivatives_causal_observation: Any | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -804,6 +815,7 @@ class _OptionalMarketData(BaseModel):
     derivatives_evidence: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     derivatives_instrument: Any | None = Field(default=None, exclude=True, repr=False)
     derivatives_decision_cutoff: datetime | None = Field(default=None, exclude=True)
+    derivatives_frozen_bundle: Any | None = Field(default=None, exclude=True, repr=False)
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
@@ -953,7 +965,7 @@ class ScannerRunner:
                 market_regime_context = await self._fetch_market_regime_context(
                     client, run_config, progress=progress
                 )
-            for symbol_config in run_config.symbols:
+            for iteration_index, symbol_config in enumerate(run_config.symbols):
                 if scan_deadline is not None and time.monotonic() >= scan_deadline:
                     global_timeout_hit = True
                     self.logger.warning("Full scan timeout reached before symbol=%s.", symbol_config.symbol)
@@ -974,6 +986,7 @@ class ScannerRunner:
                     symbol_timeout = min(symbol_timeout, remaining_scan_seconds)
 
                 try:
+                    symbol_deadline = time.monotonic() + symbol_timeout
                     symbol_result = await asyncio.wait_for(
                         self._scan_symbol(
                             symbol_config,
@@ -981,6 +994,8 @@ class ScannerRunner:
                             client,
                             global_context=global_context,
                             progress=progress,
+                            iteration_index=iteration_index,
+                            symbol_deadline=symbol_deadline,
                         ),
                         timeout=symbol_timeout,
                     )
@@ -1317,7 +1332,12 @@ class ScannerRunner:
 
         fetched = await asyncio.gather(
             *(fetch_timeframe(timeframe) for timeframe in BTC_CONTEXT_TIMEFRAMES),
-            self._fetch_optional_market_data(client, "BTCUSDT", config),
+            self._fetch_optional_market_data(
+                client,
+                "BTCUSDT",
+                config,
+                withhold_shadow_instrument=True,
+            ),
         )
         optional_data = fetched[-1]
         timeframe_results = fetched[:-1]
@@ -1468,6 +1488,8 @@ class ScannerRunner:
         *,
         global_context: GlobalContextSnapshot | None = None,
         progress: Callable[[str], Any] | None = None,
+        iteration_index: int | None = None,
+        symbol_deadline: float | None = None,
     ) -> ScannerSymbolResult:
         symbol = symbol_config.symbol
         microstructure_flow = self._microstructure_snapshot(symbol, config)
@@ -1478,7 +1500,13 @@ class ScannerRunner:
         technical_candles = _technical_candles(candles)
         current_price = _current_price_from_candles(candles)
         await _emit_progress(progress, "Fetching derivatives...")
-        optional_data = await self._fetch_optional_market_data(client, symbol, config)
+        optional_data = await self._fetch_optional_market_data(
+            client,
+            symbol,
+            config,
+            iteration_index=iteration_index,
+            symbol_deadline=symbol_deadline,
+        )
 
         optional_data = optional_data.model_copy(
             update={
@@ -2451,6 +2479,10 @@ class ScannerRunner:
         client: BaseExchangeClient,
         symbol: str,
         config: ScannerRunConfig,
+        *,
+        iteration_index: int | None = None,
+        symbol_deadline: float | None = None,
+        withhold_shadow_instrument: bool = False,
     ) -> _OptionalMarketData:
         missing_data: list[str] = []
         unverified_data: list[str] = []
@@ -2468,6 +2500,16 @@ class ScannerRunner:
             "open_interest_history",
             "long_short_ratio",
         } if config.fast_mode else set()
+        # Do not start instrument metadata on the production client. A symbol
+        # deadline and global-context collection withhold the lookup so it
+        # cannot take the shared connection or extend a production deadline.
+        # The withheld record has no invented acquisition time. A direct caller
+        # with neither a deadline nor the withhold flag may look up metadata
+        # only after this gather returns.
+        withhold_instrument = bool(
+            config.derivatives_source_truth_shadow
+            and (withhold_shadow_instrument or symbol_deadline is not None)
+        )
         optional_results = await asyncio.gather(
             *(
                 self._optional_call(client, method_name, symbol, config, label)
@@ -2506,6 +2548,7 @@ class ScannerRunner:
 
         evidence: dict[str, Any] | None = None
         instrument = None
+        frozen = None
         if config.derivatives_source_truth_shadow:
             evidence = {
                 label: item
@@ -2514,7 +2557,42 @@ class ScannerRunner:
             }
             for label in skipped_fast_labels:
                 evidence[label] = _shadow_unavailable(label, symbol, "fast_mode_skipped")
-            instrument = await self._shadow_instrument(client, symbol, config)
+            scan_mode = "fast" if config.fast_mode else "full"
+            try:
+                if withhold_instrument:
+                    from app.data.derivatives_instrument import unverified_instrument
+
+                    instrument = unverified_instrument(
+                        exchange=config.exchange,
+                        requested_symbol=symbol,
+                        source_endpoint="get_instrument_metadata",
+                        reason="instrument_lookup_withheld",
+                    )
+                else:
+                    instrument = await self._shadow_instrument(client, symbol, config)
+                boundary = capture_observation_boundary(self.capture_clock)
+                frozen = freeze_derivatives_bundle(
+                    evidence,
+                    instrument=instrument,
+                    strategy_cutoff=config.decision_timestamp,
+                    observation=boundary,
+                    symbol=symbol,
+                    requested_venue=config.exchange,
+                    scan_mode=scan_mode,
+                    iteration_index=iteration_index,
+                )
+                instrument = frozen.instrument
+            except Exception as exc:
+                frozen = fallback_shadow_bundle(
+                    evidence,
+                    symbol=symbol,
+                    requested_venue=config.exchange,
+                    strategy_cutoff=config.decision_timestamp,
+                    scan_mode=scan_mode,
+                    iteration_index=iteration_index,
+                    error_name=type(exc).__name__,
+                )
+                instrument = frozen.instrument
 
         return _OptionalMarketData(
             ticker=ticker,
@@ -2531,6 +2609,7 @@ class ScannerRunner:
             derivatives_evidence=evidence,
             derivatives_instrument=instrument,
             derivatives_decision_cutoff=config.decision_timestamp,
+            derivatives_frozen_bundle=frozen,
         )
 
     async def _optional_call(
@@ -2766,7 +2845,7 @@ class ScannerRunner:
         candidate_quality_grade = _display_decimal_or_text(
             getattr(setup_quality.quality_grade, "value", setup_quality.quality_grade)
         )
-        shadow = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
+        shadow, causal = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
         return ScannerSymbolResult(
             symbol=symbol,
             status=status,
@@ -2903,6 +2982,7 @@ class ScannerRunner:
             candidate_quality_grade=candidate_quality_grade,
             final_quality_grade=candidate_quality_grade,
             derivatives_source_truth_shadow=shadow,
+            derivatives_causal_observation=causal,
         )
 
 
@@ -2915,12 +2995,13 @@ def _shadow_unavailable(label: str, symbol: str, reason: str) -> Any:
 def _derivatives_shadow_result(
     optional_data: _OptionalMarketData,
     liquidation_flow: Any,
-) -> DerivativesSourceTruthResult | None:
+) -> tuple[DerivativesSourceTruthResult | None, Any | None]:
     if not optional_data.derivatives_source_truth_requested:
-        return None
-    evidence = optional_data.derivatives_evidence or {}
+        return None, None
+    bundle = optional_data.derivatives_frozen_bundle
+    evidence = bundle.evidence_map() if bundle is not None else (optional_data.derivatives_evidence or {})
     try:
-        return evaluate_derivatives_source_truth(
+        strategy = evaluate_derivatives_source_truth(
             decision_cutoff=optional_data.derivatives_decision_cutoff,
             instrument=optional_data.derivatives_instrument,
             open_interest=evidence.get("open_interest"),
@@ -2931,7 +3012,7 @@ def _derivatives_shadow_result(
             liquidation_snapshot=liquidation_flow,
         )
     except Exception as exc:
-        return DerivativesSourceTruthResult(
+        strategy = DerivativesSourceTruthResult(
             classification="evaluation_error",
             validated_confirmation=False,
             supports_long="unverified",
@@ -2939,6 +3020,24 @@ def _derivatives_shadow_result(
             reason_codes=("evaluation_error",),
             evaluation_error=type(exc).__name__,
         )
+    if bundle is None:
+        return strategy, None
+    try:
+        causal = assess_frozen_bundle(
+            bundle,
+            strategy_evaluation=strategy,
+            liquidation_snapshot=liquidation_flow,
+        )
+    except Exception as exc:
+        from app.analytics.derivatives_causal_observation import unavailable_causal_record
+
+        causal = unavailable_causal_record(
+            bundle,
+            strategy_evaluation=strategy,
+            reason="evaluation_error",
+            error_name=type(exc).__name__,
+        )
+    return strategy, causal
 
 
 def _setup_quality_for_result(
