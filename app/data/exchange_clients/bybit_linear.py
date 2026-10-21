@@ -1,11 +1,27 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 import httpx
 
+from app.data.derivatives_instrument import InstrumentMetadata, parse_bybit_linear_instrument
+from app.data.derivatives_source_evidence import (
+    ENDPOINT_BYBIT_ACCOUNT_RATIO,
+    ENDPOINT_BYBIT_FUNDING,
+    ENDPOINT_BYBIT_INSTRUMENT,
+    ENDPOINT_BYBIT_OPEN_INTEREST,
+    REASON_EVIDENCE_REPRESENTATION_FAILED,
+    MetricEvidenceDelivery,
+    capture_acquisition,
+    describe_bybit_account_ratio,
+    describe_bybit_funding_history,
+    describe_bybit_open_interest,
+    represent_delivery,
+    unavailable_batch,
+)
 from app.data.dtos import CandleDTO, FundingDTO, OpenInterestDTO, TickerDTO
 from app.data.exceptions import ExchangeRateLimitError, ExchangeResponseError
 from app.data.exchange_clients.base import PublicHTTPExchangeClient
@@ -71,73 +87,177 @@ class BybitLinearClient(PublicHTTPExchangeClient):
         return normalize_bybit_ticker(normalized_symbol, payload)
 
     async def get_funding_rate(self, symbol: str) -> FundingDTO:
+        return (await self.get_funding_rate_with_evidence(symbol)).value
+
+    async def get_funding_rate_with_evidence(
+        self,
+        symbol: str,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
+        history = await self.get_funding_rate_history_with_evidence(symbol, limit=1, capture_clock=capture_clock)
+        if history.value:
+            return represent_delivery(history.value[-1], history.evidence)
         normalized_symbol = symbol.upper()
-        history = await self.get_funding_rate_history(normalized_symbol, limit=1)
-        if history:
-            return history[-1]
-        payload = await self._get_json(
-            "/v5/market/funding/history",
-            params={"category": self.CATEGORY, "symbol": normalized_symbol, "limit": 1},
-            validate=self._ensure_success,
+        params = {"category": self.CATEGORY, "symbol": normalized_symbol, "limit": 1}
+        payload = await self._get_json(ENDPOINT_BYBIT_FUNDING, params=params, validate=self._ensure_success)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_bybit_funding(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_bybit_funding_history(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="funding",
+            endpoint=ENDPOINT_BYBIT_FUNDING,
         )
-        return normalize_bybit_funding(normalized_symbol, payload)
+        return represent_delivery(value, evidence)
 
     async def get_funding_rate_history(self, symbol: str, limit: int = 100) -> list[FundingDTO]:
+        return (await self.get_funding_rate_history_with_evidence(symbol, limit=limit)).value
+
+    async def get_funding_rate_history_with_evidence(
+        self,
+        symbol: str,
+        limit: int = 100,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
         _validate_limit(limit, maximum=200)
         normalized_symbol = symbol.upper()
-        payload = await self._get_json(
-            "/v5/market/funding/history",
-            params={"category": self.CATEGORY, "symbol": normalized_symbol, "limit": limit},
-            validate=self._ensure_success,
+        params = {"category": self.CATEGORY, "symbol": normalized_symbol, "limit": limit}
+        payload = await self._get_json(ENDPOINT_BYBIT_FUNDING, params=params, validate=self._ensure_success)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_bybit_funding_history(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_bybit_funding_history(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="funding",
+            endpoint=ENDPOINT_BYBIT_FUNDING,
         )
-        return normalize_bybit_funding_history(normalized_symbol, payload)
+        return represent_delivery(value, evidence)
 
     async def get_open_interest(self, symbol: str) -> OpenInterestDTO:
+        return (await self.get_open_interest_with_evidence(symbol)).value
+
+    async def get_open_interest_with_evidence(
+        self,
+        symbol: str,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
+        history = await self.get_open_interest_history_with_evidence(symbol, limit=1, capture_clock=capture_clock)
+        if history.value:
+            return represent_delivery(history.value[-1], history.evidence)
         normalized_symbol = symbol.upper()
-        history = await self.get_open_interest_history(normalized_symbol, limit=1)
-        if history:
-            return history[-1]
-        payload = await self._get_json(
-            "/v5/market/open-interest",
-            params={
-                "category": self.CATEGORY,
-                "symbol": normalized_symbol,
-                "intervalTime": self.open_interest_interval,
-                "limit": 1,
-            },
-            validate=self._ensure_success,
+        params = {
+            "category": self.CATEGORY,
+            "symbol": normalized_symbol,
+            "intervalTime": self.open_interest_interval,
+            "limit": 1,
+        }
+        payload = await self._get_json(ENDPOINT_BYBIT_OPEN_INTEREST, params=params, validate=self._ensure_success)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_bybit_open_interest(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_bybit_open_interest(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="open_interest",
+            endpoint=ENDPOINT_BYBIT_OPEN_INTEREST,
         )
-        return normalize_bybit_open_interest(normalized_symbol, payload)
+        return represent_delivery(value, evidence)
 
     async def get_open_interest_history(self, symbol: str, limit: int = 30) -> list[OpenInterestDTO]:
+        return (await self.get_open_interest_history_with_evidence(symbol, limit=limit)).value
+
+    async def get_open_interest_history_with_evidence(
+        self,
+        symbol: str,
+        limit: int = 30,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
         _validate_limit(limit, maximum=200)
         normalized_symbol = symbol.upper()
-        payload = await self._get_json(
-            "/v5/market/open-interest",
-            params={
-                "category": self.CATEGORY,
-                "symbol": normalized_symbol,
-                "intervalTime": self.open_interest_interval,
-                "limit": limit,
-            },
-            validate=self._ensure_success,
+        params = {
+            "category": self.CATEGORY,
+            "symbol": normalized_symbol,
+            "intervalTime": self.open_interest_interval,
+            "limit": limit,
+        }
+        payload = await self._get_json(ENDPOINT_BYBIT_OPEN_INTEREST, params=params, validate=self._ensure_success)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_bybit_open_interest_history(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_bybit_open_interest(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="open_interest",
+            endpoint=ENDPOINT_BYBIT_OPEN_INTEREST,
         )
-        return normalize_bybit_open_interest_history(normalized_symbol, payload)
+        return represent_delivery(value, evidence)
 
     async def get_long_short_ratio(self, symbol: str, limit: int = 1, period: str = "5min") -> Decimal:
+        return (await self.get_long_short_ratio_with_evidence(symbol, limit=limit, period=period)).value
+
+    async def get_long_short_ratio_with_evidence(
+        self,
+        symbol: str,
+        limit: int = 1,
+        period: str = "5min",
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> MetricEvidenceDelivery:
         _validate_limit(limit, maximum=500)
         normalized_symbol = symbol.upper()
-        payload = await self._get_json(
-            "/v5/market/account-ratio",
-            params={
-                "category": self.CATEGORY,
-                "symbol": normalized_symbol,
-                "period": period,
-                "limit": limit,
-            },
-            validate=self._ensure_success,
+        params = {"category": self.CATEGORY, "symbol": normalized_symbol, "period": period, "limit": limit}
+        payload = await self._get_json(ENDPOINT_BYBIT_ACCOUNT_RATIO, params=params, validate=self._ensure_success)
+        acquired = capture_acquisition(capture_clock)
+        value = normalize_bybit_long_short_ratio(normalized_symbol, payload)
+        evidence = _describe_safely(
+            lambda: describe_bybit_account_ratio(
+                requested_symbol=normalized_symbol,
+                payload=payload,
+                request_params=params,
+                capture_clock=None,
+                acquisition=acquired,
+            ),
+            metric="account_ratio",
+            endpoint=ENDPOINT_BYBIT_ACCOUNT_RATIO,
         )
-        return normalize_bybit_long_short_ratio(normalized_symbol, payload)
+        return represent_delivery(value, evidence)
+
+    async def get_instrument_metadata(
+        self,
+        symbol: str,
+        *,
+        capture_clock: Callable[[], datetime] | None = None,
+    ) -> InstrumentMetadata:
+        normalized_symbol = symbol.upper()
+        params = {"category": self.CATEGORY, "symbol": normalized_symbol}
+        payload = await self._get_json(ENDPOINT_BYBIT_INSTRUMENT, params=params, validate=self._ensure_success)
+        return parse_bybit_linear_instrument(
+            payload,
+            requested_symbol=normalized_symbol,
+            acquisition=capture_acquisition(capture_clock),
+        )
 
     @staticmethod
     def _ensure_success(payload: Any) -> None:
@@ -153,6 +273,13 @@ class BybitLinearClient(PublicHTTPExchangeClient):
         if normalized_code == "10006":
             raise ExchangeRateLimitError(f"Bybit rate limit response: retCode={ret_code} {ret_msg}")
         raise ExchangeResponseError(f"Bybit API error: retCode={ret_code} {ret_msg}")
+
+
+def _describe_safely(build, *, metric: str, endpoint: str):
+    try:
+        return build()
+    except Exception:
+        return unavailable_batch(metric=metric, endpoint=endpoint, reason=REASON_EVIDENCE_REPRESENTATION_FAILED)
 
 
 def _validate_limit(limit: int, *, maximum: int) -> None:

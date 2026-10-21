@@ -34,9 +34,9 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/binance_futures.py", "line": 88, "contains": '"/fapi/v1/klines"'},
+            {"path": "app/data/exchange_clients/binance_futures.py", "line": 105, "contains": '"/fapi/v1/klines"'},
             {"path": "app/data/normalizers/binance.py", "line": 41, "contains": "volume=decimal_from(require_index(raw, 5, row_path)"},
-            {"path": "app/cache/market_data_cache.py", "line": 49, "contains": '"candles": 60'},
+            {"path": "app/cache/market_data_cache.py", "line": 59, "contains": '"candles": 60'},
         ),
     },
     {
@@ -68,7 +68,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/bybit_linear.py", "line": 53, "contains": '"/v5/market/kline"'},
+            {"path": "app/data/exchange_clients/bybit_linear.py", "line": 69, "contains": '"/v5/market/kline"'},
             {"path": "app/data/normalizers/bybit.py", "line": 48, "contains": "quote_volume=optional_decimal"},
         ),
     },
@@ -133,9 +133,9 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/binance_futures.py", "line": 121, "contains": '"/fapi/v1/ticker/24hr"'},
+            {"path": "app/data/exchange_clients/binance_futures.py", "line": 138, "contains": '"/fapi/v1/ticker/24hr"'},
             {"path": "app/data/normalizers/bybit.py", "line": 79, "contains": '"bybit.ticker"'},
-            {"path": "app/cache/market_data_cache.py", "line": 50, "contains": '"ticker": 15'},
+            {"path": "app/cache/market_data_cache.py", "line": 60, "contains": '"ticker": 15'},
         ),
     },
     {
@@ -191,7 +191,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "fetcher": "get_funding_rate via history",
         "normalizer": "normalize_*_funding",
         "cache": "data_type funding",
-        "consumer": "ScannerRunner._fetch_optional_market_data then _derivatives_enrichment_input then _derivatives_rejection; REJECTED_BY_DERIVATIVES drops source timestamps",
+        "consumer": "ScannerRunner._fetch_optional_market_data then _derivatives_enrichment_input then _derivatives_rejection; REJECTED_BY_DERIVATIVES drops source timestamps. Shadow evidence is separate and cannot validate a confirmation.",
         "role": "optional enrichment",
         "missing_behavior": "N/A funding context",
         "code_present": "yes",
@@ -199,12 +199,12 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/binance_futures.py", "line": 153, "contains": '"/fapi/v1/fundingRate"'},
-            {"path": "app/data/exchange_clients/bybit_linear.py", "line": 79, "contains": '"/v5/market/funding/history"'},
-            {"path": "app/pipeline/scanner_runner.py", "line": 2435, "contains": "async def _fetch_optional_market_data("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4397, "contains": "def _derivatives_enrichment_input("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4422, "contains": "def _derivatives_rejection("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 1670, "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"},
+            {"path": "app/data/derivatives_source_evidence.py", "line": 48, "contains": '"/fapi/v1/fundingRate"'},
+            {"path": "app/data/derivatives_source_evidence.py", "line": 52, "contains": '"/v5/market/funding/history"'},
+            {"path": "app/pipeline/scanner_runner.py", "line": 2449, "contains": "async def _fetch_optional_market_data("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4507, "contains": "def _derivatives_enrichment_input("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4532, "contains": "def _derivatives_rejection("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 1684, "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"},
         ),
     },
     {
@@ -228,7 +228,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "fetcher": "get_open_interest and get_open_interest_history",
         "normalizer": "normalize_*_open_interest",
         "cache": "open_interest and open_interest_history",
-        "consumer": "derivatives enrichment current_open_interest; previous sample is history[-2]; timestamps are not copied onto those numbers",
+        "consumer": "derivatives enrichment current_open_interest; legacy previous sample is history[-2]; timestamps are not copied onto those numbers. Shadow pairing is separate and cannot validate a confirmation.",
         "role": "optional",
         "missing_behavior": "N/A; never zero",
         "code_present": "yes",
@@ -236,7 +236,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/binance_futures.py", "line": 175, "contains": '"/futures/data/openInterestHist"'},
+            {"path": "app/data/derivatives_source_evidence.py", "line": 47, "contains": '"/futures/data/openInterestHist"'},
             {"path": "app/data/normalizers/bybit.py", "line": 158, "contains": '"openInterest"'},
         ),
     },
@@ -269,8 +269,8 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/data/exchange_clients/binance_futures.py", "line": 184, "contains": '"/futures/data/globalLongShortAccountRatio"'},
-            {"path": "app/data/exchange_clients/bybit_linear.py", "line": 131, "contains": '"/v5/market/account-ratio"'},
+            {"path": "app/data/derivatives_source_evidence.py", "line": 49, "contains": '"/futures/data/globalLongShortAccountRatio"'},
+            {"path": "app/data/derivatives_source_evidence.py", "line": 53, "contains": '"/v5/market/account-ratio"'},
         ),
     },
     {
@@ -434,8 +434,8 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/pipeline/scanner_runner.py", "line": 286, "contains": "market_regime_enabled: bool = False"},
-            {"path": "app/pipeline/scanner_runner.py", "line": 2006, "contains": '"ETHUSDT", "eth_candles"'},
+            {"path": "app/pipeline/scanner_runner.py", "line": 290, "contains": "market_regime_enabled: bool = False"},
+            {"path": "app/pipeline/scanner_runner.py", "line": 2020, "contains": '"ETHUSDT", "eth_candles"'},
         ),
     },
     {
