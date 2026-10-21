@@ -1483,9 +1483,9 @@ def _population_report(population: str, tally: _PopulationTally) -> dict[str, An
     rates.append(_rate("unique_observations", tally.unique, tally.received_rows, "source_row_to_unique_observation", "not_cutoff_specific", population, (), "identity/time deduplication inside each attempt"))
     for role in (STRATEGY_CUTOFF_ROLE, RESEARCH_CUTOFF_ROLE):
         rule = (
-            "existing_selector_validation_blocks_conflicting_groups"
+            "shared_conflict_rules_on_every_retained_identity_time_group"
             if role == STRATEGY_CUTOFF_ROLE
-            else "existing_selector_validation_blocks_conflicting_groups_and_requires_recorded_consumer_delivery"
+            else "shared_conflict_rules_on_every_retained_identity_time_group_and_recorded_consumer_delivery"
         )
         exclusions = ("research_assessment_unavailable",) if role == RESEARCH_CUTOFF_ROLE and tally.research_unavailable else ()
         rates.append(_rate("semantically_verified_observations", tally.verified[role], tally.unique, "unique_observation", role, population, exclusions, "bound instrument visibility at this cutoff"))
@@ -1714,6 +1714,9 @@ def _dedup_key(observation: DerivativesObservation) -> tuple[Any, ...]:
         observation.metric_time.quality,
         None if primary is None else primary.raw_field,
         None if primary is None else primary.raw_value,
+        None if primary is None else primary.counting_convention,
+        None if primary is None else primary.unit,
+        None if primary is None else primary.unit_asset,
         observation.rate_kind,
         observation.subtype_declarations,
         acquired,
@@ -1990,9 +1993,9 @@ _DEFINITIONS = {
     "metric_opportunities": "Five scanner derivative slots per attempt: open_interest, open_interest_history, funding_rate, funding_history, long_short_ratio.",
     "metric_dispositions": "Mutually exclusive slot states: received, skipped, unsupported, failed, empty, unassessed.",
     "received_source_rows": "Raw observation rows in received slots before deduplication.",
-    "unique_observations": "Rows collapsed inside one attempt when metric, venue, endpoint, symbol, metric time, primary raw value, subtype, and acquisition provenance match. Conflicting values stay distinct. Totals sum per-attempt unique counts. Received-row denominators stay on the raw rows.",
+    "unique_observations": "Rows collapsed inside one attempt when metric, venue, endpoint, symbol, metric time, primary raw value, counting convention, unit, subtype, and acquisition provenance match. Conflicting values and different series stay distinct. Totals sum per-attempt unique counts. Received-row denominators stay on the raw rows.",
     "semantically_verified_observations": "Unique observations whose instrument-bound semantics are verified at the labeled cutoff. A conflicting group can still contain individually verified rows.",
-    "causally_admissible_observations": "Temporal and semantic gates plus the existing selector's group conflicts. A duplicate_conflict, conflicting_provenance, or contradictory_funding_evidence mark excludes that group. Observations at other timestamps and in other metrics stay admissible. Research admission also requires recorded consumer delivery at or before the observation event. A later admissible observation does not make evidence available to the earlier strategy decision.",
+    "causally_admissible_observations": "Temporal and semantic gates, plus conflict validation of every retained identity and time group. Latest-pair selection stays on the existing selectors and does not define which older groups are checked. A duplicate_conflict, conflicting_provenance, or contradictory_funding_evidence mark excludes that group. Raw rows and unique observations stay in their denominators. Observations outside the conflicting group stay admissible. Research admission also requires recorded consumer delivery at or before the observation event. A later admissible observation does not make evidence available to the earlier strategy decision.",
     "fresh_observations": "Admissible observations whose existing cadence-or-period freshness helper returns current. The denominator is the admissible population. An empty admissible population is N/A.",
     "oi_pairs": "One opportunity per attempt assessed at that cutoff. Strategy-role valid and verified counts follow the labeled P3 evaluation. Research-role counts also require the selected current and previous observations, and the batches that carry them, to be delivered at or before the research observation. A verified quantity change is a native quantity result that is not notional growth and not a zero baseline.",
     "attempts_assessed_at_both_cutoffs": "Exclusive disposition assessed_both. Clock failures, evaluation errors, and unassessed attempts are separate dispositions and are not dropped.",

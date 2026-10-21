@@ -23,7 +23,7 @@ from app.analytics.derivatives_causal_observation import (
     study_from_symbol_results,
 )
 from app.data.derivatives_instrument import parse_binance_usds_instrument
-from app.data.derivatives_source_evidence import capture_acquisition
+from app.data.derivatives_source_evidence import COUNT_BOTH_SIDES, capture_acquisition
 from app.data.dtos import NA
 from app.pipeline.scanner_runner import ScannerRunner
 from tests.test_derivatives_causal_observation import CUTOFF, fixed_clock
@@ -441,3 +441,145 @@ def test_global_timeout_study_still_counts_every_targeted_symbol() -> None:
         shadow_requested=True,
     )
     assert len(study.attempts) == len(result.config.symbols)
+
+
+def _overlap(payload: dict[str, Any], name: str, role: str = RESEARCH_CUTOFF_ROLE) -> int:
+    return sum(
+        item["count"]
+        for item in payload["populations"][0]["overlapping_reason_counts"]
+        if item["name"] == name and item["cutoff_role"] == role
+    )
+
+
+def _replace_quantity(observation: Any, **changes: Any) -> Any:
+    if observation.metric == "account_ratio":
+        quantities = tuple(
+            replace(item, **changes)
+            if item.raw_field in {"longShortRatio", "longAccount"}
+            else item
+            for item in observation.quantities
+        )
+    else:
+        quantities = (replace(observation.quantities[0], **changes), *observation.quantities[1:])
+    return replace(observation, quantities=quantities)
+
+
+def _older_rows(bundle: Any, metric: str, rows: tuple[Any, ...], *, reverse: bool) -> Any:
+    evidence = bundle.evidence_map()
+    batch = evidence[metric]
+    combined = (*batch.observations, *rows)
+    evidence[metric] = replace(batch, observations=tuple(reversed(combined)) if reverse else combined)
+    return replace(bundle, slots=tuple(evidence.items()))
+
+
+def _older_value_conflict(bundle: Any, metric: str, value: str, *, reverse: bool) -> Any:
+    oldest = bundle.evidence_map()[metric].observations[0]
+    old_at = oldest.metric_time.at - timedelta(minutes=5)
+    stamp = replace(oldest.metric_time, at=old_at, raw=str(int(old_at.timestamp() * 1000)))
+    row = replace(oldest, metric_time=stamp)
+    conflicting = _replace_quantity(row, raw_value=value, numeric_value=Decimal(value))
+    return _older_rows(bundle, metric, (row, conflicting), reverse=reverse)
+
+
+@pytest.mark.parametrize("metric,value", [
+    ("open_interest_history", "999"),
+    ("funding_history", "0.0002"),
+    ("long_short_ratio", "9"),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_older_conflicting_group_is_excluded_without_dropping_the_latest_pair(metric: str, value: str, reverse: bool) -> None:
+    bundle = build_verified_coverage_fixture().attempts[0].record.bundle
+    clean_record, clean = _report(bundle)
+    record, payload = _report(_older_value_conflict(bundle, metric, value, reverse=reverse))
+    admission = _rate(payload, "causally_admissible_observations")
+    assert record.research_assessment.evaluation.oi_change_pct == "10.00000000"
+    assert record.strategy_assessment.evaluation.oi_change_pct == clean_record.strategy_assessment.evaluation.oi_change_pct
+    assert payload["complete_verified_coverage"] is False
+    assert admission["numerator"] < admission["denominator"]
+    assert admission["numerator"] > 0
+    assert _rate(payload, "verified_oi_quantity_changes")["numerator"] == 1
+    assert _rate(payload, "received_source_rows", "not_cutoff_specific")["numerator"] == (
+        _rate(clean, "received_source_rows", "not_cutoff_specific")["numerator"] + 2
+    )
+    assert _overlap(payload, "duplicate_conflict") >= 2
+    assert record.research_assessment.evaluation.funding_rate != NA
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_identical_older_duplicate_stays_admissible(reverse: bool) -> None:
+    bundle = build_verified_coverage_fixture().attempts[0].record.bundle
+    _clean_record, clean = _report(bundle)
+    oldest = bundle.evidence_map()["open_interest_history"].observations[0]
+    changed = _older_rows(bundle, "open_interest_history", (oldest,), reverse=reverse)
+    record, payload = _report(changed)
+    admission = _rate(payload, "causally_admissible_observations")
+    assert payload["complete_verified_coverage"] is True
+    assert admission["numerator"] == admission["denominator"]
+    assert _rate(payload, "unique_observations", "not_cutoff_specific")["numerator"] == _rate(
+        clean, "unique_observations", "not_cutoff_specific"
+    )["numerator"]
+    assert _rate(payload, "received_source_rows", "not_cutoff_specific")["numerator"] == (
+        _rate(clean, "received_source_rows", "not_cutoff_specific")["numerator"] + 1
+    )
+    assert record.research_assessment.evaluation.oi_change_pct == "10.00000000"
+    assert _overlap(payload, "duplicate_conflict") == 0
+
+
+def test_older_provenance_conflict_is_excluded_and_order_independent() -> None:
+    bundle = build_verified_coverage_fixture().attempts[0].record.bundle
+    oldest = bundle.evidence_map()["funding_history"].observations[0]
+    old_at = oldest.metric_time.at - timedelta(minutes=5)
+    stamp = replace(oldest.metric_time, at=old_at, raw=str(int(old_at.timestamp() * 1000)))
+    row = replace(oldest, metric_time=stamp)
+    shifted = replace(
+        row,
+        acquisition=replace(row.acquisition, acquired_at=row.acquisition.acquired_at + timedelta(seconds=1)),
+    )
+    forward, forward_payload = _report(_older_rows(bundle, "funding_history", (row, shifted), reverse=False))
+    reverse, reverse_payload = _report(_older_rows(bundle, "funding_history", (row, shifted), reverse=True))
+    for record, payload in ((forward, forward_payload), (reverse, reverse_payload)):
+        admission = _rate(payload, "causally_admissible_observations")
+        assert payload["complete_verified_coverage"] is False
+        assert admission["numerator"] < admission["denominator"]
+        assert admission["numerator"] > 0
+        assert _overlap(payload, "conflicting_provenance") >= 2
+        assert record.research_assessment.evaluation.oi_change_pct == "10.00000000"
+        assert _rate(payload, "verified_oi_quantity_changes")["numerator"] == 1
+    assert _rate(forward_payload, "causally_admissible_observations")["numerator"] == _rate(
+        reverse_payload, "causally_admissible_observations"
+    )["numerator"]
+
+
+def test_other_series_and_venue_stay_outside_an_older_conflict() -> None:
+    bundle = build_verified_coverage_fixture().attempts[0].record.bundle
+    history = bundle.evidence_map()["open_interest_history"]
+    old_at = history.observations[0].metric_time.at - timedelta(minutes=5)
+    stamp = replace(history.observations[0].metric_time, at=old_at, raw=str(int(old_at.timestamp() * 1000)))
+    base = replace(history.observations[0], metric_time=stamp)
+    conflicted = _older_value_conflict(bundle, "open_interest_history", "999", reverse=False)
+    _conflict_record, conflict_payload = _report(conflicted)
+    isolated = _replace_quantity(base, counting_convention=COUNT_BOTH_SIDES)
+    _isolated_record, isolated_payload = _report(_older_rows(conflicted, "open_interest_history", (isolated,), reverse=True))
+    assert _rate(isolated_payload, "causally_admissible_observations")["numerator"] == (
+        _rate(conflict_payload, "causally_admissible_observations")["numerator"] + 1
+    )
+    assert isolated_payload["complete_verified_coverage"] is False
+    assert _rate(isolated_payload, "verified_oi_quantity_changes")["numerator"] == 1
+
+    funding = bundle.evidence_map()["funding_history"]
+    funding_conflict = _older_value_conflict(bundle, "funding_history", "0.0002", reverse=True)
+    _funding_record, funding_payload = _report(funding_conflict)
+    foreign_at = funding.observations[0].metric_time.at - timedelta(minutes=5)
+    foreign_stamp = replace(funding.observations[0].metric_time, at=foreign_at, raw=str(int(foreign_at.timestamp() * 1000)))
+    foreign = _replace_quantity(
+        replace(funding.observations[0], exchange="bybit", metric_time=foreign_stamp),
+        raw_value="0.0003",
+        numeric_value=Decimal("0.0003"),
+    )
+    _foreign_record, foreign_payload = _report(_older_rows(funding_conflict, "funding_history", (foreign,), reverse=False))
+    assert _rate(foreign_payload, "causally_admissible_observations")["numerator"] == _rate(
+        funding_payload, "causally_admissible_observations"
+    )["numerator"]
+    assert _overlap(foreign_payload, "duplicate_conflict") == _overlap(funding_payload, "duplicate_conflict")
+    assert foreign_payload["complete_verified_coverage"] is False
+    assert _rate(foreign_payload, "verified_oi_quantity_changes")["numerator"] == 1

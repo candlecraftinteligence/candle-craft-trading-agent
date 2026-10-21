@@ -6,7 +6,7 @@ eligibility, scores, and rejection stay on the legacy numeric path.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
@@ -1703,16 +1703,96 @@ _GROUP_REJECTION_REASONS = frozenset(
 
 @dataclass(frozen=True)
 class VisibleSelectorAdmission:
-    """Group conflicts and the selected OI pair from the existing selectors.
+    """Retained-group conflicts and the selected latest OI pair.
 
     The batches are the already-bound batches from ``evidence_visible_at_cutoff``.
-    ``group_rejections`` maps a bound observation id to conflict reasons.
+    ``group_rejections`` maps a bound observation id to conflict reasons from
+    every retained identity and time group, plus the latest selector marks.
     Identical duplicates are not rejections. ``selected_oi_ids`` is empty unless
-    the open-interest selector admitted a native quantity pair.
+    the open-interest selector admitted a native quantity pair. An older
+    conflict does not clear that pair.
     """
 
     group_rejections: Mapping[int, tuple[str, ...]]
     selected_oi_ids: tuple[int, ...]
+
+
+def _measurement_identity(observation: DerivativesObservation) -> tuple[Any, ...]:
+    identity = observation.identity
+    return (observation.exchange, identity.requested_symbol, identity.returned_symbol)
+
+
+def _remember_rejection(grouped: dict[int, list[str]], obs_id: int, reasons: tuple[str, ...]) -> None:
+    blocking = [code for code in reasons if code in _GROUP_REJECTION_REASONS]
+    if not blocking:
+        return
+    bucket = grouped.setdefault(int(obs_id), [])
+    for code in blocking:
+        if code not in bucket:
+            bucket.append(code)
+
+
+def _retained_oi_conflict_marks(points: Sequence[_OiPoint]) -> tuple[tuple[int, tuple[str, ...]], ...]:
+    """Apply the open-interest collapse rules at every timestamp and series."""
+
+    buckets: dict[tuple[Any, ...], list[_OiPoint]] = {}
+    for point in points:
+        moment = point.observation.metric_time.at
+        if moment is None or point.observation.metric_time.quality != QUALITY_VERIFIED:
+            continue
+        buckets.setdefault((moment, _series_partition(point)), []).append(point)
+    marks: list[tuple[int, tuple[str, ...]]] = []
+    for group in buckets.values():
+        _chosen, reasons, _exclusions = _collapse_timestamp_group(group)
+        blocking = tuple(code for code in reasons if code in _GROUP_REJECTION_REASONS)
+        if blocking:
+            marks.extend((id(point.observation), blocking) for point in group)
+    return tuple(marks)
+
+
+def _funding_values_present(observations: Sequence[DerivativesObservation]) -> tuple[DerivativesObservation, ...]:
+    return tuple(
+        item
+        for item in observations
+        if item.quantities and item.quantities[0].numeric_value is not None
+    )
+
+
+def _ratio_values_present(observations: Sequence[DerivativesObservation]) -> tuple[DerivativesObservation, ...]:
+    return tuple(item for item in observations if _ratio_value(item) is not None)
+
+
+def _retained_measurement_conflict_marks(
+    observations: Sequence[DerivativesObservation],
+    *,
+    present: Callable[[Sequence[DerivativesObservation]], tuple[DerivativesObservation, ...]],
+    values_conflict: Callable[[Sequence[DerivativesObservation]], bool],
+) -> tuple[tuple[int, tuple[str, ...]], ...]:
+    """Value and provenance conflicts for every retained identity and time.
+
+    This does not choose the latest measurement. Rows that fail identity stay
+    outside the group, so another venue or instrument is not a value conflict.
+    """
+
+    buckets: dict[tuple[Any, ...], list[DerivativesObservation]] = {}
+    for item in observations:
+        moment = item.metric_time.at
+        if moment is None or item.metric_time.quality != QUALITY_VERIFIED or _identity_failed(item):
+            continue
+        buckets.setdefault((moment, *_measurement_identity(item)), []).append(item)
+    marks: list[tuple[int, tuple[str, ...]]] = []
+    for group in buckets.values():
+        comparable = present(group)
+        if len(comparable) <= 1:
+            continue
+        if values_conflict(comparable):
+            reason = ("duplicate_conflict",)
+        elif _observation_provenance_conflict(comparable):
+            reason = ("conflicting_provenance",)
+        else:
+            continue
+        marks.extend((id(item), reason) for item in comparable)
+    return tuple(marks)
 
 
 def visible_selector_admission(
@@ -1725,7 +1805,12 @@ def visible_selector_admission(
     funding_history: DerivativesEvidenceBatch | None = None,
     account_ratio: DerivativesEvidenceBatch | None = None,
 ) -> VisibleSelectorAdmission:
-    """Reuse the evaluator's selectors. This does not apply a second rule set."""
+    """Separate retained-group conflicts from selection of the latest measurement.
+
+    The latest OI pair and the latest funding and ratio choices still come from
+    the existing selectors. Conflict marks additionally cover every retained
+    identity and time group, using those selectors' collapse and conflict helpers.
+    """
 
     cutoff = _coerce_cutoff(decision_cutoff)
     points = [
@@ -1737,19 +1822,26 @@ def visible_selector_admission(
     selection = select_open_interest_pair(points, cutoff=cutoff, period_ms=period_ms)
     funding_choice = _select_funding(funding, funding_history, cutoff, instrument)
     ratio_choice = _select_ratio(account_ratio, cutoff)
+    funding_rows = tuple(batch.observations for batch in (funding, funding_history) if batch is not None)
+    ratio_rows = () if account_ratio is None else account_ratio.observations
     grouped: dict[int, list[str]] = {}
     for obs_id, reasons in (
         *selection.marked_exclusions,
         *funding_choice.excluded,
         *ratio_choice.excluded,
+        *_retained_oi_conflict_marks(points),
+        *_retained_measurement_conflict_marks(
+            tuple(item for rows in funding_rows for item in rows),
+            present=_funding_values_present,
+            values_conflict=_funding_conflict,
+        ),
+        *_retained_measurement_conflict_marks(
+            ratio_rows,
+            present=_ratio_values_present,
+            values_conflict=_ratio_values_conflict,
+        ),
     ):
-        blocking = [code for code in reasons if code in _GROUP_REJECTION_REASONS]
-        if not blocking:
-            continue
-        bucket = grouped.setdefault(int(obs_id), [])
-        for code in blocking:
-            if code not in bucket:
-                bucket.append(code)
+        _remember_rejection(grouped, int(obs_id), reasons)
     selected: tuple[int, ...] = ()
     if (
         selection.change_pct is not None
