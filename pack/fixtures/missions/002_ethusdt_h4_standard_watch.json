@@ -1,0 +1,42 @@
+{
+  "cci_setup_id": "mock_setup_eth_h4_watch",
+  "symbol": "ETHUSDT",
+  "timeframe": "H4",
+  "direction": "SHORT",
+  "quality_tier": "STANDARD",
+  "title": "Range premium, structure intact",
+  "thesis_summary": "Synthetic H4 short on watch. Price is in premium relative to the prior dealing range, and bearish structure is not confirmed. This remains observation, not a trigger.",
+  "evidence": [
+    {
+      "type": "structure",
+      "label": "Prior dealing range",
+      "detail": "The last impulsive leg still defines the range. Premium is tagged, not broken."
+    },
+    {
+      "type": "context",
+      "label": "Watch only",
+      "detail": "No displacement through the range low is present in this fixture."
+    },
+    {
+      "type": "invalidation",
+      "label": "Range high",
+      "detail": "Acceptance above the range high removes the short idea."
+    }
+  ],
+  "lifecycle": [
+    {
+      "cci_event_id": "evt_eth_h4_01",
+      "event_type": "SETUP_PUBLISHED",
+      "state": "ACTIVE",
+      "occurred_at": "2026-09-21T09:00:00Z"
+    },
+    {
+      "cci_event_id": "evt_eth_h4_02",
+      "event_type": "LIFECYCLE_UPDATED",
+      "state": "WATCH",
+      "occurred_at": "2026-09-21T11:30:00Z"
+    }
+  ],
+  "disclaimer": "Synthetic training fixture. Not a live CCI setup. The Pack does not execute trades and does not promise profit.",
+  "synthetic": true
+}
