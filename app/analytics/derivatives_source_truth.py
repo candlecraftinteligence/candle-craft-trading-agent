@@ -99,6 +99,8 @@ class SourceLineageFact:
     acquired_at: str | None
     cache_delivered_at: str | None
     reason_codes: tuple[str, ...]
+    rate_kind: str = NA
+    components: tuple[tuple[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,6 +123,8 @@ class SourceLineageFact:
             "acquired_at": self.acquired_at,
             "cache_delivered_at": self.cache_delivered_at,
             "reason_codes": list(self.reason_codes),
+            "rate_kind": self.rate_kind,
+            "components": [{"raw_field": field, "raw_value": value} for field, value in self.components],
         }
 
 
@@ -150,6 +154,7 @@ class DerivativesSourceTruthResult:
     liquidation_coverage: str = "not_collected"
     freshness_policy: str = SHADOW_FRESHNESS_POLICY
     lineage: tuple[SourceLineageFact, ...] = ()
+    lineage_omitted_count: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mode", "shadow")
@@ -159,8 +164,10 @@ class DerivativesSourceTruthResult:
             object.__setattr__(self, "supports_long", "unverified")
         if self.supports_short not in _SUPPORT_STATES:
             object.__setattr__(self, "supports_short", "unverified")
-        if len(self.lineage) > _LINEAGE_LIMIT:
-            object.__setattr__(self, "lineage", self.lineage[:_LINEAGE_LIMIT])
+        kept, dropped = _prioritize_lineage(self.lineage)
+        object.__setattr__(self, "lineage", kept)
+        if dropped:
+            object.__setattr__(self, "lineage_omitted_count", int(self.lineage_omitted_count) + dropped)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -188,6 +195,7 @@ class DerivativesSourceTruthResult:
             "liquidation_coverage": self.liquidation_coverage,
             "freshness_policy": self.freshness_policy,
             "lineage": [item.to_dict() for item in self.lineage],
+            "lineage_omitted_count": self.lineage_omitted_count,
         }
 
     @classmethod
@@ -223,6 +231,8 @@ class DerivativesSourceTruthResult:
                             acquired_at=item.get("acquired_at"),
                             cache_delivered_at=item.get("cache_delivered_at"),
                             reason_codes=tuple(str(code) for code in item.get("reason_codes") or ()),
+                            rate_kind=str(item.get("rate_kind") or NA),
+                            components=_lineage_components(item.get("components")),
                         )
                     )
         allowed = {
@@ -252,6 +262,11 @@ class DerivativesSourceTruthResult:
             if key in kwargs and not isinstance(kwargs[key], tuple):
                 kwargs[key] = tuple(kwargs[key])
         kwargs["lineage"] = tuple(facts)
+        omitted = data.get("lineage_omitted_count", 0)
+        try:
+            kwargs["lineage_omitted_count"] = int(omitted)
+        except (TypeError, ValueError):
+            kwargs["lineage_omitted_count"] = 0
         return cls(**kwargs)
 
 
@@ -272,6 +287,9 @@ class OpenInterestPairSelection:
     exclusions: tuple[str, ...]
     current_quantity: Decimal | None = None
     previous_quantity: Decimal | None = None
+    current_observation: DerivativesObservation | None = None
+    previous_observation: DerivativesObservation | None = None
+    marked_exclusions: tuple[tuple[int, tuple[str, ...]], ...] = ()
 
 
 def native_position_change_pct(current: Decimal, previous: Decimal) -> tuple[Decimal | None, tuple[str, ...]]:
@@ -368,6 +386,41 @@ def evaluate_derivatives_source_truth(
         )
 
 
+def _oi_result(
+    change: Decimal | None,
+    interval: int | None,
+    label: str,
+    context: str,
+    reasons: tuple[str, ...] | list[str],
+    exclusions: tuple[str, ...] | list[str],
+    *,
+    current_point: _OiPoint | None = None,
+    previous_point: _OiPoint | None = None,
+    marks: Sequence[tuple[int, tuple[str, ...]]] = (),
+) -> OpenInterestPairSelection:
+    return OpenInterestPairSelection(
+        change,
+        interval,
+        label,
+        context,
+        tuple(reasons),
+        tuple(dict.fromkeys(exclusions)),
+        None if current_point is None else current_point.quantity.numeric_value,
+        None if previous_point is None else previous_point.quantity.numeric_value,
+        None if current_point is None else current_point.observation,
+        None if previous_point is None else previous_point.observation,
+        tuple(marks),
+    )
+
+
+def _sibling_marks(group: Sequence[_OiPoint], chosen: _OiPoint | None, reason: str) -> tuple[tuple[int, tuple[str, ...]], ...]:
+    return tuple(
+        (id(point.observation), (reason,))
+        for point in group
+        if chosen is None or point.observation is not chosen.observation
+    )
+
+
 def select_open_interest_pair(
     points: Sequence[_OiPoint],
     *,
@@ -382,27 +435,25 @@ def select_open_interest_pair(
             continue
         timed.append(point)
     if not timed:
-        return OpenInterestPairSelection(
-            None, None, NA, "not_admissible", ("missing_open_interest",), tuple(exclusions)
-        )
+        return _oi_result(None, None, NA, "not_admissible", ("missing_open_interest",), exclusions)
     groups: dict[datetime, list[_OiPoint]] = {}
     for point in timed:
         moment = point.observation.metric_time.at
         if moment is not None:
             groups.setdefault(moment, []).append(point)
     newest_at = max(groups)
-    current, collapse_reasons, collapse_exclusions = _collapse_timestamp_group(
-        _chosen_series_points(groups[newest_at])
-    )
+    current_group = _chosen_series_points(groups[newest_at])
+    current, collapse_reasons, collapse_exclusions = _collapse_timestamp_group(current_group)
     exclusions.extend(collapse_exclusions)
     if current is None:
-        return OpenInterestPairSelection(
+        return _oi_result(
             None,
             None,
             NA,
             "not_admissible",
             collapse_reasons,
-            tuple(dict.fromkeys(exclusions)),
+            exclusions,
+            marks=tuple((id(point.observation), collapse_reasons) for point in current_group),
         )
     current_reasons = _point_block_reasons(current, cutoff)
     earlier = [
@@ -431,51 +482,64 @@ def select_open_interest_pair(
             reasons.append("cross_instrument_not_paired")
         if same_instrument:
             reasons.append("endpoint_incompatible")
-        return OpenInterestPairSelection(
+        return _oi_result(
             None,
             None,
             NA,
             "not_admissible",
             tuple(reasons),
-            tuple(dict.fromkeys(exclusions)),
-            current_quantity=current.quantity.numeric_value,
+            exclusions,
+            current_point=current,
+            marks=_sibling_marks(current_group, current, "identical_duplicate"),
         )
     previous_at = earlier[0].observation.metric_time.at
     previous_group = [point for point in earlier if point.observation.metric_time.at == previous_at]
     previous, previous_collapse_reasons, previous_exclusions = _collapse_timestamp_group(previous_group)
     exclusions.extend(previous_exclusions)
+    sibling_marks = (
+        *_sibling_marks(current_group, current, "identical_duplicate"),
+        *_sibling_marks(previous_group, previous, "identical_duplicate"),
+    )
     if previous is None:
-        return OpenInterestPairSelection(
+        return _oi_result(
             None,
             None,
             NA,
             "not_admissible",
             tuple(dict.fromkeys((*previous_collapse_reasons, *current_reasons))),
-            tuple(dict.fromkeys(exclusions)),
-            current_quantity=current.quantity.numeric_value,
+            exclusions,
+            current_point=current,
+            marks=(
+                *_sibling_marks(current_group, current, "identical_duplicate"),
+                *((id(point.observation), previous_collapse_reasons) for point in previous_group),
+            ),
         )
     if current_reasons:
         exclusions.append(_exclusion(current, ",".join(current_reasons)))
-        return OpenInterestPairSelection(
+        return _oi_result(
             None,
             None,
             NA,
             "not_admissible",
             current_reasons,
-            tuple(dict.fromkeys(exclusions)),
-            current_quantity=current.quantity.numeric_value,
+            exclusions,
+            current_point=current,
+            previous_point=previous,
+            marks=sibling_marks,
         )
     previous_reasons = _point_block_reasons(previous, cutoff)
     if previous_reasons:
         exclusions.append(_exclusion(previous, ",".join(previous_reasons)))
-        return OpenInterestPairSelection(
+        return _oi_result(
             None,
             None,
             NA,
             "not_admissible",
             previous_reasons,
-            tuple(dict.fromkeys(exclusions)),
-            current_quantity=current.quantity.numeric_value,
+            exclusions,
+            current_point=current,
+            previous_point=previous,
+            marks=sibling_marks,
         )
     assert current.observation.metric_time.at is not None
     assert previous.observation.metric_time.at is not None
@@ -483,31 +547,41 @@ def select_open_interest_pair(
     assert previous.quantity.numeric_value is not None
     interval_ms = int((current.observation.metric_time.at - previous.observation.metric_time.at).total_seconds() * 1000)
     if interval_ms <= 0:
-        return OpenInterestPairSelection(
-            None, None, NA, "not_admissible", ("non_positive_comparison_interval",), tuple(exclusions)
+        return _oi_result(
+            None,
+            None,
+            NA,
+            "not_admissible",
+            ("non_positive_comparison_interval",),
+            exclusions,
+            current_point=current,
+            previous_point=previous,
+            marks=sibling_marks,
         )
     change, change_reasons = native_position_change_pct(current.quantity.numeric_value, previous.quantity.numeric_value)
     if change_reasons:
-        return OpenInterestPairSelection(
+        return _oi_result(
             None,
             interval_ms,
             f"{interval_ms}ms",
             "not_admissible",
             change_reasons,
-            tuple(exclusions),
-            current.quantity.numeric_value,
-            previous.quantity.numeric_value,
+            exclusions,
+            current_point=current,
+            previous_point=previous,
+            marks=sibling_marks,
         )
     context, freshness_reasons = _freshness(current.observation.metric_time.at, cutoff, period_ms)
-    return OpenInterestPairSelection(
+    return _oi_result(
         change,
         interval_ms,
         f"{interval_ms}ms",
         context,
         freshness_reasons,
-        tuple(dict.fromkeys(exclusions)),
-        current.quantity.numeric_value,
-        previous.quantity.numeric_value,
+        exclusions,
+        current_point=current,
+        previous_point=previous,
+        marks=sibling_marks,
     )
 
 
@@ -550,9 +624,13 @@ def _evaluate(
     oi_pair = select_open_interest_pair(quantity_points, cutoff=cutoff, period_ms=period_ms)
     reasons.extend(oi_pair.reason_codes)
     exclusions.extend(oi_pair.exclusions)
-    funding_obs, funding_reasons = _select_funding(funding, funding_history, cutoff, instrument)
+    funding_choice = _select_funding(funding, funding_history, cutoff, instrument)
+    funding_obs = funding_choice.observation
+    funding_reasons = funding_choice.reasons
     reasons.extend(funding_reasons)
-    ratio_obs, ratio_reasons = _select_ratio(account_ratio, cutoff)
+    ratio_choice = _select_ratio(account_ratio, cutoff)
+    ratio_obs = ratio_choice.observation
+    ratio_reasons = ratio_choice.reasons
     reasons.extend(ratio_reasons)
     funding_rate = funding_obs.quantities[0].numeric_value if funding_obs and funding_obs.quantities else None
     funding_texts = (NA, NA, NA)
@@ -648,20 +726,18 @@ def _evaluate(
         dependencies=dependencies,
         exclusions=tuple(dict.fromkeys(exclusions)),
         liquidation_coverage=liquidation_coverage_label(liquidation_snapshot),
-        lineage=_bounded_lineage(
-            _result_lineage(
-                instrument=instrument,
-                oi_pair=oi_pair,
-                funding_obs=funding_obs,
-                ratio_obs=ratio_obs,
-                batches=(
-                    ("open_interest", open_interest),
-                    ("open_interest_history", open_interest_history),
-                    ("funding", funding),
-                    ("funding_history", funding_history),
-                    ("account_ratio", account_ratio),
-                ),
-            )
+        lineage=_result_lineage(
+            instrument=instrument,
+            oi_pair=oi_pair,
+            funding_choice=funding_choice,
+            ratio_choice=ratio_choice,
+            batches=(
+                ("open_interest", open_interest),
+                ("open_interest_history", open_interest_history),
+                ("funding", funding),
+                ("funding_history", funding_history),
+                ("account_ratio", account_ratio),
+            ),
         ),
     )
 
@@ -810,91 +886,208 @@ def _temporal_reasons(observation: DerivativesObservation, cutoff: datetime | No
     return tuple(dict.fromkeys(reasons))
 
 
+@dataclass(frozen=True)
+class _EvidenceChoice:
+    observation: DerivativesObservation | None
+    reasons: tuple[str, ...]
+    excluded: tuple[tuple[int, tuple[str, ...]], ...] = ()
+
+
+_RATIO_FAILURES = frozenset(
+    {
+        "invalid_denominator",
+        "ratio_component_conflict",
+        "invalid_account_ratio",
+        "account_share_inconsistent",
+        "account_share_precision_unjustified",
+        "non_finite_quantity",
+        "malformed_quantity",
+    }
+)
+_OPTIONAL_RATIO_CUTOFFS = frozenset({"acquisition_after_cutoff", "metric_after_cutoff"})
+
+
+def _identity_failed(observation: DerivativesObservation) -> bool:
+    return any(code in _IDENTITY_FAILURES for code in observation.reason_codes)
+
+
 def _select_funding(
     current: DerivativesEvidenceBatch | None,
     history: DerivativesEvidenceBatch | None,
     cutoff: datetime | None,
     instrument: InstrumentMetadata | None,
-) -> tuple[DerivativesObservation | None, tuple[str, ...]]:
+) -> _EvidenceChoice:
+    """Validate every same-timestamp candidate before collapsing it.
+
+    A foreign identity is excluded. It does not veto a valid row for the
+    requested measurement, and it does not become eligible by sorting first.
+    """
+
     del instrument
-    owned = {id(item): batch for batch in (history, current) if batch is not None for item in batch.observations}
-    observations = [item for batch in (history, current) if batch is not None for item in batch.observations]
+    batches = [batch for batch in (history, current) if batch is not None]
+    owned = {id(item): batch for batch in batches for item in batch.observations}
+    observations = [item for batch in batches for item in batch.observations]
     if not observations:
-        return None, ("missing_funding",)
+        return _EvidenceChoice(None, ("missing_funding",))
     timed = [item for item in observations if item.metric_time.at is not None and item.metric_time.quality == QUALITY_VERIFIED]
     if not timed:
-        return None, ("missing_metric_timestamp",)
+        return _EvidenceChoice(None, ("missing_metric_timestamp",))
     newest_at = max(item.metric_time.at for item in timed if item.metric_time.at is not None)
     newest = [item for item in timed if item.metric_time.at == newest_at]
-    if _funding_conflict(newest):
-        return None, ("duplicate_conflict",)
-    if _observation_provenance_conflict(newest):
-        return None, ("conflicting_provenance",)
-    chosen = sorted(newest, key=lambda item: (item.endpoint, item.quantities[0].raw_value if item.quantities else ""))[0]
-    if chosen.rate_kind != RATE_SETTLED_FUNDING or "unexpected_funding_subtype" in chosen.reason_codes:
-        return None, ("unexpected_funding_subtype",)
-    reasons = list(_temporal_reasons(chosen, cutoff))
-    reasons.extend(_cache_chronology(owned.get(id(chosen))))
-    reasons.extend(code for code in chosen.reason_codes if code in _IDENTITY_FAILURES)
-    quantity = chosen.quantities[0] if chosen.quantities else None
+    local = [item for item in newest if not _identity_failed(item)]
+    foreign = [item for item in newest if _identity_failed(item)]
+    foreign_marks = tuple(
+        (
+            id(item),
+            tuple(code for code in item.reason_codes if code in _IDENTITY_FAILURES) or ("symbol_conflict",),
+        )
+        for item in foreign
+    )
+    if not local:
+        identity = tuple(
+            dict.fromkeys(code for item in foreign for code in item.reason_codes if code in _IDENTITY_FAILURES)
+        )
+        return _EvidenceChoice(None, identity or ("symbol_conflict",), foreign_marks)
+    failures = [(item, _funding_candidate_failures(item, cutoff, owned.get(id(item)))) for item in local]
+    failures = [(item, codes) for item, codes in failures if codes]
+    if failures:
+        failed = {id(item) for item, _codes in failures}
+        group_reasons = tuple(dict.fromkeys(code for _item, codes in failures for code in codes))
+        marks = list(foreign_marks)
+        for item in local:
+            own = next((codes for obs, codes in failures if obs is item), ())
+            if own:
+                marks.append((id(item), own))
+            elif id(item) not in failed:
+                marks.append((id(item), ("contradictory_funding_evidence",)))
+        return _EvidenceChoice(None, group_reasons, tuple(marks))
+    if _funding_conflict(local):
+        marks = (*foreign_marks, *((id(item), ("duplicate_conflict",)) for item in local))
+        return _EvidenceChoice(None, ("duplicate_conflict",), marks)
+    if _observation_provenance_conflict(local):
+        marks = (*foreign_marks, *((id(item), ("conflicting_provenance",)) for item in local))
+        return _EvidenceChoice(None, ("conflicting_provenance",), marks)
+    chosen = sorted(local, key=_funding_sort)[0]
+    duplicates = tuple((id(item), ("identical_duplicate",)) for item in local if item is not chosen)
+    return _EvidenceChoice(chosen, (), (*foreign_marks, *duplicates))
+
+
+def _funding_candidate_failures(
+    observation: DerivativesObservation,
+    cutoff: datetime | None,
+    batch: DerivativesEvidenceBatch | None,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if (
+        observation.rate_kind != RATE_SETTLED_FUNDING
+        or "unexpected_funding_subtype" in observation.reason_codes
+        or "unsupported_funding_subtype" in observation.reason_codes
+    ):
+        if "unsupported_funding_subtype" in observation.reason_codes:
+            reasons.append("unsupported_funding_subtype")
+        else:
+            reasons.append("unexpected_funding_subtype")
+    reasons.extend(_temporal_reasons(observation, cutoff))
+    reasons.extend(_cache_chronology(batch))
+    quantity = observation.quantities[0] if observation.quantities else None
     if quantity is None or quantity.unit != UNIT_FUNDING_FRACTION or quantity.numeric_value is None:
         reasons.append("malformed_quantity")
     elif abs(quantity.numeric_value) >= 1:
         reasons.append("unexpected_funding_magnitude")
-    if chosen.semantic_quality == QUALITY_CONFLICT and "symbol_conflict" not in reasons:
-        reasons.append("symbol_conflict")
-    if chosen.semantic_quality != QUALITY_VERIFIED and not reasons:
+    if observation.semantic_quality != QUALITY_VERIFIED and not reasons:
         reasons.append("unverified_funding_semantics")
-    if reasons:
-        return chosen, tuple(dict.fromkeys(reasons))
-    return chosen, ()
+    return tuple(dict.fromkeys(reasons))
+
+
+def _funding_sort(observation: DerivativesObservation) -> tuple[str, str, str]:
+    raw = observation.quantities[0].raw_value if observation.quantities else ""
+    return (observation.endpoint, observation.identity.returned_symbol or "", raw)
 
 
 def _select_ratio(
     batch: DerivativesEvidenceBatch | None,
     cutoff: datetime | None,
-) -> tuple[DerivativesObservation | None, tuple[str, ...]]:
+) -> _EvidenceChoice:
+    """Keep one valid population row. Invalid or foreign siblings do not veto it."""
+
     if batch is None or not batch.observations:
         reasons = ("missing_account_ratio",)
         if batch is not None and "fast_mode_skipped" in batch.reason_codes:
             reasons = ("fast_mode_skipped", "missing_account_ratio")
-        return None, reasons
+        return _EvidenceChoice(None, reasons)
     timed = [item for item in batch.observations if item.metric_time.at is not None]
     if not timed:
-        return None, ("missing_metric_timestamp",)
+        return _EvidenceChoice(None, ("missing_metric_timestamp",))
     newest_at = max(item.metric_time.at for item in timed if item.metric_time.at is not None)
     newest = [item for item in timed if item.metric_time.at == newest_at]
-    if _observation_provenance_conflict(newest):
-        return None, ("conflicting_provenance",)
-    values = {_ratio_value(item) for item in newest}
-    if len(values) > 1:
-        return None, ("duplicate_conflict",)
-    chosen = sorted(newest, key=lambda item: item.endpoint)[0]
-    identity = tuple(code for code in chosen.reason_codes if code in _IDENTITY_FAILURES)
-    ratio_failures = tuple(
-        code
-        for code in chosen.reason_codes
-        if code
-        in {
-            "invalid_denominator",
-            "ratio_component_conflict",
-            "invalid_account_ratio",
-            "account_share_inconsistent",
-        }
+    local = [item for item in newest if not _identity_failed(item)]
+    foreign = [item for item in newest if _identity_failed(item)]
+    foreign_marks = tuple(
+        (
+            id(item),
+            tuple(code for code in item.reason_codes if code in _IDENTITY_FAILURES) or ("symbol_conflict",),
+        )
+        for item in foreign
     )
-    if chosen.semantic_quality != QUALITY_VERIFIED or identity or ratio_failures:
-        reasons = identity or ratio_failures or ("invalid_account_ratio",)
-        reasons = tuple(dict.fromkeys((*reasons, *_cache_chronology(batch), *_temporal_reasons(chosen, cutoff))))
-        return None, reasons
-    reasons = list(_temporal_reasons(chosen, cutoff))
-    reasons.extend(_cache_chronology(batch))
-    if _ratio_value(chosen) is None:
+    valid: list[DerivativesObservation] = []
+    invalid: list[tuple[DerivativesObservation, tuple[str, ...]]] = []
+    for item in local:
+        failures = _ratio_candidate_failures(item, cutoff, batch)
+        if failures:
+            invalid.append((item, failures))
+        else:
+            valid.append(item)
+    if valid:
+        values_conflict = _ratio_values_conflict(valid)
+        provenance_conflict = _observation_provenance_conflict(valid)
+        if values_conflict or provenance_conflict:
+            reason = "duplicate_conflict" if values_conflict else "conflicting_provenance"
+            marks = [
+                *foreign_marks,
+                *((id(item), (reason,)) for item in valid),
+                *((id(item), codes) for item, codes in invalid),
+            ]
+            return _EvidenceChoice(None, (reason,), tuple(marks))
+        chosen = sorted(valid, key=lambda item: (item.endpoint, item.identity.returned_symbol or ""))[0]
+        marks = [
+            *foreign_marks,
+            *((id(item), ("identical_duplicate",)) for item in valid if item is not chosen),
+            *((id(item), codes) for item, codes in invalid),
+        ]
+        return _EvidenceChoice(chosen, (), tuple(marks))
+    marks = list(foreign_marks)
+    codes: list[str] = []
+    if local:
+        for item, failures in invalid:
+            marks.append((id(item), failures))
+            codes.extend(failures)
+    else:
+        codes.extend(code for item in foreign for code in item.reason_codes if code in _IDENTITY_FAILURES)
+    decision = tuple(dict.fromkeys(code for code in codes if code not in _OPTIONAL_RATIO_CUTOFFS))
+    return _EvidenceChoice(None, decision, tuple(marks))
+
+
+def _ratio_candidate_failures(
+    observation: DerivativesObservation,
+    cutoff: datetime | None,
+    batch: DerivativesEvidenceBatch,
+) -> tuple[str, ...]:
+    reasons: list[str] = [code for code in observation.reason_codes if code in _RATIO_FAILURES]
+    if observation.semantic_quality != QUALITY_VERIFIED and not reasons:
         reasons.append("invalid_account_ratio")
-    period_ms = _period_ms(chosen.series_period)
-    if not reasons and chosen.metric_time.at is not None:
-        _context, fresh_reasons = _freshness(chosen.metric_time.at, cutoff, period_ms)
+    reasons.extend(_temporal_reasons(observation, cutoff))
+    reasons.extend(_cache_chronology(batch))
+    if _ratio_value(observation) is None and not any(code in _RATIO_FAILURES for code in reasons):
+        reasons.append("invalid_account_ratio")
+    if not reasons and observation.metric_time.at is not None:
+        _context, fresh_reasons = _freshness(observation.metric_time.at, cutoff, _period_ms(observation.series_period))
         reasons.extend(fresh_reasons)
-    return (None, tuple(dict.fromkeys(reasons))) if reasons else (chosen, ())
+    return tuple(dict.fromkeys(reasons))
+
+
+def _ratio_values_conflict(observations: Sequence[DerivativesObservation]) -> bool:
+    values = [_ratio_value(item) for item in observations]
+    return any(value is None for value in values) or len(set(values)) > 1
 
 
 def _ratio_value(observation: DerivativesObservation) -> Decimal | None:
@@ -969,9 +1162,12 @@ def _classification(reasons: tuple[str, ...], *, eligible: bool, conflict: bool)
         "conflicting_provenance",
         "request_context_identity_conflict",
         "account_share_inconsistent",
+        "account_share_precision_unjustified",
         "settlement_mismatch",
         "contract_mismatch",
         "unexpected_funding_subtype",
+        "unsupported_funding_subtype",
+        "contradictory_funding_evidence",
         "description_without_acquisition_fact",
         "acquisition_capture_failed",
     }
@@ -1201,24 +1397,63 @@ def _result_lineage(
     *,
     instrument: InstrumentMetadata | None,
     oi_pair: OpenInterestPairSelection,
-    funding_obs: DerivativesObservation | None,
-    ratio_obs: DerivativesObservation | None,
+    funding_choice: _EvidenceChoice,
+    ratio_choice: _EvidenceChoice,
     batches: Sequence[tuple[str, DerivativesEvidenceBatch | None]],
 ) -> tuple[SourceLineageFact, ...]:
-    del funding_obs, ratio_obs
     facts: list[SourceLineageFact] = []
     instrument_fact = _instrument_lineage(instrument)
     if instrument_fact is not None:
         facts.append(instrument_fact)
-    for role, batch in batches:
+    selected: dict[int, str] = {}
+    if funding_choice.observation is not None and not funding_choice.reasons:
+        selected[id(funding_choice.observation)] = "selected_funding"
+    if ratio_choice.observation is not None and not ratio_choice.reasons:
+        selected[id(ratio_choice.observation)] = "selected_account_ratio"
+    if oi_pair.change_pct is not None:
+        if oi_pair.current_observation is not None:
+            selected[id(oi_pair.current_observation)] = "selected_current_oi"
+        if oi_pair.previous_observation is not None:
+            selected[id(oi_pair.previous_observation)] = "selected_previous_oi"
+    excluded: dict[int, tuple[str, ...]] = dict(oi_pair.marked_exclusions)
+    excluded.update(funding_choice.excluded)
+    excluded.update(ratio_choice.excluded)
+    if oi_pair.change_pct is None:
+        if oi_pair.current_observation is not None:
+            excluded.setdefault(id(oi_pair.current_observation), oi_pair.reason_codes)
+        if oi_pair.previous_observation is not None:
+            excluded.setdefault(id(oi_pair.previous_observation), oi_pair.reason_codes)
+    for _role, batch in batches:
         if batch is None:
             continue
         for observation in batch.observations:
-            fact_role = role
-            if observation.metric == "open_interest":
-                fact_role = "excluded_oi" if oi_pair.change_pct is None else "selected_current_oi"
-            facts.append(_lineage_fact(fact_role, observation, batch, instrument))
+            observation_id = id(observation)
+            extra: tuple[str, ...] = ()
+            if observation_id in selected:
+                fact_role = selected[observation_id]
+            elif observation_id in excluded:
+                fact_role = _excluded_role(observation.metric)
+                extra = excluded[observation_id]
+            else:
+                fact_role = _context_role(observation.metric)
+            facts.append(_lineage_fact(fact_role, observation, batch, instrument, extra))
     return tuple(facts)
+
+
+def _excluded_role(metric: str) -> str:
+    if metric == "funding":
+        return "excluded_funding"
+    if metric == "account_ratio":
+        return "excluded_account_ratio"
+    return "excluded_oi"
+
+
+def _context_role(metric: str) -> str:
+    if metric == "funding":
+        return "context_funding"
+    if metric == "account_ratio":
+        return "context_account_ratio"
+    return "context_oi"
 
 
 def _safe_input_lineage(
@@ -1236,25 +1471,71 @@ def _safe_input_lineage(
                 continue
             for observation in getattr(batch, "observations", ()):
                 facts.append(_lineage_fact(role, observation, batch, None))
-        return _bounded_lineage(facts)
+        return tuple(facts)
     except Exception:
         return ()
 
 
-def _bounded_lineage(facts: Sequence[SourceLineageFact]) -> tuple[SourceLineageFact, ...]:
-    ordered = tuple(
-        sorted(
-            facts,
-            key=lambda item: (
-                item.role,
-                item.endpoint,
-                item.metric_time or "",
-                item.raw_field,
-                item.raw_value,
-            ),
-        )
-    )
-    return ordered[:_LINEAGE_LIMIT]
+_LINEAGE_PRIORITY = {
+    "instrument": 0,
+    "selected_current_oi": 1,
+    "selected_previous_oi": 2,
+    "selected_funding": 3,
+    "selected_account_ratio": 4,
+    "excluded_funding": 5,
+    "excluded_account_ratio": 6,
+    "excluded_oi": 7,
+    "input_open_interest": 8,
+    "input_open_interest_history": 9,
+    "input_funding": 10,
+    "input_funding_history": 11,
+    "input_account_ratio": 12,
+}
+
+
+def _lineage_priority(role: str) -> int:
+    if role in _LINEAGE_PRIORITY:
+        return _LINEAGE_PRIORITY[role]
+    if role.startswith("selected_"):
+        return 4
+    if role.startswith("excluded_"):
+        return 7
+    if role.startswith("input_"):
+        return 12
+    if role.startswith("context_"):
+        return 20
+    return 15
+
+
+def _descending_time(value: str | None) -> str:
+    if not value:
+        return "~"
+    return "".join(chr(126 - ord(char)) for char in value)
+
+
+def _lineage_sort_key(item: SourceLineageFact) -> tuple[Any, ...]:
+    priority = _lineage_priority(item.role)
+    time_key = _descending_time(item.metric_time) if priority >= 20 else (item.metric_time or "")
+    return (priority, time_key, item.endpoint, item.raw_field, item.raw_value, item.role)
+
+
+def _prioritize_lineage(facts: Sequence[SourceLineageFact]) -> tuple[tuple[SourceLineageFact, ...], int]:
+    ordered = tuple(sorted(facts, key=_lineage_sort_key))
+    if len(ordered) <= _LINEAGE_LIMIT:
+        return ordered, 0
+    return ordered[:_LINEAGE_LIMIT], len(ordered) - _LINEAGE_LIMIT
+
+
+def _lineage_components(payload: Any) -> tuple[tuple[str, str], ...]:
+    if not isinstance(payload, Sequence) or isinstance(payload, (str, bytes)):
+        return ()
+    components: list[tuple[str, str]] = []
+    for part in payload:
+        if isinstance(part, Mapping):
+            components.append((str(part.get("raw_field") or NA), str(part.get("raw_value") or NA)))
+        elif isinstance(part, Sequence) and not isinstance(part, (str, bytes)) and len(part) == 2:
+            components.append((str(part[0]), str(part[1])))
+    return tuple(components)
 
 
 def _instrument_lineage(instrument: InstrumentMetadata | None) -> SourceLineageFact | None:
@@ -1292,10 +1573,14 @@ def _lineage_fact(
     observation: DerivativesObservation,
     batch: DerivativesEvidenceBatch | None,
     instrument: InstrumentMetadata | None,
+    extra_reasons: tuple[str, ...] = (),
 ) -> SourceLineageFact:
-    quantity = next((item for item in observation.quantities if item.unit != UNIT_QUOTE_NOTIONAL), None)
-    if quantity is None and observation.quantities:
-        quantity = observation.quantities[0]
+    quantity = _primary_lineage_quantity(observation)
+    components = tuple(
+        (item.raw_field, item.raw_value)
+        for item in observation.quantities
+        if quantity is None or item.raw_field != quantity.raw_field
+    )
     delivered = None
     if batch is not None and batch.cache.delivered_at is not None:
         delivered = batch.cache.delivered_at.isoformat()
@@ -1318,8 +1603,27 @@ def _lineage_fact(
         response_time=observation.response_time.at.isoformat() if observation.response_time.at is not None else None,
         acquired_at=observation.acquisition.acquired_at.isoformat() if observation.acquisition.acquired_at is not None else None,
         cache_delivered_at=delivered,
-        reason_codes=tuple(observation.reason_codes),
+        reason_codes=tuple(dict.fromkeys((*observation.reason_codes, *extra_reasons))),
+        rate_kind=observation.rate_kind or NA,
+        components=components,
     )
+
+
+def _primary_lineage_quantity(observation: DerivativesObservation) -> QuantityFact | None:
+    if observation.metric == "account_ratio":
+        for quantity in observation.quantities:
+            if quantity.raw_field in {"longShortRatio", "buyRatio/sellRatio"}:
+                return quantity
+    if observation.metric == "funding" and observation.quantities:
+        return observation.quantities[0]
+    if observation.metric == "open_interest":
+        chosen = _chosen_quantity(observation)
+        if chosen is not None:
+            return chosen
+    for quantity in observation.quantities:
+        if quantity.unit != UNIT_QUOTE_NOTIONAL:
+            return quantity
+    return observation.quantities[0] if observation.quantities else None
 
 
 def evidence_map_reasons(evidence: Mapping[str, Any] | None) -> tuple[str, ...]:

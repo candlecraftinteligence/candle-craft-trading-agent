@@ -771,13 +771,7 @@ def _funding_rows(
         metric_time = _row_metric_time(data, (time_field,), ("fundingTime", "fundingRateTimestamp"), "funding_settlement_time")
         subtype = _supplied_funding_subtype(data)
         semantic, reasons = _observation_quality(identity, (rate,), metric_time)
-        if subtype is None:
-            rate_kind = RATE_SETTLED_FUNDING
-            reasons = tuple(dict.fromkeys((*reasons, RATE_SETTLED_FUNDING)))
-        else:
-            rate_kind = subtype
-            semantic = QUALITY_UNVERIFIED
-            reasons = tuple(dict.fromkeys((*reasons, "unexpected_funding_subtype")))
+        rate_kind, semantic, reasons = _apply_funding_subtype(subtype, semantic, reasons)
         observations.append(
             DerivativesObservation(
                 metric="funding",
@@ -796,7 +790,6 @@ def _funding_rows(
                 raw_retained=True,
             )
         )
-    settled = bool(observations) and all(item.rate_kind == RATE_SETTLED_FUNDING for item in observations)
     return _batch(
         metric="funding",
         endpoint=endpoint,
@@ -804,7 +797,7 @@ def _funding_rows(
         observations=tuple(observations),
         acquisition=acquired,
         response_time=response_time,
-        extra_reasons=(RATE_SETTLED_FUNDING,) if settled else (("unexpected_funding_subtype",) if observations else ()),
+        extra_reasons=_funding_batch_reasons(observations),
     )
 
 
@@ -917,8 +910,10 @@ def _account_ratio_quantity(
 ) -> tuple[QuantityFact, tuple[str, ...]]:
     """Validate holder shares before trusting a supplied or derived quotient.
 
-    Share consistency allows one unit in the last place of the coarser supplied
-    share. That is the provider's decimal scale, not a trading threshold.
+    Sum tolerance is one fractional unit in the last place of the coarser share.
+    An integer-form string is exact as written and does not grant a tolerance of 1.
+    A supplied quotient must overlap the half-unit interval implied by each
+    component. That is source rounding, not a trading threshold.
     """
 
     reasons: list[str] = []
@@ -941,9 +936,14 @@ def _account_ratio_quantity(
         if parsed.numeric_value is None or parsed.numeric_value <= 0:
             reasons.append("invalid_account_ratio")
         else:
-            implied = long_part.numeric_value / short_value
-            if not _within_share_precision(parsed.numeric_value, implied, long_part.raw_value, short_part.raw_value):
-                reasons.append("ratio_component_conflict")
+            quotient_reason = _quotient_reason(
+                parsed.numeric_value,
+                long_part,
+                short_part,
+                str(raw_ratio),
+            )
+            if quotient_reason:
+                reasons.append(quotient_reason)
             elif not reasons:
                 return replace(parsed, multiplier_applicability=MULTIPLIER_NOT_APPLICABLE), ()
     if not explicit and not reasons and short_value not in (None, 0) and long_part.numeric_value is not None:
@@ -979,6 +979,10 @@ def _account_ratio_quantity(
 
 
 def _share_domain_reasons(part: QuantityFact) -> tuple[str, ...]:
+    if "non_finite_quantity" in part.reason_codes:
+        return ("non_finite_quantity", "invalid_account_ratio")
+    if "malformed_quantity" in part.reason_codes:
+        return ("malformed_quantity", "invalid_account_ratio")
     if part.quality == QUALITY_MISSING or part.numeric_value is None:
         return ()
     value = part.numeric_value
@@ -1004,20 +1008,101 @@ def _within_share_precision(left: Decimal, right: Decimal, *raw_values: str) -> 
 
 
 def _stated_quantum(raw: str) -> Decimal:
+    """Fractional unit in the last place. Integer text is exact and contributes no slack."""
+
     try:
         value = Decimal(str(raw).strip())
     except (InvalidOperation, ValueError):
-        return Decimal(1)
+        return Decimal(0)
     if not value.is_finite():
-        return Decimal(1)
+        return Decimal(0)
     exponent = value.as_tuple().exponent
     if not isinstance(exponent, int) or exponent >= 0:
-        return Decimal(1)
+        return Decimal(0)
     return Decimal(10) ** exponent
 
 
+def _quotient_reason(
+    reported: Decimal,
+    long_part: QuantityFact,
+    short_part: QuantityFact,
+    ratio_raw: str,
+) -> str:
+    """Return a reason when component uncertainty cannot admit the reported quotient."""
+
+    long_value = long_part.numeric_value
+    short_value = short_part.numeric_value
+    if long_value is None or short_value is None:
+        return "invalid_denominator"
+    low_short = short_value - (_stated_quantum(short_part.raw_value) / 2)
+    high_short = short_value + (_stated_quantum(short_part.raw_value) / 2)
+    low_long = long_value - (_stated_quantum(long_part.raw_value) / 2)
+    high_long = long_value + (_stated_quantum(long_part.raw_value) / 2)
+    if low_short <= 0 or low_long < 0 or high_short <= 0:
+        return "account_share_precision_unjustified"
+    lower = low_long / high_short
+    upper = high_long / low_short
+    half_ratio = _stated_quantum(ratio_raw) / 2
+    if reported + half_ratio < lower or reported - half_ratio > upper:
+        return "ratio_component_conflict"
+    return ""
+
+
+_FUNDING_ROW_IDENTITY_CONFLICTS = frozenset(
+    {
+        "symbol_conflict",
+        "category_mismatch",
+        "identity_conflict",
+        "request_context_identity_conflict",
+        "settlement_mismatch",
+        "contract_mismatch",
+        "unsupported_inverse",
+    }
+)
+
+
+def _apply_funding_subtype(
+    subtype: str | None,
+    semantic: str,
+    reasons: tuple[str, ...],
+) -> tuple[str, str, tuple[str, ...]]:
+    """Map a documented funding subtype without treating an unknown token as ordinary."""
+
+    if subtype is None:
+        return RATE_SETTLED_FUNDING, semantic, tuple(dict.fromkeys((*reasons, RATE_SETTLED_FUNDING)))
+    token = subtype.casefold()
+    if token == "regular":
+        return (
+            RATE_SETTLED_FUNDING,
+            semantic,
+            tuple(dict.fromkeys((*reasons, RATE_SETTLED_FUNDING, "regular_funding"))),
+        )
+    if token == "special":
+        return subtype, QUALITY_UNVERIFIED, tuple(dict.fromkeys((*reasons, "unsupported_funding_subtype")))
+    return subtype, QUALITY_UNVERIFIED, tuple(dict.fromkeys((*reasons, "unexpected_funding_subtype")))
+
+
+def _funding_batch_reasons(observations: Sequence[DerivativesObservation]) -> tuple[str, ...]:
+    if not observations:
+        return ()
+    local = [
+        item
+        for item in observations
+        if not any(code in _FUNDING_ROW_IDENTITY_CONFLICTS for code in item.reason_codes)
+    ]
+    pool = local or list(observations)
+    reasons: list[str] = []
+    if all(item.rate_kind == RATE_SETTLED_FUNDING for item in pool):
+        reasons.append(RATE_SETTLED_FUNDING)
+    if any("unsupported_funding_subtype" in item.reason_codes for item in pool):
+        reasons.append("unsupported_funding_subtype")
+    if any("unexpected_funding_subtype" in item.reason_codes for item in pool):
+        reasons.append("unexpected_funding_subtype")
+    return tuple(reasons)
+
+
 def _supplied_funding_subtype(data: Mapping[str, Any]) -> str | None:
-    """History endpoints document no rate subtype. A supplied one stays unverified."""
+    """Return a supplied rateType or fundingRateType token. Absence means ordinary history."""
 
     for key in ("rateType", "fundingRateType"):
         if key not in data:
