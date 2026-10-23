@@ -74,8 +74,14 @@ After Astra preflight findings, 25 focused tests passed for original-error
 preservation, tail-failure status, OS contention, abrupt exit, bounded writes,
 unknown files, cancellation, startup cleanup and reporting-tail timing. The final
 corrected session/cadence/inventory subset passed **76 tests in 27.73 seconds**,
-including consecutive tail-failure coverage. Full pytest, PR/CI and final
-exact-head independent review are pending. One early oversized fixture label
+including consecutive tail-failure coverage. Full existing-environment Windows
+pytest on `c8d2a2fdc78f7b31c5d93152c8ed4b4c0b3ed65b`: **3455 passed,
+1 existing dependency warning in 1641.43 seconds**, no failures or skips.
+Astra APPROVE for that exact head, independently 44 session/cadence/inventory
+tests passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39994803059)
+succeeded. [PR #144](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/144)
+is unmerged and undeployed; its final documentation checkpoint has separate
+CI/review requirements. One early oversized fixture label
 exceeded Windows' environment limit; explicit short IDs corrected fixture setup.
 
 A 100-repetition DEV filesystem-only probe measured receipt start/finish writes

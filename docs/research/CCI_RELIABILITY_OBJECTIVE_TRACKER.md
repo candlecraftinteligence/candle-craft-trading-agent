@@ -10,7 +10,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## A — Scanner continuity
 
-- Status: IMPLEMENTING.
+- Status: TESTED.
 - Weakness: historical 16h54m absence of normal scanning; four missed start slots.
 - Evidence: `schedule_after_iteration` uses monotonic time, accounts for overruns
   and has deterministic tests. The watch loop persists completion/failure
@@ -21,7 +21,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   status/schedule includes the reporting tail; old duration scope is labelled.
   No automatic restart, process killing or age/PID-based lease breaking.
 - Branch: `codex/reliability-watch-session`, based on D final head `2cfd608`.
-- Implementation PR: pending. Contract:
+- Implementation PR: [#144](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/144). Contract:
   `docs/research/CCI_WATCH_SESSION_OBSERVATIONS.md`.
 - Tests: 232 broader watch/command/owner/provenance/inventory tests passed.
   Corrected focused session suite: 25 passed; repeated tail-failure case added.
@@ -30,7 +30,15 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Independent preflight: Astra requested preservation of original exceptions
   across descriptor/temporary cleanup failure and final status recomputation after
   watch-output failure. Both corrected with failure-injection regressions. Final
-  full pytest, exact-head review and CI pending.
+  full pytest on `c8d2a2fdc78f7b31c5d93152c8ed4b4c0b3ed65b`:
+  **3455 passed, 1 existing dependency warning in 1641.43 seconds**, no failures
+  or skips. Astra APPROVE for that exact implementation head, independently
+  44 session/cadence/inventory tests passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39994803059)
+  succeeded. Dependency, compile, whitespace and invariant checks passed.
+- Handoff: `docs/handoffs/CCI_RELIABILITY_WATCH_SESSION.md`. The final
+  documentation-only head needs its own CI/review. A subsequent Astra design
+  review could not run because the reviewer account reached its usage limit;
+  no approval for that review is inferred.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: outage cause cannot be established from DEV source. P4 causation
   is Unverified. Requires genuine launcher/process/manifest evidence.
@@ -221,8 +229,9 @@ Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
 the final documentation head `e4a5fb9` has CI and Astra approval.
 PRs #141, #142 and #143 remain unmerged and undeployed. D is CODE_COMPLETE at
 implementation/correction head `29056e7`, with a documentation-only checkpoint
-receiving separate review/CI. Continue A's watch lease/session observations,
-then E's phase/resource observations. No historical outage cause was found in
+  receiving separate review/CI. A implementation `c8d2a2f` has full pytest,
+CI and exact-head Astra approval; its documentation checkpoint has separate
+CI/review requirements. Continue E's phase/resource observations. No historical outage cause was found in
 repository notes or the scoped GitHub audit search; it remains Unverified.
 Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
