@@ -2536,7 +2536,14 @@ def _retain_owner_monitoring_result(result: ScannerRunResult, monitoring: Any) -
 def _retain_owner_monitoring_failure(result: ScannerRunResult, exc: BaseException) -> ScannerRunResult:
     """A continuation exception cannot attest to coverage or an empty population."""
     summary = dict(result.scanner_process_summary)
-    report = dict(summary.get("owner_monitoring") or {
+    summary["owner_monitoring"] = _owner_monitoring_failure_diagnostics(summary.get("owner_monitoring"), exc)
+    return result.model_copy(update={"scanner_process_summary": summary})
+
+
+def _owner_monitoring_failure_diagnostics(
+    prior: Mapping[str, Any] | None, exc: BaseException,
+) -> dict[str, Any]:
+    report = dict(prior or {
         "obligation_count": None,
         "owner_dispositions": [],
         "historical_completeness": "Unverified",
@@ -2548,8 +2555,7 @@ def _retain_owner_monitoring_failure(result: ScannerRunResult, exc: BaseExceptio
         "continuation_error": _watch_phase_error("owner_monitoring", exc),
         "all_obligations_verified": False,
     })
-    summary["owner_monitoring"] = report
-    return result.model_copy(update={"scanner_process_summary": summary})
+    return report
 
 
 def _persist_one_shot_monitoring_failure(
@@ -2658,7 +2664,9 @@ async def _surface_monitoring_during_discovery_failure(
         result = await _continue_owned_plan_monitoring(args, evidence_by_key={}, scan_run_id=None)
     except (Exception, SystemExit) as caught:
         monitor_exc = caught
-    if result is not None and callable(getattr(result, "as_dict", None)):
+    if monitor_exc is not None:
+        setattr(discovery, "owner_monitoring_diagnostics", _owner_monitoring_failure_diagnostics(None, monitor_exc))
+    elif result is not None and callable(getattr(result, "as_dict", None)):
         setattr(discovery, "owner_monitoring_diagnostics", result.as_dict())
     lines = _owner_monitoring_failure_lines(exc=monitor_exc, result=result)
     if publish_on_system_exit and hasattr(discovery, "owner_monitoring_diagnostics"):

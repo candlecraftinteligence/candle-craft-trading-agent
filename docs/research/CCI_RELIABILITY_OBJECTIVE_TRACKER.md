@@ -39,15 +39,20 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Implementation PR / independent Astra review: pending.
 - Tests: existing P5A/watch subset plus initial regressions: 98 passed. Expanded
   accounting/failure-visibility/binding subset after the first review correction:
-  39 passed. The first full run was interrupted at 44% without failures to
-  revalidate the corrected implementation. Final full-suite result is pending.
+  41 passed. Full runs were interrupted at 44% and 10% without failures to
+  revalidate review corrections. Final full-suite result is pending.
   Dependency, compile and whitespace checks passed.
+  Corrected accounting/failure/binding plus command/watch suites: 167 passed.
 - Independent review: Astra returned CHANGES_REQUIRED for `fc170b0` because
   one-shot error exits preceded durable report persistence, and raised watch
   continuations left incompleteness implicit. The correction writes a diagnostic
   manifest before one-shot failure, marks continuation errors explicitly, and
   preserves discovery-failure startup reports. These records explicitly are not
-  scan-completion records. Corrected exact-head review is pending.
+  scan-completion records. A second review of `b2d8251` found that simultaneous
+  discovery and monitoring exceptions still lacked an unknown-coverage report;
+  that path now shares the explicit N/A population error report. Synthetic scanner
+  artifact defaults are isolated under pytest temp directories. Corrected
+  exact-head review is pending.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: DEV counterexamples do not identify the nine historical owners'
   actual cause. Current collection can expose but cannot repair historical gaps.
@@ -92,6 +97,12 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   diagnostic sizes. No cleanup or production access.
 - Implementation PR / independent review: N/A.
 - Tests: existing process-memory and cadence tests; matched Runtime evidence N/A.
+- B diagnostic microbenchmark (synthetic DEV structures, 200 repetitions,
+  summary plus JSON serialization, excludes disk/SQLite): 41 owners produced
+  28,455 bytes versus 15,198 legacy bytes, median 0.416 ms / p95 0.553 ms;
+  118 owners produced 80,548 versus 43,476 bytes, median 1.188 ms / p95 2.484 ms.
+  These are per report, not total artifact growth; reports can appear in more
+  than one artifact. Runtime cadence and storage impact remain Unverified.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: Runtime capacity may require a hardware/storage upgrade. No
   database bottleneck has been established.

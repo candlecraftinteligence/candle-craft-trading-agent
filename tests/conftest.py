@@ -60,6 +60,14 @@ def synthetic_runtime_epoch(
     import scripts.run_scan as run_scan_module
 
     monkeypatch.setattr(run_scan_module, "DEFAULT_DATABASE_PATH", default_db)
+    # Synthetic command tests must not append diagnostic evidence to DEV artifacts.
+    for name, filename in (
+        ("SCAN_RUN_MANIFEST_PATH", "manifest.jsonl"),
+        ("NIGHTLY_SCAN_HISTORY_PATH", "nightly.json"),
+        ("LATEST_RUN_PATH", "latest.json"),
+        ("PERFORMANCE_MEMORY_PATH", "performance_memory.json"),
+    ):
+        monkeypatch.setattr(run_scan_module, name, default_db.parent / filename)
     original_prepare = run_scan_module._prepare_operational_runtime_if_needed
 
     def wrapped_prepare(args, settings):

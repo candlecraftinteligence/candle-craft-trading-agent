@@ -263,3 +263,34 @@ def test_failed_diagnostic_write_keeps_original_error(tmp_path, monkeypatch):
         run_scan._persist_one_shot_monitoring_failure(result, exc=failure)
     assert "original monitoring failure" in str(raised.value)
     assert "owner_monitoring_diagnostic_persistence" in str(raised.value)
+
+
+@pytest.mark.parametrize("startup", [False, True])
+def test_discovery_and_monitoring_exception_persist_unknown_coverage(tmp_path, monkeypatch, startup):
+    from types import SimpleNamespace
+    from tests.test_p5a_monitoring_failure_visibility import _discovery_exit, _summary
+
+    _quiet_runtime(monkeypatch, tmp_path)
+
+    async def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic monitoring database unavailable")
+
+    monkeypatch.setattr(run_scan, "_continue_owned_plan_monitoring", fail)
+    discovery = _discovery_exit()
+    asyncio.run(run_scan._surface_monitoring_during_discovery_failure(
+        SimpleNamespace(), discovery, publish_on_system_exit=startup,
+    ))
+    if not startup:
+        run_scan._record_failed_watch_iteration(
+            SimpleNamespace(watch_output_file=None), _summary(discovery),
+            watchlist=SimpleNamespace(universe=None, source_label="synthetic"),
+        )
+    row = json.loads((tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert row["status"] == "FAILED"
+    report = row["owner_monitoring"]
+    assert report["obligation_count"] is None
+    assert report["owner_accounting_status"] == "N/A"
+    assert report["all_obligations_verified"] is False
+    assert report["continuation_status"] == "ERROR"
+    assert "synthetic monitoring database unavailable" in report["continuation_error"]
+    assert any("universe_error" in item for item in row.get("errors", row.get("watch_supervisor", {}).get("errors", ())))
