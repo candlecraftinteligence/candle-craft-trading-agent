@@ -19,6 +19,7 @@ approved integration; an unexpected change requires reassessment, not force push
 | 3 | [#143 Telegram provenance](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/143) / D | `2cfd608d5744b6f2dfcce53cfdc568dcd6471223` | Astra APPROVE; full implementation 3429 passed; [final CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39990861792) |
 | 4 | [#144 watch sessions](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/144) / A | `1830aa87b2c47ca5b2e51df1cc5a12c453c464fc` | Astra APPROVE; full implementation 3455 passed; [final CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40028951292) |
 | 5 | [#145 resource observations](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/145) / E | Final implementation `3aaac3bfeeaf1ba68e8722de373ac92d63d0bd59`; final documentation head recorded in PR | Astra APPROVE; full implementation **3507 passed**; [implementation CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40032395331) succeeded |
+| 6 | Provenance-only cadence / A-D follow-up | Pending DEV verification | Independently reproduced interaction; tests/review/CI must complete before integration approval |
 
 The branches form a linear source ancestry in that order. The final E source
 contains the previous four corrections; this is not five independent patches to
@@ -28,14 +29,20 @@ GitHub's direct `main...3aaac3b` comparison also confirmed the expected base,
 16 commits ahead and zero behind at this checkpoint. Final documentation review
 and CI are recorded with the published final head in PR #145 before integration
 approval is requested.
+E final documentation head is `8fa80b62d45b4e8c8bdfb0b149b28fa239f5d048`, with
+Astra APPROVE and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40033691462).
+The final acceptance audit found that persistent provenance-only PARTIAL cycles
+would accumulate retry backoff. Complete the focused sixth correction described
+in `docs/research/CCI_PROVENANCE_ONLY_CADENCE.md` before requesting integration.
 
 ## Proposed integration, requiring owner approval
 
-1. Recheck the exact five PR heads, required CI, independent approval, remote base
+1. Recheck all six exact PR heads, required CI, independent approval, remote base
    and clean DEV state. No branch deletion, reset or force push is needed.
 2. Merge #141 into main using a merge commit that preserves its accepted commits.
 3. Retarget #142 to main, verify its now-current required checks and unchanged
-   approved head, then merge. Repeat in order for #143, #144 and #145. Do not
+   approved head, then merge. Repeat in order for #143, #144, #145 and the pinned
+   provenance-only cadence follow-up. Do not
    squash or rewrite the stacked ancestry. Stop for unexpected source changes,
    conflicts, stale approvals or failed checks.
 4. Record the resulting immutable main SHA. Verify its complete source tree

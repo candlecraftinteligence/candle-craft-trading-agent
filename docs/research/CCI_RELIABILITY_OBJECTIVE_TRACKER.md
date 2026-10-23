@@ -1,8 +1,9 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-24, all five focused reliability implementations CODE_COMPLETE.
-The final documentation checkpoint receives separate review/CI. Integration,
-deployment and natural Runtime verification remain pending owner authorization.
+Checkpoint: 2026-10-24, five focused reliability implementations CODE_COMPLETE.
+A final acceptance audit reproduced an A/D cadence interaction; its focused
+follow-up is in DEV. Integration, deployment and natural Runtime verification
+remain pending owner authorization.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
@@ -11,7 +12,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## A — Scanner continuity
 
-- Status: TESTED.
+- Status: IMPLEMENTING (follow-up A/D interaction; original session patch TESTED).
 - Weakness: historical 16h54m absence of normal scanning; four missed start slots.
 - Evidence: `schedule_after_iteration` uses monotonic time, accounts for overruns
   and has deterministic tests. The watch loop persists completion/failure
@@ -48,6 +49,24 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   is Unverified. Requires genuine launcher/process/manifest evidence.
   The supplied historical 16h54m interval is missing observation coverage; exact
   start/end UTC are N/A in the supplied summary. No outage receipt is fabricated.
+- Follow-up root cause verified: provenance-only PARTIAL status feeds the existing
+  all-PARTIAL retry streak. Real pure functions reproduced a 300-second backoff
+  and next start at 540 seconds for a 240-second cycle / 300-second cadence.
+  This newly introduced DEV interaction is not historical Runtime causation.
+- Follow-up branch: `codex/reliability-provenance-cadence`, based on E final
+  `8fa80b62d45b4e8c8bdfb0b149b28fa239f5d048`. Keep PARTIAL truthful, but exempt
+  only positively observed provenance-only diagnostics from operational backoff.
+  Missing or adverse evidence and other phase failures retain backoff. Recompute
+  each persistence/finalization boundary from the original prior streak.
+- Follow-up contract: `docs/research/CCI_PROVENANCE_ONLY_CADENCE.md`.
+  Corrected expanded subset: 201 passed in 37.96 seconds. Initial fixture error
+  (frozen dataclass assignment) corrected with dataclasses.replace. Final targeted,
+  full pytest, PR/CI and exact-head review pending. Astra independently confirmed
+  the regression and reviewed the narrow-exemption design.
+  Final focused cadence/Telegram/session subset: 91 passed in 17.53 seconds,
+  including real synthetic storage/manifest/watch-output failures after repeated
+  diagnostic-only cycles. Dependency, compile, whitespace and invariant checks
+  passed. Source inventory line reference and deterministic artifacts refreshed.
 
 ## B — Existing-owner monitoring accounting
 
@@ -267,6 +286,9 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Uncertainty: Runtime capacity may require a hardware/storage upgrade. No
   database bottleneck has been established.
 - Handoff: `docs/handoffs/CCI_RELIABILITY_RESOURCE_OBSERVATIONS.md`.
+- E final documentation head `8fa80b62d45b4e8c8bdfb0b149b28fa239f5d048` received
+  Astra APPROVE and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40033691462).
+  PR #145 is ready for owner review, unmerged and undeployed.
 - Integration and Runtime evidence package:
   `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`. Its proposed
   sequence requires separate owner approval; it is not cutover authorization.
@@ -281,8 +303,9 @@ the final documentation head `e4a5fb9` has CI and Astra approval.
 PRs #141 through #144 remain unmerged and undeployed. D's final documentation
 head `2cfd608` and A's final `1830aa8` have CI and exact-head Astra approval.
 E's final implementation `3aaac3b` has full pytest, required CI and Astra approval.
-The final documentation head receives its own exact-head review/CI, recorded in
-PR #145. Then request owner approval for the pinned integration sequence in
+The final E documentation head `8fa80b6` has exact-head approval and CI. Complete
+the provenance-only cadence follow-up's verification/review/CI and include its
+pinned head before requesting owner approval for the integration sequence in
 `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`; Runtime preflight
 and rollout require separate authorization. No historical outage cause was found in
 repository notes or the scoped GitHub audit search; it remains Unverified.

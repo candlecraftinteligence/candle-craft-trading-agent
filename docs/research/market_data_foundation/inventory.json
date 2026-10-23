@@ -880,7 +880,7 @@
     "code_refs": [
       {
         "path": "scripts/run_scan.py",
-        "line": 614,
+        "line": 615,
         "contains": "default=60.0"
       },
       {

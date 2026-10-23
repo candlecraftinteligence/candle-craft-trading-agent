@@ -678,5 +678,5 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `scripts/run_scan.py:614` contains `default=60.0`
+  - `scripts/run_scan.py:615` contains `default=60.0`
   - `app/watch_supervisor.py:82` contains `first_next_start = scheduled + interval`
