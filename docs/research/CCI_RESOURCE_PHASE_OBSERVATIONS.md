@@ -85,6 +85,11 @@ failure cannot replace scan failures. The bounded current receipt continues;
 unknown, torn or missing historical journals still fail closed. No evidence is
 deleted or automatically rotated. Resuming journal history needs a separately
 approved archival/generation procedure; restarting alone is not that procedure.
+Established journal ownership is retained separately from budget exhaustion and
+callback configuration. Losing a previously established normal journal also
+refuses recreation, both in an active session and after restart. A legacy receipt
+without journal attestation is conservative: it does not authorize creating new
+history. A genuinely new session, or a known never-configured journal, may initialize.
 
 The receipt remains at most 32 KiB with one nonrecursive prior session. Existing
 scan JSON, SQLite payloads, manifests and watch-output retention policies are
@@ -98,6 +103,14 @@ owner, provenance, stream-service, cadence, memory and inventory subset:
 preflight's three findings were corrected: cross-session budget suspension,
 startup/failure-path advisories, and timestamp failure isolation. Final full
 pytest, exact-head review and CI remain pending.
+The initial full run on `8ca919a` was stopped at 10% without observed failures
+after Astra identified missing normal-history recreation. The correction retains
+established ownership independently of exhaustion and includes active-session,
+restart and callback-configuration regressions; corrected full verification is
+required before release readiness.
+Corrected expanded subset: 242 passed in 46.05 seconds. Final corrected
+profile/resource/session/inventory subset: **111 passed in 16.64 seconds**,
+including legacy receipt and contradictory-ownership cases.
 
 An alternating 100-pair filesystem-only DEV probe compared committed A's session
 writer with E's writer plus actual local resource sampling, 19 synthetic phase

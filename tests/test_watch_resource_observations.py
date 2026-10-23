@@ -254,3 +254,81 @@ def test_corrupt_budget_metadata_cannot_authorize_reset(tmp_path):
         with WatchSession(path, interval_seconds=300, on_observation=_writer(path)):
             pass
     assert session.receipt_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_established_nonexhausted_journal_is_never_recreated_when_missing(tmp_path, restart):
+    path = tmp_path / "synthetic.db"
+    journal = Path(f"{path}.watch-observations.jsonl")
+    if restart:
+        with WatchSession(path, interval_seconds=300, on_observation=_writer(path)):
+            pass
+        journal.unlink()  # Owned fixture simulates externally lost evidence.
+        with pytest.raises(WatchSessionError, match="refusing append"):
+            with WatchSession(path, interval_seconds=300, on_observation=_writer(path)):
+                pass
+    else:
+        with WatchSession(path, interval_seconds=300, on_observation=_writer(path)) as session:
+            journal.unlink()
+            with pytest.raises(WatchSessionError, match="refusing append"):
+                session._observe({"database_id": session.database_id, "record_kind": "synthetic"})
+    assert not journal.exists()
+
+
+def test_unconfigured_session_does_not_erase_established_history_knowledge(tmp_path):
+    path = tmp_path / "synthetic.db"
+    with WatchSession(path, interval_seconds=300, on_observation=_writer(path)):
+        pass
+    with WatchSession(path, interval_seconds=300) as unconfigured:
+        assert unconfigured.state["journal_established"] is True
+    Path(f"{path}.watch-observations.jsonl").unlink()
+    with pytest.raises(WatchSessionError, match="refusing append"):
+        with WatchSession(path, interval_seconds=300, on_observation=_writer(path)):
+            pass
+
+
+def test_first_configuration_after_known_unconfigured_session_initializes_journal(tmp_path):
+    path = tmp_path / "synthetic.db"
+    with WatchSession(path, interval_seconds=300) as unconfigured:
+        assert unconfigured.state["journal_established"] is False
+    with WatchSession(path, interval_seconds=300, on_observation=_writer(path)) as configured:
+        assert configured.state["journal_established"] is True
+        assert configured.state["observation_journal"]["status"] == "APPENDED"
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_legacy_receipt_requires_existing_journal_without_silent_reset(tmp_path, missing):
+    path = tmp_path / "synthetic.db"
+    with WatchSession(path, interval_seconds=300, on_observation=_writer(path)) as session:
+        pass
+    legacy = json.loads(session.receipt_path.read_text())
+    legacy.pop("journal_established")
+    legacy.pop("observation_journal")
+    session.receipt_path.write_text(json.dumps(legacy))
+    journal = Path(f"{path}.watch-observations.jsonl")
+    if missing:
+        journal.unlink()
+        with pytest.raises(WatchSessionError, match="refusing append"):
+            with WatchSession(path, interval_seconds=300, on_observation=_writer(path)):
+                pass
+        assert not journal.exists()
+    else:
+        before = journal.read_bytes()
+        with WatchSession(path, interval_seconds=300, on_observation=_writer(path)) as resumed:
+            assert resumed.state["journal_established"] is True
+        assert journal.read_bytes().startswith(before)
+
+
+def test_contradictory_established_flag_cannot_recreate_history(tmp_path):
+    path = tmp_path / "synthetic.db"
+    with WatchSession(path, interval_seconds=300, on_observation=_writer(path)) as session:
+        pass
+    receipt = json.loads(session.receipt_path.read_text())
+    receipt["journal_established"] = False
+    session.receipt_path.write_text(json.dumps(receipt))
+    Path(f"{path}.watch-observations.jsonl").unlink()
+    before = session.receipt_path.read_bytes()
+    with pytest.raises(WatchSessionError, match="refusing overwrite"):
+        with WatchSession(path, interval_seconds=300, on_observation=_writer(path)):
+            pass
+    assert session.receipt_path.read_bytes() == before

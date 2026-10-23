@@ -62,12 +62,13 @@ def append_session_observation(database_path: str | Path, row: Mapping[str, Any]
     if len(terminal) > JOURNAL_TERMINAL_RESERVE_BYTES:
         raise WatchSessionError("journal terminal marker exceeds reserved bound")
     suspended = row.get("journal_recording_suspended") is True
-    payload = json.dumps({"contract": CONTRACT, **{key: value for key, value in row.items() if key != "journal_recording_suspended"}}, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    established = suspended or row.get("journal_previously_established") is True
+    payload = json.dumps({"contract": CONTRACT, **{key: value for key, value in row.items() if key not in {"journal_recording_suspended", "journal_previously_established"}}}, sort_keys=True, ensure_ascii=False).encode("utf-8")
     if len(payload) > MAX_RECEIPT_BYTES:
         raise WatchSessionError("watch journal record exceeds bound")
     if path.is_symlink():
         raise WatchSessionError("watch journal must not be a symlink")
-    if not suspended:
+    if not established:
         try:
             with path.open("xb") as handle:
                 handle.write(json.dumps(header, sort_keys=True).encode("utf-8") + b"\n")
@@ -173,9 +174,14 @@ class WatchSession:
                 "stage": "STARTING", "latest_iteration": {},
                 "shutdown_finalization_observed_at": NA, "shutdown_outcome": NA,
                 "process_exit_cause": "Unverified", "previous_session": {},
+                "journal_established": False,
             }
             if prior is not None:
                 journal = prior.get("observation_journal", {})
+                self.state["journal_established"] = prior.get(
+                    "journal_established", journal.get("status") in {"APPENDED", "BUDGET_EXHAUSTED"}
+                    or "observation_journal" not in prior,
+                )
                 if journal.get("status") == "BUDGET_EXHAUSTED":
                     self.state["observation_journal"] = {**journal, "omitted_this_session": 0}
                 compact = {key: prior[key] for key in (
@@ -219,8 +225,12 @@ class WatchSession:
                 self.state["observation_journal"] = {"status": "NOT_CONFIGURED", "coverage_complete": False}
             return
         prior = self.state.get("observation_journal", {})
-        result = self._on_observation({**row, "journal_recording_suspended": prior.get("status") == "BUDGET_EXHAUSTED"})
+        result = self._on_observation({
+            **row, "journal_recording_suspended": prior.get("status") == "BUDGET_EXHAUSTED",
+            "journal_previously_established": self.state.get("journal_established", False),
+        })
         if isinstance(result, dict) and result.get("status") in {"APPENDED", "BUDGET_EXHAUSTED"}:
+            self.state["journal_established"] = True
             omitted = int(prior.get("omitted_this_session", 0))
             total_omitted = int(prior.get("omitted_record_count", 0))
             if result["status"] == "BUDGET_EXHAUSTED":
@@ -285,10 +295,14 @@ class WatchSession:
                 if latest["completion_observed"]:
                     _timestamp(latest["finalization_observed_at"])
             journal = prior.get("observation_journal")
+            if "journal_established" in prior and type(prior["journal_established"]) is not bool:
+                raise ValueError("invalid journal ownership observation")
             if journal is not None:
                 if not isinstance(journal, dict) or journal.get("status") not in {"APPENDED", "BUDGET_EXHAUSTED", "NOT_CONFIGURED", "CALLBACK_UNATTESTED"}:
                     raise ValueError("unknown journal observation")
                 if journal["status"] in {"APPENDED", "BUDGET_EXHAUSTED"}:
+                    if prior.get("journal_established") is False:
+                        raise ValueError("inconsistent established journal observation")
                     for field in ("bytes", "limit_bytes", "omitted_record_count", "omitted_this_session"):
                         if type(journal[field]) is not int or not 0 <= journal[field] <= 2**63 - 1:
                             raise ValueError("invalid journal count")

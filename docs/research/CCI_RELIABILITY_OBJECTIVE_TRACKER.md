@@ -1,7 +1,8 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-23, owner accounting, research stratification and Telegram
-provenance diagnostics CODE_COMPLETE.
+Checkpoint: 2026-10-24, owner accounting, research stratification, Telegram
+provenance and watch-session implementation CODE_COMPLETE; resource observations
+under final DEV verification.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
@@ -214,7 +215,15 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   or restart. Current receipt continues without auto-cleanup or backoff changes.
 - Branch: `codex/reliability-resource-observations`, based on A final `1830aa8`.
 - Contract: `docs/research/CCI_RESOURCE_PHASE_OBSERVATIONS.md`.
-- Implementation PR / independent review: N/A.
+- Implementation PR: [#145](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/145),
+  stacked on #144. Astra exact-head review of `8ca919a`: CHANGES_REQUIRED because
+  a missing established normal journal could be recreated. Corrected established
+  ownership is independent of exhaustion and callback configuration, with
+  active-session/restart/legacy/configuration regressions. The first full pytest
+  was stopped at 10% without observed failures to verify this correction.
+  Corrected broader subset: 242 passed in 46.05 seconds; final corrected
+  profile/resource/session/inventory subset: 111 passed in 16.64 seconds,
+  including conservative legacy/contradictory-ownership cases.
 - Tests: corrected profile/resource/session subset 65 passed; expanded resource,
   watch/command/owner/provenance/stream/cadence/inventory subset 238 passed in
   45.97 seconds. Full pytest, exact-head review and CI pending. Astra preflight
@@ -249,11 +258,10 @@ approval; PR #141 stays unmerged and undeployed. Handoff:
 `docs/handoffs/CCI_RELIABILITY_OWNER_COVERAGE.md`.
 Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
 the final documentation head `e4a5fb9` has CI and Astra approval.
-PRs #141, #142 and #143 remain unmerged and undeployed. D is CODE_COMPLETE at
-implementation/correction head `29056e7`, with a documentation-only checkpoint
-  receiving separate review/CI. A implementation `c8d2a2f` has full pytest,
-CI and exact-head Astra approval; its documentation checkpoint has separate
-CI/review requirements. Continue E's phase/resource observations. No historical outage cause was found in
+PRs #141 through #144 remain unmerged and undeployed. D's final documentation
+head `2cfd608` and A's final `1830aa8` have CI and exact-head Astra approval.
+Continue E's corrected full pytest, exact-head review and CI, then prepare the
+concrete integration and Runtime verification packet. No historical outage cause was found in
 repository notes or the scoped GitHub audit search; it remains Unverified.
 Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
