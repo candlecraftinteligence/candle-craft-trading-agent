@@ -184,6 +184,10 @@ def test_discovery_failure_retains_monitoring_report_in_failed_manifest(tmp_path
     args = run_scan.parse_args(["--symbols", "BTCUSDT", "--lifecycle", "--database-path", str(path),
                                "--execution-timeframe", TIMEFRAME])
     asyncio.run(run_scan._surface_monitoring_during_discovery_failure(args, discovery))
+    startup = json.loads((tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert startup["record_kind"] == "discovery_failure_monitoring_diagnostic"
+    assert startup["scan_completion_record"] is False
+    assert startup["owner_monitoring"]["evaluated_lifecycle_ids"] == [owner.lifecycle_id]
     summary = _summary(discovery)
     from types import SimpleNamespace
     run_scan._record_failed_watch_iteration(
@@ -193,3 +197,69 @@ def test_discovery_failure_retains_monitoring_report_in_failed_manifest(tmp_path
     assert row["status"] == "FAILED"
     assert row["owner_monitoring"]["evaluated_lifecycle_ids"] == [owner.lifecycle_id]
     assert row["watch_supervisor"]["owner_monitoring"] == row["owner_monitoring"]
+
+
+@pytest.mark.parametrize("continuation_raises", [False, True])
+@pytest.mark.parametrize("watch", [False, True])
+def test_monitoring_failure_has_durable_partial_diagnostics(
+    tmp_path, monkeypatch, continuation_raises, watch,
+):
+    _quiet_runtime(monkeypatch, tmp_path)
+    path, _ = _bootstrap_watch_main(tmp_path, monkeypatch, prior_state=False)
+    with SQLiteSetupLifecycleRepository(path) as repository:
+        owner = _seed_entered(repository)
+        before = _progress(repository, owner.lifecycle_id)
+    monkeypatch.setattr(run_scan, "ScannerRunner", SequenceWatchRunner)
+    SequenceWatchRunner.configs = []
+    SequenceWatchRunner.results_by_call = [
+        (_rejected_result("BTCUSDT", tuple(_continuation_candles()), mode="scalp", bias=None),)
+    ]
+    if continuation_raises:
+        async def fail(*args, **kwargs):
+            raise RuntimeError("synthetic continuation failure")
+        monkeypatch.setattr(run_scan, "_continue_owned_plan_monitoring", fail)
+    else:
+        monkeypatch.setattr(run_scan, "_owner_monitoring_client",
+                            lambda args: _KlineClient(error=RuntimeError("synthetic adapter failure")))
+    monkeypatch.setattr(run_scan, "_watch_iteration_timestamp", lambda: _decision(2))
+
+    async def forbid_delivery(*args, **kwargs):
+        raise AssertionError("one-shot failure must exit before delivery")
+
+    if not watch:
+        monkeypatch.setattr(run_scan, "_deliver_telegram_manual_signals_if_enabled", forbid_delivery)
+    args = ["--symbols", "BTCUSDT", "--database-path", str(path), "--lifecycle",
+            "--execution-timeframe", TIMEFRAME]
+    if watch:
+        args += ["--watch", "--watch-max-iterations", "1", "--watch-interval-sec", "0.01"]
+        asyncio.run(run_scan.main(args))
+    else:
+        with pytest.raises(SystemExit, match="synthetic"):
+            asyncio.run(run_scan.main(args))
+    row = json.loads((tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    report = row["owner_monitoring"]
+    assert report["obligation_count"] == 1
+    assert report["all_obligations_verified"] is False
+    assert row.get("status", row.get("watch_supervisor", {}).get("status")) == "PARTIAL"
+    if continuation_raises:
+        assert report["continuation_status"] == "ERROR"
+        assert "synthetic continuation failure" in report["continuation_error"]
+    else:
+        assert report["owner_dispositions"][0]["disposition"] == "ERROR"
+        assert "synthetic adapter failure" in report["errors"][0]["detail"]
+    with SQLiteSetupLifecycleRepository(path) as repository:
+        assert _progress(repository, owner.lifecycle_id) == before
+
+
+def test_failed_diagnostic_write_keeps_original_error(tmp_path, monkeypatch):
+    from tests.test_p5a_active_owner_monitoring import _run
+
+    monkeypatch.setattr(run_scan, "SCAN_RUN_MANIFEST_PATH", tmp_path)
+    result = _run(_rejected_result("BTCUSDT", (), mode="scalp", bias=None))
+    failure = RuntimeError("original monitoring failure")
+    result = run_scan._retain_owner_monitoring_failure(result, failure)
+    assert result.scanner_process_summary["owner_monitoring"]["obligation_count"] is None
+    with pytest.raises(SystemExit) as raised:
+        run_scan._persist_one_shot_monitoring_failure(result, exc=failure)
+    assert "original monitoring failure" in str(raised.value)
+    assert "owner_monitoring_diagnostic_persistence" in str(raised.value)

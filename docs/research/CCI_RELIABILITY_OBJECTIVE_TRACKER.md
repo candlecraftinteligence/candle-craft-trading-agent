@@ -38,8 +38,16 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Branch: `codex/reliability-owner-coverage`.
 - Implementation PR / independent Astra review: pending.
 - Tests: existing P5A/watch subset plus initial regressions: 98 passed. Expanded
-  accounting and failure-visibility checks: 15 passed. Full pytest is running;
-  its result is pending. Dependency, compile and whitespace checks passed.
+  accounting/failure-visibility/binding subset after the first review correction:
+  39 passed. The first full run was interrupted at 44% without failures to
+  revalidate the corrected implementation. Final full-suite result is pending.
+  Dependency, compile and whitespace checks passed.
+- Independent review: Astra returned CHANGES_REQUIRED for `fc170b0` because
+  one-shot error exits preceded durable report persistence, and raised watch
+  continuations left incompleteness implicit. The correction writes a diagnostic
+  manifest before one-shot failure, marks continuation errors explicitly, and
+  preserves discovery-failure startup reports. These records explicitly are not
+  scan-completion records. Corrected exact-head review is pending.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: DEV counterexamples do not identify the nine historical owners'
   actual cause. Current collection can expose but cannot repair historical gaps.

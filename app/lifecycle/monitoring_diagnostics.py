@@ -82,5 +82,12 @@ def summarize_monitoring_passes(
         "covered_keys": list(covered),
     }
     if retain_passes:
-        result["passes"] = [dict(report) for report in passes]
+        # The latest lag/identity rows already appear above. Keep pass provenance
+        # without serializing those rows repeatedly into every scan artifact.
+        keys = (
+            "obligation_count", "disposition_counts", "evaluated_lifecycle_ids",
+            "verified_lifecycle_ids", "gap_lifecycle_ids", "skipped_lifecycle_ids",
+            "uncovered_symbols", "errors",
+        )
+        result["passes"] = [{key: report[key] for key in keys if key in report} for report in passes]
     return result

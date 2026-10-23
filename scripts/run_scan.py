@@ -1041,9 +1041,13 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 skip_lifecycle_ids=evaluated_ids,
             )
         except (Exception, SystemExit) as exc:
+            result = _retain_owner_monitoring_failure(result, exc)
+            _persist_one_shot_monitoring_failure(result, exc=exc, prior_errors=prior_monitoring_errors)
             _raise_one_shot_owner_monitoring_failure(exc, prior_errors=prior_monitoring_errors)
         else:
             result = _retain_owner_monitoring_result(result, monitoring_result)
+            if _owner_monitoring_failure_lines(result=monitoring_result, prior_errors=prior_monitoring_errors):
+                _persist_one_shot_monitoring_failure(result, prior_errors=prior_monitoring_errors)
             _raise_one_shot_owner_monitoring_failure(
                 result=monitoring_result,
                 prior_errors=prior_monitoring_errors,
@@ -2529,6 +2533,59 @@ def _retain_owner_monitoring_result(result: ScannerRunResult, monitoring: Any) -
     return result.model_copy(update={"scanner_process_summary": summary})
 
 
+def _retain_owner_monitoring_failure(result: ScannerRunResult, exc: BaseException) -> ScannerRunResult:
+    """A continuation exception cannot attest to coverage or an empty population."""
+    summary = dict(result.scanner_process_summary)
+    report = dict(summary.get("owner_monitoring") or {
+        "obligation_count": None,
+        "owner_dispositions": [],
+        "historical_completeness": "Unverified",
+        "evidence_scope": "this_monitoring_cycle_only",
+        "owner_accounting_status": NA,
+    })
+    report.update({
+        "continuation_status": "ERROR",
+        "continuation_error": _watch_phase_error("owner_monitoring", exc),
+        "all_obligations_verified": False,
+    })
+    summary["owner_monitoring"] = report
+    return result.model_copy(update={"scanner_process_summary": summary})
+
+
+def _persist_one_shot_monitoring_failure(
+    result: ScannerRunResult, *,
+    exc: BaseException | None = None, prior_errors: Sequence[Any] = (),
+) -> None:
+    """Write diagnostic evidence before failing closed; never enter delivery."""
+    report = dict(result.scanner_process_summary.get("owner_monitoring") or {})
+    errors = _owner_monitoring_failure_lines(exc=exc, prior_errors=prior_errors)
+    for item in report.get("errors", ()):
+        line = f"owner_monitoring:{item.get('symbol', NA)}:{item.get('detail', NA)}"
+        if line not in errors:
+            errors = (*errors, line)
+    row = {
+        "record_kind": "owner_monitoring_failure_diagnostic",
+        "scan_completion_record": False,
+        "run_id": _manifest_run_id(result, None),
+        "timestamp": _watch_iteration_timestamp(),
+        "status": "PARTIAL",
+        "phase_statuses": {"owner_monitoring": "PARTIAL"},
+        "owner_monitoring": report,
+        "errors": list(errors),
+    }
+    _append_monitoring_failure_diagnostic(row)
+
+
+def _append_monitoring_failure_diagnostic(row: Mapping[str, Any]) -> None:
+    try:
+        SCAN_RUN_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SCAN_RUN_MANIFEST_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
+    except OSError as persistence_error:
+        lines = (*row.get("errors", ()), _watch_phase_error("owner_monitoring_diagnostic_persistence", persistence_error))
+        raise SystemExit("\n".join(lines)) from persistence_error
+
+
 def _owner_monitoring_failure_lines(
     *,
     exc: BaseException | None = None,
@@ -2604,6 +2661,17 @@ async def _surface_monitoring_during_discovery_failure(
     if result is not None and callable(getattr(result, "as_dict", None)):
         setattr(discovery, "owner_monitoring_diagnostics", result.as_dict())
     lines = _owner_monitoring_failure_lines(exc=monitor_exc, result=result)
+    if publish_on_system_exit and hasattr(discovery, "owner_monitoring_diagnostics"):
+        _append_monitoring_failure_diagnostic({
+            "record_kind": "discovery_failure_monitoring_diagnostic",
+            "scan_completion_record": False,
+            "run_id": f"discovery-failure-{uuid4().hex}",
+            "timestamp": _watch_iteration_timestamp(),
+            "status": "FAILED",
+            "phase_statuses": {"discovery": "FAILED", "owner_monitoring": "PARTIAL" if lines else "SUCCESS"},
+            "owner_monitoring": discovery.owner_monitoring_diagnostics,
+            "errors": [_watch_phase_error("discovery", discovery), *lines],
+        })
     if monitor_exc is not None:
         setattr(discovery, "owner_monitoring_error", monitor_exc)
     if not lines:
@@ -4208,6 +4276,7 @@ async def _run_watch_scan_iteration(
                 skip_lifecycle_ids=monitoring_skip_ids,
             )
         except (Exception, SystemExit) as exc:
+            result = _retain_owner_monitoring_failure(result, exc)
             _record_owner_monitoring_phase(
                 phase_statuses,
                 recoverable_errors,
