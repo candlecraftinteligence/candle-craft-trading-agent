@@ -1,6 +1,7 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-23, owner-accounting CODE_COMPLETE. DEV investigation based on the user-supplied October 23
+Checkpoint: 2026-10-23, owner accounting CODE_COMPLETE; research stratification
+implemented and under review. DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
 not accessed. Current Runtime identity, resource headroom, coverage and delivery
@@ -59,20 +60,26 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   tests passed, no remaining actionable findings. Code-review approval only.
 - [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39923605763):
   success for `735d0b4`. Dependency, compile and whitespace checks passed.
+- Final documentation head `bdcc90e649fdcd4d5b542f867ba27264a6d038d9` independently
+  Astra APPROVED; [final-head CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39925121114)
+  succeeded. PR #141 is ready for owner review, unmerged and undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: DEV counterexamples do not identify the nine historical owners'
   actual cause. Current collection can expose but cannot repair historical gaps.
 
 ## C — Historical lifecycle integrity
 
-- Status: INVESTIGATING.
+- Status: REVIEW_PENDING (supplied research-evidence stratification only).
 - Weakness: 73 historical continuity gaps and 20 missing confirmation boundaries.
 - Evidence: outcome evaluator rejects absent boundaries and continuity holes;
   `record_closed_candle_evidence_gap` preserves cursor positions and emits no
   synthetic terminal event. B makes current evaluation distinct from lifetime
   completeness; `historical_completeness` stays Unverified.
-- Correction: preserve these guards; verify research exclusion/stratification
-  separately before claiming research-grade outcome completeness.
+- Correction: preserve these guards; classify supplied execution-integrity claims
+  separately from plan attribution, preserve source timestamps/lineage, and add
+  evidence strata to evaluation and plan-interpretation counts. Missing status is
+  unavailable; conflicting snapshots are mixed; a reported Verified status with
+  a diagnostic has a separate conservative stratum. No original outcome is changed.
 - New DEV counterexample: `project_outcome_ownership` accepts a synthetic progress
   row with `integrity_status=Unverified` and a candle-gap diagnostic as an
   interpretable `tp3_terminal` when plan attribution and supplied context match.
@@ -80,8 +87,12 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   snapshot interpretations. It does not stratify that interpretation by supplied
   execution-evidence integrity. This is a reporting-classification issue, not
   evidence that the lifecycle engine fabricated a terminal state.
-- Implementation PR: B is a partial diagnostic improvement only.
-- Tests / independent review: gap and identity regression tests; review pending.
+- Branch: `codex/reliability-research-evidence`, based on B's final head. The
+  focused PR will target `codex/reliability-owner-coverage` until integration.
+- Implementation PR: pending; report contract is described in
+  `docs/research/CCI_EXECUTION_EVIDENCE_STRATIFICATION.md`.
+- Tests: 106 targeted report, attribution, context and cutoff tests passed.
+  Full suite and independent Astra exact-head review pending.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: no historical candles recovered; none fabricated or relabeled.
 
@@ -125,12 +136,11 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## Continuation and release boundaries
 
-Owner-accounting implementation is CODE_COMPLETE with CI and exact-code Astra
-approval; PR #141 stays unmerged and undeployed. Documentation checkpoint changes
-require their own final-head CI/review confirmation. Handoff:
+Owner-accounting implementation is CODE_COMPLETE with final-head CI and Astra
+approval; PR #141 stays unmerged and undeployed. Handoff:
 `docs/handoffs/CCI_RELIABILITY_OWNER_COVERAGE.md`.
-Next implement C's explicit execution-evidence stratification on a separate DEV
-branch, then continue A, D and E. Preserve quality 88, grade A, RR 3.0,
+Finish C's full verification, PR/CI and exact-head independent review, then
+continue A, D and E. Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
 freshness and deduplication. P4 shadow remains disabled and non-enforcing.
 No merge, deployment, production database access, scanner, listener or external

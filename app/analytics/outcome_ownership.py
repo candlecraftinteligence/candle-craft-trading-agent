@@ -17,10 +17,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 from app.analytics.evidence_contract import UNAVAILABLE, UNSAFE
+from app.analytics.execution_evidence_strata import EXECUTION_EVIDENCE_CONTRACT, summarize_execution_evidence
 from app.data.candle_integrity import normalize_utc_timestamp
 from app.data.dtos import NA
 from app.lifecycle.economic_identity import (
@@ -144,10 +146,26 @@ def project_outcome_ownership(
     )
     inventory = _plan_identity_inventory(records, evaluations)
     interpretations = _plan_interpretations(evaluations)
+    execution_by_plan: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for evaluation in evaluations:
+        plan_id = evaluation["attribution"].get("plan_version_id")
+        if plan_id and evaluation["integrity_status"] == STATUS_VERIFIED:
+            execution_by_plan.setdefault((evaluation["source_namespace"], plan_id), []).extend(
+                evaluation["execution_evidence"]["supplied_rows"]
+            )
+    for interpretation in interpretations:
+        key = (interpretation["source_namespace"], interpretation["plan_version_id"])
+        interpretation["execution_evidence"] = summarize_execution_evidence(execution_by_plan.get(key, ()))
     integrity = _integrity_rollup(records, evaluations)
     counts = _counts(records, progress, events, analytics, evaluations, interpretations, inventory)
     return {
         "ownership_version": OUTCOME_OWNERSHIP_VERSION,
+        "execution_evidence_policy": {
+            "contract_version": EXECUTION_EVIDENCE_CONTRACT,
+            "historical_completeness": "Unverified",
+            "basis": "supplied progress integrity is separate from verified plan attribution",
+            "use": "stratified snapshot diagnostics; source claims do not establish candle coverage or expectancy",
+        },
         "feeds_operational_decisions": False,
         "schema_version_unchanged": True,
         "canonical_outcome_per_plan_version": {
@@ -517,6 +535,7 @@ def _build_evaluations(
                 "lifecycle_id": lifecycle_id,
                 "plan_identity": plan_identity,
                 "integrity_status": integrity,
+                "execution_evidence": summarize_execution_evidence([item["payload"] for item in snapshots]),
                 "attribution": attribution,
                 "economic": economic,
                 "merge_conflicts": merge_conflicts,
@@ -922,6 +941,7 @@ def _record_only_evaluations(
                 "lifecycle_id": lifecycle_id,
                 "plan_identity": None,
                 "integrity_status": status,
+                "execution_evidence": summarize_execution_evidence([]),
                 "attribution": _attribution(
                     status,
                     detail,
@@ -1269,9 +1289,22 @@ def _counts(
         },
         "interpretable_plan_outcomes": {
             "value": len(interpretable),
+            "execution_evidence_strata": dict(sorted(Counter(
+                item["execution_evidence"]["stratum"] for item in interpretable
+            ).items())),
             "unit": "diagnostic plan-level interpretation with one coherent evaluation context",
             "denominator": "verified plan_version_id groups that are not split across windows",
             "not": "unique trades, fills, or persisted canonical outcomes",
+            "evidence_note": "Snapshot interpretations include unverified/unavailable execution evidence; use the strata.",
+        },
+        "execution_evidence_strata": {
+            "evaluation_groups": dict(sorted(Counter(
+                item["execution_evidence"]["stratum"] for item in evaluations
+            ).items())),
+            "plan_interpretations": dict(sorted(Counter(
+                item["execution_evidence"]["stratum"] for item in interpretations
+            ).items())),
+            "unit": "supplied evaluation groups and diagnostic plan interpretations, not trades",
         },
         "unresolved_plan_groups": {
             "value": sum(1 for item in interpretations if not item.get("interpretable")),
