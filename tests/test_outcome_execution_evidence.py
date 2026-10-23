@@ -114,3 +114,21 @@ def test_absent_progress_is_not_a_zero_integrity_observation():
     report = project_outcome_ownership(lifecycle_records=[_latched()], provenance=_provenance())
     assert report["evaluations"][0]["execution_evidence"]["stratum"] == "no_progress_supplied"
     assert report["counts"]["execution_evidence_strata"]["evaluation_groups"] == {"no_progress_supplied": 1}
+
+
+def test_conflicting_tracking_boundaries_keep_each_source_reference():
+    record = _latched()
+    first = _terminal_row(record, integrity_status="Unverified")
+    first["tracking_start_at"] = "2026-01-01T00:05:00+00:00"
+    second = {**first, "tracking_start_at": "2026-01-01T01:10:00+01:00", "integrity_status": "Verified"}
+    original = copy.deepcopy([first, second])
+    report = project_outcome_ownership(lifecycle_records=[record], progress_rows=[first, second], provenance=_provenance())
+    retained = report["evaluations"][0]["execution_evidence"]["supplied_rows"]
+    assert {row["tracking_start_at"] for row in retained} == {first["tracking_start_at"], second["tracking_start_at"]}
+    assert {row["lifecycle_id"] for row in retained} == {record.lifecycle_id}
+    assert {row["source_namespace"] for row in retained} == {"synthetic-test"}
+    references = report["source_evidence"]["outcome_progress"]["references"]
+    assert {row["source_reference"]["digest"] for row in retained} == {row["digest"] for row in references}
+    assert [first, second] == original
+    reversed_report = project_outcome_ownership(lifecycle_records=[record], progress_rows=[second, first], provenance=_provenance())
+    assert reversed_report == report

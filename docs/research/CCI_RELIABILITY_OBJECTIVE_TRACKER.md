@@ -91,8 +91,12 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   focused PR will target `codex/reliability-owner-coverage` until integration.
 - Implementation PR: pending; report contract is described in
   `docs/research/CCI_EXECUTION_EVIDENCE_STRATIFICATION.md`.
-- Tests: 106 targeted report, attribution, context and cutoff tests passed.
+- Tests: 107 targeted report, attribution, context and cutoff tests passed.
   Full suite and independent Astra exact-head review pending.
+- Astra review of `0220a0f`: CHANGES_REQUIRED for the retained tracking-boundary
+  field name. The correction retains actual `tracking_start_at`, lifecycle id,
+  namespace and each original source reference. The conflicting-boundary regression
+  passes; corrected exact-head review is pending.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: no historical candles recovered; none fabricated or relabeled.
 

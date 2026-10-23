@@ -535,7 +535,10 @@ def _build_evaluations(
                 "lifecycle_id": lifecycle_id,
                 "plan_identity": plan_identity,
                 "integrity_status": integrity,
-                "execution_evidence": summarize_execution_evidence([item["payload"] for item in snapshots]),
+                "execution_evidence": summarize_execution_evidence([
+                    {**item["payload"], "source_namespace": item["source_namespace"], "source_reference": _source_ref(item)}
+                    for item in snapshots
+                ]),
                 "attribution": attribution,
                 "economic": economic,
                 "merge_conflicts": merge_conflicts,

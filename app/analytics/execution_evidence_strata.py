@@ -11,9 +11,10 @@ from app.data.dtos import NA
 
 EXECUTION_EVIDENCE_CONTRACT = "cci-supplied-execution-evidence-v1"
 SUPPLIED_FIELDS = (
-    "plan_identity", "plan_version_id", "integrity_status", "diagnostic",
+    "lifecycle_id", "plan_identity", "plan_version_id", "source_namespace", "source_reference",
+    "integrity_status", "diagnostic",
     "evaluation_cursor_open_at", "evaluation_cursor_close_at",
-    "entry_tracking_from_at", "first_evaluated_at", "last_evaluated_at",
+    "tracking_start_at", "first_evaluated_at", "last_evaluated_at",
     "metadata_json", "metadata",
 )
 

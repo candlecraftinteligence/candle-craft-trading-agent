@@ -43,11 +43,16 @@ retain their prior meanings.
 
 ## Verification and limits
 
-The targeted report, attribution, context and cutoff subset passed 106 tests.
+The targeted report, attribution, context and cutoff subset passed 107 tests.
 The counterexample is a deterministic regression. Tests cover missing/malformed
 status, contradictory Verified+diagnostic claims, conflicting snapshots,
 namespace/lineage/timestamp preservation, input immutability and deterministic
 ordering. Full pytest, CI and exact-head independent Astra review are pending.
+
+The first independent review requested correction of a boundary-field typo.
+Retained snapshots now include the actual `tracking_start_at`, lifecycle id,
+namespace and original source reference/digest. A regression preserves two
+conflicting boundary strings and source references, without changing the inputs.
 
 The branch is `codex/reliability-research-evidence`, stacked on the independently
 approved owner-accounting head `bdcc90e649fdcd4d5b542f867ba27264a6d038d9`.
