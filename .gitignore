@@ -44,6 +44,8 @@ scan_runs/*.sqlite3-shm
 scan_runs/*.sqlite3-journal
 scan_runs/*.json
 scan_runs/*.jsonl
+scan_runs/*.watch.lock
+scan_runs/*.watch-session.json.*.tmp
 scan_runs/admin_drafts/
 scan_runs/admin_commands/
 !scan_runs/.gitkeep

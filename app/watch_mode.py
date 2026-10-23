@@ -124,6 +124,8 @@ class WatchIterationSummary(BaseModel):
     rejected_no_edge: int
     data_issues: int
     iteration_id: str = NA
+    watch_session_id: str = NA
+    duration_scope: str = "through_primary_persistence_before_manifest_reporting_and_presentation"
     status: Literal["SUCCESS", "PARTIAL", "FAILED", "CANCELLED", "FATAL"] = "SUCCESS"
     scheduled_start: str = NA
     actual_start: str = NA

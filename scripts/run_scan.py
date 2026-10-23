@@ -91,6 +91,7 @@ from app.alerts.telegram_lifecycle import (  # noqa: E402
 )
 from app.alerts.telegram_sender import resolve_public_signal_destination  # noqa: E402
 from app.alerts.provenance_diagnostics import summary_provenance, unavailable_provenance  # noqa: E402
+from app.watch_session import WatchSession, append_session_observation  # noqa: E402
 from app.formatters.scanner_console import ScannerConsolePresenter  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
@@ -774,6 +775,24 @@ def _watch_console_mode(args: argparse.Namespace) -> str:
 
 async def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    report_only = (
+        args.list_command_presets or args.list_presets or args.research
+        or args.show_history or args.export_history_json is not None
+    )
+    if args.watch and (args.reset_lifecycle or not report_only):
+        with WatchSession(
+            args.database_path, interval_seconds=args.watch_interval_sec,
+            on_observation=lambda row: append_session_observation(args.database_path, row),
+        ) as session:
+            await _main(args, argv=argv, session=session)
+    else:
+        await _main(args, argv=argv)
+
+
+async def _main(
+    args: argparse.Namespace, *, argv: Sequence[str] | None = None,
+    session: WatchSession | None = None,
+) -> None:
     if args.reset_lifecycle:
         _reset_lifecycle_state(args)
     if args.list_command_presets:
@@ -871,6 +890,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
             display_mode=display_mode,
             effective_candle_limit=effective_candle_limit,
             command_used=_command_used(argv),
+            session=session,
         )
         return
 
@@ -3427,6 +3447,7 @@ async def _run_watch_mode(
     display_mode: str,
     effective_candle_limit: int,
     command_used: str,
+    session: WatchSession | None = None,
 ) -> None:
     btc_d_context_service = _btc_d_context_service_for_config(config)
     macro_calendar_service = _macro_calendar_service_for_config(config)
@@ -3481,15 +3502,15 @@ async def _run_watch_mode(
     completed_iterations = 0
     stored_scan_runs = 0
     failure_streak = 0
-    if microstructure_flow_service is not None:
-        await microstructure_flow_service.start(startup_queued_symbols)
-    if order_book_liquidity_service is not None:
-        await order_book_liquidity_service.start(startup_queued_symbols)
-    if liquidation_flow_service is not None:
-        await liquidation_flow_service.start(startup_queued_symbols)
     iteration_in_progress = False
     scheduled_start_monotonic = time.monotonic()
     try:
+        if microstructure_flow_service is not None:
+            await microstructure_flow_service.start(startup_queued_symbols)
+        if order_book_liquidity_service is not None:
+            await order_book_liquidity_service.start(startup_queued_symbols)
+        if liquidation_flow_service is not None:
+            await liquidation_flow_service.start(startup_queued_symbols)
         while True:
             iteration += 1
             iteration_started_at = _watch_iteration_timestamp()
@@ -3498,7 +3519,13 @@ async def _run_watch_mode(
                 iteration_started_at, scheduled_start_monotonic - iteration_started_monotonic
             )
             previous_state = state
+            prior_failure_streak = failure_streak
             iteration_in_progress = True
+            if session is not None:
+                session.start_iteration(
+                    iteration=iteration, actual_start=iteration_started_at,
+                    scheduled_start=scheduled_start_at,
+                )
             iteration_watchlist, execution, iteration_error = await _attempt_watch_scan_iteration(
                 args,
                 startup_watchlist=watchlist,
@@ -3539,11 +3566,26 @@ async def _run_watch_mode(
                     failure_streak=failure_streak,
                     selected_backoff=selected_backoff,
                 )
+                if session is not None:
+                    failed_summary = failed_summary.model_copy(update={"watch_session_id": session.state["session_id"]})
                 _record_failed_watch_iteration(args, failed_summary, watchlist=watchlist, console_presenter=console)
                 iteration_in_progress = False
                 completed_iterations = iteration
                 if disposition == WatchFailureDisposition.FATAL:
                     raise iteration_error
+                schedule = schedule_after_iteration(
+                    scheduled_start_monotonic=scheduled_start_monotonic,
+                    actual_start_monotonic=iteration_started_monotonic,
+                    finished_monotonic=time.monotonic(), interval_seconds=args.watch_interval_sec,
+                    backoff_seconds=selected_backoff,
+                )
+                if session is not None:
+                    session.finish_iteration(
+                        status="FAILED", phases=failed_summary.phase_statuses, schedule=schedule,
+                        iteration_id=failed_summary.iteration_id, consecutive_failures=failure_streak,
+                        backoff_seconds=selected_backoff,
+                        will_continue=args.watch_max_iterations is None or iteration < args.watch_max_iterations,
+                    )
                 if args.watch_max_iterations is not None and iteration >= args.watch_max_iterations:
                     break
                 scheduled_start_monotonic = schedule.next_scheduled_monotonic
@@ -3644,6 +3686,7 @@ async def _run_watch_mode(
             summary = summary.model_copy(
                 update={
                     "iteration_id": execution.storage_run_id or uuid4().hex,
+                    "watch_session_id": session.state["session_id"] if session is not None else NA,
                     "status": iteration_status,
                     "scheduled_start": scheduled_start_at,
                     "actual_start": iteration_started_at,
@@ -3808,6 +3851,13 @@ async def _run_watch_mode(
                 database_path=args.database_path,
                 expected_identity=getattr(args, "runtime_identity", None),
             )
+            iteration_status = _iteration_status_from_phases(phase_statuses)
+            failure_streak = prior_failure_streak + 1 if iteration_status != "SUCCESS" else 0
+            selected_backoff = failure_backoff_seconds(failure_streak) if continue_watching else 0.0
+            presentation_summary = presentation_summary.model_copy(update={
+                "status": iteration_status, "phase_statuses": dict(phase_statuses),
+                "consecutive_failure_count": failure_streak, "selected_backoff_seconds": selected_backoff,
+            })
             console.emit(
                 console.format_watch_iteration(
                     presentation_summary,
@@ -3819,12 +3869,26 @@ async def _run_watch_mode(
             )
             iteration_in_progress = False
             completed_iterations = iteration
+            schedule = schedule_after_iteration(
+                scheduled_start_monotonic=scheduled_start_monotonic,
+                actual_start_monotonic=iteration_started_monotonic,
+                finished_monotonic=time.monotonic(), interval_seconds=args.watch_interval_sec,
+                backoff_seconds=selected_backoff,
+            )
+            if session is not None:
+                session.finish_iteration(
+                    status=iteration_status, phases=phase_statuses, schedule=schedule,
+                    iteration_id=summary.iteration_id, consecutive_failures=failure_streak,
+                    backoff_seconds=selected_backoff, will_continue=continue_watching,
+                )
 
             if not continue_watching:
                 break
             scheduled_start_monotonic = schedule.next_scheduled_monotonic
             await asyncio.sleep(max(0.0, scheduled_start_monotonic - time.monotonic()))
     except (KeyboardInterrupt, asyncio.CancelledError) as exc:
+        if session is not None:
+            session.shutdown_outcome = "CANCELLED"
         if iteration_in_progress:
             cancelled_watchlist = getattr(exc, "watch_iteration_watchlist", watchlist)
             cancelled_summary = _cancelled_watch_iteration_summary(
@@ -3839,6 +3903,8 @@ async def _run_watch_mode(
                 interval_seconds=args.watch_interval_sec,
                 interruption=exc,
             )
+            if session is not None:
+                cancelled_summary = cancelled_summary.model_copy(update={"watch_session_id": session.state["session_id"]})
             _record_failed_watch_iteration(args, cancelled_summary, watchlist=cancelled_watchlist, console_presenter=console)
             completed_iterations = iteration
         _print_watch_shutdown(
@@ -3849,12 +3915,17 @@ async def _run_watch_mode(
         )
         return
     finally:
-        if microstructure_flow_service is not None:
-            await microstructure_flow_service.stop()
-        if order_book_liquidity_service is not None:
-            await order_book_liquidity_service.stop()
-        if liquidation_flow_service is not None:
-            await liquidation_flow_service.stop()
+        # Attempt every cleanup even when an earlier service stop fails. The
+        # enclosing session keeps its lease until all of these attempts finish.
+        services = (microstructure_flow_service, order_book_liquidity_service, liquidation_flow_service)
+        cleanup_results = await asyncio.gather(*(service.stop() for service in services if service is not None), return_exceptions=True)
+        cleanup_errors = [item for item in cleanup_results if isinstance(item, BaseException)]
+        if cleanup_errors:
+            original = sys.exception()
+            details = "; ".join(f"{type(item).__name__}: {item}" for item in cleanup_errors)
+            if original is not None:
+                raise RuntimeError(f"{type(original).__name__}: {original}; service cleanup failed: {details}") from original
+            raise RuntimeError(f"service cleanup failed: {details}")
 
 
 async def _attempt_watch_scan_iteration(

@@ -700,7 +700,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "scripts/run_scan.py", "line": 611, "contains": "default=60.0"},
+            {"path": "scripts/run_scan.py", "line": 612, "contains": "default=60.0"},
             {"path": "app/watch_supervisor.py", "line": 82, "contains": "first_next_start = scheduled + interval"},
         ),
     },
