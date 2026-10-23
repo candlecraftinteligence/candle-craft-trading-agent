@@ -1,6 +1,6 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-23. DEV investigation based on the user-supplied October 23
+Checkpoint: 2026-10-23, owner-accounting CODE_COMPLETE. DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
 not accessed. Current Runtime identity, resource headroom, coverage and delivery
@@ -23,7 +23,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## B — Existing-owner monitoring accounting
 
-- Status: REVIEW_PENDING.
+- Status: TESTED.
 - Weakness: nine historically uncovered owners; monitoring success can obscure
   missing execution evidence.
 - Root cause verified in DEV: P5A already selects economic obligations independent
@@ -36,11 +36,14 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   diagnostics in scan JSON, SQLite payloads and manifests. Failed discovery watch
   iterations also retain the monitoring report. No eligibility change.
 - Branch: `codex/reliability-owner-coverage`.
-- Implementation PR / independent Astra review: pending.
+- Implementation PR: [#141](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/141).
+- Implementation SHA: `735d0b4dbe85e79f082e7cb6b6560c7890262f10`.
 - Tests: existing P5A/watch subset plus initial regressions: 98 passed. Expanded
   accounting/failure-visibility/binding subset after the first review correction:
   41 passed. Full runs were interrupted at 44% and 10% without failures to
-  revalidate review corrections. Final full-suite result is pending.
+  revalidate review corrections. Final full applicable pytest on `735d0b4`:
+  **3390 passed, 1 dependency deprecation warning in 612.93 seconds**. No skips
+  or failures. The warning concerns FastAPI/Starlette TestClient's httpx adapter.
   Dependency, compile and whitespace checks passed.
   Corrected accounting/failure/binding plus command/watch suites: 167 passed.
 - Independent review: Astra returned CHANGES_REQUIRED for `fc170b0` because
@@ -52,7 +55,10 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   discovery and monitoring exceptions still lacked an unknown-coverage report;
   that path now shares the explicit N/A population error report. Synthetic scanner
   artifact defaults are isolated under pytest temp directories. Corrected
-  exact-head review is pending.
+  exact-head review of `735d0b4`: **Astra APPROVE**, independently 41 targeted
+  tests passed, no remaining actionable findings. Code-review approval only.
+- [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39923605763):
+  success for `735d0b4`. Dependency, compile and whitespace checks passed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: DEV counterexamples do not identify the nine historical owners'
   actual cause. Current collection can expose but cannot repair historical gaps.
@@ -67,6 +73,13 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   completeness; `historical_completeness` stays Unverified.
 - Correction: preserve these guards; verify research exclusion/stratification
   separately before claiming research-grade outcome completeness.
+- New DEV counterexample: `project_outcome_ownership` accepts a synthetic progress
+  row with `integrity_status=Unverified` and a candle-gap diagnostic as an
+  interpretable `tp3_terminal` when plan attribution and supplied context match.
+  The report already keeps expectancy/P&L unavailable and warns that these are
+  snapshot interpretations. It does not stratify that interpretation by supplied
+  execution-evidence integrity. This is a reporting-classification issue, not
+  evidence that the lifecycle engine fabricated a terminal state.
 - Implementation PR: B is a partial diagnostic improvement only.
 - Tests / independent review: gap and identity regression tests; review pending.
 - Deployment / Runtime verification: not deployed / N/A.
@@ -78,6 +91,9 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Weakness: ten historical PENDING follow-ups lack canonical reservations.
 - Evidence: ownership checks require the canonical pointer and matching event /
   reservation identity; outbox recovery fails closed without that pointer.
+- Prospective diagnostic finding: `recover_public_lifecycle_alerts` logs a
+  missing-attempt event on every pass and continues without a delivery diagnostic
+  for that event. The ten historical events' current state remains Unverified.
 - Correction: investigate bounded event-key diagnostics and warning suppression
   while preserving unresolved status and preventing any automatic resend.
 - Implementation PR / tests / independent review: N/A / existing outbox tests /
@@ -109,9 +125,13 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## Continuation and release boundaries
 
-Finish B verification, commit, PR/CI and exact-head independent Astra review.
-Then continue focused DEV investigations of A, D and E; verify C's research
-consumers. Preserve quality 88, grade A, RR 3.0, confirmation, immutable economics,
+Owner-accounting implementation is CODE_COMPLETE with CI and exact-code Astra
+approval; PR #141 stays unmerged and undeployed. Documentation checkpoint changes
+require their own final-head CI/review confirmation. Handoff:
+`docs/handoffs/CCI_RELIABILITY_OWNER_COVERAGE.md`.
+Next implement C's explicit execution-evidence stratification on a separate DEV
+branch, then continue A, D and E. Preserve quality 88, grade A, RR 3.0,
+confirmation, immutable economics,
 freshness and deduplication. P4 shadow remains disabled and non-enforcing.
 No merge, deployment, production database access, scanner, listener or external
 market-data acquisition was authorized as part of implementation.
