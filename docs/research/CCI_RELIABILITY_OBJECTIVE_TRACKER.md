@@ -1,7 +1,7 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-23, owner accounting CODE_COMPLETE; research stratification
-implemented and under review. DEV investigation based on the user-supplied October 23
+Checkpoint: 2026-10-23, owner accounting and research stratification CODE_COMPLETE.
+DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
 not accessed. Current Runtime identity, resource headroom, coverage and delivery
@@ -69,7 +69,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## C — Historical lifecycle integrity
 
-- Status: REVIEW_PENDING (supplied research-evidence stratification only).
+- Status: TESTED (supplied research-evidence stratification only).
 - Weakness: 73 historical continuity gaps and 20 missing confirmation boundaries.
 - Evidence: outcome evaluator rejects absent boundaries and continuity holes;
   `record_closed_candle_evidence_gap` preserves cursor positions and emits no
@@ -89,14 +89,14 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   evidence that the lifecycle engine fabricated a terminal state.
 - Branch: `codex/reliability-research-evidence`, based on B's final head. The
   focused PR will target `codex/reliability-owner-coverage` until integration.
-- Implementation PR: pending; report contract is described in
+- Implementation PR: [#142](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/142),
+  stacked on PR #141; report contract is described in
   `docs/research/CCI_EXECUTION_EVIDENCE_STRATIFICATION.md`.
 - Tests: 107 targeted report, attribution, context and cutoff tests passed.
-  Full suite and independent Astra exact-head review pending.
 - Astra review of `0220a0f`: CHANGES_REQUIRED for the retained tracking-boundary
   field name. The correction retains actual `tracking_start_at`, lifecycle id,
   namespace and each original source reference. The conflicting-boundary regression
-  passes; corrected exact-head review is pending.
+  passes; corrected exact-head review approved the implementation.
 - Astra APPROVE for corrected `25cc560`; 89 independently verified targeted
   tests. [CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39946206142)
   passed. Full local run: 3404 passed, 1 failed, 1 dependency warning in 863.03 s.
@@ -105,7 +105,12 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   contract now uses a blocked synthetic symbol and already computed real results,
   with a bounded outer test timeout. Production timeouts and scanner code are
   unchanged. Corrected timeout/report/context/cutoff subset: 108 passed.
-  Final full verification and exact-head review/CI pending.
+  Final full applicable pytest on `30f8d0f38d13949f869c1c9dbd7d4b647192a335`:
+  **3405 passed, 1 dependency warning in 633.88 seconds**, no failures or skips.
+  Astra APPROVE for that exact head; corrected timeout regression independently
+  passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39948528496)
+  succeeded for the same head. Dependency, compile and whitespace checks passed.
+- Handoff: `docs/handoffs/CCI_RELIABILITY_RESEARCH_EVIDENCE.md`.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: no historical candles recovered; none fabricated or relabeled.
 
@@ -152,8 +157,10 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 Owner-accounting implementation is CODE_COMPLETE with final-head CI and Astra
 approval; PR #141 stays unmerged and undeployed. Handoff:
 `docs/handoffs/CCI_RELIABILITY_OWNER_COVERAGE.md`.
-Finish C's full verification, PR/CI and exact-head independent review, then
-continue A, D and E. Preserve quality 88, grade A, RR 3.0,
+Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
+the documentation-only final checkpoint receives its own CI and Astra review.
+PR #142 remains unmerged and undeployed. Continue D, then A and E.
+Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
 freshness and deduplication. P4 shadow remains disabled and non-enforcing.
 No merge, deployment, production database access, scanner, listener or external

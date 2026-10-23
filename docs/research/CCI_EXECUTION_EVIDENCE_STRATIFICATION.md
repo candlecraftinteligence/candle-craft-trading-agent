@@ -47,7 +47,7 @@ The targeted report, attribution, context and cutoff subset passed 107 tests.
 The counterexample is a deterministic regression. Tests cover missing/malformed
 status, contradictory Verified+diagnostic claims, conflicting snapshots,
 namespace/lineage/timestamp preservation, input immutability and deterministic
-ordering. Full pytest, CI and exact-head independent Astra review are pending.
+ordering.
 
 The first independent review requested correction of a boundary-field typo.
 Retained snapshots now include the actual `tracking_start_at`, lifecycle id,
@@ -61,7 +61,15 @@ failure: an existing scanner test timed ordinary strategy CPU work against a
 threshold.
 The test now prepares real strategy results outside the scheduling deadline and
 uses a blocked synthetic symbol to exercise the real per-symbol timeout path.
-No production timeout changes. Final full-suite and exact-head checks are pending.
+No production timeout changes. Final full applicable pytest on
+`30f8d0f38d13949f869c1c9dbd7d4b647192a335`: **3405 passed, 1 dependency warning
+in 633.88 seconds**, no failures or skips. Astra APPROVE for that exact head;
+the corrected timeout regression also passed independently.
+[Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39948528496)
+succeeded for the same head. Dependency, compile and whitespace checks passed.
+PR [#142](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/142)
+is stacked on #141, unmerged and undeployed. The final documentation-only head
+is recorded in the PR after publication and receives separate CI/review.
 
 The branch is `codex/reliability-research-evidence`, stacked on the independently
 approved owner-accounting head `bdcc90e649fdcd4d5b542f867ba27264a6d038d9`.
