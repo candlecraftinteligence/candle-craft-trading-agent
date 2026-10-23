@@ -1043,6 +1043,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         except (Exception, SystemExit) as exc:
             _raise_one_shot_owner_monitoring_failure(exc, prior_errors=prior_monitoring_errors)
         else:
+            result = _retain_owner_monitoring_result(result, monitoring_result)
             _raise_one_shot_owner_monitoring_failure(
                 result=monitoring_result,
                 prior_errors=prior_monitoring_errors,
@@ -2067,6 +2068,9 @@ def _scan_run_manifest_row(
         "average_seconds_per_symbol": runtime.average_seconds_per_symbol,
         "process_memory": runtime.process_memory.model_dump(mode="json"),
     }
+    monitoring = result.scanner_process_summary.get("owner_monitoring")
+    if isinstance(monitoring, Mapping):
+        row["owner_monitoring"] = dict(monitoring)
     if watch_iteration is not None:
         row["watch_iteration"] = watch_iteration
     queue_diagnostics = result.resume_metadata.get("symbol_queue") if isinstance(result.resume_metadata, Mapping) else None
@@ -2511,6 +2515,20 @@ def _prior_owner_monitoring_errors(result: Any) -> tuple[Any, ...]:
     return tuple(errors)
 
 
+def _retain_owner_monitoring_result(result: ScannerRunResult, monitoring: Any) -> ScannerRunResult:
+    """Keep continuation evidence beside discovery monitoring in durable scan output."""
+    from app.lifecycle.monitoring_diagnostics import summarize_monitoring_passes
+
+    if monitoring is None:
+        return result
+    summary = dict(result.scanner_process_summary)
+    first = summary.get("owner_monitoring")
+    passes = [first] if isinstance(first, Mapping) else []
+    passes.append(monitoring.as_dict())
+    summary["owner_monitoring"] = summarize_monitoring_passes(passes, retain_passes=True)
+    return result.model_copy(update={"scanner_process_summary": summary})
+
+
 def _owner_monitoring_failure_lines(
     *,
     exc: BaseException | None = None,
@@ -2583,6 +2601,8 @@ async def _surface_monitoring_during_discovery_failure(
         result = await _continue_owned_plan_monitoring(args, evidence_by_key={}, scan_run_id=None)
     except (Exception, SystemExit) as caught:
         monitor_exc = caught
+    if result is not None and callable(getattr(result, "as_dict", None)):
+        setattr(discovery, "owner_monitoring_diagnostics", result.as_dict())
     lines = _owner_monitoring_failure_lines(exc=monitor_exc, result=result)
     if monitor_exc is not None:
         setattr(discovery, "owner_monitoring_error", monitor_exc)
@@ -3516,6 +3536,7 @@ async def _run_watch_mode(
                     "errors": tuple(iteration_errors),
                     "active_lifecycle_count": len(iteration_watchlist.active_lifecycle_symbols),
                     "telegram_outbox_status": dict(execution.telegram_outbox_status),
+                    "owner_monitoring": dict(execution.result.scanner_process_summary.get("owner_monitoring") or {}),
                     "database_storage_status": "NOT_REQUESTED",
                 }
             )
@@ -3908,6 +3929,7 @@ def _failed_watch_iteration_summary(
         },
         phase_statuses=phase_statuses,
         errors=(error_text, *monitoring_lines),
+        owner_monitoring=dict(getattr(iteration_error, "owner_monitoring_diagnostics", {}) or {}),
         active_lifecycle_count=len(watchlist.active_lifecycle_symbols),
         database_storage_status="NOT_ATTEMPTED",
         next_scan_seconds=schedule.sleep_seconds,
@@ -3941,6 +3963,7 @@ def _record_failed_watch_iteration(
         "universe_mode": _display(getattr(watchlist.universe, "mode", NA)),
         "universe_label": _display(getattr(watchlist.universe, "label", watchlist.source_label)),
         "symbols_scanned": 0,
+        "owner_monitoring": dict(summary.owner_monitoring),
         "watch_supervisor": summary.model_dump(mode="json"),
     }
     try:
@@ -4192,6 +4215,7 @@ async def _run_watch_scan_iteration(
                 prior_errors=prior_monitoring_errors,
             )
         else:
+            result = _retain_owner_monitoring_result(result, monitoring_result)
             _record_owner_monitoring_phase(
                 phase_statuses,
                 recoverable_errors,

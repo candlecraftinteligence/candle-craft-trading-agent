@@ -18,9 +18,11 @@ from app.data.candle_integrity import CandleIntegrityError, closed_candles_as_of
 from app.data.exceptions import ExchangeClientError
 from app.data.dtos import NA
 from app.lifecycle.models import SetupLifecycleRecord
+from app.lifecycle.monitoring_diagnostics import summarize_monitoring_passes
 from app.lifecycle.outcome_policy import compatible_plan_identities
 from app.lifecycle.outcomes import (
     OUTCOME_ELIGIBLE_STATES,
+    INTEGRITY_VERIFIED,
     TERMINAL_OUTCOME_STATES,
     evaluate_closed_candle_outcomes,
     record_closed_candle_evidence_gap,
@@ -120,17 +122,22 @@ class OwnerMonitoringResult:
     errors: tuple[dict[str, str], ...]
     lags: tuple[TrackingCursorLag, ...]
     covered_keys: tuple[str, ...]
+    obligation_lifecycle_ids: tuple[str, ...] = ()
+    skipped_lifecycle_ids: tuple[str, ...] = ()
+    verified_lifecycle_ids: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        return summarize_monitoring_passes([{
             "evaluated_lifecycle_ids": list(self.evaluated_lifecycle_ids),
             "uncovered_symbols": list(self.uncovered_symbols),
             "gap_lifecycle_ids": list(self.gap_lifecycle_ids),
             "errors": [dict(item) for item in self.errors],
             "lags": [item.as_dict() for item in self.lags],
             "covered_keys": list(self.covered_keys),
-            "obligation_count": len(self.lags),
-        }
+            "obligation_lifecycle_ids": list(self.obligation_lifecycle_ids),
+            "skipped_lifecycle_ids": list(self.skipped_lifecycle_ids),
+            "verified_lifecycle_ids": list(self.verified_lifecycle_ids),
+        }])
 
 
 def _account_monitored_outcome(repository: Any, evaluation: Any) -> None:
@@ -248,6 +255,7 @@ def monitor_tracking_obligations(
 
     skip = set(skip_lifecycle_ids)
     evaluated: list[str] = []
+    verified: list[str] = []
     uncovered: list[str] = []
     gaps: list[str] = []
     errors: list[dict[str, str]] = []
@@ -361,6 +369,15 @@ def monitor_tracking_obligations(
                     "detail": f"{type(exc).__name__}:{exc}",
                 }
             )
+            lags.append(diagnose_tracking_cursor_lag(
+                record,
+                last_processed_close_at=_last_processed_close(rows),
+                latest_available_close_at=_latest_close(
+                    evidence.candles, evidence.execution_timeframe or timeframe,
+                    evidence.decision_timestamp or evaluated_at,
+                ),
+                gap_reason=f"evaluation_error:{type(exc).__name__}",
+            ))
             continue
         else:
             connection.execute("RELEASE owner_monitor")
@@ -371,6 +388,8 @@ def monitor_tracking_obligations(
         evaluated.append(record.lifecycle_id)
         covered.append(key)
         progress = evaluation.progress
+        if progress is not None and progress.integrity_status == INTEGRITY_VERIFIED:
+            verified.append(record.lifecycle_id)
         gap_reason = _gap_reason_from_progress(progress)
         if gap_reason is not None:
             gaps.append(record.lifecycle_id)
@@ -396,6 +415,9 @@ def monitor_tracking_obligations(
         errors=tuple(errors),
         lags=tuple(lags),
         covered_keys=tuple(dict.fromkeys(covered)),
+        obligation_lifecycle_ids=tuple(record.lifecycle_id for record in obligations),
+        skipped_lifecycle_ids=tuple(record.lifecycle_id for record in obligations if record.lifecycle_id in skip),
+        verified_lifecycle_ids=tuple(verified),
     )
 
 
@@ -545,7 +567,21 @@ async def monitor_obligations_with_market_data(
                 skip_lifecycle_ids=blocked_ids,
             )
             if subsystem_errors:
-                result = replace(result, errors=result.errors + tuple(subsystem_errors))
+                failed_ids = {item["lifecycle_id"] for item in subsystem_errors}
+                failed_lags = tuple(
+                    diagnose_tracking_cursor_lag(
+                        record,
+                        last_processed_close_at=_last_processed_close(grouped.get(record.lifecycle_id, ())),
+                        latest_available_close_at=None,
+                        gap_reason="market_data_subsystem_error",
+                    )
+                    for record in obligations if record.lifecycle_id in failed_ids
+                )
+                result = replace(
+                    result, errors=result.errors + tuple(subsystem_errors),
+                    lags=result.lags + failed_lags,
+                    skipped_lifecycle_ids=tuple(item for item in result.skipped_lifecycle_ids if item not in failed_ids),
+                )
         except Exception:
             if started and connection.in_transaction:
                 connection.rollback()
