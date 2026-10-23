@@ -97,6 +97,15 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   field name. The correction retains actual `tracking_start_at`, lifecycle id,
   namespace and each original source reference. The conflicting-boundary regression
   passes; corrected exact-head review is pending.
+- Astra APPROVE for corrected `25cc560`; 89 independently verified targeted
+  tests. [CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39946206142)
+  passed. Full local run: 3404 passed, 1 failed, 1 dependency warning in 863.03 s.
+  The failure was an existing scanner test that assumed real strategy CPU work
+  would finish inside 0.2 s on Windows; it passed alone in 2.30 s. Its timeout
+  contract now uses a blocked synthetic symbol and already computed real results,
+  with a bounded outer test timeout. Production timeouts and scanner code are
+  unchanged. Corrected timeout/report/context/cutoff subset: 108 passed.
+  Final full verification and exact-head review/CI pending.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: no historical candles recovered; none fabricated or relabeled.
 

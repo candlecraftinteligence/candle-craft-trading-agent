@@ -54,6 +54,15 @@ Retained snapshots now include the actual `tracking_start_at`, lifecycle id,
 namespace and original source reference/digest. A regression preserves two
 conflicting boundary strings and source references, without changing the inputs.
 
+Astra approved corrected implementation `25cc560` (89 independently verified
+targeted tests), and its CI passed. The full Windows run had 3404 passes and one
+failure: an existing scanner test timed ordinary strategy CPU work against a
+0.2-second deadline. That test passed alone, consistent with a host-load-sensitive
+threshold.
+The test now prepares real strategy results outside the scheduling deadline and
+uses a blocked synthetic symbol to exercise the real per-symbol timeout path.
+No production timeout changes. Final full-suite and exact-head checks are pending.
+
 The branch is `codex/reliability-research-evidence`, stacked on the independently
 approved owner-accounting head `bdcc90e649fdcd4d5b542f867ba27264a6d038d9`.
 No Runtime evidence was inspected or recovered. The historical 73 continuity gaps
