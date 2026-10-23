@@ -57,8 +57,16 @@ same single failing inventory-anchor check (3428 passed). Added imports moved
 two declarations without updating the existing research catalog's line references.
 The catalog and its two deterministic inventory artifacts now retain the correct
 lines; the existing anchor and exact-generated-content tests remain unchanged.
-Corrected inventory/provenance subset: 58 passed. Final full pytest, exact-head
-CI and correction review remain pending. The initial failing provenance test
+Corrected inventory/provenance subset: 58 passed. Final full Windows pytest on
+`29056e76c315385fdb5cbb379ea0155434fd1e95`: **3429 passed, 1 existing dependency
+warning in 1624.99 seconds**, no failures/skips. Astra approved that exact head;
+the two existing inventory checks independently passed. Required
+[CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39986875741)
+succeeded. The longer Windows runtime has no verified cause.
+PR [#143](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/143)
+is unmerged and undeployed. Handoff: `docs/handoffs/CCI_RELIABILITY_TELEGRAM_PROVENANCE.md`.
+The final documentation-only head receives separate CI/review and is recorded in
+the PR after publication. The initial failing provenance test
 fixture mixed a SENT attempt with a PENDING event and was corrected to represent
 pending state consistently; it did not reproduce an erroneous HTTP send.
 

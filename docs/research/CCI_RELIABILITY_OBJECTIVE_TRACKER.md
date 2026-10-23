@@ -1,6 +1,7 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-23, owner accounting and research stratification CODE_COMPLETE.
+Checkpoint: 2026-10-23, owner accounting, research stratification and Telegram
+provenance diagnostics CODE_COMPLETE.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
@@ -119,7 +120,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## D — Telegram provenance
 
-- Status: IMPLEMENTING.
+- Status: TESTED.
 - Weakness: ten historical PENDING follow-ups lack canonical reservations.
 - Evidence: ownership checks require the canonical pointer and matching event /
   reservation identity; outbox recovery fails closed without that pointer.
@@ -147,9 +148,15 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   and the same inventory-anchor failure. Two source line references were stale
   after added imports. Catalog and its deterministic artifacts corrected without
   changing the existing checks. Corrected inventory/provenance subset: 58 passed.
-  Final full pytest, exact-head CI and correction review pending.
+  Final full existing-environment Windows pytest on `29056e76c315385fdb5cbb379ea0155434fd1e95`:
+  **3429 passed, 1 dependency warning in 1624.99 seconds**, no failures/skips.
+  Astra APPROVE for the same head; both existing inventory checks independently
+  passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39986875741)
+  succeeded. Longer Windows test runtime cause remains Unverified.
 - Implementation PR: [#143](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/143),
-  draft, stacked on #142; unmerged and undeployed.
+  stacked on #142; unmerged and undeployed. Handoff:
+  `docs/handoffs/CCI_RELIABILITY_TELEGRAM_PROVENANCE.md`. Final documentation-only
+  head receives its own CI/Astra review and is recorded in the PR after publication.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: historical delivery receipts are unavailable in DEV. No event
   mutation or resend has been attempted.
@@ -159,8 +166,15 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Status: INVESTIGATING.
 - Weakness: historically low Runtime RAM/disk and cadence overruns.
 - Evidence: scanner already samples RSS through platform APIs; supervisor records
-  full-cycle duration. These do not yet attribute all downstream phase latency.
+  processing duration before the manifest/admin/presentation tail. It does not
+  yet measure the full finalization boundary or all downstream phase latency.
   DEV free C: capacity was approximately 115 GB, not a Runtime measurement.
+- Later DEV point observations: 98.8 GiB free C:, 7.86 GiB total physical RAM /
+  1.91 GiB available. These sequential observations are not Runtime evidence or a
+  resource stability result. Existing readiness policy reserves the greater of
+  10 GiB or 10% per volume, plus the documented measured growth/restore terms.
+  Preserve this policy; historical F06 schema-26 runbooks are not a current
+  schema-27 release authorization or current Runtime capacity evidence.
 - Correction: assess low-overhead phase/resource instrumentation and bounded
   diagnostic sizes. No cleanup or production access.
 - Implementation PR / independent review: N/A.
@@ -182,7 +196,11 @@ approval; PR #141 stays unmerged and undeployed. Handoff:
 `docs/handoffs/CCI_RELIABILITY_OWNER_COVERAGE.md`.
 Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
 the final documentation head `e4a5fb9` has CI and Astra approval.
-PR #142 remains unmerged and undeployed. Complete D, then A and E.
+PRs #141, #142 and #143 remain unmerged and undeployed. D is CODE_COMPLETE at
+implementation/correction head `29056e7`, with a documentation-only checkpoint
+receiving separate review/CI. Continue A's watch lease/session observations,
+then E's phase/resource observations. No historical outage cause was found in
+repository notes or the scoped GitHub audit search; it remains Unverified.
 Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
 freshness and deduplication. P4 shadow remains disabled and non-enforcing.
