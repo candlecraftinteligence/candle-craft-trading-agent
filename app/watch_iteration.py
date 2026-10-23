@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app.data.dtos import NA
+from app.alerts.provenance_diagnostics import summary_provenance
 from app.pipeline.scanner_runner import (
     ScannerPipelineStatus,
     ScannerRunResult,
@@ -98,7 +99,7 @@ def scanner_phase_status(result: ScannerRunResult, queued_symbols: Sequence[str]
 
 def telegram_outbox_status_summary(summary: Any | None) -> dict[str, int]:
     if summary is None:
-        return {}
+        return {"provenance_unresolved": 0, "provenance_incomplete": 1}
     counts = {
         "sent": int(getattr(summary, "sent", 0)),
         "skipped": int(getattr(summary, "skipped", 0)),
@@ -110,6 +111,10 @@ def telegram_outbox_status_summary(summary: Any | None) -> dict[str, int]:
         "uncertain": 0,
         "failed_final": 0,
     }
+    provenance = summary_provenance(summary)
+    unresolved = provenance.get("unresolved")
+    counts["provenance_unresolved"] = unresolved if isinstance(unresolved, int) else 0
+    counts["provenance_incomplete"] = int(provenance.get("coverage_complete") is not True)
     confirmed_audit = getattr(summary, "confirmed_alert_audit", None)
     if confirmed_audit is not None:
         candidates = int(getattr(confirmed_audit, "confirmed_candidates_seen", 0))
@@ -147,7 +152,7 @@ def telegram_outbox_status_summary(summary: Any | None) -> dict[str, int]:
 def telegram_outbox_phase_status(counts: Mapping[str, int]) -> str:
     failures = sum(
         int(counts.get(key, 0))
-        for key in ("failed", "retryable", "uncertain", "failed_final")
+        for key in ("failed", "retryable", "uncertain", "failed_final", "provenance_unresolved", "provenance_incomplete")
     )
     return "PARTIAL" if failures else "SUCCESS"
 

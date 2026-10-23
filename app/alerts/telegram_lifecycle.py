@@ -12,6 +12,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
+from app.alerts.provenance_diagnostics import collect_provenance_diagnostics
+
 from app.analytics.public_signal_quality import (
     MIN_PUBLIC_SIGNAL_GRADE,
     MIN_PUBLIC_SETUP_QUALITY_SCORE,
@@ -88,6 +90,7 @@ from app.runtime_epoch.errors import RuntimeEpochError, RuntimeEpochOwnershipErr
 from app.runtime_epoch.ownership import (
     decide_public_effect,
     require_event_reservation_association,
+    require_canonical_reservation_for_public_effect,
     require_lifecycle_public_intent,
     require_public_attempt_mutation,
     require_public_event_mutation,
@@ -873,6 +876,7 @@ class TelegramLifecycleDeliverySummary:
     deliveries: tuple[TelegramLifecycleDelivery, ...] = ()
     public_watchlist_audit: PublicWatchlistAuditSummary = field(default_factory=lambda: PublicWatchlistAuditSummary())
     confirmed_alert_audit: ConfirmedAlertAuditSummary = field(default_factory=lambda: ConfirmedAlertAuditSummary())
+    provenance_diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -3918,6 +3922,9 @@ class TelegramLifecycleDeliveryService:
             self.database_path,
             expected_identity=self.expected_identity,
         ) as repository:
+            provenance_diagnostics = collect_provenance_diagnostics(
+                repository._connection, database_path=self.database_path,
+            )
             with SQLiteSetupLifecycleRepository(
                 self.database_path,
                 expected_identity=self.expected_identity,
@@ -4099,6 +4106,7 @@ class TelegramLifecycleDeliveryService:
             deliveries=tuple(deliveries),
             public_watchlist_audit=public_watchlist_audit,
             confirmed_alert_audit=confirmed_alert_audit,
+            provenance_diagnostics=provenance_diagnostics,
         )
 
     async def deliver_transitions_for_symbol(
@@ -4237,6 +4245,14 @@ class TelegramLifecycleDeliveryService:
                 continue
             if not decide_public_effect(repository._connection, row).allowed:
                 continue
+            try:
+                require_canonical_reservation_for_public_effect(
+                    repository._connection, event_id=event.id,
+                )
+            except RuntimeEpochOwnershipError:
+                # The separate read-only report retains this issue. Never use
+                # the event-key lookup fallback as canonical send authority.
+                continue
             alert_type = PUBLIC_LIFECYCLE_OUTBOX_ALERT_BY_EVENT_TYPE.get(
                 _status_key(event.event_type)
             )
@@ -4246,10 +4262,6 @@ class TelegramLifecycleDeliveryService:
                 event_key=event.event_key,
             )
             if attempt is None or attempt.id is None:
-                logger.error(
-                    "Recoverable public lifecycle event has no attempt reservation: event_key=%s",
-                    event.event_key,
-                )
                 continue
             if alert_type == TelegramAlertType.SETUP_TRIGGERED:
                 SQLitePublicTelegramOutbox(repository._connection).mark_terminal_without_send(

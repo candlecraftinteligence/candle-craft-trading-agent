@@ -111,22 +111,38 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39948528496)
   succeeded for the same head. Dependency, compile and whitespace checks passed.
 - Handoff: `docs/handoffs/CCI_RELIABILITY_RESEARCH_EVIDENCE.md`.
+- Final documentation head `e4a5fb9693ce78c9194d32dcac0231b109671c74`: Astra
+  APPROVE and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39950075163).
+  PR #142 is ready for owner review, unmerged and undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: no historical candles recovered; none fabricated or relabeled.
 
 ## D — Telegram provenance
 
-- Status: INVESTIGATING.
+- Status: IMPLEMENTING.
 - Weakness: ten historical PENDING follow-ups lack canonical reservations.
 - Evidence: ownership checks require the canonical pointer and matching event /
   reservation identity; outbox recovery fails closed without that pointer.
 - Prospective diagnostic finding: `recover_public_lifecycle_alerts` logs a
   missing-attempt event on every pass and continues without a delivery diagnostic
   for that event. The ten historical events' current state remains Unverified.
-- Correction: investigate bounded event-key diagnostics and warning suppression
-  while preserving unresolved status and preventing any automatic resend.
-- Implementation PR / tests / independent review: N/A / existing outbox tests /
-  pending new acceptance investigation.
+- Correction: a bounded read-only inspection of known public event families in
+  PENDING/RETRYABLE/IN_FLIGHT, separate from recovery; event-key/canonical/ownership
+  reasons, retained run evidence, and PARTIAL status for unresolved or incomplete
+  coverage. No delivery attempt is invented. The process warning cache is bounded
+  at 1024 fingerprints and ten warnings per inspection. Default inspection is
+  256 rows, 64 per SQL page, at most 50 detail rows; incomplete coverage is explicit.
+  Existing recovery selection is unchanged and cannot be starved by diagnostic
+  limits. Recovery checks canonical association before using any attempt fallback.
+- Branch: `codex/reliability-telegram-provenance`, based on C final `e4a5fb9`.
+- Implementation PR / independent review: pending; Astra read-only design review
+  supported separate diagnostics, canonical guard reuse and explicit coverage.
+- Tests: initial targeted run exposed a synthetic fixture mixing SENT attempts
+  with a PENDING event; the fixture now represents pending state consistently.
+  Expanded provenance/outbox/recovery/quality/watch/command subset: 309 passed.
+  Corrected final targeted subset including failure persistence: 41 passed.
+  Report contract: `docs/research/CCI_TELEGRAM_PROVENANCE_DIAGNOSTICS.md`.
+  Broader/full pytest, exact-head CI and independent implementation review pending.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: historical delivery receipts are unavailable in DEV. No event
   mutation or resend has been attempted.
@@ -158,8 +174,8 @@ Owner-accounting implementation is CODE_COMPLETE with final-head CI and Astra
 approval; PR #141 stays unmerged and undeployed. Handoff:
 `docs/handoffs/CCI_RELIABILITY_OWNER_COVERAGE.md`.
 Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
-the documentation-only final checkpoint receives its own CI and Astra review.
-PR #142 remains unmerged and undeployed. Continue D, then A and E.
+the final documentation head `e4a5fb9` has CI and Astra approval.
+PR #142 remains unmerged and undeployed. Complete D, then A and E.
 Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
 freshness and deduplication. P4 shadow remains disabled and non-enforcing.

@@ -144,6 +144,7 @@ class WatchIterationSummary(BaseModel):
     active_lifecycle_count: int = 0
     telegram_outbox_status: dict[str, int] = Field(default_factory=dict)
     owner_monitoring: dict[str, Any] = Field(default_factory=dict)
+    telegram_provenance: dict[str, Any] = Field(default_factory=dict)
     database_storage_status: str = "NOT_REQUESTED"
     next_scan_seconds: float | None = None
     activated_symbols: tuple[str, ...] = ()
