@@ -1,8 +1,8 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-24, owner accounting, research stratification, Telegram
-provenance and watch-session implementation CODE_COMPLETE; resource observations
-under final DEV verification.
+Checkpoint: 2026-10-24, all five focused reliability implementations CODE_COMPLETE.
+The final documentation checkpoint receives separate review/CI. Integration,
+deployment and natural Runtime verification remain pending owner authorization.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
@@ -192,7 +192,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## E — Resource reliability
 
-- Status: IMPLEMENTING.
+- Status: TESTED.
 - Weakness: historically low Runtime RAM/disk and cadence overruns.
 - Evidence: scanner already samples RSS through platform APIs; supervisor records
   processing duration before the manifest/admin/presentation tail. It does not
@@ -231,9 +231,18 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   than its actual boundary. That PENDING summary now explicitly precedes primary
   scan storage; later manifest scope is unchanged. A real synthetic storage-path
   regression verifies both. No timing or scheduling calculation changes.
+  Final implementation `3aaac3bfeeaf1ba68e8722de373ac92d63d0bd59` has Astra
+  APPROVE; the new boundary regression independently passed in 1.12 seconds.
+  [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40032395331)
+  succeeded. Final targeted watch/session/resource/inventory subset: 139 passed
+  in 29.44 seconds. Final full Windows pytest on that exact implementation:
+  **3507 passed, 1 existing dependency warning in 646.34 seconds**, no failures
+  or skips. The warning is FastAPI/Starlette's deprecated httpx TestClient adapter.
+  No new dependency or configuration warning occurred in the full run.
 - Tests: corrected profile/resource/session subset 65 passed; expanded resource,
   watch/command/owner/provenance/stream/cadence/inventory subset 238 passed in
-  45.97 seconds. Full pytest, exact-head review and CI pending. Astra preflight
+  45.97 seconds. Final full pytest, exact-head implementation review and CI passed.
+  Astra preflight
   findings corrected with regressions for restart latching, failure/startup
   warnings and resource timestamp failure. Durable marker also covers abrupt
   helper exit before receipt persistence, exact admission and torn markers.
@@ -257,6 +266,10 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: Runtime capacity may require a hardware/storage upgrade. No
   database bottleneck has been established.
+- Handoff: `docs/handoffs/CCI_RELIABILITY_RESOURCE_OBSERVATIONS.md`.
+- Integration and Runtime evidence package:
+  `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`. Its proposed
+  sequence requires separate owner approval; it is not cutover authorization.
 
 ## Continuation and release boundaries
 
@@ -267,8 +280,11 @@ Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
 the final documentation head `e4a5fb9` has CI and Astra approval.
 PRs #141 through #144 remain unmerged and undeployed. D's final documentation
 head `2cfd608` and A's final `1830aa8` have CI and exact-head Astra approval.
-Continue E's corrected full pytest, exact-head review and CI, then prepare the
-concrete integration and Runtime verification packet. No historical outage cause was found in
+E's final implementation `3aaac3b` has full pytest, required CI and Astra approval.
+The final documentation head receives its own exact-head review/CI, recorded in
+PR #145. Then request owner approval for the pinned integration sequence in
+`docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`; Runtime preflight
+and rollout require separate authorization. No historical outage cause was found in
 repository notes or the scoped GitHub audit search; it remains Unverified.
 Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,

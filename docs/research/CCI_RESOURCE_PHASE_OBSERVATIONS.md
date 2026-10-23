@@ -104,8 +104,8 @@ Corrected profile/resource/session subset: 65 passed. Expanded watch, command,
 owner, provenance, stream-service, cadence, memory and inventory subset:
 **238 passed in 45.97 seconds**, including durable-marker regressions. An earlier
 preflight's three findings were corrected: cross-session budget suspension,
-startup/failure-path advisories, and timestamp failure isolation. Final full
-pytest, exact-head review and CI remain pending.
+startup/failure-path advisories, and timestamp failure isolation. Those earlier
+checkpoints did not establish final full-suite success.
 The initial full run on `8ca919a` was stopped at 10% without observed failures
 after Astra identified missing normal-history recreation. The correction retains
 established ownership independently of exhaustion and includes active-session,
@@ -121,6 +121,13 @@ legacy duration label as misleading. That PENDING snapshot now explicitly says
 through watch-state persistence, before primary scan storage; the later manifest
 keeps its later scope. No elapsed calculation, scheduling or production storage
 behavior changes. A dedicated synthetic SQLite/manifest regression verifies both.
+
+Final implementation `3aaac3bfeeaf1ba68e8722de373ac92d63d0bd59`: **3507 passed,
+1 existing dependency warning in 646.34 seconds**, no failures/skips, using the
+existing DEV Python environment. Astra APPROVE for the exact head; the new
+boundary regression independently passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40032395331)
+succeeded. Final targeted watch/session/resource/inventory subset: 139 passed in
+29.44 seconds. Final documentation has its own review/CI, recorded in PR #145.
 
 An alternating 100-pair filesystem-only DEV probe compared committed A's session
 writer with E's writer plus actual local resource sampling, 19 synthetic phase
