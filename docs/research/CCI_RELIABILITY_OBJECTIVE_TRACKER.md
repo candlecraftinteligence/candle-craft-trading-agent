@@ -39,6 +39,9 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   documentation-only head needs its own CI/review. A subsequent Astra design
   review could not run because the reviewer account reached its usage limit;
   no approval for that review is inferred.
+- Final documentation head `1830aa87b2c47ca5b2e51df1cc5a12c453c464fc` subsequently
+  received Astra APPROVE after the usage window reset, and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40028951292).
+  PR #144 is ready for owner review, unmerged and undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: outage cause cannot be established from DEV source. P4 causation
   is Unverified. Requires genuine launcher/process/manifest evidence.
@@ -188,7 +191,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## E — Resource reliability
 
-- Status: INVESTIGATING.
+- Status: IMPLEMENTING.
 - Weakness: historically low Runtime RAM/disk and cadence overruns.
 - Evidence: scanner already samples RSS through platform APIs; supervisor records
   processing duration before the manifest/admin/presentation tail. It does not
@@ -200,10 +203,29 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   10 GiB or 10% per volume, plus the documented measured growth/restore terms.
   Preserve this policy; historical F06 schema-26 runbooks are not a current
   schema-27 release authorization or current Runtime capacity evidence.
-- Correction: assess low-overhead phase/resource instrumentation and bounded
-  diagnostic sizes. No cleanup or production access.
+- Root cause verified in DEV: current telemetry does not attribute downstream
+  phase work or current system resources. The new A journal bounds rows but has
+  no total append budget. No SQLite bottleneck or historical disk-growth cause
+  is established.
+- Correction: 19 fixed inclusive elapsed-call profiles with QPC clock metadata;
+  one advisory resource point (RSS, Windows physical RAM and proven fixed-local
+  system disk), reused reserve floor, and a 32 MiB journal budget. A durable
+  terminal marker plus receipt latch prevents post-gap append across abrupt exit
+  or restart. Current receipt continues without auto-cleanup or backoff changes.
+- Branch: `codex/reliability-resource-observations`, based on A final `1830aa8`.
+- Contract: `docs/research/CCI_RESOURCE_PHASE_OBSERVATIONS.md`.
 - Implementation PR / independent review: N/A.
-- Tests: existing process-memory and cadence tests; matched Runtime evidence N/A.
+- Tests: corrected profile/resource/session subset 65 passed; expanded resource,
+  watch/command/owner/provenance/stream/cadence/inventory subset 238 passed in
+  45.97 seconds. Full pytest, exact-head review and CI pending. Astra preflight
+  findings corrected with regressions for restart latching, failure/startup
+  warnings and resource timestamp failure. Durable marker also covers abrupt
+  helper exit before receipt persistence, exact admission and torn markers.
+- Alternating 100-pair DEV filesystem probe: A median 10.816 ms / p95 18.362 ms,
+  E including actual local resource point and synthetic profile median 11.499 ms /
+  p95 18.059 ms. Receipts 1,128 / 6,979 bytes; 100-finalization journals
+  89,294 / 628,430 bytes. No scanner, SQLite or network. Other artifact writes
+  and matched Runtime overhead remain Unverified.
 - B diagnostic microbenchmark (synthetic DEV structures, 200 repetitions,
   summary plus JSON serialization, excludes disk/SQLite): 41 owners produced
   28,455 bytes versus 15,198 legacy bytes, median 0.416 ms / p95 0.553 ms;
