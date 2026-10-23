@@ -224,6 +224,13 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   Corrected broader subset: 242 passed in 46.05 seconds; final corrected
   profile/resource/session/inventory subset: 111 passed in 16.64 seconds,
   including conservative legacy/contradictory-ownership cases.
+  Astra APPROVE for `d063c3f`, independently 77 passed in 14.63 seconds;
+  [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40031254615).
+  Its full Windows run was stopped at 71% without observed failures after final
+  review identified the initial SQLite snapshot's duration-scope label as later
+  than its actual boundary. That PENDING summary now explicitly precedes primary
+  scan storage; later manifest scope is unchanged. A real synthetic storage-path
+  regression verifies both. No timing or scheduling calculation changes.
 - Tests: corrected profile/resource/session subset 65 passed; expanded resource,
   watch/command/owner/provenance/stream/cadence/inventory subset 238 passed in
   45.97 seconds. Full pytest, exact-head review and CI pending. Astra preflight

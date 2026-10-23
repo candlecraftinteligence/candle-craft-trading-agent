@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -332,3 +333,18 @@ def test_contradictory_established_flag_cannot_recreate_history(tmp_path):
         with WatchSession(path, interval_seconds=300, on_observation=_writer(path)):
             pass
     assert session.receipt_path.read_bytes() == before
+
+
+def test_sqlite_duration_scope_precedes_its_own_storage_but_manifest_follows_it(tmp_path, monkeypatch):
+    path, args = _bootstrap(tmp_path, monkeypatch)
+    asyncio.run(run_scan.main(args + ["--store-scan"]))
+    with sqlite3.connect(path) as connection:
+        payload = json.loads(connection.execute("SELECT raw_payload_json FROM scan_runs LIMIT 1").fetchone()[0])
+    stored = payload["watch_iteration"]
+    assert stored["database_storage_status"] == "PENDING"
+    assert stored["duration_scope"] == "through_watch_state_before_primary_scan_storage"
+    assert stored["phase_profile"]["phases"]["scan_storage"]["elapsed_seconds"] == "N/A"
+    manifest = json.loads((tmp_path / "manifest.jsonl").read_text().splitlines()[-1])["watch_supervisor"]
+    assert manifest["database_storage_status"] == "SUCCESS"
+    assert manifest["duration_scope"] == "through_primary_persistence_before_manifest_reporting_and_presentation"
+    assert manifest["phase_profile"]["phases"]["scan_storage"]["measurement_status"] == "OBSERVED"

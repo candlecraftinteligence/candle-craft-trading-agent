@@ -81,8 +81,11 @@ omission time and bounded omission counters. Counts are observed lower bounds:
 abrupt exit can precede receipt persistence. Coverage refers only to this recording
 budget, not scan coverage or historical integrity. Startup and both successful and
 failed iterations emit at most one budget advisory per session. Advisory-output
-failure cannot replace scan failures. The bounded current receipt continues;
-unknown, torn or missing historical journals still fail closed. No evidence is
+failure cannot replace scan failures. The bounded current receipt continues.
+`first_omitted_at` is the first retained omission observation, not proof of the
+original first lost row's timestamp after an abrupt exit. No earlier timestamp is
+reconstructed from the marker. Unknown, torn or missing historical journals still
+fail closed. No evidence is
 deleted or automatically rotated. Resuming journal history needs a separately
 approved archival/generation procedure; restarting alone is not that procedure.
 Established journal ownership is retained separately from budget exhaustion and
@@ -111,6 +114,13 @@ required before release readiness.
 Corrected expanded subset: 242 passed in 46.05 seconds. Final corrected
 profile/resource/session/inventory subset: **111 passed in 16.64 seconds**,
 including legacy receipt and contradictory-ownership cases.
+Exact corrected head `d063c3f` received Astra APPROVE (77 independent tests) and
+required CI success. Its full Windows run was stopped at 71% without observed
+failures after a final boundary review identified the initial SQLite payload's
+legacy duration label as misleading. That PENDING snapshot now explicitly says
+through watch-state persistence, before primary scan storage; the later manifest
+keeps its later scope. No elapsed calculation, scheduling or production storage
+behavior changes. A dedicated synthetic SQLite/manifest regression verifies both.
 
 An alternating 100-pair filesystem-only DEV probe compared committed A's session
 writer with E's writer plus actual local resource sampling, 19 synthetic phase
@@ -132,6 +142,13 @@ at five-minute iterations, or 3.7 days at the CLI's one-minute default, before
 accounting for extra session boundaries. These are projections, not observed
 Runtime growth or recommended retention periods. Plan an approved archive before
 exhaustion if longer history is required; never discard protected evidence.
+
+A second alternating 100-pair probe on corrected source `d063c3f`, while the
+full DEV suite was running, observed A median 9.931 ms / p95 18.854 ms and E
+median 10.615 ms / p95 16.695 ms. Receipts were 1,128 / 7,024 bytes; journals
+89,294 / 628,237 bytes; profile JSON 4,537 bytes. The median increment was
+0.684 ms. Shared host load and the same exclusions apply; lower observed p95
+does not demonstrate a causal performance improvement.
 
 At 2026-10-23 21:57:44 UTC this DEV point reported 7.86 GiB total physical memory,
 1.66 GiB available, 78% physical load, 60.5 MiB process RSS, and 95.1 GiB free on

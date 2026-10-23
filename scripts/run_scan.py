@@ -3750,7 +3750,10 @@ async def _run_watch_mode(
                     stored_manifest_run_id = profile.call("scan_storage", _store_watch_iteration_scan_run,
                         args,
                         execution=execution,
-                        summary=summary.model_copy(update={"database_storage_status": "PENDING"}),
+                        summary=summary.model_copy(update={
+                            "database_storage_status": "PENDING",
+                            "duration_scope": "through_watch_state_before_primary_scan_storage",
+                        }),
                         started_at=iteration_started_at,
                         completed_at=completed_at,
                         runtime_sec=runtime_sec,
