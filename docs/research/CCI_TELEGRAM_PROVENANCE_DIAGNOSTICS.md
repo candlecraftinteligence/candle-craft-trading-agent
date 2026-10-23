@@ -50,10 +50,24 @@ both errors. Fatal watch errors retain unavailable coverage in the failed summar
 
 The initial expanded synthetic recovery/ownership/quality/watch/command subset
 passed 309 tests. The final targeted provenance and watch-status subset passed
-41 tests before retaining the source update timestamp. Full pytest, required CI
-and exact-head independent Astra review remain pending. The initial failing test
+41 tests before retaining the source update timestamp. Astra approved exact
+implementation `82750b5` and independently passed 59 tests. Its full Windows run
+had 3428 passes, one failure and one dependency warning in 784.67 s; CI had the
+same single failing inventory-anchor check (3428 passed). Added imports moved
+two declarations without updating the existing research catalog's line references.
+The catalog and its two deterministic inventory artifacts now retain the correct
+lines; the existing anchor and exact-generated-content tests remain unchanged.
+Corrected inventory/provenance subset: 58 passed. Final full pytest, exact-head
+CI and correction review remain pending. The initial failing provenance test
 fixture mixed a SENT attempt with a PENDING event and was corrected to represent
 pending state consistently; it did not reproduce an erroneous HTTP send.
+
+A read-only DEV microbenchmark (100 repetitions, SQLite collection plus JSON,
+warm process cache, warning logger disabled) observed one valid event at median
+3.215 ms / p95 7.321 ms, 467 serialized bytes. A 71-event fixture with 70 unresolved
+events and 50 retained details observed median 43.252 ms / p95 58.014 ms, 23,194
+bytes. This is per report, excludes artifact writes and is not matched Runtime
+evidence. Original recovery query costs and production cadence remain Unverified.
 
 No production database was inspected or mutated. The ten historical pending
 follow-ups cannot be individually classified from DEV source or supplied counts;

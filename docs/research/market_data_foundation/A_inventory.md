@@ -645,7 +645,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - code refs:
   - `app/analytics/public_signal_quality.py:10` contains `MIN_PUBLIC_SIGNAL_GRADE = "A"`
   - `app/analytics/public_signal_quality.py:11` contains `MIN_PUBLIC_SETUP_QUALITY_SCORE = Decimal("88")`
-  - `app/alerts/telegram_lifecycle.py:288` contains `PUBLIC_SIGNAL_MIN_RR = Decimal("3")`
+  - `app/alerts/telegram_lifecycle.py:291` contains `PUBLIC_SIGNAL_MIN_RR = Decimal("3")`
   - `app/core/minimum_rr.py:8` contains `DEFAULT_CONFIGURED_MINIMUM_RR = Decimal("2.5")`
   - `app/storage/database.py:9` contains `SCHEMA_VERSION = 27`
 
@@ -678,5 +678,5 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified
 - expectancy_benefit: not established
 - code refs:
-  - `scripts/run_scan.py:610` contains `default=60.0`
+  - `scripts/run_scan.py:611` contains `default=60.0`
   - `app/watch_supervisor.py:82` contains `first_next_start = scheduled + interval`

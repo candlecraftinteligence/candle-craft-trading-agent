@@ -666,7 +666,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "code_refs": (
             {"path": "app/analytics/public_signal_quality.py", "line": 10, "contains": 'MIN_PUBLIC_SIGNAL_GRADE = "A"'},
             {"path": "app/analytics/public_signal_quality.py", "line": 11, "contains": 'MIN_PUBLIC_SETUP_QUALITY_SCORE = Decimal("88")'},
-            {"path": "app/alerts/telegram_lifecycle.py", "line": 288, "contains": 'PUBLIC_SIGNAL_MIN_RR = Decimal("3")'},
+            {"path": "app/alerts/telegram_lifecycle.py", "line": 291, "contains": 'PUBLIC_SIGNAL_MIN_RR = Decimal("3")'},
             {"path": "app/core/minimum_rr.py", "line": 8, "contains": 'DEFAULT_CONFIGURED_MINIMUM_RR = Decimal("2.5")'},
             {"path": "app/storage/database.py", "line": 9, "contains": "SCHEMA_VERSION = 27"},
         ),
@@ -700,7 +700,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "scripts/run_scan.py", "line": 610, "contains": "default=60.0"},
+            {"path": "scripts/run_scan.py", "line": 611, "contains": "default=60.0"},
             {"path": "app/watch_supervisor.py", "line": 82, "contains": "first_next_start = scheduled + interval"},
         ),
     },

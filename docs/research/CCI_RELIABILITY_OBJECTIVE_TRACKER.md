@@ -142,7 +142,14 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   Expanded provenance/outbox/recovery/quality/watch/command subset: 309 passed.
   Corrected final targeted subset including failure persistence: 41 passed.
   Report contract: `docs/research/CCI_TELEGRAM_PROVENANCE_DIAGNOSTICS.md`.
-  Broader/full pytest, exact-head CI and independent implementation review pending.
+  Astra APPROVE on `82750b5`, 59 independent tests passed. Full Windows run:
+  3428 passed, one failure, one dependency warning in 784.67 s; CI also 3428 passed
+  and the same inventory-anchor failure. Two source line references were stale
+  after added imports. Catalog and its deterministic artifacts corrected without
+  changing the existing checks. Corrected inventory/provenance subset: 58 passed.
+  Final full pytest, exact-head CI and correction review pending.
+- Implementation PR: [#143](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/143),
+  draft, stacked on #142; unmerged and undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: historical delivery receipts are unavailable in DEV. No event
   mutation or resend has been attempted.
