@@ -92,6 +92,8 @@ from app.alerts.telegram_lifecycle import (  # noqa: E402
 from app.alerts.telegram_sender import resolve_public_signal_destination  # noqa: E402
 from app.alerts.provenance_diagnostics import summary_provenance, unavailable_provenance  # noqa: E402
 from app.watch_session import WatchSession, append_session_observation  # noqa: E402
+from app.core.phase_profile import PhaseProfile, current_observations, profiled  # noqa: E402
+from app.core.resource_observation import observe_local_resources  # noqa: E402
 from app.formatters.scanner_console import ScannerConsolePresenter  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
@@ -783,6 +785,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         with WatchSession(
             args.database_path, interval_seconds=args.watch_interval_sec,
             on_observation=lambda row: append_session_observation(args.database_path, row),
+            on_advisory=print,
         ) as session:
             await _main(args, argv=argv, session=session)
     else:
@@ -1956,6 +1959,7 @@ def _result_is_scan_error(symbol_result: ScannerSymbolResult) -> bool:
     return symbol_result.status in (ScannerPipelineStatus.SCAN_ERROR, ScannerPipelineStatus.FAILED)
 
 
+@profiled("json_output")
 def _write_run_json(
     path: Path,
     result: ScannerRunResult,
@@ -2001,6 +2005,7 @@ def _write_export_json(
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+@profiled("scan_manifest")
 def _append_scan_run_manifest(
     result: ScannerRunResult,
     *,
@@ -2206,6 +2211,7 @@ def _first_manifest_non_na(*values: Any) -> Any:
     return NA
 
 
+@profiled("admin_report")
 async def _route_admin_report(
     result: ScannerRunResult,
     *,
@@ -2511,6 +2517,7 @@ def _stamp_runtime_watch_state(args: argparse.Namespace, state):
     return state
 
 
+@profiled("lifecycle")
 def _apply_lifecycle_if_enabled(
     args: argparse.Namespace,
     result: ScannerRunResult,
@@ -2731,6 +2738,7 @@ async def _surface_monitoring_during_discovery_failure(
         discovery.code = f"{discovery.code}\n" + "\n".join(lines)
 
 
+@profiled("owner_monitoring")
 async def _continue_owned_plan_monitoring(
     args: argparse.Namespace,
     *,
@@ -2846,6 +2854,7 @@ def _telegram_admin_draft_status_label() -> str:
     return "dry-run" if config.dry_run else "enabled"
 
 
+@profiled("telegram_outbox")
 async def _deliver_telegram_manual_signals_if_enabled(
     args: argparse.Namespace,
     result: ScannerRunResult,
@@ -3018,6 +3027,7 @@ def _adaptive_symbol_priority_enabled(args: argparse.Namespace, watchlist: Watch
     return bool(args.watch or args.universe_size >= 100 or len(watchlist.symbols) >= 100)
 
 
+@profiled("priority_queue")
 def _symbol_priority_plan_for_watchlist(
     args: argparse.Namespace,
     watchlist: WatchlistResolution,
@@ -3214,6 +3224,7 @@ def _format_symbol_queue_diagnostics(diagnostics: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+@profiled("symbol_health")
 def _apply_symbol_health_if_enabled(
     args: argparse.Namespace,
     result: ScannerRunResult,
@@ -3413,6 +3424,7 @@ def _liquidation_flow_service_for_config(
     )
 
 
+@profiled("scanner")
 async def _run_scanner(
     runner: Any,
     config: ScannerRunConfig,
@@ -3436,6 +3448,16 @@ async def _run_scanner(
         for index, symbol_result in enumerate(result.results, start=1):
             await after_symbol(symbol_result, index, total)
         return result
+
+
+def _observe_watch_resources() -> dict[str, Any]:
+    try:
+        return observe_local_resources()
+    except Exception as exc:
+        return {"contract": "cci-local-resource-point-v1", "status": "Unverified",
+                "observed_at": NA, "reason": type(exc).__name__, "capacity_approval": False,
+                "physical_memory": {"value": NA}, "system_disk": {"value": NA},
+                "process_rss": {"bytes": NA}}
 
 
 async def _run_watch_mode(
@@ -3521,23 +3543,26 @@ async def _run_watch_mode(
             previous_state = state
             prior_failure_streak = failure_streak
             iteration_in_progress = True
+            profile = PhaseProfile()
+            profile.resources = profile.call("resource_observation", _observe_watch_resources)
             if session is not None:
-                session.start_iteration(
+                profile.call("start_receipt", session.start_iteration,
                     iteration=iteration, actual_start=iteration_started_at,
                     scheduled_start=scheduled_start_at,
                 )
-            iteration_watchlist, execution, iteration_error = await _attempt_watch_scan_iteration(
-                args,
-                startup_watchlist=watchlist,
-                config=config,
-                iteration=iteration,
-                console_presenter=console,
-                btc_d_context_service=btc_d_context_service,
-                macro_calendar_service=macro_calendar_service,
-                microstructure_flow_service=microstructure_flow_service,
-                order_book_liquidity_service=order_book_liquidity_service,
-                liquidation_flow_service=liquidation_flow_service,
-            )
+            with profile.activate():
+                iteration_watchlist, execution, iteration_error = await _attempt_watch_scan_iteration(
+                    args,
+                    startup_watchlist=watchlist,
+                    config=config,
+                    iteration=iteration,
+                    console_presenter=console,
+                    btc_d_context_service=btc_d_context_service,
+                    macro_calendar_service=macro_calendar_service,
+                    microstructure_flow_service=microstructure_flow_service,
+                    order_book_liquidity_service=order_book_liquidity_service,
+                    liquidation_flow_service=liquidation_flow_service,
+                )
             if iteration_error is not None:
                 disposition = classify_watch_exception(iteration_error)
                 if disposition == WatchFailureDisposition.RECOVERABLE:
@@ -3568,7 +3593,11 @@ async def _run_watch_mode(
                 )
                 if session is not None:
                     failed_summary = failed_summary.model_copy(update={"watch_session_id": session.state["session_id"]})
-                _record_failed_watch_iteration(args, failed_summary, watchlist=watchlist, console_presenter=console)
+                failed_summary = failed_summary.model_copy(update={
+                    "phase_profile": profile.snapshot(boundary="before_failure_recording"),
+                    "resource_observation": dict(profile.resources),
+                })
+                profile.call("failure_recording", _record_failed_watch_iteration, args, failed_summary, watchlist=watchlist, console_presenter=console)
                 iteration_in_progress = False
                 completed_iterations = iteration
                 if disposition == WatchFailureDisposition.FATAL:
@@ -3585,6 +3614,8 @@ async def _run_watch_mode(
                         iteration_id=failed_summary.iteration_id, consecutive_failures=failure_streak,
                         backoff_seconds=selected_backoff,
                         will_continue=args.watch_max_iterations is None or iteration < args.watch_max_iterations,
+                        phase_profile=profile.snapshot(boundary="after_failure_recording_before_final_observation_persistence"),
+                        resource_observation=profile.resources,
                     )
                 if args.watch_max_iterations is not None and iteration >= args.watch_max_iterations:
                     break
@@ -3642,7 +3673,7 @@ async def _run_watch_mode(
 
             state = _stamp_runtime_watch_state(args, updated_state)
             try:
-                save_watch_state(
+                profile.call("watch_state_persistence", save_watch_state,
                     WATCH_STATE_PATH, state, expected_updated_at=previous_state.updated_at
                 )
             except WatchModeError as exc:
@@ -3709,15 +3740,20 @@ async def _run_watch_mode(
                     "owner_monitoring": dict(execution.result.scanner_process_summary.get("owner_monitoring") or {}),
                     "telegram_provenance": dict(execution.result.scanner_process_summary.get("telegram_provenance") or {}),
                     "database_storage_status": "NOT_REQUESTED",
+                    "phase_profile": profile.snapshot(boundary="before_primary_scan_storage"),
+                    "resource_observation": dict(profile.resources),
                 }
             )
             stored_manifest_run_id = execution.storage_run_id
             if args.store_scan:
                 try:
-                    stored_manifest_run_id = _store_watch_iteration_scan_run(
+                    stored_manifest_run_id = profile.call("scan_storage", _store_watch_iteration_scan_run,
                         args,
                         execution=execution,
-                        summary=summary.model_copy(update={"database_storage_status": "PENDING"}),
+                        summary=summary.model_copy(update={
+                            "database_storage_status": "PENDING",
+                            "duration_scope": "through_watch_state_before_primary_scan_storage",
+                        }),
                         started_at=iteration_started_at,
                         completed_at=completed_at,
                         runtime_sec=runtime_sec,
@@ -3775,10 +3811,11 @@ async def _run_watch_mode(
                     "phase_statuses": dict(phase_statuses),
                     "errors": tuple(iteration_errors),
                     "database_storage_status": database_storage_status,
+                    "phase_profile": profile.snapshot(boundary="before_manifest_reporting_and_presentation"),
                 }
             )
             try:
-                manifest_row = _append_scan_run_manifest(
+                manifest_row = profile.call("scan_manifest", _append_scan_run_manifest,
                     execution.result,
                     watchlist=iteration_watchlist,
                     ranked_results=execution.ranked_results,
@@ -3831,7 +3868,9 @@ async def _run_watch_mode(
             presentation_summary = summary
             if args.watch_output_file is not None:
                 try:
-                    append_watch_output(args.watch_output_file, summary)
+                    profile.call("watch_output", append_watch_output, args.watch_output_file, summary.model_copy(update={
+                        "phase_profile": profile.snapshot(boundary="before_watch_output_and_admin_report"),
+                    }))
                 except OSError as exc:
                     phase_statuses["watch_output"] = "FAILED"
                     iteration_errors.append(_watch_phase_error("watch_output", exc))
@@ -3843,7 +3882,7 @@ async def _run_watch_mode(
                     )
                 else:
                     phase_statuses["watch_output"] = "SUCCESS"
-            await _route_admin_report(
+            await profile.acall("admin_report", _route_admin_report,
                 execution.result,
                 ranked_results=execution.ranked_results,
                 manifest_row=manifest_row,
@@ -3858,7 +3897,7 @@ async def _run_watch_mode(
                 "status": iteration_status, "phase_statuses": dict(phase_statuses),
                 "consecutive_failure_count": failure_streak, "selected_backoff_seconds": selected_backoff,
             })
-            console.emit(
+            profile.call("console_emit", console.emit,
                 console.format_watch_iteration(
                     presentation_summary,
                     results=execution.result.results,
@@ -3880,6 +3919,8 @@ async def _run_watch_mode(
                     status=iteration_status, phases=phase_statuses, schedule=schedule,
                     iteration_id=summary.iteration_id, consecutive_failures=failure_streak,
                     backoff_seconds=selected_backoff, will_continue=continue_watching,
+                    phase_profile=profile.snapshot(boundary="after_manifest_reporting_and_presentation_before_final_observation_persistence"),
+                    resource_observation=profile.resources,
                 )
 
             if not continue_watching:
@@ -3905,6 +3946,10 @@ async def _run_watch_mode(
             )
             if session is not None:
                 cancelled_summary = cancelled_summary.model_copy(update={"watch_session_id": session.state["session_id"]})
+            cancelled_summary = cancelled_summary.model_copy(update={
+                "phase_profile": profile.snapshot(boundary="before_cancelled_iteration_recording"),
+                "resource_observation": dict(profile.resources),
+            })
             _record_failed_watch_iteration(args, cancelled_summary, watchlist=cancelled_watchlist, console_presenter=console)
             completed_iterations = iteration
         _print_watch_shutdown(
@@ -4177,6 +4222,7 @@ def _record_failed_watch_iteration(
         print(f"Warning: failed iteration manifest persistence failed safely: {type(exc).__name__}: {exc}")
 
 
+@profiled("universe")
 async def _watchlist_for_watch_iteration(
     args: argparse.Namespace,
     startup_watchlist: WatchlistResolution,
@@ -4196,6 +4242,7 @@ def _watch_mode_refreshes_universe(args: argparse.Namespace) -> bool:
     )
 
 
+@profiled("scan_core")
 async def _run_watch_scan_iteration(
     args: argparse.Namespace,
     *,
@@ -4481,6 +4528,10 @@ async def _run_watch_scan_iteration(
     if portfolio_selection is not None:
         ranked_results = _ranked_results_with_selected_first(ranked_results, portfolio_selection)
 
+    result = result.model_copy(update={"scanner_process_summary": {
+        **result.scanner_process_summary,
+        **current_observations(boundary="before_final_scan_json_output"),
+    }})
     output_requested = args.output_json is not None or args.save_run is not None
     try:
         if args.output_json is not None:
@@ -4518,6 +4569,7 @@ async def _run_watch_scan_iteration(
     )
 
 
+@profiled("scan_storage")
 def _store_watch_iteration_scan_run(
     args: argparse.Namespace,
     *,
@@ -4867,6 +4919,7 @@ def _parse_bucket_filter(values: Sequence[str] | None) -> set[DisplayBucket] | N
     return buckets
 
 
+@profiled("portfolio_selection")
 def _portfolio_selection_for_result(
     args: argparse.Namespace,
     result: ScannerRunResult,

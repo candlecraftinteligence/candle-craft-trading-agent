@@ -42,6 +42,10 @@ re-audited on each append. Records are at most 32 KiB; the history is append-onl
 with no automatic retention, pruning or cleanup. Capacity planning must include
 its measured growth. A bounded receipt retains only one compact prior session;
 prior-session nesting cannot grow recursively.
+The follow-on resource correction adds a total 32 MiB append budget, durable
+exhaustion marker and separate established-history protection. See
+`docs/research/CCI_RESOURCE_PHASE_OBSERVATIONS.md` for the current combined
+contract; it preserves evidence without automatic retention or repair.
 
 Unobserved prior shutdown or iteration completion is explicit. Cross-session UTC
 elapsed time is an observation with clock/coverage Unverified. Negative differences

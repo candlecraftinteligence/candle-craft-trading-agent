@@ -1,7 +1,8 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-23, owner accounting, research stratification and Telegram
-provenance diagnostics CODE_COMPLETE.
+Checkpoint: 2026-10-24, all five focused reliability implementations CODE_COMPLETE.
+The final documentation checkpoint receives separate review/CI. Integration,
+deployment and natural Runtime verification remain pending owner authorization.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
@@ -39,6 +40,9 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   documentation-only head needs its own CI/review. A subsequent Astra design
   review could not run because the reviewer account reached its usage limit;
   no approval for that review is inferred.
+- Final documentation head `1830aa87b2c47ca5b2e51df1cc5a12c453c464fc` subsequently
+  received Astra APPROVE after the usage window reset, and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40028951292).
+  PR #144 is ready for owner review, unmerged and undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: outage cause cannot be established from DEV source. P4 causation
   is Unverified. Requires genuine launcher/process/manifest evidence.
@@ -188,7 +192,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## E — Resource reliability
 
-- Status: INVESTIGATING.
+- Status: TESTED.
 - Weakness: historically low Runtime RAM/disk and cadence overruns.
 - Evidence: scanner already samples RSS through platform APIs; supervisor records
   processing duration before the manifest/admin/presentation tail. It does not
@@ -200,10 +204,53 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   10 GiB or 10% per volume, plus the documented measured growth/restore terms.
   Preserve this policy; historical F06 schema-26 runbooks are not a current
   schema-27 release authorization or current Runtime capacity evidence.
-- Correction: assess low-overhead phase/resource instrumentation and bounded
-  diagnostic sizes. No cleanup or production access.
-- Implementation PR / independent review: N/A.
-- Tests: existing process-memory and cadence tests; matched Runtime evidence N/A.
+- Root cause verified in DEV: current telemetry does not attribute downstream
+  phase work or current system resources. The new A journal bounds rows but has
+  no total append budget. No SQLite bottleneck or historical disk-growth cause
+  is established.
+- Correction: 19 fixed inclusive elapsed-call profiles with QPC clock metadata;
+  one advisory resource point (RSS, Windows physical RAM and proven fixed-local
+  system disk), reused reserve floor, and a 32 MiB journal budget. A durable
+  terminal marker plus receipt latch prevents post-gap append across abrupt exit
+  or restart. Current receipt continues without auto-cleanup or backoff changes.
+- Branch: `codex/reliability-resource-observations`, based on A final `1830aa8`.
+- Contract: `docs/research/CCI_RESOURCE_PHASE_OBSERVATIONS.md`.
+- Implementation PR: [#145](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/145),
+  stacked on #144. Astra exact-head review of `8ca919a`: CHANGES_REQUIRED because
+  a missing established normal journal could be recreated. Corrected established
+  ownership is independent of exhaustion and callback configuration, with
+  active-session/restart/legacy/configuration regressions. The first full pytest
+  was stopped at 10% without observed failures to verify this correction.
+  Corrected broader subset: 242 passed in 46.05 seconds; final corrected
+  profile/resource/session/inventory subset: 111 passed in 16.64 seconds,
+  including conservative legacy/contradictory-ownership cases.
+  Astra APPROVE for `d063c3f`, independently 77 passed in 14.63 seconds;
+  [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40031254615).
+  Its full Windows run was stopped at 71% without observed failures after final
+  review identified the initial SQLite snapshot's duration-scope label as later
+  than its actual boundary. That PENDING summary now explicitly precedes primary
+  scan storage; later manifest scope is unchanged. A real synthetic storage-path
+  regression verifies both. No timing or scheduling calculation changes.
+  Final implementation `3aaac3bfeeaf1ba68e8722de373ac92d63d0bd59` has Astra
+  APPROVE; the new boundary regression independently passed in 1.12 seconds.
+  [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40032395331)
+  succeeded. Final targeted watch/session/resource/inventory subset: 139 passed
+  in 29.44 seconds. Final full Windows pytest on that exact implementation:
+  **3507 passed, 1 existing dependency warning in 646.34 seconds**, no failures
+  or skips. The warning is FastAPI/Starlette's deprecated httpx TestClient adapter.
+  No new dependency or configuration warning occurred in the full run.
+- Tests: corrected profile/resource/session subset 65 passed; expanded resource,
+  watch/command/owner/provenance/stream/cadence/inventory subset 238 passed in
+  45.97 seconds. Final full pytest, exact-head implementation review and CI passed.
+  Astra preflight
+  findings corrected with regressions for restart latching, failure/startup
+  warnings and resource timestamp failure. Durable marker also covers abrupt
+  helper exit before receipt persistence, exact admission and torn markers.
+- Alternating 100-pair DEV filesystem probe: A median 10.816 ms / p95 18.362 ms,
+  E including actual local resource point and synthetic profile median 11.499 ms /
+  p95 18.059 ms. Receipts 1,128 / 6,979 bytes; 100-finalization journals
+  89,294 / 628,430 bytes. No scanner, SQLite or network. Other artifact writes
+  and matched Runtime overhead remain Unverified.
 - B diagnostic microbenchmark (synthetic DEV structures, 200 repetitions,
   summary plus JSON serialization, excludes disk/SQLite): 41 owners produced
   28,455 bytes versus 15,198 legacy bytes, median 0.416 ms / p95 0.553 ms;
@@ -219,6 +266,10 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: Runtime capacity may require a hardware/storage upgrade. No
   database bottleneck has been established.
+- Handoff: `docs/handoffs/CCI_RELIABILITY_RESOURCE_OBSERVATIONS.md`.
+- Integration and Runtime evidence package:
+  `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`. Its proposed
+  sequence requires separate owner approval; it is not cutover authorization.
 
 ## Continuation and release boundaries
 
@@ -227,11 +278,13 @@ approval; PR #141 stays unmerged and undeployed. Handoff:
 `docs/handoffs/CCI_RELIABILITY_OWNER_COVERAGE.md`.
 Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
 the final documentation head `e4a5fb9` has CI and Astra approval.
-PRs #141, #142 and #143 remain unmerged and undeployed. D is CODE_COMPLETE at
-implementation/correction head `29056e7`, with a documentation-only checkpoint
-  receiving separate review/CI. A implementation `c8d2a2f` has full pytest,
-CI and exact-head Astra approval; its documentation checkpoint has separate
-CI/review requirements. Continue E's phase/resource observations. No historical outage cause was found in
+PRs #141 through #144 remain unmerged and undeployed. D's final documentation
+head `2cfd608` and A's final `1830aa8` have CI and exact-head Astra approval.
+E's final implementation `3aaac3b` has full pytest, required CI and Astra approval.
+The final documentation head receives its own exact-head review/CI, recorded in
+PR #145. Then request owner approval for the pinned integration sequence in
+`docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`; Runtime preflight
+and rollout require separate authorization. No historical outage cause was found in
 repository notes or the scoped GitHub audit search; it remains Unverified.
 Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
