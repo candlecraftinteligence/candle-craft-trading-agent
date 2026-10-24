@@ -1,6 +1,7 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-23, owner accounting and research stratification CODE_COMPLETE.
+Checkpoint: 2026-10-23, owner accounting, research stratification and Telegram
+provenance diagnostics CODE_COMPLETE.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
@@ -111,22 +112,51 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39948528496)
   succeeded for the same head. Dependency, compile and whitespace checks passed.
 - Handoff: `docs/handoffs/CCI_RELIABILITY_RESEARCH_EVIDENCE.md`.
+- Final documentation head `e4a5fb9693ce78c9194d32dcac0231b109671c74`: Astra
+  APPROVE and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39950075163).
+  PR #142 is ready for owner review, unmerged and undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: no historical candles recovered; none fabricated or relabeled.
 
 ## D — Telegram provenance
 
-- Status: INVESTIGATING.
+- Status: TESTED.
 - Weakness: ten historical PENDING follow-ups lack canonical reservations.
 - Evidence: ownership checks require the canonical pointer and matching event /
   reservation identity; outbox recovery fails closed without that pointer.
 - Prospective diagnostic finding: `recover_public_lifecycle_alerts` logs a
   missing-attempt event on every pass and continues without a delivery diagnostic
   for that event. The ten historical events' current state remains Unverified.
-- Correction: investigate bounded event-key diagnostics and warning suppression
-  while preserving unresolved status and preventing any automatic resend.
-- Implementation PR / tests / independent review: N/A / existing outbox tests /
-  pending new acceptance investigation.
+- Correction: a bounded read-only inspection of known public event families in
+  PENDING/RETRYABLE/IN_FLIGHT, separate from recovery; event-key/canonical/ownership
+  reasons, retained run evidence, and PARTIAL status for unresolved or incomplete
+  coverage. No delivery attempt is invented. The process warning cache is bounded
+  at 1024 fingerprints and ten warnings per inspection. Default inspection is
+  256 rows, 64 per SQL page, at most 50 detail rows; incomplete coverage is explicit.
+  Existing recovery selection is unchanged and cannot be starved by diagnostic
+  limits. Recovery checks canonical association before using any attempt fallback.
+- Branch: `codex/reliability-telegram-provenance`, based on C final `e4a5fb9`.
+- Implementation PR / independent review: pending; Astra read-only design review
+  supported separate diagnostics, canonical guard reuse and explicit coverage.
+- Tests: initial targeted run exposed a synthetic fixture mixing SENT attempts
+  with a PENDING event; the fixture now represents pending state consistently.
+  Expanded provenance/outbox/recovery/quality/watch/command subset: 309 passed.
+  Corrected final targeted subset including failure persistence: 41 passed.
+  Report contract: `docs/research/CCI_TELEGRAM_PROVENANCE_DIAGNOSTICS.md`.
+  Astra APPROVE on `82750b5`, 59 independent tests passed. Full Windows run:
+  3428 passed, one failure, one dependency warning in 784.67 s; CI also 3428 passed
+  and the same inventory-anchor failure. Two source line references were stale
+  after added imports. Catalog and its deterministic artifacts corrected without
+  changing the existing checks. Corrected inventory/provenance subset: 58 passed.
+  Final full existing-environment Windows pytest on `29056e76c315385fdb5cbb379ea0155434fd1e95`:
+  **3429 passed, 1 dependency warning in 1624.99 seconds**, no failures/skips.
+  Astra APPROVE for the same head; both existing inventory checks independently
+  passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39986875741)
+  succeeded. Longer Windows test runtime cause remains Unverified.
+- Implementation PR: [#143](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/143),
+  stacked on #142; unmerged and undeployed. Handoff:
+  `docs/handoffs/CCI_RELIABILITY_TELEGRAM_PROVENANCE.md`. Final documentation-only
+  head receives its own CI/Astra review and is recorded in the PR after publication.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: historical delivery receipts are unavailable in DEV. No event
   mutation or resend has been attempted.
@@ -136,8 +166,15 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Status: INVESTIGATING.
 - Weakness: historically low Runtime RAM/disk and cadence overruns.
 - Evidence: scanner already samples RSS through platform APIs; supervisor records
-  full-cycle duration. These do not yet attribute all downstream phase latency.
+  processing duration before the manifest/admin/presentation tail. It does not
+  yet measure the full finalization boundary or all downstream phase latency.
   DEV free C: capacity was approximately 115 GB, not a Runtime measurement.
+- Later DEV point observations: 98.8 GiB free C:, 7.86 GiB total physical RAM /
+  1.91 GiB available. These sequential observations are not Runtime evidence or a
+  resource stability result. Existing readiness policy reserves the greater of
+  10 GiB or 10% per volume, plus the documented measured growth/restore terms.
+  Preserve this policy; historical F06 schema-26 runbooks are not a current
+  schema-27 release authorization or current Runtime capacity evidence.
 - Correction: assess low-overhead phase/resource instrumentation and bounded
   diagnostic sizes. No cleanup or production access.
 - Implementation PR / independent review: N/A.
@@ -158,8 +195,12 @@ Owner-accounting implementation is CODE_COMPLETE with final-head CI and Astra
 approval; PR #141 stays unmerged and undeployed. Handoff:
 `docs/handoffs/CCI_RELIABILITY_OWNER_COVERAGE.md`.
 Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
-the documentation-only final checkpoint receives its own CI and Astra review.
-PR #142 remains unmerged and undeployed. Continue D, then A and E.
+the final documentation head `e4a5fb9` has CI and Astra approval.
+PRs #141, #142 and #143 remain unmerged and undeployed. D is CODE_COMPLETE at
+implementation/correction head `29056e7`, with a documentation-only checkpoint
+receiving separate review/CI. Continue A's watch lease/session observations,
+then E's phase/resource observations. No historical outage cause was found in
+repository notes or the scoped GitHub audit search; it remains Unverified.
 Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
 freshness and deduplication. P4 shadow remains disabled and non-enforcing.

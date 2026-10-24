@@ -834,7 +834,7 @@
       },
       {
         "path": "app/alerts/telegram_lifecycle.py",
-        "line": 288,
+        "line": 291,
         "contains": "PUBLIC_SIGNAL_MIN_RR = Decimal(\"3\")"
       },
       {
@@ -880,7 +880,7 @@
     "code_refs": [
       {
         "path": "scripts/run_scan.py",
-        "line": 610,
+        "line": 611,
         "contains": "default=60.0"
       },
       {

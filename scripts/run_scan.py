@@ -90,6 +90,7 @@ from app.alerts.telegram_lifecycle import (  # noqa: E402
     TelegramLifecycleDeliverySummary,
 )
 from app.alerts.telegram_sender import resolve_public_signal_destination  # noqa: E402
+from app.alerts.provenance_diagnostics import summary_provenance, unavailable_provenance  # noqa: E402
 from app.formatters.scanner_console import ScannerConsolePresenter  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
@@ -1052,7 +1053,14 @@ async def main(argv: Sequence[str] | None = None) -> None:
                 result=monitoring_result,
                 prior_errors=prior_monitoring_errors,
             )
-    await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
+    try:
+        telegram_summary = await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
+    except (Exception, SystemExit) as exc:
+        _persist_one_shot_telegram_failure(result, exc)
+        raise
+    result = _retain_telegram_provenance(
+        result, telegram_summary, requested=_telegram_lifecycle_public_delivery_enabled(args),
+    )
     result = _apply_symbol_health_if_enabled(args, result, symbol_priority_plan)
 
     bucket_filter = _parse_bucket_filter(args.bucket_filter)
@@ -2075,6 +2083,13 @@ def _scan_run_manifest_row(
     monitoring = result.scanner_process_summary.get("owner_monitoring")
     if isinstance(monitoring, Mapping):
         row["owner_monitoring"] = dict(monitoring)
+    provenance = result.scanner_process_summary.get("telegram_provenance")
+    if isinstance(provenance, Mapping):
+        row["telegram_provenance"] = dict(provenance)
+        if provenance.get("status") != "NOT_REQUESTED" and (
+            provenance.get("coverage_complete") is not True or provenance.get("unresolved", 0) != 0
+        ):
+            row["status"] = "PARTIAL"
     if watch_iteration is not None:
         row["watch_iteration"] = watch_iteration
     queue_diagnostics = result.resume_metadata.get("symbol_queue") if isinstance(result.resume_metadata, Mapping) else None
@@ -2836,6 +2851,39 @@ async def _deliver_telegram_manual_signals_if_enabled(
     return summary
 
 
+def _retain_telegram_provenance(
+    result: ScannerRunResult,
+    summary: TelegramLifecycleDeliverySummary | None,
+    *,
+    requested: bool,
+) -> ScannerRunResult:
+    return result.model_copy(update={"scanner_process_summary": {
+        **result.scanner_process_summary,
+        "telegram_provenance": summary_provenance(summary, requested=requested),
+    }})
+
+
+def _persist_one_shot_telegram_failure(result: ScannerRunResult, exc: Exception | SystemExit) -> None:
+    row = {
+        "record_kind": "telegram_provenance_failure_diagnostic",
+        "scan_completion_record": False,
+        "run_id": _manifest_run_id(result, None),
+        "timestamp": _watch_iteration_timestamp(),
+        "status": "PARTIAL",
+        "phase_statuses": {"telegram_outbox": "FAILED"},
+        "telegram_provenance": unavailable_provenance(type(exc).__name__),
+        "errors": [_watch_phase_error("telegram_outbox", exc)],
+    }
+    try:
+        SCAN_RUN_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with SCAN_RUN_MANIFEST_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
+    except OSError as persistence_error:
+        raise SystemExit("\n".join((*row["errors"], _watch_phase_error(
+            "telegram_provenance_diagnostic_persistence", persistence_error,
+        )))) from persistence_error
+
+
 def _print_telegram_manual_lifecycle_summary(summary: TelegramLifecycleDeliverySummary) -> None:
     print("Telegram manual lifecycle summary:")
     print(f"- sent: {summary.sent}")
@@ -2843,6 +2891,9 @@ def _print_telegram_manual_lifecycle_summary(summary: TelegramLifecycleDeliveryS
     print(f"- blocked: {summary.blocked}")
     print(f"- blocked repeats compacted: {summary.blocked_repeat}")
     print(f"- failed: {summary.failed}")
+    provenance = summary_provenance(summary)
+    print(f"- unresolved provenance (observed): {provenance.get('unresolved', NA)}")
+    print(f"- provenance inspection complete: {provenance.get('coverage_complete')}")
 
 
 def _watchlist_with_lifecycle_priority(
@@ -3613,6 +3664,7 @@ async def _run_watch_mode(
                     "active_lifecycle_count": len(iteration_watchlist.active_lifecycle_symbols),
                     "telegram_outbox_status": dict(execution.telegram_outbox_status),
                     "owner_monitoring": dict(execution.result.scanner_process_summary.get("owner_monitoring") or {}),
+                    "telegram_provenance": dict(execution.result.scanner_process_summary.get("telegram_provenance") or {}),
                     "database_storage_status": "NOT_REQUESTED",
                 }
             )
@@ -4006,6 +4058,7 @@ def _failed_watch_iteration_summary(
         phase_statuses=phase_statuses,
         errors=(error_text, *monitoring_lines),
         owner_monitoring=dict(getattr(iteration_error, "owner_monitoring_diagnostics", {}) or {}),
+        telegram_provenance=dict(getattr(iteration_error, "telegram_provenance_diagnostics", {}) or {}),
         active_lifecycle_count=len(watchlist.active_lifecycle_symbols),
         database_storage_status="NOT_ATTEMPTED",
         next_scan_seconds=schedule.sleep_seconds,
@@ -4040,6 +4093,7 @@ def _record_failed_watch_iteration(
         "universe_label": _display(getattr(watchlist.universe, "label", watchlist.source_label)),
         "symbols_scanned": 0,
         "owner_monitoring": dict(summary.owner_monitoring),
+        "telegram_provenance": dict(summary.telegram_provenance),
         "watch_supervisor": summary.model_dump(mode="json"),
     }
     try:
@@ -4310,16 +4364,23 @@ async def _run_watch_scan_iteration(
                 print_summary=False,
             )
         except (Exception, SystemExit) as exc:
+            setattr(exc, "telegram_provenance_diagnostics", unavailable_provenance(type(exc).__name__))
             if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
                 raise
             phase_statuses["telegram_outbox"] = "FAILED"
             recoverable_errors.append(_watch_phase_error("telegram_outbox", exc))
+            result = result.model_copy(update={"scanner_process_summary": {
+                **result.scanner_process_summary,
+                "telegram_provenance": unavailable_provenance(type(exc).__name__),
+            }})
         else:
             telegram_delivery_summary = telegram_summary
+            result = _retain_telegram_provenance(result, telegram_summary, requested=True)
             telegram_outbox_status = _telegram_outbox_status_summary(telegram_summary)
             phase_statuses["telegram_outbox"] = _telegram_outbox_phase_status(telegram_outbox_status)
     else:
         phase_statuses["telegram_outbox"] = "SKIPPED"
+        result = _retain_telegram_provenance(result, None, requested=False)
     symbol_health_enabled = bool(
         symbol_priority_plan.enabled or args.show_symbol_health or args.store_scan
     )
