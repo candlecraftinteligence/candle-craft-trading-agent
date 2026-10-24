@@ -56,9 +56,14 @@ to complete this DEV task.
    `<database>.watch-session.json` and `<database>.watch-observations.jsonl` beside
    the canonical database. Verify parent-directory permissions, OS locking and
    atomic replacement on the actual filesystem without starting a second scanner.
-   The receipt is bounded to 32 KiB; the journal to 32 MiB. Exhaustion is reported
-   as incomplete history. Unknown, corrupt or missing established files fail
-   closed; preserve them for an operator decision. Never break a lease by PID/age.
+   New receipt writes are bounded to 32 KiB; journal appends have a 32 MiB budget.
+   Existing larger journals are preserved with further appends suspended, never
+   shrunk. Exhaustion is reported as incomplete history. Validate recognized
+   lease/journal headers and any existing receipt; malformed existing files fail
+   closed. A missing journal fails closed when its establishment is known.
+   Missing lock markers may be created and absent receipts treated as no prior
+   receipt, so arbitrary sidecar loss is not always detected. Preserve all three
+   sidecars for operator review. Never break a lease by PID/age.
 5. Verify current RAM/RSS and storage on C: and actual database/recovery volumes.
    Preserve the existing per-volume reserve floor (max 10 GiB / 10%), restore
    budget and ten-day growth horizon, with two comparable points at least 24 hours

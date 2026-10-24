@@ -162,9 +162,11 @@ Resource advisories alone never grant capacity approval or weaken signal policy.
 
 Journal exhaustion means incomplete diagnostic history, not an opportunity to
 delete evidence. Archive/generation management requires its own reviewed procedure.
-The bounded current receipt continues until a critical integrity failure; unknown,
-torn or missing established sidecars require an operator decision, not automatic
-repair. An independent observer and an archive plan remain operational work.
+The bounded current receipt continues until a critical integrity failure. Unknown
+or torn existing files and a missing journal known to be established fail closed.
+Missing lock markers or receipts are not universally detected as lost history;
+preserve every sidecar and require operator review rather than deleting evidence.
+An independent observer and an archive plan remain operational work.
 
 ## Honest completion boundary
 
