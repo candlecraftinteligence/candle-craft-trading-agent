@@ -1,5 +1,11 @@
 # Reliability integration and Runtime verification packet
 
+DEV scope update: Runtime access, preflight and deployment are explicitly outside
+this DEV task. There is no connection from this session to Runtime, and none is
+to be requested or established. The user will handle rollout with Codex directly
+on Runtime. Use `CCI_RUNTIME_DEPLOYMENT_HANDOFF.md` for the concise self-contained
+handoff; the following Runtime requirements are documentation for that session.
+
 Integration update, 2026-10-24: the owner separately approved integration only.
 PRs #141-146 are now merged, preserving accepted commits. Verified main is
 `6785cf6c5a5d4c083f31a280c2ca1555bc7df88c`, with exact-main Astra approval and
@@ -74,8 +80,8 @@ and present that immutable release candidate for a separate Runtime decision.
 
 The reported host is `DESKTOP-G7M42AL`; the reported code path is
 `C:\Users\aspir\Desktop\Candle Craft Inteligence`. These are supplied identities,
-not a verified current connection. DEV must not mount, query, copy or inspect the
-live database. No established authorized Runtime connection is assumed here.
+to be independently checked locally by the separate Runtime Codex session. DEV
+must not mount, query, copy or inspect the live database or seek Runtime access.
 
 Before proposing cutover, obtain bounded, sanitized evidence on Runtime:
 

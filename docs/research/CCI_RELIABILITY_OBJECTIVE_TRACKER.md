@@ -9,8 +9,17 @@ and [push CI success](https://github.com/candlecraftinteligence/candle-craft-tra
 **3553 passed, 1 existing dependency warning in 280.94 seconds**, no failures or
 skips. Integration receipt: `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RESULT.md`.
 Earlier implementation/review checkpoints below are retained as history.
-Runtime preflight, deployment and natural verification still require separate
-authorization; this documentation branch does not change the verified main SHA.
+The user has explicitly scoped this task to DEV integration and a self-contained
+handoff. Runtime preflight, deployment and natural verification belong to a
+separate Codex session running directly on Runtime and are not DEV blockers.
+There is no DEV-to-Runtime connection to request or establish. Handoff:
+`docs/handoffs/CCI_RUNTIME_DEPLOYMENT_HANDOFF.md`. This documentation branch does
+not change the verified main SHA, and PR #147 is not merged without approval.
+DEV completion verdict: `DEV_INTEGRATION_COMPLETE_RUNTIME_HANDOFF_READY`.
+This verdict covers DEV integration and its handoff, not operational resolution.
+Final safeguard audit: 108 tests passed in 65.96 seconds. No remaining DEV code
+integration defect was found; the retained backup-planner prerequisite and
+existing dependency warning are documented in the Runtime handoff.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was

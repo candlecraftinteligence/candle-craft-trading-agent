@@ -54,15 +54,22 @@ the final exact-main run below is the integration evidence.
   exact main solely for this receipt/tracker update. It changes no runtime code
   and is not permission to merge an additional documentation PR.
 
-## Remaining work and authorization
+## DEV completion and separate Runtime handoff
+
+The owner subsequently clarified that Runtime work is outside this DEV task.
+There is no connection between this session and the Runtime PC. Do not discover,
+establish, simulate or request Runtime access. The user will authorize and execute
+rollout separately with Codex running directly on Runtime. This is not a DEV
+integration blocker. The concise, self-contained handoff is
+`CCI_RUNTIME_DEPLOYMENT_HANDOFF.md`; its exact code target remains `6785cf6`.
 
 Runtime was not accessed or changed. The actual running release, schema/index
 compatibility, processes/consumer paths, resource headroom, growth/restore budget,
 filesystem locking, source capture configuration and external listener state
-remain N/A / Unverified. No verified authorized Runtime connection is assumed.
+remain N/A / Unverified and are outside the DEV completion verdict.
 
-The next phase is separately authorized bounded read-only preflight on the
-reported Runtime host `DESKTOP-G7M42AL`, using the evidence requirements in
+Any subsequent phase belongs to the separately authorized Runtime Codex session
+on `DESKTOP-G7M42AL`, using the evidence requirements in
 `CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`. Explicit filesystem-only
 collection precedes any separately bounded SQLite work. No service control,
 deployment, maintenance, event repair or resend follows from integration approval.
