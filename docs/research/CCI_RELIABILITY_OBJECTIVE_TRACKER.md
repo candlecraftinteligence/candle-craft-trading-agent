@@ -10,18 +10,40 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## A — Scanner continuity
 
-- Status: INVESTIGATING.
+- Status: TESTED.
 - Weakness: historical 16h54m absence of normal scanning; four missed start slots.
 - Evidence: `schedule_after_iteration` uses monotonic time, accounts for overruns
   and has deterministic tests. The watch loop persists completion/failure
   summaries, but starts are not a durable supervisor lifecycle contract.
-- Correction: investigate durable start/exit coverage and separate scanner timing
-  from full-cycle timing. No restart supervisor is proposed.
-- Implementation PR / independent review: N/A.
-- Tests: existing `test_watch_supervisor_reliability.py`; new acceptance pending.
+- Correction: a shared OS lease before reset/discovery through service cleanup,
+  bounded atomic current receipt and separate session observation journal. Actual
+  starts/finalization and unobserved completion/shutdown are explicit. Final phase
+  status/schedule includes the reporting tail; old duration scope is labelled.
+  No automatic restart, process killing or age/PID-based lease breaking.
+- Branch: `codex/reliability-watch-session`, based on D final head `2cfd608`.
+- Implementation PR: [#144](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/144). Contract:
+  `docs/research/CCI_WATCH_SESSION_OBSERVATIONS.md`.
+- Tests: 232 broader watch/command/owner/provenance/inventory tests passed.
+  Corrected focused session suite: 25 passed; repeated tail-failure case added.
+  Final corrected session/cadence/inventory subset: 76 passed in 27.73 seconds.
+  Initial oversized fixture ID caused Windows setup errors and was shortened.
+- Independent preflight: Astra requested preservation of original exceptions
+  across descriptor/temporary cleanup failure and final status recomputation after
+  watch-output failure. Both corrected with failure-injection regressions. Final
+  full pytest on `c8d2a2fdc78f7b31c5d93152c8ed4b4c0b3ed65b`:
+  **3455 passed, 1 existing dependency warning in 1641.43 seconds**, no failures
+  or skips. Astra APPROVE for that exact implementation head, independently
+  44 session/cadence/inventory tests passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39994803059)
+  succeeded. Dependency, compile, whitespace and invariant checks passed.
+- Handoff: `docs/handoffs/CCI_RELIABILITY_WATCH_SESSION.md`. The final
+  documentation-only head needs its own CI/review. A subsequent Astra design
+  review could not run because the reviewer account reached its usage limit;
+  no approval for that review is inferred.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: outage cause cannot be established from DEV source. P4 causation
   is Unverified. Requires genuine launcher/process/manifest evidence.
+  The supplied historical 16h54m interval is missing observation coverage; exact
+  start/end UTC are N/A in the supplied summary. No outage receipt is fabricated.
 
 ## B — Existing-owner monitoring accounting
 
@@ -157,6 +179,9 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   stacked on #142; unmerged and undeployed. Handoff:
   `docs/handoffs/CCI_RELIABILITY_TELEGRAM_PROVENANCE.md`. Final documentation-only
   head receives its own CI/Astra review and is recorded in the PR after publication.
+- Final documentation head `2cfd608d5744b6f2dfcce53cfdc568dcd6471223`: Astra APPROVE;
+  [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39990861792).
+  PR #143 is ready for owner review, unmerged and undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: historical delivery receipts are unavailable in DEV. No event
   mutation or resend has been attempted.
@@ -185,6 +210,12 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   118 owners produced 80,548 versus 43,476 bytes, median 1.188 ms / p95 2.484 ms.
   These are per report, not total artifact growth; reports can appear in more
   than one artifact. Runtime cadence and storage impact remain Unverified.
+- A filesystem-only DEV probe, 100 repetitions of start/finish receipt writes and
+  journal append with flush/fsync: median 22.210 ms, p95 37.617 ms using the
+  high-resolution QPC timer. Receipt 1,183 bytes; 100 synthetic finalizations plus
+  header/start records 94,704 bytes. No scanner, SQLite or network work. The
+  scheduling monotonic clock has 15.625 ms resolution on this DEV environment;
+  do not imply sub-tick precision or matched Runtime overhead from these points.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: Runtime capacity may require a hardware/storage upgrade. No
   database bottleneck has been established.
@@ -198,8 +229,9 @@ Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
 the final documentation head `e4a5fb9` has CI and Astra approval.
 PRs #141, #142 and #143 remain unmerged and undeployed. D is CODE_COMPLETE at
 implementation/correction head `29056e7`, with a documentation-only checkpoint
-receiving separate review/CI. Continue A's watch lease/session observations,
-then E's phase/resource observations. No historical outage cause was found in
+  receiving separate review/CI. A implementation `c8d2a2f` has full pytest,
+CI and exact-head Astra approval; its documentation checkpoint has separate
+CI/review requirements. Continue E's phase/resource observations. No historical outage cause was found in
 repository notes or the scoped GitHub audit search; it remains Unverified.
 Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
