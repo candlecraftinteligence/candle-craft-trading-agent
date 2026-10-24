@@ -67,6 +67,12 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   including real synthetic storage/manifest/watch-output failures after repeated
   diagnostic-only cycles. Dependency, compile, whitespace and invariant checks
   passed. Source inventory line reference and deterministic artifacts refreshed.
+  Astra CHANGES_REQUIRED on `d4983b3`: existing healthy `blocked_repeat` was
+  omitted from the raw-status allowlist, so benign suppression could still trigger
+  backoff. Corrected with real delivery dataclasses and retained failure-marker
+  checks. First full run stopped at 14% without observed failures. Required CI
+  for that initial head succeeded; corrected full/CI/exact-head review required.
+  Corrected blocked-repeat expanded subset: 208 passed in 39.65 seconds.
 
 ## B — Existing-owner monitoring accounting
 

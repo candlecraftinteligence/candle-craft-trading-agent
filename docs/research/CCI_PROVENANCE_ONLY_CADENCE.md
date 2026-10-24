@@ -67,6 +67,14 @@ The final focused cadence/Telegram/session subset passed **91 tests in 17.53
 seconds**, including real synthetic storage, manifest and watch-output failures
 after two diagnostic-only cycles. Dependency, compile, whitespace and invariant
 checks passed. Final full pytest and exact-head review/CI remain pending.
+Astra requested correction on `d4983b3`: the conservative raw-status allowlist
+omitted existing healthy `blocked_repeat`, used for suppression/compaction. The
+first full run was stopped at 14% without observed failures. The allowlist now
+includes that existing status while retaining failure-marker rejection. Real
+delivery dataclasses cover benign suppression and failed/retryable/uncertain
+markers; repeated mixed provenance/suppression cycles exercise final receipts.
+Corrected expanded watch/cadence/session/resource/Telegram/inventory subset:
+**208 passed in 39.65 seconds**. Compilation and whitespace checks passed.
 
 The five previous focused PR heads remain unchanged and independently reviewed.
 This follow-up must be included in the integration sequence before requesting

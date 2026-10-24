@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.watch_retry_policy import watch_backoff_eligibility
+from app.alerts.telegram_lifecycle import TelegramLifecycleDelivery, TelegramLifecycleDeliverySummary
 from app.watch_supervisor import schedule_after_iteration
 from scripts import run_scan
 from tests.test_watch_session import _bootstrap
@@ -46,6 +47,18 @@ def test_successfully_observed_inspection_budget_is_diagnostic_only():
     execution = _execution(_summary(complete=False, unresolved=0))
     decision = watch_backoff_eligibility({"scanner": "SUCCESS", "telegram_outbox": "PARTIAL"}, execution.telegram_outbox_status, execution.telegram_delivery_summary)
     assert decision.eligible is False
+
+
+@pytest.mark.parametrize("detail,eligible", [("Public lifecycle transition suppressed from standalone delivery.", False), ("FAILED_FINAL", True), ("UNCERTAIN", True), ("RETRYABLE", True)])
+def test_real_blocked_repeat_is_healthy_but_failure_markers_retain_backoff(detail, eligible):
+    summary = TelegramLifecycleDeliverySummary(
+        failed=0, blocked_repeat=1,
+        deliveries=(TelegramLifecycleDelivery(symbol="BTCUSDT", signal_id="synthetic", alert_type="signal_confirmed", status="blocked_repeat", detail=detail),),
+        provenance_diagnostics=_summary().provenance_diagnostics,
+    )
+    counts = run_scan._telegram_outbox_status_summary(summary)
+    assert counts["blocked_repeat"] == 1
+    assert watch_backoff_eligibility({"scanner": "SUCCESS", "telegram_outbox": "PARTIAL"}, counts, summary).eligible is eligible
 
 
 @pytest.mark.parametrize("changes", [{"status": "UNAVAILABLE"}, {"status": "ERROR"}, {"contract": "unknown"},
@@ -102,7 +115,11 @@ def test_real_watch_keeps_repeated_partial_status_at_cadence_and_recognizes_tail
     async def provenance_only(*args, **kwargs):
         watchlist, execution, error = await original_attempt(*args, **kwargs)
         assert error is None
-        summary = _summary()
+        summary = TelegramLifecycleDeliverySummary(
+            failed=0, blocked_repeat=1,
+            deliveries=(TelegramLifecycleDelivery(symbol="BTCUSDT", signal_id="synthetic", alert_type="signal_confirmed", status="blocked_repeat", detail="Public lifecycle transition suppressed from standalone delivery."),),
+            provenance_diagnostics=_summary().provenance_diagnostics,
+        )
         execution = replace(execution, telegram_delivery_summary=summary,
                             telegram_outbox_status=run_scan._telegram_outbox_status_summary(summary),
                             phase_statuses={**execution.phase_statuses, "telegram_outbox": "PARTIAL"})

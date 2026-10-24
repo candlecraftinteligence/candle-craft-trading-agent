@@ -49,7 +49,7 @@ def watch_backoff_eligibility(
         status, detail = getattr(delivery, "status", None), getattr(delivery, "detail", None)
         if not isinstance(status, str) or not isinstance(detail, str):
             return BackoffEligibility(True, "DELIVERY_SOURCE_UNVERIFIED")
-        if status.lower() not in {"sent", "skipped", "blocked", "duplicate", "dry_run"} or any(
+        if status.lower() not in {"sent", "skipped", "blocked", "blocked_repeat", "duplicate", "dry_run"} or any(
             marker in detail.upper() for marker in ("RETRYABLE", "UNCERTAIN", "FAILED_FINAL")
         ):
             return BackoffEligibility(True, "DELIVERY_OPERATIONAL_FAILURE")
