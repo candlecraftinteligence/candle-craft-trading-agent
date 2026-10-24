@@ -1,0 +1,101 @@
+# Provenance-only diagnostics and watch cadence
+
+## Reproduced DEV interaction
+
+The D correction truthfully marks unresolved or incomplete Telegram provenance
+PARTIAL. The existing supervisor treats every repeated PARTIAL as an operational
+retry failure. With ten unresolved historical rows and zero delivery failures,
+the real pure functions produce a 300-second backoff after repeated cycles. A
+synthetic 240-second cycle on a 300-second cadence then schedules the next start
+at 540 seconds, despite useful scanner work completing within the interval.
+
+This is a prospective interaction in the unmerged DEV reliability stack. It does
+not explain the historical four missed slots or the 16h54m outage. The production
+ten events and their actual current state remain individually Unverified.
+
+## Narrow correction
+
+Keep Telegram and overall PARTIAL, provenance counts, incomplete-coverage markers
+and bounded warnings. Separate retry eligibility from diagnostic status. Only a
+positively established provenance-only PARTIAL avoids operational backoff:
+
+- Telegram is the sole adverse phase; every other phase is recognized SUCCESS
+  or SKIPPED.
+- A delivery summary exists; all four failure counters are explicit nonnegative
+  integers and zero. Its original failed count and delivery list must also exist;
+  default-to-zero conversions cannot establish health. Unknown, failed, uncertain
+  or retryable raw delivery statuses/details retain backoff.
+- Provenance has the recognized contract and OBSERVED status without a reported
+  inspection error, valid bounded counts and an explicit completeness boolean.
+  A completed inspection with unresolved rows qualifies. Incomplete inspection
+  qualifies only at its explicitly observed inspection limit. Missing, unavailable,
+  failed or inconsistent evidence retains backoff.
+
+Any other failed/partial phase or actual delivery failure preserves the existing
+backoff constants and policy. Recompute the decision before primary storage,
+after storage, on manifest failure and after watch-output/reporting work. Each
+calculation starts from the iteration's original prior streak, so provisional
+diagnostic-only decisions cannot hide a later operational failure or double count.
+
+`retry_backoff_eligible`, `retry_backoff_reason` and `consecutive_failure_scope`
+are additive summary/receipt evidence. The scope explicitly describes consecutive
+backoff-eligible operational iterations. Historical counts are not reinterpreted;
+missing scope in old records remains unavailable. Earlier snapshots retain their
+declared boundaries; the final receipt retains the final decision. Cancellation
+and fatal stops are not presented as retry requests.
+
+No send/recovery selection, canonical claim, deduplication, public eligibility,
+strategy, economic identity, history or resource threshold changes. This does not
+approve delivery or mutate/quarantine the historical events.
+
+## Verification checkpoint
+
+The real pure-function regression retains PARTIAL and moves the synthetic next
+start from 540 to 300 seconds. A four-iteration mocked watch test keeps statuses
+PARTIAL and operational streaks 0, 0, 1, 0 when a watch-output failure follows two
+diagnostic-only cycles and then recovers. Final eligibility and reasons persist.
+Malformed/defaulted counters, unavailable/failed provenance, bounded inspection,
+raw delivery failures and combined scanner/lifecycle/owner/storage/manifest/output
+failures are covered. No live scanner, listener, Telegram or market request runs.
+
+The first subset had 136 passes and one fixture failure: it tried to assign to
+the frozen WatchScanExecution dataclass. The fixture now uses dataclasses.replace;
+no production invariant was relaxed. Corrected expanded subset: **201 passed in
+37.96 seconds**. An explicit OBSERVED-with-error regression was added afterward.
+These intermediate results preceded the final corrected source checks below.
+The final focused cadence/Telegram/session subset passed **91 tests in 17.53
+seconds**, including real synthetic storage, manifest and watch-output failures
+after two diagnostic-only cycles. Dependency, compile, whitespace and invariant
+checks passed. These checks preceded the final blocked-repeat correction.
+Astra requested correction on `d4983b3`: the conservative raw-status allowlist
+omitted existing healthy `blocked_repeat`, used for suppression/compaction. The
+first full run was stopped at 14% without observed failures. The allowlist now
+includes that existing status while retaining failure-marker rejection. Real
+delivery dataclasses cover benign suppression and failed/retryable/uncertain
+markers; repeated mixed provenance/suppression cycles exercise final receipts.
+Corrected expanded watch/cadence/session/resource/Telegram/inventory subset:
+**208 passed in 39.65 seconds**. Compilation and whitespace checks passed.
+
+Exact corrected source `bd897491fb490fcfe1fea817927f2c9311bde2f0` received Astra
+APPROVE, independently **45 passed in 5.91 seconds**. Full Windows pytest:
+**3552 passed, 1 existing dependency warning in 651.59 seconds**, no failures
+or skips. The warning is the existing Starlette/httpx TestClient deprecation.
+The first corrected-head Linux CI attempt had **3551 passed / 1 failed** in
+288.28 seconds. Its unchanged backup snapshot-boundary test reported quick_check
+failure; the exact cause is Unverified. That single test passed locally in
+0.62 seconds. One retry reproduced the same sole failure (3551 passed / 1 failed
+in 340.83 seconds). No integrity check was relaxed. Independent diagnosis
+confirmed a pre-existing unsafe immutable assumption for a potentially changing
+backup source. PR #146 also includes the narrow actual-acquisition correction
+and deterministic safety-proof/snapshot regression described in
+`docs/research/CCI_MUTABLE_BACKUP_SOURCE_SAFETY.md`. Combined source
+`0c01aa8a4213d7980fc3ccc898791230ff68aab0` received Astra APPROVE (61 independent
+maintenance tests in 15.65 seconds), [successful CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40063440798)
+(3553 passed, one existing dependency warning in 221.43 seconds), and full
+Windows pytest: **3553 passed, 1 existing dependency warning in 646.33 seconds**,
+no failures or skips. The warning is the existing Starlette/httpx deprecation.
+
+The five previous focused PR heads remain unchanged and independently reviewed.
+This follow-up must be included in the integration sequence before requesting
+owner approval for the complete reliability stack. No Runtime improvement is
+claimed before an authorized rollout and natural measurements.

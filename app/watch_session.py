@@ -356,6 +356,7 @@ class WatchSession:
         consecutive_failures: int = 0, backoff_seconds: float = 0, will_continue: bool = True,
         phase_profile: Mapping[str, Any] | None = None,
         resource_observation: Mapping[str, Any] | None = None,
+        retry_policy: Mapping[str, Any] | None = None,
     ) -> None:
         self.state["latest_iteration"].update({
             "completion_observed": True, "status": status,
@@ -376,6 +377,8 @@ class WatchSession:
             self.state["latest_iteration"]["phase_profile"] = dict(phase_profile)
         if resource_observation is not None:
             self.state["latest_iteration"]["resource_observation"] = dict(resource_observation)
+        if retry_policy is not None:
+            self.state["latest_iteration"].update(retry_policy)
         self._observe({
                 "record_kind": "watch_iteration_finalization_observation",
                 "scan_completion_record": False,

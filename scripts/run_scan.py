@@ -94,6 +94,7 @@ from app.alerts.provenance_diagnostics import summary_provenance, unavailable_pr
 from app.watch_session import WatchSession, append_session_observation  # noqa: E402
 from app.core.phase_profile import PhaseProfile, current_observations, profiled  # noqa: E402
 from app.core.resource_observation import observe_local_resources  # noqa: E402
+from app.watch_retry_policy import watch_backoff_eligibility  # noqa: E402
 from app.formatters.scanner_console import ScannerConsolePresenter  # noqa: E402
 from app.formatters.scanner_display import (  # noqa: E402
     DEFAULT_MAX_DISPLAY_RESULTS,
@@ -3616,6 +3617,9 @@ async def _run_watch_mode(
                         will_continue=args.watch_max_iterations is None or iteration < args.watch_max_iterations,
                         phase_profile=profile.snapshot(boundary="after_failure_recording_before_final_observation_persistence"),
                         resource_observation=profile.resources,
+                        retry_policy=failed_summary.model_dump(include={
+                            "retry_backoff_eligible", "retry_backoff_reason", "consecutive_failure_scope",
+                        }),
                     )
                 if args.watch_max_iterations is not None and iteration >= args.watch_max_iterations:
                     break
@@ -3685,14 +3689,8 @@ async def _run_watch_mode(
 
             continue_watching = args.watch_max_iterations is None or iteration < args.watch_max_iterations
             iteration_status = _iteration_status_from_phases(phase_statuses)
-            if iteration_status == "SUCCESS":
-                failure_streak = 0
-            else:
-                failure_streak += 1
-            selected_backoff = (
-                failure_backoff_seconds(failure_streak)
-                if continue_watching and iteration_status != "SUCCESS"
-                else 0.0
+            failure_streak, selected_backoff, retry_policy = _watch_retry_policy(
+                execution, phase_statuses, prior_failure_streak, continue_watching,
             )
             finished_monotonic = time.monotonic()
             completed_at = _watch_iteration_timestamp()
@@ -3729,6 +3727,7 @@ async def _run_watch_mode(
                     "missed_interval_count": schedule.missed_interval_count,
                     "consecutive_failure_count": failure_streak,
                     "selected_backoff_seconds": selected_backoff,
+                    **retry_policy,
                     "next_scheduled_attempt": _watch_timestamp_offset(completed_at, next_scan_seconds),
                     "queue_total": len(execution.queued_symbols),
                     "outcome_counts": outcome_counts,
@@ -3774,16 +3773,9 @@ async def _run_watch_mode(
                 database_storage_status = "NOT_REQUESTED"
 
             phase_statuses["scan_manifest"] = "SUCCESS"
-            status_before_downstream_storage = iteration_status
             iteration_status = _iteration_status_from_phases(phase_statuses)
-            if iteration_status == "SUCCESS":
-                failure_streak = 0
-            elif status_before_downstream_storage == "SUCCESS":
-                failure_streak = 1
-            selected_backoff = (
-                failure_backoff_seconds(failure_streak)
-                if continue_watching and iteration_status != "SUCCESS"
-                else 0.0
+            failure_streak, selected_backoff, retry_policy = _watch_retry_policy(
+                execution, phase_statuses, prior_failure_streak, continue_watching,
             )
             finished_monotonic = time.monotonic()
             completed_at = _watch_iteration_timestamp()
@@ -3811,6 +3803,7 @@ async def _run_watch_mode(
                     "phase_statuses": dict(phase_statuses),
                     "errors": tuple(iteration_errors),
                     "database_storage_status": database_storage_status,
+                    **retry_policy,
                     "phase_profile": profile.snapshot(boundary="before_manifest_reporting_and_presentation"),
                 }
             )
@@ -3830,10 +3823,10 @@ async def _run_watch_mode(
             except OSError as exc:
                 phase_statuses["scan_manifest"] = "FAILED"
                 iteration_errors.append(_watch_phase_error("scan_manifest", exc))
-                if iteration_status == "SUCCESS":
-                    failure_streak = 1
                 iteration_status = _iteration_status_from_phases(phase_statuses)
-                selected_backoff = failure_backoff_seconds(failure_streak) if continue_watching else 0.0
+                failure_streak, selected_backoff, retry_policy = _watch_retry_policy(
+                    execution, phase_statuses, prior_failure_streak, continue_watching,
+                )
                 schedule = schedule_after_iteration(
                     scheduled_start_monotonic=scheduled_start_monotonic,
                     actual_start_monotonic=iteration_started_monotonic,
@@ -3849,6 +3842,7 @@ async def _run_watch_mode(
                         "next_scan_seconds": next_scan_seconds,
                         "consecutive_failure_count": failure_streak,
                         "selected_backoff_seconds": selected_backoff,
+                        **retry_policy,
                         "next_scheduled_attempt": _watch_timestamp_offset(_watch_iteration_timestamp(), next_scan_seconds),
                         "phase_statuses": dict(phase_statuses),
                         "errors": tuple(iteration_errors),
@@ -3891,11 +3885,13 @@ async def _run_watch_mode(
                 expected_identity=getattr(args, "runtime_identity", None),
             )
             iteration_status = _iteration_status_from_phases(phase_statuses)
-            failure_streak = prior_failure_streak + 1 if iteration_status != "SUCCESS" else 0
-            selected_backoff = failure_backoff_seconds(failure_streak) if continue_watching else 0.0
+            failure_streak, selected_backoff, retry_policy = _watch_retry_policy(
+                execution, phase_statuses, prior_failure_streak, continue_watching,
+            )
             presentation_summary = presentation_summary.model_copy(update={
                 "status": iteration_status, "phase_statuses": dict(phase_statuses),
                 "consecutive_failure_count": failure_streak, "selected_backoff_seconds": selected_backoff,
+                **retry_policy,
             })
             profile.call("console_emit", console.emit,
                 console.format_watch_iteration(
@@ -3921,6 +3917,7 @@ async def _run_watch_mode(
                     backoff_seconds=selected_backoff, will_continue=continue_watching,
                     phase_profile=profile.snapshot(boundary="after_manifest_reporting_and_presentation_before_final_observation_persistence"),
                     resource_observation=profile.resources,
+                    retry_policy=retry_policy,
                 )
 
             if not continue_watching:
@@ -4009,6 +4006,16 @@ async def _attempt_watch_scan_iteration(
             )
         return None, None, exc
     return watchlist, execution, None
+
+
+def _watch_retry_policy(
+    execution: WatchScanExecution, phases: Mapping[str, str], prior_failure_streak: int,
+    continue_watching: bool,
+) -> tuple[int, float, dict[str, Any]]:
+    decision = watch_backoff_eligibility(phases, execution.telegram_outbox_status, execution.telegram_delivery_summary)
+    failures = prior_failure_streak + 1 if decision.eligible else 0
+    backoff = failure_backoff_seconds(failures) if continue_watching and decision.eligible else 0.0
+    return failures, backoff, decision.as_dict()
 
 
 def _iteration_status_from_phases(phase_statuses: Mapping[str, str]) -> str:
@@ -4117,6 +4124,9 @@ def _cancelled_watch_iteration_summary(
         outcome_counts=outcome_counts,
         symbol_outcomes=symbol_outcomes,
         phase_statuses={"scanner": "CANCELLED"},
+        retry_backoff_eligible=False,
+        retry_backoff_reason="CANCELLED_ITERATION_STOP",
+        consecutive_failure_scope="backoff_eligible_operational_iterations",
         errors=(_watch_phase_error("iteration", interruption),),
         active_lifecycle_count=len(watchlist.active_lifecycle_symbols),
         database_storage_status="NOT_ATTEMPTED",
@@ -4152,6 +4162,9 @@ def _failed_watch_iteration_summary(
         data_issues=0,
         iteration_id=uuid4().hex,
         status=status,
+        retry_backoff_eligible=status == "FAILED",
+        retry_backoff_reason="RECOVERABLE_ITERATION_EXCEPTION" if status == "FAILED" else "FATAL_ITERATION_STOP",
+        consecutive_failure_scope="backoff_eligible_operational_iterations",
         scheduled_start=scheduled_start_at,
         actual_start=actual_start_at,
         finished_at=finished_at,

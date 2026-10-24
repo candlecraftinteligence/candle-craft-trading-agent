@@ -136,6 +136,9 @@ class WatchIterationSummary(BaseModel):
     overrun_seconds: float = 0.0
     missed_interval_count: int = 0
     consecutive_failure_count: int = 0
+    retry_backoff_eligible: bool | Literal["N/A"] = NA
+    retry_backoff_reason: str = NA
+    consecutive_failure_scope: str = NA
     selected_backoff_seconds: float = 0.0
     next_scheduled_attempt: str = NA
     queue_total: int = 0

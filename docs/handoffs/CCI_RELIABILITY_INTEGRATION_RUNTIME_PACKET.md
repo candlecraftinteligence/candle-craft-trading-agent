@@ -7,7 +7,7 @@ tests, focused branch pushes, PRs and independent review only.
 
 ## Pinned change sequence
 
-Remote PR metadata was rechecked during this preparation: #141 through #144 are
+Remote PR metadata was rechecked during this preparation: #141 through #145 are
 open, ready for review and unmerged. The live `main` base reported by #141 is
 `a88ed55d8923c1af7078e8c612de4cec106c623b`. Recheck it immediately before any
 approved integration; an unexpected change requires reassessment, not force push.
@@ -18,28 +18,43 @@ approved integration; an unexpected change requires reassessment, not force push
 | 2 | [#142 evidence strata](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/142) / C | `e4a5fb9693ce78c9194d32dcac0231b109671c74` | Astra APPROVE; full implementation 3405 passed; [final CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39950075163) |
 | 3 | [#143 Telegram provenance](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/143) / D | `2cfd608d5744b6f2dfcce53cfdc568dcd6471223` | Astra APPROVE; full implementation 3429 passed; [final CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39990861792) |
 | 4 | [#144 watch sessions](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/144) / A | `1830aa87b2c47ca5b2e51df1cc5a12c453c464fc` | Astra APPROVE; full implementation 3455 passed; [final CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40028951292) |
-| 5 | [#145 resource observations](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/145) / E | Final implementation `3aaac3bfeeaf1ba68e8722de373ac92d63d0bd59`; final documentation head recorded in PR | Astra APPROVE; full implementation **3507 passed**; [implementation CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40032395331) succeeded |
+| 5 | [#145 resource observations](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/145) / E | `8fa80b62d45b4e8c8bdfb0b149b28fa239f5d048` | Astra APPROVE; full implementation **3507 passed**; [final CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40033691462) |
+| 6 | [#146 cadence and backup safety](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/146) / A-D-E | Combined implementation `0c01aa8a4213d7980fc3ccc898791230ff68aab0`; final documentation head recorded in PR | Astra APPROVE; full Windows **3553 passed**; [source CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40063440798) **3553 passed** |
 
-The branches form a linear source ancestry in that order. The final E source
-contains the previous four corrections; this is not five independent patches to
+The branches form a linear source ancestry in that order. The final cadence source
+contains the previous five corrections; this is not six independent patches to
 apply to arbitrary source. Each handoff and the objective tracker retain earlier
 failures, review corrections, microbenchmark limits and historical uncertainties.
-GitHub's direct `main...3aaac3b` comparison also confirmed the expected base,
-16 commits ahead and zero behind at this checkpoint. Final documentation review
-and CI are recorded with the published final head in PR #145 before integration
-approval is requested.
+GitHub's direct `main...0c01aa8` comparison confirmed the expected base,
+20 commits ahead and zero behind at the source-review checkpoint. Final
+documentation review and CI must be recorded with the published final head in
+PR #146 before integration approval is requested.
+E final documentation head is `8fa80b62d45b4e8c8bdfb0b149b28fa239f5d048`, with
+Astra APPROVE and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40033691462).
+The final acceptance audit found that persistent provenance-only PARTIAL cycles
+would accumulate retry backoff. The focused sixth correction is described in
+`docs/research/CCI_PROVENANCE_ONLY_CADENCE.md`.
+Its CI diagnosis confirmed a pre-existing unsafe immutable assumption in actual
+backup acquisition. The same PR includes that narrow correction; the combined
+source now has full Windows pytest, successful CI and Astra approval. Final
+documentation review/CI must be recorded at the published PR head before owner
+integration approval. The raw mechanism of the earlier CI quick_check failure
+remains Unverified; the corrected candidate passes that regression on both hosts.
 
 ## Proposed integration, requiring owner approval
 
-1. Recheck the exact five PR heads, required CI, independent approval, remote base
-   and clean DEV state. No branch deletion, reset or force push is needed.
+1. Recheck all six exact PR heads, required CI, independent approval, remote base
+   and clean DEV state, including the combined backup correction. No branch
+   deletion, reset or force push is needed. The final documentation head must
+   have its own successful CI and Astra review recorded in PR #146.
 2. Merge #141 into main using a merge commit that preserves its accepted commits.
 3. Retarget #142 to main, verify its now-current required checks and unchanged
-   approved head, then merge. Repeat in order for #143, #144 and #145. Do not
+   approved head, then merge. Repeat in order for #143, #144, #145 and the pinned
+   provenance-only cadence follow-up #146. Do not
    squash or rewrite the stacked ancestry. Stop for unexpected source changes,
    conflicts, stale approvals or failed checks.
 4. Record the resulting immutable main SHA. Verify its complete source tree
-   against the accepted final E head; investigate every difference. Obtain
+   against the accepted final cadence head; investigate every difference. Obtain
    successful main/push CI and independent review of that exact integration SHA.
    A GitHub synthetic merge preview is not the release identity.
 5. Keep Runtime unchanged. Integration approval does not authorize deployment,
@@ -98,6 +113,13 @@ plan proof. Run only on the separately authorized Runtime host/tool checkout;
 no command in this packet is an instruction to use the live path on DEV.
 The collector never manufactures GO_FOR_RUNTIME_DEPLOYMENT. Do not substitute
 maintenance inspect, table counts, dbstat, integrity checks, checkpoint or VACUUM.
+
+The existing SQLite backup planner still requires independently established
+source quiescence; its immutable fallback does not prove concurrent safety.
+Do not use it against a changing source with absent sidecars. Ordinary actual
+backup read coordination may create WAL/SHM; never remove them to simulate a
+read-only filesystem. The acquisition correction does not authorize any backup
+or service stop. See `docs/research/CCI_MUTABLE_BACKUP_SOURCE_SAFETY.md`.
 
 Fix the exact release SHA, all consumer paths, observation/stop budgets, recovery
 steps and public-delivery settings in a concrete cutover package before asking
