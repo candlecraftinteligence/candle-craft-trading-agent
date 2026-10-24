@@ -965,13 +965,7 @@ def test_owned_http_client_closes_and_cancellation_propagates(monkeypatch) -> No
 
 
 def test_one_slow_symbol_does_not_stop_full_scan_runtime_stats() -> None:
-    class OneSlowSymbolClient(FakeExchangeClient):
-        async def get_klines(self, symbol: str, interval: str, limit: int) -> list[dict[str, Decimal | int]]:
-            if symbol == "SLOWUSDT":
-                await asyncio.sleep(0.3)
-            return await super().get_klines(symbol, interval, limit)
-
-    client = OneSlowSymbolClient(
+    client = FakeExchangeClient(
         {
             "SLOWUSDT": _flat_candles(),
             "ETHUSDT": _flat_candles(),
@@ -979,10 +973,25 @@ def test_one_slow_symbol_does_not_stop_full_scan_runtime_stats() -> None:
         },
         failing_timeframes={"2d"},
     )
+    # Exercise real strategy processing outside the short scheduling deadline.
+    # Its CPU cost varies with host load and is not this timeout contract.
+    prepared = run(ScannerRunner(exchange_client=client).run(
+        _config(["ETHUSDT", "BTCUSDT"], request_timeout_sec=1, symbol_timeout_sec=10)
+    ))
+    ready = {item.symbol: item for item in prepared.results}
+
+    class ControlledSymbolRunner(ScannerRunner):
+        async def _scan_symbol(self, symbol_config, *args, **kwargs):
+            if symbol_config.symbol == "SLOWUSDT":
+                await asyncio.Event().wait()
+            return ready[symbol_config.symbol]
 
     result = run(
-        ScannerRunner(exchange_client=client).run(
-            _config(["SLOWUSDT", "ETHUSDT", "BTCUSDT"], request_timeout_sec=1, symbol_timeout_sec=0.2)
+        asyncio.wait_for(
+            ControlledSymbolRunner(exchange_client=client).run(
+                _config(["SLOWUSDT", "ETHUSDT", "BTCUSDT"], request_timeout_sec=1, symbol_timeout_sec=0.2)
+            ),
+            timeout=5,
         )
     )
 
