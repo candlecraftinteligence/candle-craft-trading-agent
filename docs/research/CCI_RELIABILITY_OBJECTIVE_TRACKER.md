@@ -1,8 +1,11 @@
 # CCI reliability objective tracker
 
 Checkpoint: 2026-10-24, five focused reliability implementations CODE_COMPLETE.
-A final acceptance audit reproduced an A/D cadence interaction; its focused
-follow-up is in DEV. Integration, deployment and natural Runtime verification
+The A/D cadence follow-up has passing full Windows pytest and source approval;
+CI twice failed the unchanged backup snapshot test. Investigation confirmed a
+pre-existing unsafe mutable-backup source assumption; its narrow correction is
+included in PR #146 with combined-head verification/review/CI pending.
+Integration, deployment and natural Runtime verification
 remain pending owner authorization.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
@@ -12,7 +15,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## A — Scanner continuity
 
-- Status: IMPLEMENTING (follow-up A/D interaction; original session patch TESTED).
+- Status: TESTED (combined cadence/backup follow-up checks pending).
 - Weakness: historical 16h54m absence of normal scanning; four missed start slots.
 - Evidence: `schedule_after_iteration` uses monotonic time, accounts for overruns
   and has deterministic tests. The watch loop persists completion/failure
@@ -73,6 +76,17 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   checks. First full run stopped at 14% without observed failures. Required CI
   for that initial head succeeded; corrected full/CI/exact-head review required.
   Corrected blocked-repeat expanded subset: 208 passed in 39.65 seconds.
+  PR [#146](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/146),
+  corrected implementation `bd897491fb490fcfe1fea817927f2c9311bde2f0`: Astra
+  APPROVE, independently 45 passed in 5.91 seconds. Corrected full Windows pytest:
+  **3552 passed, 1 existing dependency warning in 651.59 seconds**, no failures
+  or skips. The first corrected-head Linux CI attempt had 3551 passes and one
+  unchanged backup snapshot-boundary failure (quick_check failed). Its exact
+  cause remains Unverified; the isolated test passed locally in 0.62 seconds.
+  One retry reproduced the same sole failure (3551 passed / 1 failed in 340.83
+  seconds). PR #146 includes the narrow backup acquisition correction; combined
+  full pytest, review and CI remain pending. Handoff:
+  `docs/handoffs/CCI_RELIABILITY_PROVENANCE_CADENCE.md`.
 
 ## B — Existing-owner monitoring accounting
 
@@ -298,6 +312,16 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Integration and Runtime evidence package:
   `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`. Its proposed
   sequence requires separate owner approval; it is not cutover authorization.
+- Additional safety finding during cadence CI diagnosis: backup source opens
+  may request immutable=1 when WAL/SHM are absent, although a writer can resume.
+  Independent synthetic proof confirmed that unsafe mode; it did not reproduce
+  the CI integrity failure. PR #146 now includes a narrow actual backup source
+  opt-out from immutable mode with deterministic source-proof/snapshot tests.
+  Complete maintenance subset: 61 passed in 14.99 seconds. Combined full checks,
+  review and CI remain pending. Contract:
+  `docs/research/CCI_MUTABLE_BACKUP_SOURCE_SAFETY.md`.
+  Planning has a separate no-artifact contract: ordinary non-immutable read-only
+  opens can create sidecars, so its concurrency limitation must remain explicit.
 
 ## Continuation and release boundaries
 

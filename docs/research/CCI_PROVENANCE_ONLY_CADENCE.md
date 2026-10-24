@@ -62,11 +62,11 @@ The first subset had 136 passes and one fixture failure: it tried to assign to
 the frozen WatchScanExecution dataclass. The fixture now uses dataclasses.replace;
 no production invariant was relaxed. Corrected expanded subset: **201 passed in
 37.96 seconds**. An explicit OBSERVED-with-error regression was added afterward.
-Final targeted/full pytest, exact-head Astra review and CI remain pending.
+These intermediate results preceded the final corrected source checks below.
 The final focused cadence/Telegram/session subset passed **91 tests in 17.53
 seconds**, including real synthetic storage, manifest and watch-output failures
 after two diagnostic-only cycles. Dependency, compile, whitespace and invariant
-checks passed. Final full pytest and exact-head review/CI remain pending.
+checks passed. These checks preceded the final blocked-repeat correction.
 Astra requested correction on `d4983b3`: the conservative raw-status allowlist
 omitted existing healthy `blocked_repeat`, used for suppression/compaction. The
 first full run was stopped at 14% without observed failures. The allowlist now
@@ -75,6 +75,21 @@ delivery dataclasses cover benign suppression and failed/retryable/uncertain
 markers; repeated mixed provenance/suppression cycles exercise final receipts.
 Corrected expanded watch/cadence/session/resource/Telegram/inventory subset:
 **208 passed in 39.65 seconds**. Compilation and whitespace checks passed.
+
+Exact corrected source `bd897491fb490fcfe1fea817927f2c9311bde2f0` received Astra
+APPROVE, independently **45 passed in 5.91 seconds**. Full Windows pytest:
+**3552 passed, 1 existing dependency warning in 651.59 seconds**, no failures
+or skips. The warning is the existing Starlette/httpx TestClient deprecation.
+The first corrected-head Linux CI attempt had **3551 passed / 1 failed** in
+288.28 seconds. Its unchanged backup snapshot-boundary test reported quick_check
+failure; the exact cause is Unverified. That single test passed locally in
+0.62 seconds. One retry reproduced the same sole failure (3551 passed / 1 failed
+in 340.83 seconds). No integrity check was relaxed. Independent diagnosis
+confirmed a pre-existing unsafe immutable assumption for a potentially changing
+backup source. PR #146 also includes the narrow actual-acquisition correction
+and deterministic safety-proof/snapshot regression described in
+`docs/research/CCI_MUTABLE_BACKUP_SOURCE_SAFETY.md`. Full checks and exact-head
+review/CI for the combined source remain pending at this checkpoint.
 
 The five previous focused PR heads remain unchanged and independently reviewed.
 This follow-up must be included in the integration sequence before requesting

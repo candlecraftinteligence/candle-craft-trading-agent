@@ -219,7 +219,12 @@ def plan_backup(
     now: datetime | None = None,
     unique_suffix: str | None = None,
 ) -> dict[str, Any]:
-    """Validate and describe a backup without creating any path or artifact."""
+    """Validate and describe a backup without creating any path or artifact.
+
+    Planning retains the inspection reader's immutable fallback. Independently
+    establish source quiescence before planning; absent sidecars do not prove it.
+    This estimate is not an authorization or a coherent live-source snapshot.
+    """
 
     source = _existing_database_path(source_database)
     archive = _archive_path(archive_directory)
@@ -334,7 +339,10 @@ def create_verified_backup(
                     f"Backup destination appeared after planning and will not be overwritten: {candidate}"
                 )
 
-        source_connection = open_read_only_database(source)
+        # A writer may resume after planning; do not disable SQLite coordination.
+        source_connection = open_read_only_database(
+            source, assume_immutable_when_sidecars_absent=False
+        )
         source_connection.execute("BEGIN")
         source_schema_version = identify_schema_version(source_connection)
         source_tables = _table_names(source_connection)

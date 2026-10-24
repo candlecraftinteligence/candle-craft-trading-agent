@@ -7,6 +7,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -734,14 +735,21 @@ def test_snapshot_sha_schema_and_core_counts_match_manifest(tmp_path: Path) -> N
     assert verify_backup(snapshot)["ok"] is True
 
 
+@pytest.mark.parametrize("keep_writer_open", (False, True), ids=("no-sidecars", "existing-wal"))
 def test_backup_snapshot_boundary_counts_ignore_later_commit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_writer_open: bool
 ) -> None:
     source = _database(tmp_path)
     archive = tmp_path / "archives"
     with open_initialized_database(source) as connection:
         _insert_scan_run(connection, "before-boundary")
 
+    original_open = maintenance_module.open_read_only_database
+
+    def open_with_safety_proof(path: Path, **options: object) -> sqlite3.Connection:
+        return original_open(path, include_immutable_safety_proof=True, **options)
+
+    monkeypatch.setattr(maintenance_module, "open_read_only_database", open_with_safety_proof)
     original_run = maintenance_module._run_online_backup
 
     def commit_then_backup(
@@ -750,12 +758,21 @@ def test_backup_snapshot_boundary_counts_ignore_later_commit(
         *,
         progress: object,
     ) -> None:
+        proof = database_module.read_only_connection_safety_proof(source_connection)
+        assert proof["sqlite_uri_mode"] == "ro"
+        assert proof["query_only_verified"] is True
+        assert proof.get("immutable_requested") is False
+        assert proof.get("live_mutable_source") is True
+        assert source_connection.in_transaction is True
         with open_initialized_database(source) as writer:
             _insert_scan_run(writer, "after-boundary")
         original_run(source_connection, destination_connection, progress=progress)
 
     monkeypatch.setattr(maintenance_module, "_run_online_backup", commit_then_backup)
-    result = _backup(source, archive)
+    with open_initialized_database(source) if keep_writer_open else nullcontext():
+        assert Path(f"{source}-wal").exists() is keep_writer_open
+        assert Path(f"{source}-shm").exists() is keep_writer_open
+        result = _backup(source, archive)
     payload = result["manifest"]
     assert payload["core_table_counts"]["scan_runs"] == 1
     with open_read_only_database(Path(str(result["snapshot_path"]))) as connection:
@@ -847,9 +864,20 @@ def test_interrupted_backup_leaves_source_unchanged_and_no_artifact(
     assert not tuple(archive.iterdir())
 
 
-def test_backup_dry_run_creates_no_files_or_directories(tmp_path: Path) -> None:
+def test_backup_dry_run_creates_no_files_or_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = _database(tmp_path)
     archive = tmp_path / "archives"
+    before = _state(source)
+    observed_states = []
+    original_table_names = maintenance_module._table_names
+
+    def observe_planning_source(connection: sqlite3.Connection) -> set[str]:
+        observed_states.append(_state(source))
+        return original_table_names(connection)
+
+    monkeypatch.setattr(maintenance_module, "_table_names", observe_planning_source)
     result = create_verified_backup(
         source,
         archive,
@@ -859,6 +887,8 @@ def test_backup_dry_run_creates_no_files_or_directories(tmp_path: Path) -> None:
     assert result["status"] == "dry-run"
     assert result["writes_performed"] is False
     assert not archive.exists()
+    assert observed_states == [before]
+    assert _state(source) == before
 
 
 def test_second_backup_creates_a_new_unique_snapshot(tmp_path: Path) -> None:
