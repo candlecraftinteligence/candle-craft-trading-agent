@@ -1,11 +1,16 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-24, six focused reliability implementations CODE_COMPLETE.
-The final cadence/backup source `0c01aa8` has full Windows pytest, CI and Astra
-approval. Earlier CI failures and the retained planner limitation are recorded
-below. The published final documentation head and its own CI/review are recorded
-in PR #146. Integration, deployment and natural Runtime verification remain
-pending owner authorization.
+Checkpoint: 2026-10-24, six focused reliability implementations CODE_COMPLETE
+and integrated with explicit owner approval. PRs #141-146 merged in order with
+their accepted commits preserved. Exact integrated main:
+`6785cf6c5a5d4c083f31a280c2ca1555bc7df88c`; its complete tree equals approved
+candidate `637191f475ee834130c0ae0c88a74e7916812dc7`. Exact-main Astra APPROVE
+and [push CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40070934655):
+**3553 passed, 1 existing dependency warning in 280.94 seconds**, no failures or
+skips. Integration receipt: `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RESULT.md`.
+Earlier implementation/review checkpoints below are retained as history.
+Runtime preflight, deployment and natural verification still require separate
+authorization; this documentation branch does not change the verified main SHA.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
@@ -45,7 +50,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   no approval for that review is inferred.
 - Final documentation head `1830aa87b2c47ca5b2e51df1cc5a12c453c464fc` subsequently
   received Astra APPROVE after the usage window reset, and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40028951292).
-  PR #144 is ready for owner review, unmerged and undeployed.
+  PR #144 subsequently merged with owner approval; Runtime remains undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: outage cause cannot be established from DEV source. P4 causation
   is Unverified. Requires genuine launcher/process/manifest evidence.
@@ -129,7 +134,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   success for `735d0b4`. Dependency, compile and whitespace checks passed.
 - Final documentation head `bdcc90e649fdcd4d5b542f867ba27264a6d038d9` independently
   Astra APPROVED; [final-head CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39925121114)
-  succeeded. PR #141 is ready for owner review, unmerged and undeployed.
+  succeeded. PR #141 subsequently merged with owner approval; Runtime remains undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: DEV counterexamples do not identify the nine historical owners'
   actual cause. Current collection can expose but cannot repair historical gaps.
@@ -180,7 +185,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Handoff: `docs/handoffs/CCI_RELIABILITY_RESEARCH_EVIDENCE.md`.
 - Final documentation head `e4a5fb9693ce78c9194d32dcac0231b109671c74`: Astra
   APPROVE and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39950075163).
-  PR #142 is ready for owner review, unmerged and undeployed.
+  PR #142 subsequently merged with owner approval; Runtime remains undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: no historical candles recovered; none fabricated or relabeled.
 
@@ -202,7 +207,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   Existing recovery selection is unchanged and cannot be starved by diagnostic
   limits. Recovery checks canonical association before using any attempt fallback.
 - Branch: `codex/reliability-telegram-provenance`, based on C final `e4a5fb9`.
-- Implementation PR / independent review: pending; Astra read-only design review
+- Initial Astra read-only design review
   supported separate diagnostics, canonical guard reuse and explicit coverage.
 - Tests: initial targeted run exposed a synthetic fixture mixing SENT attempts
   with a PENDING event; the fixture now represents pending state consistently.
@@ -220,12 +225,13 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   passed. [Required CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39986875741)
   succeeded. Longer Windows test runtime cause remains Unverified.
 - Implementation PR: [#143](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/143),
-  stacked on #142; unmerged and undeployed. Handoff:
+  originally stacked on #142; subsequently retargeted and merged with approval.
+  Runtime remains undeployed. Handoff:
   `docs/handoffs/CCI_RELIABILITY_TELEGRAM_PROVENANCE.md`. Final documentation-only
   head receives its own CI/Astra review and is recorded in the PR after publication.
 - Final documentation head `2cfd608d5744b6f2dfcce53cfdc568dcd6471223`: Astra APPROVE;
   [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39990861792).
-  PR #143 is ready for owner review, unmerged and undeployed.
+  PR #143 subsequently merged with owner approval; Runtime remains undeployed.
 - Deployment / Runtime verification: not deployed / N/A.
 - Uncertainty: historical delivery receipts are unavailable in DEV. No event
   mutation or resend has been attempted.
@@ -309,7 +315,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 - Handoff: `docs/handoffs/CCI_RELIABILITY_RESOURCE_OBSERVATIONS.md`.
 - E final documentation head `8fa80b62d45b4e8c8bdfb0b149b28fa239f5d048` received
   Astra APPROVE and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40033691462).
-  PR #145 is ready for owner review, unmerged and undeployed.
+  PR #145 subsequently merged with owner approval; Runtime remains undeployed.
 - Integration and Runtime evidence package:
   `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`. Its proposed
   sequence requires separate owner approval; it is not cutover authorization.
@@ -333,25 +339,29 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 ## Continuation and release boundaries
 
 Owner-accounting implementation is CODE_COMPLETE with final-head CI and Astra
-approval; PR #141 stays unmerged and undeployed. Handoff:
+approval; PR #141 is merged and remains undeployed. Handoff:
 `docs/handoffs/CCI_RELIABILITY_OWNER_COVERAGE.md`.
 Research stratification is CODE_COMPLETE at implementation/test head `30f8d0f`;
 the final documentation head `e4a5fb9` has CI and Astra approval.
-PRs #141 through #144 remain unmerged and undeployed. D's final documentation
+PRs #141 through #146 are merged and remain undeployed. D's final documentation
 head `2cfd608` and A's final `1830aa8` have CI and exact-head Astra approval.
 E's final implementation `3aaac3b` has full pytest, required CI and Astra approval.
 The final E documentation head `8fa80b6` has exact-head approval and CI. Final
 cadence/backup source `0c01aa8` has full Windows pytest, required CI and Astra
-approval. Pin its final documentation head with its own CI/review in PR #146
-before requesting owner approval for the integration sequence in
-`docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`; Runtime preflight
-and rollout require separate authorization. No historical outage cause was found in
+approval. Final documentation head `637191f` also has exact-head CI and Astra
+approval. The owner subsequently approved integration only; ordered merges and
+the resulting exact-main verification are recorded in
+`docs/handoffs/CCI_RELIABILITY_INTEGRATION_RESULT.md`. The Runtime evidence
+requirements in `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`
+remain applicable and require separate authorization. No historical outage cause was found in
 repository notes or the scoped GitHub audit search; it remains Unverified.
 Preserve quality 88, grade A, RR 3.0,
 confirmation, immutable economics,
 freshness and deduplication. P4 shadow remains disabled and non-enforcing.
-No merge, deployment, production database access, scanner, listener or external
-market-data acquisition was authorized as part of implementation.
+The separate integration approval covered only the six ordered merges and
+exact-main CI/Astra verification. It did not authorize Runtime preflight,
+deployment, production database access, scanner/listener control or external
+market-data acquisition.
 
 Overall state: PARTIALLY_RESOLVED. No objective is VERIFIED_RESOLVED. A passing
 DEV suite is not release approval or evidence of natural Runtime improvement.

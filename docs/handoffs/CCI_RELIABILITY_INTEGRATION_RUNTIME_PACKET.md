@@ -1,5 +1,12 @@
 # Reliability integration and Runtime verification packet
 
+Integration update, 2026-10-24: the owner separately approved integration only.
+PRs #141-146 are now merged, preserving accepted commits. Verified main is
+`6785cf6c5a5d4c083f31a280c2ca1555bc7df88c`, with exact-main Astra approval and
+successful push CI. See `CCI_RELIABILITY_INTEGRATION_RESULT.md` for the immutable
+receipt. The preparation and proposed sequence below are retained as the approved
+historical plan. Runtime requirements remain unfulfilled and separately authorized.
+
 Prepared in DEV, 2026-10-24. State: **PARTIALLY_RESOLVED**. This packet authorizes
 no merge, deployment, service change or production access. All Runtime evidence
 below is still required. The current DEV assignment permits code, synthetic
