@@ -19,31 +19,34 @@ approved integration; an unexpected change requires reassessment, not force push
 | 3 | [#143 Telegram provenance](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/143) / D | `2cfd608d5744b6f2dfcce53cfdc568dcd6471223` | Astra APPROVE; full implementation 3429 passed; [final CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/39990861792) |
 | 4 | [#144 watch sessions](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/144) / A | `1830aa87b2c47ca5b2e51df1cc5a12c453c464fc` | Astra APPROVE; full implementation 3455 passed; [final CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40028951292) |
 | 5 | [#145 resource observations](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/145) / E | `8fa80b62d45b4e8c8bdfb0b149b28fa239f5d048` | Astra APPROVE; full implementation **3507 passed**; [final CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40033691462) |
-| 6 | [#146 cadence and backup safety](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/146) / A-D-E | Cadence `bd897491fb490fcfe1fea817927f2c9311bde2f0`; combined implementation/final documentation head recorded in PR | Cadence Astra APPROVE / **3552 passed**; combined backup correction checks pending |
+| 6 | [#146 cadence and backup safety](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/146) / A-D-E | Combined implementation `0c01aa8a4213d7980fc3ccc898791230ff68aab0`; final documentation head recorded in PR | Astra APPROVE; full Windows **3553 passed**; [source CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40063440798) **3553 passed** |
 
 The branches form a linear source ancestry in that order. The final cadence source
 contains the previous five corrections; this is not six independent patches to
 apply to arbitrary source. Each handoff and the objective tracker retain earlier
 failures, review corrections, microbenchmark limits and historical uncertainties.
-GitHub's direct `main...bd89749` comparison confirmed the expected base,
-19 commits ahead and zero behind at the source-review checkpoint. Final
+GitHub's direct `main...0c01aa8` comparison confirmed the expected base,
+20 commits ahead and zero behind at the source-review checkpoint. Final
 documentation review and CI must be recorded with the published final head in
 PR #146 before integration approval is requested.
 E final documentation head is `8fa80b62d45b4e8c8bdfb0b149b28fa239f5d048`, with
 Astra APPROVE and [CI success](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40033691462).
 The final acceptance audit found that persistent provenance-only PARTIAL cycles
-would accumulate retry backoff. Complete the focused sixth correction described
-in `docs/research/CCI_PROVENANCE_ONLY_CADENCE.md` before requesting integration.
+would accumulate retry backoff. The focused sixth correction is described in
+`docs/research/CCI_PROVENANCE_ONLY_CADENCE.md`.
 Its CI diagnosis confirmed a pre-existing unsafe immutable assumption in actual
-backup acquisition. The same PR includes that narrow correction and must receive
-combined full verification/review before integration is proposed. The exact
-cause of the observed CI quick_check failure remains Unverified.
+backup acquisition. The same PR includes that narrow correction; the combined
+source now has full Windows pytest, successful CI and Astra approval. Final
+documentation review/CI must be recorded at the published PR head before owner
+integration approval. The raw mechanism of the earlier CI quick_check failure
+remains Unverified; the corrected candidate passes that regression on both hosts.
 
 ## Proposed integration, requiring owner approval
 
 1. Recheck all six exact PR heads, required CI, independent approval, remote base
    and clean DEV state, including the combined backup correction. No branch
-   deletion, reset or force push is needed. Verification is not yet complete.
+   deletion, reset or force push is needed. The final documentation head must
+   have its own successful CI and Astra review recorded in PR #146.
 2. Merge #141 into main using a merge commit that preserves its accepted commits.
 3. Retarget #142 to main, verify its now-current required checks and unchanged
    approved head, then merge. Repeat in order for #143, #144, #145 and the pinned

@@ -1,12 +1,11 @@
 # CCI reliability objective tracker
 
-Checkpoint: 2026-10-24, five focused reliability implementations CODE_COMPLETE.
-The A/D cadence follow-up has passing full Windows pytest and source approval;
-CI twice failed the unchanged backup snapshot test. Investigation confirmed a
-pre-existing unsafe mutable-backup source assumption; its narrow correction is
-included in PR #146 with combined-head verification/review/CI pending.
-Integration, deployment and natural Runtime verification
-remain pending owner authorization.
+Checkpoint: 2026-10-24, six focused reliability implementations CODE_COMPLETE.
+The final cadence/backup source `0c01aa8` has full Windows pytest, CI and Astra
+approval. Earlier CI failures and the retained planner limitation are recorded
+below. The published final documentation head and its own CI/review are recorded
+in PR #146. Integration, deployment and natural Runtime verification remain
+pending owner authorization.
 DEV investigation based on the user-supplied October 23
 audit and source at `a88ed55d8923c1af7078e8c612de4cec106c623b`. Audit counts
 are historical observations, not current Runtime measurements. Production was
@@ -15,7 +14,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
 
 ## A — Scanner continuity
 
-- Status: TESTED (combined cadence/backup follow-up checks pending).
+- Status: TESTED.
 - Weakness: historical 16h54m absence of normal scanning; four missed start slots.
 - Evidence: `schedule_after_iteration` uses monotonic time, accounts for overruns
   and has deterministic tests. The watch loop persists completion/failure
@@ -63,8 +62,8 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   each persistence/finalization boundary from the original prior streak.
 - Follow-up contract: `docs/research/CCI_PROVENANCE_ONLY_CADENCE.md`.
   Corrected expanded subset: 201 passed in 37.96 seconds. Initial fixture error
-  (frozen dataclass assignment) corrected with dataclasses.replace. Final targeted,
-  full pytest, PR/CI and exact-head review pending. Astra independently confirmed
+  (frozen dataclass assignment) corrected with dataclasses.replace. These
+  intermediate checks preceded final source verification. Astra independently confirmed
   the regression and reviewed the narrow-exemption design.
   Final focused cadence/Telegram/session subset: 91 passed in 17.53 seconds,
   including real synthetic storage/manifest/watch-output failures after repeated
@@ -74,7 +73,7 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   omitted from the raw-status allowlist, so benign suppression could still trigger
   backoff. Corrected with real delivery dataclasses and retained failure-marker
   checks. First full run stopped at 14% without observed failures. Required CI
-  for that initial head succeeded; corrected full/CI/exact-head review required.
+  for that initial head succeeded; final corrected results follow below.
   Corrected blocked-repeat expanded subset: 208 passed in 39.65 seconds.
   PR [#146](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/146),
   corrected implementation `bd897491fb490fcfe1fea817927f2c9311bde2f0`: Astra
@@ -84,8 +83,10 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   unchanged backup snapshot-boundary failure (quick_check failed). Its exact
   cause remains Unverified; the isolated test passed locally in 0.62 seconds.
   One retry reproduced the same sole failure (3551 passed / 1 failed in 340.83
-  seconds). PR #146 includes the narrow backup acquisition correction; combined
-  full pytest, review and CI remain pending. Handoff:
+  seconds). PR #146 includes the narrow backup acquisition correction. Combined
+  final source `0c01aa8a4213d7980fc3ccc898791230ff68aab0` received Astra APPROVE,
+  successful CI (3553 passed) and full Windows pytest: **3553 passed, 1 existing
+  dependency warning in 646.33 seconds**, no failures or skips. Handoff:
   `docs/handoffs/CCI_RELIABILITY_PROVENANCE_CADENCE.md`.
 
 ## B — Existing-owner monitoring accounting
@@ -317,8 +318,14 @@ state are N/A / Unverified. No rollout is authorized by this tracker.
   Independent synthetic proof confirmed that unsafe mode; it did not reproduce
   the CI integrity failure. PR #146 now includes a narrow actual backup source
   opt-out from immutable mode with deterministic source-proof/snapshot tests.
-  Complete maintenance subset: 61 passed in 14.99 seconds. Combined full checks,
-  review and CI remain pending. Contract:
+  Complete maintenance subset: 61 passed in 14.99 seconds; combined maintenance,
+  readiness and cadence subset: 162 passed in 29.21 seconds. Combined source
+  `0c01aa8a4213d7980fc3ccc898791230ff68aab0` received Astra APPROVE with 61
+  independent maintenance tests in 15.65 seconds and no findings. [Corrected CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40063440798)
+  succeeded: **3553 passed, 1 existing dependency warning in 221.43 seconds**,
+  no failures or skips. Full Windows pytest on the same source: **3553 passed,
+  1 existing dependency warning in 646.33 seconds**, no failures or skips. The
+  warning is the existing Starlette/httpx TestClient deprecation. Contract:
   `docs/research/CCI_MUTABLE_BACKUP_SOURCE_SAFETY.md`.
   Planning has a separate no-artifact contract: ordinary non-immutable read-only
   opens can create sidecars, so its concurrency limitation must remain explicit.
@@ -333,9 +340,10 @@ the final documentation head `e4a5fb9` has CI and Astra approval.
 PRs #141 through #144 remain unmerged and undeployed. D's final documentation
 head `2cfd608` and A's final `1830aa8` have CI and exact-head Astra approval.
 E's final implementation `3aaac3b` has full pytest, required CI and Astra approval.
-The final E documentation head `8fa80b6` has exact-head approval and CI. Complete
-the provenance-only cadence follow-up's verification/review/CI and include its
-pinned head before requesting owner approval for the integration sequence in
+The final E documentation head `8fa80b6` has exact-head approval and CI. Final
+cadence/backup source `0c01aa8` has full Windows pytest, required CI and Astra
+approval. Pin its final documentation head with its own CI/review in PR #146
+before requesting owner approval for the integration sequence in
 `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`; Runtime preflight
 and rollout require separate authorization. No historical outage cause was found in
 repository notes or the scoped GitHub audit search; it remains Unverified.

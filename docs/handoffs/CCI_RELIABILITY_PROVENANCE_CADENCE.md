@@ -1,15 +1,16 @@
 # CCI reliability: provenance-only cadence and backup safety handoff
 
-Date: 2026-10-24. Cadence source independently approved and full Windows pytest
-passed. A backup acquisition correction addresses its CI blocker; combined
-source checks/review/CI are pending. No merge, deployment or Runtime authorization.
+Date: 2026-10-24. Implementation CODE_COMPLETE: combined source has full Windows
+pytest, successful CI and independent Astra approval. Final documentation head
+and its separate checks are recorded in PR #146. No merge, deployment or Runtime
+authorization.
 
 - Branch: `codex/reliability-provenance-cadence`.
 - PR: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/146.
 - Base: `8fa80b62d45b4e8c8bdfb0b149b28fa239f5d048` (PR #145).
 - Initial implementation: `d4983b3be215c785d65e2ea362fd7217ba910b66`.
 - Cadence correction: `bd897491fb490fcfe1fea817927f2c9311bde2f0`.
-- The combined backup-source correction is pinned in the PR review metadata.
+- Combined backup-source correction: `0c01aa8a4213d7980fc3ccc898791230ff68aab0`.
 - The final documentation head receives separate review/CI and is recorded in PR.
 
 ## Problem and correction
@@ -64,7 +65,13 @@ and fatal stops remain distinct from retry requests.
   snapshot tests with both absent and existing sidecars. Complete maintenance
   subset: 61 passed in 14.99 seconds. Combined maintenance/readiness/cadence
   subset: **162 passed in 29.21 seconds**. Dependency, compilation and whitespace
-  checks passed; combined full pytest, review and CI remain pending.
+  checks passed. Exact combined source `0c01aa8` received Astra APPROVE with
+  **61 independent maintenance tests passed in 15.65 seconds**, clean tree and
+  whitespace; no actionable findings. [Combined-source CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40063440798)
+  succeeded: **3553 passed, 1 existing dependency warning in 221.43 seconds**,
+  no failures or skips. Full Windows pytest on exact combined source `0c01aa8`:
+  **3553 passed, 1 existing dependency warning in 646.33 seconds**, no failures
+  or skips. The warning is the existing Starlette/httpx TestClient deprecation.
   Dependency, compilation, whitespace and invariant checks passed. The source
   inventory line reference/artifacts were regenerated after an import shifted it.
 
@@ -82,8 +89,8 @@ during and after source access. Actual backup coordination may create WAL/SHM;
 never delete them. The retained planner limitation and scope are recorded in
 `docs/research/CCI_MUTABLE_BACKUP_SOURCE_SAFETY.md`.
 
-Finish combined-head full pytest, CI and exact-head review before requesting
-owner approval for integration in
+Finish final documentation exact-head review/CI before requesting owner approval
+for integration in
 `docs/handoffs/CCI_RELIABILITY_INTEGRATION_RUNTIME_PACKET.md`. Runtime preflight,
 cutover and natural verification remain separate. The mission is not complete
 based on DEV results alone.

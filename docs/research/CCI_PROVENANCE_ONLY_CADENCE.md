@@ -88,8 +88,12 @@ in 340.83 seconds). No integrity check was relaxed. Independent diagnosis
 confirmed a pre-existing unsafe immutable assumption for a potentially changing
 backup source. PR #146 also includes the narrow actual-acquisition correction
 and deterministic safety-proof/snapshot regression described in
-`docs/research/CCI_MUTABLE_BACKUP_SOURCE_SAFETY.md`. Full checks and exact-head
-review/CI for the combined source remain pending at this checkpoint.
+`docs/research/CCI_MUTABLE_BACKUP_SOURCE_SAFETY.md`. Combined source
+`0c01aa8a4213d7980fc3ccc898791230ff68aab0` received Astra APPROVE (61 independent
+maintenance tests in 15.65 seconds), [successful CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40063440798)
+(3553 passed, one existing dependency warning in 221.43 seconds), and full
+Windows pytest: **3553 passed, 1 existing dependency warning in 646.33 seconds**,
+no failures or skips. The warning is the existing Starlette/httpx deprecation.
 
 The five previous focused PR heads remain unchanged and independently reviewed.
 This follow-up must be included in the integration sequence before requesting

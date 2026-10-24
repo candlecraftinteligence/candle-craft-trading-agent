@@ -36,7 +36,15 @@ corrected to observe the actual setting without changing its value.
 After correction the complete maintenance subset passed **61 tests in 14.99
 seconds**. The combined maintenance/readiness/cadence subset passed **162 tests
 in 29.21 seconds**; dependency, compilation and whitespace checks passed.
-Full checks, corrected-head CI and Astra review are pending.
+Exact combined source `0c01aa8a4213d7980fc3ccc898791230ff68aab0` received Astra
+APPROVE, with **61 independent maintenance tests passed in 15.65 seconds** and
+no actionable findings. [Corrected-head CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40063440798)
+succeeded: **3553 passed, 1 existing dependency warning in 221.43 seconds**,
+no failures or skips. Full Windows pytest on the same exact source: **3553
+passed, 1 existing dependency warning in 646.33 seconds**, no failures or skips.
+The warning is the existing Starlette/httpx TestClient deprecation. The earlier
+CI failure is cleared on this corrected candidate; its raw mechanism remains
+Unverified because the original integrity rows were not retained.
 
 ## Retained planning limitation and operational boundary
 
