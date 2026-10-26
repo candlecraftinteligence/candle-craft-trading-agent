@@ -830,6 +830,7 @@ async def _main(
     effective_candle_limit = _effective_candle_limit(args)
 
     config = ScannerRunConfig(
+        cmc_mode=runtime_settings.cmc_mode,
         symbols=watchlist.symbols,
         exchange=args.exchange,
         interval=args.interval,
@@ -2864,6 +2865,11 @@ async def _deliver_telegram_manual_signals_if_enabled(
     print_summary: bool = True,
 ) -> TelegramLifecycleDeliverySummary | None:
     if not _telegram_lifecycle_public_delivery_enabled(args):
+        if result.config.cmc_mode in {"shadow", "decision"}:
+            from app.cmc.integration import prepare_selection
+            from app.alerts.telegram_lifecycle import TelegramEligibilityContext
+            await prepare_selection(result, _telegram_manual_signal_settings(), TelegramEligibilityContext(
+                min_rr=result.config.min_rr, min_score_for_idea=result.config.min_score_for_idea))
         return None
     settings = _telegram_manual_signal_settings()
     try:
