@@ -1,7 +1,7 @@
 """Endpoint-specific semantics. Unspecified OI units / funding intervals stay Unverified."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from app.cmc.client import Fetch
@@ -27,7 +27,8 @@ def observation(fetch: Fetch, metric: str, raw, *, units: str, source=None, scop
         reason = reason or "missing/invalid/future provider metric timestamp"
     elif (fetch.acquired_at - source_at).total_seconds() > max_age:
         state = S.STALE
-    if value is not None and (metric.startswith(("open_interest", "liquidation", "market_cap", "price", "index_price")) and value < 0):
+    nonnegative = metric.startswith(("open_interest", "liquidation", "price", "index_price")) or metric in {"market_cap", "market_cap_rank"}
+    if value is not None and nonnegative and value < 0:
         state, reason = S.ERROR, "negative monetary/position value"
     if value is not None and metric in {"btc_dominance", "eth_dominance", "fear_greed", "altcoin_index"} and not 0 <= value <= 100:
         state, reason = S.ERROR, "percentage/index outside 0..100"
@@ -52,7 +53,8 @@ def _usd(quotes):
 
 def normalize_pair(fetch: Fetch, pair: dict, instrument: Instrument | None = None,
                    *, oi_units: str | None = None, funding_interval_seconds: int | None = None,
-                   funding_semantics: str | None = None, oi_counting_convention: str | None = None):
+                   funding_semantics: str | None = None, oi_counting_convention: str | None = None,
+                   index_price_units: str | None = None):
     quotes = _usd(pair.get("exchange_reported_quotes", []))
     if len(quotes) != 1:
         result = observation(fetch, "pair_quote", None, units="N/A", verified=False,
@@ -65,7 +67,7 @@ def normalize_pair(fetch: Fetch, pair: dict, instrument: Instrument | None = Non
     trusted = instrument is not None and pair.get("outlier_detected") is False and not pair.get("exclusions")
     result = []
     for metric, units, verified in (
-        ("price", "USD", trusted), ("index_price", "USD", trusted),
+        ("price", "USD", trusted), ("index_price", index_price_units or "unspecified", trusted and index_price_units == "USD"),
         ("open_interest", oi_units or "unspecified", trusted and oi_units in {"base", "USD"} and oi_counting_convention == "open_contract_quantity"),
         ("funding_rate", "fraction/interval", trusted and funding_interval_seconds is not None and funding_semantics in {"settled_funding", "indicative_funding"}),
         ("provider_index_basis", "unspecified", False),
@@ -78,8 +80,9 @@ def normalize_pair(fetch: Fetch, pair: dict, instrument: Instrument | None = Non
             counting_convention=oi_counting_convention if metric == "open_interest" else None, **identity))
     price, index = number(q.get("price")), number(q.get("index_price"))
     basis = (price - index) / index if price is not None and index is not None and price > 0 and index > 0 else None
-    result.append(observation(fetch, "basis", basis, units="fraction", verified=trusted,
-        reason="(exchange reported price - index price) / index price; not annualized", **identity))
+    result.append(observation(fetch, "basis", basis, units="fraction", verified=trusted and index_price_units == "USD",
+        reason="(exchange reported price - index price) / index price; not annualized" if index_price_units == "USD"
+        else "diagnostic calculation only: index-price currency not independently established", **identity))
     return tuple(result)
 
 
@@ -113,8 +116,14 @@ def _normalize_context(fetch: Fetch):
                 q = row.get("quote", {}).get("USD", {})
             for metric, value, units in (("market_cap_rank", row.get("cmc_rank"), "rank"),
                     ("asset_return_24h", q.get("percent_change_24h"), "percent")):
-                result.append(observation(fetch, metric, value, units=units, cmc_id=row.get("id"),
-                    source=row.get("last_updated") if metric == "market_cap_rank" else q.get("last_updated"), scope="asset"))
+                item = observation(fetch, metric, value, units=units, cmc_id=row.get("id"),
+                    source=row.get("last_updated") if metric == "market_cap_rank" else q.get("last_updated"), scope="asset")
+                if fetch.endpoint == Endpoint.HISTORICAL_LISTINGS:
+                    requested = _requested_day(fetch.request_params.get("date"))
+                    if requested is None or item.source_at is None or item.source_at.date() > requested:
+                        item = item.model_copy(update={"state": S.UNVERIFIED,
+                            "reason": "historical request date missing or source timestamp after requested UTC day"})
+                result.append(item)
     elif fetch.endpoint in {Endpoint.FEAR_GREED, Endpoint.ALTCOIN}:
         row = data[0] if isinstance(data, list) and len(data) == 1 else data
         if isinstance(row, dict):
@@ -153,3 +162,12 @@ def _normalize_context(fetch: Fetch):
             result.append(observation(fetch, "sector_member:" + str(data.get("id")), 1, units="membership",
                 source=data.get("last_updated"), cmc_id=row.get("id"), scope="sector:" + str(data.get("id")), max_age=7200))
     return tuple(result)
+
+
+def _requested_day(value) -> date | None:
+    try:
+        if isinstance(value, (str, int)) and str(value).isdigit():
+            return datetime.fromtimestamp(int(value), UTC).date()
+        return date.fromisoformat(str(value)[:10])
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None

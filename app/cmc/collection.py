@@ -24,6 +24,7 @@ class Semantics(Frozen):
     oi_units: Literal["base", "USD"] | None = None
     oi_counting_convention: Literal["open_contract_quantity"] | None = None
     funding_semantics: Literal["settled_funding", "indicative_funding"] | None = None
+    index_price_units: Literal["USD"] | None = None
     funding_interval_seconds: int | None = Field(default=None, gt=0, le=86400)
     verified_at: datetime
     expires_at: datetime
@@ -185,7 +186,8 @@ class Collector:
                         oi_units=semantics.oi_units if semantics else None,
                         funding_interval_seconds=semantics.funding_interval_seconds if semantics else None,
                         funding_semantics=semantics.funding_semantics if semantics else None,
-                        oi_counting_convention=semantics.oi_counting_convention if semantics else None))
+                        oi_counting_convention=semantics.oi_counting_convention if semantics else None,
+                        index_price_units=semantics.index_price_units if semantics else None))
             else:
                 observations.extend(normalize_context(result))
             if len(observations) > self.max_observations:

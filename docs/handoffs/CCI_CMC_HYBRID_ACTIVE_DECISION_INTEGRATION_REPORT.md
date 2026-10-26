@@ -2,6 +2,12 @@
 
 Date: 2026-10-26, Europe/Bratislava. Scope: existing Scanner V1 on DEV only.
 
+This records the original engineering phase through `2990c8f`. Its keyless-only
+authentication statements describe that phase. The subsequent owner-authorized
+[CMC AUTHENTICATED VALIDATION REPORT](CCI_CMC_AUTHENTICATED_VALIDATION_REPORT.md)
+supersedes those limitations with real account evidence, additional fixes and
+new regression results. Production activation remains disabled.
+
 ## 1. Repository branch and SHA
 
 Branch: `feature/cmc-hybrid-active-intelligence`.
@@ -11,7 +17,7 @@ Base: `6785cf6c5a5d4c083f31a280c2ca1555bc7df88c` (refreshed GitHub main).
 Implementation milestones:
 
 - `c8e3374f0e7cf562bdced3e992d7e4d03e8da770`: complete subsystem, integration, tests and operator documentation.
-- `462c00c9fcee21c16f08950a036497b8020584c9`: bounded selection provenance and source-inventory refresh. This is the final code/test revision; subsequent delivery evidence is documentation-only.
+- `462c00c9fcee21c16f08950a036497b8020584c9`: bounded selection provenance and source-inventory refresh. This was the original phase's final code/test revision; the later authenticated validation is recorded separately.
 
 The pre-existing untracked `CCI_ALPHA_RECOVERY_ROOT_CAUSE.md` and linked worktrees were not modified. A two-day-old empty `.git/index.lock`, with no Git process owner, was preserved as `.git/index.lock.stale-cmc-20261026` before creating the authorized feature branch. No reset, merge, main push or Runtime deployment occurred.
 
@@ -27,7 +33,7 @@ The typed endpoint registry supports all requested families: V3 listings; V1 map
 
 Fixture-supported: all normalization, identity, comparison, policy and failure contracts in the new subsystem. Live keyless observations verified metric-level global metrics, Fear & Greed and altcoin-season values and fetched the numeric ID map. An initial V3 listings request succeeded, exposed the quote-array contract, and motivated a parser correction; the repeat live listings probe returned HTTP 429. The corrected parser is fixture-verified, with that final live listing-normalization check still unavailable. Saved [keyless probe results](../research/cmc_hybrid_keyless_probe.json) retain the 429 rather than replacing it with invented data.
 
-Authenticated futures, liquidation and historical entitlements were not tested. The client reported UNAVAILABLE without sending credentialless requests to authenticated-only routes. Actual subscription capabilities remain Unverified. Current official plan documentation and account-specific caveats are linked in the operator guide.
+Authenticated futures, liquidation and historical entitlements were not tested during this original phase. The later authenticated validation accessed all 15 route families, including fresh V3 listings, and verified three real Binance perpetual mappings. Field-level semantics and dated history retain the specific blockers in the authenticated report.
 
 ## 5. Decision features
 
@@ -119,7 +125,7 @@ Provider, contracts, normalization, comparison, features, policy, sidecar and re
 
 ## 19. Exact authenticated API test status
 
-**NOT PERFORMED.** No real CMC credential was inspected or used for authenticated validation. Public keyless REST tests are partial source verification and do not prove authenticated futures access or the owner's subscription. Synthetic authenticated headers in MockTransport tests establish client behavior only.
+**Original phase: NOT PERFORMED. Subsequent phase: PERFORMED.** The owner supplied a local credential and explicitly authorized real validation. All 15 route families responded successfully within the bounded credit cap. The [authenticated report](CCI_CMC_AUTHENTICATED_VALIDATION_REPORT.md) records exact coverage, source evidence and unresolved semantics; successful authentication alone does not verify futures fields or trading usefulness.
 
 ## 20. Readiness and final conditions
 

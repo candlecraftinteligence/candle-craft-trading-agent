@@ -73,6 +73,7 @@ def test_unknown_futures_units_and_intervals_are_not_verified():
     assert data["open_interest"].state == S.UNVERIFIED
     assert data["funding_rate"].state == S.UNVERIFIED
     assert data["basis"].value == Decimal(1)/99
+    assert data["index_price"].state == data["basis"].state == S.UNVERIFIED
     assert data["provider_index_basis"].state == S.UNVERIFIED
     assert data["basis"].value != data["provider_index_basis"].value
 
@@ -159,3 +160,29 @@ def test_coverage_provenance_does_not_repeat_irrelevant_snapshot_rows():
     observations=(obs(),*(obs("unused",str(i)) for i in range(1500)))
     features={f.name:f for f in build_features(observations,as_of=AT)}
     assert features["CmcDataConfidence"].evidence_ids==(observations[0].id,)
+
+
+def test_negative_market_cap_return_is_valid_but_negative_capitalization_is_not():
+    signed=obs("market_cap_change_24h","-2.5")
+    assert signed.state==S.VERIFIED and signed.value==Decimal("-2.5")
+    assert obs("market_cap","-2.5").state==S.ERROR
+    risk={f.name:f for f in build_features((signed,),as_of=AT)}["CmcGlobalMarketRisk"]
+    assert risk.value==Decimal("2.5") and risk.state==S.VERIFIED
+
+
+def test_basis_requires_independently_reviewed_index_currency():
+    values=normalize_pair(fetched(Endpoint.EXCHANGE_PAIRS),pair(),instrument(),index_price_units="USD")
+    indexed={o.metric:o for o in values}
+    assert indexed["index_price"].state==indexed["basis"].state==S.VERIFIED
+    assert indexed["provider_index_basis"].state==S.UNVERIFIED
+
+
+@pytest.mark.parametrize("requested",[None,"2025-12-31"])
+def test_historical_http_success_cannot_verify_a_later_snapshot(requested):
+    payload=[{"id":1,"cmc_rank":1,"last_updated":AT.isoformat(),
+        "quote":{"USD":{"percent_change_24h":"-2.5","last_updated":AT.isoformat()}}}]
+    request={"date":requested} if requested else {}
+    result=fetched(Endpoint.HISTORICAL_LISTINGS,payload,request_params=request)
+    assert all(o.state==S.UNVERIFIED for o in normalize_context(result))
+    correct=result.model_copy(update={"request_params":{"date":"2026-01-01"}})
+    assert all(o.state==S.VERIFIED for o in normalize_context(correct))

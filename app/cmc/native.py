@@ -25,11 +25,15 @@ def native_observations(evidence: dict, instrument: Instrument) -> tuple[Observa
         for row in batch.observations:
             identity = row.identity
             if (identity.exchange != "binance_futures" or identity.requested_symbol != instrument.symbol
-                    or identity.returned_symbol != instrument.symbol or identity.reason_codes
+                    or identity.returned_symbol != instrument.symbol
+                    or set(identity.reason_codes) - {"category_from_request_context"}
                     or row.acquisition.acquired_at is None):
                 continue
             for quantity in row.quantities:
-                units = {"base_asset_quantity":"base", "quote_notional":"USD", "funding_fraction":"fraction/interval"}.get(quantity.unit)
+                # The independent contract metadata establishes the request category.
+                # Quote notional retains USDT rather than assuming parity with USD.
+                units = {"base_asset_quantity":"base", "quote_notional":instrument.quote,
+                         "funding_fraction":"fraction/interval"}.get(quantity.unit)
                 if units is None:
                     continue
                 verified = (row.semantic_quality == "verified" and quantity.quality == "verified"

@@ -1,0 +1,60 @@
+{
+  "starting_commit": "2990c8fbb3a5565859e1d1f722ea7fe734be5b53",
+  "targeted_passed": 114,
+  "full_passed": 3667,
+  "full_unique_cases": 3667,
+  "test_files": 179,
+  "full_partitions": "Disjoint complete test-file set, canonical alphabetical order within each group; independent temporary/cache directories.",
+  "environment": "Existing .venv Python 3.11; LOCAL_MANUAL_MODE=true, ORDER_EXECUTION_ENABLED=false, TELEGRAM_DRY_RUN=true, TELEGRAM_SIGNALS_ENABLED=false, TELEGRAM_RESEARCH_WATCH_ENABLED=false. No .env mutation.",
+  "runs": [
+    {
+      "artifact": "cmc-auth-targeted-precision.xml",
+      "sha256": "6ef4df5971682096acabd3950e94520fdc39dad3ed3fa70351aa0aa0f82aed53",
+      "tests": 114,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 6.06
+    },
+    {
+      "artifact": "cmc-auth-full-part1.xml",
+      "sha256": "e1dc3a06bf42639f3d8a68340055bea466a8f3e2e2c25760a570e3d15232e857",
+      "tests": 864,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 284.516
+    },
+    {
+      "artifact": "cmc-auth-full-part2.xml",
+      "sha256": "94ae19b886e2eadc5a423be28c9fe753acaa8d42dfd678a1361c037022b93fc2",
+      "tests": 827,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 289.809
+    },
+    {
+      "artifact": "cmc-auth-full-part3.xml",
+      "sha256": "59a6dbb9a32579eb6c3fc2f56b31c5fc335a406b7a2e8671e9210efe531596a8",
+      "tests": 995,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 261.76
+    },
+    {
+      "artifact": "cmc-auth-full-part4.xml",
+      "sha256": "ae6f1e4488890160454bd1b025d1a28552b830e8d48c340a1f5d1955ed9816a8",
+      "tests": 981,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 279.483
+    }
+  ],
+  "compileall": "passed",
+  "pip_check": "passed",
+  "ci": "pending exact implementation revision",
+  "fixture_precision": "Selected fixture JSON preserves numeric values through Decimal; a second focused run passed after serialization verification."
+}

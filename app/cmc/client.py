@@ -32,6 +32,7 @@ class Fetch(Frozen):
     credits_reported: int | None = None
     authenticated: bool = False
     pagination_complete: bool | None = None
+    request_params: dict[str, Any] = Field(default_factory=dict)
 
 
 class CmcClient:
@@ -192,7 +193,7 @@ class CmcClient:
                         result = Fetch(endpoint=endpoint, acquired_at=acquired,
                             state=EvidenceState.UNVERIFIED, data=payload["data"], raw=payload,
                             raw_text=body.decode("utf-8"),raw_ref=hashlib.sha256(body).hexdigest(),
-                            credits_reported=reported, authenticated=authenticated)
+                            credits_reported=reported, authenticated=authenticated, request_params=params)
                         self._failures = 0
                         self.capabilities[endpoint.value] = "FETCHED_AUTHENTICATED" if authenticated else "FETCHED_KEYLESS"
                         return result

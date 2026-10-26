@@ -38,7 +38,7 @@ Contracts were reviewed on 2026-10-26 against CMC's official [cryptocurrency ref
 
 V3 listings use `quote[]` entries identified by USD ID 2781 and symbol, while V1 historical listings use `quote.USD`. Liquidation responses use `quotes[]`, `exchanges[]` or `cryptocurrencies[]`. The altcoin index uses `altcoin_index` and `snapshot_time`; Fear & Greed uses `value` and `update_time`. Envelope timestamps are never metric timestamps.
 
-Current documentation advertises Free/Basic and higher tiers for many latest routes, and historical listings with plan-dependent history (Basic: one year; Builder: three years; Startup and higher: from 2013). **Actual account entitlement, historical availability and authenticated derivatives semantics remain Unverified until owner-supplied authentication tests succeed.** No subscription is purchased. Keyless support is limited to documented public routes; authenticated derivatives are not emulated with MCP or anonymous web data.
+Current documentation advertises Free/Basic and higher tiers for many latest routes, and historical listings with plan-dependent history (Basic: one year; Builder: three years; Startup and higher: from 2013). The [2026-10-26 authenticated validation](handoffs/CCI_CMC_AUTHENTICATED_VALIDATION_REPORT.md) successfully accessed all 15 route families with bounded samples. Key-info reported 15,000 monthly credits and 50 requests/minute, without a plan name. Maximum history depth and broader entitlements remain Unverified; the dated historical sample failed its requested-day semantics despite HTTP success. No subscription is purchased. Keyless support is limited to documented public routes; authenticated derivatives are not emulated with MCP or anonymous web data.
 
 ## Evidence and instrument identity
 
@@ -48,9 +48,11 @@ Raw successful REST text is retained with its SHA-256, without request headers. 
 
 Binance matching requires an explicitly approved CMC ID/slug ↔ Binance base binding, a CMC ID-map record, agreement with the independent derivatives exchange registry, exact market ID and perpetual category, base/quote IDs and exchange symbols, clean outlier/exclusion flags, and independent Binance USDT-margined TRADING/PERPETUAL metadata. Non-unit multipliers are rejected. Symbols alone never establish identity. Metadata, binding, map and exchange-registry acquisition times must all be causal; metadata expires after a day.
 
-An owner-reviewed semantics manifest must separately establish OI units/counting and funding interval/kind for each market. The examples in the public docs do not establish these facts. Unknown OI units and funding intervals remain Unverified. Cross-exchange funding additionally needs reviewed independent venue metadata, matching asset/USDT/perpetual identity, identical funding interval and settled/indicative semantics. At most four such assets are polled. No external venue is automatically trusted.
+An owner-reviewed semantics manifest must separately establish OI units/counting, funding interval/kind and index-price currency for each market. Unknown semantics remain Unverified. Actual authenticated verification established conversion-currency USD OI but did not establish its counting convention, CMC funding interval/kind or index currency. Raw provider basis has an unresolved formula/sign convention. Computed basis requires separately reviewed USD index units. Cross-exchange funding additionally needs reviewed independent venue metadata, matching asset/USDT/perpetual identity, identical funding interval and settled/indicative semantics. At most four such assets are polled. No external venue is automatically trusted.
 
 Existing Binance source facts are bound with the existing metadata binder. Naked legacy numbers are not comparison evidence. Comparisons require the same exact instrument, metric, units, counting/rate semantics and timestamps within 30 seconds; relative divergence tolerance is 2%. Outputs include CONSISTENT, MATERIAL_DIVERGENCE, TEMPORALLY_MISALIGNED, UNIT_MISMATCH, IDENTITY_MISMATCH, NOT_COMPARABLE and UNVERIFIED. Aggregate CMC OI is never compared as Binance-specific OI. Global liquidation totals never prove a local stop sweep.
+
+The native bridge accepts the documented request-context category only after independent contract binding, and rejects other identity conflicts. Quote notional retains USDT where that is the instrument's quote; USD parity is not assumed. Historical normalization preserves the requested date and rejects source timestamps later than that UTC day. Signed market-cap percentage changes are valid even when negative.
 
 ## Feature definitions, version 1
 
@@ -140,6 +142,28 @@ An explicitly requested CMC-only probe starts no scanner/listener and opens only
 ```
 
 ## Research method and limits
+
+For bounded authenticated validation without exporting the local credential, use
+the separate validation CLI. It reads `.env` in memory with interpolation
+disabled, enforces the local daily/monthly budgets plus a conservative 25-credit
+cap, and never starts a scanner/listener. `--capture` collects bounded source
+families for one to three explicitly reviewed validation-only bindings;
+`--refresh` adds fresh matched metrics to an existing capture. Use a dedicated
+CMC sidecar ledger and retain it across invocations. The full capture fits the
+default cap; prior owner-probe reservations are deducted from configured limits.
+No production identity or activation manifest is created by this command.
+
+```powershell
+# Requires explicit owner authorization for authenticated acquisition.
+.\.venv\Scripts\python.exe -m scripts.cmc_authenticated_validation --capture --source research_runs/cmc_validation --bindings research_runs/validation_bindings.reviewed.json --output research_runs/cmc_validation_report.json
+# Fully offline replay of selected real public responses; no credential access.
+.\.venv\Scripts\python.exe -m scripts.cmc_authenticated_validation --replay --source tests/fixtures/cmc_authenticated --bindings tests/fixtures/cmc_authenticated/bindings.reviewed.json --output research_runs/cmc_validation_replay.json
+```
+
+See the [authenticated report](handoffs/CCI_CMC_AUTHENTICATED_VALIDATION_REPORT.md)
+for actual costs, route coverage, raw source hashes, nine comparison outcomes and
+the distinction between field verification and production authority. Saved
+captures are evaluated at their original final acquisition cutoff.
 
 `ResearchRow` accepts a policy evaluation and an independently attributed economic-plan outcome. One original decision per economic plan is required; duplicate plans or ownership mismatches are rejected. Unknown/unverified outcomes are excluded from expectancy. Verified net R additionally requires known entry activation, close time, attribution reference, fees and slippage. The evaluator does not reconstruct trustworthy fills from candle touches or fix existing CCI attribution. Owner-provided independently reconstructed outcomes remain an external research input; no live Runtime database was accessed to obtain them.
 
