@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
 import time
 from collections.abc import Mapping, Sequence
@@ -51,6 +52,9 @@ DEFAULT_ORDER_BOOK_BOOTSTRAP_BACKOFF_SECONDS = 1.0
 DEFAULT_ORDER_BOOK_BOOTSTRAP_JITTER_SECONDS = 0.1
 DEFAULT_RECONNECT_BASE_SECONDS = 1.0
 DEFAULT_RECONNECT_MAX_SECONDS = 30.0
+DEFAULT_ORDER_BOOK_OPEN_TIMEOUT_SECONDS = 20.0
+DEFAULT_ORDER_BOOK_RECEIVE_TIMEOUT_SECONDS = 30.0
+DEFAULT_ORDER_BOOK_RECONNECT_RESET_SECONDS = 60.0
 ORDER_BOOK_WEBSOCKET_MAX_MESSAGE_BYTES = 1024 * 1024
 ORDER_BOOK_WEBSOCKET_MAX_QUEUE = 4
 VALID_UPDATE_SPEEDS = frozenset({"100ms", "250ms", "500ms"})
@@ -141,6 +145,8 @@ class OrderBookLiquidityService:
         bootstrap_jitter_seconds: float = DEFAULT_ORDER_BOOK_BOOTSTRAP_JITTER_SECONDS,
         reconnect_base_seconds: float = DEFAULT_RECONNECT_BASE_SECONDS,
         reconnect_max_seconds: float = DEFAULT_RECONNECT_MAX_SECONDS,
+        receive_timeout_seconds: float = DEFAULT_ORDER_BOOK_RECEIVE_TIMEOUT_SECONDS,
+        reconnect_reset_seconds: float = DEFAULT_ORDER_BOOK_RECONNECT_RESET_SECONDS,
         clock: Any | None = None,
         monotonic: Any | None = None,
         sleep: Any | None = None,
@@ -169,9 +175,16 @@ class OrderBookLiquidityService:
             raise ValueError("order-book bootstrap backoff and jitter cannot be negative")
         if reconnect_base_seconds < 0 or reconnect_max_seconds < reconnect_base_seconds:
             raise ValueError("order-book reconnect delays are invalid")
+        for name, value in (
+            ("receive_timeout_seconds", receive_timeout_seconds),
+            ("reconnect_reset_seconds", reconnect_reset_seconds),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"order-book {name} must be positive and finite")
 
         self.transport = transport or BinanceWebSocketTransport(
             url=BINANCE_USDM_PUBLIC_STREAM_URL,
+            open_timeout_seconds=DEFAULT_ORDER_BOOK_OPEN_TIMEOUT_SECONDS,
             max_message_bytes=ORDER_BOOK_WEBSOCKET_MAX_MESSAGE_BYTES,
             max_queue=ORDER_BOOK_WEBSOCKET_MAX_QUEUE,
             ping_interval_seconds=20.0,
@@ -191,6 +204,8 @@ class OrderBookLiquidityService:
         self.bootstrap_jitter_seconds = float(bootstrap_jitter_seconds)
         self.reconnect_base_seconds = float(reconnect_base_seconds)
         self.reconnect_max_seconds = float(reconnect_max_seconds)
+        self.receive_timeout_seconds = float(receive_timeout_seconds)
+        self.reconnect_reset_seconds = float(reconnect_reset_seconds)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.monotonic = monotonic or time.monotonic
         self.sleep = sleep or asyncio.sleep
@@ -213,6 +228,8 @@ class OrderBookLiquidityService:
         self._ever_connected = False
         self._connection_count = 0
         self._disconnect_count = 0
+        self._consecutive_connection_failures = 0
+        self._reconnect_delay_seconds = 0.0
         self._malformed_event_count = 0
         self._wrong_contract_event_count = 0
         self._ignored_message_count = 0
@@ -338,6 +355,13 @@ class OrderBookLiquidityService:
             "active_bootstrap_count": len(self._bootstrap_tasks),
             "connection_count": self._connection_count,
             "disconnect_count": self._disconnect_count,
+            "consecutive_connection_failures": self._consecutive_connection_failures,
+            "reconnect_delay_seconds": self._reconnect_delay_seconds,
+            "receive_timeout_seconds": self.receive_timeout_seconds,
+            "reconnect_reset_seconds": self.reconnect_reset_seconds,
+            "websocket_open_timeout_seconds": getattr(
+                self.transport, "open_timeout_seconds", None,
+            ),
             "malformed_event_count": self._malformed_event_count,
             "wrong_contract_event_count": self._wrong_contract_event_count,
             "ignored_message_count": self._ignored_message_count,
@@ -360,10 +384,17 @@ class OrderBookLiquidityService:
 
     async def _run_forever(self) -> None:
         failure_count = 0
+        self._consecutive_connection_failures = 0
+        self._reconnect_delay_seconds = 0.0
         while not self._stop_event.is_set():
             connection: FlowWebSocketConnection | None = None
+            phase = "connect"
+            delay = 0.0
             try:
                 connection = await self.transport.connect()
+                connected_at = float(self.monotonic())
+                self._reconnect_delay_seconds = 0.0
+                phase = "subscribe"
                 reconnect = self._ever_connected
                 self._ever_connected = True
                 self._connection_count += 1
@@ -378,7 +409,6 @@ class OrderBookLiquidityService:
                 )
                 for symbol in sorted(self._desired_symbols):
                     self._schedule_bootstrap(symbol)
-                failure_count = 0
                 self._last_error = None
                 self.logger.info(
                     "Order-book WebSocket connected symbols=%s reconnect=%s speed=%s "
@@ -389,60 +419,79 @@ class OrderBookLiquidityService:
                     getattr(self.transport, "max_message_bytes", None),
                     getattr(self.transport, "max_queue", None),
                 )
+                phase = "receive"
                 while not self._stop_event.is_set():
-                    payload = await connection.recv()
-                    self._handle_payload(payload)
+                    async with asyncio.timeout(self.receive_timeout_seconds):
+                        payload = await connection.recv()
+                    accepted = self._handle_payload(payload)
+                    # A successful handshake alone must not reset a flapping feed.
+                    # Control frames, malformed events and other contracts aren't
+                    # evidence of a recovered subscribed USD-M depth connection.
+                    if (
+                        failure_count
+                        and accepted
+                        and self.monotonic() - connected_at >= self.reconnect_reset_seconds
+                    ):
+                        failure_count = 0
+                        self._consecutive_connection_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 failure_count += 1
                 self._disconnect_count += 1
+                self._consecutive_connection_failures = failure_count
+                delay = min(
+                    self.reconnect_max_seconds,
+                    self.reconnect_base_seconds * (2 ** min(failure_count - 1, 10)),
+                )
+                self._reconnect_delay_seconds = delay
                 self._last_error = f"{type(exc).__name__}:{_clean_reason(exc)}"
                 self.logger.warning(
-                    "Order-book WebSocket disconnected attempt=%s error=%s.",
+                    "Order-book WebSocket disconnected attempt=%s phase=%s "
+                    "retry_in=%.1fs error=%s.",
                     failure_count,
+                    phase,
+                    delay,
                     self._last_error,
                 )
             finally:
                 if self._connection is connection:
                     self._connection = None
                 self._active_symbols.clear()
+                # Revoke trusted levels before any potentially slow socket cleanup.
+                for book in self._books.values():
+                    book.mark_disconnected()
                 await self._cancel_bootstraps()
                 if connection is not None:
                     await _safe_close(connection)
-                for book in self._books.values():
-                    book.mark_disconnected()
             if self._stop_event.is_set():
                 break
-            delay = min(
-                self.reconnect_max_seconds,
-                self.reconnect_base_seconds * (2 ** min(max(failure_count - 1, 0), 10)),
-            )
             if delay > 0:
                 await self.sleep(delay)
 
-    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> None:
+    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> bool:
         if _is_control_message(payload):
             self._ignored_message_count += 1
-            return
+            return False
         try:
             event = parse_binance_depth_event(payload)
         except WrongOrderBookContractTypeError:
             self._wrong_contract_event_count += 1
-            return
+            return False
         except OrderBookPayloadError:
             self._malformed_event_count += 1
-            return
+            return False
         book = self._books.get(event.symbol)
         if book is None or event.symbol not in self._desired_symbols:
             self._ignored_message_count += 1
-            return
+            return False
         outcome = book.ingest(event, received_at=self.clock())
         if outcome in {
             BookIngestOutcome.NEEDS_RESYNC,
             BookIngestOutcome.BUFFER_OVERFLOW,
         }:
             self._schedule_bootstrap(event.symbol)
+        return True
 
     def _schedule_bootstrap(self, symbol: str) -> None:
         if self._connection is None or self._stop_event.is_set():
