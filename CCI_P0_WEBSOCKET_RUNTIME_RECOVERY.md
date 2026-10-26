@@ -8,9 +8,15 @@ Date: 2026-10-26 (Europe/Bratislava). Status: DEV correction prepared; Runtime d
 - Original DEV checkout: `C:\CandleCraftDev`, branch `feature/cmc-hybrid-active-intelligence`, HEAD `1cecd54c714bea24fdce5009a1c6f51f3e21e520`. Its untracked `CCI_ALPHA_RECOVERY_ROOT_CAUSE.md` was preserved.
 - Isolated worktree: `C:\CandleCraftDev\.worktrees\p0-binance-wss`.
 - Repair branch: `codex/p0-binance-wss-recovery`.
-- Commit / PR / CI: pending final verification and publication; see final handoff below.
+- Implementation commit: `1469ad2aaa19ab28e7a6784c1845cc8464cc68e6`. Draft PR: [#150](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/150). GitHub returned no PR-triggered CI runs at the last check on 2026-10-26; no CI pass is claimed.
 - No production scanner/listener started, stopped, restarted, or signalled. No live database opened, copied, queried, or modified. No deployment or environment/firewall change performed.
 - User confirmed Runtime checks must run manually on the separate PC. The Runtime directory does not exist on this connected DEV machine. DEV results cannot establish Runtime network or process health.
+
+## Owner-directed hold and upstream overlap
+
+After publishing the draft, GitHub reported that main had advanced to `235ec88c09ff6df0372bd636eaaf47814e48bd6d`, merged [PR #149](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/149), an overlapping order-book recovery repair. That change already addresses order-book flapping backoff / pre-cleanup invalidation and adds a 20 second opening timeout, 30 second receive timeout, phase/retry diagnostics and tests. It does not establish a Runtime root cause. The expected incident release and this draft's base remain `a7899eb`.
+
+The owner explicitly directed: **“Keep #150 as a draft; diagnostics only.”** No reconciliation, merge, rebase, further implementation change or deployment will be performed under this handoff. PR #150 is reported as not mergeable. Do not deploy it as-is: future reconciliation must preserve #149's safeguards and tests, and needs renewed owner authorization. This report distinguishes findings against the expected release from code now present on upstream main. Runtime's actual installed commit is still N/A.
 
 ## Confirmed defects versus incident uncertainty
 
@@ -115,14 +121,14 @@ Modified only the three feed services, shared retry policy, initial-book validat
 - Project Python: `C:\CandleCraftDev\.venv\Scripts\python.exe` (existing environment).
 - Focused suite: **123 passed in 9.91 seconds**. Includes actual loopback HTTP 101, 404 rejection, opening timeout, Ping/Pong, provider close 1012, oversized frame bounds, repeated receive/handshake failures, exponential retry/jitter bounds, cancellation, duplicate-start protection, shutdown/restart, rejected subscriptions, raw/combined USD-M and COIN-M parsing, snapshot bridge, sequence gap, overflow, stale and empty/crossed book handling, plus sanitized diagnostic tests.
 - Loopback diagnostic integration received one fixture depth frame and synchronized a fixture snapshot. This is protocol/test evidence only, not a Binance market frame count.
-- Full DEV suite: RUNNING. One failure was isolated to a research-catalog source anchor shifted from line 92 to 93 by the new import; the reference was corrected, its unchanged assertion passed (1 passed in 0.48 seconds), and the final full result / rerun will be recorded before handoff.
-- Dependency check: PASS (`No broken requirements found`). Changed Python compile check: PASS. PowerShell diagnostic syntax: PASS. `git diff --check`: PASS.
+- Full DEV regression completed: **3713 passed, 1 failed, 1 warning in 668.81 seconds**. The sole failure was `test_inventory_anchors_match_source`: the added import shifted its source anchor from line 92 to 93. The reference was corrected in the implementation commit; the unchanged assertion then passed separately (**1 passed in 0.48 seconds**). The in-flight full process had loaded the old catalog before the correction. There is no clean all-pass full run or CI result for this draft, and no validation against current main is claimed. The warning is an existing Starlette/httpx deprecation.
+- Dependency check: PASS (`No broken requirements found`). Changed Python compile check: PASS. PowerShell diagnostic syntax: PASS. Tracked working diff check: PASS. The initial implementation commit has a trailing blank line warning in the new recovery test file; a local whitespace-only cleanup was prepared before the owner hold and is not an implementation change or a CI pass.
 - Initial sandboxed asyncio tests stalled while Windows created its loopback socketpair; they were interrupted. Tests then ran with permitted local sockets and the four DEV safety flags. An earlier full run was interrupted to incorporate additional repairs/tests; it is not counted as a pass.
 - All test databases are isolated under this worktree's pytest temporary directories. No full scanner/listener is launched by this work.
 
 ## Deployment and restart requirements
 
-1. Review the PR and wait for passing required GitHub CI. Owner approval is required for merge and separately for deployment/restart. No merge or deploy has occurred.
+1. PR #150 remains draft by owner direction. Future reconciliation with PR #149 requires renewed owner authorization, followed by a clean full regression run. Review the reconciled PR and wait for passing required GitHub CI. Owner approval is required for merge and separately for deployment/restart. No merge or deploy has occurred.
 2. Obtain Runtime commit, host/probe output and sanitized scanner-cycle evidence. Verify the source checkout is clean without discarding any changes. Confirm the launch owner, environment and existing scanner/listener counts.
 3. If diagnostics isolate a host/network fault, prefer the smallest owner-approved host correction and repeat bounded probes. Do not deploy a code release as a substitute for missing network evidence.
 4. A code fix affects newly started Python processes. After the approved merge, deploy the reviewed merge SHA using the existing controlled release procedure; do not check out this feature branch directly into a running Runtime checkout. No schema migration or database operation is needed by this fix.
@@ -150,4 +156,28 @@ RUNTIME_FIX_APPLIED: NO
 READY_FOR_NORMAL_OPERATION: NO
 ```
 
-Runtime recovery remains open pending manual diagnostics, reviewed correction approval and consecutive-cycle acceptance. DEV tests cannot close this P0 incident.
+Runtime recovery remains open pending manual diagnostics, reviewed correction approval and consecutive-cycle acceptance. DEV tests cannot close this P0 incident. The immediate next action is to run the pinned standalone probes below and return their sanitized output, not deploy draft #150.
+
+## One-block Runtime diagnostic handoff
+
+This downloads only the two diagnostic files from the immutable implementation commit into the temporary directory, without updating Runtime source:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$cciDiagFolder = Join-Path $env:TEMP 'cci-p0'
+New-Item -ItemType Directory -Path $cciDiagFolder -Force | Out-Null
+$cciSource = 'https://raw.githubusercontent.com/candlecraftinteligence/candle-craft-trading-agent/1469ad2aaa19ab28e7a6784c1845cc8464cc68e6/scripts'
+Invoke-WebRequest "$cciSource/diagnose_binance_websocket.py" -OutFile "$cciDiagFolder\diagnose_binance_websocket.py"
+Invoke-WebRequest "$cciSource/collect_websocket_host_health.ps1" -OutFile "$cciDiagFolder\collect_websocket_host_health.ps1"
+Set-Location 'C:\Users\aspir\Desktop\Candle Craft Inteligence'
+git rev-parse HEAD
+& .\.venv\Scripts\python.exe "$cciDiagFolder\diagnose_binance_websocket.py" --seconds 15
+& "$cciDiagFolder\collect_websocket_host_health.ps1"
+```
+
+Committed diagnostic SHA-256 hashes (LF source bytes):
+
+- `diagnose_binance_websocket.py`: `6b204a9f3ffec76a3a1ddbd617547020d98d41cb2829d3da38e9d4d4f4efdc07`
+- `collect_websocket_host_health.ps1`: `f4b0fc928cda5c0ba6d67d135fd586325e945032da30422a4795130b96b8a4ce`
+
+These scripts were prepared before the owner hold. They do not start or stop the scanner/listener. If the Runtime interpreter path differs, use its established Python environment rather than installing dependencies or changing production configuration.
