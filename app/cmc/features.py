@@ -15,10 +15,20 @@ FEATURE_NAMES = (
     "CmcRegimeCompatibility",
 )
 
+# Ignore fields that no current formula consumes before performing timestamp and
+# instrument checks for every candidate. Provider pages contain many unrelated
+# aggregate rows; they must neither add authority nor multiply critical-path work.
+_INPUT_METRICS = frozenset({"market_cap_change_24h", "btc_dominance", "altcoin_index", "basis",
+    "funding_rate", "open_interest", "market_cap_rank", "open_interest_usd", "derivatives_volume_24h",
+    "liquidation_total_1h", "liquidation_total_24h", "liquidation_long_1h", "liquidation_short_1h"})
+
 
 def build_features(observations: tuple[Observation, ...], *, as_of: datetime,
                    cmc_id: int | None = None, instrument_key: str | None = None) -> tuple[Feature, ...]:
-    causal = [o for o in observations if o.status_at(as_of) == S.VERIFIED]
+    causal = [o for o in observations if
+        (o.metric in _INPUT_METRICS or o.metric.startswith(("sector_member:", "sector_return_24h:")))
+        and (not o.metric.startswith("liquidation_") or o.scope == "global_all_contracts")
+        and o.status_at(as_of) == S.VERIFIED]
 
     def select(metric, *, scope=None, asset=False, contract=False):
         candidates = [o for o in causal if o.metric == metric and (scope is None or o.scope == scope)

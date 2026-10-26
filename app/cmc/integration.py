@@ -17,6 +17,14 @@ from app.cmc.runtime import service_for
 logger = logging.getLogger(__name__)
 
 
+def clear_evaluations(result):
+    """A reused in-memory result never carries authority across a new boundary."""
+    if not any(r.cmc_evaluation is not None for r in result.results):
+        return result
+    return result.model_copy(update={"results": tuple(
+        r.model_copy(update={"cmc_evaluation": None}) for r in result.results)})
+
+
 def load_activations(path):
     if path is None:
         return ()
@@ -29,16 +37,16 @@ async def evaluate_delivery_run(result, settings, *, candidate_builder, service=
     """Only sidecar-persisted decisions can affect selection; any failure preserves baseline."""
     mode = Mode(settings.cmc_mode)
     if mode in {Mode.OFF, Mode.COLLECT}:
-        return result
+        return clear_evaluations(result)
     original_cutoff = result.config.decision_timestamp
     cutoff = decision_at or datetime.now(UTC)
     if (original_cutoff is None or original_cutoff.tzinfo is None or cutoff.tzinfo is None
             or original_cutoff > cutoff):
-        return result
+        return clear_evaluations(result)
     try:
         service = service or await service_for(settings)
         if service is None:
-            return result
+            return clear_evaluations(result)
         snapshot = service.snapshot  # frozen once, never per-symbol provider calls
         activations = await asyncio.wait_for(asyncio.to_thread(load_activations, settings.cmc_activation_manifest), timeout=0.1)
         updated, records = [], []
@@ -80,7 +88,7 @@ async def evaluate_delivery_run(result, settings, *, candidate_builder, service=
     except Exception as exc:
         logger.warning("CMC policy unavailable; canonical selection retained: %s", type(exc).__name__)
         # Never reuse attached enforcement if a resumed result crosses a failed/new boundary.
-        return result.model_copy(update={"results":tuple(r.model_copy(update={"cmc_evaluation":None}) for r in result.results)})
+        return clear_evaluations(result)
 
 
 def decision_for(symbol_result):
@@ -113,7 +121,7 @@ def veto_applies(symbol_result, *, alert_type: str, previously_public: bool):
 
 async def prepare_selection(result, settings, context, repository=None, *, service=None):
     if settings.cmc_mode in {"off", "collect"}:
-        return result
+        return clear_evaluations(result)
     # Local import avoids changing the canonical alert module's import ownership.
     from app.alerts.telegram_lifecycle import (
         telegram_alert_decision_for_symbol, _signal_id_candidates,

@@ -30,10 +30,24 @@ class ResearchRow(Frozen):
     outcome: Outcome
     regime: str = "N/A"
     cohort: str = "unverified"  # historical / out_of_sample / prospective / synthetic
+    trading_style: str = "N/A"  # independently supplied scalp/swing; never inferred
 
 
 def _mean(values):
     return str(sum(values, Decimal(0))/len(values)) if values else "N/A"
+
+
+def _distribution(values):
+    ordered = sorted(values)
+    size = len(ordered)
+    median = (ordered[(size-1)//2] + ordered[size//2])/2 if size else None
+    gains = sum((x for x in values if x > 0), Decimal(0))
+    losses = -sum((x for x in values if x < 0), Decimal(0))
+    return {"verified_filled": size, "net_expectancy_r": _mean(values),
+        "median_net_r": str(median) if median is not None else "N/A",
+        "profit_factor": str(gains/losses) if losses else "N/A",
+        "profit_factor_note": "net winning R / absolute net losing R; N/A without observed losses",
+        "winners": sum(x > 0 for x in values), "losers": sum(x < 0 for x in values)}
 
 
 def compare_policies(rows: tuple[ResearchRow, ...], *, delivery_limit=1,
@@ -77,17 +91,19 @@ def compare_policies(rows: tuple[ResearchRow, ...], *, delivery_limit=1,
         realized = [o.realized_net_r for o in outcomes if o.entry_activated and o.realized_net_r is not None
                     and o.fees_r is not None and o.slippage_r is not None]
         cohorts = {}
-        for axis in ("direction", "regime", "cohort"):
+        for axis in ("direction", "regime", "cohort", "trading_style"):
             values = defaultdict(list)
             for r in included:
                 key = r.evaluation.candidate.direction if axis == "direction" else getattr(r,axis)
                 if trusted(r) and r.outcome.entry_activated and r.outcome.realized_net_r is not None and r.outcome.fees_r is not None and r.outcome.slippage_r is not None:
                     values[key].append(r.outcome.realized_net_r)
-            cohorts[axis] = {key:{"verified_filled":len(v),"net_expectancy_r":_mean(v)} for key,v in sorted(values.items())}
+            cohorts[axis] = {key:_distribution(v) for key,v in sorted(values.items())}
         results[name] = {
             "selected_plan_ids":plans, "selected_count":len(plans), "verified_outcomes":len(outcomes),
             "verified_realized_net_r":str(sum(realized,Decimal(0))) if realized else "N/A",
             "net_expectancy_r":_mean(realized), "entry_activation_rate":_mean([Decimal(int(o.entry_activated)) for o in outcomes]),
+            "verified_fill_rate":_mean([Decimal(int(o.entry_activated)) for o in outcomes]),
+            "realized_distribution":_distribution(realized),
             "mean_fill_probability":_mean([o.fill_probability for o in outcomes if o.fill_probability is not None]),
             "mean_max_adverse_excursion_r":_mean([o.max_adverse_excursion_r for o in outcomes if o.max_adverse_excursion_r is not None]),
             "additional_fee_slippage_sensitivity_r":{str(cost):_mean([value-cost for value in realized]) for cost in additional_cost_r},
@@ -105,6 +121,15 @@ def compare_policies(rows: tuple[ResearchRow, ...], *, delivery_limit=1,
             rejected_winning_trades=sum(r.outcome.realized_net_r>0 for r in removed_verified),
             lost_winning_opportunities=sum(r.outcome.realized_net_r>0 for r in removed_verified),
         )
+        def population(plans):
+            values = [by_plan[p].outcome.realized_net_r for p in plans if trusted(by_plan[p])
+                and by_plan[p].outcome.entry_activated and by_plan[p].outcome.realized_net_r is not None
+                and by_plan[p].outcome.fees_r is not None and by_plan[p].outcome.slippage_r is not None]
+            return {"plan_ids": sorted(plans), "count": len(plans), **_distribution(values)}
+        selected_ids = set(selected[name])
+        results[name]["retained"] = population(baseline_ids & selected_ids)
+        results[name]["displaced"] = population(baseline_ids - selected_ids)
+        results[name]["introduced"] = population(selected_ids - baseline_ids)
         a,b = results[name]["net_expectancy_r"], results["CCI_BASELINE"]["net_expectancy_r"]
         results[name]["incremental_expectancy_r"] = str(Decimal(a)-Decimal(b)) if "N/A" not in (a,b) else "N/A"
     return {

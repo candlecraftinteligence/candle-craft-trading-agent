@@ -160,6 +160,7 @@ def test_coverage_provenance_does_not_repeat_irrelevant_snapshot_rows():
     observations=(obs(),*(obs("unused",str(i)) for i in range(1500)))
     features={f.name:f for f in build_features(observations,as_of=AT)}
     assert features["CmcDataConfidence"].evidence_ids==(observations[0].id,)
+    assert tuple(features.values()) == build_features(observations[:1], as_of=AT)
 
 
 def test_negative_market_cap_return_is_valid_but_negative_capitalization_is_not():

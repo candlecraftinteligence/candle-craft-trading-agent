@@ -10,9 +10,11 @@ The existing exchange-data → structure/liquidity → risk/quality/scoring → 
 
 Public delivery builds CMC candidates **after** the existing canonical eligibility checks. Recommendations use the actual CMC selection timestamp. `Candidate.original_decision_at` preserves the original CCI analysis cutoff; no CCI decision timestamp is rewritten. Evidence acquired after the selection timestamp is ineligible. This separates a new selection decision from an earlier strategy observation. Historical replays must pass their original selection cutoff to the pure evaluator; later acquisitions cannot be attached to it.
 
-Only a typed evaluation tied to the exact current setup ID, economic plan version, direction and symbol can affect selection. Public WATCHLIST ranking keeps the existing quality, RR, technical and opportunity ordering; the CMC priority delta breaks ties before the existing major/symbol tie-breakers. Canonical thresholds and scores are unchanged. The final delivery veto applies only to a new WATCHLIST or SIGNAL_CONFIRMED candidate. Prior public signals, entry/fill notices, TP/SL updates, invalidations and other follow-ups retain their ownership and deduplication paths.
+Only a typed evaluation tied to the exact current setup ID, economic plan version, direction and symbol can affect selection. Current V1 initially publishes CONFIRMED lifecycle events; the old initial WATCHLIST ranking path is not enabled by CMC. Authorized priority adjusts delivery order only between new eligible candidates with identical canonical quality, RR, technical and opportunity ranks, preserving all other occupied positions and send counts. The legacy WATCHLIST sort hook remains compatible without enabling its publication. Canonical thresholds and scores are unchanged. The final veto applies only to a newly eligible public candidate. Prior public signals, entry/fill notices, TP/SL updates, invalidations and other follow-ups retain their ownership and deduplication paths.
 
 The veto does not mutate trade geometry, invalidation, lifecycle records or public event keys. Positive support is an evidence annotation, not a lifecycle confirmation. Missing IDs or an unavailable provider cannot promote or reject a setup.
+
+OFF/COLLECT and failed/new invalid evaluation boundaries clear any attached in-memory CMC authority. A separate selection intent records the exact baseline/actual order and selected IDs before enforcement reaches delivery; failure to persist it restores baseline. Post-delivery status records are linked separately and never treated as fills or realized outcomes. Feature construction skips rows that no current formula consumes before repeating causal checks per candidate.
 
 ## Official endpoint contracts and account capabilities
 
@@ -172,6 +174,13 @@ The comparison reports original valid setups, hypothetical veto/priority/support
 `cmc_hybrid_fixture_comparison.json` is deliberately synthetic and includes a vetoed winner and loser. It verifies mechanics, not profitability. `improvement_proven` remains false. Real out-of-sample/prospective data, verified execution attribution, and owner-reviewed analysis are required before any claim of incremental expectancy or rule activation. Historical REST data acquired today cannot be joined to yesterday's original decision as if it was known then.
 
 ## Controlled Runtime rollout and rollback — owner procedure only
+
+The later [release readiness packet](handoffs/CCI_CMC_RELEASE_READINESS_REPORT.md),
+[Runtime rollout plan](handoffs/CCI_CMC_RUNTIME_ROLLOUT_PLAN.md) and
+[individual activation plan](handoffs/CCI_CMC_DECISION_ACTIVATION_PLAN.md)
+supersede the generic procedure below where more specific. They require the
+current schema-27 compatibility and full existing epoch identity, quantify credit
+coverage constraints, and distinguish merge approval from Runtime approval.
 
 No commands in this section were executed on Runtime. Deployment and rule activation require separate owner approval. Use the existing single Scanner V1 service/launcher and established Runtime safeguards.
 
