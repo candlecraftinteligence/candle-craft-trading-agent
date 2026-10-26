@@ -1,10 +1,10 @@
 # CCI P0 — WebSocket runtime recovery
 
-Date: 2026-10-26 (Europe/Bratislava). Status: DEV correction prepared; Runtime diagnosis and recovery acceptance pending manual evidence.
+Date: 2026-10-26 (Europe/Bratislava). Status: manual Runtime probes confirm short-window depth/trade connectivity and synchronization; incident root cause and sustained scanner recovery remain unconfirmed. PR #150 remains draft; diagnostics only.
 
 ## Scope and repository handoff
 
-- Expected Runtime release and repair base: `a7899eb3541ca8d08735771281789ab0dad45687` (local `origin/main`). Runtime HEAD has **not** been verified.
+- Expected incident release and repair base: `a7899eb3541ca8d08735771281789ab0dad45687` (initial local `origin/main`). The owner's Runtime screenshot now shows checkout HEAD `235ec88c09ff6df0372bd636eaaf47814e48bd6d` (merged #149). This does not prove which source version was loaded by the already-running scanner.
 - Original DEV checkout: `C:\CandleCraftDev`, branch `feature/cmc-hybrid-active-intelligence`, HEAD `1cecd54c714bea24fdce5009a1c6f51f3e21e520`. Its untracked `CCI_ALPHA_RECOVERY_ROOT_CAUSE.md` was preserved.
 - Isolated worktree: `C:\CandleCraftDev\.worktrees\p0-binance-wss`.
 - Repair branch: `codex/p0-binance-wss-recovery`.
@@ -16,7 +16,7 @@ Date: 2026-10-26 (Europe/Bratislava). Status: DEV correction prepared; Runtime d
 
 After publishing the draft, GitHub reported that main had advanced to `235ec88c09ff6df0372bd636eaaf47814e48bd6d`, merged [PR #149](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/149), an overlapping order-book recovery repair. That change already addresses order-book flapping backoff / pre-cleanup invalidation and adds a 20 second opening timeout, 30 second receive timeout, phase/retry diagnostics and tests. It does not establish a Runtime root cause. The expected incident release and this draft's base remain `a7899eb`.
 
-The owner explicitly directed: **“Keep #150 as a draft; diagnostics only.”** No reconciliation, merge, rebase, further implementation change or deployment will be performed under this handoff. PR #150 is reported as not mergeable. Do not deploy it as-is: future reconciliation must preserve #149's safeguards and tests, and needs renewed owner authorization. This report distinguishes findings against the expected release from code now present on upstream main. Runtime's actual installed commit is still N/A.
+The owner explicitly directed: **“Keep #150 as a draft; diagnostics only.”** No reconciliation, merge, rebase, further implementation change or deployment will be performed under this handoff. PR #150 is reported as not mergeable. Do not deploy it as-is: future reconciliation must preserve #149's safeguards and tests, and needs renewed owner authorization. This report distinguishes findings against the expected release from code now present on upstream main. The owner's diagnostic screenshot confirms Runtime checkout HEAD `235ec88`; the running scanner's loaded release is still Unverified.
 
 ## Confirmed defects versus incident uncertainty
 
@@ -58,7 +58,7 @@ DEV uses Python 3.11.9 and websockets 16.0; requirements permit `>=15.0,<17.0`. 
 - Initial bridge retains the official Futures rule `U <= snapshot.lastUpdateId <= u`, dropping only events with `u < lastUpdateId`. Later frames require `pu == previous u`. Sequence gaps invalidate; older/duplicate frames do not refresh freshness.
 - The pre-existing untracked alpha report's proposed contiguous-only bridge exception was **not** implemented: current official instructions still require snapshot overlap. Accepting `U == lastUpdateId + 1` would relax that documented condition.
 - Freshness uses source event time; stale books cannot be VERIFIED. Incomplete depth coverage does not become a valid liquidity band. The new initial-side validation closes the empty/crossed bridge defect.
-- Actual Runtime snapshot bridging, valid book counts and resynchronization duration: **N/A**, awaiting Runtime output.
+- Manual Runtime probe: BTCUSDT snapshot acquired and book synchronized; 29 fresh valid depth updates, zero sequence gaps and buffer overflows. End status VERIFIED with `insufficient_book_coverage`: synchronization/freshness succeeded, but complete requested-band liquidity coverage was not established. Scanner-owned books across the full watched universe and resynchronization duration remain N/A.
 
 [Official Futures local-book sequence procedure](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/websocket-market-streams/How-to-manage-a-local-order-book-correctly).
 
@@ -66,23 +66,46 @@ DEV uses Python 3.11.9 and websockets 16.0; requirements permit `>=15.0,<17.0`. 
 
 Trade and liquidation clients are separate watch-owned sockets using the market route, each with bounded retention. Existing parsers require post-migration USD-M discrimination; subscriptions/retained symbols come from the scanner's instrument universe. Liquidations retain exchange event/trade timestamps and receipt timestamps, fingerprint deduplicate within bounded storage, and invalidate coverage on disconnect or stale arrival. Reconnect cannot erase a missing interval or fabricate a zero-liquidation observation. Binance's liquidation stream is a latest-per-symbol snapshot per 1000 ms, not an exhaustive fill tape. Absence of a liquidation frame in a short probe is inconclusive, even when aggregate-trade frames are healthy.
 
-## Runtime evidence ledger
+## Runtime evidence ledger — owner screenshots received
 
-| Required evidence | Result |
+Evidence: three owner-supplied screenshots of the manual scripts, filenames ending `b854c64f-bb73-4dfc-8e21-03adf39a364f.png`, `115bfbc8-d7de-4bda-ac5a-e7f48543671c.png`, and `58bbe817-8181-410d-a0d0-2b21e23eaa6a.png`. Values were visually inspected; original JSON and rejected payloads were not supplied. Probe timestamp: 2026-10-26 19:53:25 UTC / 21:53:25 Europe/Bratislava. Host sample timestamp: 19:54:07 UTC / 21:54:07 local.
+
+| Required evidence | Observed result and limit |
 | --- | --- |
-| Runtime commit, Python/websockets version | N/A — manual output pending |
-| DNS / TCP 443 / validated TLS | N/A — not measured on Runtime |
-| HTTP upgrade / negotiated protocol | N/A — not measured on Runtime |
-| Order-book / trade / liquidation connection status | Unverified |
-| Actual valid market frames by type | N/A; loopback fixture frames are not market observations |
-| Valid / stale / unavailable symbol counts | N/A |
-| Actual snapshot synchronization | N/A |
-| Ping RTT, disconnect codes/frequency | N/A |
-| Reconnect timing/concurrency on Runtime | N/A |
-| CPU / RAM pressure, duplicate Runtime processes | N/A |
-| Runtime scanner event-loop lag | N/A; external counters/probe loop lag cannot measure it |
-| Proxy/firewall state | N/A; no settings changed |
-| Consecutive scanner cycles after correction | 0 observed |
+| Runtime checkout HEAD | `235ec88c09ff6df0372bd636eaaf47814e48bd6d` — already contains #149; running scanner's loaded version Unverified |
+| Runtime Python / websockets | 3.12.10 / 16.0 (DEV tests used Python 3.11.9) |
+| DNS | PASS; eight IPv4 results shown for fstream.binance.com |
+| TCP 443 | PASS during standalone check |
+| TLS | PASS; TLSv1.3, TLS_AES_128_GCM_SHA256, certificate validated |
+| Public depth upgrade | HTTP 101, HTTP/1.1 RFC6455, no selected subprotocol; handshake 1078 ms |
+| Market upgrade | HTTP 101, HTTP/1.1 RFC6455, no selected subprotocol; handshake 1078 ms |
+| Ping/Pong | Depth RTT 281 ms; market RTT 266 ms |
+| Depth frames | 30 total: ACK + 29 valid depthUpdate; stale 0, Unverified 0, COIN-M rejected 0 |
+| Depth source times | 19:53:30.035–19:53:44.103 UTC |
+| Snapshot / book | Snapshot acquired; synchronized true; end status VERIFIED; reason insufficient_book_coverage; gaps 0, overflows 0 |
+| Market frames | 281 total: ACK + 278 valid aggTrade + 2 Unverified; stale 0, COIN-M rejected 0 |
+| Trade source times | 19:53:49.662–19:54:03.793 UTC |
+| Liquidation parsing | No valid forceOrder count shown. The 2 Unverified frames' event types / rejection reasons are unknown; do not assume they were liquidations or malformed Binance payloads |
+| Public instrument metadata | 523 TRADING USDT perpetual instruments recognized by probe |
+| Probe completion | Depth elapsed 19.41 s; market 19.36 s; each received for ~15 s; both final close codes 1000 from deliberate probe teardown |
+| Abnormal disconnects | None reported in these two short windows; long-running frequency and recovery N/A |
+| Probe loop metric | 0.0 ms reported; measures helper yield only, not scanner responsiveness or absence of starvation |
+| Proxy / certificates | Probe proxy configuration empty; user proxy disabled, no autoconfig; SSL_CERT_FILE / SSL_CERT_DIR / REQUESTS_CA_BUNDLE absent |
+| Firewall | Domain / Private / Public profiles enabled. DefaultOutboundAction 0 does not establish a blocking policy or rule; successful probes show public access during this test |
+| Scanner process entries | PID 11756 (parent 2772), 0.1 MiB working set / 0.8 MiB private, CPU 0%; PID 11312 (parent 11756), 1125.9 MiB working set / 1641.7 MiB private, 37.8% of one core |
+| Duplicate scanner conclusion | NOT established: these entries form a parent-child chain, consistent with a venv redirector and worker. Executable paths / creation times or session ownership should confirm it |
+| Listener count | No matching run_telegram_bot.py Python process at sample time; alternate launch forms / intended listener state not established |
+| Host memory | 3971 MiB total, 243 MiB free (~6.1% free / 93.9% in use). Strong resource-pressure concern; paging/commit history and causal link to WebSocket failures not measured |
+| Host CPU | 6% sampled overall; does not establish CPU saturation or scanner event-loop health |
+| Scanner universe / cycles | No per-symbol scanner freshness counts or consecutive cycle summaries provided; supplied earlier 94/2/14/PARTIAL observations remain independently unclassified |
+
+Interpretation: a permanent DNS, TCP, TLS, blanket firewall or universally incorrect endpoint failure is not reproduced by these probes. Intermittent network loss and scanner-specific starvation remain possible. Memory headroom is the strongest newly observed host concern, but memory pressure has not been established as the root cause. Short standalone probes cannot close this incident.
+
+The parent-child interpretation is an inference from the PIDs and memory distribution, consistent with [Python's documented Windows venv redirector behavior](https://docs.python.org/3.12/library/venv.html); it is not proof of two scanners or proof of one logical scanner.
+
+The `insufficient_book_coverage` result is distinct from synchronization failure. Existing book code sets VERIFIED for a fresh synchronized book while retaining per-band coverage flags and this reason. Do not interpret the status alone as complete liquidity-band evidence. Diagnostics-only owner direction remains in force; no gate or book logic was changed after it.
+
+Next bounded evidence: process executable paths / creation times, a few host available-memory / commit / hard-paging samples, sanitized last scanner-cycle phase/status/timing counts, and at most one targeted liquidation probe reporting structural fields and explicit rejection categories. Historical Unverified frames cannot be classified retrospectively without their payloads.
 
 ## Manual read-only diagnostics — can run before deployment
 
@@ -104,7 +127,7 @@ If default proxy mode fails while direct DNS/TCP/TLS pass, one explicit comparis
 
 ## Scanner performance and independent incident classification
 
-About 94 watched, 2 evaluated, 14 warnings, PARTIAL, ~405 seconds/cycle and ~600 second cadence are supplied observations, not independently measured here. There is no evidence tying every warning to WebSockets.
+About 94 watched, 2 evaluated, 14 warnings, PARTIAL, ~405 seconds/cycle and ~600 second cadence are supplied observations, not independently measured here. Manual short-window probe success and low host free memory have now been observed separately. There is no evidence tying every warning to WebSockets.
 
 `ScannerRunner` processes symbols sequentially and can perform concurrent optional REST calls within a symbol. Snapshot HTTP I/O is asynchronous and bounded. Synchronous strategy/technical analysis runs on the same event loop (`scanner_runner.py`), as does synchronous primary scan persistence through `profile.call("scan_storage", ...)` in `run_scan.py`. These are plausible starvation sources, especially on a large database, but duration/lag correlation is unavailable. No production query, profiling injection or storage rewrite was performed.
 
@@ -143,12 +166,12 @@ Require HTTP 101 on correct routed URLs, actual st=1 USDT-perpetual traffic, a s
 
 ## Runtime acceptance verdicts
 
-The required binary values below are conservative **acceptance-not-demonstrated** results, not claims that unperformed Runtime tests observed network/data corruption.
+PASS/YES below refer only to the owner-run standalone probes: both handshakes, one BTCUSDT book, and aggregate trades. They do not assert scanner-owned feed recovery. Liquidation reception is Unverified. FAIL below means remaining acceptance is not demonstrated, not proven corruption. RUNTIME_FIX_APPLIED=NO refers to this workflow / draft #150; Runtime checkout already contains #149, which was not deployed by this workflow.
 
 ```text
-WEBSOCKET_HANDSHAKE: FAIL
-ORDER_BOOK_SYNCHRONIZED: NO
-MICROSTRUCTURE_RECEIVING: NO
+WEBSOCKET_HANDSHAKE: PASS
+ORDER_BOOK_SYNCHRONIZED: YES
+MICROSTRUCTURE_RECEIVING: YES
 RECONNECT_RECOVERY: FAIL
 DATA_INTEGRITY: FAIL
 SCANNER_PARTIAL_ROOT_CAUSE: UNCONFIRMED
@@ -156,7 +179,7 @@ RUNTIME_FIX_APPLIED: NO
 READY_FOR_NORMAL_OPERATION: NO
 ```
 
-Runtime recovery remains open pending manual diagnostics, reviewed correction approval and consecutive-cycle acceptance. DEV tests cannot close this P0 incident. The immediate next action is to run the pinned standalone probes below and return their sanitized output, not deploy draft #150.
+Runtime recovery remains open pending manual diagnostics, reviewed correction approval and consecutive-cycle acceptance. DEV tests cannot close this P0 incident. The immediate next action is to classify the 2 Unverified frames and collect scanner-cycle / resource evidence, not deploy draft #150 or repeat identical probes without a diagnostic purpose.
 
 ## One-block Runtime diagnostic handoff
 
