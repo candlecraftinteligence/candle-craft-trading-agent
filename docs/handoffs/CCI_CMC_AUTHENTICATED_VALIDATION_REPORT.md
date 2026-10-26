@@ -3,6 +3,9 @@
 Date: 2026-10-26. Branch: `feature/cmc-hybrid-active-intelligence`.
 PR: [#148](https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/148).
 Starting revision: `2990c8fbb3a5565859e1d1f722ea7fe734be5b53`.
+Authenticated validation implementation: `047b4e5915879d84223f3dacb029441e5376012c`.
+Subsequent delivery changes only record verification evidence and normalize
+fixture metadata line endings; captured response bodies and code are unchanged.
 
 ## Finding
 
@@ -199,8 +202,20 @@ research-watch false). Counts were 864 + 827 + 995 + 981; unique testcase IDs we
 checked to prevent duplicate counting. Dependency consistency and compilation of
 `app`, `scripts`, `src` and `tests` also passed. No test assertions were weakened.
 The [verification manifest](../research/cmc_authenticated_verification.json)
-records JUnit SHA-256 hashes and exact environment details. Serial GitHub CI on
-the pushed implementation revision is checked separately before completion.
+records JUnit SHA-256 hashes and exact environment details. Serial
+[GitHub Python 3.11 CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40332093223)
+on implementation revision `047b4e5` also passed **3,667 tests** in **297.27s**,
+with one existing Starlette/httpx deprecation warning. Dependency verification
+and compilation passed there too. The fixed offline Scanner V1/public-delivery
+artifact remains byte-identical to main, SHA-256
+`c8903203a8929e6a12445f2cad556a8599258e0256c1911a5a92682d57ca1c7c`.
+
+All 12 requested requirements have evidence: secure key loading; prior probe
+inspection; bounded real acquisition; three exact identities; derivative and
+liquidation semantics; explicit field states; nine real comparisons; observed
+quotas and entitlement limits; four defect corrections; focused/full regression;
+the existing PR/docs update; and this source-backed report. Missing provider
+definitions are findings of the completed validation, not invented evidence.
 
 Unresolved provider evidence: CMC OI counting; current funding kind/interval;
 index currency and basis convention; normalized-versus-reported price method;

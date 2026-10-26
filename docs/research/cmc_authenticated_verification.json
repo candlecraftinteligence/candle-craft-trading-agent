@@ -55,6 +55,43 @@
   ],
   "compileall": "passed",
   "pip_check": "passed",
-  "ci": "pending exact implementation revision",
-  "fixture_precision": "Selected fixture JSON preserves numeric values through Decimal; a second focused run passed after serialization verification."
+  "ci": {
+    "implementation_commit": "047b4e5915879d84223f3dacb029441e5376012c",
+    "run_id": 40332093223,
+    "job_id": 121603855861,
+    "url": "https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40332093223",
+    "conclusion": "success",
+    "passed": 3667,
+    "warnings": 1,
+    "warning": "Existing Starlette/httpx deprecation warning",
+    "seconds": 297.27,
+    "pip_check": "passed",
+    "compileall": "passed",
+    "command": "python -m pytest"
+  },
+  "fixture_precision": "Selected fixture JSON preserves numeric values through Decimal; a second focused run passed after serialization verification.",
+  "off_mode_fixture": {
+    "byte_identical_to_main": true,
+    "sha256": "c8903203a8929e6a12445f2cad556a8599258e0256c1911a5a92682d57ca1c7c",
+    "current_artifact": "research_runs\\cmc_authenticated_off_decisions.json",
+    "main_artifact": "docs\\research\\cmc_hybrid_main_fixed_decisions.json"
+  },
+  "implementation_commit": "047b4e5915879d84223f3dacb029441e5376012c",
+  "credential_staged_diff_scan": "passed; local credential not present in staged changes; .env and production manifests excluded",
+  "portable_fixture_hashes": "All 45 staged response blobs match their exact SHA-256; Git text conversion disabled for JSON. Metadata line endings normalized separately.",
+  "delivery_changes_after_ci": "Documentation/evidence recording and LF normalization of fixture index/review JSON only; no code or captured response-body changes.",
+  "requirement_audit": {
+    "1": "completed; see authenticated validation report",
+    "2": "completed; see authenticated validation report",
+    "3": "completed; see authenticated validation report",
+    "4": "completed; see authenticated validation report",
+    "5": "completed; see authenticated validation report",
+    "6": "completed; see authenticated validation report",
+    "7": "completed; see authenticated validation report",
+    "8": "completed; see authenticated validation report",
+    "9": "completed; see authenticated validation report",
+    "10": "completed; see authenticated validation report",
+    "11": "completed; see authenticated validation report",
+    "12": "completed; see authenticated validation report"
+  }
 }
