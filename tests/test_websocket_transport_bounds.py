@@ -42,6 +42,7 @@ def test_service_transports_keep_workload_specific_finite_bounds() -> None:
     assert DEFAULT_WEBSOCKET_MAX_QUEUE == 32
     assert generic.max_message_bytes == DEFAULT_WEBSOCKET_MAX_MESSAGE_BYTES
     assert generic.max_queue == DEFAULT_WEBSOCKET_MAX_QUEUE
+    assert generic.open_timeout_seconds == 10
 
     assert isinstance(microstructure.transport, BinanceWebSocketTransport)
     assert microstructure.transport.max_message_bytes == 64 * 1024
@@ -54,6 +55,7 @@ def test_service_transports_keep_workload_specific_finite_bounds() -> None:
     assert isinstance(order_book.transport, BinanceWebSocketTransport)
     assert order_book.transport.max_message_bytes == 1024 * 1024
     assert order_book.transport.max_queue == 4
+    assert order_book.transport.open_timeout_seconds == 20
     assert order_book.transport.max_message_bytes is not None
     assert order_book.transport.max_queue is not None
 
@@ -77,6 +79,7 @@ def test_order_book_transport_forwards_explicit_bounds_to_websockets(
     assert connection is expected_connection
     assert captured["max_size"] == ORDER_BOOK_WEBSOCKET_MAX_MESSAGE_BYTES
     assert captured["max_queue"] == ORDER_BOOK_WEBSOCKET_MAX_QUEUE
+    assert captured["open_timeout"] == 20
     assert captured["max_size"] is not None
     assert captured["max_queue"] is not None
 

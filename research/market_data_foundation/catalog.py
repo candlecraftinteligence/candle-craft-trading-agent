@@ -335,7 +335,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "runtime_enabled": "unverified; code default order_book_liquidity_enabled false",
         "expectancy_benefit": "not established",
         "code_refs": (
-            {"path": "app/microstructure/order_book_service.py", "line": 92, "contains": '"/fapi/v1/depth"'},
+            {"path": "app/microstructure/order_book_service.py", "line": 96, "contains": '"/fapi/v1/depth"'},
             {"path": "app/core/config.py", "line": 97, "contains": "order_book_liquidity_enabled: bool = False"},
         ),
     },

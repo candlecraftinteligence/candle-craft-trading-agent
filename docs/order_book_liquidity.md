@@ -61,6 +61,25 @@ The one task is cancelled by service stop, symbol unsubscribe, or WebSocket
 disconnect, so it cannot retry against a dead connection. Recovery requires no
 depth message, buffer overflow, symbol churn, or WebSocket reconnect.
 
+## Connection recovery
+
+The order-book transport allows 20 seconds for the opening handshake and retains
+the 20-second ping interval and ping timeout. A 30-second application receive
+timeout reconnects a silent connection. These limits do not extend the existing
+five-second evidence freshness threshold.
+
+Abrupt TCP disconnects and handshake timeouts use exponential reconnect waits of
+1, 2, 4, 8, 16, then at most 30 seconds. Opening a socket does not reset that
+sequence: a subscribed USD-M depth event received after at least 60 seconds on
+the connection is required. Acknowledgements, malformed events and COIN-M events
+cannot reset it. Every disconnect immediately clears trusted book state before
+waiting for bootstrap cancellation or socket closure. Recovery still requires a
+new REST snapshot and the existing continuity checks.
+
+Warnings identify the failed phase and next retry delay. Service health exposes
+the consecutive failure count, retry delay and connection time limits. These
+changes improve recovery; they cannot prevent network or exchange disconnects.
+
 ## Default load contract
 
 - Update speed: 500 ms. The scanner consumes research context at a five-minute

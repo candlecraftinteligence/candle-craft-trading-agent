@@ -419,7 +419,7 @@
     "code_refs": [
       {
         "path": "app/microstructure/order_book_service.py",
-        "line": 92,
+        "line": 96,
         "contains": "\"/fapi/v1/depth\""
       },
       {
