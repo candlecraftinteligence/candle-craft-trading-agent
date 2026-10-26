@@ -94,10 +94,12 @@ def build_features(observations: tuple[Observation, ...], *, as_of: datetime,
     result.append(feature("CmcSectorRelativeStrength", (sector_input, market, membership), lambda a,b,c:a-b,
         "percentage_points", "unambiguous observed sector 24h return minus total market-cap change; membership must be causal", scope="sector"))
     covered = sum(f.state == S.VERIFIED for f in result)
-    refs = tuple(o.id for o in causal)
+    refs = tuple(dict.fromkeys(ref for f in result for ref in f.evidence_ids))
+    ref_set=set(refs)
+    used = [o for o in causal if o.id in ref_set]
     result.append(Feature(name="CmcDataConfidence", value=Decimal(covered)/len(result) if refs else None,
         units="coverage_fraction", state=S.VERIFIED if refs else S.MISSING, evidence_ids=refs,
-        input_timestamps=tuple(o.source_at for o in causal), acquired_timestamps=tuple(o.acquired_at for o in causal),
+        input_timestamps=tuple(o.source_at for o in used), acquired_timestamps=tuple(o.acquired_at for o in used),
         reason="verified feature coverage; not a profitability probability", cmc_id=cmc_id, instrument_key=instrument_key))
     return tuple(result)
 

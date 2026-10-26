@@ -44,6 +44,12 @@ async def evaluate_delivery_run(result, settings, *, candidate_builder, service=
         updated, records = [], []
         for symbol_result in result.results:
             candidate = candidate_builder(symbol_result)
+            if not candidate.cci_eligible or not candidate.is_new_signal:
+                evaluation=evaluate(candidate,(),mode=mode,as_of=cutoff,activations=activations)
+                records.append({"evaluation":evaluation.model_dump(mode="json"),"features":[],"comparisons":[],
+                    "native_observations":[],"application_status":"EVALUATED_NOT_DELIVERY_PROOF","batch_id":snapshot.batch_id})
+                updated.append(symbol_result.model_copy(update={"cmc_evaluation":evaluation}))
+                continue
             instruments = {o.instrument.key:o.instrument for o in snapshot.observations
                 if o.instrument and o.instrument.symbol == symbol_result.symbol and o.instrument.exchange == result.config.exchange
                 and o.status_at(cutoff).value == "VERIFIED"}

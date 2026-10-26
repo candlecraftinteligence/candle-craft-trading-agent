@@ -153,3 +153,9 @@ def test_regime_compatibility_is_explicit_research_context():
     kwargs=dict(regime_state="RISK_OFF",regime_at=AT,regime_ref="synthetic:cci-regime",as_of=AT)
     assert regime_compatibility(feature("CmcGlobalMarketRisk",4),direction="long",**kwargs).value==-1
     assert regime_compatibility(feature("CmcGlobalMarketRisk",4),direction="short",**kwargs).value==1
+
+
+def test_coverage_provenance_does_not_repeat_irrelevant_snapshot_rows():
+    observations=(obs(),*(obs("unused",str(i)) for i in range(1500)))
+    features={f.name:f for f in build_features(observations,as_of=AT)}
+    assert features["CmcDataConfidence"].evidence_ids==(observations[0].id,)

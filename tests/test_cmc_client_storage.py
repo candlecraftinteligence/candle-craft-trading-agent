@@ -95,6 +95,7 @@ def test_network_failures_are_bounded_and_structured(tmp_path,failure):
 def test_authentication_header_is_not_in_results_or_errors(tmp_path):
     async def scenario():
         def handler(request):
+            assert request.method=="GET"
             assert request.headers["X-CMC_PRO_API_KEY"]=="synthetic-fixture-key"
             assert "synthetic-fixture-key" not in str(request.url)
             return httpx.Response(403)
@@ -103,6 +104,8 @@ def test_authentication_header_is_not_in_results_or_errors(tmp_path):
             result=await client.get(Endpoint.EXCHANGES)
             assert "synthetic-fixture-key" not in result.model_dump_json()
             assert result.state==S.UNAVAILABLE
+            with pytest.raises(ValueError): await client.get("/fapi/v1/order")
+            assert not any(hasattr(client,name) for name in ("place_order","withdraw","transfer"))
             await client.aclose()
     asyncio.run(scenario())
 

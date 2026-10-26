@@ -205,3 +205,23 @@ def test_mode_serialization_and_key_safety():
     assert "synthetic-fixture-key" not in settings.model_dump_json()
     assert "cmc_mode" not in _config(["BTCUSDT"]).model_dump()
     assert _config(["BTCUSDT"],cmc_mode="shadow").model_dump()["cmc_mode"]=="shadow"
+
+
+def test_full_candidate_batch_stays_within_sidecar_payload_budget(tmp_path,monkeypatch):
+    async def scenario():
+        from tests.fixtures.cmc import obs
+        snapshot=stress_snapshot()
+        snapshot=snapshot.model_copy(update={"observations":(*snapshot.observations,
+            *(obs("unused",str(i)) for i in range(1500)))})
+        fake=SimpleNamespace(store=Sidecar(tmp_path/"cmc_bounded_policy.sqlite"),snapshot=snapshot)
+        monkeypatch.setattr(integration,"datetime",FrozenNow)
+        symbol=setup_symbol()
+        result=_run_result(symbol)
+        result=result.model_copy(update={"results":tuple(symbol.model_copy(update={"symbol":f"SYNTHETIC{i}"}) for i in range(100)),
+            "config":result.config.model_copy(update={"decision_timestamp":AT})})
+        output=await integration.evaluate_delivery_run(result,Settings(_env_file=None,cmc_mode="shadow"),service=fake,
+            candidate_builder=lambda s:candidate(symbol=s.symbol,setup_id=s.symbol,economic_plan_id=s.symbol))
+        assert all(r.cmc_evaluation and r.cmc_evaluation.hypothetical_veto for r in output.results)
+        persisted=fake.store.causal("policy_batch",AT)[0]
+        assert len(persisted)==100 and len(json.dumps(persisted).encode())<2*1024*1024
+    asyncio.run(scenario())
