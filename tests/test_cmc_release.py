@@ -74,6 +74,11 @@ def test_actual_delivery_has_separate_policy_intent_and_application(tmp_path, mo
             settings=settings, sender=sender).deliver_for_run(result, scan_run_id="synthetic:audit")
         intents = store.causal("selection_intent", AT)
         applications = store.causal("selection_application", AT)
+        policy = store.causal("policy_batch", AT)[0][0]
+        assert policy["context"]["trading_style"] == result.results[0].lifecycle_state.mode
+        assert policy["context"]["market_regime"] == "N/A"
+        assert policy["context"]["market_regime_status"] == "MISSING"
+        assert policy["context"]["cci_original_decision_at"] == AT.isoformat()
         assert len(intents) == len(applications) == 1
         assert intents[0]["evaluations"][0]["vetoed"] == (mode == "decision")
         assert intents[0]["evaluations"][0]["hypothetical_veto"] is True
@@ -81,6 +86,17 @@ def test_actual_delivery_has_separate_policy_intent_and_application(tmp_path, mo
         assert any(d["cmc_veto_observed"] for d in observed) == (mode == "decision")
         assert summary.sent == (0 if mode == "decision" else 1)
         assert applications[0]["fills"] == applications[0]["economic_outcomes"] == "N/A"
+        for flags,status in (({"enabled":False,"missing_data":("synthetic:gap",),"unverified_data":()},"DISABLED"),
+                             ({"missing_data":("synthetic:gap",),"unverified_data":()},"MISSING"),
+                             ({"missing_data":(),"unverified_data":("synthetic:unverified",)},"UNVERIFIED"),
+                             ({"missing_data":(),"unverified_data":()},"VERIFIED")):
+            changed=result.model_copy(update={"market_regime":result.market_regime.model_copy(update={"enabled":True,**flags})})
+            await integration.evaluate_delivery_run(changed,settings,service=fake,
+                candidate_builder=lambda _:candidate(),decision_at=AT)
+            contexts=[r[0]["context"] for r in store.causal("policy_batch",AT)]
+            matching=next(c for c in contexts if c["market_regime_status"]==status)
+            assert matching["market_regime"] == ("Unverified" if status=="UNVERIFIED"
+                else "N/A" if status in {"MISSING","DISABLED"} else changed.market_regime.state.value)
     asyncio.run(scenario())
 
 

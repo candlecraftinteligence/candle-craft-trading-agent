@@ -34,7 +34,7 @@ replay and field-level evidence, not treated as executable policy authority.
 | Timestamp causality | Metric and acquisition times are distinct, checked at selection; no historical backdating. OFF baseline clock consumption restored after regression caught an extra clock read |
 | SQLite isolation | Dedicated cmc_ path/application ID, bounded rows/bytes/retention, idempotent evidence and UTC credit ledger. No production schema or migration diff |
 | Memory, latency and credits | Bounded worker/cache/HTTP/storage settings reviewed; irrelevant rows are skipped before repeated causal checks without changing feature output. Local 100-candidate benchmark ~0.303s untraced / 200,432 bytes incremental traced allocation. Actual 4 GB Runtime capacity unverified. Default credits cannot sustain continuous full-family five-minute acquisition |
-| Research completeness | Added median net R, profit factor, verified fill rate, scalp/swing cohorts and retained/displaced/introduced outcome populations. Missing/unverified outcomes remain excluded and visible |
+| Research completeness | Added median net R, profit factor, verified fill rate, scalp/swing cohorts and retained/displaced/introduced outcome populations. Policy batches retain original CCI decision time, native lifecycle mode and CCI regime quality/value (missing N/A, unreliable Unverified), avoiding later reconstruction from huge Runtime history. Missing/unverified outcomes remain excluded and visible |
 | Autonomous execution | No order, withdrawal or transfer capability, private exchange operation, live service, production DB access or deployment added/executed |
 
 The existing activation contract and all five rule specification hashes remain
@@ -86,6 +86,11 @@ The [baseline summary](CCI_CMC_BASELINE_REGRESSION_SUMMARY.md), machine-readable
 release regression and verification manifest carry exact test scope/results.
 The final local suite passed 3,683 distinct cases, the focused CMC suite 130 and
 the affected-module suite 171. Compilation/dependency checks also passed.
+[Release implementation CI](https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40347743791)
+on `2b301f27d1b56549deee68261359ec915cd6055c` passed all 3,683 cases in
+365.75 seconds, with one existing deprecation warning. The final cohort-context
+follow-up must also have successful exact-head CI before the merge; its result
+is recorded in PR #148 and the final release receipt.
 Merge remains pending until those gates are satisfied; the final receipt records
 the resulting YES/NO verdict and immutable SHA rather than predicting a merge ID.
 

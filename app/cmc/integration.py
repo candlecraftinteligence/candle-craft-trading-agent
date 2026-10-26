@@ -50,11 +50,19 @@ async def evaluate_delivery_run(result, settings, *, candidate_builder, service=
         snapshot = service.snapshot  # frozen once, never per-symbol provider calls
         activations = await asyncio.wait_for(asyncio.to_thread(load_activations, settings.cmc_activation_manifest), timeout=0.1)
         updated, records = [], []
+        regime = result.market_regime
+        regime_status = ("DISABLED" if not regime.enabled else "MISSING" if regime.missing_data
+                         else "UNVERIFIED" if regime.unverified_data else "VERIFIED")
         for symbol_result in result.results:
             candidate = candidate_builder(symbol_result)
+            context = {"trading_style": getattr(symbol_result.lifecycle_state, "mode", None) or "N/A",
+                "market_regime": regime.state.value if regime_status == "VERIFIED"
+                    else "Unverified" if regime_status == "UNVERIFIED" else "N/A",
+                "market_regime_status": regime_status,
+                "cci_original_decision_at": original_cutoff.isoformat()}
             if not candidate.cci_eligible or not candidate.is_new_signal:
                 evaluation=evaluate(candidate,(),mode=mode,as_of=cutoff,activations=activations)
-                records.append({"evaluation":evaluation.model_dump(mode="json"),"features":[],"comparisons":[],
+                records.append({"evaluation":evaluation.model_dump(mode="json"),"context":context,"features":[],"comparisons":[],
                     "native_observations":[],"application_status":"EVALUATED_NOT_DELIVERY_PROOF","batch_id":snapshot.batch_id})
                 updated.append(symbol_result.model_copy(update={"cmc_evaluation":evaluation}))
                 continue
@@ -69,7 +77,6 @@ async def evaluate_delivery_run(result, settings, *, candidate_builder, service=
                 cmc_id=instrument.cmc_id if instrument else None, instrument_key=instrument.key if instrument else None)
             consistency, comparisons = consistency_feature(observations, native, as_of=cutoff)
             features = (*features, consistency)
-            regime=result.market_regime
             if regime.enabled and not regime.missing_data and not regime.unverified_data:
                 risk=next(f for f in features if f.name=="CmcGlobalMarketRisk")
                 features=(*features,regime_compatibility(risk,regime_state=regime.state.value,
@@ -77,6 +84,7 @@ async def evaluate_delivery_run(result, settings, *, candidate_builder, service=
                     regime_ref="cci-regime:"+stable_id(regime),as_of=cutoff))
             evaluation = evaluate(candidate, features, mode=mode, as_of=cutoff, activations=activations)
             records.append({"evaluation":evaluation.model_dump(mode="json"),
+                "context":context,
                 "features":[f.model_dump(mode="json") for f in features], "comparisons":comparisons,
                 "native_observations":[o.model_dump(mode="json") for o in native],
                 "application_status":"EVALUATED_NOT_DELIVERY_PROOF",

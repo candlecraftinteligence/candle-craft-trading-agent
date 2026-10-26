@@ -77,7 +77,16 @@
   },
   "earlier_fixture_finding": "Legacy WATCHLIST initial publishing is ineligible in V1. New mechanics use existing CONFIRMED path; no lifecycle/quality gate was changed.",
   "ci": {
-    "status": "pending exact release head"
+    "implementation_commit": "2b301f27d1b56549deee68261359ec915cd6055c",
+    "run_id": 40347743791,
+    "job_id": 121659090554,
+    "url": "https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40347743791",
+    "status": "success",
+    "passed": 3683,
+    "warnings": 1,
+    "seconds": 365.75,
+    "dependency_check": "passed",
+    "compileall": "passed"
   },
   "production_runtime_accessed": false,
   "production_deployed": false,
@@ -85,5 +94,28 @@
   "economic_expectancy_proven": false,
   "owner_merge_authorization": "Current user master goal, conditional on successful release gates",
   "runtime_rollout_approval": false,
-  "code_rule_hashes_unchanged": true
+  "code_rule_hashes_unchanged": true,
+  "release_implementation_commit": "2b301f27d1b56549deee68261359ec915cd6055c",
+  "cohort_metadata_followup": {
+    "scope": "Capture native CCI mode, regime quality/value and original decision cutoff in policy sidecar records; no formula, gate or default mode changes.",
+    "targeted_passed": 130,
+    "artifact": "cmc-release-context-final.xml",
+    "sha256": "4e4165ec302a9e018a2bbb172d0fb32d2706e106a494eb494b6e377600c1e1f5",
+    "final_head_ci": "Required before merge; exact result recorded in PR and final release receipt.",
+    "typed_release_cases": {
+      "passed": 16,
+      "artifact": "cmc-release-typed.xml",
+      "sha256": "743320f549d57e13da21ee7d2cc61f0e3ac55676baf5e8935b27a13ff038aaf8",
+      "quality_fields": "Native tuple[str,...] fixtures; disabled/missing/unverified/verified states covered."
+    }
+  },
+  "resolved_metadata_fixture_failure": "Two new assertions initially assumed the native regime fixture was disabled; its actual default is enabled/missing. Exact assertions corrected and all disabled/missing/unverified/verified states tested without production gate changes.",
+  "secret_staged_diff_scan": "passed before implementation commit; repeated for final head",
+  "powershell_runbook_syntax": "All prepared PowerShell blocks parsed; none executed",
+  "document_local_links_checked": 27,
+  "current_pr_discussion_review": {
+    "comments": 0,
+    "review_submissions": 0,
+    "critical_external_findings": 0
+  }
 }
