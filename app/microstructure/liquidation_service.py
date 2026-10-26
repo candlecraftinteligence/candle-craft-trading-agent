@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.context.models import ContextStatus
+from app.microstructure.reconnect import ReconnectBackoff
 from app.microstructure.liquidation import (
     LiquidationPayloadError,
     WrongLiquidationContractTypeError,
@@ -46,6 +47,8 @@ class LiquidationFlowService:
         reconnect_max_seconds: float = DEFAULT_RECONNECT_MAX_SECONDS,
         clock: Any | None = None,
         sleep: Any | None = None,
+        monotonic: Any | None = None,
+        jitter: Any | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         if stale_after_seconds <= 0:
@@ -65,6 +68,8 @@ class LiquidationFlowService:
         self.reconnect_max_seconds = float(reconnect_max_seconds)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.sleep = sleep or asyncio.sleep
+        self._reconnect_monotonic = monotonic
+        self._reconnect_jitter = jitter
         self.logger = log or logger
         self._aggregators: dict[str, SymbolLiquidationAggregator] = {}
         self._desired_symbols: set[str] = set()
@@ -103,8 +108,10 @@ class LiquidationFlowService:
     async def stop(self) -> None:
         self._stop_event.set()
         task = self._task
-        self._task = None
         connection = self._connection
+        self._connection = None
+        for aggregator in self._aggregators.values():
+            aggregator.mark_disconnected(self.clock())
         if connection is not None:
             await _safe_close(connection)
         if task is not None:
@@ -114,6 +121,9 @@ class LiquidationFlowService:
             except asyncio.CancelledError:
                 pass
         self._connection = None
+
+        if self._task is task:
+            self._task = None
 
     async def reconcile_symbols(self, symbols: Sequence[str]) -> tuple[str, ...]:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
@@ -203,7 +213,10 @@ class LiquidationFlowService:
         }
 
     async def _run_forever(self) -> None:
-        failure_count = 0
+        backoff = ReconnectBackoff(
+            self.reconnect_base_seconds, self.reconnect_max_seconds,
+            monotonic=self._reconnect_monotonic, jitter=self._reconnect_jitter,
+        )
         while not self._stop_event.is_set():
             connection: FlowWebSocketConnection | None = None
             try:
@@ -226,7 +239,7 @@ class LiquidationFlowService:
                         sort_keys=True,
                     )
                 )
-                failure_count = 0
+                backoff.connected()
                 self._last_error = None
                 self.logger.info(
                     "Liquidation WebSocket connected tracked_symbols=%s reconnect=%s.",
@@ -235,41 +248,37 @@ class LiquidationFlowService:
                 )
                 while not self._stop_event.is_set():
                     payload = await connection.recv()
-                    self._handle_payload(payload)
+                    if self._handle_payload(payload):
+                        backoff.market_event()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                failure_count += 1
+                delay = backoff.next_delay()
                 self._disconnect_count += 1
                 self._last_error = f"{type(exc).__name__}:{_clean_reason(exc)}"
                 self.logger.warning(
                     "Liquidation WebSocket disconnected attempt=%s error=%s.",
-                    failure_count,
+                    backoff.failures,
                     self._last_error,
                 )
             finally:
                 if self._connection is connection:
                     self._connection = None
-                if connection is not None:
-                    await _safe_close(connection)
                 now = self.clock()
                 for aggregator in self._aggregators.values():
                     aggregator.mark_disconnected(now)
+                if connection is not None:
+                    await _safe_close(connection)
             if self._stop_event.is_set():
                 break
-            delay = min(
-                self.reconnect_max_seconds,
-                self.reconnect_base_seconds
-                * (2 ** min(max(failure_count - 1, 0), 10)),
-            )
             if delay > 0:
                 await self.sleep(delay)
 
-    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> None:
+    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> bool:
         decoded = _decoded_mapping(payload)
         if decoded is not None and _is_control_message(decoded):
             self._ignored_message_count += 1
-            return
+            return False
         if decoded is not None:
             event_payload = decoded.get("data") if isinstance(decoded.get("data"), Mapping) else decoded
             if isinstance(event_payload, Mapping) and event_payload.get("e") == "serverShutdown":
@@ -278,15 +287,15 @@ class LiquidationFlowService:
             event = parse_binance_liquidation(payload)
         except WrongLiquidationContractTypeError:
             self._wrong_contract_event_count += 1
-            return
+            return False
         except LiquidationPayloadError:
             self._malformed_event_count += 1
-            return
+            return False
         aggregator = self._aggregators.get(event.symbol)
         if aggregator is None or event.symbol not in self._desired_symbols:
             self._untracked_symbol_event_count += 1
-            return
-        aggregator.ingest(event, received_at=self.clock())
+            return False
+        return aggregator.ingest(event, received_at=self.clock())
 
 
 def _bounded_symbols(symbols: set[str], *, maximum: int) -> tuple[set[str], set[str]]:
@@ -323,7 +332,11 @@ def _decoded_mapping(payload: str | bytes | Mapping[str, Any]) -> Mapping[str, A
 
 
 def _is_control_message(payload: Mapping[str, Any]) -> bool:
-    return "id" in payload and "e" not in payload and "data" not in payload
+    control = "id" in payload and "e" not in payload and "data" not in payload
+    if control and "code" in payload:
+        code = payload["code"] if type(payload["code"]) is int else "invalid"
+        raise ConnectionError(f"binance_subscription_rejected:code={code}")
+    return control
 
 
 async def _safe_close(connection: FlowWebSocketConnection) -> None:

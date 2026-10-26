@@ -7,7 +7,9 @@ from typing import Any
 
 import pytest
 from websockets.asyncio.server import serve
-from websockets.exceptions import ConnectionClosedError
+from websockets.exceptions import ConnectionClosedError, InvalidStatus
+from websockets.http11 import Response
+from websockets.datastructures import Headers
 
 from app.microstructure.liquidation_service import LiquidationFlowService
 from app.microstructure.order_book import parse_binance_depth_event
@@ -46,6 +48,8 @@ def test_service_transports_keep_workload_specific_finite_bounds() -> None:
     assert isinstance(microstructure.transport, BinanceWebSocketTransport)
     assert microstructure.transport.max_message_bytes == 64 * 1024
     assert microstructure.transport.max_queue == 32
+    assert microstructure.transport.ping_interval_seconds == 20
+    assert microstructure.transport.ping_timeout_seconds == 20
 
     assert isinstance(liquidation.transport, BinanceWebSocketTransport)
     assert liquidation.transport.max_message_bytes == 64 * 1024
@@ -164,3 +168,58 @@ def _depth_message_larger_than(minimum_bytes: int) -> str:
         if len(payload.encode("utf-8")) > minimum_bytes:
             return payload
         level_count += 256
+
+
+def test_wrong_path_reports_http_upgrade_rejection() -> None:
+    async def scenario() -> None:
+        async def reject(connection: Any, request: Any) -> Response:
+            return Response(404, "Not Found", Headers(), b"")
+
+        async with serve(lambda connection: connection.wait_closed(), "127.0.0.1", 0,
+                         process_request=reject) as server:
+            port = server.sockets[0].getsockname()[1]
+            transport = BinanceWebSocketTransport(url=f"ws://127.0.0.1:{port}/incorrect")
+            with pytest.raises(InvalidStatus) as caught:
+                await transport.connect()
+            assert caught.value.response.status_code == 404
+    asyncio.run(scenario())
+
+
+def test_handshake_timeout_is_bounded() -> None:
+    async def scenario() -> None:
+        async def stall(connection: Any, request: Any) -> None:
+            await asyncio.sleep(0.2)
+
+        async with serve(lambda connection: connection.wait_closed(), "127.0.0.1", 0,
+                         process_request=stall) as server:
+            port = server.sockets[0].getsockname()[1]
+            transport = BinanceWebSocketTransport(url=f"ws://127.0.0.1:{port}", open_timeout_seconds=0.03)
+            with pytest.raises(TimeoutError):
+                await transport.connect()
+    asyncio.run(scenario())
+
+
+def test_valid_upgrade_ping_pong_frames_and_provider_close() -> None:
+    async def scenario() -> None:
+        async def provider(connection: Any) -> None:
+            # Real protocol responds automatically to Ping while waiting for data.
+            await connection.recv()
+            await connection.send('{"diagnostic":"fixture"}')
+            await connection.close(code=1012, reason="test provider restart")
+
+        async with serve(provider, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            connection = await BinanceWebSocketTransport(url=f"ws://127.0.0.1:{port}").connect()
+            try:
+                assert connection.response.status_code == 101
+                assert connection.subprotocol is None
+                pong = await connection.ping(b"cci-test")
+                assert await asyncio.wait_for(pong, 1) >= 0
+                await connection.send("fixture trigger")
+                assert json.loads(await connection.recv())["diagnostic"] == "fixture"
+                with pytest.raises(ConnectionClosedError) as caught:
+                    await connection.recv()
+                assert caught.value.rcvd.code == 1012
+            finally:
+                await connection.close()
+    asyncio.run(scenario())

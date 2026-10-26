@@ -12,6 +12,7 @@ from typing import Any, Protocol
 import httpx
 
 from app.context.models import ContextStatus
+from app.microstructure.reconnect import ReconnectBackoff
 from app.data.exceptions import (
     ExchangeHTTPError,
     ExchangeMalformedJSONError,
@@ -240,8 +241,11 @@ class OrderBookLiquidityService:
     async def stop(self) -> None:
         self._stop_event.set()
         task = self._task
-        self._task = None
         connection = self._connection
+        self._connection = None
+        self._active_symbols.clear()
+        for book in self._books.values():
+            book.mark_disconnected()
         if connection is not None:
             await _safe_close(connection)
         if task is not None:
@@ -257,6 +261,9 @@ class OrderBookLiquidityService:
             await self.snapshot_client.aclose()
         except Exception:
             pass
+
+        if self._task is task:
+            self._task = None
 
     async def reconcile_symbols(self, symbols: Sequence[str]) -> tuple[str, ...]:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
@@ -359,7 +366,10 @@ class OrderBookLiquidityService:
         }
 
     async def _run_forever(self) -> None:
-        failure_count = 0
+        backoff = ReconnectBackoff(
+            self.reconnect_base_seconds, self.reconnect_max_seconds,
+            monotonic=self.monotonic, jitter=self.jitter,
+        )
         while not self._stop_event.is_set():
             connection: FlowWebSocketConnection | None = None
             try:
@@ -378,7 +388,7 @@ class OrderBookLiquidityService:
                 )
                 for symbol in sorted(self._desired_symbols):
                     self._schedule_bootstrap(symbol)
-                failure_count = 0
+                backoff.connected()
                 self._last_error = None
                 self.logger.info(
                     "Order-book WebSocket connected symbols=%s reconnect=%s speed=%s "
@@ -391,58 +401,56 @@ class OrderBookLiquidityService:
                 )
                 while not self._stop_event.is_set():
                     payload = await connection.recv()
-                    self._handle_payload(payload)
+                    if self._handle_payload(payload):
+                        backoff.market_event()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                failure_count += 1
+                delay = backoff.next_delay()
                 self._disconnect_count += 1
                 self._last_error = f"{type(exc).__name__}:{_clean_reason(exc)}"
                 self.logger.warning(
                     "Order-book WebSocket disconnected attempt=%s error=%s.",
-                    failure_count,
+                    backoff.failures,
                     self._last_error,
                 )
             finally:
                 if self._connection is connection:
                     self._connection = None
                 self._active_symbols.clear()
+                for book in self._books.values():
+                    book.mark_disconnected()
                 await self._cancel_bootstraps()
                 if connection is not None:
                     await _safe_close(connection)
-                for book in self._books.values():
-                    book.mark_disconnected()
             if self._stop_event.is_set():
                 break
-            delay = min(
-                self.reconnect_max_seconds,
-                self.reconnect_base_seconds * (2 ** min(max(failure_count - 1, 0), 10)),
-            )
             if delay > 0:
                 await self.sleep(delay)
 
-    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> None:
+    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> bool:
         if _is_control_message(payload):
             self._ignored_message_count += 1
-            return
+            return False
         try:
             event = parse_binance_depth_event(payload)
         except WrongOrderBookContractTypeError:
             self._wrong_contract_event_count += 1
-            return
+            return False
         except OrderBookPayloadError:
             self._malformed_event_count += 1
-            return
+            return False
         book = self._books.get(event.symbol)
         if book is None or event.symbol not in self._desired_symbols:
             self._ignored_message_count += 1
-            return
+            return False
         outcome = book.ingest(event, received_at=self.clock())
         if outcome in {
             BookIngestOutcome.NEEDS_RESYNC,
             BookIngestOutcome.BUFFER_OVERFLOW,
         }:
             self._schedule_bootstrap(event.symbol)
+        return outcome in {BookIngestOutcome.SYNCHRONIZED, BookIngestOutcome.APPLIED}
 
     def _schedule_bootstrap(self, symbol: str) -> None:
         if self._connection is None or self._stop_event.is_set():
@@ -643,7 +651,11 @@ def _is_control_message(payload: str | bytes | Mapping[str, Any]) -> bool:
             decoded = json.loads(decoded)
         except json.JSONDecodeError:
             return False
-    return isinstance(decoded, Mapping) and "id" in decoded and "e" not in decoded and "data" not in decoded
+    control = isinstance(decoded, Mapping) and "id" in decoded and "e" not in decoded and "data" not in decoded
+    if control and "code" in decoded:
+        code = decoded["code"] if type(decoded["code"]) is int else "invalid"
+        raise ConnectionError(f"binance_subscription_rejected:code={code}")
+    return control
 
 
 def _retry_after(response: httpx.Response) -> float | None:
