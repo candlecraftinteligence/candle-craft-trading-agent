@@ -1,0 +1,153 @@
+{
+  "authenticated_api_verified": false,
+  "probe": [
+    {
+      "acquired_at": "2026-10-26T10:43:59.137634+00:00",
+      "authenticated": false,
+      "credits_reported": null,
+      "endpoint": "/v3/cryptocurrency/listings/latest",
+      "error": "http_429",
+      "normalized_metrics": [
+        {
+          "metric": "provider_error",
+          "source_at": null,
+          "state": "ERROR"
+        }
+      ],
+      "normalized_states": [
+        "ERROR"
+      ],
+      "state": "ERROR"
+    },
+    {
+      "acquired_at": "2026-10-26T10:44:00.260844+00:00",
+      "authenticated": false,
+      "credits_reported": 1,
+      "endpoint": "/v1/cryptocurrency/map",
+      "error": null,
+      "normalized_metrics": [],
+      "normalized_states": [],
+      "state": "UNVERIFIED"
+    },
+    {
+      "acquired_at": "2026-10-26T10:44:00.861048+00:00",
+      "authenticated": false,
+      "credits_reported": 1,
+      "endpoint": "/v1/global-metrics/quotes/latest",
+      "error": null,
+      "normalized_metrics": [
+        {
+          "metric": "btc_dominance",
+          "source_at": "2026-10-26T10:41:59.999000+00:00",
+          "state": "VERIFIED"
+        },
+        {
+          "metric": "eth_dominance",
+          "source_at": "2026-10-26T10:41:59.999000+00:00",
+          "state": "VERIFIED"
+        },
+        {
+          "metric": "market_cap",
+          "source_at": "2026-10-26T10:41:59.999000+00:00",
+          "state": "VERIFIED"
+        },
+        {
+          "metric": "market_cap_change_24h",
+          "source_at": "2026-10-26T10:41:59.999000+00:00",
+          "state": "VERIFIED"
+        }
+      ],
+      "normalized_states": [
+        "VERIFIED",
+        "VERIFIED",
+        "VERIFIED",
+        "VERIFIED"
+      ],
+      "state": "UNVERIFIED"
+    },
+    {
+      "acquired_at": "2026-10-26T10:44:01.305903+00:00",
+      "authenticated": false,
+      "credits_reported": 1,
+      "endpoint": "/v3/fear-and-greed/latest",
+      "error": null,
+      "normalized_metrics": [
+        {
+          "metric": "fear_greed",
+          "source_at": "2026-10-26T10:38:10.628000+00:00",
+          "state": "VERIFIED"
+        }
+      ],
+      "normalized_states": [
+        "VERIFIED"
+      ],
+      "state": "UNVERIFIED"
+    },
+    {
+      "acquired_at": "2026-10-26T10:44:01.921675+00:00",
+      "authenticated": false,
+      "credits_reported": 1,
+      "endpoint": "/v1/altcoin-season-index/latest",
+      "error": null,
+      "normalized_metrics": [
+        {
+          "metric": "altcoin_index",
+          "source_at": "2026-10-26T10:41:41+00:00",
+          "state": "VERIFIED"
+        }
+      ],
+      "normalized_states": [
+        "VERIFIED"
+      ],
+      "state": "UNVERIFIED"
+    },
+    {
+      "acquired_at": "2026-10-26T10:44:01.924261+00:00",
+      "authenticated": false,
+      "credits_reported": null,
+      "endpoint": "/v5/exchange/derivatives/market-pairs/list/latest",
+      "error": "credential_or_keyless_route",
+      "normalized_metrics": [],
+      "normalized_states": [],
+      "state": "UNAVAILABLE"
+    },
+    {
+      "acquired_at": "2026-10-26T10:44:01.924261+00:00",
+      "authenticated": false,
+      "credits_reported": null,
+      "endpoint": "/v5/derivatives/liquidations/quotes/latest",
+      "error": "credential_or_keyless_route",
+      "normalized_metrics": [
+        {
+          "metric": "provider_error",
+          "source_at": null,
+          "state": "UNAVAILABLE"
+        }
+      ],
+      "normalized_states": [
+        "UNAVAILABLE"
+      ],
+      "state": "UNAVAILABLE"
+    },
+    {
+      "acquired_at": "2026-10-26T10:44:01.925820+00:00",
+      "authenticated": false,
+      "credits_reported": null,
+      "endpoint": "/v1/key/info",
+      "error": "credential_or_keyless_route",
+      "normalized_metrics": [],
+      "normalized_states": [],
+      "state": "UNAVAILABLE"
+    }
+  ],
+  "usage": {
+    "d:2026-10-26": {
+      "requests": 8,
+      "reserved_credits": 7
+    },
+    "m:2026-10": {
+      "requests": 8,
+      "reserved_credits": 7
+    }
+  }
+}

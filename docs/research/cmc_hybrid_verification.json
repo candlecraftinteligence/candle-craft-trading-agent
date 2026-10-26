@@ -1,0 +1,256 @@
+{
+  "base_commit": "6785cf6c5a5d4c083f31a280c2ca1555bc7df88c",
+  "baseline": {
+    "initial_failure": "Existing Windows os.replace permission failure; unchanged watch-session rerun passed.",
+    "runs": [
+      {
+        "artifact": "cmc-baseline-main.xml",
+        "failed": 1,
+        "failure_nodes": [
+          "tests.test_watch_session::test_completion_scope_and_nonrecursive_prior_observation_are_bounded"
+        ],
+        "passed": 3494,
+        "sha256": "dd7199c0fbd0f156598c3199509d988c58e154c6195a5916e3928378f53d3dd7",
+        "skipped": 0,
+        "tests": 3495
+      },
+      {
+        "artifact": "cmc-baseline-watch-session.xml",
+        "failed": 0,
+        "failure_nodes": [],
+        "passed": 26,
+        "sha256": "845ea6aab1b93da2c15e2827462d0fc6bf23ffb995dd228588917ee631208501",
+        "skipped": 0,
+        "tests": 26
+      },
+      {
+        "artifact": "cmc-baseline-tail.xml",
+        "failed": 0,
+        "failure_nodes": [],
+        "passed": 45,
+        "sha256": "aa4e74a841aec809b51df8cb5b961bf238fe335a5f824dfec703868ae9b10ffd",
+        "skipped": 0,
+        "tests": 45
+      }
+    ],
+    "unique_passed": 3553,
+    "unresolved_failures": []
+  },
+  "branch": "feature/cmc-hybrid-active-intelligence",
+  "code_commit": "462c00c9fcee21c16f08950a036497b8020584c9",
+  "expectancy_improvement_proven": false,
+  "external_inputs_required": [
+    "Authenticated CMC subscription/entitlement verification",
+    "Independent native/futures metric semantics and identity reviews",
+    "Causal real outcomes and out-of-sample/prospective empirical validation",
+    "Named owner rule activation and Runtime release approval"
+  ],
+  "github_ci": {
+    "compilation": "passed",
+    "dependency_check": "passed",
+    "failed": 0,
+    "job_id": 121535546292,
+    "passed": 3646,
+    "seconds": 290.22,
+    "skipped": 0,
+    "status": "success",
+    "url": "https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40312101783",
+    "warnings": 1
+  },
+  "initial_feature_full_run": {
+    "artifact": "cmc-full.xml",
+    "failed": 1,
+    "failure_nodes": [
+      "tests.test_market_data_foundation::test_inventory_anchors_match_source"
+    ],
+    "passed": 3637,
+    "sha256": "5fbd92088178beb6cac92b157eaca4073e2f72baef8cf300c8c1449c940cef31",
+    "skipped": 0,
+    "tests": 3638
+  },
+  "local_final": {
+    "failed": 0,
+    "new_cmc_tests": 93,
+    "runs": [
+      {
+        "artifact": "cmc-final-part1.xml",
+        "failed": 0,
+        "failure_nodes": [],
+        "passed": 843,
+        "sha256": "b0cecf96863d5a9d48dc344a9908add03e76faf8c605e7e7b47fcc7ac6fb5c28",
+        "skipped": 0,
+        "tests": 843
+      },
+      {
+        "artifact": "cmc-final-part2.xml",
+        "failed": 0,
+        "failure_nodes": [],
+        "passed": 827,
+        "sha256": "b0c1ae7c5f51d399582b793fd761512e3a097722b88d3bef7841397eeacd750e",
+        "skipped": 0,
+        "tests": 827
+      },
+      {
+        "artifact": "cmc-final-part3.xml",
+        "failed": 0,
+        "failure_nodes": [],
+        "passed": 995,
+        "sha256": "288a26743d3a5f8f3bade5a27f6946f2e0481aac1b7ebdaf4904c35768b13880",
+        "skipped": 0,
+        "tests": 995
+      },
+      {
+        "artifact": "cmc-final-part4-canonical.xml",
+        "failed": 0,
+        "failure_nodes": [],
+        "passed": 981,
+        "sha256": "9725276f814786c597be8dcdf4e07d8e50758c9c74ad7b762d287b75c322b89f",
+        "skipped": 0,
+        "tests": 981
+      }
+    ],
+    "skipped": 0,
+    "test_files": 178,
+    "unique_passed": 3646
+  },
+  "off_mode_fixture": {
+    "artifacts": [
+      "docs/research/cmc_hybrid_main_fixed_decisions.json",
+      "docs/research/cmc_hybrid_feature_fixed_decisions.json"
+    ],
+    "byte_identical": true,
+    "sha256": "c8903203a8929e6a12445f2cad556a8599258e0256c1911a5a92682d57ca1c7c"
+  },
+  "pr_url": "https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/148",
+  "provider_probe": {
+    "artifact": "cmc_hybrid_keyless_probe.json",
+    "authenticated_api_verified": false,
+    "routes": [
+      {
+        "authenticated": false,
+        "endpoint": "/v3/cryptocurrency/listings/latest",
+        "error": "http_429",
+        "state": "ERROR"
+      },
+      {
+        "authenticated": false,
+        "endpoint": "/v1/cryptocurrency/map",
+        "error": null,
+        "state": "UNVERIFIED"
+      },
+      {
+        "authenticated": false,
+        "endpoint": "/v1/global-metrics/quotes/latest",
+        "error": null,
+        "state": "UNVERIFIED"
+      },
+      {
+        "authenticated": false,
+        "endpoint": "/v3/fear-and-greed/latest",
+        "error": null,
+        "state": "UNVERIFIED"
+      },
+      {
+        "authenticated": false,
+        "endpoint": "/v1/altcoin-season-index/latest",
+        "error": null,
+        "state": "UNVERIFIED"
+      },
+      {
+        "authenticated": false,
+        "endpoint": "/v5/exchange/derivatives/market-pairs/list/latest",
+        "error": "credential_or_keyless_route",
+        "state": "UNAVAILABLE"
+      },
+      {
+        "authenticated": false,
+        "endpoint": "/v5/derivatives/liquidations/quotes/latest",
+        "error": "credential_or_keyless_route",
+        "state": "UNAVAILABLE"
+      },
+      {
+        "authenticated": false,
+        "endpoint": "/v1/key/info",
+        "error": "credential_or_keyless_route",
+        "state": "UNAVAILABLE"
+      }
+    ],
+    "usage": {
+      "d:2026-10-26": {
+        "requests": 8,
+        "reserved_credits": 7
+      },
+      "m:2026-10": {
+        "requests": 8,
+        "reserved_credits": 7
+      }
+    }
+  },
+  "readiness": {
+    "CMC_API_VERIFIED": "PARTIAL_KEYLESS_ONLY_AUTHENTICATED_UNVERIFIED",
+    "CODE_IMPLEMENTED": true,
+    "DECISION_ENGINE_READY": "FIXTURE_AND_REGRESSION_TESTED",
+    "DECISION_RULES_VALIDATED": false,
+    "PRODUCTION_ACTIVATION_APPROVED": false,
+    "PR_READY": true,
+    "TESTS_VERIFIED": true
+  },
+  "reordered_partition_attempt": {
+    "artifact": "cmc-final-part4.xml",
+    "failed": 1,
+    "failure_nodes": [
+      "tests.test_config::test_default_settings_are_safe"
+    ],
+    "passed": 980,
+    "sha256": "ad128381222a4565cade1e1d985087e9fcc8a7afc81c4e530cf6ac2d1c26834a",
+    "skipped": 0,
+    "tests": 981
+  },
+  "resolved_validation_issues": [
+    "Shifted source-inventory anchors refreshed; generator formatting retained; exact checks pass.",
+    "Reordered local batch let an existing CLI dotenv load affect research-watch settings; canonical file-order rerun with explicit DEV research-watch=false passed all 981 cases."
+  ],
+  "rules": [
+    {
+      "id": "data_divergence",
+      "production_enabled": false,
+      "specification_hash": "580bd1a4824a2ea4452ce29b742dd86e60171f7ca066891f5a925d61b20736fe",
+      "version": "1"
+    },
+    {
+      "id": "liquidation_stress",
+      "production_enabled": false,
+      "specification_hash": "e8bcc2c51898385dc345093aaa92cb9d72faece8b2f12e6e53b6ec3dc602a735",
+      "version": "1"
+    },
+    {
+      "id": "adverse_regime",
+      "production_enabled": false,
+      "specification_hash": "0cd7878eb32d7a66f4b5a62a6f423b5762d16694b3a6ca37fae93c2583fbcf44",
+      "version": "1"
+    },
+    {
+      "id": "sector_support",
+      "production_enabled": false,
+      "specification_hash": "b1e8d1132d5833db7d2aff5b181d6e6a935b80d7f56034faf38b8fc2811bb2bd",
+      "version": "1"
+    },
+    {
+      "id": "consistent_context",
+      "production_enabled": false,
+      "specification_hash": "31d22a811e04632bc8f347a35f37188cf164d5ac2542d24e5c25ac8db0467510",
+      "version": "1"
+    }
+  ],
+  "schema_version": "cmc-integration-verification/1",
+  "security": {
+    "authenticated_cmc_requests": 0,
+    "live_scanner_started": false,
+    "main_merged": false,
+    "order_or_transfer_capability_added": false,
+    "runtime_database_accessed": false,
+    "runtime_deployed": false,
+    "secret_files_modified": false,
+    "telegram_listener_started": false
+  }
+}

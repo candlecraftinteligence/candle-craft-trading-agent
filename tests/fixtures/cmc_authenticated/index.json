@@ -1,0 +1,757 @@
+{
+  "configured_budget": {
+    "daily": 100,
+    "monthly": 3000
+  },
+  "finished_at": "2026-10-26T12:37:39.591670+00:00",
+  "native_finished_at": "2026-10-26T12:40:02.173633+00:00",
+  "native_request_attempts_this_session": 6,
+  "prior_probe_reserved": {
+    "daily": 7,
+    "monthly": 7
+  },
+  "sources": [
+    {
+      "acquired_at": "2026-10-26T12:37:37.688730+00:00",
+      "authenticated": true,
+      "credits_reported": 0,
+      "data_keys": [
+        "plan",
+        "usage"
+      ],
+      "endpoint": "/v1/key/info",
+      "error": null,
+      "params": {},
+      "plan": {
+        "credit_limit_monthly": 15000,
+        "credit_limit_monthly_reset": "In 5 days, 11 hours, 22 minutes",
+        "rate_limit_minute": 50
+      },
+      "provider": "CoinMarketCap",
+      "state": "UNVERIFIED",
+      "usage": {
+        "current_day": {
+          "credits_used": 13
+        },
+        "current_month": {
+          "credits_left": 14985,
+          "credits_used": 15
+        }
+      }
+    },
+    {
+      "acquired_at": "2026-10-26T12:37:37.830955+00:00",
+      "authenticated": true,
+      "credits_reported": 0,
+      "endpoint": "/v1/cryptocurrency/map",
+      "error": null,
+      "file": "1_cmc.json",
+      "params": {
+        "limit": 20,
+        "symbol": "BTC,ETH,SOL,USDT"
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "97529a0c8a03d475fd4850b07aa1588fd48fab960e495f2664da0186f94ed61b",
+      "state": "UNVERIFIED",
+      "original_raw_sha256": "3e067557843dd879e3fc60ecf52501b118ba60c953e4754f9851ada219831f4b",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:37:38.716163+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/exchange/derivatives/list",
+      "error": null,
+      "file": "2_cmc.json",
+      "params": {
+        "limit": 100
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "a6a15c09327c7a2adc442c12b8ac85dcc6f528f65d03b3c55394beb6f6dfe14d",
+      "state": "UNVERIFIED",
+      "original_raw_sha256": "b329bf4989dfb671cdf7e6ce15b67be54508fc4ebecf0964901a48855a406d27",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:37:38.897148+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/exchange/derivatives/market-pairs/list/latest",
+      "error": null,
+      "file": "3_cmc.json",
+      "params": {
+        "category": "perpetual",
+        "exchange_slug": "binance",
+        "limit": 100,
+        "matched_id": 825
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "e3de3cfc9d83b41202a9b516001ce7583073c2beff19fe8bfecd5f3b1d9f64ce",
+      "state": "UNVERIFIED",
+      "original_raw_sha256": "a2b9d8758a6f916384924051188ae09e2557af3912358efa4a64d987105ac9be",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:37:39.238802+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v1/global-metrics/quotes/latest",
+      "error": null,
+      "file": "4_cmc.json",
+      "params": {},
+      "provider": "CoinMarketCap",
+      "sha256": "599a02c1218030d0675cae78ec79a55e0c8a0b6dbea7d00285a005e765c857b6",
+      "state": "UNVERIFIED",
+      "original_raw_sha256": "9861f3a59c36bb08a90d8dd704982636fc7d55cf32f4330d9be9593fd8976619",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:37:39.582186+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/derivatives/liquidations/quotes/latest",
+      "error": null,
+      "file": "5_cmc.json",
+      "params": {},
+      "provider": "CoinMarketCap",
+      "sha256": "c44760832a6dce38bf475ff1e4ae9435d004bbb6b3326a01184ee937f9e4d699",
+      "state": "UNVERIFIED",
+      "original_raw_sha256": "59929f40883025411520f090c5a467819ca824d055b1e6d0b0e5b85a3582459d",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:39:59.208490+00:00",
+      "endpoint": "/fapi/v1/exchangeInfo",
+      "error": null,
+      "file": "6_binance.json",
+      "params": {},
+      "provider": "Binance",
+      "sha256": "7002be0edfaa6e9004db25fd423767af63b1487635f3cfe9b86ce99a1bfdf6a8",
+      "original_raw_sha256": "61e4c5f815000b639899363b43b32011bfed67f04e515191d58493709a762df1",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:39:59.477116+00:00",
+      "endpoint": "/fapi/v1/premiumIndex",
+      "error": null,
+      "file": "7_binance.json",
+      "params": {},
+      "provider": "Binance",
+      "sha256": "be3a49bc0146c3308b5bd63be7fe313d930aa2c1cfc1197ac573c260ae01634b",
+      "original_raw_sha256": "a1b7a86cf48986dab13bf41026125e9f251764783d09b5e4143962912a316954",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:39:59.737523+00:00",
+      "endpoint": "/fapi/v1/fundingInfo",
+      "error": null,
+      "file": "8_binance.json",
+      "params": {},
+      "provider": "Binance",
+      "sha256": "8a495f493e147f0f0a5252a2b8e7643305742209d5bcd82f9fe6b7c479840319",
+      "original_raw_sha256": "3ea99eb430bbe6f73f2dd88cb4d532f83c8db7e7cef5fa20983bd15b70a64f4e",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:39:59.993979+00:00",
+      "endpoint": "/fapi/v1/openInterest",
+      "error": null,
+      "file": "9_binance.json",
+      "params": {
+        "symbol": "BTCUSDT"
+      },
+      "provider": "Binance",
+      "sha256": "35cce6fff423c9cfbacce9a49d10d38dcc1e5f7f4507e6f5e9c082a532481e3d",
+      "original_raw_sha256": "f302ed4629e779fc9b8bc3cd076b427ea3bacda01e9a3f367808317d74247479",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:40:00.261657+00:00",
+      "endpoint": "/fapi/v2/ticker/price",
+      "error": null,
+      "file": "10_binance.json",
+      "params": {
+        "symbol": "BTCUSDT"
+      },
+      "provider": "Binance",
+      "sha256": "7c530de3e43f2a537770a36a7b7ca341958920287e747e7fca5083d2891bac56",
+      "original_raw_sha256": "4ae7850667e6a3dc42f8f410e7f806a955c8bd2a85b9a76ef325077b34bfd353",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:40:00.545265+00:00",
+      "endpoint": "/fapi/v1/fundingRate",
+      "error": null,
+      "file": "11_binance.json",
+      "params": {
+        "limit": 3,
+        "symbol": "BTCUSDT"
+      },
+      "provider": "Binance",
+      "sha256": "ee564e32f762812a43f32b916a1991c23c325dc10ce76a01520b4a6ffc7a47d8",
+      "original_raw_sha256": "43ea2904b46778c149f548468329d7cba9f0d8bfb9f43d410e7fb5e35c0bb588",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:40:00.817785+00:00",
+      "endpoint": "/fapi/v1/openInterest",
+      "error": null,
+      "file": "12_binance.json",
+      "params": {
+        "symbol": "ETHUSDT"
+      },
+      "provider": "Binance",
+      "sha256": "750e352a3878b45916ac413b40e3096f67c6a9ea397d266d6e2caf90d8f0e71c",
+      "original_raw_sha256": "53c467a9da9b2ef00eaeb3ecc253b0c840e9b6e35219ac6143249af142eb6c64",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:40:01.087884+00:00",
+      "endpoint": "/fapi/v2/ticker/price",
+      "error": null,
+      "file": "13_binance.json",
+      "params": {
+        "symbol": "ETHUSDT"
+      },
+      "provider": "Binance",
+      "sha256": "8cba17d530f6ce272e3a34d70674ae9059ed43cda584af937927251a9c6f5fd9",
+      "original_raw_sha256": "4368b2807b369ddba2c65eac2b15f4e9b8e60b4febf900ed93aaa605b7f8f094",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:40:01.349271+00:00",
+      "endpoint": "/fapi/v1/fundingRate",
+      "error": null,
+      "file": "14_binance.json",
+      "params": {
+        "limit": 3,
+        "symbol": "ETHUSDT"
+      },
+      "provider": "Binance",
+      "sha256": "9a461a4f7452481fb7b5748ac0c7f8795372edfd727807ceb41e6b8382a60d60",
+      "original_raw_sha256": "a69487f61308d1b4efd3d927fb37e0776a1b5ae195f2c87af920830b4f908154",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:40:01.604474+00:00",
+      "endpoint": "/fapi/v1/openInterest",
+      "error": null,
+      "file": "15_binance.json",
+      "params": {
+        "symbol": "SOLUSDT"
+      },
+      "provider": "Binance",
+      "sha256": "0b4ac3914f47ebbb6b00c84238e4bb2fc99996921b5ef8477a015faa1de453f6",
+      "original_raw_sha256": "ea5ea16cf8d673cd46215ab779fb950423978f1b8950e6570ea0438164277674",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:40:01.879471+00:00",
+      "endpoint": "/fapi/v2/ticker/price",
+      "error": null,
+      "file": "16_binance.json",
+      "params": {
+        "symbol": "SOLUSDT"
+      },
+      "provider": "Binance",
+      "sha256": "8ab6a123ebb5df1ee8f9330a4aa89ea3276065a105aa7bf3101bd344470f3646",
+      "original_raw_sha256": "1d5ce902481e3843cf413f7075115c7a7dedc2106d7ff0fa112ddd30a09b1b6c",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:40:02.172636+00:00",
+      "endpoint": "/fapi/v1/fundingRate",
+      "error": null,
+      "file": "17_binance.json",
+      "params": {
+        "limit": 3,
+        "symbol": "SOLUSDT"
+      },
+      "provider": "Binance",
+      "sha256": "c87500aaccb64dd5617d6fe80dc2ce1b434a2d1f40b8df78601725cecbbc2f1f",
+      "original_raw_sha256": "46daa29f7c12efa316d7461a55cc22aab161bbe5f2b1c89489700981c11b8f06",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:00.761783+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v3/cryptocurrency/listings/latest",
+      "error": null,
+      "file": "18_coinmarketcap.json",
+      "params": {
+        "limit": 10
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "3b1b0a0f769c28154376ba5b6b78665fe88fb026d4d0c7228e3ee6bc696d04cb",
+      "original_raw_sha256": "c14390196963dbbc175890183b5db6d7e5bb238633f6251d80a7815962e658fc",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:00.956588+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/cryptocurrency/derivatives/market-pairs/list/latest",
+      "error": null,
+      "file": "19_coinmarketcap.json",
+      "params": {
+        "category": "perpetual",
+        "crypto_id": 1,
+        "limit": 30,
+        "matched_id": 825
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "a9220f4f671128b6a4048d366fa0fc91404ad2265e84eca5a07440d7a5607cc3",
+      "original_raw_sha256": "a6de99f5e17eb5e4f4d042d5f72cc7e50ecab09b8807f57879c882cf4bef7773",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:01.152808+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/cryptocurrency/derivatives/market-pairs/list/latest",
+      "error": null,
+      "file": "20_coinmarketcap.json",
+      "params": {
+        "category": "perpetual",
+        "crypto_id": 1027,
+        "limit": 30,
+        "matched_id": 825
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "aa1f7a7a91123ac2139f12d830f77976bfeebd2acbf5c8fcd02e576aa26f8a7c",
+      "original_raw_sha256": "93f6249acc2be41577fa46a529eff30ffa4458f163beae3b0b3902ba77cbe20b",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:01.866877+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/cryptocurrency/derivatives/market-pairs/list/latest",
+      "error": null,
+      "file": "21_coinmarketcap.json",
+      "params": {
+        "category": "perpetual",
+        "crypto_id": 5426,
+        "limit": 30,
+        "matched_id": 825
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "e75bbe233c57861a3a29fe293fcb5fa5a1bb27030ba7c0e9cefe6c695382c396",
+      "original_raw_sha256": "0726c1c3432331d1f9db0837cfcd1fe832c8c6046601fc9be5c802e3620f31ae",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:02.207123+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/derivatives/liquidations/exchange/list/latest",
+      "error": null,
+      "file": "22_coinmarketcap.json",
+      "params": {
+        "exchange_slug": "binance",
+        "limit": 5
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "5ac3e23d6f4b8836ecde7b485abf445e702359dccd234d61aa69f2f66c5a052a",
+      "original_raw_sha256": "c7db09bfffeb903c7ded3bd23128697f2731f0b701cf22962103c13eb77b14db",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:02.555489+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/derivatives/liquidations/cryptocurrency/list/latest",
+      "error": null,
+      "file": "23_coinmarketcap.json",
+      "params": {
+        "crypto_id": "1,1027,5426",
+        "limit": 5
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "e738ba90ba2149e0264e05f2dce3ec753b0934f7d5cca92b89d849a786bb8563",
+      "original_raw_sha256": "ae2e0273662c32c3a71c94b26ec6e09ef3be8da7d697075f64c862fe5fbedbaa",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:02.922710+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v3/fear-and-greed/latest",
+      "error": null,
+      "file": "24_coinmarketcap.json",
+      "params": {},
+      "provider": "CoinMarketCap",
+      "sha256": "59ac5833f01a0653ea8a9ec0f60c91f4f39fcd480c0ddb5ab40ce5dc27a77107",
+      "original_raw_sha256": "8b15bbf9e566d8441a07fb1ba5b6da1c48bf20673d504f73ad20e2e09123aa20",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:03.284670+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v1/altcoin-season-index/latest",
+      "error": null,
+      "file": "25_coinmarketcap.json",
+      "params": {},
+      "provider": "CoinMarketCap",
+      "sha256": "72b086cc7ff5d5f303f8bfc2261f8a53b00b3ad69781ecf5b55ae20e2b78714e",
+      "original_raw_sha256": "236f0523d24b55f2d52b73216f02f2ca3f50ff1c03df849a7f3e92190f15542b",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:03.433654+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v1/cryptocurrency/categories",
+      "error": null,
+      "file": "26_coinmarketcap.json",
+      "params": {
+        "limit": 3
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "8acdc08066f70342ab3f887bb6c78a48ac699dae3ed9644d9cf6cfce51caa0db",
+      "original_raw_sha256": "6bbee37542ff854cf8a6f76125054e6345e78ef6d907f0dc5ec62576eff8b0db",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:03.874707+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v1/cryptocurrency/category",
+      "error": null,
+      "file": "27_coinmarketcap.json",
+      "params": {
+        "id": "6051a82066fc1b42617d6dc0",
+        "limit": 3
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "b66f1e7ccdc70b8f597c8da8819dc53641728a3608bc82b368b67df80b997909",
+      "original_raw_sha256": "e3a48249febc9689c5af218300a03d2550ef7018d45c4b2844831fd702295e24",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:04.262231+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v1/cryptocurrency/listings/historical",
+      "error": null,
+      "file": "28_coinmarketcap.json",
+      "params": {
+        "date": "2026-10-25",
+        "limit": 3
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "2cb8bdfc3b9c8828cdc17eb8c853845ada3e3c0bebcf01873ad76ce578687042",
+      "original_raw_sha256": "e473f7e055637101bd26ab1c56f6c343b6ecfd78516475bfe834999265d543c5",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:04.479164+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/exchange/derivatives/market-pairs/list/latest",
+      "error": null,
+      "file": "29_coinmarketcap.json",
+      "params": {
+        "category": "perpetual",
+        "exchange_slug": "binance",
+        "limit": 100,
+        "matched_id": 825
+      },
+      "provider": "CoinMarketCap",
+      "sample_group": "concurrent_round_2",
+      "sha256": "ff76d2cc583dd93f6d8bd89e72984168af872c952d448f0eeaba8b15838c5dc9",
+      "original_raw_sha256": "d56d90bff4f807935801c92f08bf662420a5e690f3d64846292b26419e9b8fde",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:04.681221+00:00",
+      "endpoint": "/fapi/v1/premiumIndex",
+      "error": null,
+      "file": "30_binance.json",
+      "params": {
+        "symbol": "ETHUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_round_2",
+      "sha256": "49848227b2c21680764d37241fa6a83c3195612c12984b912842449ed28a382b",
+      "original_raw_sha256": "7c5610305a1ad12f328298ba23b1d27d76f0d2049e90d2905fd281dec7160b8d",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:04.687532+00:00",
+      "endpoint": "/fapi/v1/premiumIndex",
+      "error": null,
+      "file": "31_binance.json",
+      "params": {
+        "symbol": "BTCUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_round_2",
+      "sha256": "93f37450b7661e801923527fd286e2a227f3f7c013303cb8ef94329c83543cf1",
+      "original_raw_sha256": "3256b915b734a8bc9740f75ea755d0f72633e3818f60d0970e8cd0a255fccdaf",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:04.690773+00:00",
+      "endpoint": "/fapi/v1/openInterest",
+      "error": null,
+      "file": "32_binance.json",
+      "params": {
+        "symbol": "BTCUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_round_2",
+      "sha256": "fb4624d236f5a0d95a4a9b2b28e79ff96ba8186327eb45ef4269da79e4de5376",
+      "original_raw_sha256": "b3cd82d39236bb90409fd6c5d6c21c1aaf3cdd91c9ccf8fbe25e719bd57f7783",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:04.695834+00:00",
+      "endpoint": "/fapi/v1/premiumIndex",
+      "error": null,
+      "file": "33_binance.json",
+      "params": {
+        "symbol": "SOLUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_round_2",
+      "sha256": "fe9b454884fd5aab54b52affcbc1a9daef4be6115bfa767158e18703dedf9bca",
+      "original_raw_sha256": "96cc8337ebe437dd4a19e115a0c9bdfc7e8e4866fdbdb51823849d498455d0fa",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:04.698261+00:00",
+      "endpoint": "/fapi/v1/openInterest",
+      "error": null,
+      "file": "34_binance.json",
+      "params": {
+        "symbol": "SOLUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_round_2",
+      "sha256": "d451c5fb0dc8aa86a6b877a47ae6c3cb91449e1c7a2262d2239423b34208aa8f",
+      "original_raw_sha256": "d77c515236a9b792485d85ee45669078fafd7029b77a935f4998688283d637a3",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:04.700568+00:00",
+      "endpoint": "/fapi/v1/openInterest",
+      "error": null,
+      "file": "35_binance.json",
+      "params": {
+        "symbol": "ETHUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_round_2",
+      "sha256": "b27531034503a028271081c542bfa9d4ffd007f469b113704d1ab5cdf4b712c0",
+      "original_raw_sha256": "796cce2f8beb97f7a54bb794833c30b48f6d759af5b1d5934316aae0cdea1c20",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T12:46:04.845759+00:00",
+      "authenticated": true,
+      "credits_reported": 0,
+      "endpoint": "/v1/key/info",
+      "error": null,
+      "params": {},
+      "plan": {
+        "credit_limit_monthly": 15000,
+        "credit_limit_monthly_reset": "In 5 days, 11 hours, 13 minutes",
+        "rate_limit_minute": 50
+      },
+      "provider": "CoinMarketCap",
+      "usage": {
+        "current_day": {
+          "credits_used": 29
+        },
+        "current_month": {
+          "credits_left": 14969,
+          "credits_used": 31
+        }
+      }
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:38.616220+00:00",
+      "endpoint": "/fapi/v2/ticker/price",
+      "error": null,
+      "file": "37_binance.json",
+      "params": {
+        "symbol": "ETHUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_20261026T130138Z",
+      "sha256": "f29924e97418e53f9a83715f1b0e5cec26f62a2fb67fedd365b6137b76f8f38b",
+      "original_raw_sha256": "a4adf9b9b795864d6236a6fcb549120d1a750c08b4b7cafa25d99a7392b534e3",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:38.660040+00:00",
+      "endpoint": "/fapi/v1/openInterest",
+      "error": null,
+      "file": "38_binance.json",
+      "params": {
+        "symbol": "SOLUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_20261026T130138Z",
+      "sha256": "24ca39fcc2efb06e224a6c7c601b47d08dea6f8c4fe2431156635478c2b0d3ec",
+      "original_raw_sha256": "d8688b34224d283e6d445f9236b27557c358d206c1f813db1f6c620d1360cd24",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:38.662138+00:00",
+      "endpoint": "/fapi/v2/ticker/price",
+      "error": null,
+      "file": "39_binance.json",
+      "params": {
+        "symbol": "BTCUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_20261026T130138Z",
+      "sha256": "d9c121426f950434c293ddc7e7e8c014251a6065beaf32c47ae5b6b84f1ee12f",
+      "original_raw_sha256": "21477bfdcd9319616bfd77ab7ade4eb77c38d64644596c733fa347af6789d90d",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:38.664189+00:00",
+      "endpoint": "/fapi/v1/openInterest",
+      "error": null,
+      "file": "40_binance.json",
+      "params": {
+        "symbol": "BTCUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_20261026T130138Z",
+      "sha256": "98d5fe432da11710f100cd8408b2a17bb4627e9e48f7b495de69a380f128937b",
+      "original_raw_sha256": "6bca2899f17ec9be8e7e22d5e66843102a223d4e74fa414466b7b3516f705a65",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:38.667293+00:00",
+      "endpoint": "/fapi/v1/openInterest",
+      "error": null,
+      "file": "41_binance.json",
+      "params": {
+        "symbol": "ETHUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_20261026T130138Z",
+      "sha256": "124e5175bdbe76cf75404c9a9d63f501f65c15651e6c5248518fe31bf86072d1",
+      "original_raw_sha256": "50b2c458a681d15b8186a1e5490c7c40b0eab64e20eb6018ebdb51a76bcef1fb",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:38.670488+00:00",
+      "endpoint": "/fapi/v2/ticker/price",
+      "error": null,
+      "file": "42_binance.json",
+      "params": {
+        "symbol": "SOLUSDT"
+      },
+      "provider": "Binance",
+      "sample_group": "concurrent_20261026T130138Z",
+      "sha256": "d3a24e6bf67cb637fed58a012a2d93a90c379745813a7209bd0d1fa893733a63",
+      "original_raw_sha256": "1712c64afe18f27fe6a76ba513780e5e6c29badc517b9849bf47584338047866",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:38.760516+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/exchange/derivatives/market-pairs/list/latest",
+      "error": null,
+      "file": "43_coinmarketcap.json",
+      "params": {
+        "category": "perpetual",
+        "exchange_slug": "binance",
+        "limit": 100,
+        "matched_id": 825
+      },
+      "provider": "CoinMarketCap",
+      "sample_group": "concurrent_20261026T130138Z",
+      "sha256": "a51360398603add155d4d1f6321b718fe5f7761079dd2b2d9d78402eae99f8b1",
+      "original_raw_sha256": "cc00f16829f899a62dc7ca4c5d28c6644fe09ad4836f05d4f9dc84f7be703e67",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:38.937857+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v1/global-metrics/quotes/latest",
+      "error": null,
+      "file": "44_coinmarketcap.json",
+      "params": {},
+      "provider": "CoinMarketCap",
+      "sha256": "81b3fecc29d08a71c7e62dde281e69ae774dcbe5553654c8ecc29e7357730c58",
+      "original_raw_sha256": "bdaf09af435a99dc4c6751eadce96a4f23b8213dce3f3f9372d9a33386591b4f",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:39.300970+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v5/derivatives/liquidations/quotes/latest",
+      "error": null,
+      "file": "45_coinmarketcap.json",
+      "params": {},
+      "provider": "CoinMarketCap",
+      "sha256": "850af69235fbc20a55c62b1029f775b274f1b1acc1db3ad7cb874fa4514a0dd4",
+      "original_raw_sha256": "884f95c980bbdec75b359453c39391f4b13dd152983ede356501af6b56bc569a",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:39.646521+00:00",
+      "authenticated": true,
+      "credits_reported": 1,
+      "endpoint": "/v3/cryptocurrency/listings/latest",
+      "error": null,
+      "file": "46_coinmarketcap.json",
+      "params": {
+        "limit": 10
+      },
+      "provider": "CoinMarketCap",
+      "sha256": "6da37fd63b4da3ee9cf8fefe5e86f48a3c9174f622bb1b5984fe2e2937196d00",
+      "original_raw_sha256": "e6a9589c4d23a8b77013143dc6b91782f50a9da2faa63c70c113f818f7dce04f",
+      "representation": "selected_public_rows_reencoded_json_decimal_exact"
+    },
+    {
+      "acquired_at": "2026-10-26T13:01:39.784751+00:00",
+      "authenticated": true,
+      "credits_reported": 0,
+      "endpoint": "/v1/key/info",
+      "error": null,
+      "params": {},
+      "plan": {
+        "credit_limit_monthly": 15000,
+        "credit_limit_monthly_reset": "In 5 days, 10 hours, 58 minutes",
+        "rate_limit_minute": 50
+      },
+      "provider": "CoinMarketCap",
+      "usage": {
+        "current_day": {
+          "credits_used": 33
+        },
+        "current_month": {
+          "credits_left": 14965,
+          "credits_used": 35
+        }
+      }
+    }
+  ],
+  "started_at": "2026-10-26T12:37:36.612577+00:00",
+  "updated_at": "2026-10-26T13:01:39.786746+00:00",
+  "usage": {
+    "d:2026-10-26": {
+      "requests": 24,
+      "reserved_credits": 24
+    },
+    "m:2026-10": {
+      "requests": 24,
+      "reserved_credits": 24
+    }
+  },
+  "validation_credit_cap": 25,
+  "representation": "Selected real public responses, reencoded with exact Decimal numeric values; source values and timestamps unchanged. Original wire-body SHA-256 retained separately. No key-info raw body or response headers."
+}

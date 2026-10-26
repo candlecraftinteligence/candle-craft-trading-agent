@@ -1,0 +1,97 @@
+{
+  "starting_commit": "2990c8fbb3a5565859e1d1f722ea7fe734be5b53",
+  "targeted_passed": 114,
+  "full_passed": 3667,
+  "full_unique_cases": 3667,
+  "test_files": 179,
+  "full_partitions": "Disjoint complete test-file set, canonical alphabetical order within each group; independent temporary/cache directories.",
+  "environment": "Existing .venv Python 3.11; LOCAL_MANUAL_MODE=true, ORDER_EXECUTION_ENABLED=false, TELEGRAM_DRY_RUN=true, TELEGRAM_SIGNALS_ENABLED=false, TELEGRAM_RESEARCH_WATCH_ENABLED=false. No .env mutation.",
+  "runs": [
+    {
+      "artifact": "cmc-auth-targeted-precision.xml",
+      "sha256": "6ef4df5971682096acabd3950e94520fdc39dad3ed3fa70351aa0aa0f82aed53",
+      "tests": 114,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 6.06
+    },
+    {
+      "artifact": "cmc-auth-full-part1.xml",
+      "sha256": "e1dc3a06bf42639f3d8a68340055bea466a8f3e2e2c25760a570e3d15232e857",
+      "tests": 864,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 284.516
+    },
+    {
+      "artifact": "cmc-auth-full-part2.xml",
+      "sha256": "94ae19b886e2eadc5a423be28c9fe753acaa8d42dfd678a1361c037022b93fc2",
+      "tests": 827,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 289.809
+    },
+    {
+      "artifact": "cmc-auth-full-part3.xml",
+      "sha256": "59a6dbb9a32579eb6c3fc2f56b31c5fc335a406b7a2e8671e9210efe531596a8",
+      "tests": 995,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 261.76
+    },
+    {
+      "artifact": "cmc-auth-full-part4.xml",
+      "sha256": "ae6f1e4488890160454bd1b025d1a28552b830e8d48c340a1f5d1955ed9816a8",
+      "tests": 981,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 279.483
+    }
+  ],
+  "compileall": "passed",
+  "pip_check": "passed",
+  "ci": {
+    "implementation_commit": "047b4e5915879d84223f3dacb029441e5376012c",
+    "run_id": 40332093223,
+    "job_id": 121603855861,
+    "url": "https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40332093223",
+    "conclusion": "success",
+    "passed": 3667,
+    "warnings": 1,
+    "warning": "Existing Starlette/httpx deprecation warning",
+    "seconds": 297.27,
+    "pip_check": "passed",
+    "compileall": "passed",
+    "command": "python -m pytest"
+  },
+  "fixture_precision": "Selected fixture JSON preserves numeric values through Decimal; a second focused run passed after serialization verification.",
+  "off_mode_fixture": {
+    "byte_identical_to_main": true,
+    "sha256": "c8903203a8929e6a12445f2cad556a8599258e0256c1911a5a92682d57ca1c7c",
+    "current_artifact": "research_runs\\cmc_authenticated_off_decisions.json",
+    "main_artifact": "docs\\research\\cmc_hybrid_main_fixed_decisions.json"
+  },
+  "implementation_commit": "047b4e5915879d84223f3dacb029441e5376012c",
+  "credential_staged_diff_scan": "passed; local credential not present in staged changes; .env and production manifests excluded",
+  "portable_fixture_hashes": "All 45 staged response blobs match their exact SHA-256; Git text conversion disabled for JSON. Metadata line endings normalized separately.",
+  "delivery_changes_after_ci": "Documentation/evidence recording and LF normalization of fixture index/review JSON only; no code or captured response-body changes.",
+  "requirement_audit": {
+    "1": "completed; see authenticated validation report",
+    "2": "completed; see authenticated validation report",
+    "3": "completed; see authenticated validation report",
+    "4": "completed; see authenticated validation report",
+    "5": "completed; see authenticated validation report",
+    "6": "completed; see authenticated validation report",
+    "7": "completed; see authenticated validation report",
+    "8": "completed; see authenticated validation report",
+    "9": "completed; see authenticated validation report",
+    "10": "completed; see authenticated validation report",
+    "11": "completed; see authenticated validation report",
+    "12": "completed; see authenticated validation report"
+  }
+}

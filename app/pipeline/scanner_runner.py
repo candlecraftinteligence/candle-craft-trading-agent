@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from app.agents.alert_agent import AlertAgent, AlertResult
 from app.agents.derivatives_orderflow import DerivativesOrderflowAgent, DerivativesOrderflowResult
@@ -320,8 +320,16 @@ class ScannerRunConfig(BaseModel):
     order_book_liquidity_event_buffer_size: int = 256
     decision_timestamp: datetime | None = None
     derivatives_source_truth_shadow: bool = False
+    cmc_mode: Literal["off", "collect", "shadow", "decision"] = "off"
 
     model_config = ConfigDict(frozen=True)
+
+    @model_serializer(mode="wrap")
+    def _serialize_cmc_mode(self, handler):
+        data = handler(self)
+        if self.cmc_mode == "off":
+            data.pop("cmc_mode", None)
+        return data
 
     @field_validator("symbols", mode="before")
     @classmethod
@@ -524,6 +532,8 @@ class ScannerRunConfig(BaseModel):
 
 
 class ScannerSymbolResult(BaseModel):
+    cmc_evaluation: Any | None = Field(default=None, exclude=True, repr=False)
+    cmc_native_evidence: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     symbol: str
     status: ScannerPipelineStatus
     status_history: tuple[ScannerPipelineStatus, ...]
@@ -799,6 +809,7 @@ class _CandidateBuildResult(BaseModel):
 
 
 class _OptionalMarketData(BaseModel):
+    cmc_native_evidence: dict[str, Any] | None = Field(default=None, exclude=True, repr=False)
     ticker: TickerDTO | Any | None = None
     funding: FundingDTO | Any | None = None
     funding_history: Sequence[FundingDTO | Any] | None = None
@@ -930,6 +941,9 @@ class ScannerRunner:
                     )
                 }
             )
+        if run_config.cmc_mode != "off":
+            from app.cmc.runtime import begin_collection
+            await begin_collection()
         process_memory_readings: list[ProcessMemoryReading] = [
             _safe_process_memory_reading(self.process_memory_sampler)
         ]
@@ -2595,6 +2609,8 @@ class ScannerRunner:
                 instrument = frozen.instrument
 
         return _OptionalMarketData(
+            cmc_native_evidence={label: item for label, _v, _m, _w, item in optional_results if item is not None}
+            if config.cmc_mode != "off" else None,
             ticker=ticker,
             funding=funding,
             funding_history=funding_history if _is_sequence_data(funding_history) else None,
@@ -2620,7 +2636,7 @@ class ScannerRunner:
         config: ScannerRunConfig,
         label: str,
     ) -> tuple[str, Any | None, str | None, str | None, Any | None]:
-        evidence_method = getattr(client, f"{method_name}_with_evidence", None) if config.derivatives_source_truth_shadow else None
+        evidence_method = getattr(client, f"{method_name}_with_evidence", None) if (config.derivatives_source_truth_shadow or config.cmc_mode != "off") else None
         method = evidence_method if callable(evidence_method) else getattr(client, method_name, None)
         if not callable(method):
             evidence = _shadow_unavailable(label, symbol, "adapter_has_no_source_evidence") if config.derivatives_source_truth_shadow else None
@@ -2847,6 +2863,7 @@ class ScannerRunner:
         )
         shadow, causal = _derivatives_shadow_result(optional_data, strategy_execution.liquidation_flow)
         return ScannerSymbolResult(
+            cmc_native_evidence=optional_data.cmc_native_evidence,
             symbol=symbol,
             status=status,
             status_history=status_history,

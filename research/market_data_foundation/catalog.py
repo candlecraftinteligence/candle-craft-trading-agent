@@ -201,10 +201,10 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "code_refs": (
             {"path": "app/data/derivatives_source_evidence.py", "line": 48, "contains": '"/fapi/v1/fundingRate"'},
             {"path": "app/data/derivatives_source_evidence.py", "line": 52, "contains": '"/v5/market/funding/history"'},
-            {"path": "app/pipeline/scanner_runner.py", "line": 2477, "contains": "async def _fetch_optional_market_data("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4606, "contains": "def _derivatives_enrichment_input("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 4631, "contains": "def _derivatives_rejection("},
-            {"path": "app/pipeline/scanner_runner.py", "line": 1712, "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"},
+            {"path": "app/pipeline/scanner_runner.py", "line": 2491, "contains": "async def _fetch_optional_market_data("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4623, "contains": "def _derivatives_enrichment_input("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 4648, "contains": "def _derivatives_rejection("},
+            {"path": "app/pipeline/scanner_runner.py", "line": 1726, "contains": "status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,"},
         ),
     },
     {
@@ -303,7 +303,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/microstructure/models.py", "line": 14, "contains": "aggTrade"},
-            {"path": "app/core/config.py", "line": 78, "contains": "microstructure_flow_enabled: bool = False"},
+            {"path": "app/core/config.py", "line": 91, "contains": "microstructure_flow_enabled: bool = False"},
         ),
     },
     {
@@ -336,7 +336,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/microstructure/order_book_service.py", "line": 92, "contains": '"/fapi/v1/depth"'},
-            {"path": "app/core/config.py", "line": 84, "contains": "order_book_liquidity_enabled: bool = False"},
+            {"path": "app/core/config.py", "line": 97, "contains": "order_book_liquidity_enabled: bool = False"},
         ),
     },
     {
@@ -369,7 +369,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/microstructure/liquidation.py", "line": 58, "contains": "def parse_binance_liquidation("},
-            {"path": "app/core/config.py", "line": 81, "contains": "liquidation_flow_enabled: bool = False"},
+            {"path": "app/core/config.py", "line": 94, "contains": "liquidation_flow_enabled: bool = False"},
         ),
     },
     {
@@ -402,7 +402,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/context/btc.py", "line": 19, "contains": 'BTC_CONTEXT_TIMEFRAMES = ("12h", "2h", "15m")'},
-            {"path": "app/core/config.py", "line": 70, "contains": "btc_context_enabled: bool = True"},
+            {"path": "app/core/config.py", "line": 83, "contains": "btc_context_enabled: bool = True"},
         ),
     },
     {
@@ -435,7 +435,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/pipeline/scanner_runner.py", "line": 296, "contains": "market_regime_enabled: bool = False"},
-            {"path": "app/pipeline/scanner_runner.py", "line": 2048, "contains": '"ETHUSDT", "eth_candles"'},
+            {"path": "app/pipeline/scanner_runner.py", "line": 2062, "contains": '"ETHUSDT", "eth_candles"'},
         ),
     },
     {
@@ -599,7 +599,7 @@ INVENTORY: tuple[dict[str, Any], ...] = (
         "expectancy_benefit": "not established",
         "code_refs": (
             {"path": "app/context/macro_providers.py", "line": 44, "contains": "BLS_CALENDAR_URL"},
-            {"path": "app/core/config.py", "line": 74, "contains": "macro_event_context_enabled: bool = True"},
+            {"path": "app/core/config.py", "line": 87, "contains": "macro_event_context_enabled: bool = True"},
         ),
     },
     {

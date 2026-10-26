@@ -1,0 +1,121 @@
+{
+  "schema_version": "cmc-release-verification/1",
+  "starting_head": "1122305ff6774d442729e9ed1d31cf737ea6914a",
+  "main_base": "6785cf6c5a5d4c083f31a280c2ca1555bc7df88c",
+  "targeted_passed": 130,
+  "affected_module_passed": 171,
+  "full_passed": 3683,
+  "full_unique_cases": 3683,
+  "test_files": 180,
+  "local_full_partition_counts": [
+    880,
+    827,
+    995,
+    981
+  ],
+  "test_environment": "Existing .venv; safe DEV process flags, explicit research-watch=false; disjoint complete files, canonical order per group, isolated temp/cache.",
+  "runs": [
+    {
+      "artifact": "cmc-release-final-target.xml",
+      "sha256": "e7a222f0573a023b72ab3b4cb6872345009ad0e59b6fdd7ffe9d54defaa06111",
+      "tests": 130,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 23.14
+    },
+    {
+      "artifact": "cmc-release-clock.xml",
+      "sha256": "36cf99f870265a39ddfcf1cfef4d9352ffa1ed1ccd4eb42b99ae61191ddc245a",
+      "tests": 171,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 88.481
+    },
+    {
+      "artifact": "cmc-release-final-part1.xml",
+      "sha256": "24a8642824712a5527af54e847c5b13081d5ba3adbd9bd28a01f3c5d3d402c01",
+      "tests": 880,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 461.984
+    },
+    {
+      "artifact": "cmc-release-final-part2.xml",
+      "sha256": "67aaaf5737ae763d5abb3c35d9fea56ea779f7e0a134e642bb527b1a06ac7658",
+      "tests": 827,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 448.819
+    },
+    {
+      "artifact": "cmc-release-final-part3.xml",
+      "sha256": "49feac341475e1c3d6bc7a902a1ff6d7347225aa134c4dfc9d3982b985c5a2c6",
+      "tests": 995,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 405.022
+    },
+    {
+      "artifact": "cmc-release-final-part4.xml",
+      "sha256": "a9eba81cae7edaac33695cee8dd876dd9c0570a1f28fadf9518883e407f23344",
+      "tests": 981,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 424.406
+    }
+  ],
+  "initial_full_run": {
+    "passed": 3679,
+    "failed": 4,
+    "cause": "Added OFF clock read consumed deterministic cooldown clocks; original behavior restored and affected/full suites passed without assertion changes."
+  },
+  "earlier_fixture_finding": "Legacy WATCHLIST initial publishing is ineligible in V1. New mechanics use existing CONFIRMED path; no lifecycle/quality gate was changed.",
+  "ci": {
+    "implementation_commit": "2b301f27d1b56549deee68261359ec915cd6055c",
+    "run_id": 40347743791,
+    "job_id": 121659090554,
+    "url": "https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40347743791",
+    "status": "success",
+    "passed": 3683,
+    "warnings": 1,
+    "seconds": 365.75,
+    "dependency_check": "passed",
+    "compileall": "passed"
+  },
+  "production_runtime_accessed": false,
+  "production_deployed": false,
+  "production_rules_enabled": false,
+  "economic_expectancy_proven": false,
+  "owner_merge_authorization": "Current user master goal, conditional on successful release gates",
+  "runtime_rollout_approval": false,
+  "code_rule_hashes_unchanged": true,
+  "release_implementation_commit": "2b301f27d1b56549deee68261359ec915cd6055c",
+  "cohort_metadata_followup": {
+    "scope": "Capture native CCI mode, regime quality/value and original decision cutoff in policy sidecar records; no formula, gate or default mode changes.",
+    "targeted_passed": 130,
+    "artifact": "cmc-release-context-final.xml",
+    "sha256": "4e4165ec302a9e018a2bbb172d0fb32d2706e106a494eb494b6e377600c1e1f5",
+    "final_head_ci": "Required before merge; exact result recorded in PR and final release receipt.",
+    "typed_release_cases": {
+      "passed": 16,
+      "artifact": "cmc-release-typed.xml",
+      "sha256": "743320f549d57e13da21ee7d2cc61f0e3ac55676baf5e8935b27a13ff038aaf8",
+      "quality_fields": "Native tuple[str,...] fixtures; disabled/missing/unverified/verified states covered."
+    }
+  },
+  "resolved_metadata_fixture_failure": "Two new assertions initially assumed the native regime fixture was disabled; its actual default is enabled/missing. Exact assertions corrected and all disabled/missing/unverified/verified states tested without production gate changes.",
+  "secret_staged_diff_scan": "passed before implementation commit; repeated for final head",
+  "powershell_runbook_syntax": "All prepared PowerShell blocks parsed; none executed",
+  "document_local_links_checked": 27,
+  "current_pr_discussion_review": {
+    "comments": 0,
+    "review_submissions": 0,
+    "critical_external_findings": 0
+  }
+}

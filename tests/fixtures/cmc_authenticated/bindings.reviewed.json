@@ -1,0 +1,33 @@
+{
+  "validation_only": true,
+  "reviewed_at": "2026-10-26T12:57:52.652985+00:00",
+  "bindings": [
+    {
+      "cmc_id": 1,
+      "cmc_slug": "bitcoin",
+      "binance_base": "BTC",
+      "quote_id": 825,
+      "approved": true,
+      "evidence_ref": "engineering-identity-review:4fb98df2309eb89ced4c7f1ec16dfd2385a296695f8ae6183f9d196236f55b90",
+      "approved_at": "2026-10-26T12:57:52.652985Z"
+    },
+    {
+      "cmc_id": 1027,
+      "cmc_slug": "ethereum",
+      "binance_base": "ETH",
+      "quote_id": 825,
+      "approved": true,
+      "evidence_ref": "engineering-identity-review:4fb98df2309eb89ced4c7f1ec16dfd2385a296695f8ae6183f9d196236f55b90",
+      "approved_at": "2026-10-26T12:57:52.652985Z"
+    },
+    {
+      "cmc_id": 5426,
+      "cmc_slug": "solana",
+      "binance_base": "SOL",
+      "quote_id": 825,
+      "approved": true,
+      "evidence_ref": "engineering-identity-review:4fb98df2309eb89ced4c7f1ec16dfd2385a296695f8ae6183f9d196236f55b90",
+      "approved_at": "2026-10-26T12:57:52.652985Z"
+    }
+  ]
+}

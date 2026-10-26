@@ -1,0 +1,137 @@
+{
+  "additional_evidence_support": 0,
+  "evidence_coverage": "1",
+  "improvement_proven": false,
+  "independent_validation_available": false,
+  "limitation": "Descriptive comparison only. Full unselected outcomes, causal attribution and independent prospective/out-of-sample validation required; synthetic fixtures establish behavior only.",
+  "original_valid_setups": 3,
+  "policies": {
+    "CCI_BASELINE": {
+      "additional_fee_slippage_sensitivity_r": {
+        "0": "0.5",
+        "0.05": "0.45",
+        "0.10": "0.40"
+      },
+      "cohorts": {
+        "cohort": {
+          "synthetic": {
+            "net_expectancy_r": "0.5",
+            "verified_filled": 3
+          }
+        },
+        "direction": {
+          "long": {
+            "net_expectancy_r": "0.5",
+            "verified_filled": 3
+          }
+        },
+        "regime": {
+          "N/A": {
+            "net_expectancy_r": "0.5",
+            "verified_filled": 3
+          }
+        }
+      },
+      "entry_activation_rate": "1",
+      "mean_fill_probability": "N/A",
+      "mean_max_adverse_excursion_r": "N/A",
+      "net_expectancy_r": "0.5",
+      "selected_count": 3,
+      "selected_plan_ids": [
+        "synthetic-plan-0",
+        "synthetic-plan-1",
+        "synthetic-plan-2"
+      ],
+      "verified_outcomes": 3,
+      "verified_realized_net_r": "1.5"
+    },
+    "CMC_DECISION_POLICY": {
+      "additional_fee_slippage_sensitivity_r": {
+        "0": "0.5",
+        "0.05": "0.45",
+        "0.10": "0.40"
+      },
+      "cohorts": {
+        "cohort": {
+          "synthetic": {
+            "net_expectancy_r": "0.5",
+            "verified_filled": 1
+          }
+        },
+        "direction": {
+          "long": {
+            "net_expectancy_r": "0.5",
+            "verified_filled": 1
+          }
+        },
+        "regime": {
+          "N/A": {
+            "net_expectancy_r": "0.5",
+            "verified_filled": 1
+          }
+        }
+      },
+      "entry_activation_rate": "1",
+      "incremental_expectancy_r": "0.0",
+      "lost_winning_opportunities": 1,
+      "mean_fill_probability": "N/A",
+      "mean_max_adverse_excursion_r": "N/A",
+      "net_expectancy_r": "0.5",
+      "prevented_losing_trades": 1,
+      "rejected_winning_trades": 1,
+      "removed_baseline_opportunities": 2,
+      "selected_count": 1,
+      "selected_plan_ids": [
+        "synthetic-plan-2"
+      ],
+      "verified_outcomes": 1,
+      "verified_realized_net_r": "0.5"
+    },
+    "CMC_SHADOW_POLICY": {
+      "additional_fee_slippage_sensitivity_r": {
+        "0": "0.5",
+        "0.05": "0.45",
+        "0.10": "0.40"
+      },
+      "cohorts": {
+        "cohort": {
+          "synthetic": {
+            "net_expectancy_r": "0.5",
+            "verified_filled": 1
+          }
+        },
+        "direction": {
+          "long": {
+            "net_expectancy_r": "0.5",
+            "verified_filled": 1
+          }
+        },
+        "regime": {
+          "N/A": {
+            "net_expectancy_r": "0.5",
+            "verified_filled": 1
+          }
+        }
+      },
+      "entry_activation_rate": "1",
+      "incremental_expectancy_r": "0.0",
+      "lost_winning_opportunities": 1,
+      "mean_fill_probability": "N/A",
+      "mean_max_adverse_excursion_r": "N/A",
+      "net_expectancy_r": "0.5",
+      "prevented_losing_trades": 1,
+      "rejected_winning_trades": 1,
+      "removed_baseline_opportunities": 2,
+      "selected_count": 1,
+      "selected_plan_ids": [
+        "synthetic-plan-2"
+      ],
+      "verified_outcomes": 1,
+      "verified_realized_net_r": "0.5"
+    }
+  },
+  "priority_changes": 0,
+  "schema_version": "cmc-policy-research/1",
+  "synthetic_fixture_only": true,
+  "veto_recommendations": 2
+}

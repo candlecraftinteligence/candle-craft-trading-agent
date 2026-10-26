@@ -3873,6 +3873,7 @@ class TelegramLifecycleDeliveryService:
         scan_run_id: str | None = None,
     ) -> TelegramLifecycleDeliverySummary:
         deliveries: list[TelegramLifecycleDelivery] = []
+        cmc_selection_intent = None
         ineligible = 0
         duplicate = 0
         sent = 0
@@ -3948,6 +3949,10 @@ class TelegramLifecycleDeliveryService:
                     public_watchlist_require_entry_zone=self.public_watchlist_require_entry_zone,
                     public_watchlist_require_invalidation=self.public_watchlist_require_invalidation,
                 )
+                if (getattr(self.settings, "cmc_mode", "off") != "off"
+                        or any(r.cmc_evaluation is not None for r in result.results)):
+                    from app.cmc.integration import prepare_selection
+                    result = await prepare_selection(result, self.settings, eligibility_context, repository)
                 for delivery in await self.reconcile_publicly_tracked_outcomes(
                     repository=repository,
                     lifecycle_repository=lifecycle_repository,
@@ -3963,16 +3968,20 @@ class TelegramLifecycleDeliveryService:
                     record_delivery(delivery)
                 public_watchlist_daily_cap_reached: bool | None = None
                 public_watchlist_hourly_cap_reached: bool | None = None
-                public_watchlist_scan_selection = _public_watchlist_scan_selection(
-                    result.results,
-                    eligibility_context,
-                    repository=repository,
-                    max_per_scan=self.public_watchlist_max_per_scan,
-                    cooldown_hours=self.public_watchlist_cooldown_hours,
-                    attempted_at=None,
+                selection_options = dict(repository=repository, max_per_scan=self.public_watchlist_max_per_scan,
+                    cooldown_hours=self.public_watchlist_cooldown_hours, attempted_at=None,
                     daily_cap_reached=public_watchlist_daily_cap_reached,
-                    hourly_cap_reached=public_watchlist_hourly_cap_reached,
-                )
+                    hourly_cap_reached=public_watchlist_hourly_cap_reached)
+                if getattr(self.settings, "cmc_mode", "off") in {"shadow", "decision"}:
+                    selection_options["attempted_at"] = now_utc_iso()
+                def select_watchlists(rows):
+                    return _public_watchlist_scan_selection(rows, eligibility_context, **selection_options)
+                public_watchlist_scan_selection = select_watchlists(result.results)
+                if getattr(self.settings, "cmc_mode", "off") in {"shadow", "decision"}:
+                    from app.cmc.selection_audit import audit_selection
+                    result, public_watchlist_scan_selection, cmc_selection_intent = await audit_selection(
+                        result, self.settings, public_watchlist_scan_selection,
+                        selector=select_watchlists, scan_run_id=scan_run_id)
                 public_watchlist_sent_this_scan = 0
                 for symbol_result in result.results:
                     audit = _public_watchlist_candidate_audit(
@@ -4078,6 +4087,9 @@ class TelegramLifecycleDeliveryService:
                 ):
                     record_delivery(delivery)
 
+        if cmc_selection_intent is not None:
+            from app.cmc.selection_audit import record_application
+            await record_application(self.settings, cmc_selection_intent, deliveries)
         public_watchlist_audit = _public_watchlist_audit_summary(public_watchlist_audits.values())
         confirmed_alert_audit = ConfirmedAlertAuditSummary(
             public_signal_policy=self.public_signal_policy,
@@ -4481,6 +4493,15 @@ class TelegramLifecycleDeliveryService:
         )
         if decision is None:
             return None
+        if getattr(self.settings, "cmc_mode", "off") == "decision":
+            from app.cmc.integration import veto_applies
+            if veto_applies(symbol_result, alert_type=decision.alert_type.value,
+                            previously_public=previously_active_sent):
+                return _persist_blocked_attempt(
+                    repository, symbol_result,
+                    decision=replace(decision, eligible=False, reason="cmc_validated_rule_veto"),
+                    scan_run_id=scan_run_id, eligibility_context=context,
+                )
         if decision.alert_type == TelegramAlertType.SIGNAL_CONFIRMED and decision.message is not None:
             prefilter = _confirmed_alert_attempt_prefilter(symbol_result, decision.message, context)
             if not prefilter.passed:
@@ -7604,6 +7625,9 @@ def _public_watchlist_scan_selection(
         gate = _public_watchlist_gate_result(symbol_result, message, context)
         if not gate.allowed:
             continue
+        from app.cmc.integration import veto_applies
+        if veto_applies(symbol_result, alert_type="watchlist", previously_public=False):
+            continue
         candidates_before_rate_limits.append((
             _public_watchlist_scan_candidate_sort_key(symbol_result, message),
             signal_id,
@@ -7660,11 +7684,13 @@ def _public_watchlist_scan_candidate_sort_key(
     technical_score = _technical_score_decimal(symbol_result) or Decimal("-1")
     opportunity_score = _opportunity_score_decimal(symbol_result) or Decimal("-1")
     symbol = _symbol(message.symbol)
+    from app.cmc.integration import priority as cmc_priority
     return (
         -score,
         -rr,
         -technical_score,
         -opportunity_score,
+        -cmc_priority(symbol_result),
         _major_liquidity_priority_index(symbol),
         symbol,
     )

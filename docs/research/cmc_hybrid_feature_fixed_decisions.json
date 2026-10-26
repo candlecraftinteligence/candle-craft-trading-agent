@@ -1,0 +1,150 @@
+{
+  "config": {
+    "account_equity": "10000",
+    "aggressive_toggle": false,
+    "bias_timeframe": "12h",
+    "btc_context_enabled": true,
+    "btc_d_cache_ttl_sec": 300,
+    "btc_d_context_enabled": true,
+    "btc_d_request_timeout_sec": 5.0,
+    "cache_enabled": true,
+    "cache_file": null,
+    "cache_ttl_seconds": null,
+    "candle_limit": 220,
+    "confirmation_timeframe": "15m",
+    "current_daily_loss_pct": null,
+    "decision_timestamp": "2026-09-21T00:00:00Z",
+    "derivatives_source_truth_shadow": false,
+    "dry_run_alerts": true,
+    "enable_strategy_output": true,
+    "exchange": "binance",
+    "execution_timeframe": "15m",
+    "fast_mode": false,
+    "global_context_enabled": false,
+    "htf_timeframe": "2d",
+    "include_formatted_strategy_output": true,
+    "interval": "15m",
+    "leverage": null,
+    "liquidation_flow_enabled": false,
+    "liquidation_flow_max_symbols": 100,
+    "liquidation_flow_stale_sec": 30.0,
+    "macro_event_cache_ttl_sec": 21600,
+    "macro_event_context_enabled": false,
+    "macro_event_max_stale_sec": 172800,
+    "macro_event_request_timeout_sec": 10.0,
+    "market_regime_enabled": false,
+    "max_daily_risk_pct": null,
+    "microstructure_flow_enabled": false,
+    "microstructure_flow_max_symbols": 100,
+    "microstructure_flow_stale_sec": 5.0,
+    "min_rr": "2.5",
+    "min_score_for_idea": "80",
+    "order_book_liquidity_bootstrap_concurrency": 2,
+    "order_book_liquidity_enabled": false,
+    "order_book_liquidity_event_buffer_size": 256,
+    "order_book_liquidity_max_symbols": 100,
+    "order_book_liquidity_snapshot_limit": 500,
+    "order_book_liquidity_stale_sec": 5.0,
+    "order_book_liquidity_update_speed": "500ms",
+    "regime_risk_mode": "balanced",
+    "regime_strictness": "normal",
+    "replay_candles": null,
+    "request_timeout_sec": 10.0,
+    "risk_per_trade_pct": "1",
+    "scan_timeout_sec": null,
+    "strategy_modes": [
+      "challenge",
+      "swing",
+      "scalp"
+    ],
+    "strategy_name": "liquidity_grab_pullback",
+    "structure_timeframe": "2h",
+    "symbol_timeout_sec": 60.0,
+    "symbols": [
+      {
+        "symbol": "BTCUSDT"
+      },
+      {
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "verbose": false
+  },
+  "public_decision": {
+    "alert_type": "SIGNAL_CONFIRMED",
+    "delivery_signal_id": "synthetic:fixed-generation-SETUP-2c0d7ffdd0a1b423",
+    "eligible": true,
+    "public_economic_plan": {
+      "material_change_reason": "same_public_economic_setup",
+      "normalized_entry_high": "102",
+      "normalized_entry_low": "100",
+      "normalized_invalidation": "96",
+      "plan_hash": "88bfc38c11fe77ef02c9",
+      "plan_id": "BTCUSDT|long|88bfc38c11fe77ef02c9",
+      "raw_entry_high": "102",
+      "raw_entry_low": "100",
+      "raw_invalidation": "95",
+      "setup_family": "liquidity_grab_pullback",
+      "side": "long",
+      "source_modes": [
+        "swing"
+      ],
+      "structural_anchor": "execution_sweep|15m|1789987200000",
+      "structural_identity": [],
+      "symbol": "BTCUSDT",
+      "tick_size": "0.01"
+    },
+    "reason": "eligible"
+  },
+  "scanner_decisions": [
+    {
+      "bos_detected": true,
+      "candidate_quality_grade": "A",
+      "choch_detected": false,
+      "derivatives_score": 100,
+      "final_failed_gate": "N/A",
+      "final_quality_grade": "A",
+      "rejected_strategy_modes": [
+        "swing",
+        "scalp",
+        "challenge"
+      ],
+      "rejection_reason": "TP2 candidate is too close to entry for the current stop.",
+      "rejection_stage": "target_integrity",
+      "status": "scanned_no_setup",
+      "status_history": [
+        "scanned_no_setup"
+      ],
+      "sweep_detected": false,
+      "symbol": "BTCUSDT",
+      "technical_score": 95,
+      "trade_plan": null,
+      "valid_strategy_modes": []
+    },
+    {
+      "bos_detected": false,
+      "candidate_quality_grade": "Reject",
+      "choch_detected": false,
+      "derivatives_score": 100,
+      "final_failed_gate": "N/A",
+      "final_quality_grade": "Reject",
+      "rejected_strategy_modes": [
+        "challenge",
+        "swing",
+        "scalp"
+      ],
+      "rejection_reason": "No valid Liquidity-Grab Pullback setup.",
+      "rejection_stage": "strategy",
+      "status": "scanned_no_setup",
+      "status_history": [
+        "scanned_no_setup"
+      ],
+      "sweep_detected": false,
+      "symbol": "ETHUSDT",
+      "technical_score": 10,
+      "trade_plan": null,
+      "valid_strategy_modes": []
+    }
+  ],
+  "synthetic_fixture_only": true
+}

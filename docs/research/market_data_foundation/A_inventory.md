@@ -194,10 +194,10 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - code refs:
   - `app/data/derivatives_source_evidence.py:48` contains `"/fapi/v1/fundingRate"`
   - `app/data/derivatives_source_evidence.py:52` contains `"/v5/market/funding/history"`
-  - `app/pipeline/scanner_runner.py:2477` contains `async def _fetch_optional_market_data(`
-  - `app/pipeline/scanner_runner.py:4606` contains `def _derivatives_enrichment_input(`
-  - `app/pipeline/scanner_runner.py:4631` contains `def _derivatives_rejection(`
-  - `app/pipeline/scanner_runner.py:1712` contains `status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,`
+  - `app/pipeline/scanner_runner.py:2491` contains `async def _fetch_optional_market_data(`
+  - `app/pipeline/scanner_runner.py:4623` contains `def _derivatives_enrichment_input(`
+  - `app/pipeline/scanner_runner.py:4648` contains `def _derivatives_rejection(`
+  - `app/pipeline/scanner_runner.py:1726` contains `status=ScannerPipelineStatus.REJECTED_BY_DERIVATIVES,`
 
 ## open_interest
 
@@ -293,7 +293,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - expectancy_benefit: not established
 - code refs:
   - `app/microstructure/models.py:14` contains `aggTrade`
-  - `app/core/config.py:78` contains `microstructure_flow_enabled: bool = False`
+  - `app/core/config.py:91` contains `microstructure_flow_enabled: bool = False`
 
 ## order_book_binance_usdm
 
@@ -325,7 +325,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - expectancy_benefit: not established
 - code refs:
   - `app/microstructure/order_book_service.py:92` contains `"/fapi/v1/depth"`
-  - `app/core/config.py:84` contains `order_book_liquidity_enabled: bool = False`
+  - `app/core/config.py:97` contains `order_book_liquidity_enabled: bool = False`
 
 ## liquidations_binance_force_order
 
@@ -357,7 +357,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - expectancy_benefit: not established
 - code refs:
   - `app/microstructure/liquidation.py:58` contains `def parse_binance_liquidation(`
-  - `app/core/config.py:81` contains `liquidation_flow_enabled: bool = False`
+  - `app/core/config.py:94` contains `liquidation_flow_enabled: bool = False`
 
 ## btc_directional_context
 
@@ -389,7 +389,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - expectancy_benefit: not established
 - code refs:
   - `app/context/btc.py:19` contains `BTC_CONTEXT_TIMEFRAMES = ("12h", "2h", "15m")`
-  - `app/core/config.py:70` contains `btc_context_enabled: bool = True`
+  - `app/core/config.py:83` contains `btc_context_enabled: bool = True`
 
 ## eth_regime_candles
 
@@ -421,7 +421,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - expectancy_benefit: not established
 - code refs:
   - `app/pipeline/scanner_runner.py:296` contains `market_regime_enabled: bool = False`
-  - `app/pipeline/scanner_runner.py:2048` contains `"ETHUSDT", "eth_candles"`
+  - `app/pipeline/scanner_runner.py:2062` contains `"ETHUSDT", "eth_candles"`
 
 ## btc_dominance
 
@@ -580,7 +580,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - expectancy_benefit: not established
 - code refs:
   - `app/context/macro_providers.py:44` contains `BLS_CALENDAR_URL`
-  - `app/core/config.py:74` contains `macro_event_context_enabled: bool = True`
+  - `app/core/config.py:87` contains `macro_event_context_enabled: bool = True`
 
 ## essential_candle_freshness
 
