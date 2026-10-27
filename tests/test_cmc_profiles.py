@@ -207,3 +207,40 @@ def test_failed_metadata_refresh_cannot_renew_expired_identity(tmp_path):
             assert collector._metadata == (metadata,old)
             await c.aclose()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("authorization", ["empty", "approved", "expired", "revoked", "wrong_market"])
+def test_restart_rechecks_snapshot_identity_against_current_owner_manifest(tmp_path,authorization):
+    async def scenario():
+        from datetime import UTC, datetime
+        from app.cmc.collection import IdentityManifest
+        from app.cmc.models import Snapshot, stable_id
+        from app.cmc.runtime import service_for
+        from app.core.config import Settings
+        from test_cmc_identity_review import approved
+        from tests.fixtures.cmc import instrument, obs
+        now = datetime.now(UTC)
+        binding = approved(acquired_at=now-timedelta(hours=2),reviewed_at=now-timedelta(hours=1),
+            approved_at=now-timedelta(minutes=30),expires_at=now+timedelta(days=1))
+        current = binding
+        if authorization == "expired": current = binding.model_copy(update={"expires_at":now-timedelta(seconds=1)})
+        if authorization == "revoked": current = binding.model_copy(update={"approved":False})
+        if authorization == "wrong_market": current = binding.model_copy(update={"market_id":999})
+        manifest = IdentityManifest(bindings=() if authorization == "empty" else (current,))
+        path = tmp_path/"identity.json"
+        path.write_text(manifest.model_dump_json())
+        identity = instrument(binding_ref=stable_id(binding),binding_expires_at=binding.expires_at,
+            binding_approved_at=binding.approved_at,metadata_acquired_at=now-timedelta(seconds=2),
+            map_acquired_at=now-timedelta(seconds=2),exchange_registry_acquired_at=now-timedelta(seconds=2))
+        global_row = obs().model_copy(update={"source_at":now-timedelta(seconds=1),"acquired_at":now-timedelta(seconds=1)})
+        contract = global_row.model_copy(update={"id":"synthetic:contract","instrument":identity,"scope":"contract"})
+        store = Sidecar(tmp_path/"cmc_restart.sqlite")
+        store.put("snapshot",Snapshot(observations=(global_row,contract),batch_id="synthetic:restored"),acquired_at=now)
+        service = await service_for(Settings(_env_file=None,cmc_mode="shadow",cmc_api_key=None,
+            cmc_sidecar_path=store.path,cmc_identity_manifest=path))
+        assert service is not None
+        assert [o.id for o in service.snapshot.observations] == ([global_row.id,contract.id]
+            if authorization == "approved" else [global_row.id])
+        assert service.task is None  # restoring a snapshot never starts another worker
+        await service.close()
+    asyncio.run(scenario())

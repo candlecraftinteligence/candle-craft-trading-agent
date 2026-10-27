@@ -103,7 +103,10 @@ that latency gap. Measure actual analysis-to-selection delays before rollout; th
 separate event-loop isolation phase retains ownership of scanner latency changes.
 
 Completed families are cached with original acquisitions and restored from the
-sidecar across restarts. Client cache and inflight coalescing remain shared. Failed
+sidecar across restarts. Restored contract observations must also match a current,
+unexpired owner-approved exact binding and its immutable approval fingerprint;
+empty, revoked, changed or legacy manifests cannot resurrect authorization.
+Independent global observations remain available. Client cache and inflight coalescing remain shared. Failed
 families retry no faster than every min(cadence, 300) seconds; the client additionally
 has bounded retries, 429 handling, a circuit breaker and a local request-rate cap.
 Outages retain prior evidence with its original timestamps, so it becomes stale.

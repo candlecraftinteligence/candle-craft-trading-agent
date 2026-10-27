@@ -4,9 +4,12 @@
 
 - BRANCH: `feature/cmc-v1-shadow-decision-recovery`
 - BASE_SHA: `81bbfc6ee806aa4928c287cd685314ea3fff8acd` — fetched origin/main; PR #150 merge.
-- IMPLEMENTATION_SHA: pending commit after verification.
-- PR_URL: pending creation after verification.
-- CI_STATUS: pending PR checks. No merge or deployment is authorized by this phase.
+- IMPLEMENTATION_SHA: `e8d9f855f84ac465f9d3ececb6815972f0ed3998`.
+- PR_URL: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/151
+- CI_STATUS: PASS on the initial recovery SHA above (CI run 40486973371, 3,831 tests).
+  The final restart guard/report head is verified through PR #151 checks and its
+  exact-head result is recorded in the PR description/final handoff.
+  No merge or deployment is authorized by this phase.
 - Worktree: `C:\CandleCraftDev\.worktrees\cmc-v1-shadow-decision-recovery`.
   The original checkout, its branch/untracked files and other worktrees are preserved.
 
@@ -53,6 +56,10 @@ bindings fail even when constructed programmatically. Binding expiry propagates
 into observations. Reviewed metadata cannot be renewed by a failed refresh; this
 additional cache regression was reproduced before repair. Identity metadata has
 its own validity and cannot refresh market-price evidence.
+Restoring a saved snapshot now rechecks the current owner-approved binding and
+fingerprint. Empty, expired, revoked or changed manifests remove older contract
+observations while retaining independent global context. Four failing restart
+scenarios were reproduced before repair; the valid-approval control still passes.
 
 `config/cmc/identity.proposed.json` represents BTC (ID 1/bitcoin/market 47150), ETH
 (1027/ethereum/47205) and SOL (5426/solana/67944), Binance exchange ID 270, USDT
@@ -133,7 +140,7 @@ No ranking authority, capacity, public gate or economic plan was changed here.
 
 ## Verification
 
-- TARGETED_TESTS: 181 selected checks passed (CMC plus inventory/report anchors),
+- TARGETED_TESTS: 186 selected checks passed (CMC plus inventory/report anchors),
   3,650 unrelated tests deselected; one existing Starlette/httpx deprecation warning.
   Command: project Python `-m pytest tests -k 'cmc or test_inventory_anchors_match_source
   or test_reports_name_every_required_section'`; JUnit evidence in the DEV-only
@@ -141,9 +148,13 @@ No ranking authority, capacity, public gate or economic plan was changed here.
 - FULL_PYTEST: 3,830 passed, zero failed/skipped, one existing deprecation warning,
   672.83 seconds on DEV. Project Python: `-m pytest
   --junitxml=research_runs/cmc_recovery/full-final.xml`. The subsequently added
-  resumed-regime boundary regression also passes in the 181 selected checks;
+  resumed-regime and five restart-authorization regressions also pass in the 186 selected checks;
   the final PR CI must run the complete current suite against the exact head.
-- GITHUB_CI: pending PR creation and exact-head verification.
+- GITHUB_CI: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40486973371
+  passed all 3,831 tests on `e8d9f855f84ac465f9d3ececb6815972f0ed3998`.
+  The final guard/report head is rechecked through
+  https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/151/checks
+  after this report is finalized; the final handoff pins that run and head.
 - BASELINE_REGRESSION: five baseline/CMC modes match the protected canonical
   fixture; six policy cases pass. Evidence: `docs/research/cmc_recovery_canonical_regression.json`.
 - SECURITY_REVIEW: no credential-pattern hits in changed/new files; CMC transport
