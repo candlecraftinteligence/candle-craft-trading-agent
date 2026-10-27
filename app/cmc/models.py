@@ -97,6 +97,7 @@ class Instrument(Frozen):
     map_acquired_at: datetime
     exchange_registry_acquired_at: datetime
     exchange_registry_ref: str
+    binding_expires_at: datetime | None = None
 
     @property
     def key(self) -> str:
@@ -138,6 +139,9 @@ class Observation(Frozen):
         if self.acquired_at > as_of:
             return EvidenceState.UNAVAILABLE
         if self.instrument is not None:
+            expiry = self.instrument.binding_expires_at
+            if expiry is not None and (expiry.tzinfo is None or as_of >= expiry):
+                return EvidenceState.STALE
             times = (self.instrument.metadata_acquired_at, self.instrument.binding_approved_at, self.instrument.map_acquired_at,
                      self.instrument.exchange_registry_acquired_at)
             if any(t.tzinfo is None or t > as_of for t in times):

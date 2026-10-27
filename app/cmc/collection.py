@@ -3,18 +3,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from collections import OrderedDict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.cmc.client import CmcClient, Fetch
 from app.cmc.endpoints import Endpoint, rows
 from app.cmc.identity import AssetBinding, match_instrument
 from app.cmc.models import EvidenceState as S, Frozen, Instrument, Snapshot, stable_id
-from app.cmc.normalize import normalize_context, normalize_pair
+from app.cmc.normalize import normalize_context, normalize_pair, observation
 from app.cmc.storage import Sidecar
+from app.cmc.profiles import CollectionProfile
 from app.data.exchange_clients import BinanceFuturesClient
 
 
@@ -35,6 +37,14 @@ class IdentityManifest(Frozen):
     semantics: tuple[Semantics, ...] = ()
     category_ids: tuple[str, ...] = ()
     external_instruments: tuple["ReviewedInstrument", ...] = ()
+
+    @model_validator(mode="after")
+    def unique_bindings(self):
+        for attr in ("cmc_id", "binance_base", "contract_symbol", "market_id"):
+            values = [getattr(b, attr) for b in self.bindings if getattr(b, attr) is not None]
+            if len(values) != len(set(values)):
+                raise ValueError("conflicting or ambiguous asset bindings")
+        return self
 
 
 class ReviewedInstrument(Frozen):
@@ -73,10 +83,15 @@ class BinanceMetadataProvider(BinanceFuturesClient):
 
 class Collector:
     def __init__(self, client: CmcClient, store: Sidecar, *, manifest=IdentityManifest(),
-                 metadata_provider=None, max_pages=2, max_observations=2500):
+                 metadata_provider=None, max_pages=2, max_observations=2500, profile: CollectionProfile | None = None):
         self.client, self.store, self.manifest = client, store, manifest
         self.metadata_provider = metadata_provider
-        self.max_pages, self.max_observations = max_pages, max_observations
+        self.profile = profile
+        self.max_pages, self.max_observations = max_pages, profile.max_observations if profile else max_observations
+        self._families = OrderedDict()
+        self._restored = False
+        self._metadata = ({}, None)
+        self._retry_at = {}
 
     async def collect(self) -> Snapshot:
         requests = (
@@ -94,10 +109,44 @@ class Collector:
         # Sequential endpoint families, with only client-bounded concurrent callers. This
         # avoids a burst of requests on the resource-constrained scanner host.
         fetched, errors = [], []
+        if self.profile and not self._restored:
+            saved = await asyncio.to_thread(self.store.causal, "collection_family", self.client.clock(), limit=64)
+            for row in saved:
+                key = row["request_key"]
+                if key not in self._families:
+                    self._families[key] = tuple(Fetch.model_validate(f) for f in row["fetches"])
+                if len(self._families) >= self.profile.cache_entries:
+                    break
+            self._restored = True
         for endpoint, params in requests:
+            family = self.profile.family(endpoint) if self.profile else None
+            if self.profile and family is None:
+                continue
+            if family and family.limit is not None:
+                params = {**params, "limit": family.limit}
+            if endpoint == Endpoint.MAP and self.manifest.bindings:
+                # Symbol is only a bounded acquisition filter. Exact reviewed
+                # numeric IDs, slugs and independent metadata still own identity.
+                params = {**params, "symbol": ",".join(b.binance_base for b in self.manifest.bindings)}
+            key = stable_id((endpoint, params))
+            previous = self._families.get(key, ())
+            if previous:
+                self._families.move_to_end(key)
+            now = self.client.clock()
+            if family and now < self._retry_at.get(key, now):
+                fetched.extend(previous)
+                errors.append(endpoint.value+":retry_backoff_stale_fallback")
+                continue
+            if (family and previous and all(not f.error for f in previous)
+                    and all(0 <= (now-f.acquired_at).total_seconds() < family.seconds for f in previous)):
+                fetched.extend(previous)
+                if any(f.pagination_complete is False for f in previous):
+                    errors.append(endpoint.value+":page_budget_partial")
+                continue
+            start = len(fetched)
             try:
                 if endpoint in {Endpoint.LISTINGS, Endpoint.MAP, Endpoint.EXCHANGE_PAIRS, Endpoint.CRYPTO_PAIRS}:
-                    async for result in self.client.pages(endpoint, params, max_pages=self.max_pages):
+                    async for result in self.client.pages(endpoint, params, max_pages=family.max_pages if family else self.max_pages):
                         fetched.append(result)
                         if result.error:
                             errors.append(endpoint.value + ":" + result.error)
@@ -112,21 +161,43 @@ class Collector:
                 reason="response_contract:"+type(exc).__name__
                 errors.append(endpoint.value+":"+reason)
                 fetched.append(Fetch(endpoint=endpoint,acquired_at=self.client.clock(),state=S.ERROR,error=reason))
-        metadata, metadata_at = {}, None
-        if self.manifest.bindings and any(f.endpoint in {Endpoint.EXCHANGE_PAIRS,Endpoint.CRYPTO_PAIRS} and not f.error for f in fetched):
+            current = tuple(fetched[start:])
+            if family and current:
+                if any(f.error for f in current):
+                    self._retry_at[key] = now + timedelta(seconds=min(300, family.seconds))
+                if any(f.error for f in current) and previous:
+                    # Outage keeps the last acquired evidence, which still expires
+                    # at source time. Failed attempts never refresh that timestamp.
+                    fetched[start:] = previous
+                elif not any(f.error for f in current):
+                    self._families[key] = current
+                    while len(self._families) > self.profile.cache_entries:
+                        self._families.popitem(last=False)
+                    try:
+                        await asyncio.to_thread(self.store.put, "collection_family", {
+                            "request_key":key, "fetches":[f.model_dump(mode="json") for f in current]},
+                            acquired_at=self.client.clock())
+                    except ValueError:
+                        errors.append(endpoint.value+":restart_cache_payload_budget")
+        metadata, metadata_at = self._metadata
+        if (self.manifest.bindings and (metadata_at is None or (self.client.clock()-metadata_at).total_seconds() >= 3600)
+                and any(f.endpoint in {Endpoint.EXCHANGE_PAIRS,Endpoint.CRYPTO_PAIRS} and not f.error for f in fetched)):
             provider = self.metadata_provider or BinanceMetadataProvider(timeout=3, retry_attempts=2)
             try:
                 payload = await asyncio.wait_for(provider.snapshot(), timeout=8)
-                metadata_at = self.client.clock()
+                refreshed_at = self.client.clock()
                 symbols = payload.get("symbols", [])
-                if len(symbols) > 10000:
+                if not isinstance(symbols, list) or len(symbols) > 10000:
                     raise ValueError("metadata item budget")
+                refreshed = {}
                 for s in symbols:
                     if not isinstance(s,dict) or not isinstance(s.get("symbol"),str):
                         continue
                     key=s["symbol"]
-                    metadata[key]=s if key not in metadata else {}
-                await asyncio.to_thread(self.store.put, "exchange_metadata", payload, acquired_at=metadata_at)
+                    refreshed[key]=s if key not in refreshed else {}
+                await asyncio.to_thread(self.store.put, "exchange_metadata", payload, acquired_at=refreshed_at)
+                metadata, metadata_at = refreshed, refreshed_at
+                self._metadata = (metadata, metadata_at)
             except Exception as exc:
                 errors.append("exchange_metadata:" + type(exc).__name__)
             finally:
@@ -173,9 +244,16 @@ class Collector:
                             binding, assets.get(binding.cmc_id, {}), as_of=self.client.clock(),
                             metadata_at=metadata_at, acquired_at=self.client.clock(),
                             map_acquired_at=asset_times.get(binding.cmc_id, self.client.clock()),
-                            exchange_registry=registry.get("binance",{}),exchange_registry_acquired_at=registry_times.get("binance",self.client.clock()))
+                            exchange_registry=registry.get("binance",{}),exchange_registry_acquired_at=registry_times.get("binance",self.client.clock()),
+                            require_owner_approval=True)
                         await asyncio.to_thread(self.store.put, "mapping", mapped, acquired_at=self.client.clock())
                         instrument = mapped.instrument
+                        if instrument:
+                            observations.append(observation(result.model_copy(update={"acquired_at":self.client.clock()}),
+                                "instrument_identity", 1, units="exact_contract_identity", source=result.acquired_at,
+                                scope="identity", cmc_id=instrument.cmc_id, exchange_id=instrument.exchange_id,
+                                instrument=instrument, max_age=86400,
+                                reason="Acquired identity metadata only; does not refresh any market metric"))
                     else:
                         instrument=self._external_instrument(pair,pair_exchange,assets,asset_times,registry,registry_times)
                     specs = [s for s in self.manifest.semantics if s.market_id == pair.get("market_id")
@@ -194,16 +272,19 @@ class Collector:
                 raise ValueError("normalized observation budget exceeded")
         acquired = self.client.clock()
         snapshot = Snapshot(observations=tuple(observations), errors=tuple(errors),
-            batch_id=stable_id(tuple((f.endpoint,f.raw_ref,f.acquired_at) for f in fetched)))
+            batch_id=stable_id((tuple((f.endpoint,f.raw_ref,f.acquired_at) for f in fetched),
+                               tuple(o.id for o in observations), tuple(errors))))
         await asyncio.to_thread(self.store.put, "snapshot", snapshot, acquired_at=acquired,
             identity=snapshot.batch_id)
         await asyncio.to_thread(self.store.put, "collection_batch", {
             "batch_id":snapshot.batch_id, "capabilities":self.client.capabilities,
-            "usage":self.store.usage(acquired), "errors":errors,
+            "profile":self.profile.name if self.profile else "LEGACY",
+            "coverage":"PARTIAL" if errors else "REQUESTED_FAMILIES_ONLY",
+            "usage":self.store.credit_summary(acquired), "errors":errors,
             "sources":[{"endpoint":f.endpoint.value,"acquired_at":f.acquired_at.isoformat(),"raw_ref":f.raw_ref,
                         "authenticated":f.authenticated,"credits_reported":f.credits_reported,
                         "pagination_complete":f.pagination_complete} for f in fetched],
-            "observation_count":len(observations)}, acquired_at=acquired, identity="batch:" + snapshot.batch_id)
+            "observation_count":len(observations)}, acquired_at=acquired)
         return snapshot
 
     def _external_instrument(self,pair,exchange,assets,asset_times,registry,registry_times):

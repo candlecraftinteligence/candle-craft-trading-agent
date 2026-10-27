@@ -39,6 +39,10 @@ class Sidecar:
                 CREATE INDEX IF NOT EXISTS evidence_retention ON evidence(acquired_at,id);
                 CREATE TABLE IF NOT EXISTS usage (
                     bucket TEXT PRIMARY KEY, credits INTEGER NOT NULL, requests INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS credit_audit (
+                    bucket TEXT PRIMARY KEY, reserved INTEGER NOT NULL DEFAULT 0,
+                    reported INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+                    unknown INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS storage_stats (
                     singleton INTEGER PRIMARY KEY CHECK(singleton=1), records INTEGER NOT NULL, bytes INTEGER NOT NULL);
                 INSERT OR IGNORE INTO storage_stats VALUES(1,0,0);
@@ -110,7 +114,7 @@ class Sidecar:
         return [json.loads(row[0]) for row in records]
 
     def reserve(self, at: datetime, credits: int, *, daily: int, monthly: int, record_request: bool = True) -> bool:
-        if credits < 0 or daily < 0 or monthly < 0:
+        if at.tzinfo is None or credits < 0 or daily < 0 or monthly < 0:
             raise ValueError("negative credit budget")
         at = at.astimezone(UTC)
         buckets = (("d:" + at.strftime("%Y-%m-%d"), daily), ("m:" + at.strftime("%Y-%m"), monthly))
@@ -122,12 +126,57 @@ class Sidecar:
                     return False
             for key, _ in buckets:
                 db.execute("INSERT INTO usage VALUES(?,?,?) ON CONFLICT(bucket) DO UPDATE SET credits=credits+excluded.credits,requests=requests+excluded.requests", (key, credits, int(record_request)))
+                if record_request:
+                    # A reservation remains conservatively charged until a valid
+                    # provider receipt arrives; cancellation cannot erase usage.
+                    db.execute("""INSERT INTO credit_audit(bucket,reserved,failed) VALUES(?,?,?)
+                        ON CONFLICT(bucket) DO UPDATE SET reserved=reserved+excluded.reserved,
+                        failed=failed+excluded.failed""", (key, credits, credits))
             # Keep at most 400 days / 24 months of accounting, independently of evidence retention.
             db.execute("DELETE FROM usage WHERE bucket LIKE 'd:%' AND bucket < ?", ("d:" + (at - timedelta(days=400)).strftime("%Y-%m-%d"),))
             db.execute("DELETE FROM usage WHERE bucket LIKE 'm:%' AND bucket < ?", ("m:" + (at - timedelta(days=730)).strftime("%Y-%m"),))
+            db.execute("DELETE FROM credit_audit WHERE bucket NOT IN (SELECT bucket FROM usage)")
         return True
 
+    def reconcile(self, reserved_at: datetime, estimate: int, reported: int | None):
+        """Reconcile to the reservation's UTC buckets, even across midnight.
+
+        Provider costs above the reservation remain charged even above the cap;
+        the next reservation fails closed. Unknown costs retain the estimate.
+        """
+        if reserved_at.tzinfo is None or estimate < 0 or reported is not None and reported < 0:
+            raise ValueError("negative credit receipt")
+        at = reserved_at.astimezone(UTC)
+        keys = ("d:"+at.strftime("%Y-%m-%d"), "m:"+at.strftime("%Y-%m"))
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            for key in keys:
+                if not db.execute("SELECT 1 FROM credit_audit WHERE bucket=?", (key,)).fetchone():
+                    raise ValueError("missing credit reservation")
+                db.execute("UPDATE usage SET credits=credits+? WHERE bucket=?",
+                    (0 if reported is None else reported-estimate, key))
+                db.execute("""UPDATE credit_audit SET reported=reported+?, failed=failed-?,
+                    unknown=unknown+? WHERE bucket=?""", (reported or 0, estimate, estimate if reported is None else 0, key))
+
+    def credit_summary(self, at: datetime):
+        usage = self.usage(at)
+        for row in usage.values():
+            row.update({"LOCAL_RESERVED_CREDITS":None, "PROVIDER_REPORTED_CREDITS":None,
+                "FAILED_ATTEMPT_RESERVATIONS":None, "UNKNOWN_USAGE":row["reserved_credits"],
+                "ACCOUNT_USAGE_OUTSIDE_CCI":"N/A: account-wide receipt required"})
+        with self.connect() as db:
+            for key, reserved, reported, failed, unknown in db.execute(
+                    "SELECT * FROM credit_audit WHERE bucket IN (?,?)",
+                    ("d:"+at.astimezone(UTC).strftime("%Y-%m-%d"), "m:"+at.astimezone(UTC).strftime("%Y-%m"))):
+                usage[key].update({"LOCAL_RESERVED_CREDITS":reserved,
+                    "PROVIDER_REPORTED_CREDITS":reported, "FAILED_ATTEMPT_RESERVATIONS":failed,
+                    "UNKNOWN_USAGE":unknown+max(0,usage[key]["reserved_credits"]-reported-failed-unknown),
+                    "ACCOUNT_USAGE_OUTSIDE_CCI":"N/A: account-wide receipt required"})
+        return usage
+
     def usage(self, at: datetime):
+        if at.tzinfo is None:
+            raise ValueError("credit accounting requires timezone")
         at = at.astimezone(UTC)
         with self.connect() as db:
             return {key: {"reserved_credits": credits, "requests": requests}

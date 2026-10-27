@@ -7,7 +7,7 @@ import hashlib
 import json
 import sqlite3
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Callable
@@ -43,9 +43,11 @@ class CmcClient:
                  timeout: float = 3, attempts: int = 3, concurrency: int = 2,
                  daily_credits: int = 100, monthly_credits: int = 3000,
                  max_entries: int = 16, max_body_bytes: int = 1024 * 1024,
+                 requests_per_minute: int = 45,
                  clock: Callable = lambda: datetime.now(UTC), monotonic: Callable = time.monotonic,
                  sleep: Callable = asyncio.sleep):
-        if not 1 <= concurrency <= 8 or not 1 <= attempts <= 5 or timeout <= 0 or max_entries < 1:
+        if (not 1 <= concurrency <= 8 or not 1 <= attempts <= 5 or timeout <= 0 or max_entries < 1
+                or max_body_bytes < 1 or not 1 <= requests_per_minute <= 50):
             raise ValueError("invalid CMC resource limits")
         self.store, self._key, self.keyless = store, api_key, keyless
         self._http = http_client or httpx.AsyncClient(follow_redirects=False)
@@ -55,6 +57,9 @@ class CmcClient:
         self.max_entries, self.max_body = max_entries, max_body_bytes
         self.clock, self.monotonic, self.sleep = clock, monotonic, sleep
         self._semaphore = asyncio.Semaphore(concurrency)
+        self._request_times = deque(maxlen=requests_per_minute)
+        self._rate_lock = asyncio.Lock()
+        self.requests_per_minute = requests_per_minute
         self._cache = OrderedDict()
         self._inflight = {}
         self._failures, self._open_until = 0, 0.0
@@ -158,9 +163,11 @@ class CmcClient:
         result = self._error(endpoint, "attempts_exhausted")
         async with self._semaphore:
             for attempt in range(self.attempts):
+                await self._rate_slot()
                 estimate = reserved_credits(endpoint, params)
+                reserved_at = self.clock()
                 try:
-                    allowed = await asyncio.to_thread(self.store.reserve, self.clock(), estimate,
+                    allowed = await asyncio.to_thread(self.store.reserve, reserved_at, estimate,
                         daily=self.daily, monthly=self.monthly)
                     if not allowed:
                         return self._error(endpoint, "credit_budget", EvidenceState.UNAVAILABLE)
@@ -187,9 +194,7 @@ class CmcClient:
                         acquired = self.clock()
                         reported = status.get("credit_count")
                         reported = int(reported) if str(reported).isdigit() else None
-                        if reported is not None and reported > estimate:
-                            await asyncio.to_thread(self.store.reserve, acquired, reported - estimate,
-                                daily=2**63-1, monthly=2**63-1,record_request=False)
+                        await asyncio.to_thread(self.store.reconcile, reserved_at, estimate, reported)
                         result = Fetch(endpoint=endpoint, acquired_at=acquired,
                             state=EvidenceState.UNVERIFIED, data=payload["data"], raw=payload,
                             raw_text=body.decode("utf-8"),raw_ref=hashlib.sha256(body).hexdigest(),
@@ -207,6 +212,15 @@ class CmcClient:
             self._open_until = self.monotonic() + 60
         self.capabilities[endpoint.value] = result.state.value + ":" + str(result.error)
         return result
+
+    async def _rate_slot(self):
+        async with self._rate_lock:
+            now = self.monotonic()
+            while self._request_times and now - self._request_times[0] >= 60:
+                self._request_times.popleft()
+            if len(self._request_times) >= self.requests_per_minute:
+                await self.sleep(max(0, 60-(now-self._request_times[0])))
+            self._request_times.append(self.monotonic())
 
     async def _request(self, url, headers, params):
         async with self._http.stream("GET", url, headers=headers, params=params, timeout=self.timeout) as response:

@@ -7,6 +7,7 @@ from datetime import UTC
 
 from app.cmc import integration
 from app.cmc.models import stable_id
+from app.cmc.leverage import selection_leverage
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,8 @@ async def audit_selection(result, settings, selection, *, selector, scan_run_id)
         before, after = set(baseline.selected_signal_ids), set(selection.selected_signal_ids)
         at = integration.datetime.now(UTC)
         record = {"schema_version": "cmc-selection/1", "scan_run_id": scan_run_id,
+            "leverage":selection_leverage(tuple(row.cmc_evaluation for row in result.results
+                if integration.decision_for(row) is not None)),
             "mode": settings.cmc_mode, "selected_at": at.isoformat(),
             "baseline_selected_signal_ids": sorted(before), "selected_signal_ids": sorted(after),
             "retained_signal_ids": sorted(before & after),

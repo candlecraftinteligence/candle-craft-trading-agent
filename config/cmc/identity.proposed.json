@@ -1,0 +1,55 @@
+{
+  "bindings": [
+    {
+      "cmc_id": 1,
+      "cmc_slug": "bitcoin",
+      "binance_base": "BTC",
+      "quote_id": 825,
+      "approved": false,
+      "evidence_ref": "sha256:7002be0edfaa6e9004db25fd423767af63b1487635f3cfe9b86ce99a1bfdf6a8;sha256:97529a0c8a03d475fd4850b07aa1588fd48fab960e495f2664da0186f94ed61b;sha256:a51360398603add155d4d1f6321b718fe5f7761079dd2b2d9d78402eae99f8b1;sha256:a6a15c09327c7a2adc442c12b8ac85dcc6f528f65d03b3c55394beb6f6dfe14d;sha256:a9220f4f671128b6a4048d366fa0fc91404ad2265e84eca5a07440d7a5607cc3;sha256:aa1f7a7a91123ac2139f12d830f77976bfeebd2acbf5c8fcd02e576aa26f8a7c;sha256:e3de3cfc9d83b41202a9b516001ce7583073c2beff19fe8bfecd5f3b1d9f64ce;sha256:e75bbe233c57861a3a29fe293fcb5fa5a1bb27030ba7c0e9cefe6c695382c396;sha256:ff76d2cc583dd93f6d8bd89e72984168af872c952d448f0eeaba8b15838c5dc9",
+      "approved_at": null,
+      "contract_symbol": "BTCUSDT",
+      "exchange_id": 270,
+      "market_id": 47150,
+      "acquired_at": "2026-10-26T13:01:39.784751Z",
+      "reviewed_at": null,
+      "expires_at": "2026-11-02T13:01:39.784751Z",
+      "owner_approval_ref": null
+    },
+    {
+      "cmc_id": 1027,
+      "cmc_slug": "ethereum",
+      "binance_base": "ETH",
+      "quote_id": 825,
+      "approved": false,
+      "evidence_ref": "sha256:7002be0edfaa6e9004db25fd423767af63b1487635f3cfe9b86ce99a1bfdf6a8;sha256:97529a0c8a03d475fd4850b07aa1588fd48fab960e495f2664da0186f94ed61b;sha256:a51360398603add155d4d1f6321b718fe5f7761079dd2b2d9d78402eae99f8b1;sha256:a6a15c09327c7a2adc442c12b8ac85dcc6f528f65d03b3c55394beb6f6dfe14d;sha256:a9220f4f671128b6a4048d366fa0fc91404ad2265e84eca5a07440d7a5607cc3;sha256:aa1f7a7a91123ac2139f12d830f77976bfeebd2acbf5c8fcd02e576aa26f8a7c;sha256:e3de3cfc9d83b41202a9b516001ce7583073c2beff19fe8bfecd5f3b1d9f64ce;sha256:e75bbe233c57861a3a29fe293fcb5fa5a1bb27030ba7c0e9cefe6c695382c396;sha256:ff76d2cc583dd93f6d8bd89e72984168af872c952d448f0eeaba8b15838c5dc9",
+      "approved_at": null,
+      "contract_symbol": "ETHUSDT",
+      "exchange_id": 270,
+      "market_id": 47205,
+      "acquired_at": "2026-10-26T13:01:39.784751Z",
+      "reviewed_at": null,
+      "expires_at": "2026-11-02T13:01:39.784751Z",
+      "owner_approval_ref": null
+    },
+    {
+      "cmc_id": 5426,
+      "cmc_slug": "solana",
+      "binance_base": "SOL",
+      "quote_id": 825,
+      "approved": false,
+      "evidence_ref": "sha256:7002be0edfaa6e9004db25fd423767af63b1487635f3cfe9b86ce99a1bfdf6a8;sha256:97529a0c8a03d475fd4850b07aa1588fd48fab960e495f2664da0186f94ed61b;sha256:a51360398603add155d4d1f6321b718fe5f7761079dd2b2d9d78402eae99f8b1;sha256:a6a15c09327c7a2adc442c12b8ac85dcc6f528f65d03b3c55394beb6f6dfe14d;sha256:a9220f4f671128b6a4048d366fa0fc91404ad2265e84eca5a07440d7a5607cc3;sha256:aa1f7a7a91123ac2139f12d830f77976bfeebd2acbf5c8fcd02e576aa26f8a7c;sha256:e3de3cfc9d83b41202a9b516001ce7583073c2beff19fe8bfecd5f3b1d9f64ce;sha256:e75bbe233c57861a3a29fe293fcb5fa5a1bb27030ba7c0e9cefe6c695382c396;sha256:ff76d2cc583dd93f6d8bd89e72984168af872c952d448f0eeaba8b15838c5dc9",
+      "approved_at": null,
+      "contract_symbol": "SOLUSDT",
+      "exchange_id": 270,
+      "market_id": 67944,
+      "acquired_at": "2026-10-26T13:01:39.784751Z",
+      "reviewed_at": null,
+      "expires_at": "2026-11-02T13:01:39.784751Z",
+      "owner_approval_ref": null
+    }
+  ],
+  "semantics": [],
+  "category_ids": [],
+  "external_instruments": []
+}

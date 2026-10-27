@@ -1,0 +1,58 @@
+{
+  "canonical_regression": "five modes equal; six policy cases",
+  "compilation": "PASS",
+  "exact_head_ci": "PENDING PR",
+  "full_pytest": {
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "subsequent_resumed_regime_regression": "PASS in 181 selected final checks; exact-head CI required for complete latest suite",
+    "tests": "3830",
+    "time": "672.334"
+  },
+  "pip_check": "PASS: No broken requirements found",
+  "production_rules_activated": false,
+  "runtime_modified": false,
+  "security": {
+    "CMC_transport": "GET-only",
+    "canonical_database_schema_changed": false,
+    "changed_and_new_files_reviewed": 30,
+    "credential_pattern_hit_files": [],
+    "order_execution_added": false,
+    "runtime_accessed": false
+  },
+  "source_inventory_anchors": 48,
+  "source_inventory_and_generated_report_checks": "PASS",
+  "targeted": {
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "181",
+    "time": "32.158"
+  },
+  "tested_source_sha256": {
+    "app/cmc/client.py": "25be90cb68157e3f9b097ccc687d72a0580edf5df8113e4682b6a43e4e42c43b",
+    "app/cmc/collection.py": "167560d30cfbb01091359e3a4a198a7f54697c37d5fe9cb3d29be865feac8e6e",
+    "app/cmc/forecast.py": "dee1bf7c62d6ccf19243be5310c6c6e5c23eeba1b1628bf6877159791d757767",
+    "app/cmc/identity.py": "3ba90d59226a0c3f2f996de7be51238ed0023c350081cc5988c3ff59128372f3",
+    "app/cmc/identity_review.py": "9724a5b19be53b2110823483b2faafabbd28f4829ef1e1524cd470d5c04bc243",
+    "app/cmc/integration.py": "6c6715abb8c3c5b0f5dae64b0f6c2f02ccacaebc67ccce84b9f13af8efd1697e",
+    "app/cmc/leverage.py": "f04b136d7533a7b880aff6114520b58866f2abb0774233d28903c8310352ebfb",
+    "app/cmc/models.py": "a7efdcdcd9bd7161964666131a15d5bcd5ed5ced2e57e1b9dc89509120185390",
+    "app/cmc/policy.py": "6ecb25b7fd4faf769b236ea7e6a9e46e4827a303797d9e7623dd8e35267ac94a",
+    "app/cmc/profiles.py": "2bec6692b674250b20951ffaf75cb5bac207ac793be1fb50acba4774370c67c3",
+    "app/cmc/runtime.py": "69a83745032017c1039fb040c619a8cf1c006cef402982e341728f0221e61584",
+    "app/cmc/selection_audit.py": "cb477601fb7e1efc9667190db677b0c0874694b5cda4351335c8ed3fbe2c5722",
+    "app/cmc/storage.py": "ee617fe7db2f8d9cb353de4d051b20e9bc0166604a93ed99f313517980161606",
+    "app/core/config.py": "5c47709ce6216b1dfe7ff29ddb7b013405d5624175d29d85c269d6a801042b17",
+    "config/cmc/identity.proposed.json": "ed404a5e414990026091a99bbf53d19a41fe410d4471f27ecfbf7d46e72291e2",
+    "scripts/run_scan.py": "415e1c637d7039527d8ee0ddaaf93daed1fea1fcdb4fb2bdaf27030a84426f49",
+    "tests/cmc_recovery_fixture.py": "1060d54beb410507dd4ca0fea2d4a1a5c4015855eedd1a18b547e7bbe4a8eb32",
+    "tests/test_cmc_forecast.py": "ac8341798902aa4da6797dfad923d701395b82298926e702bd40a325b49ecc9d",
+    "tests/test_cmc_identity_review.py": "a753d2c15934d2187db8bf55d4a4031f42207ce0ad62d3f990ed20b41869f952",
+    "tests/test_cmc_integration.py": "7a44a00071d30305a8812447403a7752d57c1e7b9f8161d5e6fd5c253806052f",
+    "tests/test_cmc_leverage.py": "d134c9b63d42f30458d34f3ab2180db61eaa5b4ee36a8804cfdf522e59964157",
+    "tests/test_cmc_profiles.py": "80d017abe5a1794ecf97a6a9a8a6e8a9698d09a98c4e13f60da8f42b7004a187",
+    "tests/test_cmc_watch_recovery.py": "381c583fb07c39823d45adcc7baf01b6f3412ec66e8f7d119f74a4d32d2ea987"
+  }
+}

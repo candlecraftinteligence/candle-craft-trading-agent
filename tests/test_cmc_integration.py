@@ -160,7 +160,9 @@ def test_fixture_collection_persists_raw_normalized_identity_and_usage(tmp_path)
         class Metadata:
             async def snapshot(self): return {"symbols":[{"symbol":"BTCUSDT","baseAsset":"BTC","quoteAsset":"USDT","marginAsset":"USDT","status":"TRADING","contractType":"PERPETUAL"}]}
         manifest=IdentityManifest(bindings=(AssetBinding(cmc_id=1,cmc_slug="bitcoin",binance_base="BTC",approved=True,
-            evidence_ref="synthetic:review",approved_at=AT-timedelta(days=1)),),semantics=(Semantics(market_id=100,source_contract_ref="synthetic:contract",
+            evidence_ref="synthetic:review",approved_at=AT-timedelta(days=1),
+            contract_symbol="BTCUSDT", exchange_id=270, market_id=100, owner_approval_ref="synthetic:owner",
+            acquired_at=AT-timedelta(days=2), reviewed_at=AT-timedelta(days=1), expires_at=AT+timedelta(days=1)),),semantics=(Semantics(market_id=100,source_contract_ref="synthetic:contract",
                 oi_units="base",oi_counting_convention="open_contract_quantity",funding_semantics="settled_funding",funding_interval_seconds=28800,
                 verified_at=AT-timedelta(seconds=1),expires_at=AT+timedelta(days=1)),))
         store=Sidecar(tmp_path/"cmc_collection.sqlite")

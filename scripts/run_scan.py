@@ -979,7 +979,7 @@ async def _main(
         for symbol_result in scan_result.results:
             latest_results_by_symbol[symbol_result.symbol] = symbol_result
         result = _combined_run_result(
-            config=config,
+            config=config.model_copy(update={"decision_timestamp": scan_result.config.decision_timestamp}),
             watchlist_symbols=watchlist.symbols,
             results_by_symbol=latest_results_by_symbol,
             cache=cache,
@@ -4413,7 +4413,9 @@ async def _run_watch_scan_iteration(
                 latest_results_by_symbol[symbol] = _not_run_symbol_result(symbol, reason=missing_reason)
 
         result = _combined_run_result(
-            config=iteration_config,
+            # ScannerRunner owns the pre-acquisition analysis cutoff. The template
+            # config has no cutoff in watch mode and must not replace that fact.
+            config=iteration_config.model_copy(update={"decision_timestamp": scan_result.config.decision_timestamp}),
             watchlist_symbols=watchlist.symbols,
             results_by_symbol=latest_results_by_symbol,
             cache=cache,
