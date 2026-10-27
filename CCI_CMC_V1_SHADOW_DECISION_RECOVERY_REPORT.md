@@ -4,9 +4,9 @@
 
 - BRANCH: `feature/cmc-v1-shadow-decision-recovery`
 - BASE_SHA: `81bbfc6ee806aa4928c287cd685314ea3fff8acd` — fetched origin/main; PR #150 merge.
-- IMPLEMENTATION_SHA: `e8d9f855f84ac465f9d3ececb6815972f0ed3998`.
+- IMPLEMENTATION_SHA: `a7f86ef5f94a1e6283234d9af4109890ebfa6f75` (includes initial recovery `e8d9f855f84ac465f9d3ececb6815972f0ed3998` and the saved-snapshot guard).
 - PR_URL: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/151
-- CI_STATUS: PASS on the initial recovery SHA above (CI run 40486973371, 3,831 tests).
+- CI_STATUS: PASS on initial recovery `e8d9f85` (CI run 40486973371, 3,831 tests).
   The final restart guard/report head is verified through PR #151 checks and its
   exact-head result is recorded in the PR description/final handoff.
   No merge or deployment is authorized by this phase.
