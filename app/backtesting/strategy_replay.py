@@ -19,7 +19,9 @@ from app.analytics.edge_analytics import (
     build_edge_analytics_report,
     condition_key_from_diagnostics,
 )
-from app.data.candle_integrity import closed_candles_as_of, validate_candle_sequence
+from app.data.candle_integrity import closed_candles_as_of, validate_candle_sequence, normalize_utc_timestamp
+from app.analytics.selective_fibonacci import LEGACY_VERSION, SELECTIVE_VERSION, StrategyVersion
+from app.data.instrument_precision import InstrumentPrecision
 from app.data.dtos import NA, MaybeDecimal, MaybeInt
 from app.strategies.liquidity_grab_pullback import (
     DEFAULT_CONFIRMATION_TIMEFRAME,
@@ -59,6 +61,7 @@ class ReplayDirection(str, Enum):
 
 
 class ReplayConfig(BaseModel):
+    strategy_version: StrategyVersion = LEGACY_VERSION
     strategy_name: str = DEFAULT_REPLAY_STRATEGY
     modes: tuple[LiquidityGrabMode, ...] = (LiquidityGrabMode.swing,)
     execution_timeframe: str = "15m"
@@ -132,6 +135,7 @@ class ReplayConfig(BaseModel):
 
 
 class ReplaySetupCandidate(BaseModel):
+    strategy_version: StrategyVersion = LEGACY_VERSION
     symbol: str
     mode: LiquidityGrabMode
     direction: ReplayDirection
@@ -241,6 +245,7 @@ class ReplaySymbolResult(BaseModel):
 
 
 class ReplaySummary(BaseModel):
+    strategy_version: StrategyVersion = LEGACY_VERSION
     strategy: str = "Liquidity Grab Pullback"
     symbols_tested: int = 0
     historical_candles: int = 0
@@ -340,6 +345,7 @@ class StrategyReplayEngine:
             min_sample=replay_config.edge_min_sample,
         )
         return ReplaySummary(
+            strategy_version=replay_config.strategy_version,
             symbols_tested=len(symbol_results),
             historical_candles=sum(result.historical_candles for result in symbol_results),
             stats=stats,
@@ -419,11 +425,18 @@ class StrategyReplayEngine:
                 candles_by_timeframe=candles_prefix,
                 config=replay_config,
                 current_price=current_candle.close,
-                timeframe_context=timeframe_context,
+                timeframe_context={**timeframe_context, "decision_timestamp": current_candle.close_timestamp},
             )
 
             for mode in replay_config.modes:
-                result = self.strategy_engine.analyze({**base_input, "mode": mode})
+                try:
+                    result = self.strategy_engine.analyze({**base_input, "mode": mode})
+                except ValueError as exc:
+                    if replay_config.strategy_version != SELECTIVE_VERSION:
+                        raise
+                    rejection_reasons.append(str(exc))
+                    rejected_keys.add(f"{mode}:{end_index}:{exc}")
+                    continue
                 setup = _setup_for_mode(result, mode)
                 if _is_replay_near_miss(setup):
                     near_miss_keys.add(_rejection_key(mode, setup, end_index))
@@ -728,8 +741,19 @@ def _strategy_input(
     current_price: Decimal,
     timeframe_context: Mapping[str, Any],
 ) -> dict[str, Any]:
+    precision = timeframe_context.get("instrument_precision")
+    cutoff = normalize_utc_timestamp(timeframe_context.get("decision_timestamp")) if config.strategy_version == SELECTIVE_VERSION else None
+    verified_precision = isinstance(precision, InstrumentPrecision) and cutoff is not None and precision.verified_for(
+        timeframe_context.get("exchange", NA), symbol, cutoff)
     return {
         "symbol": symbol,
+        "strategy_version": config.strategy_version,
+        "exchange": timeframe_context.get("exchange", NA),
+        "decision_timestamp": timeframe_context.get("decision_timestamp"),
+        "tick_size": precision.tick_size if verified_precision else NA,
+        "precision_source": precision.source_endpoint if verified_precision else NA,
+        "candles_1d": candles_by_timeframe.get("1d"),
+        "htf_1d_context_source": timeframe_context.get("htf_1d_context_source", NA),
         "htf_timeframe": config.htf_timeframe,
         "bias_timeframe": config.bias_timeframe,
         "structure_timeframe": config.structure_timeframe,
@@ -804,6 +828,8 @@ def _setup_for_mode(result: LiquidityGrabResult, mode: LiquidityGrabMode | str) 
 
 
 def _is_valid_replay_setup(setup: LiquidityGrabSetup) -> bool:
+    if setup.strategy_version == SELECTIVE_VERSION and not setup.pullback_zone.selective_fib.execution_eligible:
+        return False
     return setup.is_valid and setup.trust_meter.grade in ("A", "B")
 
 
@@ -829,6 +855,7 @@ def _candidate_from_setup(
     if setup.bias not in ("long", "short"):
         raise ValueError("valid replay setup has N/A direction")
     return ReplaySetupCandidate(
+        strategy_version=setup.strategy_version,
         symbol=symbol,
         mode=mode,
         direction=ReplayDirection.LONG if setup.bias == "long" else ReplayDirection.SHORT,
@@ -863,6 +890,9 @@ def _setup_condition_diagnostics(setup: LiquidityGrabSetup) -> dict[str, Any]:
     return {
         "bias": setup.bias,
         "mode": setup.mode.value,
+        "strategy_version": setup.strategy_version,
+        "selective_fib": setup.pullback_zone.selective_fib.model_dump(mode="json"),
+        "htf_1d_trend": setup.htf_1d_trend,
         "htf_2d_trend": setup.htf_2d_trend,
         "mtf_12h_trend": setup.mtf_12h_trend,
         "trend": setup.trend,

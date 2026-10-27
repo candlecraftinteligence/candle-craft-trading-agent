@@ -124,6 +124,8 @@ from app.lifecycle.service import (  # noqa: E402
     active_lifecycle_symbols,
 )
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository  # noqa: E402
+from app.analytics.selective_fibonacci import LEGACY_VERSION, SELECTIVE_VERSION
+from app.strategies.context_fields import htf_value, htf_label
 from app.pipeline.scanner_runner import (  # noqa: E402
     DEFAULT_CONFIRMATION_TIMEFRAME,
     DEFAULT_STRUCTURE_TIMEFRAME,
@@ -308,7 +310,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
     "daily": CommandPreset(
         name="daily",
         modes=("challenge", "swing", "scalp"),
-        htf_timeframe="2d",
+        htf_timeframe="1d",
         bias_timeframe="12h",
         structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
         execution_timeframe="15m",
@@ -325,7 +327,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
     "swing": CommandPreset(
         name="swing",
         modes=("swing",),
-        htf_timeframe="2d",
+        htf_timeframe="1d",
         bias_timeframe="12h",
         structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
         execution_timeframe="15m",
@@ -342,7 +344,7 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
     "challenge": CommandPreset(
         name="challenge",
         modes=("challenge",),
-        htf_timeframe="2d",
+        htf_timeframe="1d",
         bias_timeframe="12h",
         structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
         execution_timeframe="15m",
@@ -359,8 +361,8 @@ COMMAND_PRESETS: dict[str, CommandPreset] = {
     "scalp": CommandPreset(
         name="scalp",
         modes=("scalp",),
-        htf_timeframe="12h",
-        bias_timeframe="4h",
+        htf_timeframe="1d",
+        bias_timeframe="12h",
         structure_timeframe=DEFAULT_STRUCTURE_TIMEFRAME,
         execution_timeframe="15m",
         confirmation_timeframe=DEFAULT_CONFIRMATION_TIMEFRAME,
@@ -550,7 +552,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-rr", type=_minimum_rr_arg, default=DEFAULT_CONFIGURED_MINIMUM_RR)
     parser.add_argument("--strategy", choices=["liquidity_grab_pullback"], default="liquidity_grab_pullback")
     parser.add_argument("--modes", nargs="+", choices=["challenge", "swing", "scalp"], default=["challenge", "swing", "scalp"])
-    parser.add_argument("--htf-timeframe", default="2d")
+    parser.add_argument("--strategy-version", choices=[LEGACY_VERSION, SELECTIVE_VERSION], default=SELECTIVE_VERSION)
+    parser.add_argument("--htf-timeframe", default="1d")
     parser.add_argument("--bias-timeframe", default="12h")
     parser.add_argument("--structure-timeframe", default=DEFAULT_STRUCTURE_TIMEFRAME)
     parser.add_argument("--execution-timeframe", default="15m")
@@ -847,6 +850,7 @@ async def _main(
         include_formatted_strategy_output=True,
         aggressive_toggle=args.aggressive_toggle,
         htf_timeframe=args.htf_timeframe,
+        strategy_version=args.strategy_version,
         bias_timeframe=args.bias_timeframe,
         structure_timeframe=args.structure_timeframe,
         execution_timeframe=args.execution_timeframe,
@@ -4804,6 +4808,7 @@ async def _run_replay(
         execution_timeframe=args.execution_timeframe,
         confirmation_timeframe=args.confirmation_timeframe,
         htf_timeframe=args.htf_timeframe,
+        strategy_version=args.strategy_version,
         bias_timeframe=args.bias_timeframe,
         structure_timeframe=args.structure_timeframe,
         replay_candles=replay_candles,
@@ -4832,17 +4837,21 @@ async def _fetch_replay_symbol_timeframes(
 ) -> tuple[Mapping[str, Sequence[Any]], tuple[str, ...], Mapping[str, Any], tuple[str, ...]]:
     limit_warnings: list[str] = []
     primary_limit = _replay_primary_fetch_limit(args, limit_warnings)
-    primary_candles = await runner._request_public_api(
-        config,
-        f"{symbol} replay {args.execution_timeframe} candles",
-        lambda: client.get_klines(symbol, args.execution_timeframe, primary_limit),
-    )
-    candles_by_timeframe, missing_data, timeframe_context = await runner._fetch_strategy_timeframe_candles(
+    if config.decision_timestamp is None:
+        config = config.model_copy(update={"decision_timestamp": datetime.now(UTC)})
+    primary_delivery = await runner._request_klines_delivery(
+        client, config, symbol, args.execution_timeframe, primary_limit,
+        f"{symbol} replay {args.execution_timeframe} candles")
+    primary_closed = runner._observe_closed_delivery(primary_delivery, symbol=symbol,
+        timeframe=args.execution_timeframe, config=config)
+    candles_by_timeframe, _, missing_data, timeframe_context = await runner._fetch_strategy_timeframe_candles(
         client=client,
         symbol=symbol,
         config=config,
-        primary_candles=primary_candles,
+        primary_candles=primary_closed.candles,
+        primary_delivery=primary_closed.delivery,
     )
+    timeframe_context["exchange"] = config.exchange
     return candles_by_timeframe, missing_data, timeframe_context, _unique_texts(limit_warnings)
 
 
@@ -5582,13 +5591,13 @@ def _format_strategy_diagnostics(symbol_result: ScannerSymbolResult) -> str:
                 f"{mode}: valid={_bool_text(bool(diagnostics.get('is_valid')))} "
                 f"trust={_display(diagnostics.get('trust_grade'))} "
                 f"{_display(diagnostics.get('trust_percentage'))}%",
-                f"{mode} {htf_timeframe.upper()} context: {_context_source_text(_display(diagnostics.get('htf_2d_context_source')))}",
+                f"{mode} {htf_timeframe.upper()} context: {_context_source_text(_display(htf_value(diagnostics, 'context_source')))}",
                 f"{mode} {bias_timeframe.upper()} bias: {'direct' if candles_12h_count > 0 else NA}",
-                f"{mode} candles: 2D={_display(diagnostics.get('candles_2d_count'))}, "
+                f"{mode} candles: {htf_label(diagnostics)}={_display(htf_value(diagnostics, 'count'))}, "
                 f"12H={_display(diagnostics.get('candles_12h_count'))}, "
                 f"15m={_display(diagnostics.get('candles_15m_count'))}, "
                 f"{confirmation_timeframe} confirmation={_display(diagnostics.get('candles_5m_count') if confirmation_timeframe == '5m' else diagnostics.get('candles_15m_count'))}",
-                f"{mode} HTF/MTF trend: 2D={_display(diagnostics.get('htf_2d_trend'))}, "
+                f"{mode} HTF/MTF trend: {htf_label(diagnostics)}={_display(htf_value(diagnostics))}, "
                 f"12H={_display(diagnostics.get('mtf_12h_trend'))}",
                 f"{mode} {execution_timeframe} execution sweep: {_status_text(diagnostics.get('execution_sweep_status'))}",
                 f"{mode} {confirmation_timeframe} confirmation BOS/CHoCH: "

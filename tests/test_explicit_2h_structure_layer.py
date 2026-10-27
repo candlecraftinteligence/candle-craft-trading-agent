@@ -37,6 +37,8 @@ def _candles(start: str, *, count: int = 24) -> list[dict[str, Decimal]]:
 def _scanner_config(**overrides: object) -> ScannerRunConfig:
     data: dict[str, object] = {
         "symbols": ["BTCUSDT"],
+        "strategy_version": "liquidity-grab-v1",
+        "htf_timeframe": "2d",
         "exchange": "binance",
         "account_equity": Decimal("10000"),
         "risk_per_trade_pct": Decimal("1"),
@@ -48,6 +50,7 @@ def _scanner_config(**overrides: object) -> ScannerRunConfig:
 def test_default_cli_and_config_resolve_the_explicit_hierarchy() -> None:
     args = run_scan.parse_args([])
     config = _scanner_config(
+        strategy_version=args.strategy_version,
         htf_timeframe=args.htf_timeframe,
         bias_timeframe=args.bias_timeframe,
         structure_timeframe=args.structure_timeframe,
@@ -61,8 +64,8 @@ def test_default_cli_and_config_resolve_the_explicit_hierarchy() -> None:
         config.structure_timeframe,
         config.execution_timeframe,
         config.confirmation_timeframe,
-    ) == ("2d", "12h", "2h", "15m", "15m")
-    assert "2d>12h>2h>15m>15m" in run_scan._format_available_command_presets()
+    ) == ("1d", "12h", "2h", "15m", "15m")
+    assert "1d>12h>2h>15m>15m" in run_scan._format_available_command_presets()
 
 
 def test_structure_timeframe_changes_only_the_structure_fetch_role() -> None:

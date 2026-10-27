@@ -114,6 +114,21 @@ def build_near_miss_intelligence(
     core_passed = sweep_passed and confirmation_passed
     reason = _reason_for_gate(gate, short_reason, data)
 
+    selective = data.get("selective_fib", {})
+    if (isinstance(selective, Mapping) and data.get("strategy_version") == "selective-fib-mtf-v2"
+        and "deep_0786_watch_only_lifecycle_stop_contract" in selective.get("rejection_reasons", ())
+        and gate not in BODY_ACCEPTANCE_GATES):
+        return NearMissIntelligence(
+            primary_failed_gate=gate, short_reason=reason,
+            watchlist_status=WATCHLIST_ONLY if core_passed else REJECTED,
+            next_required_conditions=("Preserve intact structure and strong body reclaim evidence.",
+                                      "An approved lifecycle and stop contract is required for 0.786 execution."),
+            activation_hint="0.786 remains observational WATCH-only; reclaim cannot activate this entry.",
+            invalidation_hint="Body acceptance beyond 0.786 or structural breakdown invalidates the idea.",
+            quality_note="The current lifecycle invalidation boundary and sweep-based stop contract block execution.",
+            action_label=WATCHLIST_ONLY if core_passed else REJECTED,
+        )
+
     if gate in RR_GATES:
         return NearMissIntelligence(
             primary_failed_gate=gate,
