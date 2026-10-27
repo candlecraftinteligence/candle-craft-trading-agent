@@ -2,10 +2,14 @@
 
 BASE_SHA: d19cce2eb471702f827fef2565b65b33a6096ad2
 FEATURE_BRANCH: feature/p0b1-lifecycle-sqlite-worker-isolation
-IMPLEMENTATION_SHA: N/A — fill after implementation commit
-PR_URL: N/A — fill after PR creation
-GITHUB_CI: N/A — pending PR checks
-EXACT_HEAD_CI: N/A — pending final head verification
+IMPLEMENTATION_SHA: c4bf50dcf2c655f6be9f5b44071d68ff61c219bb
+PR_URL: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/154
+GITHUB_CI: PASS on the implementation SHA above, Python 3.11 tests,
+https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40551840202
+EXACT_HEAD_CI: See PR #154's description for the final documentation-head SHA,
+result and immutable Actions URL, recorded after this documentation commit.
+Review must match that SHA to the current PR head; the implementation-head run
+above alone is not evidence for a later head.
 RUNTIME_DEPLOYMENT_APPROVED: NO
 
 Remote main was fetched and independently verified at the supplied baseline,
@@ -173,7 +177,12 @@ or unobserved disposition. It never infers business success from duration.
 
 ## Verification and limits
 
-FULL_TEST_RESULTS: Confirmation run pending. The initial full run completed with
+FULL_TEST_RESULTS: PASS — 3,884 passed, 0 failed, 1 dependency deprecation warning
+in 660.19 s (11:00), using the existing Python 3.11.9 environment and CI/DEV
+safety variables. The confirmation run used a fresh OS temp directory with the
+existing `pytest-of-` safety convention. No tests were skipped or deselected.
+
+The initial full run completed with
 3,883 passed, 1 failed and 1 dependency deprecation warning in 672.66 s. The
 failure was `test_watch_session.py::test_completion_scope_and_nonrecursive_prior_observation_are_bounded`:
 Windows denied an atomic receipt replacement (`WinError 5`). Its source and
@@ -183,14 +192,15 @@ retry behavior or test was changed to hide it.
 
 A fresh OS temporary directory using the existing `pytest-of-` synthetic-DB
 whitelist passed the entire watch-session suite and P0B1 ordering tests:
-28 passed in 6.71 s. Root cause of the worktree-local file contention remains
-Unverified. Full pytest is being repeated with that temporary-root convention.
+28 passed in 6.71 s. Root cause of the worktree-local replacement error remains
+Unverified. Full pytest then passed with that temporary-root convention.
 An earlier exploratory temp directory did not match the existing safety
 whitelist, so 10 setup/identity tests failed closed (18 passed); the directory
 name was corrected, without weakening the whitelist or epoch guards.
 
-Focused P0B1 tests: 28 passed in 5.93 s before the final shutdown-receipt
-persistence assertion. P0B1 plus inventory verification: 61 passed in 9.14 s
+P0B1 adds 28 focused tests, all included in the successful full confirmation.
+A standalone run passed all 28 in 5.93 s before the final shutdown-receipt
+persistence assertions. P0B1 plus inventory verification: 61 passed in 9.14 s
 before the final additional fatal-cleanup test. A wider focused run passed
 245 tests and exposed only the synthetic SQLite default-clock issue described
 above. Early test-fixture errors were corrected; none were hidden or skipped.
@@ -203,6 +213,15 @@ Dependencies: `python -m pip check` passed, no broken requirements.
 The inventory anchor moved from `scripts/run_scan.py:617` to line 618 because
 of one import. The cadence default remains 60.0. Both generated inventory
 snapshots were regenerated from `render_package`; no research result changed.
+
+Full DEV confirmation command (with `LOCAL_MANUAL_MODE=true`,
+`ORDER_EXECUTION_ENABLED=false`, `TELEGRAM_DRY_RUN=true`,
+`TELEGRAM_SIGNALS_ENABLED=false`):
+
+```powershell
+$cciP0b1PytestRoot = Join-Path ([IO.Path]::GetTempPath()) ("pytest-of-p0b1-" + [guid]::NewGuid().ToString("N"))
+& C:\CandleCraftDev\.venv\Scripts\python.exe -m pytest -o "addopts=" -q "--basetemp=$cciP0b1PytestRoot" --tb=short
+```
 
 OUTSTANDING_OWNER_MONITORING_BLOCKING: The separate async continuation still
 opens/reads/closes a repository on the loop, fetches candles using its existing
