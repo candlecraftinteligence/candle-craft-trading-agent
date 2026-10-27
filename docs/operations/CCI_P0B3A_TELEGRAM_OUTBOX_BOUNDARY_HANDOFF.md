@@ -12,14 +12,16 @@ RUNTIME_DEPLOYMENT_APPROVED: NO
 
 ## 1. Executive Summary & Architectural Scope Decision
 
-Candle Craft Intelligence (CCI) observed approximately 59–65 seconds of Telegram outbox work per scanner iteration during the Production Runtime audit on the 4 GB Windows runtime host. This phase investigates the transaction and transport ownership boundaries of the Telegram outbox and designs the isolation of synchronous SQLite operations from the main asyncio event loop without introducing duplicate public signals, orphaned reservations, unsafe HTTP retries, or economic identity corruption.
+Candle Craft Intelligence (CCI) observed approximately 59–65 seconds of total Telegram outbox phase duration per scanner iteration during the Production Runtime audit on the 4 GB Windows runtime host. This duration encompasses multiple categories of work: candidate discovery, eligibility audits, CMC shadow evaluations, cooldown queries, HTTP network round-trips, and synchronous SQLite operations. No measured performance improvement from P0B3B exists yet, and DEV simulations must not be used to claim production runtime improvements.
+
+This phase investigates the transaction and transport ownership boundaries of the Telegram outbox and designs the future isolation of synchronous SQLite operations from the main asyncio event loop without introducing duplicate public signals, orphaned reservations, unsafe HTTP retries, or economic identity corruption.
 
 ### Scope Decision (Stop-Fence Justification)
 In accordance with Master Prompt Section 6 (*"P0B3A Scope Decision"*) and Section 12 (*"Safety Stop Conditions"*):
 - A shallow refactoring (such as wrapping outer methods in `asyncio.to_thread` or attempting a partial offload of individual SQLite calls) violates core repository safety directives:
   1. In `TelegramLifecycleDeliveryService.deliver_for_run`, the outer context managers `with SQLiteTelegramAlertAttemptRepository(...)` and `with SQLiteSetupLifecycleRepository(...)` hold open SQLite connections on the main asyncio event loop across all network awaits.
   2. Inside `_deliver_committed_public_alert_intent`, SQLite write transactions (`persist_intent_parts`, `claim`, `mark_part_in_flight`), network HTTP transport (`send_part` / `send_text`), and SQLite result persistence (`record_part_result`, `_finalize_sent_locked`) are tightly interleaved within an active loop spanning the caller's repository context.
-  3. Any worker thread opening a separate SQLite connection to perform outbox writes while the outer repository holds an open transaction will hit SQLite table locks (`sqlite3.OperationalError: database is locked`) or read uncommitted dirty state.
+  3. Attempting an ad-hoc offload while outer connections remain committed-but-open risks connection lifecycle confusion and database lock contention under multi-threaded writers.
   4. Moving live `sqlite3.Connection` objects across threads is strictly prohibited (`check_same_thread=True`).
   5. Offloading only read-only provenance diagnostics (`collect_provenance_diagnostics`) does not alter outbox transport blocking, while decomposing `_deliver_committed_public_alert_intent` requires an explicit 3-stage protocol (*Worker Preparation -> Async Transport -> Worker Persistence*) and refactoring the caller hierarchy across `deliver_for_run`.
 - **DECISION**: As mandated by Section 6 and Section 12, P0B3A executes the comprehensive, source-grounded architectural investigation and ownership mapping, proves the exact boundary stop conditions, establishes the implementation-ready blueprint for P0B3B, and prevents unsafe premature code modifications.
@@ -148,8 +150,15 @@ Three distinct database connection instances operate during scanner runs:
    - **Instantiated / Opened**: `app/cmc/storage.py:59` via `sqlite3.connect(self.path, timeout=0.1)`.
    - **Thread Confinement**: Opened, written, and closed inside worker threads via `asyncio.to_thread`. Completely independent of the main runtime SQLite database.
 
+### Connection States & Lifecycle Distinctions
+To reason accurately about SQLite concurrency, four distinct connection states must be distinguished:
+1. **Open Connection (Idle)**: OS handle and SQLite internal structures allocated, but no read or write transaction is active (`in_transaction == False`). In WAL mode, an idle open connection does not block readers or writers, but retains OS memory and file handles.
+2. **Active Read Transaction**: Begun by an explicit `BEGIN` or implicit `SELECT`. Holds a shared read lock on the WAL index (`shm`). While open across awaits, it prevents WAL truncation and WAL-index checkpoints, causing WAL file growth under write load.
+3. **Active Write Transaction**: Begun by `BEGIN IMMEDIATE` or an implicit `INSERT`/`UPDATE`. Holds an exclusive write lock. In SQLite, only ONE connection across all threads and processes may hold a write lock. Any other write attempt blocks until `busy_timeout` expires.
+4. **Committed-but-Open Connection**: A write transaction was ended via `COMMIT`, but the connection handle was not closed. Other readers and writers can proceed; it does not automatically cause dirty reads or instant deadlock. However, holding committed-but-open connections across threads and async yields invites thread-confinement bugs, leaks OS resources under memory pressure, and creates scheduling stalls when re-entering SQLite on the event loop.
+
 ### The Architectural Defect
-Connections 1 and 2 remain open simultaneously on the asyncio event loop thread (`MainThread`) while HTTP requests to Telegram and CMC are awaited. Under Windows disk write-cache flushing, WAL checkpointing, or 4 GB host memory pressure, any SQLite query or transaction step executed on `MainThread` blocks the asyncio event loop, delaying WebSocket frame processing and scanner heartbeat timers.
+Connections 1 and 2 remain open simultaneously on the asyncio event loop thread (`MainThread`) while HTTP requests to Telegram and CMC are awaited. While committed-but-open connections do not inherently deadlock or read dirty data in SQLite WAL mode, executing synchronous SQLite operations on `MainThread` interleaves CPU/disk I/O directly into the event loop. Under Windows disk write-cache flushing, pagefile paging, or WAL checkpointing on a 4 GB RAM host, these synchronous calls block event-loop scheduling, delaying WebSocket frame processing and scanner heartbeat timers.
 
 ---
 
@@ -169,7 +178,7 @@ Every transaction boundary, explicit lock, commit, and rollback in the Telegram 
 | `repositories.py:69` | `SQLiteSetupLifecycleRepository.__exit__` | `connection.commit()` | Commits lifecycle updates; rolls back on exception (L64, L74). |
 
 ### Flaw in Current Contract
-The call to `commit_before_network_activity()` terminates the write transaction, but **leaves the underlying connection open**. If a worker thread attempted to write to the database during the network await, SQLite WAL concurrency rules permit reads, but concurrent write attempts require serialized exclusive locks. If the event loop thread re-enters SQLite while an offloaded task holds a lock, deadlocks or database busy errors occur.
+The call to `commit_before_network_activity()` terminates the write transaction, but leaves the underlying connection committed-but-open. While this allows external readers and writers to operate on the WAL database without an active write lock during network I/O, it leaves connection lifecycle management tied to the outer scope of `deliver_for_run`. If a worker thread were introduced to handle intermediate outbox state while the caller retains an open repository, managing cross-thread connection lifetimes without passing connection handles violates `check_same_thread=True` or requires fragile ad-hoc re-connection logic.
 
 ---
 
@@ -232,11 +241,13 @@ Network transport uncertainty is governed by `app/alerts/telegram.py:67–101` a
 2. **Cancellation After Reservation Before HTTP**: Event remains `PENDING` or `IN_FLIGHT` with lease. Can be safely recovered or cancelled without external side effect.
 3. **Cancellation During Telegram HTTP**:
    - `client.post` may have transmitted bytes; the Telegram server may have accepted and broadcast the message to public channels.
-   - **CRITICAL INVARIANT**: The outcome is unknown. The part and event **MUST BE MARKED `UNCERTAIN`**. It must **NEVER** be assumed unsent. Automatic retry is strictly prohibited.
-4. **HTTP Success Before Result Persistence**:
-   - HTTP returns 200 OK with `message_id`. If cancellation or a crash hits before `record_part_result` commits:
-   - On restart, the event is `IN_FLIGHT`. When recovered, the lack of durable receipt must be classified as `UNCERTAIN` unless verifiable delivery metadata exists.
-   - Under the target architecture, persistence must be **fenced** (shielded) so that once HTTP 200 is received, cancellation is deferred until the `SENT` receipt is durably committed.
+   - **CRITICAL INVARIANT**: The outcome is unknown. An `IN_FLIGHT` part after an interrupted HTTP attempt must **NOT** be automatically retried unless absence of external transmission is independently and verifiably established. Automatic retry is strictly prohibited.
+4. **Post-HTTP SQLite Commit Failure**:
+   - If HTTP transmission succeeds (or begins) but the subsequent SQLite commit fails (e.g. disk write failure, I/O error, or host crash), the database **CANNOT guarantee that an `UNCERTAIN` or `SENT` status is durably recorded**. In such failure cases, the database remains in its pre-commit state (`IN_FLIGHT` or unrecorded), and the system must report an explicit unresolved delivery state to the caller rather than assuming durable recording succeeded.
+5. **Limits of Cancellation Fencing**:
+   - Python-level cancellation fencing (such as `_fenced_wait` with `asyncio.shield`) protects only against cooperative `asyncio.CancelledError` within a healthy running event loop. It provides **zero protection against hard process termination (`SIGKILL`, Windows Task Manager kill, unhandled OS-level crash) or physical power loss**.
+6. **No "Exactly-Once" Telegram Broadcast**:
+   - Exactly-once external Telegram delivery **cannot be claimed merely from local SQLite atomicity**. Once network bytes leave the socket, network partitions, dropped ACK packets, and Telegram server crashes can decouple HTTP transport from local persistence. The architectural goal is strictly **at-most-once publication** with fail-closed uncertainty tracking, never a false claim of network-level exactly-once delivery.
 
 ---
 
@@ -339,33 +350,35 @@ Phase 3 (Persistence): delivery_receipt = await worker.call(
 
 ## 15. PUBLIC_DELIVERY_EQUIVALENCE
 
-The documented decomposition preserves 100% equivalence with verified public delivery behavior:
-- `event_key` generation and plan identity derivation are unchanged.
-- Public signal eligibility gates, cooldowns, and frequency caps remain identical.
-- Quarantined historical records are never touched.
-- All delivery states (`SENT`, `IN_FLIGHT`, `PENDING`, `RETRYABLE`, `UNCERTAIN`, `FAILED_FINAL`) retain their exact state machine semantics.
+The proposed transport decomposition has **NOT yet demonstrated production public-delivery equivalence**. Equivalence remains a theoretical design constraint and architectural requirement to be empirically proven in P0B3B. 
+
+To preserve equivalence when implemented, the protocol must enforce:
+- `event_key` generation and plan identity derivation must remain identical.
+- Public signal eligibility gates, cooldowns, and frequency caps must not be weakened.
+- Quarantined historical records must never be touched.
+- Delivery state definitions (`SENT`, `IN_FLIGHT`, `PENDING`, `RETRYABLE`, `UNCERTAIN`, `FAILED_FINAL`) must strictly match current semantics.
 
 ---
 
 ## 16. DUPLICATE_SEND_REGRESSION & FAILURE MODES
 
-Analysis of all 17 double-send failure modes:
+Analysis of all 17 double-send failure modes (distinguishing tested current behavior, architectural requirements, and failure limits):
 
-| Failure Mode | Failure Mechanism | Architectural Guard |
+| Failure Mode | Failure Mechanism | Architectural Guard & Verified Limit |
 | :--- | :--- | :--- |
 | **Two callers racing for same event** | Concurrent claim attempts | `BEGIN IMMEDIATE` atomic claim; only one receives `claim != None`. |
 | **Scanner & bot racing to claim** | Multi-process race | SQLite database write lock (`BEGIN IMMEDIATE`) serializes cross-process claims. |
 | **Cancellation before reservation** | Task cancelled before DB write | Clean exit; zero database rows created; zero HTTP calls. |
 | **Cancellation after reservation before HTTP** | Cancelled during preparation | Receipt not returned; part remains `PENDING` or recovered as `RETRYABLE`. |
-| **Cancellation during Telegram HTTP** | HTTP in flight when cancelled | Transport outcome unknown; fenced persistence marks `UNCERTAIN`; never retried. |
-| **HTTP success before result persistence** | Network 200 OK, persistence interrupted | Persistence is fenced (`_fenced_wait`); commits `SENT` before cancellation propagates. |
+| **Cancellation during Telegram HTTP** | HTTP in flight when cancelled | Transport outcome unknown; must not be automatically retried; marked unresolved. |
+| **HTTP success before result persistence** | Network 200 OK, persistence interrupted | Cooperative cancellation fenced (`_fenced_wait`); cannot protect against hard process kill. |
 | **HTTP timeout with unknown outcome** | Network read timeout | Categorized as `UNCERTAIN` (`transport_timeout_uncertain`); never re-sent. |
 | **Crash immediately before commit** | Process killed during prep | SQLite WAL rolls back; transaction was never committed; zero HTTP calls. |
-| **Crash immediately after committed IN_FLIGHT** | Process killed before HTTP | Stale lease expires; recovered as `UNCERTAIN` or retryable only if un-transmitted. |
-| **Crash after HTTP before persistence** | Process killed after send | Event remains `IN_FLIGHT`; on restart, recovered according to UNCERTAIN policy. |
+| **Crash immediately after committed IN_FLIGHT** | Process killed before HTTP | Stale lease expires; must not be retried unless verified unsent externally. |
+| **Crash after HTTP before persistence** | Process killed after send | Event remains `IN_FLIGHT`; recovered as `UNCERTAIN`; exact-once cannot be claimed. |
 | **Restart with uncertain multipart** | Process restarts after partial send | Only remaining un-sent parts are sent; already-sent parts are never re-sent. |
 | **Partial multipart success** | Part 1 SENT, Part 2 fails | Part 1 remains `SENT`; Part 2 becomes `UNCERTAIN`; event becomes `UNCERTAIN`. |
-| **SQLite commit failure after HTTP** | Disk error on persistence | Caught in persistence worker; event marked `UNCERTAIN_AFTER_PERSISTENCE_FAILURE`. |
+| **SQLite commit failure after HTTP** | Disk error on persistence | If DB commit fails, UNCERTAIN cannot be guaranteed persisted; caller must treat as unresolved. |
 | **Duplicate scan replay** | Same candidate processed in next scan | Blocked by `has_attempt` and dedupe index in `telegram_alert_attempts`. |
 | **Runtime epoch change during processing** | Epoch rollover mid-scan | `decide_public_effect` fails closed (`public_event_epoch_mismatch`); send aborted. |
 | **Missing canonical reservation** | Public event without reservation | `require_canonical_reservation_for_public_effect` fails closed; send blocked. |
@@ -400,15 +413,18 @@ asyncio: mode=Mode.STRICT, default_loop_scope=None
 - **Failures**: 0
 - **Errors**: 0
 - **Regression Count**: 0
+- **Verification Disclosure**: DEV-only baseline test success validates the existing codebase (`bcc1e33`), but does **NOT** validate or prove the correctness of any future, unmerged implementation.
 
 ---
 
 ## 19. PERFORMANCE_EVIDENCE
 
-- **Event-Loop Blocking vs Wall-Clock Duration**:
-  - Wall-clock duration (~59–65s in Production Runtime audit) represents cumulative HTTP latency, retry backoffs, and SQLite disk I/O.
-  - Event-loop blocking (~500ms–2000ms per transaction burst under disk contention) represents synchronous SQLite disk writes and lock acquisition occurring directly on `MainThread`.
-  - Isolating SQLite preparation and persistence to a serialized worker thread eliminates event-loop blocking entirely, ensuring WebSocket frame processing and scanner loops remain responsive during outbox processing.
+- **Tested Current Behavior**:
+  - The 59–65 second Telegram outbox phase duration observed in the Production Runtime audit represents total wall-clock duration across multiple activities: candidate filtering, CMC shadow evaluation, eligibility gates, rate-limit queries, HTTP round-trips, and synchronous SQLite reads/writes.
+  - Synchronous SQLite operations executed on `MainThread` under disk write contention cause measurable event-loop scheduling stalls.
+- **Architectural Requirements & Hypothetical Future Benefits**:
+  - The architectural goal of P0B3B is to isolate synchronous SQLite preparation and persistence to a dedicated worker thread, removing SQLite disk I/O from the event loop.
+  - **No measured performance improvement from P0B3B exists yet.** Any claim of reduced wall-clock duration or event-loop latency remains a hypothetical future benefit until empirically measured on production hardware under real market conditions.
 
 ---
 
