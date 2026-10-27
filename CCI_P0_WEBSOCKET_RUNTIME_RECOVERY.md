@@ -1,6 +1,6 @@
 # CCI P0 — WebSocket runtime recovery
 
-Date: 2026-10-26 (Europe/Bratislava). Status: manual Runtime probes confirm short-window depth/trade connectivity and synchronization; incident root cause and sustained scanner recovery remain unconfirmed. PR #150 remains draft; diagnostics only.
+Incident opened: 2026-10-26. Updated: 2026-10-27 (Europe/Bratislava). Status: manual Runtime probes confirm short-window depth/trade connectivity and synchronization; incident root cause and sustained scanner recovery remain unconfirmed. PR #150 remains draft; diagnostics only.
 
 ## Scope and repository handoff
 
@@ -68,7 +68,7 @@ Trade and liquidation clients are separate watch-owned sockets using the market 
 
 ## Runtime evidence ledger — owner screenshots received
 
-Evidence: three owner-supplied screenshots of the manual scripts, filenames ending `b854c64f-bb73-4dfc-8e21-03adf39a364f.png`, `115bfbc8-d7de-4bda-ac5a-e7f48543671c.png`, and `58bbe817-8181-410d-a0d0-2b21e23eaa6a.png`. Values were visually inspected; original JSON and rejected payloads were not supplied. Probe timestamp: 2026-10-26 19:53:25 UTC / 21:53:25 Europe/Bratislava. Host sample timestamp: 19:54:07 UTC / 21:54:07 local.
+Evidence: three owner-supplied screenshots of the manual scripts, filenames ending `b854c64f-bb73-4dfc-8e21-03adf39a364f.png`, `115bfbc8-d7de-4bda-ac5a-e7f48543671c.png`, and `58bbe817-8181-410d-a0d0-2b21e23eaa6a.png`. Values were visually inspected; original JSON and rejected payloads were not supplied. Probe timestamp: 2026-10-26 19:53:25 UTC / 20:53:25 Europe/Bratislava (CET, UTC+1). Host sample timestamp: 19:54:07 UTC / 20:54:07 local (CET, UTC+1).
 
 | Required evidence | Observed result and limit |
 | --- | --- |
@@ -97,7 +97,7 @@ Evidence: three owner-supplied screenshots of the manual scripts, filenames endi
 | Listener count | No matching run_telegram_bot.py Python process at sample time; alternate launch forms / intended listener state not established |
 | Host memory | 3971 MiB total, 243 MiB free (~6.1% free / 93.9% in use). Strong resource-pressure concern; paging/commit history and causal link to WebSocket failures not measured |
 | Host CPU | 6% sampled overall; does not establish CPU saturation or scanner event-loop health |
-| Scanner universe / cycles | No per-symbol scanner freshness counts or consecutive cycle summaries provided; supplied earlier 94/2/14/PARTIAL observations remain independently unclassified |
+| Scanner universe / cycles | Six recent cycle summaries have now been supplied (see follow-up below); no scanner-owned frame/freshness counts or exact historical 14-warning breakdown are available |
 
 Interpretation: a permanent DNS, TCP, TLS, blanket firewall or universally incorrect endpoint failure is not reproduced by these probes. Intermittent network loss and scanner-specific starvation remain possible. Memory headroom is the strongest newly observed host concern, but memory pressure has not been established as the root cause. Short standalone probes cannot close this incident.
 
@@ -164,9 +164,62 @@ Observe five consecutive complete scanner cycles (about 50 minutes at the report
 
 Require HTTP 101 on correct routed URLs, actual st=1 USDT-perpetual traffic, a snapshot-overlap bridge, continuous pu/u sequence, fresh VERIFIED books, unverified/unavailable state throughout disconnection, fresh synchronization on reconnect, bounded attempts, stable resource use and scanner responsiveness. Preserve missing coverage in microstructure windows; successful reconnection alone cannot restore historical coverage. Observe liquidation traffic when it actually exists; report quiet periods accurately. Five cycles do not establish 24-hour rotation reliability; retain next-day observation through a natural connection expiry. Keep PARTIAL/Telegram/performance findings open independently.
 
+## Follow-up: 2026-10-27 Runtime diagnostic text
+
+Source: `CCI_Runtime_Diagnostics_20261027_074351.txt`, owner supplied, 107,749 bytes, SHA-256 `b1a621e9bb045f302443e715f8e7dec8e96aec6dc0db59cdd2618a58784124ba`. The file was read without mutation. It contains process inventory, three memory samples and **six** cycle objects despite the section label “LAST FIVE SCANNER CYCLES”. The last cycle timestamp is later than the capture header/memory samples; this is sequential, non-atomic evidence, not a single synchronized observation. No Runtime log files or production database were opened by this analysis; only the owner-provided export and DEV source were read.
+
+A correction to the previous report: on October 26–27 Bratislava uses CET (UTC+1). The earlier screenshot local-time labels were one hour late; they have been corrected using `zoneinfo.ZoneInfo('Europe/Bratislava')`. UTC source timestamps were unchanged.
+
+### PARTIAL classification is now established at the phase level
+
+All six rows report `scanner=SUCCESS`, with `errored=0`, `timed_out=0`, `not_run=0`, `failed_symbols=0`, and `timeouts=0`. Every adverse recorded phase is `telegram_outbox=PARTIAL`; all other requested phases report SUCCESS (output_files SKIPPED).
+
+Across six rows, 542 symbols are accounted for: **4 evaluated + 538 rejected**, with zero execution failures or skipped/unrun symbols. The 0–2 evaluated column is an outcome category, not the count of all processed symbols. These records do not show rejection reasons, so they do not establish whether all rejection decisions were appropriate or which gates rejected them.
+
+The reported Runtime source confirms this interpretation: [scanner / outbox status functions](https://github.com/candlecraftinteligence/candle-craft-trading-agent/blob/235ec88c09ff6df0372bd636eaaf47814e48bd6d/app/watch_iteration.py#L90) and [iteration phase aggregation](https://github.com/candlecraftinteligence/candle-craft-trading-agent/blob/235ec88c09ff6df0372bd636eaaf47814e48bd6d/scripts/run_scan.py#L4027).
+
+The outbox status function marks PARTIAL when any of `failed`, `retryable`, `uncertain`, `failed_final`, `provenance_unresolved`, or `provenance_incomplete` is nonzero. The supplied export omitted those counters and provenance summaries. Consequently **Telegram phase incompleteness is confirmed, but actual Telegram send failure versus provenance-only incompleteness remains Unverified**. A missing listener is not established as the cause of the outbox status. Do not clear provenance warnings, replay alerts or alter Telegram identity to remove PARTIAL.
+
+### Measured performance and event-loop mechanism
+
+| Cycle time CET, Oct 27 | Accounted symbols | Evaluated / rejected | Scanner runtime s | Profile elapsed before manifest s | Telegram outbox s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 06:54:21 | 90 | 1 / 89 | 264.922 | 347.392 | 15.421 |
+| 07:04:24 | 92 | 1 / 91 | 271.766 | 349.965 | 14.889 |
+| 07:14:25 | 90 | 2 / 88 | 266.438 | 351.060 | 16.677 |
+| 07:25:13 | 90 | 0 / 90 | 266.172 | 398.767 | 43.770 |
+| 07:34:46 | 90 | 0 / 90 | 269.953 | 371.579 | 24.223 |
+| 07:45:37 | 90 | 0 / 90 | 282.250 | 422.951 | 43.355 |
+
+`runtime_seconds` is scanner work, not the complete watch cycle. The profile elapsed values stop before manifest/report/presentation and range from **347.392 to 422.951 seconds**; they are not final cycle durations. Profile phases are inclusive and nested (`inclusive_elapsed_calls_may_overlap_do_not_sum`), so their durations must not be summed. Completion timestamps are roughly ten minutes apart; actual-start/scheduled-start/missed-interval fields were not exported, so missed-interval acceptance remains Unverified.
+
+The current source directly calls synchronous lifecycle work from the async scan iteration and invokes synchronous persistence through `PhaseProfile.call`, which executes `function(...)` on the calling thread:
+
+| Synchronous section | Observed elapsed range s | Source |
+| --- | ---: | --- |
+| lifecycle | 19.420–31.395 | `scripts/run_scan.py:2522`, direct call at `4449` |
+| watch_state_persistence | 11.256–17.242 | `scripts/run_scan.py:3686` |
+| scan_storage | 6.384–7.739 | `scripts/run_scan.py:3755` |
+
+Source detail: `app/core/phase_profile.py:77` calls synchronously; no executor/thread is introduced at those boundaries. These measurements combined with the code identify **long non-yielding sections on the scanner's event-loop thread**, subject to the running process matching the inspected source. They delay other loop tasks, including WebSocket receive/handshake/heartbeat handling, and provide a concrete application starvation mechanism. A causal match to a particular Binance disconnect or opening timeout is **not yet established**, because this export contains no disconnect timestamps or direct loop-lag trace. The elapsed values include I/O/OS scheduling time, not just CPU execution.
+
+Primary scan storage itself takes 6–8 seconds in these samples; the large live database has not been identified as the sole bottleneck, and no database query or alteration was performed. Any future repair must preserve lifecycle ordering, SQLite connection ownership, watch-state atomicity, identity/epoch safeguards and fail-closed data status. Implementation remains held by the owner's diagnostics-only instruction.
+
+### Process inventory and memory interpretation
+
+- PID 11756 is the Runtime `.venv\Scripts\python.exe` redirector; PID 11312 is its base Python312 child. Creation timestamps differ by 17 ms: 2026-10-26 18:32:50.798/815 UTC (19:32:50 CET). The inventory supports one launcher/worker chain, not two independent scanner starts; no other Python processes were listed.
+- PR #149 metadata records merge at 18:20:32 UTC and an owner-approved deployment/manual-stop handoff, preceding this process creation. Chronology is consistent with startup after that deployment; a loaded-source fingerprint is still not provided. This workflow performed none of those production operations.
+- Available memory: **659, 654, 655 MiB**. Committed bytes: **5,860,581,376; 5,852,708,864; 5,853,839,360**, against a **13,290,409,984-byte** limit: **44.10%, 44.04%, 44.05%**. Commit exhaustion is not observed in these samples; physical headroom is limited.
+- `PagesInputPersec`: **3703, 1244, 63**; `PagesOutputPersec`: **0, 0, 0**. These are system-wide disk-backed page-in observations. They include mapped/executable files as well as page-file reads and do not isolate scanner paging, swap thrashing, memory exhaustion or the WebSocket root cause. [Microsoft counter interpretation](https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/how-to-determine-the-appropriate-page-file-size-for-64-bit-versions-of-windows#performance-counters).
+- The three memory samples cover only about seven seconds and do not align with every profiled section. Disk latency and per-process hard-fault correlation remain N/A. Do not resize page files, kill processes or restart services from this evidence alone.
+
+### Next bounded diagnostics
+
+Read only the existing JSONL manifest's last three rows, exporting `watch_supervisor.telegram_outbox_status`, summarized `telegram_provenance` status/coverage/unresolved/by_reason, retry-backoff reason and missed-interval counts. Omit message text, destinations, receipts, environment values and full command lines. This requires no production database query and no Telegram send. Preserve the earlier successful network probe evidence while retaining unknown liquidation/reconnect/scanner-feed acceptance items.
+
 ## Runtime acceptance verdicts
 
-PASS/YES below refer only to the owner-run standalone probes: both handshakes, one BTCUSDT book, and aggregate trades. They do not assert scanner-owned feed recovery. Liquidation reception is Unverified. FAIL below means remaining acceptance is not demonstrated, not proven corruption. RUNTIME_FIX_APPLIED=NO refers to this workflow / draft #150; Runtime checkout already contains #149, which was not deployed by this workflow.
+PASS/YES below refer only to the owner-run standalone probes: both handshakes, one BTCUSDT book, and aggregate trades. They do not assert scanner-owned feed recovery. Liquidation reception is Unverified. SCANNER_PARTIAL_ROOT_CAUSE=CONFIRMED is limited to the Telegram-outbox phase causing PARTIAL in the six supplied cycles; its delivery/provenance subcause and the historical 14 warnings remain Unverified. FAIL below means remaining acceptance is not demonstrated, not proven corruption. RUNTIME_FIX_APPLIED=NO refers to this workflow / draft #150; Runtime checkout already contains #149, which was not deployed by this workflow.
 
 ```text
 WEBSOCKET_HANDSHAKE: PASS
@@ -174,12 +227,12 @@ ORDER_BOOK_SYNCHRONIZED: YES
 MICROSTRUCTURE_RECEIVING: YES
 RECONNECT_RECOVERY: FAIL
 DATA_INTEGRITY: FAIL
-SCANNER_PARTIAL_ROOT_CAUSE: UNCONFIRMED
+SCANNER_PARTIAL_ROOT_CAUSE: CONFIRMED
 RUNTIME_FIX_APPLIED: NO
 READY_FOR_NORMAL_OPERATION: NO
 ```
 
-Runtime recovery remains open pending manual diagnostics, reviewed correction approval and consecutive-cycle acceptance. DEV tests cannot close this P0 incident. The immediate next action is to classify the 2 Unverified frames and collect scanner-cycle / resource evidence, not deploy draft #150 or repeat identical probes without a diagnostic purpose.
+Runtime recovery remains open pending manual diagnostics, reviewed correction approval and consecutive-cycle acceptance. DEV tests cannot close this P0 incident. The immediate next action is to obtain the already-recorded Telegram outbox/provenance counters and connect WebSocket disconnect timestamps with the identified synchronous phase stalls. The two earlier Unverified market frames still need classification. Do not deploy draft #150 or repeat identical probes without a diagnostic purpose.
 
 ## One-block Runtime diagnostic handoff
 
@@ -204,3 +257,47 @@ Committed diagnostic SHA-256 hashes (LF source bytes):
 - `collect_websocket_host_health.ps1`: `f4b0fc928cda5c0ba6d67d135fd586325e945032da30422a4795130b96b8a4ce`
 
 These scripts were prepared before the owner hold. They do not start or stop the scanner/listener. If the Runtime interpreter path differs, use its established Python environment rather than installing dependencies or changing production configuration.
+
+## Next Runtime export — small text file
+
+Run this on Runtime and attach the generated Desktop `.txt` file. It reads three existing JSONL rows and exports only counters/reason categories; it does not open the production database, send Telegram messages, start a scanner/listener, or modify their configuration.
+
+```powershell
+$cciOutput = Join-Path ([Environment]::GetFolderPath('Desktop')) `
+    ("CCI_Outbox_Diagnostics_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+
+& {
+    Set-Location 'C:\Users\aspir\Desktop\Candle Craft Inteligence'
+    function Get-CciValue($v) {
+        if ($null -eq $v) { 'N/A' } else { $v }
+    }
+    $cciManifest = '.\scan_runs\scan_run_manifest.jsonl'
+    if (!(Test-Path -LiteralPath $cciManifest -PathType Leaf)) {
+        throw 'Scanner manifest is absent; no database will be opened.'
+    }
+    Get-Content -LiteralPath $cciManifest -Tail 3 | ForEach-Object {
+        $r = $_ | ConvertFrom-Json
+        $w = $r.watch_supervisor
+        $p = $w.telegram_provenance
+        if ($null -eq $p) { $p = $r.telegram_provenance }
+        [pscustomobject]@{
+            timestamp = Get-CciValue $r.timestamp
+            telegram_phase = Get-CciValue $w.phase_statuses.telegram_outbox
+            outbox_counts = Get-CciValue $w.telegram_outbox_status
+            provenance_status = Get-CciValue $p.status
+            coverage_complete = Get-CciValue $p.coverage_complete
+            inspected = Get-CciValue $p.inspected
+            inspection_limit = Get-CciValue $p.inspection_limit
+            unresolved = Get-CciValue $p.unresolved
+            reason_counts = Get-CciValue $p.by_reason
+            provenance_error_type = Get-CciValue $p.error
+            provenance_unavailable_reason = Get-CciValue $p.reason
+            retry_backoff_eligible = Get-CciValue $w.retry_backoff_eligible
+            retry_backoff_reason = Get-CciValue $w.retry_backoff_reason
+            missed_interval_count = Get-CciValue $w.missed_interval_count
+        }
+    } | ConvertTo-Json -Depth 6
+} *>&1 | Out-File -LiteralPath $cciOutput -Encoding utf8 -Width 4096
+
+Write-Host "Saved: $cciOutput"
+```
