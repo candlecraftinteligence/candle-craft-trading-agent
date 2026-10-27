@@ -14,10 +14,11 @@ from app.analytics.selective_fibonacci import (
 from app.data.instrument_precision import InstrumentPrecision, parse_precision
 from app.pipeline.scanner_runner import ScannerRunConfig, ScannerRunner, _strategy_diagnostics_for_setup
 from app.strategies.context_fields import htf_value
-from app.strategies.liquidity_grab_pullback import LiquidityGrabEngine, LiquidityGrabInput
+from app.strategies.liquidity_grab_pullback import LiquidityGrabEngine, LiquidityGrabInput, LiquidityGrabSetup
 from app.strategies.selective_timeframes import closed_selective_timeframes
 from app.storage.run_provenance import collect_run_provenance
-from app.backtesting.strategy_replay import ReplayConfig, StrategyReplayEngine, _strategy_input
+from app.backtesting.strategy_replay import ReplayConfig, StrategyReplayEngine, _strategy_input, _setup_condition_diagnostics
+from app.analytics.edge_analytics import condition_key_from_diagnostics
 from app.analytics.near_miss_intelligence import build_near_miss_intelligence
 from app.formatters.telegram_signal_formatter import (
     SignalEdgeEvidence, TelegramSignalMessage, format_premium_public_signal_message,
@@ -367,3 +368,14 @@ def test_replay_version_and_precision_are_causal_and_separate_from_legacy():
     summary = StrategyReplayEngine().run({"BTCUSDT": candles}, config,
         timeframe_context_by_symbol={"BTCUSDT": {"exchange": "binance"}})
     assert summary.strategy_version == SELECTIVE_VERSION and summary.stats.total_setups == 0
+
+
+@pytest.mark.parametrize("version,timeframe,expected", [
+    (SELECTIVE_VERSION, "1d", "aligned"), (LEGACY_VERSION, "2d", "conflicting"),
+])
+def test_replay_conditions_use_the_named_htf_without_relabeling(version, timeframe, expected):
+    setup = LiquidityGrabSetup(mode="swing", bias="long", strategy_version=version,
+        htf_timeframe=timeframe, htf_1d_trend="bullish", htf_2d_trend="bearish")
+    diagnostics = _setup_condition_diagnostics(setup)
+    condition = condition_key_from_diagnostics(symbol="BTCUSDT", mode="swing", diagnostics=diagnostics)
+    assert condition.htf_direction_alignment == expected

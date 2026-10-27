@@ -891,6 +891,7 @@ def _setup_condition_diagnostics(setup: LiquidityGrabSetup) -> dict[str, Any]:
         "bias": setup.bias,
         "mode": setup.mode.value,
         "strategy_version": setup.strategy_version,
+        "htf_timeframe": setup.htf_timeframe,
         "selective_fib": setup.pullback_zone.selective_fib.model_dump(mode="json"),
         "htf_1d_trend": setup.htf_1d_trend,
         "htf_2d_trend": setup.htf_2d_trend,
