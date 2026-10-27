@@ -4,8 +4,8 @@ BASE_SHA: bcc1e330b1f06660a7c4c06edcc6eac368836eae
 FEATURE_BRANCH: feature/p0b3a-telegram-outbox-boundary-isolation
 PR_URL: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/156
 FINAL_IMPLEMENTATION_SHA: 0ff869bad9abec9b2035246e6567577419f2628b
-FINAL_PR_HEAD_SHA: ca6f4e0cc505719b93243b042f65a25d503ead8c
-EXACT_HEAD_CI: https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40582362805
+FINAL_PR_HEAD_SHA: 60bfa9237825c132ff43d37fecbe4c995909e91e
+EXACT_HEAD_CI: PASS on 60bfa9237825c132ff43d37fecbe4c995909e91e (https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40582454444)
 RUNTIME_DEPLOYMENT_APPROVED: NO
 
 ---
