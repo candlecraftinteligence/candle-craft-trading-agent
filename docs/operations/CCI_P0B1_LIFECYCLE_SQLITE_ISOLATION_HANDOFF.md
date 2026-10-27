@@ -2,10 +2,12 @@
 
 BASE_SHA: d19cce2eb471702f827fef2565b65b33a6096ad2
 FEATURE_BRANCH: feature/p0b1-lifecycle-sqlite-worker-isolation
-IMPLEMENTATION_SHA: c4bf50dcf2c655f6be9f5b44071d68ff61c219bb
+IMPLEMENTATION_SHA: b31b9de55637e147256144b6ca1c57d9cfeabd83
+INITIAL_IMPLEMENTATION_SHA: c4bf50dcf2c655f6be9f5b44071d68ff61c219bb
 PR_URL: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/154
-GITHUB_CI: PASS on the implementation SHA above, Python 3.11 tests,
-https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40551840202
+GITHUB_CI: PASS on IMPLEMENTATION_SHA, Python 3.11 tests, dependency verification
+and compilation,
+https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40555354854
 EXACT_HEAD_CI: See PR #154's description for the final documentation-head SHA,
 result and immutable Actions URL, recorded after this documentation commit.
 Review must match that SHA to the current PR head; the implementation-head run
@@ -56,13 +58,17 @@ Importing modules starts no thread. There is no per-symbol thread or unbounded
 executor submission. The P0A file worker is unchanged and remains separate.
 
 CANCELLATION_FENCE: Cancellation before admission does not execute work.
-After admission, every cancellation is delayed inside the awaiting coroutine
+After admission, every cancellation or caught `KeyboardInterrupt` is delayed inside the awaiting coroutine
 until the receipt is known. Successful completion after cancellation is
 discarded and cancellation is re-raised. Worker failure takes precedence over
-concurrent cancellation, retaining its original explicit cause and fatal or
-recoverable classification. `SystemExit` and `KeyboardInterrupt` travel as
+concurrent cancellation at the raw worker receipt, retaining its original
+explicit cause and fatal or recoverable classification. The scanner dispatcher
+then honors a pending cancellation after a settled recoverable failure, chaining
+that error into `CancelledError` so the watch loop stops without continuation or
+publication. Fatal epoch/corruption failures retain priority. `SystemExit` and
+`KeyboardInterrupt` travel as
 receipt data, rather than escaping a detached asyncio task. One-shot cleanup
-cancellation cannot replace an already-received fatal epoch failure.
+cancellation or Ctrl+C cannot replace an already-received fatal epoch failure.
 
 No caller can start the next lifecycle call, continuation monitor, public
 delivery, failed-iteration write, or next scanner iteration using an unresolved
@@ -71,7 +77,10 @@ has completed. The existing session lease encloses that whole fence.
 
 SHUTDOWN_JOIN: `aclose` closes admission, acquires it after the caller releases
 its receipt, sends the shutdown sentinel and joins the non-daemon worker.
-Repeated cancellation also waits for this join. Shutdown has no artificial
+Repeated cancellation or Ctrl+C also waits for this join. A stop request during
+lifecycle shutdown is retained while disk/socket cleanup still runs, and is
+propagated after cleanup unless an original fatal failure already has priority.
+Shutdown has no artificial
 timeout that could detach a transaction. The lifecycle and P0A workers finish
 before socket cleanup and watch-lease release. The existing watch-session
 receipt persists `lifecycle_isolation_shutdown`, including join and in-flight
@@ -177,10 +186,12 @@ or unobserved disposition. It never infers business success from duration.
 
 ## Verification and limits
 
-FULL_TEST_RESULTS: PASS — 3,884 passed, 0 failed, 1 dependency deprecation warning
-in 660.19 s (11:00), using the existing Python 3.11.9 environment and CI/DEV
+FULL_TEST_RESULTS: PASS — 3,890 passed, 0 failed, 1 dependency warning
+in 668.03 s (11:08), using the existing Python 3.11.9 environment and CI/DEV
 safety variables. The confirmation run used a fresh OS temp directory with the
 existing `pytest-of-` safety convention. No tests were skipped or deselected.
+The warning is the existing FastAPI/Starlette `httpx` test-client deprecation.
+A preceding implementation also passed all 3,884 then-collected tests in 660.19 s.
 
 The initial full run completed with
 3,883 passed, 1 failed and 1 dependency deprecation warning in 672.66 s. The
@@ -198,7 +209,12 @@ An earlier exploratory temp directory did not match the existing safety
 whitelist, so 10 setup/identity tests failed closed (18 passed); the directory
 name was corrected, without weakening the whitelist or epoch guards.
 
-P0B1 adds 28 focused tests, all included in the successful full confirmation.
+P0B1 adds 34 focused tests. The completed stop fence and existing watch-session
+suite passed together: 60 passed in 12.52 s. The correction covers
+both direct SQLite lock errors and recoverable `StorageError`/`SystemExit`
+wrappers arriving together with cancellation, Ctrl+C during an active job,
+Ctrl+C plus a recoverable error, and interruption during shutdown with all
+workers joined before lease release.
 A standalone run passed all 28 in 5.93 s before the final shutdown-receipt
 persistence assertions. P0B1 plus inventory verification: 61 passed in 9.14 s
 before the final additional fatal-cleanup test. A wider focused run passed
