@@ -1,6 +1,6 @@
 # CCI P0 — WebSocket runtime recovery
 
-Incident opened: 2026-10-26. Updated: 2026-10-27 (Europe/Bratislava). Status: manual Runtime probes confirm short-window depth/trade connectivity and synchronization; incident root cause and sustained scanner recovery remain unconfirmed. PR #150 remains draft; diagnostics only.
+Incident opened: 2026-10-26. Updated: 2026-10-27 (Europe/Bratislava). Status: short-window depth/trade connectivity confirmed; the latest three Telegram PARTIAL records are explained by missing canonical alert reservation references. Historical WebSocket failure causality and sustained feed recovery remain unconfirmed. PR #150 remains draft; diagnostics only.
 
 ## Scope and repository handoff
 
@@ -217,9 +217,51 @@ Primary scan storage itself takes 6–8 seconds in these samples; the large live
 
 Read only the existing JSONL manifest's last three rows, exporting `watch_supervisor.telegram_outbox_status`, summarized `telegram_provenance` status/coverage/unresolved/by_reason, retry-backoff reason and missed-interval counts. Omit message text, destinations, receipts, environment values and full command lines. This requires no production database query and no Telegram send. Preserve the earlier successful network probe evidence while retaining unknown liquidation/reconnect/scanner-feed acceptance items.
 
+## Follow-up: outbox classification confirmed, 2026-10-27
+
+Source: `CCI_Outbox_Diagnostics_20261027_075838.txt`, owner supplied, 4994 bytes, SHA-256 `590d3bbe24e8f3592a66f50d4f8f4af8098f4aed63e66ac22110e499cef96c20`. Three rows cover 06:34:46, 06:45:37 and 06:55:21 UTC (07:34:46, 07:45:37 and 07:55:21 CET). The first two overlap the previous six-cycle export; these are not three additional independent cycles.
+
+Every row has:
+
+| Field | Observed value |
+| --- | --- |
+| telegram_phase | PARTIAL |
+| provenance_status | OBSERVED |
+| coverage_complete | true |
+| inspected / inspection_limit | 11 / 256 |
+| unresolved | 11 |
+| reason_counts | public_canonical_reservation_missing: 11 |
+| failed / retryable / uncertain / failed_final | 0 / 0 / 0 / 0 |
+| provenance_incomplete | 0 |
+| retry_backoff_eligible | false |
+| retry_backoff_reason | PROVENANCE_ONLY_DIAGNOSTIC |
+| missed_interval_count | 1 |
+| blocked | 110 |
+| sent / confirmed transitions / confirmed candidates / confirmed sent | 0 / 0 / 0 / 0 |
+| skipped | 12, 12, 13 across the rows |
+
+**Confirmed cause of these three PARTIAL records:** completed provenance inspection reports 11 unresolved public-alert records whose canonical reservation attempt reference cannot be resolved. This is not incomplete inspection: all 11 eligible records in the bounded diagnostic scope were inspected. `telegram_outbox_phase_status` treats the nonzero `provenance_unresolved` count as PARTIAL even with all delivery-failure counters zero.
+
+The exact guard at the reported Runtime commit is [require_canonical_reservation_for_public_effect](https://github.com/candlecraftinteligence/candle-craft-trading-agent/blob/235ec88c09ff6df0372bd636eaaf47814e48bd6d/app/runtime_epoch/ownership.py#L641). `canonical_reservation_attempt_id` parses the event's persisted `canonical_reservation_attempt_id` field; a missing/unusable reference raises `public_canonical_reservation_missing`. This does not prove an attempt row was deleted, that a historical Telegram message was lost, or that the records are safe to resend.
+
+The existing retry classifier positively identifies this as provenance-only and does **not** add operational retry backoff. Therefore these samples do not support the earlier provenance-backoff cadence failure as the explanation for the current missed intervals. PARTIAL is intentionally retained to keep unresolved identity/effect evidence visible. No suppression, backfill, relinking, replay or resend is authorized by this diagnosis.
+
+Interpretation limits:
+
+- The counter is 11 in each inspection; do not add it to 33 distinct affected events. Stable counts alone do not prove that the same event IDs were inspected each time.
+- `coverage_complete=true` describes this scoped pending/retryable/in-flight public-event inspection, not all historical deliveries, market-data coverage or system-wide health.
+- `blocked=110` is a separate delivery-summary category. It is not evidence of 110 transport failures, and its relationship to the 11 provenance issues is not shown.
+- The export reports no failed/retryable/uncertain/finally-failed deliveries in these observations. It does not test Telegram connectivity or prove historical successful receipt. With no confirmed candidates/transitions in these rows, zero confirmed messages sent is not an observed confirmed-signal transport failure.
+- The origin, age, event identities and historical send state of the 11 affected records remain Unverified. Previously documented historical pending records cannot be equated with these 11 from counts alone. Existing manifest provenance details may be used for a future read-only classification; no live database query is required merely to identify the PARTIAL reason.
+- Every row reports one missed interval. These are recorded schedule metrics, separate from the disabled provenance retry backoff. Do not sum overlapping exports or infer a configured cadence solely from completion timestamps. A configured five-minute interval with a longer cycle could produce roughly ten-minute starts, but this is only a hypothesis until `interval_seconds`, scheduled/actual starts, final receipt duration and sleep/overrun are inspected.
+
+No additional outbox export is needed to explain this PARTIAL flag. Open reliability questions are the specific WebSocket-error timing, scanner-owned feed freshness/recovery, the two Unverified market frames, and full-cycle schedule overrun. Long synchronous lifecycle/persistence phases remain an identified starvation mechanism requiring correlation. The outbox metadata issue is separate; do not present it as the cause of Binance DNS/TLS/HTTP failures.
+
+No production database access, record mutation, Telegram send, process control, code implementation, merge or deployment occurred. Owner direction remains: PR #150 draft; diagnostics only.
+
 ## Runtime acceptance verdicts
 
-PASS/YES below refer only to the owner-run standalone probes: both handshakes, one BTCUSDT book, and aggregate trades. They do not assert scanner-owned feed recovery. Liquidation reception is Unverified. SCANNER_PARTIAL_ROOT_CAUSE=CONFIRMED is limited to the Telegram-outbox phase causing PARTIAL in the six supplied cycles; its delivery/provenance subcause and the historical 14 warnings remain Unverified. FAIL below means remaining acceptance is not demonstrated, not proven corruption. RUNTIME_FIX_APPLIED=NO refers to this workflow / draft #150; Runtime checkout already contains #149, which was not deployed by this workflow.
+PASS/YES below refer only to the owner-run standalone probes: both handshakes, one BTCUSDT book, and aggregate trades. They do not assert scanner-owned feed recovery. Liquidation reception is Unverified. SCANNER_PARTIAL_ROOT_CAUSE=CONFIRMED is limited to the Telegram-outbox phase causing PARTIAL in the six supplied cycles; the latest three outbox records specifically establish 11 unresolved canonical reservation references per inspection, while the records' creation/history and full historical 14-warning breakdown remain Unverified. FAIL below means remaining acceptance is not demonstrated, not proven corruption. RUNTIME_FIX_APPLIED=NO refers to this workflow / draft #150; Runtime checkout already contains #149, which was not deployed by this workflow.
 
 ```text
 WEBSOCKET_HANDSHAKE: PASS
@@ -232,7 +274,7 @@ RUNTIME_FIX_APPLIED: NO
 READY_FOR_NORMAL_OPERATION: NO
 ```
 
-Runtime recovery remains open pending manual diagnostics, reviewed correction approval and consecutive-cycle acceptance. DEV tests cannot close this P0 incident. The immediate next action is to obtain the already-recorded Telegram outbox/provenance counters and connect WebSocket disconnect timestamps with the identified synchronous phase stalls. The two earlier Unverified market frames still need classification. Do not deploy draft #150 or repeat identical probes without a diagnostic purpose.
+Runtime recovery remains open pending manual diagnostics, reviewed correction approval and consecutive-cycle acceptance. DEV tests cannot close this P0 incident. The outbox status is now classified. Remaining diagnostic work is to correlate WebSocket disconnect timestamps with synchronous phase stalls and to verify final cadence/session timing. The two earlier Unverified market frames still need classification. Do not deploy draft #150 or repeat identical probes without a diagnostic purpose.
 
 ## One-block Runtime diagnostic handoff
 
@@ -258,7 +300,7 @@ Committed diagnostic SHA-256 hashes (LF source bytes):
 
 These scripts were prepared before the owner hold. They do not start or stop the scanner/listener. If the Runtime interpreter path differs, use its established Python environment rather than installing dependencies or changing production configuration.
 
-## Next Runtime export — small text file
+## Previous Runtime export — completed on 2026-10-27
 
 Run this on Runtime and attach the generated Desktop `.txt` file. It reads three existing JSONL rows and exports only counters/reason categories; it does not open the production database, send Telegram messages, start a scanner/listener, or modify their configuration.
 

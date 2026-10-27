@@ -1,4 +1,6 @@
-# Next read-only Runtime check
+# Completed read-only Runtime check
+
+Result received 2026-10-27: PARTIAL is caused by 11 unresolved canonical reservation references per inspection. No delivery failures were reported; provenance-only retry backoff is disabled. This prompt is retained for audit and does not need to be repeated to explain the flag. See CCI_P0_WEBSOCKET_RUNTIME_RECOVERY.md for scope and remaining uncertainty.
 
 Paste this into PowerShell on Runtime. Attach the generated Desktop text file. This reads the existing scan manifest only; no database, message delivery or process control.
 
