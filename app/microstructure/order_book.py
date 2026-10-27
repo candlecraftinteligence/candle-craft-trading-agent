@@ -392,6 +392,9 @@ class SynchronizedLocalOrderBook:
             return BookIngestOutcome.NEEDS_RESYNC
 
         self._apply_levels(event, received_at=bridge.received_at)
+        if not self.bids or not self.asks or max(self.bids) >= min(self.asks):
+            self._invalidate("crossed_book", gap=False)
+            return BookIngestOutcome.NEEDS_RESYNC
         self.synchronized = True
         self.reason = None
         self._needs_resync = False

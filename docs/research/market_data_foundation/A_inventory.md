@@ -324,7 +324,7 @@ Expectancy benefit is `not established` unless an existing measured result is ci
 - runtime_enabled: unverified; code default order_book_liquidity_enabled false
 - expectancy_benefit: not established
 - code refs:
-  - `app/microstructure/order_book_service.py:96` contains `"/fapi/v1/depth"`
+  - `app/microstructure/order_book_service.py:103` contains `"/fapi/v1/depth"`
   - `app/core/config.py:97` contains `order_book_liquidity_enabled: bool = False`
 
 ## liquidations_binance_force_order

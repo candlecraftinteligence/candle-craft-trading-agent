@@ -3,11 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from app.context.models import ContextStatus
+from app.microstructure.reconnect import FeedRecovery, close_connection
+from app.microstructure.websocket_protocol import is_control_message as _is_control_message
+from app.microstructure.websocket_protocol import matches_usdt_perpetual, UnverifiedPayloadError
+from app.microstructure.websocket_protocol import is_subscription_ack
 from app.microstructure.liquidation import (
     LiquidationPayloadError,
     WrongLiquidationContractTypeError,
@@ -44,8 +49,11 @@ class LiquidationFlowService:
         max_symbols: int = DEFAULT_LIQUIDATION_MAX_SYMBOLS,
         reconnect_base_seconds: float = DEFAULT_RECONNECT_BASE_SECONDS,
         reconnect_max_seconds: float = DEFAULT_RECONNECT_MAX_SECONDS,
+        subscription_timeout_seconds: float = 10.0,
         clock: Any | None = None,
         sleep: Any | None = None,
+        monotonic: Any | None = None,
+        jitter: Any | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         if stale_after_seconds <= 0:
@@ -54,6 +62,8 @@ class LiquidationFlowService:
             raise ValueError("liquidation max_symbols must be between 1 and 1024")
         if reconnect_base_seconds < 0 or reconnect_max_seconds < reconnect_base_seconds:
             raise ValueError("liquidation reconnect delays are invalid")
+        if not math.isfinite(subscription_timeout_seconds) or subscription_timeout_seconds <= 0:
+            raise ValueError("subscription timeout must be positive and finite")
         self.transport = transport or BinanceWebSocketTransport(
             url=BINANCE_USDM_AGG_TRADE_URL,
             ping_interval_seconds=20.0,
@@ -63,13 +73,21 @@ class LiquidationFlowService:
         self.max_symbols = int(max_symbols)
         self.reconnect_base_seconds = float(reconnect_base_seconds)
         self.reconnect_max_seconds = float(reconnect_max_seconds)
+        self.subscription_timeout_seconds = float(subscription_timeout_seconds)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.sleep = sleep or asyncio.sleep
         self.logger = log or logger
+        self._lifecycle_lock = asyncio.Lock()
+        self._recovery = FeedRecovery(
+            "Liquidation", self.reconnect_base_seconds, self.reconnect_max_seconds,
+            monotonic=monotonic, jitter=jitter, log=self.logger,
+        )
         self._aggregators: dict[str, SymbolLiquidationAggregator] = {}
         self._desired_symbols: set[str] = set()
         self._overflow_symbols: dict[str, str] = {}
         self._connection: FlowWebSocketConnection | None = None
+        self._subscription_confirmed = False
+        self._pending_reconnect = False
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._state_lock = asyncio.Lock()
@@ -81,6 +99,7 @@ class LiquidationFlowService:
         self._untracked_symbol_event_count = 0
         self._ignored_message_count = 0
         self._last_error: str | None = None
+        self._payload_failure = False
 
     @property
     def running(self) -> bool:
@@ -91,29 +110,36 @@ class LiquidationFlowService:
         return tuple(sorted(self._desired_symbols))
 
     async def start(self, symbols: Sequence[str] = ()) -> None:
-        await self.reconcile_symbols(symbols)
-        if self.running:
-            return
-        self._stop_event.clear()
-        self._task = asyncio.create_task(
-            self._run_forever(),
-            name="liquidation-flow-service",
-        )
+        async with self._lifecycle_lock:
+            await self.reconcile_symbols(symbols)
+            if self.running:
+                return
+            self._stop_event.clear()
+            self._task = asyncio.create_task(self._run_forever(), name="liquidation-flow-service")
 
     async def stop(self) -> None:
-        self._stop_event.set()
-        task = self._task
-        self._task = None
-        connection = self._connection
-        if connection is not None:
-            await _safe_close(connection)
-        if task is not None:
-            task.cancel()
+        async with self._lifecycle_lock:
+            self._stop_event.set()
+            task, connection = self._task, self._connection
+            self._invalidate_stream()
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                elif connection is not None:
+                    await close_connection(connection)
+            finally:
+                self._task = None
+                self._recovery.stopped()
+
+    def _invalidate_stream(self) -> None:
         self._connection = None
+        self._subscription_confirmed = False
+        for aggregator in self._aggregators.values():
+            aggregator.mark_disconnected(self.clock())
 
     async def reconcile_symbols(self, symbols: Sequence[str]) -> tuple[str, ...]:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
@@ -131,7 +157,7 @@ class LiquidationFlowService:
                     symbol,
                     stale_after_seconds=self.stale_after_seconds,
                 )
-                if self._connection is not None:
+                if self._connection is not None and self._subscription_confirmed:
                     aggregator.mark_connected(self.clock(), reconnect=False)
                 self._aggregators[symbol] = aggregator
             for symbol in removals:
@@ -189,8 +215,10 @@ class LiquidationFlowService:
 
     def health(self) -> dict[str, Any]:
         return {
+            **self._recovery.health(),
             "running": self.running,
             "connected": self._connection is not None,
+            "subscription_confirmed": self._subscription_confirmed,
             "tracked_symbol_count": len(self._desired_symbols),
             "overflow_symbol_count": len(self._overflow_symbols),
             "connection_count": self._connection_count,
@@ -203,90 +231,92 @@ class LiquidationFlowService:
         }
 
     async def _run_forever(self) -> None:
-        failure_count = 0
+        self._recovery.start_session()
         while not self._stop_event.is_set():
             connection: FlowWebSocketConnection | None = None
+            phase, delay = "connect", 0.0
+            self._payload_failure = False
             try:
                 connection = await self.transport.connect()
+                self._recovery.connected()
+                phase = "subscribe"
                 reconnect = self._ever_connected
                 self._ever_connected = True
                 self._connection_count += 1
                 self._connection = connection
-                now = self.clock()
-                for aggregator in self._aggregators.values():
-                    aggregator.mark_connected(now, reconnect=reconnect)
-                await connection.send(
-                    json.dumps(
-                        {
-                            "method": "SUBSCRIBE",
-                            "params": [BINANCE_ALL_MARKET_LIQUIDATION_STREAM],
-                            "id": self._connection_count,
-                        },
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    )
-                )
-                failure_count = 0
+                self._pending_reconnect = reconnect
+                await connection.send(json.dumps({
+                    "method": "SUBSCRIBE", "params": [BINANCE_ALL_MARKET_LIQUIDATION_STREAM],
+                    "id": self._connection_count,
+                }, separators=(",", ":"), sort_keys=True))
                 self._last_error = None
-                self.logger.info(
-                    "Liquidation WebSocket connected tracked_symbols=%s reconnect=%s.",
-                    len(self._desired_symbols),
-                    reconnect,
-                )
+                deadline = asyncio.get_running_loop().time() + self.subscription_timeout_seconds
                 while not self._stop_event.is_set():
-                    payload = await connection.recv()
-                    self._handle_payload(payload)
+                    if not self._subscription_confirmed:
+                        async with asyncio.timeout(max(0.0, deadline - asyncio.get_running_loop().time())):
+                            payload = await connection.recv()
+                    else:
+                        payload = await connection.recv()
+                    accepted = self._handle_payload(payload)
+                    if self._payload_failure:
+                        raise UnverifiedPayloadError("public_stream_payload_unverified")
+                    if self._subscription_confirmed:
+                        phase = "receive"
+                    if accepted and self._subscription_confirmed:
+                        self._recovery.market_event()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                failure_count += 1
                 self._disconnect_count += 1
                 self._last_error = f"{type(exc).__name__}:{_clean_reason(exc)}"
-                self.logger.warning(
-                    "Liquidation WebSocket disconnected attempt=%s error=%s.",
-                    failure_count,
-                    self._last_error,
-                )
+                self._invalidate_stream()
+                delay = self._recovery.failed(exc, phase)
             finally:
-                if self._connection is connection:
-                    self._connection = None
+                self._invalidate_stream()
                 if connection is not None:
-                    await _safe_close(connection)
-                now = self.clock()
-                for aggregator in self._aggregators.values():
-                    aggregator.mark_disconnected(now)
+                    await close_connection(connection)
             if self._stop_event.is_set():
                 break
-            delay = min(
-                self.reconnect_max_seconds,
-                self.reconnect_base_seconds
-                * (2 ** min(max(failure_count - 1, 0), 10)),
-            )
             if delay > 0:
                 await self.sleep(delay)
+            else:
+                # A zero-delay injected test policy must still yield ownership.
+                await asyncio.sleep(0)
 
-    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> None:
-        decoded = _decoded_mapping(payload)
-        if decoded is not None and _is_control_message(decoded):
+    def _reject_unverified_payload(self) -> None:
+        if self._connection is not None:
+            self._payload_failure = True
+            self._invalidate_stream()
+
+    def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> bool:
+        if _is_control_message(payload):
             self._ignored_message_count += 1
-            return
-        if decoded is not None:
-            event_payload = decoded.get("data") if isinstance(decoded.get("data"), Mapping) else decoded
-            if isinstance(event_payload, Mapping) and event_payload.get("e") == "serverShutdown":
-                raise ConnectionError("binance_server_shutdown")
+            if (self._connection is not None and not self._subscription_confirmed
+                    and is_subscription_ack(payload, self._connection_count)):
+                self._subscription_confirmed = True
+                for aggregator in self._aggregators.values():
+                    aggregator.mark_connected(self.clock(), reconnect=self._pending_reconnect)
+            return False
         try:
             event = parse_binance_liquidation(payload)
         except WrongLiquidationContractTypeError:
             self._wrong_contract_event_count += 1
-            return
+            return False
         except LiquidationPayloadError:
             self._malformed_event_count += 1
-            return
+            self._reject_unverified_payload()
+            return False
+        if not matches_usdt_perpetual(event.symbol, event.pair_symbol):
+            self._wrong_contract_event_count += 1
+            if event.symbol in self._desired_symbols and matches_usdt_perpetual(event.symbol):
+                self._reject_unverified_payload()
+            return False
         aggregator = self._aggregators.get(event.symbol)
         if aggregator is None or event.symbol not in self._desired_symbols:
             self._untracked_symbol_event_count += 1
-            return
-        aggregator.ingest(event, received_at=self.clock())
+            return False
+        accepted = aggregator.ingest(event, received_at=self.clock())
+        return accepted and 0 <= (self.clock() - event.event_time).total_seconds() <= self.stale_after_seconds
 
 
 def _bounded_symbols(symbols: set[str], *, maximum: int) -> tuple[set[str], set[str]]:
@@ -303,34 +333,6 @@ def _normalize_symbol(value: Any) -> str:
     if not normalized:
         raise ValueError("liquidation tracked symbol must not be blank")
     return normalized
-
-
-def _decoded_mapping(payload: str | bytes | Mapping[str, Any]) -> Mapping[str, Any] | None:
-    if isinstance(payload, Mapping):
-        return payload
-    if isinstance(payload, bytes):
-        try:
-            payload = payload.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-    if not isinstance(payload, str):
-        return None
-    try:
-        decoded = json.loads(payload)
-    except json.JSONDecodeError:
-        return None
-    return decoded if isinstance(decoded, Mapping) else None
-
-
-def _is_control_message(payload: Mapping[str, Any]) -> bool:
-    return "id" in payload and "e" not in payload and "data" not in payload
-
-
-async def _safe_close(connection: FlowWebSocketConnection) -> None:
-    try:
-        await connection.close()
-    except Exception:
-        return
 
 
 def _clean_reason(exc: Exception) -> str:

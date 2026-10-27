@@ -13,6 +13,9 @@ from typing import Any, Protocol
 import httpx
 
 from app.context.models import ContextStatus
+from app.microstructure.reconnect import FeedRecovery, close_connection
+from app.microstructure.websocket_protocol import is_control_message as _is_control_message
+from app.microstructure.websocket_protocol import matches_usdt_perpetual, UnverifiedPayloadError
 from app.data.exceptions import (
     ExchangeHTTPError,
     ExchangeMalformedJSONError,
@@ -83,6 +86,8 @@ class BinanceDepthSnapshotClient:
         if timeout_seconds <= 0:
             raise ValueError("depth snapshot timeout must be greater than zero")
         self._owns_client = http_client is None
+        self._base_url = base_url.rstrip("/")
+        self._timeout_seconds = timeout_seconds
         self._client = http_client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
@@ -91,6 +96,8 @@ class BinanceDepthSnapshotClient:
     async def fetch(self, symbol: str, limit: int) -> Mapping[str, Any]:
         if limit not in VALID_SNAPSHOT_LIMITS:
             raise ValueError("invalid Binance depth snapshot limit")
+        if self._owns_client and self._client.is_closed:
+            self._client = httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout_seconds)
         try:
             response = await self._client.get(
                 "/fapi/v1/depth",
@@ -211,6 +218,11 @@ class OrderBookLiquidityService:
         self.sleep = sleep or asyncio.sleep
         self.jitter = jitter or (lambda maximum: random.uniform(0.0, maximum))
         self.logger = log or logger
+        self._lifecycle_lock = asyncio.Lock()
+        self._recovery = FeedRecovery(
+            "Order-book", self.reconnect_base_seconds, self.reconnect_max_seconds,
+            reset_after=self.reconnect_reset_seconds, monotonic=self.monotonic, jitter=self.jitter, log=self.logger,
+        )
 
         self._books: dict[str, SynchronizedLocalOrderBook] = {}
         self._desired_symbols: set[str] = set()
@@ -228,8 +240,6 @@ class OrderBookLiquidityService:
         self._ever_connected = False
         self._connection_count = 0
         self._disconnect_count = 0
-        self._consecutive_connection_failures = 0
-        self._reconnect_delay_seconds = 0.0
         self._malformed_event_count = 0
         self._wrong_contract_event_count = 0
         self._ignored_message_count = 0
@@ -238,6 +248,7 @@ class OrderBookLiquidityService:
         self._snapshot_recovery_scheduled_count = 0
         self._snapshot_recovery_attempt_count = 0
         self._last_error: str | None = None
+        self._payload_failure = False
 
     @property
     def running(self) -> bool:
@@ -248,32 +259,41 @@ class OrderBookLiquidityService:
         return tuple(sorted(self._desired_symbols))
 
     async def start(self, symbols: Sequence[str] = ()) -> None:
-        await self.reconcile_symbols(symbols)
-        if self.running:
-            return
-        self._stop_event.clear()
-        self._task = asyncio.create_task(self._run_forever(), name="order-book-liquidity-service")
+        async with self._lifecycle_lock:
+            await self.reconcile_symbols(symbols)
+            if self.running:
+                return
+            self._stop_event.clear()
+            self._task = asyncio.create_task(self._run_forever(), name="order-book-liquidity-service")
 
     async def stop(self) -> None:
-        self._stop_event.set()
-        task = self._task
-        self._task = None
-        connection = self._connection
-        if connection is not None:
-            await _safe_close(connection)
-        if task is not None:
-            task.cancel()
+        async with self._lifecycle_lock:
+            self._stop_event.set()
+            task, connection = self._task, self._connection
+            self._invalidate_stream()
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        await self._cancel_bootstraps()
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                elif connection is not None:
+                    await close_connection(connection)
+            finally:
+                await self._cancel_bootstraps()
+                try:
+                    await self.snapshot_client.aclose()
+                except Exception:
+                    pass
+                self._task = None
+                self._recovery.stopped()
+
+    def _invalidate_stream(self) -> None:
         self._connection = None
         self._active_symbols.clear()
-        try:
-            await self.snapshot_client.aclose()
-        except Exception:
-            pass
+        for book in self._books.values():
+            book.mark_disconnected()
 
     async def reconcile_symbols(self, symbols: Sequence[str]) -> tuple[str, ...]:
         requested = {_normalize_symbol(symbol) for symbol in symbols}
@@ -347,6 +367,7 @@ class OrderBookLiquidityService:
 
     def health(self) -> dict[str, Any]:
         return {
+            **self._recovery.health(),
             "running": self.running,
             "connected": self._connection is not None,
             "desired_symbol_count": len(self._desired_symbols),
@@ -355,8 +376,6 @@ class OrderBookLiquidityService:
             "active_bootstrap_count": len(self._bootstrap_tasks),
             "connection_count": self._connection_count,
             "disconnect_count": self._disconnect_count,
-            "consecutive_connection_failures": self._consecutive_connection_failures,
-            "reconnect_delay_seconds": self._reconnect_delay_seconds,
             "receive_timeout_seconds": self.receive_timeout_seconds,
             "reconnect_reset_seconds": self.reconnect_reset_seconds,
             "websocket_open_timeout_seconds": getattr(
@@ -383,17 +402,14 @@ class OrderBookLiquidityService:
         }
 
     async def _run_forever(self) -> None:
-        failure_count = 0
-        self._consecutive_connection_failures = 0
-        self._reconnect_delay_seconds = 0.0
+        self._recovery.start_session()
         while not self._stop_event.is_set():
             connection: FlowWebSocketConnection | None = None
-            phase = "connect"
-            delay = 0.0
+            phase, delay = "connect", 0.0
+            self._payload_failure = False
             try:
                 connection = await self.transport.connect()
-                connected_at = float(self.monotonic())
-                self._reconnect_delay_seconds = 0.0
+                self._recovery.connected()
                 phase = "subscribe"
                 reconnect = self._ever_connected
                 self._ever_connected = True
@@ -402,72 +418,43 @@ class OrderBookLiquidityService:
                 self._active_symbols.clear()
                 for book in self._books.values():
                     book.mark_connected(reconnect=reconnect)
-                await self._send_subscription_diff(
-                    connection,
-                    additions=set(self._desired_symbols),
-                    removals=set(),
-                )
+                await self._send_subscription_diff(connection, additions=set(self._desired_symbols), removals=set())
                 for symbol in sorted(self._desired_symbols):
                     self._schedule_bootstrap(symbol)
                 self._last_error = None
-                self.logger.info(
-                    "Order-book WebSocket connected symbols=%s reconnect=%s speed=%s "
-                    "max_message_bytes=%s max_queue=%s.",
-                    len(self._desired_symbols),
-                    reconnect,
-                    self.update_speed,
-                    getattr(self.transport, "max_message_bytes", None),
-                    getattr(self.transport, "max_queue", None),
-                )
                 phase = "receive"
                 while not self._stop_event.is_set():
                     async with asyncio.timeout(self.receive_timeout_seconds):
                         payload = await connection.recv()
                     accepted = self._handle_payload(payload)
-                    # A successful handshake alone must not reset a flapping feed.
-                    # Control frames, malformed events and other contracts aren't
-                    # evidence of a recovered subscribed USD-M depth connection.
-                    if (
-                        failure_count
-                        and accepted
-                        and self.monotonic() - connected_at >= self.reconnect_reset_seconds
-                    ):
-                        failure_count = 0
-                        self._consecutive_connection_failures = 0
+                    if self._payload_failure:
+                        raise UnverifiedPayloadError("public_stream_payload_unverified")
+                    if accepted:
+                        self._recovery.market_event()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                failure_count += 1
                 self._disconnect_count += 1
-                self._consecutive_connection_failures = failure_count
-                delay = min(
-                    self.reconnect_max_seconds,
-                    self.reconnect_base_seconds * (2 ** min(failure_count - 1, 10)),
-                )
-                self._reconnect_delay_seconds = delay
                 self._last_error = f"{type(exc).__name__}:{_clean_reason(exc)}"
-                self.logger.warning(
-                    "Order-book WebSocket disconnected attempt=%s phase=%s "
-                    "retry_in=%.1fs error=%s.",
-                    failure_count,
-                    phase,
-                    delay,
-                    self._last_error,
-                )
+                self._invalidate_stream()
+                delay = self._recovery.failed(exc, phase)
             finally:
-                if self._connection is connection:
-                    self._connection = None
-                self._active_symbols.clear()
-                # Revoke trusted levels before any potentially slow socket cleanup.
-                for book in self._books.values():
-                    book.mark_disconnected()
+                self._invalidate_stream()
                 await self._cancel_bootstraps()
                 if connection is not None:
-                    await _safe_close(connection)
+                    await close_connection(connection)
             if self._stop_event.is_set():
                 break
             if delay > 0:
                 await self.sleep(delay)
+            else:
+                # A zero-delay injected test policy must still yield ownership.
+                await asyncio.sleep(0)
+
+    def _reject_unverified_payload(self) -> None:
+        if self._connection is not None:
+            self._payload_failure = True
+            self._invalidate_stream()
 
     def _handle_payload(self, payload: str | bytes | Mapping[str, Any]) -> bool:
         if _is_control_message(payload):
@@ -480,6 +467,12 @@ class OrderBookLiquidityService:
             return False
         except OrderBookPayloadError:
             self._malformed_event_count += 1
+            self._reject_unverified_payload()
+            return False
+        if not matches_usdt_perpetual(event.symbol, event.pair_symbol):
+            self._wrong_contract_event_count += 1
+            if event.symbol in self._desired_symbols and matches_usdt_perpetual(event.symbol):
+                self._reject_unverified_payload()
             return False
         book = self._books.get(event.symbol)
         if book is None or event.symbol not in self._desired_symbols:
@@ -491,7 +484,10 @@ class OrderBookLiquidityService:
             BookIngestOutcome.BUFFER_OVERFLOW,
         }:
             self._schedule_bootstrap(event.symbol)
-        return True
+        fresh = 0 <= (self.clock() - event.event_time).total_seconds() <= self.stale_after_seconds
+        return fresh and outcome in {
+            BookIngestOutcome.BUFFERED, BookIngestOutcome.SYNCHRONIZED, BookIngestOutcome.APPLIED,
+        }
 
     def _schedule_bootstrap(self, symbol: str) -> None:
         if self._connection is None or self._stop_event.is_set():
@@ -680,21 +676,6 @@ def _normalize_symbol(value: Any) -> str:
     return normalized
 
 
-def _is_control_message(payload: str | bytes | Mapping[str, Any]) -> bool:
-    decoded: Any = payload
-    if isinstance(payload, bytes):
-        try:
-            decoded = payload.decode("utf-8")
-        except UnicodeDecodeError:
-            return False
-    if isinstance(decoded, str):
-        try:
-            decoded = json.loads(decoded)
-        except json.JSONDecodeError:
-            return False
-    return isinstance(decoded, Mapping) and "id" in decoded and "e" not in decoded and "data" not in decoded
-
-
 def _retry_after(response: httpx.Response) -> float | None:
     value = response.headers.get("Retry-After")
     if value is None:
@@ -703,13 +684,6 @@ def _retry_after(response: httpx.Response) -> float | None:
         return max(float(value), 0.0)
     except ValueError:
         return None
-
-
-async def _safe_close(connection: FlowWebSocketConnection) -> None:
-    try:
-        await connection.close()
-    except Exception:
-        return
 
 
 def _clean_reason(exc: Exception) -> str:
