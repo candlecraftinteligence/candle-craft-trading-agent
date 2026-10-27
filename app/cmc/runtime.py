@@ -17,6 +17,9 @@ from app.cmc.profiles import profile_for
 
 logger = logging.getLogger(__name__)
 _services = weakref.WeakKeyDictionary()
+# Whole-collection deadline. Loop starvation can delay this firing; do not raise it
+# to hide that. Cancelling the waiter does not join sidecar threads inside collect().
+COLLECTION_DEADLINE_SECONDS = 30
 
 
 class Service:
@@ -26,6 +29,7 @@ class Service:
         self.task = None
         self.next_refresh = 0
         self.closed = False
+        self.last_acquisition = None
 
     def schedule(self):
         if not self.closed and (self.task is None or self.task.done()) and time.monotonic() >= self.next_refresh:
@@ -41,14 +45,29 @@ class Service:
             await self.collector.client.aclose()
 
     async def _refresh(self):
+        started = time.monotonic()
+        started_at = datetime.now(UTC).isoformat()
+        outcome = "completed"
         try:
-            self.snapshot = await asyncio.wait_for(self.collector.collect(), timeout=30)
+            self.snapshot = await asyncio.wait_for(
+                self.collector.collect(), timeout=COLLECTION_DEADLINE_SECONDS,
+            )
         except asyncio.CancelledError:
+            outcome = "cancelled"
             raise
         except Exception as exc:
             # Keep previous evidence, whose timestamps still expire. Never retain an old
             # enforcement decision and never log provider exception text / credentials.
-            logger.warning("CMC collection unavailable: %s", type(exc).__name__)
+            outcome = type(exc).__name__
+            logger.warning("CMC collection unavailable: %s", outcome)
+        finally:
+            self.last_acquisition = {
+                "started_at": started_at,
+                "duration_seconds": round(max(0.0, time.monotonic() - started), 3),
+                "outcome": outcome,
+                "deadline_seconds": COLLECTION_DEADLINE_SECONDS,
+                "deadline_extended": False,
+            }
 
     async def close(self):
         self.closed = True

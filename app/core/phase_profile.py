@@ -28,6 +28,9 @@ class PhaseProfile:
         self._rows = {name: {"calls": 0, "active_calls": 0, "raised_calls": 0, "unavailable_calls": 0,
                              "observed_seconds": 0.0} for name in PHASES}
         self.resources: dict[str, Any] = {}
+        self.loop_lag: Any = None
+        self.disk_worker: Any = None
+        self._phase_stack: list[str] = []
         self._started = self._read_clock()
         try:
             info = time.get_clock_info("perf_counter")
@@ -61,12 +64,14 @@ class PhaseProfile:
         start = self._read_clock()
         row["calls"] += 1
         row["active_calls"] += 1
+        self._phase_stack.append(name)
         try:
             yield
         except BaseException:
             row["raised_calls"] += 1
             raise
         finally:
+            self._phase_stack.pop()
             row["active_calls"] -= 1
             end = self._read_clock()
             if start is None or end is None or end < start or not math.isfinite(end - start):
@@ -74,9 +79,21 @@ class PhaseProfile:
             else:
                 row["observed_seconds"] += end - start
 
+    @property
+    def active_phase(self) -> str | None:
+        return self._phase_stack[-1] if self._phase_stack else None
+
     def call(self, name: str, function: Callable, *args: Any, **kwargs: Any) -> Any:
-        with self.measure(name):
-            return function(*args, **kwargs)
+        monitor = self.loop_lag
+        started = self._read_clock() if monitor is not None else None
+        try:
+            with self.measure(name):
+                return function(*args, **kwargs)
+        finally:
+            if monitor is not None and started is not None:
+                ended = self._read_clock()
+                if ended is not None and ended >= started and math.isfinite(ended - started):
+                    monitor.note_induced_block(name, ended - started)
 
     async def acall(self, name: str, function: Callable, *args: Any, **kwargs: Any) -> Any:
         with self.measure(name):
@@ -93,10 +110,15 @@ class PhaseProfile:
                 "measurement_status": "NOT_OBSERVED" if not value["calls"] else
                     "Unverified" if value["unavailable_calls"] else "IN_PROGRESS" if value["active_calls"] else "OBSERVED",
             }
-        return {"contract": "cci-phase-profile-v1", "boundary": boundary,
+        report: dict[str, Any] = {"contract": "cci-phase-profile-v1", "boundary": boundary,
                 "clock": dict(self.clock_info), "elapsed_seconds": total, "phases": rows,
                 "scope": "inclusive_elapsed_calls_may_overlap_do_not_sum",
                 "coverage": "instrumented_boundaries_only", "business_success_inferred": False}
+        if self.loop_lag is not None:
+            report["event_loop"] = self.loop_lag.compact_snapshot()
+        if self.disk_worker is not None:
+            report["disk_isolation"] = self.disk_worker.compact_snapshot()
+        return report
 
 
 def current_observations(*, boundary: str) -> dict[str, Any]:
