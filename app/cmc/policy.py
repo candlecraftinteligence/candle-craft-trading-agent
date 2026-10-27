@@ -29,6 +29,7 @@ class Candidate(Frozen):
     baseline_tie_rank: tuple[Decimal, ...] = ()
     is_new_signal: bool = True
     original_decision_at: datetime | None = None
+    alert_type: str = "N/A"
 
 
 class Rule(Frozen):

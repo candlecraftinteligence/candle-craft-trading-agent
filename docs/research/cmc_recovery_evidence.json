@@ -1,0 +1,499 @@
+{
+  "benchmark": [
+    {
+      "candidates": 100,
+      "peak_python_bytes": null,
+      "seconds_including_sidecar_write": 0.2712902000057511,
+      "snapshot_observations": 2413,
+      "tracemalloc": false
+    },
+    {
+      "candidates": 100,
+      "peak_python_bytes": 7650829,
+      "seconds_including_sidecar_write": 0.606179800000973,
+      "snapshot_observations": 2413,
+      "tracemalloc": true
+    }
+  ],
+  "credentials_read": false,
+  "economic_improvement": "N/A: no verified prospective outcome cohort",
+  "identity_evidence": [
+    {
+      "authorization_status": "IDENTITY_REVIEW_PENDING",
+      "current_contract_metadata": "N/A: reacquire before rollout",
+      "evidence_cutoff": "2026-10-26T13:01:39.784751+00:00",
+      "historical_evidence_status": "EVIDENCE_VERIFIED",
+      "owner_approval": "N/A",
+      "provenance_refs": [
+        "sha256:7002be0edfaa6e9004db25fd423767af63b1487635f3cfe9b86ce99a1bfdf6a8",
+        "sha256:97529a0c8a03d475fd4850b07aa1588fd48fab960e495f2664da0186f94ed61b",
+        "sha256:a51360398603add155d4d1f6321b718fe5f7761079dd2b2d9d78402eae99f8b1",
+        "sha256:a6a15c09327c7a2adc442c12b8ac85dcc6f528f65d03b3c55394beb6f6dfe14d",
+        "sha256:a9220f4f671128b6a4048d366fa0fc91404ad2265e84eca5a07440d7a5607cc3",
+        "sha256:aa1f7a7a91123ac2139f12d830f77976bfeebd2acbf5c8fcd02e576aa26f8a7c",
+        "sha256:e3de3cfc9d83b41202a9b516001ce7583073c2beff19fe8bfecd5f3b1d9f64ce",
+        "sha256:e75bbe233c57861a3a29fe293fcb5fa5a1bb27030ba7c0e9cefe6c695382c396",
+        "sha256:ff76d2cc583dd93f6d8bd89e72984168af872c952d448f0eeaba8b15838c5dc9"
+      ],
+      "review_at": "N/A: pending",
+      "symbol": "BTCUSDT"
+    },
+    {
+      "authorization_status": "IDENTITY_REVIEW_PENDING",
+      "current_contract_metadata": "N/A: reacquire before rollout",
+      "evidence_cutoff": "2026-10-26T13:01:39.784751+00:00",
+      "historical_evidence_status": "EVIDENCE_VERIFIED",
+      "owner_approval": "N/A",
+      "provenance_refs": [
+        "sha256:7002be0edfaa6e9004db25fd423767af63b1487635f3cfe9b86ce99a1bfdf6a8",
+        "sha256:97529a0c8a03d475fd4850b07aa1588fd48fab960e495f2664da0186f94ed61b",
+        "sha256:a51360398603add155d4d1f6321b718fe5f7761079dd2b2d9d78402eae99f8b1",
+        "sha256:a6a15c09327c7a2adc442c12b8ac85dcc6f528f65d03b3c55394beb6f6dfe14d",
+        "sha256:a9220f4f671128b6a4048d366fa0fc91404ad2265e84eca5a07440d7a5607cc3",
+        "sha256:aa1f7a7a91123ac2139f12d830f77976bfeebd2acbf5c8fcd02e576aa26f8a7c",
+        "sha256:e3de3cfc9d83b41202a9b516001ce7583073c2beff19fe8bfecd5f3b1d9f64ce",
+        "sha256:e75bbe233c57861a3a29fe293fcb5fa5a1bb27030ba7c0e9cefe6c695382c396",
+        "sha256:ff76d2cc583dd93f6d8bd89e72984168af872c952d448f0eeaba8b15838c5dc9"
+      ],
+      "review_at": "N/A: pending",
+      "symbol": "ETHUSDT"
+    },
+    {
+      "authorization_status": "IDENTITY_REVIEW_PENDING",
+      "current_contract_metadata": "N/A: reacquire before rollout",
+      "evidence_cutoff": "2026-10-26T13:01:39.784751+00:00",
+      "historical_evidence_status": "EVIDENCE_VERIFIED",
+      "owner_approval": "N/A",
+      "provenance_refs": [
+        "sha256:7002be0edfaa6e9004db25fd423767af63b1487635f3cfe9b86ce99a1bfdf6a8",
+        "sha256:97529a0c8a03d475fd4850b07aa1588fd48fab960e495f2664da0186f94ed61b",
+        "sha256:a51360398603add155d4d1f6321b718fe5f7761079dd2b2d9d78402eae99f8b1",
+        "sha256:a6a15c09327c7a2adc442c12b8ac85dcc6f528f65d03b3c55394beb6f6dfe14d",
+        "sha256:a9220f4f671128b6a4048d366fa0fc91404ad2265e84eca5a07440d7a5607cc3",
+        "sha256:aa1f7a7a91123ac2139f12d830f77976bfeebd2acbf5c8fcd02e576aa26f8a7c",
+        "sha256:e3de3cfc9d83b41202a9b516001ce7583073c2beff19fe8bfecd5f3b1d9f64ce",
+        "sha256:e75bbe233c57861a3a29fe293fcb5fa5a1bb27030ba7c0e9cefe6c695382c396",
+        "sha256:ff76d2cc583dd93f6d8bd89e72984168af872c952d448f0eeaba8b15838c5dc9"
+      ],
+      "review_at": "N/A: pending",
+      "symbol": "SOLUSDT"
+    }
+  ],
+  "live_scanner_started": false,
+  "owner_approvals_created": false,
+  "prospective_selection_leverage": "BLOCKED_EXTERNAL: no sanitized Runtime cohort supplied",
+  "provider_requests": 0,
+  "recorded_context_cutoff": "2026-10-26T13:01:39.784751+00:00",
+  "recorded_context_evaluation": {
+    "candidate": {
+      "alert_type": "N/A",
+      "baseline_tie_rank": [],
+      "canonical_rank": [],
+      "cci_eligible": true,
+      "direction": "long",
+      "economic_plan_id": "synthetic:plan",
+      "is_new_signal": true,
+      "original_decision_at": "2026-10-26T13:01:39.784751Z",
+      "setup_id": "synthetic:setup",
+      "symbol": "BTCUSDT"
+    },
+    "decision_at": "2026-10-26T13:01:39.784751Z",
+    "final_eligible": true,
+    "hypothetical_priority_delta": 0,
+    "hypothetical_veto": false,
+    "mode": "shadow",
+    "priority_delta": 0,
+    "recommendations": [
+      {
+        "acquisition_timestamps": [],
+        "action": "INSUFFICIENT_EVIDENCE",
+        "cci_eligible": true,
+        "data_timestamps": [],
+        "direction": "long",
+        "economic_plan_id": "synthetic:plan",
+        "enforced": false,
+        "evidence_refs": [],
+        "evidence_status": "MISSING",
+        "final_decision": "ELIGIBLE_PRIORITY_0",
+        "original_setup_id": "synthetic:setup",
+        "reason": "N/A: required verified, fresh, causal rule evidence missing",
+        "rule_id": "data_divergence",
+        "rule_version": "1",
+        "specification_hash": "580bd1a4824a2ea4452ce29b742dd86e60171f7ca066891f5a925d61b20736fe"
+      },
+      {
+        "acquisition_timestamps": [
+          "2026-10-26T13:01:39.300970Z",
+          "2026-10-26T13:01:39.300970Z",
+          "2026-10-26T13:01:39.300970Z",
+          "2026-10-26T13:01:39.300970Z"
+        ],
+        "action": "NO_EFFECT",
+        "cci_eligible": true,
+        "data_timestamps": [
+          "2026-10-26T12:59:00Z",
+          "2026-10-26T12:59:00Z",
+          "2026-10-26T12:59:00Z",
+          "2026-10-26T12:59:00Z"
+        ],
+        "direction": "long",
+        "economic_plan_id": "synthetic:plan",
+        "enforced": false,
+        "evidence_refs": [
+          "45e2c564de8c71a8f3218f0e2d1743b0d6f62f9d6504c5ad808a94288d497af8",
+          "322cabd42afb7afeb87161e2fc265b9842a61ea6c1ed7aa52c41039c24453398",
+          "af529ef00b05e343eb51c36b927fd34a91ec17cd73579f7599ffd6e3be25daca",
+          "e1fa64cc950f89f0ce41ff04ab49ae0721bdf5f00364505c1e8266370d491535"
+        ],
+        "evidence_status": "VERIFIED",
+        "final_decision": "ELIGIBLE_PRIORITY_0",
+        "original_setup_id": "synthetic:setup",
+        "reason": "Global hourly stress ratio >=4 and direction-signed liquidation imbalance >=0.75; no sweep inference.",
+        "rule_id": "liquidation_stress",
+        "rule_version": "1",
+        "specification_hash": "e8bcc2c51898385dc345093aaa92cb9d72faece8b2f12e6e53b6ec3dc602a735"
+      },
+      {
+        "acquisition_timestamps": [
+          "2026-10-26T13:01:38.937857Z",
+          "2026-10-26T13:01:39.300970Z",
+          "2026-10-26T13:01:39.300970Z"
+        ],
+        "action": "NO_EFFECT",
+        "cci_eligible": true,
+        "data_timestamps": [
+          "2026-10-26T12:59:59.999000Z",
+          "2026-10-26T12:59:00Z",
+          "2026-10-26T12:59:00Z"
+        ],
+        "direction": "long",
+        "economic_plan_id": "synthetic:plan",
+        "enforced": false,
+        "evidence_refs": [
+          "34478a1d4a98db42bafb2912de7fcf9b168b6103bccb7a6926f36e4e17f4cdf8",
+          "45e2c564de8c71a8f3218f0e2d1743b0d6f62f9d6504c5ad808a94288d497af8",
+          "322cabd42afb7afeb87161e2fc265b9842a61ea6c1ed7aa52c41039c24453398"
+        ],
+        "evidence_status": "VERIFIED",
+        "final_decision": "ELIGIBLE_PRIORITY_0",
+        "original_setup_id": "synthetic:setup",
+        "reason": "Direction-signed negative market-cap return >3 percent and global stress ratio >=2.",
+        "rule_id": "adverse_regime",
+        "rule_version": "1",
+        "specification_hash": "0cd7878eb32d7a66f4b5a62a6f423b5762d16694b3a6ca37fae93c2583fbcf44"
+      },
+      {
+        "acquisition_timestamps": [
+          "2026-10-26T13:01:38.937857Z",
+          "2026-10-26T13:01:38.937857Z"
+        ],
+        "action": "INSUFFICIENT_EVIDENCE",
+        "cci_eligible": true,
+        "data_timestamps": [
+          "2026-10-26T12:59:59.999000Z",
+          "2026-10-26T12:59:59.999000Z"
+        ],
+        "direction": "long",
+        "economic_plan_id": "synthetic:plan",
+        "enforced": false,
+        "evidence_refs": [
+          "34478a1d4a98db42bafb2912de7fcf9b168b6103bccb7a6926f36e4e17f4cdf8"
+        ],
+        "evidence_status": "MISSING",
+        "final_decision": "ELIGIBLE_PRIORITY_0",
+        "original_setup_id": "synthetic:setup",
+        "reason": "N/A: required verified, fresh, causal rule evidence missing",
+        "rule_id": "sector_support",
+        "rule_version": "1",
+        "specification_hash": "b1e8d1132d5833db7d2aff5b181d6e6a935b80d7f56034faf38b8fc2811bb2bd"
+      },
+      {
+        "acquisition_timestamps": [],
+        "action": "INSUFFICIENT_EVIDENCE",
+        "cci_eligible": true,
+        "data_timestamps": [],
+        "direction": "long",
+        "economic_plan_id": "synthetic:plan",
+        "enforced": false,
+        "evidence_refs": [],
+        "evidence_status": "MISSING",
+        "final_decision": "ELIGIBLE_PRIORITY_0",
+        "original_setup_id": "synthetic:setup",
+        "reason": "N/A: required verified, fresh, causal rule evidence missing",
+        "rule_id": "consistent_context",
+        "rule_version": "1",
+        "specification_hash": "31d22a811e04632bc8f347a35f37188cf164d5ac2542d24e5c25ac8db0467510"
+      }
+    ],
+    "vetoed": false
+  },
+  "recorded_context_features": [
+    {
+      "acquired_timestamps": [
+        "2026-10-26T13:01:38.937857Z"
+      ],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [
+        "34478a1d4a98db42bafb2912de7fcf9b168b6103bccb7a6926f36e4e17f4cdf8"
+      ],
+      "input_timestamps": [
+        "2026-10-26T12:59:59.999000Z"
+      ],
+      "instrument_key": null,
+      "name": "CmcGlobalMarketRisk",
+      "reason": "negative 24h total market-cap change",
+      "scope": "global",
+      "state": "VERIFIED",
+      "units": "percent",
+      "value": "0.0124609900",
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [
+        "2026-10-26T13:01:38.937857Z"
+      ],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [
+        "0644c2fabf9459d7b5b3e1d149c857495f9487568a865e4c7194b1dca826c002"
+      ],
+      "input_timestamps": [
+        "2026-10-26T12:59:59.999000Z"
+      ],
+      "instrument_key": null,
+      "name": "CmcBtcDominanceContext",
+      "reason": "BTC share of market cap",
+      "scope": "global",
+      "state": "VERIFIED",
+      "units": "percent",
+      "value": "60.063619732203",
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [],
+      "input_timestamps": [],
+      "instrument_key": null,
+      "name": "CmcAltcoinRotation",
+      "reason": "N/A: required equivalent fresh causal inputs unavailable or misaligned",
+      "scope": "global",
+      "state": "MISSING",
+      "units": "fraction",
+      "value": null,
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [],
+      "input_timestamps": [],
+      "instrument_key": null,
+      "name": "CmcBasisContext",
+      "reason": "N/A: required equivalent fresh causal inputs unavailable or misaligned",
+      "scope": "contract",
+      "state": "MISSING",
+      "units": "fraction",
+      "value": null,
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [],
+      "input_timestamps": [],
+      "instrument_key": null,
+      "name": "CmcFundingContext",
+      "reason": "N/A: required equivalent fresh causal inputs unavailable or misaligned",
+      "scope": "contract",
+      "state": "MISSING",
+      "units": "fraction/interval",
+      "value": null,
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [],
+      "input_timestamps": [],
+      "instrument_key": null,
+      "name": "CmcOpenInterestContext",
+      "reason": "N/A: required equivalent fresh causal inputs unavailable or misaligned",
+      "scope": "contract",
+      "state": "MISSING",
+      "units": "N/A",
+      "value": null,
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [],
+      "input_timestamps": [],
+      "instrument_key": null,
+      "name": "CmcMarketCapRank",
+      "reason": "N/A: required equivalent fresh causal inputs unavailable or misaligned",
+      "scope": "asset",
+      "state": "MISSING",
+      "units": "rank",
+      "value": null,
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [],
+      "input_timestamps": [],
+      "instrument_key": null,
+      "name": "CmcDerivativesLeverage",
+      "reason": "N/A: required equivalent fresh causal inputs unavailable or misaligned",
+      "scope": "exchange_all_contracts",
+      "state": "MISSING",
+      "units": "OI/daily_volume",
+      "value": null,
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [],
+      "input_timestamps": [],
+      "instrument_key": null,
+      "name": "CmcFundingDispersion",
+      "reason": "N/A: required equivalent fresh causal inputs unavailable or misaligned",
+      "scope": "cross_exchange",
+      "state": "MISSING",
+      "units": "fraction/interval",
+      "value": null,
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [
+        "2026-10-26T13:01:39.300970Z",
+        "2026-10-26T13:01:39.300970Z"
+      ],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [
+        "45e2c564de8c71a8f3218f0e2d1743b0d6f62f9d6504c5ad808a94288d497af8",
+        "322cabd42afb7afeb87161e2fc265b9842a61ea6c1ed7aa52c41039c24453398"
+      ],
+      "input_timestamps": [
+        "2026-10-26T12:59:00Z",
+        "2026-10-26T12:59:00Z"
+      ],
+      "instrument_key": null,
+      "name": "CmcLiquidationPressure",
+      "reason": "24 * global rolling 1h liquidations / rolling 24h liquidations",
+      "scope": "global_all_contracts",
+      "state": "VERIFIED",
+      "units": "hourly_vs_daily_rate",
+      "value": "0.5689791305173645414830914058",
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [
+        "2026-10-26T13:01:39.300970Z",
+        "2026-10-26T13:01:39.300970Z"
+      ],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [
+        "af529ef00b05e343eb51c36b927fd34a91ec17cd73579f7599ffd6e3be25daca",
+        "e1fa64cc950f89f0ce41ff04ab49ae0721bdf5f00364505c1e8266370d491535"
+      ],
+      "input_timestamps": [
+        "2026-10-26T12:59:00Z",
+        "2026-10-26T12:59:00Z"
+      ],
+      "instrument_key": null,
+      "name": "CmcLiquidationImbalance",
+      "reason": "(long - short) / total; aggregate stress, never a local sweep",
+      "scope": "global_all_contracts",
+      "state": "VERIFIED",
+      "units": "fraction",
+      "value": "-0.1113402170786392338865241051",
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [
+        "2026-10-26T13:01:38.937857Z"
+      ],
+      "cmc_id": null,
+      "decision_relevance": "experimental policy evidence; separate owner activation required",
+      "evidence_ids": [
+        "34478a1d4a98db42bafb2912de7fcf9b168b6103bccb7a6926f36e4e17f4cdf8"
+      ],
+      "input_timestamps": [
+        "2026-10-26T12:59:59.999000Z"
+      ],
+      "instrument_key": null,
+      "name": "CmcSectorRelativeStrength",
+      "reason": "N/A: required equivalent fresh causal inputs unavailable or misaligned",
+      "scope": "sector",
+      "state": "MISSING",
+      "units": "percentage_points",
+      "value": null,
+      "version": "1"
+    },
+    {
+      "acquired_timestamps": [
+        "2026-10-26T13:01:38.937857Z",
+        "2026-10-26T13:01:38.937857Z",
+        "2026-10-26T13:01:39.300970Z",
+        "2026-10-26T13:01:39.300970Z",
+        "2026-10-26T13:01:39.300970Z",
+        "2026-10-26T13:01:39.300970Z"
+      ],
+      "cmc_id": null,
+      "decision_relevance": "research context only",
+      "evidence_ids": [
+        "34478a1d4a98db42bafb2912de7fcf9b168b6103bccb7a6926f36e4e17f4cdf8",
+        "0644c2fabf9459d7b5b3e1d149c857495f9487568a865e4c7194b1dca826c002",
+        "45e2c564de8c71a8f3218f0e2d1743b0d6f62f9d6504c5ad808a94288d497af8",
+        "322cabd42afb7afeb87161e2fc265b9842a61ea6c1ed7aa52c41039c24453398",
+        "af529ef00b05e343eb51c36b927fd34a91ec17cd73579f7599ffd6e3be25daca",
+        "e1fa64cc950f89f0ce41ff04ab49ae0721bdf5f00364505c1e8266370d491535"
+      ],
+      "input_timestamps": [
+        "2026-10-26T12:59:59.999000Z",
+        "2026-10-26T12:59:59.999000Z",
+        "2026-10-26T12:59:00Z",
+        "2026-10-26T12:59:00Z",
+        "2026-10-26T12:59:00Z",
+        "2026-10-26T12:59:00Z"
+      ],
+      "instrument_key": null,
+      "name": "CmcDataConfidence",
+      "reason": "verified feature coverage; not a profitability probability",
+      "scope": "global",
+      "state": "VERIFIED",
+      "units": "coverage_fraction",
+      "value": "0.3333333333333333333333333333",
+      "version": "1"
+    }
+  ],
+  "runtime_database_opened": false,
+  "runtime_host_RSS_and_latency": "BLOCKED_EXTERNAL: separate 4 GB Runtime host",
+  "schema_version": "cmc-recovery/1",
+  "selection_leverage_recorded_candidate_fixture": {
+    "actual_delivery_change_proven": false,
+    "alert_types": {
+      "N/A": 1
+    },
+    "candidates_in_exact_rank_ties": 0,
+    "confirmed_priority_mechanism": "delivery ordering only; no membership cap introduced",
+    "economic_outcome": "N/A",
+    "eligible_new_candidates": 1,
+    "exact_rank_tie_groups": 0,
+    "ties_with_different_hypothetical_priorities": 0
+  }
+}

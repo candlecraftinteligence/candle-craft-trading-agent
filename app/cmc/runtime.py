@@ -10,8 +10,10 @@ from pathlib import Path
 
 from app.cmc.client import CmcClient
 from app.cmc.collection import Collector, load_manifest
-from app.cmc.models import Mode, Snapshot
+from app.cmc.models import Mode, Snapshot, stable_id
+from app.cmc.identity import IdentityStatus, binding_status
 from app.cmc.storage import Sidecar
+from app.cmc.profiles import profile_for
 
 logger = logging.getLogger(__name__)
 _services = weakref.WeakKeyDictionary()
@@ -57,10 +59,35 @@ class Service:
 
 
 def _construct(settings):
+    profile = profile_for(settings.cmc_collection_profile, legacy_seconds=settings.cmc_poll_seconds,
+                          custom_path=settings.cmc_collection_profile_path)
     store = Sidecar(settings.cmc_sidecar_path, max_bytes=settings.cmc_storage_max_bytes,
-                    max_records=settings.cmc_storage_max_records, retention_days=settings.cmc_retention_days)
+                    max_records=settings.cmc_storage_max_records,
+                    retention_days=min(settings.cmc_retention_days, profile.retention_days))
     manifest = load_manifest(settings.cmc_identity_manifest)
-    return store, manifest
+    return store, manifest, profile
+
+
+def authorized_snapshot(snapshot, manifest, as_of):
+    """An old persisted snapshot never substitutes for current owner authorization."""
+    bindings = {stable_id(b):b for b in manifest.bindings
+        if binding_status(b,as_of) == IdentityStatus.OWNER_APPROVED}
+    observations = []
+    for observation in snapshot.observations:
+        i = observation.instrument
+        if i is None:
+            observations.append(observation)
+            continue
+        binding = bindings.get(i.binding_ref)
+        if (binding is not None and i.exchange == "binance" and i.exchange_id == binding.exchange_id
+                and i.market_id == binding.market_id and i.cmc_id == binding.cmc_id
+                and i.symbol == binding.contract_symbol and i.base == binding.binance_base
+                and i.quote == i.margin_asset == "USDT" and i.quote_id == binding.quote_id
+                and i.binding_approved_at == binding.approved_at and i.binding_expires_at == binding.expires_at):
+            observations.append(observation)
+    removed = len(observations) != len(snapshot.observations)
+    return snapshot.model_copy(update={"observations":tuple(observations),
+        "errors":(*snapshot.errors,"restored_identity_not_currently_owner_approved") if removed else snapshot.errors})
 
 
 async def service_for(settings):
@@ -68,22 +95,27 @@ async def service_for(settings):
         return None
     loop = asyncio.get_running_loop()
     key = (str(settings.cmc_sidecar_path), str(settings.cmc_identity_manifest), settings.cmc_keyless,
-           settings.cmc_daily_credits, settings.cmc_monthly_credits)
+           settings.cmc_daily_credits, settings.cmc_monthly_credits,
+           settings.cmc_collection_profile, str(settings.cmc_collection_profile_path), settings.cmc_poll_seconds,
+           settings.cmc_storage_max_bytes, settings.cmc_storage_max_records, settings.cmc_retention_days)
     services = _services.setdefault(loop, {})
     if key not in services:
         if services:
             # Configuration changes require process restart; never accumulate collectors.
             return None
         try:
-            store, manifest = await asyncio.wait_for(asyncio.to_thread(_construct, settings), timeout=0.25)
+            store, manifest, profile = await asyncio.wait_for(asyncio.to_thread(_construct, settings), timeout=0.25)
             client = CmcClient(store=store, api_key=settings.cmc_api_key, keyless=settings.cmc_keyless,
-                daily_credits=settings.cmc_daily_credits, monthly_credits=settings.cmc_monthly_credits)
-            service = Service(Collector(client, store, manifest=manifest), store, interval=settings.cmc_poll_seconds)
+                daily_credits=settings.cmc_daily_credits, monthly_credits=settings.cmc_monthly_credits,
+                concurrency=profile.concurrency, max_entries=profile.cache_entries, max_body_bytes=profile.max_body_bytes,
+                requests_per_minute=profile.requests_per_minute)
+            service = Service(Collector(client, store, manifest=manifest, profile=profile), store,
+                              interval=min(60, profile.tick_seconds))
             # Only completed, originally acquired batches are restored. The decision
             # layer rechecks every observation's source and acquisition timestamps.
             saved = await asyncio.wait_for(asyncio.to_thread(store.causal, "snapshot", datetime.now(UTC), limit=1), timeout=0.1)
             if saved:
-                service.snapshot = Snapshot.model_validate(saved[0])
+                service.snapshot = authorized_snapshot(Snapshot.model_validate(saved[0]),manifest,datetime.now(UTC))
             services[key] = service
         except Exception as exc:
             logger.warning("CMC sidecar unavailable: %s", type(exc).__name__)

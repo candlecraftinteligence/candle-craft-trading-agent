@@ -48,36 +48,60 @@ async def evaluate_delivery_run(result, settings, *, candidate_builder, service=
         if service is None:
             return clear_evaluations(result)
         snapshot = service.snapshot  # frozen once, never per-symbol provider calls
+        if len(result.results) > 200 or len(snapshot.observations) > 5000:
+            return clear_evaluations(result)
         activations = await asyncio.wait_for(asyncio.to_thread(load_activations, settings.cmc_activation_manifest), timeout=0.1)
         updated, records = [], []
+        causal_cache, feature_cache = {}, {}
         regime = result.market_regime
         regime_status = ("DISABLED" if not regime.enabled else "MISSING" if regime.missing_data
                          else "UNVERIFIED" if regime.unverified_data else "VERIFIED")
         for symbol_result in result.results:
             candidate = candidate_builder(symbol_result)
+            # A resumed symbol is an earlier observation, not a fresh analysis at
+            # this run's cutoff. Without its authoritative cutoff it stays N/A.
+            symbol_cutoff = (symbol_result.lifecycle_decision_timestamp
+                if symbol_result.evaluation_origin_kind == "resumed_payload" else original_cutoff)
+            if symbol_cutoff is None or symbol_cutoff.tzinfo is None or symbol_cutoff > original_cutoff:
+                updated.append(symbol_result.model_copy(update={"cmc_evaluation": None}))
+                continue
+            candidate = candidate.model_copy(update={"original_decision_at": symbol_cutoff})
+            candidate_regime_status = regime_status if symbol_cutoff == original_cutoff else "UNVERIFIED"
             context = {"trading_style": getattr(symbol_result.lifecycle_state, "mode", None) or "N/A",
-                "market_regime": regime.state.value if regime_status == "VERIFIED"
-                    else "Unverified" if regime_status == "UNVERIFIED" else "N/A",
-                "market_regime_status": regime_status,
-                "cci_original_decision_at": original_cutoff.isoformat()}
+                "market_regime": regime.state.value if candidate_regime_status == "VERIFIED"
+                    else "Unverified" if candidate_regime_status == "UNVERIFIED" else "N/A",
+                "market_regime_status": candidate_regime_status,
+                "cci_original_decision_at": symbol_cutoff.isoformat(),
+                "cmc_selection_at": cutoff.isoformat(),
+                "evidence_knowledge_cutoff": symbol_cutoff.isoformat()}
             if not candidate.cci_eligible or not candidate.is_new_signal:
                 evaluation=evaluate(candidate,(),mode=mode,as_of=cutoff,activations=activations)
                 records.append({"evaluation":evaluation.model_dump(mode="json"),"context":context,"features":[],"comparisons":[],
                     "native_observations":[],"application_status":"EVALUATED_NOT_DELIVERY_PROOF","batch_id":snapshot.batch_id})
                 updated.append(symbol_result.model_copy(update={"cmc_evaluation":evaluation}))
                 continue
-            instruments = {o.instrument.key:o.instrument for o in snapshot.observations
+            # Selection freshness is checked at the later boundary, but evidence
+            # acquired after analysis can never be attributed to that analysis.
+            if symbol_cutoff not in causal_cache:
+                causal_cache[symbol_cutoff] = tuple(o for o in snapshot.observations
+                    if o.status_at(symbol_cutoff).value == "VERIFIED")
+            causal = causal_cache[symbol_cutoff]
+            instruments = {o.instrument.key:o.instrument for o in causal
                 if o.instrument and o.instrument.symbol == symbol_result.symbol and o.instrument.exchange == result.config.exchange
                 and o.status_at(cutoff).value == "VERIFIED"}
             instrument = next(iter(instruments.values())) if len(instruments) == 1 else None
-            observations = tuple(o for o in snapshot.observations if o.instrument is None or
+            observations = tuple(o for o in causal if o.instrument is None or
                 instrument is not None and o.instrument.cmc_id == instrument.cmc_id)
-            native = native_observations(symbol_result.cmc_native_evidence or {}, instrument) if instrument else ()
-            features = build_features(observations, as_of=cutoff,
-                cmc_id=instrument.cmc_id if instrument else None, instrument_key=instrument.key if instrument else None)
+            native = tuple(o for o in native_observations(symbol_result.cmc_native_evidence or {}, instrument)
+                if o.status_at(symbol_cutoff).value == "VERIFIED") if instrument else ()
+            feature_key = (symbol_cutoff, instrument.key if instrument else None)
+            if feature_key not in feature_cache:
+                feature_cache[feature_key] = build_features(observations, as_of=cutoff,
+                    cmc_id=instrument.cmc_id if instrument else None, instrument_key=instrument.key if instrument else None)
+            features = feature_cache[feature_key]
             consistency, comparisons = consistency_feature(observations, native, as_of=cutoff)
             features = (*features, consistency)
-            if regime.enabled and not regime.missing_data and not regime.unverified_data:
+            if candidate_regime_status == "VERIFIED":
                 risk=next(f for f in features if f.name=="CmcGlobalMarketRisk")
                 features=(*features,regime_compatibility(risk,regime_state=regime.state.value,
                     direction=candidate.direction,regime_at=original_cutoff,
@@ -153,6 +177,7 @@ async def prepare_selection(result, settings, context, repository=None, *, servi
             economic_plan_id=record.plan_version_id or "N/A" if record else "N/A",
             symbol=symbol_result.symbol, direction=record.direction if record else "N/A",
             original_decision_at=result.config.decision_timestamp,
+            alert_type=decision.alert_type.value if decision.alert_type else "N/A",
             canonical_rank=tuple(Decimal(str(x)) for x in sort_key[:4]) if sort_key else (),
             baseline_tie_rank=(Decimal(sort_key[-2]),) if sort_key else (),
             cci_eligible=eligible, is_new_signal=prior is None and decision.alert_type in {
