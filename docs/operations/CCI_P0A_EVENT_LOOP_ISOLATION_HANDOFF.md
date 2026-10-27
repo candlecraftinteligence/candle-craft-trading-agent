@@ -2,7 +2,7 @@
 
 BASE_SHA: ff85a7de744507b593ef118e322e47eba171f311
 FEATURE_BRANCH: feature/p0a-scanner-event-loop-isolation
-FINAL_IMPLEMENTATION_SHA: pending commit
+FINAL_IMPLEMENTATION_SHA: 23fcf6f03d4281aa930119ef20da246551642f7b
 PR_URL: pending
 GITHUB_CI: pending exact-head verification
 
