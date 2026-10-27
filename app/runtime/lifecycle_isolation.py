@@ -71,6 +71,11 @@ class LifecycleWorker:
         self._rejected = 0
         self._transaction_result = "NOT_OBSERVED"
         self._connection_closed: bool | None = None
+        self._continuation_read_duration = 0.0
+        self._continuation_write_duration = 0.0
+        self._continuation_queue_wait = 0.0
+        self._continuation_completion_delay = 0.0
+        self._continuation_transaction_result = "NOT_OBSERVED"
         self.shutdown_report: dict[str, Any] = {}
         self._thread = threading.Thread(target=self._run, name="cci-p0b1-lifecycle", daemon=False)
         self._thread.start()
@@ -82,7 +87,7 @@ class LifecycleWorker:
         elif self._loop is not loop:
             raise RuntimeError("lifecycle worker belongs to a different event loop")
 
-    async def call(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    async def call(self, fn: Callable[..., Any], /, *args: Any, stage: str | None = None, **kwargs: Any) -> Any:
         self._bind_loop()
         if self._closed:
             raise LifecycleWorkerClosed("lifecycle worker is closed")
@@ -113,12 +118,25 @@ class LifecycleWorker:
             self._inflight = True
             receipt, cancelled = await _fenced_wait(asyncio.wrap_future(completion))
             observed = time.perf_counter()
-            self._queue_wait = max(self._queue_wait, receipt.started - queued)
-            self._duration = max(self._duration, receipt.finished - receipt.started)
-            self._completion_delay = max(self._completion_delay, observed - receipt.finished)
-            self._completed += 1
-            self._transaction_result = receipt.transaction_result
-            self._connection_closed = receipt.connection_closed
+            if stage == "continuation_read":
+                self._continuation_read_duration = max(self._continuation_read_duration, receipt.finished - receipt.started)
+                self._continuation_queue_wait = max(self._continuation_queue_wait, receipt.started - queued)
+                self._continuation_completion_delay = max(self._continuation_completion_delay, observed - receipt.finished)
+                self._completed += 1
+            elif stage == "continuation_write":
+                self._continuation_write_duration = max(self._continuation_write_duration, receipt.finished - receipt.started)
+                self._continuation_queue_wait = max(self._continuation_queue_wait, receipt.started - queued)
+                self._continuation_completion_delay = max(self._continuation_completion_delay, observed - receipt.finished)
+                self._continuation_transaction_result = receipt.transaction_result
+                self._connection_closed = receipt.connection_closed
+                self._completed += 1
+            else:
+                self._queue_wait = max(self._queue_wait, receipt.started - queued)
+                self._duration = max(self._duration, receipt.finished - receipt.started)
+                self._completion_delay = max(self._completion_delay, observed - receipt.finished)
+                self._completed += 1
+                self._transaction_result = receipt.transaction_result
+                self._connection_closed = receipt.connection_closed
             if cancelled is not None:
                 self._cancelled += 1
             if receipt.error is not None:
@@ -164,6 +182,12 @@ class LifecycleWorker:
             "connection_closed": self._connection_closed,
             "completed": self._completed, "failed": self._failed,
             "cancelled_after_admission": self._cancelled, "backpressure_rejections": self._rejected,
+            "CONTINUATION_READ_WORKER_DURATION": round(self._continuation_read_duration, 6),
+            "CONTINUATION_WRITE_WORKER_DURATION": round(self._continuation_write_duration, 6),
+            "CONTINUATION_WORKER_QUEUE_WAIT": round(self._continuation_queue_wait, 6),
+            "CONTINUATION_TRANSACTION_RESULT": self._continuation_transaction_result,
+            "CONTINUATION_COMPLETION_DELAY": round(self._continuation_completion_delay, 6),
+            "IN_FLIGHT_AT_SHUTDOWN": self.shutdown_report.get("IN_FLIGHT_AT_SHUTDOWN", int(self._inflight)),
             "shutdown": dict(self.shutdown_report),
         }
 

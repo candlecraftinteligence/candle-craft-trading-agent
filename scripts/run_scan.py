@@ -1053,34 +1053,42 @@ async def _main(
         )
 
     lifecycle_scan_run_id = scan_run_id if _lifecycle_enabled(args) else None
-    result = await _apply_lifecycle_isolated(args, result, scan_run_id=lifecycle_scan_run_id)
-    if _lifecycle_enabled(args):
-        covered_keys, evaluated_ids = _owner_monitoring_skip(result)
-        prior_monitoring_errors = _prior_owner_monitoring_errors(result)
-        discovery_evidence = evidence_from_symbol_results(
-            result.results,
-            decision_fallback=_watch_iteration_timestamp(),
+    lifecycle_worker = LifecycleWorker() if _lifecycle_enabled(args) else None
+    try:
+        result = await _apply_lifecycle_isolated(
+            args, result, scan_run_id=lifecycle_scan_run_id, worker=lifecycle_worker
         )
-        try:
-            monitoring_result = await _continue_owned_plan_monitoring(
-                args,
-                evidence_by_key=discovery_evidence,
-                scan_run_id=lifecycle_scan_run_id,
-                skip_keys=covered_keys,
-                skip_lifecycle_ids=evaluated_ids,
+        if _lifecycle_enabled(args):
+            covered_keys, evaluated_ids = _owner_monitoring_skip(result)
+            prior_monitoring_errors = _prior_owner_monitoring_errors(result)
+            discovery_evidence = evidence_from_symbol_results(
+                result.results,
+                decision_fallback=_watch_iteration_timestamp(),
             )
-        except (Exception, SystemExit) as exc:
-            result = _retain_owner_monitoring_failure(result, exc)
-            _persist_one_shot_monitoring_failure(result, exc=exc, prior_errors=prior_monitoring_errors)
-            _raise_one_shot_owner_monitoring_failure(exc, prior_errors=prior_monitoring_errors)
-        else:
-            result = _retain_owner_monitoring_result(result, monitoring_result)
-            if _owner_monitoring_failure_lines(result=monitoring_result, prior_errors=prior_monitoring_errors):
-                _persist_one_shot_monitoring_failure(result, prior_errors=prior_monitoring_errors)
-            _raise_one_shot_owner_monitoring_failure(
-                result=monitoring_result,
-                prior_errors=prior_monitoring_errors,
-            )
+            try:
+                monitoring_result = await _continue_owned_plan_monitoring(
+                    args,
+                    evidence_by_key=discovery_evidence,
+                    scan_run_id=lifecycle_scan_run_id,
+                    skip_keys=covered_keys,
+                    skip_lifecycle_ids=evaluated_ids,
+                    worker=lifecycle_worker,
+                )
+            except (Exception, SystemExit) as exc:
+                result = _retain_owner_monitoring_failure(result, exc)
+                _persist_one_shot_monitoring_failure(result, exc=exc, prior_errors=prior_monitoring_errors)
+                _raise_one_shot_owner_monitoring_failure(exc, prior_errors=prior_monitoring_errors)
+            else:
+                result = _retain_owner_monitoring_result(result, monitoring_result)
+                if _owner_monitoring_failure_lines(result=monitoring_result, prior_errors=prior_monitoring_errors):
+                    _persist_one_shot_monitoring_failure(result, prior_errors=prior_monitoring_errors)
+                _raise_one_shot_owner_monitoring_failure(
+                    result=monitoring_result,
+                    prior_errors=prior_monitoring_errors,
+                )
+    finally:
+        if lifecycle_worker is not None:
+            await lifecycle_worker.aclose()
     try:
         telegram_summary = await _deliver_telegram_manual_signals_if_enabled(args, result, scan_run_id=scan_run_id)
     except (Exception, SystemExit) as exc:
@@ -2770,6 +2778,7 @@ async def _surface_monitoring_during_discovery_failure(
     discovery: BaseException,
     *,
     publish_on_system_exit: bool = True,
+    worker: LifecycleWorker | None = None,
 ) -> None:
     """Attempt owned-plan monitoring without hiding the discovery failure.
 
@@ -2781,7 +2790,9 @@ async def _surface_monitoring_during_discovery_failure(
     monitor_exc: BaseException | None = None
     result: Any | None = None
     try:
-        result = await _continue_owned_plan_monitoring(args, evidence_by_key={}, scan_run_id=None)
+        result = await _continue_owned_plan_monitoring(
+            args, evidence_by_key={}, scan_run_id=None, worker=worker,
+        )
     except (Exception, SystemExit) as caught:
         monitor_exc = caught
     if monitor_exc is not None:
@@ -2824,6 +2835,7 @@ async def _continue_owned_plan_monitoring(
     scan_run_id: str | None = None,
     skip_keys: Sequence[str] = (),
     skip_lifecycle_ids: Sequence[str] = (),
+    worker: LifecycleWorker | None = None,
 ) -> Any:
     """Keep owned-plan evaluation running when discovery did not cover those symbols.
 
@@ -2860,12 +2872,27 @@ async def _continue_owned_plan_monitoring(
             execution_timeframe=str(getattr(args, "execution_timeframe", "15m") or "15m"),
             candle_limit=limit,
             evaluated_at=_watch_iteration_timestamp(),
-            scan_run_id=scan_run_id or f"owner-monitor-{uuid4().hex}",
+            scan_run_id=scan_run_id,
             expected_identity=getattr(args, "runtime_identity", None),
             skip_keys=tuple(skip_keys),
             skip_lifecycle_ids=tuple(skip_lifecycle_ids),
             record_missing_evidence=True,
+            worker=worker,
+            require_registered_run=bool(scan_run_id),
         )
+    except (Exception, SystemExit) as exc:
+        task = asyncio.current_task()
+        interruption = getattr(exc, "_cci_lifecycle_interruption", None)
+        if isinstance(interruption, (asyncio.CancelledError, KeyboardInterrupt)):
+            del exc._cci_lifecycle_interruption
+        else:
+            interruption = None
+        if (
+            (interruption is not None or (task is not None and task.cancelling()))
+            and classify_watch_exception(exc) == WatchFailureDisposition.RECOVERABLE
+        ):
+            raise (interruption if interruption is not None else asyncio.CancelledError()) from exc
+        raise
     finally:
         client = client_box.get("client")
         if client is not None:
@@ -4143,6 +4170,7 @@ async def _attempt_watch_scan_iteration(
                 args,
                 exc,
                 publish_on_system_exit=False,
+                worker=lifecycle_worker,
             )
         return None, None, exc
     return watchlist, execution, None
@@ -4612,6 +4640,7 @@ async def _run_watch_scan_iteration(
                 scan_run_id=storage_run_id,
                 skip_keys=monitoring_skip_keys,
                 skip_lifecycle_ids=monitoring_skip_ids,
+                worker=lifecycle_worker,
             )
         except (Exception, SystemExit) as exc:
             result = _retain_owner_monitoring_failure(result, exc)

@@ -120,11 +120,24 @@ class PhaseProfile:
         if self.disk_worker is not None:
             report["disk_isolation"] = self.disk_worker.compact_snapshot()
         if self.lifecycle_worker is not None:
-            report["lifecycle_isolation"] = self.lifecycle_worker.compact_snapshot()
+            snapshot = self.lifecycle_worker.compact_snapshot()
+            report["lifecycle_isolation"] = snapshot
             report["lifecycle_isolation"]["LOOP_LAG_DURING_LIFECYCLE"] = (
                 self.loop_lag.compact_snapshot()["phase_sampled_lag_seconds_max"].get("lifecycle", NA)
                 if self.loop_lag is not None else NA
             )
+            report["continuation_isolation"] = {
+                "CONTINUATION_READ_WORKER_DURATION": snapshot.get("CONTINUATION_READ_WORKER_DURATION", 0.0),
+                "CONTINUATION_WRITE_WORKER_DURATION": snapshot.get("CONTINUATION_WRITE_WORKER_DURATION", 0.0),
+                "CONTINUATION_WORKER_QUEUE_WAIT": snapshot.get("CONTINUATION_WORKER_QUEUE_WAIT", 0.0),
+                "CONTINUATION_TRANSACTION_RESULT": snapshot.get("CONTINUATION_TRANSACTION_RESULT", "NOT_OBSERVED"),
+                "CONTINUATION_COMPLETION_DELAY": snapshot.get("CONTINUATION_COMPLETION_DELAY", 0.0),
+                "LOOP_LAG_DURING_MONITORING": (
+                    self.loop_lag.compact_snapshot()["phase_sampled_lag_seconds_max"].get("owner_monitoring", NA)
+                    if self.loop_lag is not None else NA
+                ),
+                "IN_FLIGHT_AT_SHUTDOWN": snapshot.get("IN_FLIGHT_AT_SHUTDOWN", 0),
+            }
         return report
 
 

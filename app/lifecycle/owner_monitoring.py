@@ -7,6 +7,8 @@ gates, or force a symbol back into the new-opportunity universe.
 
 from __future__ import annotations
 
+import asyncio
+
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -41,7 +43,12 @@ from app.research.durable_source_replay.constants import (
     LINEAGE_FETCHED,
     LINEAGE_SCANNER_SUPPLIED,
 )
+import sys
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
+from app.runtime.lifecycle_isolation import LifecycleWorker
+from app.runtime_epoch.authority import require_active_runtime_epoch
+from app.runtime_epoch.errors import RuntimeEpochOriginError
+from app.runtime_epoch.origin import require_registered_operational_run
 from app.runtime_epoch.models import RuntimeEpochIdentity
 from app.universe.symbol_universe import UniverseResolutionError
 
@@ -421,6 +428,157 @@ def monitor_tracking_obligations(
     )
 
 
+def stage_1_continuation_read(
+    database_path: Path | str,
+    *,
+    expected_identity: RuntimeEpochIdentity | None = None,
+    execution_timeframe: str = "15m",
+    skip_keys: Collection[str] = (),
+    covered_keys: Collection[str] = (),
+) -> tuple[
+    tuple[SetupLifecycleRecord, ...],
+    dict[str, list[Any]],
+    dict[str, tuple[str, str]],
+]:
+    with SQLiteSetupLifecycleRepository(
+        database_path,
+        expected_identity=expected_identity,
+    ) as repository:
+        connection = repository.connection
+        assert connection is not None
+        connection.execute("BEGIN")
+        require_active_runtime_epoch(connection)
+        obligations = select_tracking_obligations(repository)
+        progress_rows = repository.list_outcome_progress_for_lifecycles(
+            tuple(record.lifecycle_id for record in obligations)
+        )
+    grouped: dict[str, list[Any]] = defaultdict(list)
+    for row in progress_rows:
+        grouped[row.lifecycle_id].append(row)
+
+    skipped = set(skip_keys)
+    covered = set(covered_keys)
+    needed: dict[str, tuple[str, str]] = {}
+    for record in obligations:
+        rows = tuple(grouped.get(record.lifecycle_id, ()))
+        timeframe = _obligation_timeframe(rows, execution_timeframe)
+        key = evidence_key(record.symbol, timeframe)
+        if key in skipped or key in covered:
+            continue
+        needed[key] = (record.symbol, timeframe)
+
+    return obligations, dict(grouped), needed
+
+
+def stage_3_continuation_write(
+    database_path: Path | str,
+    *,
+    expected_identity: RuntimeEpochIdentity | None,
+    scan_run_id: str | None,
+    evaluated_at: str,
+    execution_timeframe: str,
+    record_missing_evidence: bool,
+    merged_evidence: Mapping[str, SymbolMonitoringEvidence],
+    subsystem_failures: Mapping[str, str],
+    skip_lifecycle_ids: Collection[str],
+    stage1_obligations: Sequence[SetupLifecycleRecord],
+    stage1_grouped: Mapping[str, Sequence[Any]],
+    require_registered_run: bool = False,
+) -> OwnerMonitoringResult:
+    with SQLiteSetupLifecycleRepository(
+        database_path,
+        expected_identity=expected_identity,
+    ) as repository:
+        connection = repository.connection
+        assert connection is not None
+        started = not connection.in_transaction
+        if started:
+            connection.execute("BEGIN IMMEDIATE")
+            note_enclosing_transaction_opened(connection)
+        epoch = require_active_runtime_epoch(connection)
+        effective_run_id = str(scan_run_id or "").strip()
+        if effective_run_id:
+            if require_registered_run:
+                require_registered_operational_run(
+                    connection,
+                    run_id=effective_run_id,
+                    epoch=epoch,
+                )
+            else:
+                existing = connection.execute(
+                    "SELECT runtime_epoch_id FROM runtime_operational_runs WHERE run_id = ?",
+                    (effective_run_id,),
+                ).fetchone()
+                if existing is not None and str(existing[0]) != epoch.epoch_id:
+                    raise RuntimeEpochOriginError("Run registration is bound to a different runtime epoch.")
+
+        # Revalidate current open obligations to protect against stale/superseded/terminal plans.
+        stage3_obligations = select_tracking_obligations(repository)
+        stage3_by_id = {r.lifecycle_id: r for r in stage3_obligations}
+
+        stage1_ids = {r.lifecycle_id for r in stage1_obligations}
+        blocked_ids = set(skip_lifecycle_ids)
+
+        # Block any Stage 3 obligations that were NOT in Stage 1,
+        # because Stage 2 did not fetch candles for them in this iteration.
+        for r in stage3_obligations:
+            if r.lifecycle_id not in stage1_ids:
+                blocked_ids.add(r.lifecycle_id)
+
+        # Check Stage 1 obligations: block any that became stale (superseded or plan version changed).
+        for record in stage1_obligations:
+            current = stage3_by_id.get(record.lifecycle_id)
+            if current is None or current.plan_version_id != record.plan_version_id:
+                blocked_ids.add(record.lifecycle_id)
+
+        subsystem_errors: list[dict[str, str]] = []
+        for record in stage1_obligations:
+            if record.lifecycle_id in blocked_ids:
+                continue
+            rows = tuple(stage1_grouped.get(record.lifecycle_id, ()))
+            timeframe = _obligation_timeframe(rows, execution_timeframe)
+            detail = subsystem_failures.get(evidence_key(record.symbol, timeframe))
+            if detail is None:
+                continue
+            blocked_ids.add(record.lifecycle_id)
+            subsystem_errors.append(
+                {
+                    "lifecycle_id": record.lifecycle_id,
+                    "symbol": record.symbol,
+                    "detail": detail,
+                }
+            )
+
+        result = monitor_tracking_obligations(
+            repository,
+            evidence_by_key=merged_evidence,
+            evaluated_at=evaluated_at,
+            scan_run_id=scan_run_id,
+            default_timeframe=execution_timeframe,
+            record_missing_evidence=record_missing_evidence,
+            skip_lifecycle_ids=blocked_ids,
+        )
+
+        if subsystem_errors:
+            failed_ids = {item["lifecycle_id"] for item in subsystem_errors}
+            failed_lags = tuple(
+                diagnose_tracking_cursor_lag(
+                    record,
+                    last_processed_close_at=_last_processed_close(stage1_grouped.get(record.lifecycle_id, ())),
+                    latest_available_close_at=None,
+                    gap_reason="market_data_subsystem_error",
+                )
+                for record in stage1_obligations if record.lifecycle_id in failed_ids
+            )
+            result = replace(
+                result,
+                errors=result.errors + tuple(subsystem_errors),
+                lags=result.lags + failed_lags,
+                skipped_lifecycle_ids=tuple(item for item in result.skipped_lifecycle_ids if item not in failed_ids),
+            )
+        return result
+
+
 async def monitor_obligations_with_market_data(
     database_path: Path | str,
     *,
@@ -434,163 +592,122 @@ async def monitor_obligations_with_market_data(
     skip_keys: Collection[str] = (),
     skip_lifecycle_ids: Collection[str] = (),
     record_missing_evidence: bool = True,
+    worker: LifecycleWorker | None = None,
+    require_registered_run: bool = False,
 ) -> OwnerMonitoringResult:
     """Fetch exchange candles for obligations discovery did not already cover.
 
-    Network reads happen before the write transaction. An expected market-data
-    failure becomes an explicit gap. An unexpected factory, adapter, or
-    programming error is reported on the result and is not stored as a gap.
-    Neither path synthesizes candles or a terminal outcome.
+    Network reads happen between worker-owned SQLite read and write stages.
+    An expected market-data failure becomes an explicit gap. An unexpected factory,
+    adapter, or programming error is reported on the result and is not stored
+    as a gap. Neither path synthesizes candles or a terminal outcome.
     """
 
-    with SQLiteSetupLifecycleRepository(
-        database_path,
-        expected_identity=expected_identity,
-    ) as repository:
-        obligations = select_tracking_obligations(repository)
-        progress_rows = repository.list_outcome_progress_for_lifecycles(
-            tuple(record.lifecycle_id for record in obligations)
+    owned = worker is None
+    worker = worker or LifecycleWorker()
+    try:
+        covered_keys = tuple(
+            k for k, ev in evidence_by_key.items() if _evidence_covers(ev)
         )
-    grouped: dict[str, list[Any]] = defaultdict(list)
-    for row in progress_rows:
-        grouped[row.lifecycle_id].append(row)
+        stage1_obligations, stage1_grouped, needed = await worker.call(
+            stage_1_continuation_read,
+            database_path,
+            expected_identity=expected_identity,
+            execution_timeframe=execution_timeframe,
+            skip_keys=tuple(skip_keys),
+            covered_keys=covered_keys,
+            stage="continuation_read",
+        )
 
-    skipped = set(skip_keys)
-    needed: dict[str, tuple[str, str]] = {}
-    for record in obligations:
-        rows = tuple(grouped.get(record.lifecycle_id, ()))
-        timeframe = _obligation_timeframe(rows, execution_timeframe)
-        key = evidence_key(record.symbol, timeframe)
-        if key in skipped or _evidence_covers(evidence_by_key.get(key)):
-            continue
-        needed[key] = (record.symbol, timeframe)
-
-    merged = dict(evidence_by_key)
-    subsystem_failures: dict[str, str] = {}
-    for key, (symbol, timeframe) in needed.items():
-        if fetch_candles is None:
-            merged[key] = SymbolMonitoringEvidence(
-                candles=(),
-                execution_timeframe=timeframe,
-                decision_timestamp=evaluated_at,
-                gap_reason=GAP_REQUIRED_CLOSED_CANDLE,
-                lineage=LINEAGE_FETCHED,
-            )
-            note_non_invocation(
-                kind="fetch_unavailable",
-                detail=GAP_REQUIRED_CLOSED_CANDLE,
-                lifecycle_id=None,
-            )
-            continue
-        try:
-            candles = await fetch_candles(symbol, timeframe, candle_limit)
-        except Exception as exc:
-            if _is_local_setup_failure(exc):
-                subsystem_failures[key] = _failure_detail(exc)
-                note_non_invocation(
-                    kind="fetch_setup_failure",
-                    detail=_failure_detail(exc),
-                    lifecycle_id=None,
-                )
-                continue
-            if isinstance(exc, EXPECTED_MARKET_DATA_ERRORS) or _is_unsupported_market(exc):
-                detail = classify_market_data_failure(exc)
+        merged = dict(evidence_by_key)
+        subsystem_failures: dict[str, str] = {}
+        for key, (symbol, timeframe) in needed.items():
+            if fetch_candles is None:
                 merged[key] = SymbolMonitoringEvidence(
                     candles=(),
                     execution_timeframe=timeframe,
                     decision_timestamp=evaluated_at,
-                    gap_reason=detail,
+                    gap_reason=GAP_REQUIRED_CLOSED_CANDLE,
                     lineage=LINEAGE_FETCHED,
                 )
-                note_non_invocation(kind="fetch_failure", detail=detail, lifecycle_id=None)
+                note_non_invocation(
+                    kind="fetch_unavailable",
+                    detail=GAP_REQUIRED_CLOSED_CANDLE,
+                    lifecycle_id=None,
+                )
                 continue
-            subsystem_failures[key] = _failure_detail(exc)
-            note_non_invocation(
-                kind="fetch_failure",
-                detail=_failure_detail(exc),
-                lifecycle_id=None,
-            )
-            continue
-        candle_tuple = tuple(candles or ())
-        if not candle_tuple:
+            try:
+                candles = await fetch_candles(symbol, timeframe, candle_limit)
+            except (asyncio.CancelledError, AssertionError):
+                raise
+            except Exception as exc:
+                if _is_local_setup_failure(exc):
+                    subsystem_failures[key] = _failure_detail(exc)
+                    note_non_invocation(
+                        kind="fetch_setup_failure",
+                        detail=_failure_detail(exc),
+                        lifecycle_id=None,
+                    )
+                    continue
+                if isinstance(exc, EXPECTED_MARKET_DATA_ERRORS) or _is_unsupported_market(exc):
+                    detail = classify_market_data_failure(exc)
+                    merged[key] = SymbolMonitoringEvidence(
+                        candles=(),
+                        execution_timeframe=timeframe,
+                        decision_timestamp=evaluated_at,
+                        gap_reason=detail,
+                        lineage=LINEAGE_FETCHED,
+                    )
+                    note_non_invocation(kind="fetch_failure", detail=detail, lifecycle_id=None)
+                    continue
+                subsystem_failures[key] = _failure_detail(exc)
+                note_non_invocation(
+                    kind="fetch_failure",
+                    detail=_failure_detail(exc),
+                    lifecycle_id=None,
+                )
+                continue
+            candle_tuple = tuple(candles or ())
+            if not candle_tuple:
+                merged[key] = SymbolMonitoringEvidence(
+                    candles=(),
+                    execution_timeframe=timeframe,
+                    decision_timestamp=evaluated_at,
+                    gap_reason=GAP_REQUIRED_CLOSED_CANDLE,
+                    lineage=LINEAGE_FETCHED,
+                )
+                continue
             merged[key] = SymbolMonitoringEvidence(
-                candles=(),
+                candles=candle_tuple,
                 execution_timeframe=timeframe,
                 decision_timestamp=evaluated_at,
-                gap_reason=GAP_REQUIRED_CLOSED_CANDLE,
                 lineage=LINEAGE_FETCHED,
             )
-            continue
-        merged[key] = SymbolMonitoringEvidence(
-            candles=candle_tuple,
-            execution_timeframe=timeframe,
-            decision_timestamp=evaluated_at,
-            lineage=LINEAGE_FETCHED,
-        )
 
-    with SQLiteSetupLifecycleRepository(
-        database_path,
-        expected_identity=expected_identity,
-    ) as repository:
-        connection = repository.connection
-        assert connection is not None
-        started = not connection.in_transaction
-        if started:
-            connection.execute("BEGIN IMMEDIATE")
-            note_enclosing_transaction_opened(connection)
-        blocked_ids = set(skip_lifecycle_ids)
-        subsystem_errors: list[dict[str, str]] = []
-        for record in obligations:
-            if record.lifecycle_id in blocked_ids:
-                continue
-            rows = tuple(grouped.get(record.lifecycle_id, ()))
-            timeframe = _obligation_timeframe(rows, execution_timeframe)
-            detail = subsystem_failures.get(evidence_key(record.symbol, timeframe))
-            if detail is None:
-                continue
-            blocked_ids.add(record.lifecycle_id)
-            subsystem_errors.append(
-                {
-                    "lifecycle_id": record.lifecycle_id,
-                    "symbol": record.symbol,
-                    "detail": detail,
-                }
-            )
-        try:
-            result = monitor_tracking_obligations(
-                repository,
-                evidence_by_key=merged,
-                evaluated_at=evaluated_at,
-                scan_run_id=scan_run_id,
-                default_timeframe=execution_timeframe,
-                record_missing_evidence=record_missing_evidence,
-                skip_lifecycle_ids=blocked_ids,
-            )
-            if subsystem_errors:
-                failed_ids = {item["lifecycle_id"] for item in subsystem_errors}
-                failed_lags = tuple(
-                    diagnose_tracking_cursor_lag(
-                        record,
-                        last_processed_close_at=_last_processed_close(grouped.get(record.lifecycle_id, ())),
-                        latest_available_close_at=None,
-                        gap_reason="market_data_subsystem_error",
-                    )
-                    for record in obligations if record.lifecycle_id in failed_ids
-                )
-                result = replace(
-                    result, errors=result.errors + tuple(subsystem_errors),
-                    lags=result.lags + failed_lags,
-                    skipped_lifecycle_ids=tuple(item for item in result.skipped_lifecycle_ids if item not in failed_ids),
-                )
-        except Exception:
-            if started and connection.in_transaction:
-                connection.rollback()
-            raise
-        else:
-            if started and connection.in_transaction:
-                connection.commit()
-                note_enclosing_transaction_committed(connection)
-        return result
+        return await worker.call(
+            stage_3_continuation_write,
+            database_path,
+            expected_identity=expected_identity,
+            scan_run_id=scan_run_id,
+            evaluated_at=evaluated_at,
+            execution_timeframe=execution_timeframe,
+            record_missing_evidence=record_missing_evidence,
+            merged_evidence=merged,
+            subsystem_failures=subsystem_failures,
+            skip_lifecycle_ids=tuple(skip_lifecycle_ids),
+            stage1_obligations=stage1_obligations,
+            stage1_grouped=stage1_grouped,
+            require_registered_run=require_registered_run,
+            stage="continuation_write",
+        )
+    finally:
+        if owned:
+            original = sys.exception()
+            try:
+                await worker.aclose()
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                if original is None:
+                    raise
 
 
 def discovery_failure_continues_owner_monitoring(exc: BaseException) -> bool:
@@ -788,6 +905,8 @@ __all__ = [
     "evidence_from_symbol_results",
     "evidence_key",
     "monitor_obligations_with_market_data",
+    "stage_1_continuation_read",
+    "stage_3_continuation_write",
     "monitor_tracking_obligations",
     "select_tracking_obligations",
 ]
