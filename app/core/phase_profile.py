@@ -30,6 +30,7 @@ class PhaseProfile:
         self.resources: dict[str, Any] = {}
         self.loop_lag: Any = None
         self.disk_worker: Any = None
+        self.lifecycle_worker: Any = None
         self._phase_stack: list[str] = []
         self._started = self._read_clock()
         try:
@@ -118,7 +119,23 @@ class PhaseProfile:
             report["event_loop"] = self.loop_lag.compact_snapshot()
         if self.disk_worker is not None:
             report["disk_isolation"] = self.disk_worker.compact_snapshot()
+        if self.lifecycle_worker is not None:
+            report["lifecycle_isolation"] = self.lifecycle_worker.compact_snapshot()
+            report["lifecycle_isolation"]["LOOP_LAG_DURING_LIFECYCLE"] = (
+                self.loop_lag.compact_snapshot()["phase_sampled_lag_seconds_max"].get("lifecycle", NA)
+                if self.loop_lag is not None else NA
+            )
         return report
+
+
+@contextmanager
+def suspend_phase_profile():
+    """Keep a copied worker context from mutating the loop-owned profile."""
+    token = _current.set(None)
+    try:
+        yield
+    finally:
+        _current.reset(token)
 
 
 def current_observations(*, boundary: str) -> dict[str, Any]:

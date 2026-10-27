@@ -9,6 +9,7 @@ from typing import Any
 
 from app.data.dtos import NA
 from app.lifecycle.plan_version_binding import resolve_persisted_plan_version
+from app.lifecycle.transaction_receipt import note_repository_completion
 from app.lifecycle.models import (
     SetupLifecycleEvent,
     SetupLifecycleOutcomeProgress,
@@ -73,10 +74,16 @@ class SQLiteSetupLifecycleRepository(AbstractContextManager["SQLiteSetupLifecycl
                             connection.rollback()
                             exit_rolled_back = True
         finally:
+            closed = False
             try:
                 connection.close()
+                closed = True
             finally:
                 self.connection = None
+                note_repository_completion(
+                    committed=committed, commit_failed=commit_error is not None,
+                    rolled_back=exit_rolled_back, closed=closed,
+                )
         try:
             from app.research.durable_source_replay.capture import observe_repository_exit
 

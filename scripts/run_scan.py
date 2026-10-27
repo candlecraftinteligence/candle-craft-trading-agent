@@ -95,6 +95,7 @@ from app.watch_session import WatchSession, append_session_observation  # noqa: 
 from app.core.phase_profile import PhaseProfile, current_observations, profiled  # noqa: E402
 from app.runtime.disk_isolation import SerializedDiskWorker  # noqa: E402
 from app.runtime.loop_lag import LoopLagMonitor  # noqa: E402
+from app.runtime.lifecycle_isolation import LifecycleWorker  # noqa: E402
 from app.core.resource_observation import observe_local_resources  # noqa: E402
 from app.watch_retry_policy import watch_backoff_eligibility  # noqa: E402
 from app.formatters.scanner_console import ScannerConsolePresenter  # noqa: E402
@@ -1052,7 +1053,7 @@ async def _main(
         )
 
     lifecycle_scan_run_id = scan_run_id if _lifecycle_enabled(args) else None
-    result = _apply_lifecycle_if_enabled(args, result, scan_run_id=lifecycle_scan_run_id)
+    result = await _apply_lifecycle_isolated(args, result, scan_run_id=lifecycle_scan_run_id)
     if _lifecycle_enabled(args):
         covered_keys, evaluated_ids = _owner_monitoring_skip(result)
         prior_monitoring_errors = _prior_owner_monitoring_errors(result)
@@ -2554,6 +2555,32 @@ async def _isolated_disk_call(
 
 
 @profiled("lifecycle")
+async def _apply_lifecycle_isolated(
+    args: argparse.Namespace,
+    result: ScannerRunResult,
+    *,
+    scan_run_id: str | None = None,
+    worker: LifecycleWorker | None = None,
+) -> ScannerRunResult:
+    if not _lifecycle_enabled(args):
+        return result
+    owned = worker is None
+    worker = worker or LifecycleWorker()
+    try:
+        return await worker.call(_apply_lifecycle_if_enabled, args, result, scan_run_id=scan_run_id)
+    finally:
+        if owned:
+            original = sys.exception()
+            try:
+                await worker.aclose()
+            except asyncio.CancelledError:
+                # aclose has joined. Preserve an already-received fatal failure
+                # if another cancellation arrived during one-shot shutdown.
+                if original is None:
+                    raise
+
+
+@profiled("lifecycle")
 def _apply_lifecycle_if_enabled(
     args: argparse.Namespace,
     result: ScannerRunResult,
@@ -3568,6 +3595,7 @@ async def _run_watch_mode(
     iteration_in_progress = False
     scheduled_start_monotonic = time.monotonic()
     disk_worker = SerializedDiskWorker()
+    lifecycle_worker = LifecycleWorker()
     loop_lag = LoopLagMonitor(interval=0.5)
     try:
         await loop_lag.start()
@@ -3590,6 +3618,7 @@ async def _run_watch_mode(
             profile = PhaseProfile()
             profile.loop_lag = loop_lag
             profile.disk_worker = disk_worker
+            profile.lifecycle_worker = lifecycle_worker
             loop_lag.bind(profile)
             profile.resources = profile.call("resource_observation", _observe_watch_resources)
             if session is not None:
@@ -3600,6 +3629,7 @@ async def _run_watch_mode(
             with profile.activate():
                 iteration_watchlist, execution, iteration_error = await _attempt_watch_scan_iteration(
                     args,
+                    lifecycle_worker=lifecycle_worker,
                     startup_watchlist=watchlist,
                     config=config,
                     iteration=iteration,
@@ -4028,8 +4058,16 @@ async def _run_watch_mode(
     finally:
         # Attempt every cleanup even when an earlier service stop fails. The
         # enclosing session keeps its lease until all of these attempts finish.
-        # Disk shutdown is first so an in-flight replace finishes before sockets stop.
+        # Both workers finish before sockets stop or the enclosing lease is released.
         isolation_errors: list[BaseException] = []
+        try:
+            await lifecycle_worker.aclose()
+        except (Exception, asyncio.CancelledError) as exc:
+            isolation_errors.append(exc)
+        finally:
+            if session is not None:
+                # WatchSession.__exit__ persists this under the still-held lease.
+                session.state["lifecycle_isolation_shutdown"] = lifecycle_worker.compact_snapshot()
         try:
             await disk_worker.aclose()
         except Exception as exc:
@@ -4062,11 +4100,13 @@ async def _attempt_watch_scan_iteration(
     microstructure_flow_service: MicrostructureFlowService | None = None,
     order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
+    lifecycle_worker: LifecycleWorker | None = None,
 ) -> tuple[WatchlistResolution | None, WatchScanExecution | None, Exception | SystemExit | None]:
     try:
         watchlist = await _watchlist_for_watch_iteration(args, startup_watchlist)
         execution = await _run_watch_scan_iteration(
             args,
+            lifecycle_worker=lifecycle_worker,
             watchlist=watchlist,
             config=config,
             iteration=iteration,
@@ -4348,6 +4388,7 @@ async def _run_watch_scan_iteration(
     microstructure_flow_service: MicrostructureFlowService | None = None,
     order_book_liquidity_service: OrderBookLiquidityService | None = None,
     liquidation_flow_service: LiquidationFlowService | None = None,
+    lifecycle_worker: LifecycleWorker | None = None,
 ) -> WatchScanExecution:
     phase_statuses = {"universe": "SUCCESS"}
     recoverable_errors: list[str] = []
@@ -4522,7 +4563,9 @@ async def _run_watch_scan_iteration(
         monitoring_skip_ids: tuple[str, ...] = ()
         prior_monitoring_errors: tuple[Any, ...] = ()
         try:
-            result = _apply_lifecycle_if_enabled(args, result, scan_run_id=storage_run_id)
+            result = await _apply_lifecycle_isolated(
+                args, result, scan_run_id=storage_run_id, worker=lifecycle_worker,
+            )
         except (Exception, SystemExit) as exc:
             if classify_watch_exception(exc) == WatchFailureDisposition.FATAL:
                 raise
