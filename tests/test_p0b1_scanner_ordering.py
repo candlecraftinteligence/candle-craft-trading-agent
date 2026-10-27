@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 
 import pytest
 
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
+from app.lifecycle import service
+from app.storage.database import StorageError
 from app.watch_session import WatchSession
 from scripts import run_scan
 from tests.test_watch_mode import _patch_watch_runtime, _watch_args
 from tests.test_p5a_monitoring_binding_query_repair import _quiet_runtime
 
 
-@pytest.mark.parametrize("cancel", [False, True])
-def test_watch_lifecycle_fences_publication_continuation_next_iteration_and_lease(tmp_path, monkeypatch, cancel):
+@pytest.mark.parametrize("cancel,failure", [(False, None), (True, None), (True, "locked"), (True, "wrapped_busy")])
+def test_watch_lifecycle_fences_publication_continuation_next_iteration_and_lease(tmp_path, monkeypatch, cancel, failure):
     _quiet_runtime(monkeypatch, tmp_path)
     path = _patch_watch_runtime(tmp_path, monkeypatch, symbols=("BTCUSDT",))
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
@@ -25,6 +28,15 @@ def test_watch_lifecycle_fences_publication_continuation_next_iteration_and_leas
     original_monitor = run_scan._continue_owned_plan_monitoring
     sessions, order = [], []
     loop_thread = threading.get_ident()
+    if failure is not None:
+        def recoverable_failure(*args, **kwargs):
+            try:
+                raise sqlite3.OperationalError("database is locked")
+            except sqlite3.OperationalError as exc:
+                if failure == "wrapped_busy":
+                    raise StorageError("synthetic busy wrapper") from exc
+                raise
+        monkeypatch.setattr(service, "monitor_tracking_obligations", recoverable_failure)
 
     def repository_exit(self, *args):
         is_worker = threading.current_thread().name == "cci-p0b1-lifecycle"
@@ -91,7 +103,8 @@ def test_watch_lifecycle_fences_publication_continuation_next_iteration_and_leas
     assert not sessions[0]._lease_acquired
     shutdown = sessions[0].state["lifecycle_isolation_shutdown"]
     assert shutdown["shutdown"] == {"IN_FLIGHT_AT_SHUTDOWN": 0, "joined": True, "thread_alive": False}
-    assert shutdown["COMMIT_OR_ROLLBACK_RESULT"] == "COMMITTED"
+    assert shutdown["COMMIT_OR_ROLLBACK_RESULT"] == ("ROLLED_BACK" if failure else "COMMITTED")
+    assert shutdown["failed"] == (1 if failure else 0)
     assert shutdown["connection_closed"] is True
     assert order[-1] == "lease_released"
     if cancel:

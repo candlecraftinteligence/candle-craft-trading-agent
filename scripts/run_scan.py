@@ -2568,6 +2568,16 @@ async def _apply_lifecycle_isolated(
     worker = worker or LifecycleWorker()
     try:
         return await worker.call(_apply_lifecycle_if_enabled, args, result, scan_run_id=scan_run_id)
+    except (Exception, SystemExit) as exc:
+        task = asyncio.current_task()
+        if (
+            task is not None and task.cancelling()
+            and classify_watch_exception(exc) == WatchFailureDisposition.RECOVERABLE
+        ):
+            # The receipt is settled. A recoverable failure must not consume a
+            # stop request and let the scanner continue to monitoring/delivery.
+            raise asyncio.CancelledError() from exc
+        raise
     finally:
         if owned:
             original = sys.exception()
