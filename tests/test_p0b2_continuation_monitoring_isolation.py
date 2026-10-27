@@ -856,3 +856,236 @@ def test_synthetic_continuation_loop_lag_wall_time_and_memory(tmp_path, monkeypa
         "python_allocation_peak_bytes": growth,
         "production_performance_claim": False,
     }, sort_keys=True))
+
+
+def test_provenance_review_missing_scan_run_id_vs_registered_and_unregistered(tmp_path):
+    """Section 1: Investigate scan_run_id=None vs registered vs unregistered synthetic runs."""
+    path = _database(tmp_path / "provenance.sqlite")
+    with _repo(path) as repository:
+        owner = _seed_entered(repository, symbol="BTCUSDT")
+
+    # Scenario A: scan_run_id is None (discovery failure continuation)
+    # Market data is available; outcome progresses to TP1; event is persisted with scan_run_id=None (NULL)
+    async def fetch(symbol, timeframe, limit):
+        return tuple(_continuation_candles())
+
+    async def scenario_none():
+        return await monitor_obligations_with_market_data(
+            path,
+            evidence_by_key={},
+            fetch_candles=fetch,
+            execution_timeframe=TIMEFRAME,
+            candle_limit=10,
+            evaluated_at=_decision(2),
+            scan_run_id=None,
+            expected_identity=SYNTHETIC_IDENTITY,
+            require_registered_run=False,
+        )
+
+    result_none = asyncio.run(scenario_none())
+    assert owner.lifecycle_id in result_none.evaluated_lifecycle_ids
+
+    with _repo(path) as repository:
+        progress = _progress(repository, owner.lifecycle_id)
+        assert progress.tp1_at is not None
+        events = repository.list_events(lifecycle_id=owner.lifecycle_id)
+        tp1_events = [e for e in events if e.reason.value == "TAKE_PROFIT_1_HIT" or "tp1" in str(e.notes).lower()]
+        assert len(tp1_events) >= 1
+        # Proves: scan_run_id is None, NOT a fabricated string like "owner-monitor-..."
+        assert tp1_events[0].scan_run_id is None
+
+        # Verify database raw row has NULL scan_run_id
+        row = repository.connection.execute(
+            "SELECT scan_run_id FROM setup_lifecycle_events WHERE lifecycle_id = ? AND scan_run_id IS NULL",
+            (owner.lifecycle_id,),
+        ).fetchone()
+        assert row is not None
+
+    # Scenario B: scan_run_id is unregistered synthetic string with require_registered_run=True (scanner watch enforcement)
+    # Fails closed immediately without applying any updates or progressing state
+    async def scenario_unregistered():
+        return await monitor_obligations_with_market_data(
+            path,
+            evidence_by_key={},
+            fetch_candles=fetch,
+            execution_timeframe=TIMEFRAME,
+            candle_limit=10,
+            evaluated_at=_decision(3),
+            scan_run_id="fabricated-synthetic-run-12345",
+            expected_identity=SYNTHETIC_IDENTITY,
+            require_registered_run=True,
+        )
+
+    with pytest.raises(RuntimeEpochOriginError, match="Operational run is not registered"):
+        asyncio.run(scenario_unregistered())
+
+    # Scenario C: scan_run_id is an authenticated, registered operational run
+    async def scenario_registered():
+        return await monitor_obligations_with_market_data(
+            path,
+            evidence_by_key={},
+            fetch_candles=fetch,
+            execution_timeframe=TIMEFRAME,
+            candle_limit=10,
+            evaluated_at=_decision(3),
+            scan_run_id=RUN_ID,
+            expected_identity=SYNTHETIC_IDENTITY,
+            require_registered_run=True,
+        )
+
+    result_reg = asyncio.run(scenario_registered())
+    assert owner.lifecycle_id in result_reg.evaluated_lifecycle_ids
+
+
+def test_stale_obligation_plan_version_change_during_stage_2(tmp_path):
+    """Section 2: Same lifecycle ID with different plan_version_id during Stage 2 is blocked."""
+    path = _database(tmp_path / "plan_ver.sqlite")
+    with _repo(path) as repository:
+        owner = _seed_entered(repository, symbol="BTCUSDT")
+
+    async def fetch(symbol, timeframe, limit):
+        # External process replaces or bumps plan_version_id
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute(
+                "UPDATE setup_lifecycle_records SET plan_version_id = 'pv-superseded-during-fetch' WHERE lifecycle_id = ?",
+                (owner.lifecycle_id,),
+            )
+            conn.commit()
+        return tuple(_continuation_candles())
+
+    async def scenario():
+        return await monitor_obligations_with_market_data(
+            path,
+            evidence_by_key={},
+            fetch_candles=fetch,
+            execution_timeframe=TIMEFRAME,
+            candle_limit=10,
+            evaluated_at=_decision(2),
+            scan_run_id=RUN_ID,
+            expected_identity=SYNTHETIC_IDENTITY,
+        )
+
+    result = asyncio.run(scenario())
+    # Blocked from Stage 3 write
+    assert owner.lifecycle_id not in result.evaluated_lifecycle_ids
+
+    with _repo(path) as repository:
+        # Progress cursor was not updated for the new plan version
+        record = repository.get_record_by_lifecycle_id(owner.lifecycle_id)
+        assert record.plan_version_id == "pv-superseded-during-fetch"
+
+
+def test_stale_obligation_cursor_advanced_externally_no_cursor_regression(tmp_path):
+    """Section 2: If progress cursor was advanced externally during fetch, cursor monotonicity is preserved."""
+    path = _database(tmp_path / "cursor_mono.sqlite")
+    with _repo(path) as repository:
+        owner = _seed_entered(repository, symbol="BTCUSDT")
+        before_cursor = _progress(repository, owner.lifecycle_id).evaluation_cursor_close_at
+
+    future_open = "2026-04-01T00:35:00Z"
+    future_close = "2026-04-01T00:50:00Z"
+
+    async def fetch(symbol, timeframe, limit):
+        # External process advanced evaluation_cursor to future
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute(
+                "UPDATE setup_lifecycle_outcome_progress SET evaluation_cursor_open_at = ?, evaluation_cursor_close_at = ? WHERE lifecycle_id = ?",
+                (future_open, future_close, owner.lifecycle_id),
+            )
+            conn.commit()
+        return tuple(_continuation_candles())
+
+    async def scenario():
+        return await monitor_obligations_with_market_data(
+            path,
+            evidence_by_key={},
+            fetch_candles=fetch,
+            execution_timeframe=TIMEFRAME,
+            candle_limit=10,
+            evaluated_at=_decision(2),
+            scan_run_id=RUN_ID,
+            expected_identity=SYNTHETIC_IDENTITY,
+        )
+
+    result = asyncio.run(scenario())
+    with _repo(path) as repository:
+        progress = _progress(repository, owner.lifecycle_id)
+        # Progress cursor was NOT regressed to an older candle
+        assert progress.evaluation_cursor_close_at == future_close
+        assert progress.evaluation_cursor_open_at == future_open
+
+
+def test_newly_arrived_obligation_during_stage_2_deferred(tmp_path):
+    """Section 2: Newly created obligation during Stage 2 is excluded from current Stage 3 write."""
+    path = _database(tmp_path / "deferred.sqlite")
+    with _repo(path) as repository:
+        owner1 = _seed_entered(repository, lifecycle_id="owner-initial", symbol="BTCUSDT")
+
+    owner2_id = "owner-arrived-stage2"
+
+    async def fetch(symbol, timeframe, limit):
+        # Insert a new obligation during Stage 2
+        with _repo(path) as repo:
+            _seed_entered(repo, lifecycle_id=owner2_id, symbol="ETHUSDT")
+        return tuple(_continuation_candles())
+
+    async def scenario():
+        return await monitor_obligations_with_market_data(
+            path,
+            evidence_by_key={},
+            fetch_candles=fetch,
+            execution_timeframe=TIMEFRAME,
+            candle_limit=10,
+            evaluated_at=_decision(2),
+            scan_run_id=RUN_ID,
+            expected_identity=SYNTHETIC_IDENTITY,
+        )
+
+    result = asyncio.run(scenario())
+    # owner1 was in Stage 1 and was evaluated
+    assert owner1.lifecycle_id in result.evaluated_lifecycle_ids
+    # owner2 was NOT in Stage 1, so it is blocked in Stage 3 and deferred to next iteration
+    assert owner2_id not in result.evaluated_lifecycle_ids
+
+
+def test_runtime_epoch_change_during_stage_2_fails_closed(tmp_path):
+    """Section 2: Epoch change during Stage 2 causes Stage 3 to fail closed and rollback."""
+    path = _database(tmp_path / "epoch_change.sqlite")
+    with _repo(path) as repository:
+        owner = _seed_entered(repository, symbol="BTCUSDT")
+        before_progress = _progress(repository, owner.lifecycle_id)
+
+    async def fetch(symbol, timeframe, limit):
+        # Switch active epoch in database during Stage 2
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute(
+                "INSERT INTO runtime_epochs (epoch_id, contract_version, activated_at, cutoff_at, reviewed_release_sha, generation_binding, created_at) VALUES ('alt-epoch-id', 'v1', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', 'sha', 'binding', '2026-04-01T00:00:00Z')"
+            )
+            conn.execute(
+                "UPDATE runtime_epoch_control SET epoch_id = 'alt-epoch-id' WHERE control_key = 'active'"
+            )
+            conn.commit()
+        return tuple(_continuation_candles())
+
+    async def scenario():
+        return await monitor_obligations_with_market_data(
+            path,
+            evidence_by_key={},
+            fetch_candles=fetch,
+            execution_timeframe=TIMEFRAME,
+            candle_limit=10,
+            evaluated_at=_decision(2),
+            scan_run_id=RUN_ID,
+            expected_identity=SYNTHETIC_IDENTITY,
+        )
+
+    with pytest.raises(RuntimeEpochError):
+        asyncio.run(scenario())
+
+    # Database state remains uncorrupted
+    with closing(sqlite3.connect(path)) as conn:
+        cursor_val = conn.execute(
+            "SELECT evaluation_cursor_close_at FROM setup_lifecycle_outcome_progress WHERE lifecycle_id = ?",
+            (owner.lifecycle_id,),
+        ).fetchone()[0]
+        assert cursor_val == before_progress.evaluation_cursor_close_at

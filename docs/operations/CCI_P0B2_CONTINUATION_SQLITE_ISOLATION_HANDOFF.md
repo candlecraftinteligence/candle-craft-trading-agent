@@ -2,9 +2,11 @@
 
 BASE_SHA: a158b451b3c8417101ed3fcfc117d28f1466afd6
 FEATURE_BRANCH: feature/p0b2-continuation-monitoring-sqlite-isolation
-IMPLEMENTATION_SHA: 6542d58ce2643bd1b635fbf485b9c3d3216a16b6
-PR_URL: TBD (created upon push)
-GITHUB_CI: Pending exact-head run
+INITIAL_IMPLEMENTATION_SHA: 6542d58ce2643bd1b635fbf485b9c3d3216a16b6
+INITIAL_DOC_SHA: 88b961f86f01f7b73e23b6e79beda83ac2ba795c
+PR_URL: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/155
+GITHUB_CI_INITIAL_HEAD: PASS on 88b961f86f01f7b73e23b6e79beda83ac2ba795c (https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40569392800)
+FINAL_REVIEW_HEAD: Pending final commit
 RUNTIME_DEPLOYMENT_APPROVED: NO
 
 Remote main was fetched and independently verified at the baseline commit `a158b451b3c8417101ed3fcfc117d28f1466afd6`, which includes merged PR #151 (CMC Shadow Decision Recovery), PR #153 (P0A Disk Persistence Isolation), and PR #154 (P0B1 Lifecycle SQLite Worker Isolation).
@@ -119,7 +121,7 @@ Because Stage 2 awaits external exchange candles over the network, database stat
 1. **Superseded or Modified Plans**: Stage 3 compares `stage1_obligations` against current `stage3_obligations`. If an obligation's `plan_version_id` changed or is no longer present, its lifecycle ID is added to `blocked_ids`.
 2. **Terminal Outcomes**: An obligation that reached a terminal state (STOPPED, TARGET_3, EXPIRED, INVALIDATED) between Stage 1 and Stage 3 is blocked from receiving further outcome updates.
 3. **New Plan Arrivals During Fetch**: Any tracking obligation present in Stage 3 that was not present in Stage 1 is excluded from Stage 3 evaluation and deferred to the next iteration. This ensures new obligations are not evaluated with incomplete or missing evidence.
-4. **Epoch Invalidation**: If the runtime epoch changes between Stage 1 and Stage 3, Stage 3 immediately raises `RuntimeEpochOwnershipError` and rolls back.
+4. **Epoch Invalidation**: If the runtime epoch changes between Stage 1 and Stage 3, Stage 3 immediately raises `RuntimeEpochOwnershipError` or `RuntimeEpochError` and rolls back.
 
 ---
 
@@ -134,7 +136,42 @@ Because Stage 2 awaits external exchange candles over the network, database stat
 
 ---
 
-## 6. Telemetry & PhaseProfile Integration
+## 6. Critical Provenance Review & Operational Run Analysis
+
+A critical architectural investigation was conducted on `scripts/run_scan.py::_continue_owned_plan_monitoring`:
+
+### Historical Implementation (P5A Baseline)
+Previously, line 2863 contained:
+```python
+scan_run_id = scan_run_id or f"owner-monitor-{uuid4().hex}"
+```
+When `scan_run_id` was `None` (specifically in `_surface_monitoring_during_discovery_failure` when universe discovery crashed before an operational scan run could complete), the code fabricated an unregistered, unauthenticated string `owner-monitor-<uuid>`.
+This violated canonical CCI origin contracts:
+- `owner-monitor-<uuid>` was never persisted in `runtime_operational_runs`.
+- It created dangling foreign references in `setup_lifecycle_events`.
+- In prospective runtime epoch isolation, `public_reservation_record_mismatch_reason` and `operational_run_belongs_to_active_epoch` explicitly check that present `scan_run_id` exists in `runtime_operational_runs` under the active epoch; an unregistered synthetic string caused `public_reservation_scan_run_unregistered`.
+
+### P0B2 Canonical Origin Contract Implementation
+In P0B2:
+```python
+scan_run_id = scan_run_id
+require_registered_run = bool(scan_run_id)
+```
+1. **Watch Mode & One-Shot With Operational Run**:
+   - `scan_run_id` is authenticated and registered prior to acquisition.
+   - `require_registered_run=True` enforces `require_registered_operational_run(connection, run_id=effective_run_id, epoch=epoch)`.
+   - Any unregistered or cross-epoch run fails closed (`RuntimeEpochOriginError`) and rolls back completely.
+2. **Discovery-Failure Continuation (`scan_run_id=None`)**:
+   - No fake operational run is fabricated.
+   - Conforms strictly to the canonical principle in `docs/research/prospective_runtime_epoch_isolation.md`: *"insert_attempt omits an unregistered scan_run_id / last_scan_run_id instead of inventing a value."*
+   - Milestone and transition events carry `scan_run_id = NULL` (nullable in `setup_lifecycle_events` schema and model).
+   - In accordance with `docs/research/prospective_runtime_epoch_isolation.md`: *"run_id is one provenance component, never sufficient to grant. An unregistered diagnostic run_id is not by itself a reject."* When `scan_run_id` is omitted (`None`), `public_reservation_record_mismatch_reason` does not raise `public_reservation_scan_run_unregistered`.
+   - Owned plan outcome progress (`SetupLifecycleOutcomeProgress`) has no `scan_run_id` column; cursor monotonicity and milestone accounting proceed truthfully based on closed exchange candles.
+   - Active epoch validation (`require_active_runtime_epoch` and `require_current_epoch_lifecycle_id`) remains strictly enforced on every record modified.
+
+---
+
+## 7. Telemetry & PhaseProfile Integration
 
 Continuation monitoring telemetry is integrated into `LifecycleWorker` and reported via `PhaseProfile.snapshot()["continuation_isolation"]`:
 
@@ -150,7 +187,7 @@ Continuation monitoring telemetry is integrated into `LifecycleWorker` and repor
 
 ---
 
-## 7. DEV PC Benchmark Measurements
+## 8. DEV PC Benchmark Measurements
 
 Measurements captured on dedicated DEV PC using `test_synthetic_continuation_loop_lag_wall_time_and_memory` with synthetic 500ms SQLite workload:
 
@@ -171,13 +208,13 @@ Measurements captured on dedicated DEV PC using `test_synthetic_continuation_loo
 
 ---
 
-## 8. Full Regression Test Results
+## 9. Full Regression Test Results
 
 All test runs were executed against dedicated synthetic temporary directories (`pytest-of-` OS temp root).
 
 | Test Suite | File / Scope | Tests | Result |
 |---|---|---|---|
-| **P0B2 Continuation Isolation** | `tests/test_p0b2_continuation_monitoring_isolation.py` | 15 | **PASSED** (100%) |
+| **P0B2 Continuation Isolation** | `tests/test_p0b2_continuation_monitoring_isolation.py` | 20 | **PASSED** (100%) |
 | **P0B2 Scanner Ordering** | `tests/test_p0b2_scanner_ordering.py` | 3 | **PASSED** (100%) |
 | **P0B1 Lifecycle Isolation** | `tests/test_p0b1_lifecycle_isolation.py` | 29 | **PASSED** (100%) |
 | **P0B1 Scanner Ordering** | `tests/test_p0b1_scanner_ordering.py` | 5 | **PASSED** (100%) |
@@ -188,13 +225,13 @@ All test runs were executed against dedicated synthetic temporary directories (`
 | **Durable Source Replay** | `tests/test_f04_durable_source_replay.py` | 30 | **PASSED** (100%) |
 | **CMC Recovery & Policy** | `tests/test_cmc_watch_recovery.py`, `tests/test_cmc_policy_research.py` | 74 | **PASSED** (100%) |
 | **Watch Session** | `tests/test_watch_session.py` | 25 | **PASSED** (100%) |
-| **Full Repository Test Suite** | All pytest suites (`--basetemp`) | **3,908** | **3,908 PASSED**, 0 failed |
+| **Full Repository Test Suite** | All pytest suites (`--basetemp`) | **3,913** | **3,913 PASSED**, 0 failed |
 | **Python Bytecode Compilation**| `python -m compileall app scripts src tests` | All | **PASSED** (0 errors) |
 | **Pip Dependency Check** | `python -m pip check` | All | **PASSED** (No broken reqs) |
 
 ---
 
-## 9. Preserved Invariants & Safety Boundaries
+## 10. Preserved Invariants & Safety Boundaries
 
 1. **No Schema Changes**: Database schema, pragma user_version, indexes, tables, triggers, and journal modes (`WAL`) are identical. No migrations or structural alterations were made.
 2. **Deterministic Trading Signals**: Mathematical setup validation, RR gates, invalidation rules, closed-candle causality, and score gates are strictly untouched.
