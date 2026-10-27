@@ -3,8 +3,10 @@
 BASE_SHA: ff85a7de744507b593ef118e322e47eba171f311
 FEATURE_BRANCH: feature/p0a-scanner-event-loop-isolation
 FINAL_IMPLEMENTATION_SHA: 23fcf6f03d4281aa930119ef20da246551642f7b
-PR_URL: pending
-GITHUB_CI: pending exact-head verification
+PR_URL: https://github.com/candlecraftinteligence/candle-craft-trading-agent/pull/153
+GITHUB_CI: success on d1664e44dfb779540136788f203fe6d6e0311648
+https://github.com/candlecraftinteligence/candle-craft-trading-agent/actions/runs/40541408083
+Python 3.11 tests passed, including compileall and pytest.
 
 RUNTIME_DEPLOYMENT_APPROVED: NO
 
