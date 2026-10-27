@@ -444,7 +444,8 @@ def test_worker_base_exception_is_received_and_shutdown_is_controlled(error):
     asyncio.run(scenario())
 
 
-def test_one_shot_shutdown_cancellation_cannot_mask_fatal_epoch_error(monkeypatch):
+@pytest.mark.parametrize("interruption", [asyncio.CancelledError, KeyboardInterrupt])
+def test_one_shot_shutdown_cancellation_cannot_mask_fatal_epoch_error(monkeypatch, interruption):
     from types import SimpleNamespace
 
     original_close = LifecycleWorker.aclose
@@ -454,7 +455,7 @@ def test_one_shot_shutdown_cancellation_cannot_mask_fatal_epoch_error(monkeypatc
 
     async def close_then_cancel(self):
         await original_close(self)
-        raise asyncio.CancelledError()
+        raise interruption()
 
     monkeypatch.setattr(run_scan, "_lifecycle_enabled", lambda args: True)
     monkeypatch.setattr(run_scan, "apply_lifecycle_to_run_result", fail)
@@ -465,6 +466,59 @@ def test_one_shot_shutdown_cancellation_cannot_mask_fatal_epoch_error(monkeypatc
             await run_scan._apply_lifecycle_isolated(SimpleNamespace(database_path="unused"), _input())
         assert isinstance(raised.value.__cause__, RuntimeEpochError)
         assert classify_watch_exception(raised.value) == WatchFailureDisposition.FATAL
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("recoverable_failure", [False, True])
+def test_keyboard_interrupt_is_fenced_and_cannot_be_consumed_by_recoverable_error(monkeypatch, recoverable_failure):
+    from types import SimpleNamespace
+
+    entered, release = threading.Event(), threading.Event()
+    original_shield = asyncio.shield
+    injected = False
+
+    def interrupt_once(future):
+        nonlocal injected
+        if not injected:
+            injected = True
+            raise KeyboardInterrupt()
+        return original_shield(future)
+
+    def apply(result, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        if recoverable_failure:
+            raise sqlite3.OperationalError("database is locked")
+        return result
+
+    monkeypatch.setattr(asyncio, "shield", interrupt_once)
+    monkeypatch.setattr(run_scan, "_lifecycle_enabled", lambda args: True)
+    monkeypatch.setattr(run_scan, "apply_lifecycle_to_run_result", apply)
+
+    async def scenario():
+        worker = LifecycleWorker()
+
+        async def invoke():
+            try:
+                await run_scan._apply_lifecycle_isolated(
+                    SimpleNamespace(database_path="unused"), _input(), worker=worker,
+                )
+            except KeyboardInterrupt:
+                return "stopped"
+
+        task = asyncio.create_task(invoke())
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            assert injected and not task.done()
+            assert worker.compact_snapshot()["inflight"] == 1
+            release.set()
+            assert await task == "stopped"
+            assert worker.compact_snapshot()["inflight"] == 0
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await worker.aclose()
 
     asyncio.run(scenario())
 

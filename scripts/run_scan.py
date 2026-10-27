@@ -2570,20 +2570,25 @@ async def _apply_lifecycle_isolated(
         return await worker.call(_apply_lifecycle_if_enabled, args, result, scan_run_id=scan_run_id)
     except (Exception, SystemExit) as exc:
         task = asyncio.current_task()
+        interruption = getattr(exc, "_cci_lifecycle_interruption", None)
+        if isinstance(interruption, (asyncio.CancelledError, KeyboardInterrupt)):
+            del exc._cci_lifecycle_interruption
+        else:
+            interruption = None
         if (
-            task is not None and task.cancelling()
+            (interruption is not None or (task is not None and task.cancelling()))
             and classify_watch_exception(exc) == WatchFailureDisposition.RECOVERABLE
         ):
             # The receipt is settled. A recoverable failure must not consume a
             # stop request and let the scanner continue to monitoring/delivery.
-            raise asyncio.CancelledError() from exc
+            raise (interruption if interruption is not None else asyncio.CancelledError()) from exc
         raise
     finally:
         if owned:
             original = sys.exception()
             try:
                 await worker.aclose()
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, KeyboardInterrupt):
                 # aclose has joined. Preserve an already-received fatal failure
                 # if another cancellation arrived during one-shot shutdown.
                 if original is None:
@@ -4070,9 +4075,12 @@ async def _run_watch_mode(
         # enclosing session keeps its lease until all of these attempts finish.
         # Both workers finish before sockets stop or the enclosing lease is released.
         isolation_errors: list[BaseException] = []
+        shutdown_interruption: BaseException | None = None
         try:
             await lifecycle_worker.aclose()
-        except (Exception, asyncio.CancelledError) as exc:
+        except (asyncio.CancelledError, KeyboardInterrupt) as exc:
+            shutdown_interruption = exc
+        except Exception as exc:
             isolation_errors.append(exc)
         finally:
             if session is not None:
@@ -4096,6 +4104,8 @@ async def _run_watch_mode(
             if original is not None:
                 raise RuntimeError(f"{type(original).__name__}: {original}; service cleanup failed: {details}") from original
             raise RuntimeError(f"service cleanup failed: {details}")
+        if shutdown_interruption is not None and sys.exception() is None:
+            raise shutdown_interruption
 
 
 async def _attempt_watch_scan_iteration(

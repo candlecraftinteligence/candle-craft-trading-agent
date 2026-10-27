@@ -11,6 +11,8 @@ import pytest
 from app.lifecycle.repositories import SQLiteSetupLifecycleRepository
 from app.lifecycle import service
 from app.storage.database import StorageError
+from app.runtime.disk_isolation import SerializedDiskWorker
+from app.runtime.lifecycle_isolation import LifecycleWorker
 from app.watch_session import WatchSession
 from scripts import run_scan
 from tests.test_watch_mode import _patch_watch_runtime, _watch_args
@@ -112,3 +114,37 @@ def test_watch_lifecycle_fences_publication_continuation_next_iteration_and_leas
     else:
         assert order.index("transaction_closed") < order.index("continuation") < order.index("public_delivery_boundary")
     assert not any(thread.name == "cci-p0b1-lifecycle" for thread in threading.enumerate())
+
+
+def test_shutdown_interrupt_still_closes_disk_worker_and_releases_lease_last(tmp_path, monkeypatch):
+    _quiet_runtime(monkeypatch, tmp_path)
+    path = _patch_watch_runtime(tmp_path, monkeypatch, symbols=("BTCUSDT",))
+    lifecycle_close, disk_close = LifecycleWorker.aclose, SerializedDiskWorker.aclose
+    original_release = WatchSession._release
+    order = []
+
+    async def interrupted_close(self):
+        await lifecycle_close(self)
+        order.append("lifecycle_joined")
+        raise KeyboardInterrupt()
+
+    async def close_disk(self):
+        await disk_close(self)
+        order.append("disk_joined")
+
+    def release(self):
+        assert order == ["lifecycle_joined", "disk_joined"]
+        original_release(self)
+        order.append("lease_released")
+
+    monkeypatch.setattr(LifecycleWorker, "aclose", interrupted_close)
+    monkeypatch.setattr(SerializedDiskWorker, "aclose", close_disk)
+    monkeypatch.setattr(WatchSession, "_release", release)
+
+    async def scenario():
+        with pytest.raises(KeyboardInterrupt):
+            await run_scan.main(_watch_args(path, universe_size=1))
+
+    asyncio.run(scenario())
+    assert order == ["lifecycle_joined", "disk_joined", "lease_released"]
+    assert not any(thread.name in {"cci-p0b1-lifecycle", "cci-p0a-disk"} for thread in threading.enumerate())

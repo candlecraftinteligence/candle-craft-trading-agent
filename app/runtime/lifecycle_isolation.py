@@ -47,7 +47,7 @@ async def _fenced_wait(future):
     while True:
         try:
             return await asyncio.shield(future), cancelled
-        except asyncio.CancelledError as exc:
+        except (asyncio.CancelledError, KeyboardInterrupt) as exc:
             if future.cancelled():
                 raise RuntimeError("lifecycle completion owner was cancelled") from exc
             cancelled = cancelled or exc
@@ -124,6 +124,8 @@ class LifecycleWorker:
             if receipt.error is not None:
                 self._failed += 1
                 # Fatal epoch/SQLite failures must remain visible after cancellation.
+                if cancelled is not None:
+                    receipt.error._cci_lifecycle_interruption = cancelled
                 raise receipt.error
             if cancelled is not None:
                 raise cancelled
